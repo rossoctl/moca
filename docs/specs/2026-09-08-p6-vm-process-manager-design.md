@@ -622,6 +622,7 @@ Per rung, recorded for attribution rather than for the report:
 | Metric                                                      | Attributes a knee to                                                           |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Throughput (turns/s), p50/p95                               | the rung itself                                                                |
+| **Whole-host non-idle CPU**                                 | **the machine running out, as distinct from any one tier**                     |
 | **Per-turn worker CPU** (worker CPU-seconds ÷ turns served) | **the worker tier being genuinely full, as distinct from the stub being slow** |
 | **Event-loop lag p99 per worker** (`monitorEventLoopDelay`) | worker CPU / mux saturation                                                    |
 | RSS per worker                                              | memory per live session                                                        |
@@ -665,6 +666,30 @@ arms, and both are worth recording because each produced a plausible number:
   section's attribution threshold (`lag / lag0 ≥ 4`) needed ~44 ms of real delay to fire. The default
   is now 1 ms (`SH_LAG_RESOLUTION_MS`), and **the resolution ships in the record beside the lag**,
   because a p99 reading is unreadable without the floor it sits on.
+
+**Host CPU is attributed ahead of every tier, and the run that made that necessary is worth recording.**
+The capacity arm sustained ~395 turns/s with the worker tier reading 52% of an 8-core target and reported
+`bound=unattributed`; `top` on that target during the same rung showed **0.9% idle** (74.6% user, 21.2%
+system, 3.3% softirq). The worker processes were about two thirds of it and the balance was the
+supervisor hand-off loop, the relay, Redis, the stub, sixteen sandbox leaves and kernel time for 400
+connections a second. A tier-level denominator cannot see that, and the natural reading of "52%" —
+half the box spare — points at a lever that was then measured not to move: **doubling `SH_WORKERS` from
+4 to 8 changed the ceiling by −6%** (395 → 371 turns/s). So a full machine is named before a full tier,
+because naming the tier sends a reader to buy workers that will not help.
+
+That falsification also disposes of a tempting story this section should not repeat: that the bound is
+per-worker event loops (one Node loop per worker, so W cores maximum). It predicted a doubling and got
+−6%.
+
+**Two utilisation denominators, and they answer different questions.** Worker CPU against `min(W, cores)`
+is the tier's own ceiling — a worker is one event loop and cannot exceed one core — and is what a
+saturation threshold can be set against; worker CPU against the box is for sizing. A single box-normalised
+figure with an 80% threshold is unreachable by construction whenever `W < cores`: measured at W=4 on 8
+cores, a saturated tier read 51% of the box and 102% of its own four.
+
+**A knee is a floor, so attribution consults the rungs above it too.** Measured: the worker tier read
+79.6% of its ceiling at the knee (c=32) and 102.3% one rung later, with throughput plateauing. Consulting
+the knee rung alone reported `unattributed` for a tier that demonstrably ran out 0.4 points later.
 
 An unmeasurable metric must read `NaN` and never `0` — a rule this section already applied to lag and
 RSS, and one the capacity arm makes load-bearing: under a utilisation _ceiling_, a confident zero is
@@ -728,6 +753,15 @@ measured path; only the command's cost goes away. And it keeps the exec **counti
 trivial-exec arm whose tool call silently never reaches a sandbox is invisible in every other
 measurement — the `/turn`-ran-tools-locally defect, whose whole signature is that the hands tier is
 absent and its cost charged to the worker tier.
+
+**Duty prices the command, not the exec, and the difference provisions the sandbox tier wrongly for fast
+workloads.** Measured in the capacity arm: a `true` command costing 1 ms produced **3.8 ms of container
+CPU per exec**, the balance being the leaf handling the request and spawning a shell. Duty is
+(command cost × execs) ÷ turn wall, so it missed that plumbing entirely and predicted ~10% sandbox
+utilisation where 28.6% was measured — three containers were not enough for a trivial command. So
+`K ≥ ceil(W × S × duty)` under-provisions by roughly the ratio of plumbing to command cost: negligible at
+the realism arm's 113 ms exec, a factor of ~4 at 1 ms. This is a second, independent reason the capacity
+arm's precondition must be a **measured** ceiling rather than one predicted from duty (§5.2).
 
 **"Measure duty, never model it" applies to both arms** — that discipline is not what is being relaxed.
 The wrong-model failure it exists to prevent is documented in `deploy/vm/tests/workload-duty.test.sh`:

@@ -58,32 +58,42 @@ ladder's top rung by 2× — otherwise a knee it finds is one of the two caps, w
 
 The sandbox tier's **own** capacity is not E8's subject at all: that is P4 §7.2 (E10) and §7.3 (E11).
 
+**Measured on 2026-09-15, and both are provisioning facts rather than driver trivia.** The capacity arm
+saturated the _host_ at ~350–400 turns/s with a ~100 ms turn, with only about two thirds of that CPU in
+the worker processes — so sizing from worker CPU alone overestimates headroom by roughly 1.5×, and
+`SH_WORKERS` is not the lever (4 → 8 workers moved the ceiling −6%). And a trivial 1 ms exec still cost
+3.8 ms of container CPU, so a duty-derived sandbox floor under-provisions fast workloads by about the
+ratio of exec plumbing to command cost — three containers were refused for a `true` command. Full
+numbers in the 2026-09-15 findings record.
+
 ## What every E8 run record must carry (§5.2, §5.7)
 
 This shape describes **E8's** records only — see the note at the end of this
 section for what an E9 record actually contains. A missing E8 field is not a result:
 
-| Field                    | Why it is load-bearing                                                                                                         |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `arm`                    | Which question this rung answers. Without it the two arms' numbers are one copy-paste apart.                                   |
-| `duty_basis`             | One §2.3 row, taken whole. A blend implies a wrong sandbox count. `none (capacity arm)` is a VALUE — distinct from blank.      |
-| `worker_cpu_ms_per_turn` | Worker CPU-seconds ÷ turns served. Tells "the worker tier is full" from "the stub is slow"; nothing else does.                 |
-| `worker_cpu_util`        | The same figure as a fraction of this box's cores — the threshold `bound=worker-cpu` fires on.                                 |
-| `sandbox_util`           | Measured sandbox utilisation. The capacity arm's precondition; a realism-arm diagnostic.                                       |
-| `lag_resolution_ms`      | The floor `loop_lag_p99` sits on. A lag reading without it is unreadable (see below).                                          |
-| `conns_per_turn`         | What the driver actually does (one connection per turn) — see the note below.                                                  |
-| stub profile             | Half the claim. ttft, token delay, output tokens, tool-call rate.                                                              |
-| `loop_lag_p99`           | Attributes a knee to worker CPU / socket multiplexing.                                                                         |
-| `rss_bytes`              | Memory per live session.                                                                                                       |
-| `file_op_ms`             | The relay round trip.                                                                                                          |
-| `sandbox_cpu`            | `bash -c` churn across the pool. **Cumulative CPU seconds** (`{{.CPUNano}}`), differenced per rung — see the correction below. |
-| `lease_saturation`       | An under-provisioned pool, which reads exactly like worker saturation.                                                         |
-| `over_admission`         | Bounds IPC staleness; self-correcting, so it is a diagnostic not a failure.                                                    |
-| `spurious_refusals`      | Refusals the next `load` convicted. Attributes a `spurious_429` to staleness.                                                  |
-| `spurious_429`           | **The dangerous one.** Refusals truncate a rung, so the knee reads early.                                                      |
-| `attempts`               | Total requests issued at this rung — the denominator for the success rate.                                                     |
-| `ok_n`                   | 200-coded requests at this rung — the numerator, and what `p50`/`p95` are computed over.                                       |
-| `contention_load1`       | 1-minute load average, a contention PROXY (not a generator-specific measurement) — see "Where the generator ran" below.        |
+| Field                    | Why it is load-bearing                                                                                                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `arm`                    | Which question this rung answers. Without it the two arms' numbers are one copy-paste apart.                                                                                        |
+| `duty_basis`             | One §2.3 row, taken whole. A blend implies a wrong sandbox count. `none (capacity arm)` is a VALUE — distinct from blank.                                                           |
+| `host_cpu_util`          | Whole-host non-idle CPU, all processes and kernel time. Tells "the machine ran out" from "a tier ran out" — measured 95% while the worker tier read 62%.                            |
+| `worker_cpu_ms_per_turn` | Worker CPU-seconds ÷ turns served. Tells "the worker tier is full" from "the stub is slow"; nothing else does.                                                                      |
+| `worker_cpu_util`        | The same figure against the tier's OWN ceiling, `min(W, cores)` — a worker is one event loop and cannot exceed one core, so this is what a saturation threshold can be set against. |
+| `worker_cpu_util_box`    | The same figure against the whole box — for sizing, and NOT a saturation signal when `W < cores`.                                                                                   |
+| `sandbox_util`           | Measured sandbox utilisation. The capacity arm's precondition; a realism-arm diagnostic.                                                                                            |
+| `lag_resolution_ms`      | The floor `loop_lag_p99` sits on. A lag reading without it is unreadable (see below).                                                                                               |
+| `conns_per_turn`         | What the driver actually does (one connection per turn) — see the note below.                                                                                                       |
+| stub profile             | Half the claim. ttft, token delay, output tokens, tool-call rate.                                                                                                                   |
+| `loop_lag_p99`           | Attributes a knee to worker CPU / socket multiplexing.                                                                                                                              |
+| `rss_bytes`              | Memory per live session.                                                                                                                                                            |
+| `file_op_ms`             | The relay round trip.                                                                                                                                                               |
+| `sandbox_cpu`            | `bash -c` churn across the pool. **Cumulative CPU seconds** (`{{.CPUNano}}`), differenced per rung — see the correction below.                                                      |
+| `lease_saturation`       | An under-provisioned pool, which reads exactly like worker saturation.                                                                                                              |
+| `over_admission`         | Bounds IPC staleness; self-correcting, so it is a diagnostic not a failure.                                                                                                         |
+| `spurious_refusals`      | Refusals the next `load` convicted. Attributes a `spurious_429` to staleness.                                                                                                       |
+| `spurious_429`           | **The dangerous one.** Refusals truncate a rung, so the knee reads early.                                                                                                           |
+| `attempts`               | Total requests issued at this rung — the denominator for the success rate.                                                                                                          |
+| `ok_n`                   | 200-coded requests at this rung — the numerator, and what `p50`/`p95` are computed over.                                                                                            |
+| `contention_load1`       | 1-minute load average, a contention PROXY (not a generator-specific measurement) — see "Where the generator ran" below.                                                             |
 
 `generator_placement` (on-box/undetermined — round 2, item 4a renamed the non-loopback case from
 "off-box"; see below for why) is recorded once **per run**, not per rung, in the run-summary prose
@@ -249,7 +259,8 @@ this exact `null` behaviour for a different reason entirely; see `percentile`'s 
 `detectKnee`'s own comments for that load-bearing coupling, which this section does not restate.)
 
 **Read every E8 bound sentence in this file accordingly.** When an E8 run record says "the bound
-observed at: worker CPU / event loop / memory / sandbox-pool / admission-control / unattributed", that
+observed at: host CPU / worker CPU / event loop / memory / sandbox-pool / admission-control /
+unattributed", that
 verdict is reached by checking only the columns that carry real readings — it is never checked against
 `file_op_ms`, because there is nothing there to check. So "unattributed" does **not** mean "no tier is
 responsible"; it means "of the tiers we can see, none crossed its threshold." A slow relay round trip
