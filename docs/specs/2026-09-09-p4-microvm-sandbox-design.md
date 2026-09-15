@@ -738,6 +738,14 @@ exactly the VM-exit-heavy work restore consists of:
 Through the relay, against P6 §5.4's model stub with its tool-call rate, driving the `Exec` mix E10
 measured. Sweep concurrent **active runs** × D × `GuestRAMBytes`.
 
+**The seam with P6, from this side.** E11 measures the sandbox tier's own capacity; P6 §5.2's E8
+measures the harness tier's, and its **capacity arm holds this tier deliberately non-binding** (trivial
+exec, a measured utilisation ceiling per rung) so that the sandbox tier's cost never lands inside a
+harness density number. That is the mirror of the last row in this section's own metric table: E11
+watches for a harness-side refusal misread as a VM-tier limit, E8's capacity arm watches for a
+VM-tier cost misread as a harness limit. Neither experiment's number substitutes for the other's, and
+P6 §5.2 records the same division of labour from its side.
+
 **The memory budget, which is computable rather than empirical:**
 
 ```

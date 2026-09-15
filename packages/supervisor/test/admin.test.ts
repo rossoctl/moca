@@ -72,6 +72,38 @@ describe('metricsBody', () => {
     expect(metricsBody(h.pool, {}).sandbox_pool_size).toBe(0);
   });
 
+  it('carries per-worker CPU seconds through to the wire, NaN until reported', () => {
+    // The metric that lets a knee be attributed to "the worker tier is actually full" rather than
+    // to "the stub is slow" (§5.2 as amended). NaN, not 0, for the same reason as every other
+    // reading here: a 0 would read as an idle worker and would exonerate the tier that saturated.
+    const h = ready();
+    expect(metricsBody(h.pool, {}).workers.map((w) => w.cpu_seconds)).toEqual(['NaN', 'NaN']);
+    h.forked[0]!.stats({ cpuSeconds: 12.5 });
+    const body = metricsBody(h.pool, {});
+    expect(body.workers[0]!.cpu_seconds).toBe(12.5);
+    expect(body.workers[1]!.cpu_seconds).toBe('NaN');
+  });
+
+  it('publishes the cores of the box the WORKERS run on, not the drivers', () => {
+    // The driver's own `nproc` describes the generator, which the required topology puts on a
+    // different and smaller machine (4 cores against the target's 8 in the published runs). Dividing
+    // the target's worker CPU by the generator's core count inflates every utilisation by that ratio,
+    // so the denominator ships from the same box as the numerator.
+    const body = metricsBody(ready().pool, {});
+    expect(typeof body.cores).toBe('number');
+    expect(body.cores).toBeGreaterThan(0);
+  });
+
+  it('publishes the lag histogram resolution, so an 11 ms reading can be read against its floor', () => {
+    // Three published runs read ~11 ms at every rung including c=1, which is the sampler's own
+    // resolution floor rather than delay. A record that quotes the lag without the resolution
+    // cannot distinguish "the floor" from "real delay", so the denominator ships with the number.
+    const h = ready();
+    expect(metricsBody(h.pool, {}).lag_resolution_ms).toBe('NaN');
+    h.forked[0]!.stats({ loopLagP99Ms: 1.2, lagResolutionMs: 1 });
+    expect(metricsBody(h.pool, {}).lag_resolution_ms).toBe(1);
+  });
+
   it('takes the worst worker s file-op p95, not the mean', () => {
     const h = ready();
     h.forked[0]!.stats({ fileOpP95Ms: 12 });

@@ -51,10 +51,27 @@
 # lands in the band. A repo small enough to stay in cache, iterated N times, has a cost that is linear
 # and repeatable in N. N is the knob.
 #
+# TWO ARMS (§5.2 as amended, issue #254 item 2a)
+#
+# ARM=realism (default) is everything above: calibrate a git chain until the MEASURED duty lands in a
+# §2.3 band. ARM=capacity prepares E8's capacity arm instead, whose whole point is a sandbox tier that
+# is present but not competing -- so the command becomes trivial and there is nothing to converge.
+#
+# What the capacity arm does NOT drop is the exec itself. Exactly one exec per turn, same as the
+# calibrated arm, because the relay hop, the lease acquire/release, the transport framing and the exec
+# plumbing are all HARNESS work and belong on the path E8 is measuring; only the command's cost goes
+# away. Nor does it drop the COUNTING probe: defect 1 on this rig was `/turn` never consulting the
+# sandbox pool, so tool calls ran inside the worker process -- the hands tier absent and its cost
+# charged to the worker tier. With `true` as the command that failure is nearly invisible, because a
+# worker-local exec and a sandbox exec differ in no other measurement, which is exactly why the probe
+# stays. And the resulting duty (~0.005) is RECORDED rather than suppressed: a capacity number with no
+# duty beside it is one edit away from being quoted as a density claim.
+#
 # USAGE (on the target, as root)
 #
 #   ./prepare-workload.sh                       # calibrate against the e6-ocp duty band
 #   BASIS=e6-kind ./prepare-workload.sh         # a different §2.3 row
+#   ARM=capacity ./prepare-workload.sh          # trivial exec for E8's capacity arm, no calibration
 #   SH_SANDBOX_COUNT=6 ./prepare-workload.sh
 #   STUB_URL=http://127.0.0.1:18081 ./prepare-workload.sh
 #
@@ -62,7 +79,15 @@
 set -euo pipefail
 
 : "${SH_SANDBOX_COUNT:=3}"
+# realism (default) preserves this script's existing behaviour exactly.
+: "${ARM:=realism}"
 : "${BASIS:=e6-ocp}"
+# The capacity arm's stub profile: fast enough that a turn's duration approximates the harness's own
+# cost rather than a programmed sleep. e8-density.sh refuses a capacity arm whose stub is slower than
+# its own ceiling (assert_arm_stub_profile), so these defaults are the two halves of one contract --
+# raise them here and that gate will reject the run.
+: "${CAPACITY_TTFT_MS:=10}"
+: "${CAPACITY_TOKEN_DELAY_MS:=1}"
 : "${WORKSPACE:=/workspace}"
 : "${STUB_URL:=http://127.0.0.1:18081}"
 # The supervisor's data port: duty is measured by driving real turns through it, so this script needs
@@ -174,6 +199,25 @@ turn_cmd() {
     "$WORKSPACE" "$1"
 }
 
+# The capacity arm's per-turn command: one exec, no cost. `true` is a shell builtin, so this measures
+# the plumbing (relay -> leaf -> container, lease acquire/release, framing) and nothing else -- which
+# is the harness work the capacity arm exists to measure, with the sandbox cost removed.
+#
+# `cd` into the workspace first, deliberately, even though `true` does not need it: defect 3 on this
+# rig was leaf images that never created /workspace, so every tool call died on `cd` inside a healthy,
+# attached sandbox. Keeping the `cd` means a trivial arm still fails on that breakage rather than
+# passing where the calibrated arm would fail -- the two arms exercise the same preconditions.
+trivial_turn_cmd() {
+  printf 'cd %s/repo && true' "$WORKSPACE"
+}
+
+# The trivial command with the same counter append the calibrated path uses, so a capacity arm can
+# prove its exec reached a sandbox. Same reason as turn_cmd_counting below; separate function because
+# the trivial command takes no repeat count.
+trivial_turn_cmd_counting() {
+  printf 'echo x >> %s && %s' "$COUNTER" "$(trivial_turn_cmd)"
+}
+
 # The same command with one appended line to a counter file, so execs can be COUNTED exactly rather
 # than inferred from the stub's schedule. Inferring is what produced a wrong duty: the rate is
 # per-request and a tool turn spends two requests, so the calls-per-turn cannot be read off the rate.
@@ -192,7 +236,7 @@ COUNTER="$WORKSPACE/.exec-count"
 # The `grep -E` is belt and braces on the same class: only pure integers can reach the median.
 measure_raw() {
   local sb="$1" reps="$2" runs="${3:-$SAMPLES}" cmd
-  cmd="$(turn_cmd "$reps")"
+  if [ "$ARM" = capacity ]; then cmd="$(trivial_turn_cmd)"; else cmd="$(turn_cmd "$reps")"; fi
   podman exec "$sb" sh -c "
     i=0
     while [ \$i -lt $runs ]; do
@@ -222,6 +266,10 @@ print(f"{med} {spread}")
 '
 }
 
+# A measured 0 is legitimate for the capacity arm (a `true` builtin inside an already-warm shell can
+# round to 0ms) and impossible for the calibrated one; either way this only rejects NON-NUMERIC input,
+# which is the contamination it was written for -- the calibrated path's band check is what refuses a
+# cost too small to be a real workload.
 require_numeric() {
   case "${1:-}" in
   '' | *[!0-9]*)
@@ -235,19 +283,54 @@ require_numeric() {
 # Restart the stub with the counting tool command at this repeat count. The stub's other four values
 # are preserved from its own /profile, so this changes the workload and nothing else.
 restart_stub() {
-  local reps="$1" ttft="$2" delay="$3" tokens="$4" rate="$5"
+  local reps="$1" ttft="$2" delay="$3" tokens="$4" rate="$5" cmd
+  # The capacity arm's workload has no repeat count to vary; both arms still go through this one
+  # function so the stub's lifecycle, its four preserved profile values and the counter are handled
+  # identically -- a second copy of this would be a second place for them to drift.
+  if [ "$ARM" = capacity ]; then cmd="$(trivial_turn_cmd_counting)"; else cmd="$(turn_cmd_counting "$reps")"; fi
   systemctl stop p6-model-stub 2>/dev/null || true
   systemctl reset-failed p6-model-stub 2>/dev/null || true
   sleep 1
   systemd-run --unit=p6-model-stub --setenv=PORT=18081 \
     --setenv="SH_STUB_TTFT_MS=$ttft" --setenv="SH_STUB_TOKEN_DELAY_MS=$delay" \
     --setenv="SH_STUB_OUTPUT_TOKENS=$tokens" --setenv="SH_STUB_TOOL_CALL_RATE=$rate" \
-    --setenv="SH_STUB_TOOL_INPUT={\"command\":\"$(turn_cmd_counting "$reps")\"}" \
+    --setenv="SH_STUB_TOOL_INPUT={\"command\":\"$cmd\"}" \
     /usr/bin/node "$STUB_JS" >/dev/null ||
     die "could not start the model stub. This script owns its lifecycle during calibration; restart it
     yourself afterwards if this failed midway."
   sleep 2
 }
+
+# The capacity arm's counterpart to restart_stub_final below: leave the stub running the trivial
+# workload WITHOUT the counter, which exists for measurement only and would otherwise grow a file
+# unboundedly across a ladder that runs many more turns than any published run.
+restart_stub_capacity_final() {
+  local ttft="$1" delay="$2" tokens="$3" rate="$4"
+  systemctl stop p6-model-stub 2>/dev/null || true
+  systemctl reset-failed p6-model-stub 2>/dev/null || true
+  sleep 1
+  systemd-run --unit=p6-model-stub --setenv=PORT=18081 \
+    --setenv="SH_STUB_TTFT_MS=$ttft" --setenv="SH_STUB_TOKEN_DELAY_MS=$delay" \
+    --setenv="SH_STUB_OUTPUT_TOKENS=$tokens" --setenv="SH_STUB_TOOL_CALL_RATE=$rate" \
+    --setenv="SH_STUB_TOOL_INPUT={\"command\":\"$(trivial_turn_cmd)\"}" \
+    /usr/bin/node "$STUB_JS" >/dev/null ||
+    die "could not restart the model stub on the trivial workload."
+  sleep 2
+}
+
+# WHY THESE ARE TWO STATEMENTS AND NOT ONE `read ... <<<"$(...)"`
+#
+# `read -r a b <<<"$(fn)"` MASKS a `die` inside fn. Verified under `set -euo pipefail`: the here-string
+# is expanded, the substitution exits 1, and the script CONTINUES with empty values, exit status 0 --
+# because the status of the enclosing command is `read`'s, not the substitution's. A plain assignment
+# does abort (its status IS the substitution's), so the two-statement form is what makes a `die`
+# inside probe_duty or read_duty_band actually stop the run.
+#
+# This was not cosmetic. probe_duty's "no sandbox exec was recorded" refusal is the load-bearing
+# assertion that the tool call reached a sandbox at all -- the /turn-ran-tools-locally defect -- and
+# masked, it let the calibration continue with an empty duty until some later python expression failed
+# on the empty string, reporting a syntax error instead of the diagnosis. `local out; out="$(fn)"` is
+# required too: `local out="$(fn)"` masks it again, because `local` supplies its own exit status.
 
 # Drive TURNS turns and report "duty execs_per_turn mean_turn_ms cost_ms spread_pct".
 probe_duty() {
@@ -288,35 +371,130 @@ print(round(execs * cost / total, 4), round(execs / turns, 2), round(total / tur
 main() {
   preflight
 
-  local dlow dhigh cite
-  read -r dlow dhigh cite <<<"$(read_duty_band)"
-  log "duty basis $BASIS: $dlow-$dhigh [$cite]"
+  # The band is the REALISM arm's target. The capacity arm takes no §2.3 row (§5.4 as amended): its
+  # duty is whatever a trivial exec costs, and it is measured and reported rather than aimed at.
+  # Resolving the band anyway would invite the reader to compare the two, which is the mistake.
+  local dlow dhigh cite band
+  if [ "$ARM" = capacity ]; then
+    dlow=n/a dhigh=n/a cite="none (capacity arm)"
+    log "arm capacity: no duty basis, trivial exec, no calibration -- the duty is MEASURED and recorded"
+  else
+    band="$(read_duty_band)"
+    read -r dlow dhigh cite <<<"$band"
+    log "duty basis $BASIS: $dlow-$dhigh [$cite]"
+  fi
 
-  local profile ttft delay tokens rate
+  local profile ttft delay tokens rate parsed
   profile="$(read_stub_profile)"
-  read -r ttft delay tokens rate <<<"$(printf '%s' "$profile" | python3 -c '
+  parsed="$(printf '%s' "$profile" | python3 -c '
 import json, sys
 p = json.load(sys.stdin)
 print(p["ttftMs"], p["tokenDelayMs"], p["outputTokens"], p["toolCallRate"])
 ')"
+  read -r ttft delay tokens rate <<<"$parsed"
   log "stub profile: ttft=${ttft}ms delay=${delay}ms tokens=$tokens rate=$rate"
-  printf '%s' "$rate" | awk '{ exit !($1 > 0) }' ||
+  # Every field must be a number before anything is decided from it. The old form was
+  # `printf '%s' "$rate" | awk '{ exit !($1 > 0) }'`, which on EMPTY input runs no rules at all and
+  # exits 0 -- so a failed profile parse (the masked here-string above could leave every variable
+  # empty) sailed through the one check meant to prove the sandbox tier is reachable, and then passed
+  # empty values into --setenv=SH_STUB_TOOL_CALL_RATE=. An END rule, or a BEGIN-only test as here,
+  # is the difference between "the value is > 0" and "no value was examined".
+  for f in "ttftMs=$ttft" "tokenDelayMs=$delay" "outputTokens=$tokens" "toolCallRate=$rate"; do
+    case "${f#*=}" in
+    '' | *[!0-9.]*) die "the stub profile field ${f%%=*} reads '${f#*=}', which is not a number. The
+      profile could not be read, so nothing below can be calibrated against it: $profile" ;;
+    esac
+  done
+  awk -v r="$rate" 'BEGIN { exit !(r + 0 > 0) }' ||
     die "toolCallRate is $rate: with no tool calls the sandbox is never occupied, so no repeat count
     can reach a non-zero duty. Start the stub with a non-zero SH_STUB_TOOL_CALL_RATE (0.5 works; 1.0
     is an infinite tool loop)."
 
   local mid
-  mid="$(python3 -c "print(($dlow + $dhigh) / 2)")"
-  log "target duty: $mid (band $dlow-$dhigh), measured end to end over $TURNS turns per round"
+  if [ "$ARM" != capacity ]; then
+    mid="$(python3 -c "print(($dlow + $dhigh) / 2)")"
+    log "target duty: $mid (band $dlow-$dhigh), measured end to end over $TURNS turns per round"
+  fi
 
+  # Both arms seed the repo. The capacity arm never reads it, but its command still `cd`s into it
+  # (see trivial_turn_cmd), so a sandbox missing /workspace/repo fails the same way in both arms
+  # rather than only in the one that does real work.
   log "seeding $SH_SANDBOX_COUNT sandbox(es) with $FILES files (fixed; the repeat count is the knob)"
   local sb
   for sb in $(sandboxes); do seed_one "$sb"; done
 
-  local reps="$REPS_START" round=0 duty=0 cpt=0 turn_ms=0 cost=0 spread=0
+  # --- capacity arm: measure once, converge on nothing, and stop. -----------------------------
+  # probe_duty is the SAME function the calibrated path drives, which is what keeps the two arms'
+  # duty figures the same quantity, measured the same way: turns driven through the real supervisor,
+  # execs counted in the sandboxes, duty = execs x cost / total wall. Its no-exec refusal is the
+  # load-bearing part here (a trivial arm whose tool call silently never reaches a sandbox is
+  # invisible in every other measurement), and its reps argument is ignored by the trivial command.
+  if [ "$ARM" = capacity ]; then
+    local cduty ccpt cturn ccost cspread probed
+    probed="$(probe_duty 0 "$CAPACITY_TTFT_MS" "$CAPACITY_TOKEN_DELAY_MS" "$tokens" "$rate")"
+    read -r cduty ccpt cturn ccost cspread <<<"$probed"
+    log "capacity arm: duty $cduty (execs/turn $ccpt, turn ${cturn}ms, per-exec ${ccost}ms, spread ${cspread}%)"
+    # A trivial exec can measure 0ms: measure_raw times with `date +%s%N` and reports whole
+    # milliseconds, and `cd && true` inside an already-warm shell is well under one. A bare "0.0" duty
+    # would then be indistinguishable from "no sandbox work happened at all" -- the same
+    # unmeasured-versus-empty ambiguity the pool-size field is careful about -- so when the cost lands
+    # below the measurement resolution, what gets recorded is an explicit UPPER BOUND instead: one
+    # exec cannot have cost more than 1ms, so the duty cannot exceed cpt x 1ms / turn.
+    local duty_note="(measured end to end: execs per turn x per-exec cost / turn wall)"
+    if [ "$ccost" = "0" ]; then
+      cduty="$(python3 -c "print('<' + str(round($ccpt * 1.0 / $cturn, 5)))")"
+      duty_note="(per-exec cost is below this rig's 1ms timing resolution, so this is an upper bound, not a point estimate)"
+    fi
+    # One exec per turn, exactly -- the same invariant the calibrated arm holds. Zero means the tool
+    # call never reached a sandbox (probe_duty would already have died); anything above ~1 means the
+    # stub is emitting more than one tool_use per turn, which would put a different amount of harness
+    # plumbing on the path and make the two arms' per-turn cost incomparable.
+    python3 -c "
+import sys
+sys.exit(0 if 0.9 <= $ccpt <= 1.1 else 1)" ||
+      die "the capacity arm measured $ccpt execs per turn, not ~1.0. E8's capacity arm keeps EXACTLY one
+      exec per turn so the relay hop, lease and framing cost are on the path once; check
+      SH_STUB_TOOL_CALL_RATE (0.5 yields one call per turn)."
+    restart_stub_capacity_final "$CAPACITY_TTFT_MS" "$CAPACITY_TOKEN_DELAY_MS" "$tokens" "$rate"
+    for sb in $(sandboxes); do podman exec "$sb" sh -c "rm -f $COUNTER" 2>/dev/null || true; done
+    cat <<EOF
+
+==> prepared E8's CAPACITY arm: trivial exec, no calibration
+
+  command                cd $WORKSPACE/repo && true   <-- one exec per turn, ~no cost
+  per-exec cost          ${ccost}ms   (spread ${cspread}%)
+  execs per turn         $ccpt        (measured, not inferred from the rate)
+  mean turn              ${cturn}ms
+  tool-call rate         $rate
+  stub profile           ttft=${CAPACITY_TTFT_MS}ms delay=${CAPACITY_TOKEN_DELAY_MS}ms tokens=$tokens
+  MEASURED DUTY          $cduty     <-- RECORD THIS. No §2.3 basis applies (§5.4)
+                         $duty_note
+
+This arm's number is an UPPER BOUND on the supervisor + worker tier, never a deployable density: the
+sandbox tier is deliberately non-binding here, and e8-density.sh enforces that with a measured
+utilisation ceiling per rung rather than trusting this preparation. Record the duty above in the run
+record beside it -- a capacity figure with no duty next to it is one edit away from being quoted as a
+density claim, which is the confusion the two arms exist to prevent.
+
+Run it with BOTH caps well clear of the ladder -- e8-density.sh refuses the run otherwise, because a
+knee at or below a cap is the cap's number and not the machine's. The supervisor must have been STARTED
+with these; S and the lease cap are restart-time constants:
+
+  SH_WORKERS=4 SH_TURNS_PER_WORKER=64    ->  256 admitted, clears a c=128 top rung by 2x
+  KAGENTI_SANDBOX_CAP=86 (3 sandboxes)   ->  258 concurrent leases, likewise
+
+  V_ARM=capacity V_LADDER='1 2 4 8 16 32 64 128' ./e8-density.sh
+
+  SH_STUB_TOOL_INPUT='{"command":"$(trivial_turn_cmd)"}'
+EOF
+    return 0
+  fi
+
+  local reps="$REPS_START" round=0 duty=0 cpt=0 turn_ms=0 cost=0 spread=0 probed=
   while [ "$round" -lt "$MAX_ROUNDS" ]; do
     round=$((round + 1))
-    read -r duty cpt turn_ms cost spread <<<"$(probe_duty "$reps" "$ttft" "$delay" "$tokens" "$rate")"
+    probed="$(probe_duty "$reps" "$ttft" "$delay" "$tokens" "$rate")"
+    read -r duty cpt turn_ms cost spread <<<"$probed"
     log "round $round: reps=$reps -> duty $duty (execs/turn $cpt, turn ${turn_ms}ms, cost ${cost}ms, spread ${spread}%)"
 
     if python3 -c "import sys; sys.exit(0 if $dlow <= $duty <= $dhigh else 1)"; then

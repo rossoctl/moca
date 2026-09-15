@@ -55,7 +55,9 @@ export class FakeWorker extends EventEmitter implements WorkerHandle {
   }
   stats(s: {
     loopLagP99Ms?: number;
+    lagResolutionMs?: number;
     rssBytes?: number;
+    cpuSeconds?: number;
     leasesHeld?: number;
     leasePoolSize?: number;
     fileOpP95Ms?: number;

@@ -24,7 +24,11 @@ export type WorkerToSupervisor =
   | {
       type: 'stats';
       loopLagP99Ms?: number;
+      /** The lag histogram's resolution — the floor a `loopLagP99Ms` reading sits on. */
+      lagResolutionMs?: number;
       rssBytes?: number;
+      /** CUMULATIVE process CPU seconds; E8 differences two samples a rung apart (§5.2). */
+      cpuSeconds?: number;
       leasesHeld?: number;
       leasePoolSize?: number;
       fileOpP95Ms?: number;
@@ -44,6 +48,12 @@ export interface WorkerTelemetry {
   readonly healthy: boolean;
   readonly loopLagP99Ms: number;
   readonly rssBytes: number;
+  /**
+   * Cumulative process CPU seconds, per worker. Per-WORKER rather than pooled, because the
+   * asymmetry is the finding: one hot worker against three idle ones is a routing problem, while
+   * four equally busy ones is a full tier, and a pooled sum cannot tell those apart.
+   */
+  readonly cpuSeconds: number;
 }
 
 /** Pool-wide rollup of telemetry not carried per-worker, for `/metrics`'s top-level fields. */
@@ -57,6 +67,13 @@ export interface TelemetryAggregates {
    * `leaseSaturation`, which cannot tell an idle pool from an absent one.
    */
   readonly leasePoolSize: number;
+  /**
+   * The lag histogram resolution the workers are sampling at, NaN until one has said. Pool-wide
+   * rather than per-worker: every worker resolves it from the same env, and it belongs in the record
+   * as the DENOMINATOR of the lag column — three published runs read ~11 ms at every rung, which was
+   * the floor of a resolution-10 histogram rather than delay, and nothing in the record said so.
+   */
+  readonly lagResolutionMs: number;
 }
 
 /** The narrow slice of `ChildProcess` the pool uses, so tests can hand it a fake. */
@@ -108,7 +125,9 @@ interface Slot {
    * saturated, defeating the point of carrying this telemetry at all.
    */
   loopLagP99Ms: number;
+  lagResolutionMs: number;
   rssBytes: number;
+  cpuSeconds: number;
   leasesHeld: number;
   leasePoolSize: number;
   fileOpP95Ms: number;
@@ -170,6 +189,7 @@ export class WorkerPool {
       healthy: s.healthy,
       loopLagP99Ms: s.loopLagP99Ms,
       rssBytes: s.rssBytes,
+      cpuSeconds: s.cpuSeconds,
     }));
   }
 
@@ -199,7 +219,16 @@ export class WorkerPool {
     // and both give 0/NaN. `Math.max` above collapses to 0 when no worker has ever reported, so
     // hand back NaN for that case — 0 would read as an observed-empty pool.
     const anyObserved = this.slots.some((s) => Number.isFinite(s.leasePoolSize));
-    return { leaseSaturation, fileOpP95Ms, leasePoolSize: anyObserved ? size : Number.NaN };
+    // MAX, not mean: every worker resolves the resolution from the same env, so they agree in
+    // practice, and if a restarted worker ever disagreed the coarser floor is the honest one to
+    // quote — it bounds how small a lag reading in this record can be believed to be.
+    const res = this.slots.map((s) => s.lagResolutionMs).filter((n) => Number.isFinite(n));
+    return {
+      leaseSaturation,
+      fileOpP95Ms,
+      leasePoolSize: anyObserved ? size : Number.NaN,
+      lagResolutionMs: res.length === 0 ? Number.NaN : Math.max(...res),
+    };
   }
 
   handOff(preferred: number, socket: Socket, head?: Buffer): number | undefined {
@@ -328,7 +357,9 @@ export class WorkerPool {
       crashes: previous?.crashes ?? 0,
       drained: false,
       loopLagP99Ms: NaN,
+      lagResolutionMs: NaN,
       rssBytes: NaN,
+      cpuSeconds: NaN,
       leasesHeld: NaN,
       leasePoolSize: NaN,
       fileOpP95Ms: NaN,
@@ -357,7 +388,9 @@ export class WorkerPool {
         // Advisory only (§5.2): recorded for `/metrics`, never merged into `WorkerView` and
         // never consulted by `reconcile()` or any routing policy.
         if (msg.loopLagP99Ms !== undefined) slot.loopLagP99Ms = msg.loopLagP99Ms;
+        if (msg.lagResolutionMs !== undefined) slot.lagResolutionMs = msg.lagResolutionMs;
         if (msg.rssBytes !== undefined) slot.rssBytes = msg.rssBytes;
+        if (msg.cpuSeconds !== undefined) slot.cpuSeconds = msg.cpuSeconds;
         if (msg.leasesHeld !== undefined) slot.leasesHeld = msg.leasesHeld;
         if (msg.leasePoolSize !== undefined) slot.leasePoolSize = msg.leasePoolSize;
         if (msg.fileOpP95Ms !== undefined) slot.fileOpP95Ms = msg.fileOpP95Ms;

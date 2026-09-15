@@ -18,27 +18,72 @@ machine's. No record here says "maximum".
 patience 2 — the same criterion `experiments/src/sharing.ts` applies to E6, so E6, E8, and E9
 records are in the same units.
 
+## E8 has two arms, and their numbers are not interchangeable (§5.2)
+
+| Arm          | Sandbox tier                                | Stub profile        | Precondition                                       | What its number is                     |
+| ------------ | ------------------------------------------- | ------------------- | -------------------------------------------------- | -------------------------------------- |
+| **realism**  | calibrated duty, one §2.3 row (`e6-ocp`)    | 300/12/64           | pool **floor** `K ≥ ceil(W × S × duty)`            | the **deployable** density             |
+| **capacity** | trivial exec, non-binding and non-competing | fast (ttft ≤ 25 ms) | measured utilisation **ceiling** ≤ 25%, every rung | an **upper bound on the harness tier** |
+
+Run them as:
+
+```bash
+# realism: calibrate against the e6-ocp band, then run with the shipped caps
+./prepare-workload.sh
+V_ARM=realism ./e8-density.sh
+
+# capacity: trivial exec and a fast stub, with BOTH caps moved out of the ladder's way. The
+# supervisor must have been STARTED with these -- S and the lease cap are restart-time constants.
+#   SH_WORKERS=4 SH_TURNS_PER_WORKER=64   -> 256 admitted, clears a c=128 top rung by 2x
+#   KAGENTI_SANDBOX_CAP=86 (3 sandboxes)  -> 258 concurrent leases, likewise
+# Both are refused rather than warned about if they do not clear it, so a run that starts is a run
+# whose knee cannot be either cap.
+ARM=capacity ./prepare-workload.sh
+V_ARM=capacity V_LADDER='1 2 4 8 16 32 64 128' ./e8-density.sh
+```
+
+The capacity arm's caps are **enforced, and you have to provide them**: `deploy/vm/env/supervisor.env.example`
+ships the realism arm's values (`KAGENTI_SANDBOX_CAP=13`, `SH_TURNS_PER_WORKER` deliberately empty) and
+documents the capacity arm's beside them. A lease is held per **session**, not per exec — the cap-of-4
+run proved it, 12 leases yielding exactly 12 × 30 successes — so `pool × cap` is what must clear the
+ladder, and 86 is only safe in this arm because its tool call is trivial and the utilisation ceiling
+independently refuses a sandbox tier that is actually busy.
+
+**A capacity-arm figure quoted as a density is a wrong number, not a rounded one.** The sandbox tier is
+held out of the way there on purpose, so a real tool cost brings the figure down; the realism arm is the
+deployable one. The driver labels both in `E8_RESULT` (`arm=`) and in every per-rung record, and the
+capacity arm additionally requires that `W × S` and `pool × KAGENTI_SANDBOX_CAP` each clear the
+ladder's top rung by 2× — otherwise a knee it finds is one of the two caps, which is what
+`bound=not-observed` meant in the earlier runs.
+
+The sandbox tier's **own** capacity is not E8's subject at all: that is P4 §7.2 (E10) and §7.3 (E11).
+
 ## What every E8 run record must carry (§5.2, §5.7)
 
-This fourteen-field shape describes **E8's** records only — see the note at the end of this
+This shape describes **E8's** records only — see the note at the end of this
 section for what an E9 record actually contains. A missing E8 field is not a result:
 
-| Field               | Why it is load-bearing                                                                                                  |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `duty_basis`        | One §2.3 row, taken whole. A blend implies a wrong sandbox count.                                                       |
-| `conns_per_turn`    | What the driver actually does (one connection per turn) — see the note below.                                           |
-| stub profile        | Half the claim. ttft, token delay, output tokens, tool-call rate.                                                       |
-| `loop_lag_p99`      | Attributes a knee to worker CPU / socket multiplexing.                                                                  |
-| `rss_bytes`         | Memory per live session.                                                                                                |
-| `file_op_ms`        | The relay round trip.                                                                                                   |
-| `sandbox_cpu`       | `bash -c` churn across the pool.                                                                                        |
-| `lease_saturation`  | An under-provisioned pool, which reads exactly like worker saturation.                                                  |
-| `over_admission`    | Bounds IPC staleness; self-correcting, so it is a diagnostic not a failure.                                             |
-| `spurious_refusals` | Refusals the next `load` convicted. Attributes a `spurious_429` to staleness.                                           |
-| `spurious_429`      | **The dangerous one.** Refusals truncate a rung, so the knee reads early.                                               |
-| `attempts`          | Total requests issued at this rung — the denominator for the success rate.                                              |
-| `ok_n`              | 200-coded requests at this rung — the numerator, and what `p50`/`p95` are computed over.                                |
-| `contention_load1`  | 1-minute load average, a contention PROXY (not a generator-specific measurement) — see "Where the generator ran" below. |
+| Field                    | Why it is load-bearing                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `arm`                    | Which question this rung answers. Without it the two arms' numbers are one copy-paste apart.                                   |
+| `duty_basis`             | One §2.3 row, taken whole. A blend implies a wrong sandbox count. `none (capacity arm)` is a VALUE — distinct from blank.      |
+| `worker_cpu_ms_per_turn` | Worker CPU-seconds ÷ turns served. Tells "the worker tier is full" from "the stub is slow"; nothing else does.                 |
+| `worker_cpu_util`        | The same figure as a fraction of this box's cores — the threshold `bound=worker-cpu` fires on.                                 |
+| `sandbox_util`           | Measured sandbox utilisation. The capacity arm's precondition; a realism-arm diagnostic.                                       |
+| `lag_resolution_ms`      | The floor `loop_lag_p99` sits on. A lag reading without it is unreadable (see below).                                          |
+| `conns_per_turn`         | What the driver actually does (one connection per turn) — see the note below.                                                  |
+| stub profile             | Half the claim. ttft, token delay, output tokens, tool-call rate.                                                              |
+| `loop_lag_p99`           | Attributes a knee to worker CPU / socket multiplexing.                                                                         |
+| `rss_bytes`              | Memory per live session.                                                                                                       |
+| `file_op_ms`             | The relay round trip.                                                                                                          |
+| `sandbox_cpu`            | `bash -c` churn across the pool. **Cumulative CPU seconds** (`{{.CPUNano}}`), differenced per rung — see the correction below. |
+| `lease_saturation`       | An under-provisioned pool, which reads exactly like worker saturation.                                                         |
+| `over_admission`         | Bounds IPC staleness; self-correcting, so it is a diagnostic not a failure.                                                    |
+| `spurious_refusals`      | Refusals the next `load` convicted. Attributes a `spurious_429` to staleness.                                                  |
+| `spurious_429`           | **The dangerous one.** Refusals truncate a rung, so the knee reads early.                                                      |
+| `attempts`               | Total requests issued at this rung — the denominator for the success rate.                                                     |
+| `ok_n`                   | 200-coded requests at this rung — the numerator, and what `p50`/`p95` are computed over.                                       |
+| `contention_load1`       | 1-minute load average, a contention PROXY (not a generator-specific measurement) — see "Where the generator ran" below.        |
 
 `generator_placement` (on-box/undetermined — round 2, item 4a renamed the non-loopback case from
 "off-box"; see below for why) is recorded once **per run**, not per rung, in the run-summary prose
@@ -83,25 +128,102 @@ to defeat — one connection per turn is simply what `vm_turn` (`lib-vm.sh`) doe
 `stickyBySession`'s session affinity is a separate, not-yet-covered gap, not something this field
 or either driver's rung loop measures.
 
-### Two of these columns are permanently `NaN` — this is not a missing run, it is a missing sensor
+### Three corrections to the instrumentation itself, each of which produced a plausible number
 
-Of the fourteen fields above, **eight** are real, load-bearing attribution telemetry every **E8**
-run record actually carries: `loop_lag_p99`, `rss_bytes`, `sandbox_cpu`, `over_admission`,
-`spurious_refusals`, `spurious_429`, `attempts`, `ok_n`. `contention_load1` is also real (it is not
-`NaN`-by-design like the two below), but round 2, item 4c moved it out of this list deliberately:
-unlike the eight above, it is not scoped to any one of E8's six attribution tiers, and — for E9,
-see "Where the generator ran" below — it does not even vary per arm the way its own field name's
-placement in a per-arm record might suggest. Treat it as a box-level contention proxy alongside
-this list, not as a ninth member of it. The other two,
-`lease_saturation` and `file_op_ms`, will
-read `NaN` in **every E8 record**, on any VM, no matter how it is provisioned — not because the
-run failed to collect them, but because nothing in this repository computes them.
-`harness/src/sandbox-lease.ts` derives a lease _count_ from an array its caller already holds; it
-keeps no pool-wide state a supervisor could expose as a saturation ratio. No file-op p95 counter
-exists anywhere in `harness/src` or `packages/k8s-sandbox/src` either. A future change could add
-both — this file does not claim the gap is permanent architecture, only that it is real today —
-but until one does, `lease_saturation` and `file_op_ms` are not measurements this driver declined
-to make; they are measurements this codebase cannot yet make.
+Found while building the two arms. Recorded here because in every case the field kept its name while
+measuring something else, so no reader had reason to doubt it.
+
+**1. `sandbox_cpu` was a percentage, not CPU-seconds — and it summed the whole box.** It read
+`podman stats --format '{{.CPU}}'`, an _instantaneous percent_, and the driver differenced two samples
+per rung: a quantity with no time base, which can come out negative. Verified against podman:
+
+| template       | value           | meaning                                                            |
+| -------------- | --------------- | ------------------------------------------------------------------ |
+| `{{.CPU}}`     | `1.0714`        | percent, right now                                                 |
+| `{{.CPUNano}}` | `4596421884000` | cumulative ns — matches that container's `cpu_time` of 1h16m36.42s |
+
+It also summed **every** container on the box (Redis, the relay, the stub) under a name that says
+"sandbox". Both are fixed: the helper reads `{{.CPUNano}}` and filters to `sh-sandbox-*`. This matters
+beyond tidiness — the capacity arm's utilisation ceiling is computed from that delta, and could not have
+been built on the old field.
+
+**2. Event-loop lag was reporting its own resolution floor.** All three earlier runs read 10.3–11.6 ms
+at every rung, _including c=1_ on a nearly idle tier, moving with neither concurrency nor turn duration
+nor worker count. Measured against the same sampler shape (p99 read once a second, reset each read):
+
+| `resolution` | idle p99     | loop blocked in 50 ms chunks |
+| ------------ | ------------ | ---------------------------- |
+| 10 (shipped) | 15.7–21.6 ms | 56.1–57.0 ms                 |
+| 1 (now)      | 1.9–6.4 ms   | 50.4 ms                      |
+
+So the sampler does discriminate a starved loop; what it could not do was see anything below its own
+floor, and the attribution threshold (`lag / lag0 ≥ 4`) needed ~44 ms of real delay before it could
+fire. `SH_LAG_RESOLUTION_MS` now defaults to 1, and the resolution ships in the record as
+`lag_resolution_ms`. **Read a lag column against its own floor, never as an absolute.**
+
+**3. An unmeasurable metric now reads `NaN` where it used to read `0`.** `sandbox_cpu_seconds` summed
+empty input to `"0.00"`, so a driver that could not see a container runtime at all — the **off-box
+generator this file's own guidance requires** — produced a confident zero. Under the capacity arm's
+_ceiling_ that is the one reading that passes the gate vacuously, on exactly the run the gate exists to
+refuse. The capacity arm now refuses an unmeasured sandbox tier, and `V_SANDBOX_CPU_CMD` exists so an
+off-box run can supply the target's own figure (e.g. via `ssh`).
+
+### Throughput is not a percentage of an "ideal", and the earlier records' version of it was not capacity
+
+An earlier record reported "88% of ideal throughput", with the ideal taken as `32 ÷ 1.537 s`. At the
+300/12/64 profile ~1.42 s of that 1.537 s turn is the stub's own programmed wait, so the denominator is
+mostly sleep: the ratio measures **how well the harness hides a fixed wait** — a concurrency-plumbing
+check — and not how much work the box can do. Do not report such a ratio as a capacity figure in either
+arm. The capacity arm exists because that ratio was being read as one.
+
+### The free check that preceded this work, and what it found
+
+Before any of the above was written, the intent was to confirm the sandbox tier's CPU share
+quantitatively out of the **existing** calibrated run record, which needs no new run. Result, recorded
+because it is a negative one:
+
+- The run's per-rung JSON — the block that does carry `sandbox_cpu` and `rss_bytes` — was appended to
+  this file **on the target VM** and never came back; the distilled findings tables omit both fields. So
+  the check could not be performed from any surviving record.
+- And it could not have answered the question anyway: `sandbox_cpu` was the percentage described above,
+  not CPU-seconds.
+
+The premise it was meant to test survives independently: the ~2.35-of-8-cores figure comes from
+`duty × c` (0.0735 × 32), not from `sandbox_cpu`. The instrument was wrong; the arithmetic was not.
+**Copy a run's per-rung JSON block off the target before the box goes away** — that is the reason this
+check had no data.
+
+### One of these columns is permanently `NaN` — this is not a missing run, it is a missing sensor
+
+Real, load-bearing attribution telemetry every **E8** run record actually carries: `loop_lag_p99`
+(read against `lag_resolution_ms`), `rss_bytes`, `worker_cpu_ms_per_turn`, `worker_cpu_util`,
+`sandbox_cpu`, `sandbox_util`, `over_admission`, `spurious_refusals`, `spurious_429`, `attempts`,
+`ok_n`. `contention_load1` is also real (it is not `NaN`-by-design like `file_op_ms` below), but
+round 2, item 4c moved it out of this list deliberately: unlike the others, it is not scoped to any
+one of E8's attribution tiers, and — for E9, see "Where the generator ran" below — it does not even
+vary per arm the way its own field name's placement in a per-arm record might suggest. Treat it as a
+box-level contention proxy alongside this list, not as a member of it.
+
+`lease_saturation` **was** in this permanently-`NaN` list and no longer belongs there: workers now
+report the leases they hold and the pool their own selection last saw, so the sandbox-pool tier is
+attributable. Read its scale with care — it is leases per **sandbox**, so it saturates at
+`KAGENTI_SANDBOX_CAP`, not at 1.0, and the attribution threshold of 0.95 is therefore around one lease
+per sandbox rather than a full pool. Corroborate any `bound=sandbox-pool` verdict against the
+arithmetic (pool × cap = concurrent leases available) before quoting it.
+
+`file_op_ms` remains the exception, and it will read `NaN` in **every E8 record**, on any VM, no matter
+how it is provisioned — not because the run failed to collect it, but because nothing in this
+repository computes it. No file-op p95 counter exists anywhere in `harness/src` or
+`packages/k8s-sandbox/src` for a worker to report. A future change could add one — this file does not
+claim the gap is permanent architecture, only that it is real today — but until one does, `file_op_ms`
+is not a measurement this driver declined to make; it is one this codebase cannot yet make.
+
+**`file_op_ms` stays `NaN`, and that is a decision rather than an oversight.** It was left unbuilt
+deliberately when the arms were added: the capacity arm keeps exactly one exec per turn, so per-turn
+worker CPU plus the measured per-exec cost already bound what the relay hop can be costing, and
+instrumenting the relay's own latency spans the harness, the worker stats message and the supervisor's
+aggregates — the relay tier's own work, not this experiment's. Whoever needs the relay hop attributed in
+its own right should build it there; until then no E8 record may claim the relay was ruled out.
 
 **A different case — an all-failed rung at `c>1` (`ok_n=0`, not a c=1 dead arm, which
 `require_live_arm` already hard-fails on) — renders its unmeasurable fields as two different
@@ -127,18 +249,22 @@ this exact `null` behaviour for a different reason entirely; see `percentile`'s 
 `detectKnee`'s own comments for that load-bearing coupling, which this section does not restate.)
 
 **Read every E8 bound sentence in this file accordingly.** When an E8 run record says "the bound
-observed at: worker CPU / memory / admission-control / unattributed", that verdict is reached by
-checking only the six real columns — it is never checked against `lease_saturation` or
-`file_op_ms`, because there is nothing there to check. So "unattributed" does **not** mean "no
-tier is responsible"; it means "of the six tiers we can see, none crossed its threshold." An
-under-provisioned sandbox-pool tier or a slow relay round trip could be the actual cause of a
-knee in this file and would show up as `unattributed` here, indistinguishable from a genuinely
-even, non-bottlenecked run. Do not read `unattributed` as an exoneration of the lease/relay
-tiers — read it as `unattributed (lease-pool and relay tiers unmeasured)`. Every claim sentence
-E8 emits should be read with that qualifier whether or not the driver's own prose spells it out
-at the point the sentence is written.
+observed at: worker CPU / event loop / memory / sandbox-pool / admission-control / unattributed", that
+verdict is reached by checking only the columns that carry real readings — it is never checked against
+`file_op_ms`, because there is nothing there to check. So "unattributed" does **not** mean "no tier is
+responsible"; it means "of the tiers we can see, none crossed its threshold." A slow relay round trip
+could be the actual cause of a knee in this file and would show up as `unattributed` here,
+indistinguishable from a genuinely even, non-bottlenecked run. Do not read `unattributed` as an
+exoneration of the relay tier — read it as `unattributed (relay tier unmeasured)`. Every claim sentence
+E8 emits should be read with that qualifier whether or not the driver's own prose spells it out at the
+point the sentence is written.
 
-**E9's records do not have the attribution shape above at all — they carry none of the eight
+Since the arms landed, one verdict is newly available and worth naming: **`bound=worker-cpu`**, fired
+from measured `worker_cpu_util` rather than from a ratio of loop-lag readings. It is checked _before_
+the loop-lag branch deliberately — measured CPU against the box's cores means what a reader assumes it
+means, where a lag ratio is a ratio of two numbers sitting on a sampling floor.
+
+**E9's records do not have the attribution shape above at all — they carry none of E8's
 attribution/basis/stub fields, not even as `NaN`.** `e9-tiers.sh` emits one point per rung as
 `{c, throughput, p95Ms, attempts, non200, contention_load1}` (`deploy/vm/e9-tiers.sh`'s `run_arm`,
 see the `points` assembly near the end of its rung loop) — `attempts` and `non200` (not `ok_n`: E9

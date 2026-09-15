@@ -122,6 +122,14 @@ sandbox share of a longer turn. So E7 is the light-leaf end of the range and E6 
 within E6, OCP's EBS-backed `/workspace` makes the same ~2 git execs costlier (`:94`), which is why it
 is the conservative row. §5.4 pins one row for the driver and forbids mixing.
 
+**E8's capacity arm takes no row from this table, and that is a recorded value rather than a gap**
+(§5.2, §5.4). Its workload is a trivial exec chosen so the sandbox tier is not competing for the CPU
+under measurement, so there is no duty to pin and pinning one would re-introduce the cost the arm
+exists to remove. The run record therefore carries `duty_basis: none (capacity arm)` — **"no basis" and
+"basis unrecorded" are different values**, exactly as `check_sandbox_floor` keeps a pool observed to be
+empty distinct from a pool never observed. A blank field would read as "nobody wrote it down"; this one
+says "this arm has no row, on purpose". The realism arm continues to take one row, whole.
+
 "Changes nothing" is not the same as "nothing to watch", and there are two open questions rather than
 one. Every row was measured on the **kubectl** path, which has a persistent fast channel the gRPC
 path lacks (§3.1a); and E6's 6–8% appears both as per-leaf duty (`:94`) and as the pinned sandbox's
@@ -532,7 +540,77 @@ pure theatre. The claim is fixed on two axes, kept apart:
 Conflating them is the most likely way this work produces a number that does not survive scrutiny,
 which is why the vocabulary is fixed before the driver exists.
 
-### 5.2 E8 — VM density and saturation
+### 5.2 E8 — VM density and saturation, in two arms
+
+**The two arms, and why one number could not serve both.** As first written this section measured turn
+concurrency _coupled to_ the sandbox tier, and its parameterisation put the harness knee out of reach.
+The first authoritative run demonstrated both halves of the problem at once: `knee_floor=32`,
+`saturated=no`, `bound=not-observed`, duty 0.0735, 960/960 at c=32, p50 flat within 9 ms (1530–1539),
+p95 rising 1.59× (1546 → 2457), worker loop lag ~11 ms flat at every rung.
+
+Three independent defects, each of which produced a number that read fine:
+
+1. **The tail belonged to the sandbox tier.** Three containers ran ~78% busy at c=32
+   (32 × 0.0735 = 2.35 sandbox-equivalents of 3). A flat p50 and flat loop lag under a rising p95 is
+   queueing at a shared downstream with few servers, not worker saturation.
+2. **The sandbox work consumed the CPU under measurement.** ~2.35 of 8 cores ran `git` inside the tier
+   the experiment wanted to exclude. Adding containers fixes the queueing and not this.
+3. **The stub's latency, not the machine, set the ladder's reach.** ~1.42 s of the 1.537 s turn was the
+   stub's programmed wait (300/12/64), so an in-flight turn is mostly a sleeping promise costing
+   single-digit ms of CPU: 32 in-flight turns loaded the worker tier at a few percent and the ladder
+   topped out at the admission cap `W×S`, a configuration choice. **Remove the sandboxes entirely and
+   the verdict would still be `not-observed`, because the cap binds first.** Two zero-duty runs
+   confirmed it directly — c=64, p95 flat within 6 ms, `saturated=no`.
+
+So E8 has two arms. Each answers a different question, each has its own preconditions, and **neither
+number may be quoted as the other's**:
+
+| Arm          | Sandbox tier                                 | Stub profile        | Duty                              | Answers                                                                                  |
+| ------------ | -------------------------------------------- | ------------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
+| **capacity** | non-binding and non-competing (trivial exec) | fast (ttft ≤ 25 ms) | recorded, ≈0.005, **no §2.3 row** | how many concurrent turns the supervisor + workers push, and where the worker tier knees |
+| **realism**  | calibrated duty from one §2.3 row (`e6-ocp`) | 300/12/64           | in band, or the run is refused    | whether the density figure survives a real tool cost                                     |
+
+**Reporting rules, per arm.** The capacity arm's number is an **upper bound on the harness tier** and
+is **not a deployable density** — a real tool cost will bring it down. The realism arm's number is the
+deployable one and is sandbox-shaped by construction. The driver labels every run record with its arm
+and states the above in the record itself, because the two are one copy-paste away from being confused.
+
+**Preconditions point in opposite directions.** For the realism arm the reasoning is unchanged: E7
+validated mixed-ref converge correctness at **6** concurrent refs on one pod; E8's rungs go well past
+that, so _whether the sandbox tier holds the duty of its pinned basis (§2.3) under this load is an open
+question — which is also why each run records which basis it used. Without these two metrics a
+sandbox-bound run would be reported as a harness density limit_ — the precise error E6 caught in
+itself. The gate is a pool **floor**, `K ≥ ceil(W × S × duty)`.
+
+For the capacity arm that conclusion **inverts**. The sandbox tier is held out of the way on purpose,
+so a busy sandbox tier is the defect rather than the precondition, and the gate becomes a utilisation
+**ceiling**: measured sandbox utilisation ≤ ~25%, computed from a cumulative CPU delta over
+`wall × containers` and checked **at every rung**, since sandbox load grows with offered concurrency
+(2.4% of the tier at c=1 against 78% at c=32 in the published run). What does **not** change between
+arms is the refusal on a pool that was never observed: that catches a turn which bypassed pool
+selection entirely, and in a trivial-exec arm the same failure is nearly invisible, so the capacity arm
+needs it more rather than less.
+
+**The caps must not be what the ladder finds** (the capacity arm's second precondition). `W × S` and
+`sandbox pool × KAGENTI_SANDBOX_CAP` must each clear the ladder's top rung by 2×, and offered
+concurrency is what sweeps. This is not the W/S sweep that was previously and correctly vetoed: that
+veto held because the cap bound and nothing else could saturate, so another sweep bought another honest
+`not-observed`. Here the cap stops being the variable. The lease half is evidenced too — the same
+ladder run with the shipped `KAGENTI_SANDBOX_CAP=4` produced exactly 360 successes at two consecutive
+rungs (12 leases × 30 turns) with throughput pinned at 10.4/s: a run that measured the lease pool and
+would have been published as a VM density figure had the 0.95 success-rate floor not caught it.
+
+**Throughput must never be reported as a fraction of an "ideal" derived from concurrency ÷ mean turn.**
+When most of a turn is the stub's programmed wait, that denominator is mostly sleep, so the ratio
+measures how well the harness hides a fixed wait — a concurrency-plumbing check, not a capacity
+ceiling. The published "88% of ideal" was exactly this, computed against `32 ÷ 1.537 s`.
+
+**The seam with P4.** The sandbox tier's own capacity is P4's subject
+(`docs/specs/2026-09-09-p4-microvm-sandbox-design.md` §7.2 E10, §7.3 E11), so E8 stops competing with
+it. P4 §7.3 already guards this boundary from its side, listing _"lease saturation one tier up — a
+harness-side refusal misread as a VM-tier limit"_ among E11's per-rung metrics. E8's capacity arm is
+the mirror of that: it refuses to let the sandbox tier's cost land inside a harness number, exactly as
+E11 refuses to let a harness refusal land inside a VM-tier number.
 
 Sweep the W×S surface across rungs of offered concurrency. Knee detection **reuses E6's
 sustained-decline `detectKnee`** with `degradeX=2` against a warm C=1 baseline, and reports the knee
@@ -541,16 +619,17 @@ rung, so "one process would be simpler" becomes a data point rather than an argu
 
 Per rung, recorded for attribution rather than for the report:
 
-| Metric                                                      | Attributes a knee to                    |
-| ----------------------------------------------------------- | --------------------------------------- |
-| Throughput (turns/s), p50/p95                               | the rung itself                         |
-| **Event-loop lag p99 per worker** (`monitorEventLoopDelay`) | worker CPU / mux saturation             |
-| RSS per worker                                              | memory per live session                 |
-| **Per-file-op latency** (§3.1a)                             | the relay round trip                    |
-| **Sandbox-container CPU**                                   | `bash -c` process churn on K containers |
-| Lease saturation (§6)                                       | an under-provisioned pool               |
-| Over-admission events (§3.9)                                | the IPC staleness bound                 |
-| **Spurious `429`s** (estimate high vs next `load`, §3.9)    | a knee read early, not a real ceiling   |
+| Metric                                                      | Attributes a knee to                                                           |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Throughput (turns/s), p50/p95                               | the rung itself                                                                |
+| **Per-turn worker CPU** (worker CPU-seconds ÷ turns served) | **the worker tier being genuinely full, as distinct from the stub being slow** |
+| **Event-loop lag p99 per worker** (`monitorEventLoopDelay`) | worker CPU / mux saturation                                                    |
+| RSS per worker                                              | memory per live session                                                        |
+| **Per-file-op latency** (§3.1a)                             | the relay round trip                                                           |
+| **Sandbox-container CPU**                                   | `bash -c` process churn on K containers                                        |
+| Lease saturation (§6)                                       | an under-provisioned pool                                                      |
+| Over-admission events (§3.9)                                | the IPC staleness bound                                                        |
+| **Spurious `429`s** (estimate high vs next `load`, §3.9)    | a knee read early, not a real ceiling                                          |
 
 Two run-record fields sit beside the metrics, because both are conditions a rung can silently violate:
 the **duty basis** the stub and provisioning came from (§2.3, §5.4), and **connections per session** —
@@ -560,6 +639,38 @@ warmth at whatever the pool did rather than at what the policy does; a default r
 measured a static load-aware partition rather than least-in-flight in motion. Neither is recoverable
 after the fact without the field, and a mismatch between arms charges one policy for the other's
 connection budget.
+
+**Per-turn worker CPU is the row whose absence made the first record ambiguous.** With only lag and
+RSS, "the worker tier is actually full" and "the stub is slow" produce the same table. It is reported
+as CPU-seconds ÷ turns served, from a cumulative per-worker counter differenced across the rung, and
+per worker as well as pooled — the asymmetry is itself a finding, since one hot worker against three
+idle ones is a routing problem while four equally busy ones are a full tier.
+
+**Two of these metrics were measuring something other than their names**, found while building the
+arms, and both are worth recording because each produced a plausible number:
+
+- **`sandbox_cpu` was a percentage, not CPU-seconds.** It summed `podman stats --format '{{.CPU}}'` —
+  an _instantaneous percent_ — and the driver differenced two such samples per rung. A difference of
+  two instantaneous percentages has no time base and can be negative. Verified against podman:
+  `{{.CPU}}` → `1.0714` (percent) while `{{.CPUNano}}` → `4596421884000` (cumulative ns, matching that
+  container's own `cpu_time` of 1h16m36s). The capacity arm's ceiling cannot be computed from the
+  former, so the field now reads the cumulative one. It also summed **every** container on the box —
+  Redis, the relay and the stub included — under a name that says "sandbox".
+- **Event-loop lag was reporting its own resolution floor.** All three published runs read 10.3–11.6 ms
+  at every rung, _including c=1_ on a nearly idle tier, and moved with neither concurrency nor turn
+  duration nor worker count. Measured against the same sampler shape: at `resolution: 10` (as shipped)
+  an idle loop reads 15.7–21.6 ms and a loop blocked in 50 ms chunks reads 56.1–57.0 ms; at
+  `resolution: 1` the same two cases read 1.9–6.4 ms and 50.4 ms. So the metric does discriminate a
+  starved loop, but the floor sat above the signal for anything short of severe starvation, and this
+  section's attribution threshold (`lag / lag0 ≥ 4`) needed ~44 ms of real delay to fire. The default
+  is now 1 ms (`SH_LAG_RESOLUTION_MS`), and **the resolution ships in the record beside the lag**,
+  because a p99 reading is unreadable without the floor it sits on.
+
+An unmeasurable metric must read `NaN` and never `0` — a rule this section already applied to lag and
+RSS, and one the capacity arm makes load-bearing: under a utilisation _ceiling_, a confident zero is
+the single reading that passes the gate vacuously, and it is exactly what an off-box generator (which
+sees no container runtime) used to produce. The driver refuses such a run instead, and takes a
+`V_SANDBOX_CPU_CMD` hook for supplying the target's figure from off-box.
 
 The event-loop-lag-versus-RSS pair is the point of the instrumentation, not decoration: it answers
 _what bound it_, which is what turns a density number into a provisioning rule. E6's value came from
@@ -605,6 +716,25 @@ stub that streams only text means no session ever reaches the sandbox, and E8's 
 silently exclude the entire hands tier. It is calibrated against a measured duty figure rather than a
 guessed constant.
 
+**The calibration requirement binds the realism arm** (§5.2). The capacity arm runs a trivial exec, so
+there is nothing to converge and no row to converge on; what it must do instead is **record its own
+measured duty** (≈0.005, or an explicit upper bound when the per-exec cost falls below the rig's
+millisecond timing resolution) so the arm can never be mistaken for a density claim. Its stub profile
+is fast by requirement, and the driver refuses an arm whose stub profile contradicts its label — in
+both directions, off one shared definition of "fast", so "capacity" and "not realism" cannot drift
+apart. It keeps **exactly one exec per turn**, like the realism arm: the relay hop, the lease
+acquire/release, the transport framing and the exec plumbing are harness work and belong on the
+measured path; only the command's cost goes away. And it keeps the exec **counting** probe, because a
+trivial-exec arm whose tool call silently never reaches a sandbox is invisible in every other
+measurement — the `/turn`-ran-tools-locally defect, whose whole signature is that the hands tier is
+absent and its cost charged to the worker tier.
+
+**"Measure duty, never model it" applies to both arms** — that discipline is not what is being relaxed.
+The wrong-model failure it exists to prevent is documented in `deploy/vm/tests/workload-duty.test.sh`:
+deriving duty as `rate × cost / (ttft + outputTokens × tokenDelay)` reported 0.0707 while the measured
+value was 0.0950, i.e. inside the band while actually above it, because the rate is per _request_ (a
+tool turn spends two) and that denominator is one response of the two a tool turn pays for.
+
 **One basis, both decisions — and "basis" means a row, not an experiment.** The tool-call rate and the
 sandbox-container count come from the **same row of §2.3's table**, named in the run record. Default:
 **E6/OCP** — calibrate the stub to `duty = 0.061–0.079` and provision at `12.6–16.5` — because
@@ -621,7 +751,8 @@ both clusters, so a pairing of `0.06–0.08` with `12–24:1` fails §2.3's own 
 the right direction for that error, but the prose is what was wrong.
 
 The check is arithmetic, so the driver asserts it: `K ≥ ceil(W × S × duty)`, with `duty` and the ratio
-from one row (`N ≈ 1/duty`).
+from one row (`N ≈ 1/duty`). **This is the realism arm's assertion**; the capacity arm asserts a
+measured utilisation ceiling in its place (§5.2), and both refuse rather than warn.
 
 It lives at `deploy/knative/model-stub/`, beside `echo-target/` and following its shape (Dockerfile
 plus one small Node service) — **not** under `deploy/vm/`, because both E9 arms must drive the same
@@ -640,22 +771,36 @@ and E2/E5 are already split between driver-local and consolidated homes.
 
 ### 5.7 How the claim will read
 
+The realism arm's sentence — the deployable claim:
+
 > On a single VM, W workers each admitting up to S in-flight turns sustained **N concurrent turns** with
 > p95 within 2× the single-session baseline, with the model tier modelled at profile X and the bound
-> observed at «event loop | memory». Against the same stub, the Knative pod-per-session arm sustained
-> M.
+> observed at «event loop | worker CPU | memory». Against the same stub, the Knative pod-per-session arm
+> sustained M.
+
+The capacity arm's sentence, which must never be written without its second clause:
+
+> With the sandbox tier held non-binding (trivial exec, measured utilisation U% against a 25% ceiling)
+> and the model stub fast, the supervisor + worker tier sustained **N concurrent turns** at
+> «X ms of worker CPU per turn», with the bound observed at «worker CPU | event loop | memory». **This
+> is an upper bound on the harness tier, not a deployable density**; the deployable figure is the
+> realism arm's.
+
+Neither sentence may borrow the other's number, and latency is not comparable across the arms at all:
+the baseline moved 1068 → 1537 ms purely from a 113 ms exec. **Compare density, never latency.**
 
 ## 6. Failure modes
 
-| Failure                             | Handling                                                                                                                                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Worker crash                        | Supervisor restarts with backoff. In-flight turns die; sessions survive in Redis — existing pod-eviction semantics (E4), not a new contract                                                       |
-| Supervisor crash                    | Workers are children and exit when the IPC channel closes; systemd restarts the set. Surviving-worker re-adoption is deliberately not built                                                       |
-| All workers at cap                  | `429` + `Retry-After` **before** hand-off (§3.5)                                                                                                                                                  |
-| Hand-off race                       | Worker dies between selection and hand-off → retry on the next-least-loaded, and close the socket rather than leak it                                                                             |
-| Sandbox pool saturated              | Existing `SandboxPoolSaturatedError`. **E8 records lease saturation per rung**, so a sandbox-starved run is never misreported as a harness density limit — the exact confound E6 caught and named |
-| `process.exit(1)` in `output-guard` | Supervisor restart contains it; P5's reachability pin prevents it (§3.6)                                                                                                                          |
-| Redis down                          | Unchanged from today; sessions unresumable until it returns                                                                                                                                       |
+| Failure                               | Handling                                                                                                                                                                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker crash                          | Supervisor restarts with backoff. In-flight turns die; sessions survive in Redis — existing pod-eviction semantics (E4), not a new contract                                                                                |
+| Supervisor crash                      | Workers are children and exit when the IPC channel closes; systemd restarts the set. Surviving-worker re-adoption is deliberately not built                                                                                |
+| All workers at cap                    | `429` + `Retry-After` **before** hand-off (§3.5)                                                                                                                                                                           |
+| Hand-off race                         | Worker dies between selection and hand-off → retry on the next-least-loaded, and close the socket rather than leak it                                                                                                      |
+| Sandbox pool saturated                | Existing `SandboxPoolSaturatedError`. **E8 records lease saturation per rung**, so a sandbox-starved run is never misreported as a harness density limit — the exact confound E6 caught and named                          |
+| Sandbox tier busy in the capacity arm | Refused, not recorded: the arm's precondition is a measured utilisation **ceiling** per rung (§5.2), because a busy sandbox tier there both competes for the CPU under measurement and queues turns behind too few servers |
+| `process.exit(1)` in `output-guard`   | Supervisor restart contains it; P5's reachability pin prevents it (§3.6)                                                                                                                                                   |
+| Redis down                            | Unchanged from today; sessions unresumable until it returns                                                                                                                                                                |
 
 ## 7. Testing & verification gate
 

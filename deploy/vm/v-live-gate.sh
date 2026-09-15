@@ -52,6 +52,10 @@ trap 'rm -rf "$WORK"' EXIT
 # E6's L1 workload: a code-review turn that must actually run a tool in the sandbox.
 BODY="${V_GATE_BODY:-{\"prompt\":\"List the files in /workspace, then summarise what this project does.\"}}"
 
+# Cumulative sandbox CPU BEFORE any turn runs, so the check below can difference it. Sampled here
+# rather than at the top of the file so nothing between the two samples but the gate's own turns.
+SBX_CPU0="$(sandbox_cpu_seconds)"
+
 for i in $(seq 1 "$C"); do
   (
     SID="v-gate-$i"
@@ -75,12 +79,29 @@ done
 # A tool call must have reached a sandbox. Zero sandbox CPU means the model answered from text
 # alone and the hands tier was never exercised -- the gate would be green on a path that cannot
 # actually do work.
-SBX_CPU="$(sandbox_cpu_seconds)"
-if awk -v c="$SBX_CPU" 'BEGIN {exit !(c+0 > 0)}'; then
-  ok "sandbox pool consumed CPU ($SBX_CPU%): a tool call reached a container"
-else
-  ko "no sandbox CPU observed: no tool call reached a sandbox, so this gate proves nothing"
-fi
+#
+# This must be a DELTA across the turns, and it did not used to be: `sandbox_cpu_seconds` returned an
+# instantaneous CPU PERCENT, so a single sample above zero meant "some container is busy right now".
+# It is now cumulative CPU since each container booted, and a single sample of that is above zero for
+# any container that has ever run a process -- which is every container, always. The one-sample form
+# would therefore pass this gate on precisely the path its own comment above says it exists to
+# refuse. $SBX_CPU0 is captured before the turns are driven (see above).
+SBX_CPU1="$(sandbox_cpu_seconds)"
+SBX_DELTA="$(cpu_delta "$SBX_CPU0" "$SBX_CPU1")"
+case "$SBX_DELTA" in
+NaN)
+  # Unmeasurable, not zero: no container runtime visible from here (this gate normally runs on the
+  # target, but nothing enforces that). Say so rather than passing or failing on a number nobody has.
+  ko "sandbox CPU is UNMEASURABLE from this box ($SBX_CPU0 -> $SBX_CPU1), so this gate cannot prove a tool call reached a container; run it on the target, or set V_SANDBOX_CPU_CMD"
+  ;;
+*)
+  if awk -v c="$SBX_DELTA" 'BEGIN {exit !(c + 0 > 0)}'; then
+    ok "sandbox pool consumed ${SBX_DELTA}s of CPU across the gate turns: a tool call reached a container"
+  else
+    ko "no sandbox CPU consumed during the gate turns (delta ${SBX_DELTA}s): no tool call reached a sandbox, so this gate proves nothing"
+  fi
+  ;;
+esac
 
 M="$(worker_metrics "$METRICS_BASE")"
 S429="$(printf '%s' "$M" | jq -r '.counters.spurious_refusals // 0')"

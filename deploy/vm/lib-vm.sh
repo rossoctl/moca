@@ -151,10 +151,268 @@ worker_metrics() {
   curl -sf --max-time 5 "$base/metrics" 2>/dev/null | jq -c . 2>/dev/null || echo '{}'
 }
 
-# Sum of container CPU seconds across the sandbox pool — the `bash -c` churn term in §5.2.
+# Cumulative CPU seconds consumed by the sandbox pool since its containers booted — the `bash -c`
+# churn term in §5.2, and the input the capacity arm's utilisation ceiling is computed from (§5.2,
+# issue #254 item 2b). Callers difference two samples across a rung.
+#
+# THREE DEFECTS FIXED HERE, all of which produced a number that read fine.
+#
+# 1. IT WAS A PERCENTAGE. This used to sum `--format '{{.CPU}}'`, which podman documents as CPU
+#    PERCENT and which is instantaneous, then e8-density.sh differenced two samples per rung. A
+#    difference of two instantaneous percentages is not a CPU delta at all: it has the wrong units,
+#    no time base, and it can be negative. Verified against podman 5.x:
+#      {{.CPU}}     -> 1.071428524872072      (percent, right now)
+#      {{.CPUNano}} -> 4596421884000          (cumulative ns; matches that container's cpu_time
+#                                              field of 1h16m36.42s, i.e. 4596.42 s)
+#    Only the cumulative field can be differenced, so that is what this reads. The old field name in
+#    the record (`sandbox_cpu`) stayed the same while its meaning was wrong, which is why the ceiling
+#    could not be built on it until this changed.
+#
+# 2. IT SUMMED EVERY CONTAINER ON THE BOX. setup-vm.sh runs Redis, the relay and the model stub under
+#    the same podman as the sandboxes, so a field named `sandbox_cpu` was charging the sandbox tier
+#    for all of them. Now filtered to the `sh-sandbox-` names setup-vm.sh creates.
+#
+# 3. A TIER IT COULD NOT MEASURE READ AS AN IDLE ONE. `awk '{s+=$1} END {printf "%.2f", s+0}'`
+#    prints "0.00" for empty input, so no podman (or, far more likely, an OFF-BOX generator, which
+#    EXPERIMENTS.md's own guidance requires) produced a confident zero. Under a utilisation CEILING
+#    that zero is the single most dangerous reading available: it passes the gate vacuously, and the
+#    run it lets through is exactly the one the gate exists to refuse. It now reads NaN, matching
+#    load1/worker_metrics' "a missing metric reads NaN, never 0" contract, and assert_sandbox_ceiling
+#    refuses on NaN rather than treating it as headroom.
+#
+# V_SANDBOX_CPU_CMD is the off-box seam, and its contract is exact because a wrong unit here is
+# invisible: print one or more lines, each a bare number of cumulative sandbox CPU **SECONDS**, which
+# are summed. Nanoseconds would over-report by 1e9 and no sanity check can catch that (there is no
+# plausible upper bound on cumulative CPU), so the conversion belongs in the hook. A complete example:
+#
+#   V_SANDBOX_CPU_CMD='ssh target sudo podman stats --no-stream --format "{{.Name}} {{.CPUNano}}" \
+#     | awk "\$1 ~ /^sh-sandbox-/ {s += \$2} END {printf \"%.2f\", s / 1e9}"'
+#
+# Set it and this function trusts the number; a hook that fails, or prints nothing numeric, reads NaN
+# rather than 0 — which the capacity arm refuses on rather than treating as an idle tier.
+# The container runtime's output is captured into a variable BEFORE being parsed, rather than piped
+# straight into awk. Both callers run under the drivers' `set -euo pipefail`, and a pipeline's status
+# under `pipefail` is the first non-zero in it: with no podman (or a podman that errors), the pipeline
+# returns podman's status even though awk succeeded, and `CPU0="$(sandbox_cpu_seconds)"` — a plain
+# assignment — then aborts the whole driver under `set -e`. Observed exactly that: the run died at
+# `-- rung c=1` with exit 127 and NO message, in place of the refusal this function's NaN exists to
+# trigger. So a missing runtime must leave this function's own exit status at 0 and let the NaN do the
+# talking; `|| true` on the capture is what makes that true.
 sandbox_cpu_seconds() {
-  podman stats --no-stream --format '{{.CPU}}' 2>/dev/null |
-    tr -d '%' | awk '{s+=$1} END {printf "%.2f", s+0}'
+  local out
+  if [ -n "${V_SANDBOX_CPU_CMD:-}" ]; then
+    out="$(eval "$V_SANDBOX_CPU_CMD" 2>/dev/null)" || out=""
+    printf '%s\n' "$out" | awk 'NF && $1+0==$1 {s+=$1; n++} END {if (n) printf "%.2f\n", s; else print "NaN"}'
+    return 0
+  fi
+  # `{{.Name}} {{.CPUNano}}`, filtered by name: a sandbox is what setup-vm.sh named `sh-sandbox-N`.
+  out="$(podman stats --no-stream --format '{{.Name}} {{.CPUNano}}' 2>/dev/null || true)"
+  printf '%s\n' "$out" |
+    awk '$1 ~ /^sh-sandbox-/ && $2+0==$2 {s+=$2; n++} END {if (n) printf "%.2f\n", s/1e9; else print "NaN"}'
+}
+
+# Cumulative CPU seconds across the WORKER tier, from the supervisor's own /metrics — the worker-side
+# counterpart to sandbox_cpu_seconds (§5.2's per-turn worker CPU, issue #254 item 2e). Summed across
+# workers because the rung's denominator (turns served) is pool-wide; the per-worker readings travel
+# separately in the record, where their ASYMMETRY is the finding (one hot worker is a routing problem,
+# four equally busy ones are a full tier).
+#
+# NaN, never 0, when no worker has reported: on a build whose /metrics predates `cpu_seconds` every
+# field is absent, and a 0 there would compute a per-turn worker CPU of zero and read as "the worker
+# tier did no work" — which would attribute a knee away from the very tier this metric exists to
+# attribute it to.
+# Captured-then-parsed for the same `pipefail` reason as sandbox_cpu_seconds above: this must never
+# hand its caller a non-zero status, because the caller assigns it in a command substitution and would
+# abort the run instead of recording the NaN.
+worker_cpu_seconds() {
+  local base="${1:-$METRICS_BASE}" body out
+  body="$(worker_metrics "$base" || true)"
+  out="$(printf '%s' "$body" |
+    jq -r '[.workers[]?.cpu_seconds | numbers] | if length == 0 then "NaN" else (add | tostring) end' 2>/dev/null || true)"
+  [ -n "$out" ] && printf '%s\n' "$out" || printf 'NaN\n'
+}
+
+# b - a for two cumulative CPU readings, propagating NaN rather than inventing a number. Both
+# endpoints must be real: an unmeasurable start or end makes the delta unmeasurable, and the one thing
+# it must never silently become is 0 (see sandbox_cpu_seconds' defect 3 above — under a utilisation
+# ceiling a confident zero is the reading that lets the bad run through).
+#
+# A NEGATIVE delta is also NaN, not a small number: cumulative counters only go up, so a decrease means
+# the pool changed under the rung (a container replaced, a worker restarted and its CPU clock reset to
+# zero), and the rung's own arithmetic no longer describes one continuous set of processes.
+cpu_delta() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    num = "^-?[0-9]+([.][0-9]+)?$"
+    if (a !~ num || b !~ num || b < a) { print "NaN"; exit }
+    printf "%.2f\n", b - a
+  }'
+}
+
+# Tier utilisation as a PERCENTAGE, measured: cpu_seconds / (wall_seconds x units). Used for both
+# tiers, which is why it is not named for either — the sandbox tier's units are CONTAINERS (one
+# container is one "sandbox-equivalent", the quantity §2.3's duty is expressed against, so this
+# reproduces the findings' own arithmetic: 2.35 sandbox-equivalents busy out of 3 = 78%, from measured
+# CPU rather than from a duty the capacity arm deliberately does not have), and the worker tier's units
+# are the box's CORES, since that is what bounds it.
+#
+# Any unmeasurable input yields NaN, never a number: a NaN in the numerator (no podman, off-box, a
+# failed hook) must not silently become 0% headroom, and a zero wall time or container count has no
+# utilisation to report. assert_sandbox_ceiling treats NaN as a refusal.
+#
+# The numeric test is a REGEX over the raw string, not `x+0 == x`. awk's number conversion goes
+# through strtod, which parses "NaN" (and "nan", "inf", "-inf") as an actual IEEE value: with
+# c="NaN", `c+0 != c` compares nan against the string "NaN" and does not reliably reject it —
+# verified, it printed "nan" as the utilisation, i.e. the unmeasured case leaked through the guard
+# wearing a lowercase disguise. Matching digits explicitly is the only test that cannot be fooled by
+# a value strtod happens to understand.
+cpu_utilisation() {
+  local delta="$1" wall_ms="$2" units="$3"
+  awk -v c="$delta" -v w="$wall_ms" -v k="$units" 'BEGIN {
+    num = "^-?[0-9]+([.][0-9]+)?$"
+    if (c !~ num || w !~ num || k !~ num) { print "NaN"; exit }
+    if (w <= 0 || k <= 0 || c < 0) { print "NaN"; exit }
+    printf "%.1f\n", 100 * c / ((w / 1000) * k)
+  }'
+}
+
+# The CAPACITY arm's precondition, and it points the OPPOSITE way to the realism arm's pool floor
+# (duty_basis_sandbox_floor): that one demands ENOUGH sandboxes for the duty, this one demands the
+# sandbox tier be doing almost NOTHING, so the CPU under measurement belongs to the worker tier and
+# the tail does not belong to queueing at a shared downstream with few servers.
+#
+# Refusal, not a warning. The published calibrated run sat at 78% sandbox utilisation at its top
+# rung (2.35 sandbox-equivalents of 3, from duty 0.0735 x c=32); its p50 was flat within 9 ms and
+# its worker loop lag flat while p95 rose 1.59x, which is the signature of that queueing rather than
+# of worker saturation. A capacity arm allowed to run there produces precisely the number this arm
+# exists to stop producing, so it must fail loudly instead of proceeding.
+#
+# Args: $1 = measured utilisation percent (or NaN), $2 = ceiling percent, $3 = a label naming the rung.
+assert_sandbox_ceiling() {
+  local util="$1" ceiling="$2" label="${3:-this rung}"
+  case "$util" in
+  '' | NaN | null)
+    ko "capacity arm at $label: sandbox utilisation is UNMEASURED, so the ceiling cannot be checked and must not be assumed clear. podman is not visible from this generator (the off-box case EXPERIMENTS.md requires): set V_SANDBOX_CPU_CMD to a command printing the target's cumulative sandbox CPU seconds" >&2
+    exit 1
+    ;;
+  esac
+  awk -v u="$util" -v c="$ceiling" 'BEGIN { exit !(u <= c) }' || {
+    ko "capacity arm at $label: measured sandbox utilisation ${util}% exceeds the ${ceiling}% ceiling — the sandbox tier is both competing for the CPU under measurement and queueing turns behind too few servers, so this rung's tail is the sandbox tier's, not the worker tier's. Use the trivial-exec workload (ARM=capacity ./prepare-workload.sh) or add containers" >&2
+    exit 1
+  }
+  ok "capacity arm at $label: sandbox utilisation ${util}% is within the ${ceiling}% ceiling"
+}
+
+# An arm cannot be LABELLED one thing while MEASURING the other's stub profile.
+#
+# assert_stub_pinned above refuses a supervisor pointed at a different stub than the driver reads;
+# this is the same fabrication path one level in — the right stub, running the wrong profile. It
+# matters because ~1.42 s of the calibrated run's 1.537 s turn was the stub's own programmed wait
+# (300/12/64): an in-flight turn is mostly a sleeping promise costing single-digit ms of CPU, so at
+# that profile the box cannot be filled at any concurrency the admission cap permits, and a
+# "capacity" arm run against it reports the stub's latency as the harness's ceiling.
+#
+# Symmetric, deliberately: a realism arm against the fast profile is equally wrong, because its
+# density figure would name a model tier it never measured. Both directions turn on the same two
+# thresholds, so there is one definition of "fast" in the tree rather than two that can drift.
+#
+# toolCallRate is checked in BOTH arms: §5.4's requirement that the rate is not optional has no arm.
+# A stub that streams only text means no session ever reaches a sandbox, and a capacity arm's exec is
+# the whole point of keeping one exec per turn — its plumbing is the harness work being measured.
+#
+# Args: $1 = arm, $2 = the stub's own /profile JSON, $3 = max ttft ms, $4 = max token delay ms.
+assert_arm_stub_profile() {
+  local arm="$1" profile="$2" max_ttft="$3" max_delay="$4" ttft delay rate fast
+  ttft="$(printf '%s' "$profile" | jq -r '.ttftMs')"
+  delay="$(printf '%s' "$profile" | jq -r '.tokenDelayMs')"
+  rate="$(printf '%s' "$profile" | jq -r '.toolCallRate')"
+  # Every comparison below is guarded by an explicit digit test FIRST, because awk compares two
+  # non-numeric operands as STRINGS: `jq -r` renders a missing field as the literal `null`, and
+  # `"null" > "0"` is true, so a profile with no toolCallRate at all used to pass this gate — the same
+  # strtod/string hazard cpu_utilisation above documents, one function later. A field this function
+  # cannot read is a refusal, not a pass; stub_profile's own four-field validation normally catches it
+  # first, but this function is called directly by tests and must not depend on that.
+  local num_re='^-?[0-9]+([.][0-9]+)?$'
+  for v in "ttftMs=$ttft" "tokenDelayMs=$delay" "toolCallRate=$rate"; do
+    [[ ${v#*=} =~ $num_re ]] || {
+      ko "$arm arm: the stub profile field ${v%%=*} reads '${v#*=}', which is not a number, so this arm cannot be verified against its own profile: $profile" >&2
+      exit 1
+    }
+  done
+  awk -v r="$rate" 'BEGIN { exit !(r + 0 > 0) }' || {
+    ko "$arm arm: the stub reports toolCallRate=$rate, so no session ever reaches a sandbox and the hands tier is absent from this run entirely (§5.4). Start the stub with a non-zero SH_STUB_TOOL_CALL_RATE (0.5 yields one tool call per turn; 1.0 is an infinite tool loop)" >&2
+    exit 1
+  }
+  fast=no
+  awk -v t="$ttft" -v d="$delay" -v mt="$max_ttft" -v md="$max_delay" \
+    'BEGIN { exit !(t + 0 <= mt + 0 && d + 0 <= md + 0) }' && fast=yes
+  case "$arm" in
+  capacity)
+    [ "$fast" = yes ] || {
+      ko "capacity arm: the stub's own /profile reports ttft=${ttft}ms tokenDelay=${delay}ms, which is not a fast profile (ceiling ttft<=${max_ttft}ms tokenDelay<=${max_delay}ms). Most of each turn would be the stub's programmed wait, so the ladder would measure how well the harness hides a fixed sleep and top out at the admission cap. Restart the stub fast, or run V_ARM=realism" >&2
+      exit 1
+    }
+    ok "capacity arm: stub profile is fast (ttft=${ttft}ms tokenDelay=${delay}ms), so turn duration approximates the harness's own cost"
+    ;;
+  realism)
+    # PINNED to a declared profile, not merely "slower than the capacity ceiling". Asserting only
+    # `fast = no` accepted ttft=50/delay=5 -- and, before the numeric guard above, an EMPTY profile,
+    # which it then cheerfully announced as "the calibrated one (ttft=nullms)". §5.2's table names this
+    # arm model tier as 300/12/64, so that is what the driver verifies. V_REALISM_* exists for a
+    # deliberate second profile point; either way the profile actually run is what lands in the record.
+    local want_ttft="${V_REALISM_TTFT_MS:-300}" want_delay="${V_REALISM_TOKEN_DELAY_MS:-12}"
+    awk -v t="$ttft" -v d="$delay" -v wt="$want_ttft" -v wd="$want_delay" \
+      'BEGIN { exit !(t + 0 == wt + 0 && d + 0 == wd + 0) }' || {
+      ko "realism arm: the stub own /profile reports ttft=${ttft}ms tokenDelay=${delay}ms, but this arm is pinned to ttft=${want_ttft}ms tokenDelay=${want_delay}ms (§5.2). A deployable density figure must be measured against the model tier it names, or it describes a model nobody deploys. Restart the stub at the pinned profile, set V_REALISM_TTFT_MS/V_REALISM_TOKEN_DELAY_MS if this run deliberately uses another, or run V_ARM=capacity" >&2
+      exit 1
+    }
+    ok "realism arm: stub profile is the pinned one (ttft=${ttft}ms tokenDelay=${delay}ms)"
+    ;;
+  *)
+    ko "unknown arm '$arm': §5.2 defines exactly two, capacity and realism" >&2
+    exit 1
+    ;;
+  esac
+}
+
+# The capacity arm's OTHER precondition: neither cap may be what the ladder finds.
+#
+# Both halves are evidenced. Two zero-duty runs swept to c=64 with p95 flat within 6 ms and reported
+# `bound=not-observed`, because the admission cap `W x S` WAS the top rung — a config choice
+# masquerading as a result. And the same ladder with the shipped `KAGENTI_SANDBOX_CAP=4` produced
+# exactly 360 successes at two consecutive rungs (12 leases x 30 turns) with throughput pinned at
+# 10.4/s: a run that measured the lease pool, and one that would have been published as a VM density
+# figure had the 0.95 success-rate floor not caught it downstream.
+#
+# So the caps stop being the variable: both must clear the ladder's top rung by $4 (default 2x). This
+# is not the W/S sweep that was vetoed — that veto held because the cap bound and nothing else could
+# saturate, so another sweep bought another honest `not-observed`. Here the cap is moved out of the
+# way and OFFERED CONCURRENCY is what sweeps.
+#
+# The two halves are checked at different TIMES, which is why $3 accepts "unknown". The admission cap
+# is known from the environment before anything runs; the lease pool's size does not exist until a
+# turn has leased (see check_sandbox_floor), so the caller passes "unknown" pre-ladder and calls again
+# with the real number once the c=1 rung has been served. A deferred half says so out loud rather than
+# being quietly skipped or, worse, passed a placeholder that always clears.
+#
+# Args: $1 = top rung c, $2 = admitted (W x S), $3 = concurrent leases available (pool x cap) or
+#       "unknown" to defer that half, $4 = required headroom multiple.
+assert_capacity_headroom() {
+  local top="$1" admitted="$2" leases="$3" x="${4:-2}"
+  awk -v t="$top" -v a="$admitted" -v x="$x" 'BEGIN { exit !(a >= t * x) }' || {
+    ko "capacity arm: the admission cap W x S = $admitted is not ${x}x the ladder's top rung ($top), so a knee found here would be the CAP, not the machine — raise SH_WORKERS x SH_TURNS_PER_WORKER well past the expected knee (several hundred admitted) and sweep offered concurrency instead" >&2
+    exit 1
+  }
+  case "$leases" in
+  unknown | '' | NaN)
+    ok "capacity arm: $admitted admitted clears the top rung ($top) by ${x}x; the lease-cap half is deferred until the pool has been observed"
+    return 0
+    ;;
+  esac
+  awk -v t="$top" -v l="$leases" -v x="$x" 'BEGIN { exit !(l >= t * x) }' || {
+    ko "capacity arm: only $leases concurrent leases are available (sandbox pool x KAGENTI_SANDBOX_CAP) against a top rung of $top — leases would become the new artificial cap, the exact confusion the utilisation ceiling guards against. Raise KAGENTI_SANDBOX_CAP (deploy/vm/env/supervisor.env.example) or add containers" >&2
+    exit 1
+  }
+  ok "capacity arm: $admitted admitted and $leases concurrent leases both clear the top rung ($top) by ${x}x, so neither cap can be this ladder's knee"
 }
 
 # tsx is a devDependency of experiments/ only, never root-hoisted, and deploy/ is not a

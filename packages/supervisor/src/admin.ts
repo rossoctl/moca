@@ -1,5 +1,6 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { once } from 'node:events';
+import { availableParallelism } from 'node:os';
 import type { WorkerPool } from './pool.js';
 
 /**
@@ -22,6 +23,10 @@ const ENV_ALLOWLIST = [
   // the record, a reader cannot tell a full pool from a quarter-full one. Non-secret config, which
   // is exactly what this allowlist is for (§5.3 pin 1: prove which configuration produced a run).
   'KAGENTI_SANDBOX_CAP',
+  // The event-loop-lag sampling resolution (worker.ts's resolveLagResolutionMs). Non-secret config,
+  // and the lag column's denominator: a record quoting ~11 ms of lag without it cannot be told from
+  // one quoting a resolution-10 histogram's own floor.
+  'SH_LAG_RESOLUTION_MS',
 ] as const;
 
 /** The exact JSON plan 2's `worker_metrics()` parses. Wire names are snake_case. */
@@ -33,6 +38,13 @@ export interface MetricsBody {
     readonly healthy: boolean;
     readonly loop_lag_p99_ms: number | 'NaN';
     readonly rss_bytes: number | 'NaN';
+    /**
+     * Cumulative process CPU seconds. E8 differences two samples a rung apart and divides by turns
+     * served: per-turn worker CPU is what attributes a knee to "the worker tier is actually full"
+     * rather than to "the stub is slow" (§5.2 as amended, issue #254 item 2e). Its absence is why
+     * the first published density record could not distinguish those two.
+     */
+    readonly cpu_seconds: number | 'NaN';
   }[];
   readonly counters: {
     readonly restarts: number;
@@ -44,6 +56,20 @@ export interface MetricsBody {
     readonly head_truncations: number;
   };
   readonly lease_saturation: number | 'NaN';
+  /**
+   * Cores available to THIS host — the one the workers actually run on. Published because the driver
+   * cannot know it: `nproc` in the driver describes the GENERATOR, which on the required topology is a
+   * different, smaller machine (a 4-core generator against an 8-core target in the published runs). A
+   * worker-CPU utilisation computed against the generator's count is inflated by the ratio, so the
+   * denominator has to come from the same box as the numerator.
+   */
+  readonly cores: number | 'NaN';
+  /**
+   * The resolution the workers' lag histograms are sampling at. Published because the lag column is
+   * unreadable without it: three published runs read ~11 ms at every rung including c=1, which was
+   * a resolution-10 histogram's own floor and not delay.
+   */
+  readonly lag_resolution_ms: number | 'NaN';
   readonly file_op_p95_ms: number | 'NaN';
   /**
    * Leasable sandboxes as the workers' last selection saw them, `'NaN'` until one has looked.
@@ -76,6 +102,7 @@ export function metricsBody(pool: WorkerPool, env: NodeJS.ProcessEnv): MetricsBo
       healthy: w.healthy,
       loop_lag_p99_ms: num(w.loopLagP99Ms),
       rss_bytes: num(w.rssBytes),
+      cpu_seconds: num(w.cpuSeconds),
     })),
     counters: {
       restarts: c.restarts,
@@ -86,6 +113,8 @@ export function metricsBody(pool: WorkerPool, env: NodeJS.ProcessEnv): MetricsBo
       head_truncations: c.headTruncations,
     },
     lease_saturation: num(agg.leaseSaturation),
+    cores: num(availableParallelism()),
+    lag_resolution_ms: num(agg.lagResolutionMs),
     file_op_p95_ms: num(agg.fileOpP95Ms),
     sandbox_pool_size: num(agg.leasePoolSize),
     env: picked,

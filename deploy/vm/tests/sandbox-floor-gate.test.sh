@@ -70,8 +70,19 @@ fi
 # --- 5. Ordering: the floor is checked AFTER require_live_arm. --------------------------------
 # The size only exists once a worker has selected, so checking it before a live rung would always
 # read unobserved. Both greps must match or this is a failure, not a pass.
+#
+# The guard matches the CONDITION line and then requires the call within the next few lines, rather
+# than pinning them to one physical line as it originally did: the once-only block grew a second
+# statement when the capacity arm's deferred lease-headroom check joined it (issue #254 item 2d),
+# which shares the same "not knowable until a turn has leased" constraint. The ordering this test
+# exists to protect is unchanged, and is still asserted below.
 LIVE_LINE="$(line_of 'require_live_arm "\$C"' e8-density.sh)"
-GATE_LINE="$(line_of 'if \[ "\$SANDBOX_COUNT" = "unknown" \]; then check_sandbox_floor' e8-density.sh)"
+GATE_LINE="$(line_of 'if \[ "\$SANDBOX_COUNT" = "unknown" \]' e8-density.sh)"
+if [ -n "$GATE_LINE" ] &&
+  ! sed -n "${GATE_LINE},$((GATE_LINE + 3))p" e8-density.sh | grep -q 'check_sandbox_floor'; then
+  ko "the once-only block at line $GATE_LINE does not call check_sandbox_floor within 3 lines"
+  GATE_LINE=""
+fi
 if [ -z "$LIVE_LINE" ] || [ -z "$GATE_LINE" ]; then
   ko "could not locate both require_live_arm and the floor-check call (greps found: live='$LIVE_LINE' gate='$GATE_LINE')"
 elif [ "$GATE_LINE" -gt "$LIVE_LINE" ]; then

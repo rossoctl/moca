@@ -17,7 +17,15 @@ export type WorkerToSupervisor =
   | {
       type: 'stats';
       loopLagP99Ms?: number;
+      /** The lag histogram's own resolution — the floor a `loopLagP99Ms` reading sits on top of. */
+      lagResolutionMs?: number;
       rssBytes?: number;
+      /**
+       * CUMULATIVE process CPU seconds (user + system) since this worker started. E8 differences two
+       * samples a rung apart for CPU-seconds-per-turn, the metric that tells "the worker tier is
+       * actually full" from "the stub is slow" (§5.2 as amended).
+       */
+      cpuSeconds?: number;
       /**
        * Declared since Task 11 and, until now, never SENT by anything — which is the whole reason
        * `lease_saturation` reads `NaN` in every run record to date and E8 reports
@@ -150,6 +158,33 @@ export function createWorkerRuntime(opts: {
   };
 }
 
+/** `monitorEventLoopDelay`'s sampling rate, in ms, when `SH_LAG_RESOLUTION_MS` says nothing. */
+export const DEFAULT_LAG_RESOLUTION_MS = 1;
+
+/**
+ * The lag histogram's sampling rate. It was a hardcoded 10, and that number — not the worker tier —
+ * is what E8's loop-lag column reported: all three published runs read 10.3–11.6 ms at EVERY rung,
+ * including c=1 with a single turn in flight, and the reading moved neither with concurrency nor
+ * with turn duration nor with worker count.
+ *
+ * Measured against this exact sampler shape (p99 read once a second, reset each read):
+ *
+ *   resolution 10: idle 15.7–21.6 ms | loop blocked in 50 ms chunks 56.1–57.0 ms
+ *   resolution  1: idle  1.9– 6.4 ms | loop blocked in 50 ms chunks 50.4 ms
+ *
+ * So the metric is not broken — a genuinely starved loop does move it — but at resolution 10 the
+ * floor sits ABOVE the signal for anything short of severe starvation, and §5.2's attribution
+ * threshold (`lag / lag0 >= 4`) needs ~44 ms of real delay before it can fire. At 1 ms the floor
+ * drops ~10x and the gradual growth a filling worker tier actually produces becomes legible.
+ *
+ * A bad value falls back rather than throwing: `monitorEventLoopDelay` requires resolution > 0, and
+ * a typo in a unit file must not take a worker down — nor silently disable the metric.
+ */
+export function resolveLagResolutionMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.SH_LAG_RESOLUTION_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LAG_RESOLUTION_MS;
+}
+
 /**
  * Advisory telemetry for `/metrics` (§5.2, Task 11). `monitorEventLoopDelay` is a *cumulative*
  * histogram: left un-reset it reports the p99 since process boot, so a late rung's reading
@@ -160,10 +195,20 @@ export function startStatsReporter(opts: {
   intervalMs: number;
   lag?: () => number;
   rss?: () => number;
+  /**
+   * Injection seam for cumulative process CPU seconds, mirroring `lag`/`rss`. CUMULATIVE by
+   * contract: E8 differences two samples a rung apart to get CPU-seconds-per-turn, which is what
+   * separates "the worker tier is full" from "the stub is slow" (§5.2). A per-interval figure could
+   * not be differenced, and a rate would bake in a window nobody chose.
+   */
+  cpu?: () => number;
+  /** The lag histogram's resolution, published so a reading can be read against its own floor. */
+  lagResolutionMs?: number;
   /** Injection seam for the sandbox observations, mirroring `lag`/`rss` above. */
   sandbox?: () => { leasePoolSize: number; leasesHeld: number };
 }): () => void {
-  const h = opts.lag ? undefined : monitorEventLoopDelay({ resolution: 10 });
+  const resolution = opts.lagResolutionMs ?? resolveLagResolutionMs();
+  const h = opts.lag ? undefined : monitorEventLoopDelay({ resolution });
   h?.enable();
   const timer = setInterval(() => {
     const lag = opts.lag ? opts.lag() : h!.percentile(99) / 1e6; // ns -> ms
@@ -176,7 +221,21 @@ export function startStatsReporter(opts: {
     opts.send({
       type: 'stats',
       loopLagP99Ms: lag,
+      // Published beside the lag it bounds: a p99 of ~11 ms against a 10 ms floor and the same
+      // ~11 ms against a 1 ms floor are different findings, and the record cannot tell them apart
+      // without this. (`h.percentile` is unreset above only after this read — see the reset below.)
+      lagResolutionMs: resolution,
       rssBytes: opts.rss ? opts.rss() : process.memoryUsage.rss(),
+      // user + system, seconds, cumulative since this process started. `process.cpuUsage()` returns
+      // microseconds for both; summing them is deliberate — a turn's cost includes the syscall side
+      // (socket writes, the relay round trip's own I/O), and charging only user time would
+      // under-report the tier this metric exists to attribute a knee to.
+      cpuSeconds: opts.cpu
+        ? opts.cpu()
+        : (() => {
+            const u = process.cpuUsage();
+            return (u.user + u.system) / 1e6;
+          })(),
       leasesHeld: sandbox.leasesHeld,
       // Omitted while NaN so the supervisor's `Number.isFinite` filter keeps treating it as
       // "never observed" rather than storing a NaN that later reads as a real sample. JSON has no
