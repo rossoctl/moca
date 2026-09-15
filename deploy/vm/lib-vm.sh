@@ -248,6 +248,44 @@ cpu_delta() {
   }'
 }
 
+# Cumulative NON-IDLE CPU seconds for the TARGET host, all processes and kernel time included.
+#
+# Why this exists, measured: at 395 turns/s the capacity arm reported `worker_cpu_util` 52% of an 8-core
+# target and `bound=unattributed`, while `top` on that target showed **0.9% idle** — 74.6% user, 21.2%
+# system, 3.3% softirq. Doubling SH_WORKERS moved the ceiling not at all (395 -> 371 turns/s), which is
+# the signature of a machine that is already full rather than a tier that is. The worker processes
+# accounted for only about two thirds of it; the rest was the supervisor hand-off loop, the relay,
+# Redis, the stub, sixteen sandbox leaves, and the kernel doing 400 connections a second.
+#
+# So a worker-tier figure cannot answer "did the box run out", and a run that only has one will keep
+# reporting `unattributed` for the most basic bound there is. This is that missing denominator.
+#
+# V_HOST_CPU_CMD is the off-box seam, same contract as V_SANDBOX_CPU_CMD: print cumulative non-idle CPU
+# SECONDS for the target as one bare number. On-box, /proc/stat is read directly. NaN when neither is
+# available — never 0, which would read as an idle machine.
+#
+# /proc/stat's first line is jiffies since boot: user nice system idle iowait irq softirq steal ...
+# Non-idle is everything except idle and iowait (iowait is not CPU spent). USER_HZ is 100 on Linux.
+host_cpu_seconds() {
+  local out
+  if [ -n "${V_HOST_CPU_CMD:-}" ]; then
+    out="$(eval "$V_HOST_CPU_CMD" 2>/dev/null)" || out=""
+    printf '%s\n' "$out" | awk 'NF && $1+0==$1 {print; found=1; exit} END {if (!found) print "NaN"}'
+    return 0
+  fi
+  [ -r /proc/stat ] || {
+    printf 'NaN\n'
+    return 0
+  }
+  awk '/^cpu /{
+    total = 0
+    for (i = 2; i <= NF; i++) total += $i
+    nonidle = total - $5 - $6
+    printf "%.2f\n", nonidle / 100
+    exit
+  }' /proc/stat
+}
+
 # Tier utilisation as a PERCENTAGE, measured: cpu_seconds / (wall_seconds x units). Used for both
 # tiers, which is why it is not named for either — the sandbox tier's units are CONTAINERS (one
 # container is one "sandbox-equivalent", the quantity §2.3's duty is expressed against, so this

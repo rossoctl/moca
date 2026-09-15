@@ -113,6 +113,10 @@ WORKER_CPU_BOUND_PCT="${V_WORKER_CPU_BOUND_PCT:-80}"
 # lease saturation over its threshold is not enough on its own: that metric is leases per sandbox and a
 # healthy run crosses it routinely, which is how a tier measured 5.5% busy was once named the bound.
 SANDBOX_BOUND_PCT="${V_SANDBOX_BOUND_PCT:-50}"
+# Whole-host non-idle CPU at or above which the BOX, rather than any tier, is named as the bound. 85%,
+# because a host this busy is already queueing everything on it: measured at 99% while the worker tier
+# read 52%, with doubling the workers changing the ceiling by -6%.
+HOST_CPU_BOUND_PCT="${V_HOST_CPU_BOUND_PCT:-85}"
 # Optional. Unset means the memory bound is never attributed, rather than attributed against a
 # number nobody chose: "RSS looked high" is not a budget, and how much RSS is too much depends
 # on what else the VM runs. Set it to the per-worker RSS you are actually willing to pay for.
@@ -344,6 +348,9 @@ for C in $LADDER; do
   # tier is full" and "the stub is slow". Summed here rather than per worker because the rung's
   # denominator (turns served) is pool-wide; the per-worker readings stay in the record separately.
   WCPU0="$(worker_cpu_seconds "$METRICS_BASE")"
+  # Whole-host CPU, so "the machine ran out" is distinguishable from "this tier ran out" (see
+  # host_cpu_seconds in lib-vm.sh for the run that made this necessary).
+  HCPU0="$(host_cpu_seconds)"
   T0="$(now_ms)"
 
   # C concurrent virtual sessions, TURNS_PER_RUNG turns each. vm_turn (lib-vm.sh) opens one
@@ -458,6 +465,7 @@ for C in $LADDER; do
   # reading that exonerates precisely the run the ceiling exists to refuse.
   SANDBOX_CPU="$(cpu_delta "$CPU0" "$(sandbox_cpu_seconds)")"
   WORKER_CPU="$(cpu_delta "$WCPU0" "$(worker_cpu_seconds "$METRICS_BASE")")"
+  HOST_CPU="$(cpu_delta "$HCPU0" "$(host_cpu_seconds)")"
   # Utilisation of each tier over this rung's own wall clock. The sandbox denominator is
   # containers x wall (one container = one sandbox-equivalent, the unit §2.3's duty is expressed in);
   # the worker denominator is cores x wall, because the worker tier is bounded by the box's CPUs.
@@ -481,6 +489,8 @@ for C in $LADDER; do
   }')"
   WORKER_CPU_UTIL="$(cpu_utilisation "$WORKER_CPU" "$WALL_MS" "$WORKER_TIER_CORES")"
   WORKER_CPU_UTIL_BOX="$(cpu_utilisation "$WORKER_CPU" "$WALL_MS" "$TARGET_CORES")"
+  # Everything on the box, kernel time included: the outermost constraint there is.
+  HOST_CPU_UTIL="$(cpu_utilisation "$HOST_CPU" "$WALL_MS" "$TARGET_CORES")"
   # A worker that served turns cannot really have consumed zero CPU, so a 0.00 delta here is a
   # SAMPLING artefact, not a reading: workers report stats on an interval (SH_STATS_INTERVAL_MS,
   # default 1000ms), and a rung shorter than one interval can see the same stats message at both ends.
@@ -523,12 +533,14 @@ for C in $LADDER; do
     --arg sutil "$SANDBOX_UTIL" --arg wcpu "$WORKER_CPU" \
     --arg wutil "$WORKER_CPU_UTIL" --arg wper "$WORKER_CPU_MS_PER_TURN" \
     --arg wutilbox "$WORKER_CPU_UTIL_BOX" --arg wtier "$WORKER_TIER_CORES" \
+    --arg hcpu "$HOST_CPU" --arg hutil "$HOST_CPU_UTIL" \
     --arg lagres "$LAG_RESOLUTION_MS" \
     '. + [{c: $c, arm: $arm, throughput: $t, p50Ms: $p50, p95Ms: $p95,
            loop_lag_p99: $lag, lag_resolution_ms: $lagres,
            rss_bytes: $rss, file_op_ms: $fop, sandbox_cpu: $scpu, sandbox_util: $sutil,
            worker_cpu_s: $wcpu, worker_cpu_util: $wutil, worker_cpu_ms_per_turn: $wper,
            worker_cpu_util_box: $wutilbox, worker_tier_cores: $wtier,
+           host_cpu_s: $hcpu, host_cpu_util: $hutil,
            lease_saturation: $lease, over_admission: $over, spurious_refusals: $recon,
            spurious_429: $s429, conns_per_turn: 1, duty_basis: $basis,
            attempts: $attempts, ok_n: $ok_n, contention_load1: $load1}]')"
@@ -626,19 +638,38 @@ if [ "$SATURATED" = yes ]; then
 BOUND_JSON="$(printf '%s' "$RECORDS" | jq -c \
   --argjson knee "$KNEE" --argjson budget "$RSS_BUDGET_BYTES" \
   --argjson wcpu_pct "$WORKER_CPU_BOUND_PCT" \
-  --argjson sbx_bound_pct "$SANDBOX_BOUND_PCT" '
+  --argjson sbx_bound_pct "$SANDBOX_BOUND_PCT" \
+  --argjson host_pct "$HOST_CPU_BOUND_PCT" '
   def num($x): if ($x | type) == "number" then $x else null end;
   def peak($a): [($a // [])[] | num(.)] | map(select(. != null))
                 | if length == 0 then null else max end;
   (map(select(.c == 1)) | first) as $b |
   (map(select(.c <= $knee)) | last) as $k |
+  # Rungs ABOVE the knee. They are not capacity results -- that is what makes the knee a floor -- but
+  # they are still measurements, and they are the difference between naming a cause and shrugging.
+  # Measured on hardware: the worker tier read 79.6% of its own ceiling at the knee (c=32) and 102.3%
+  # one rung later (c=64), with throughput plateauing and p99 loop lag rising 6.7x. Consulting only the
+  # knee rung reported `unattributed` for a tier that demonstrably ran out 0.4 points later. A tier that
+  # saturates immediately above the knee is why the knee is where it is.
+  (map(select(.c > $knee)) | map((.worker_cpu_util | tonumber?) // 0) | max // 0) as $wmax |
+  (map(select(.c > $knee)) | map((.host_cpu_util | tonumber?) // 0) | max // 0) as $hmax |
+  (map(select(.c > $knee)) | map(select(((.worker_cpu_util | tonumber?) // 0) >= $wcpu_pct))
+     | first | .c) as $wsat_c |
   (peak($k.loop_lag_p99)) as $lag | (peak($b.loop_lag_p99)) as $lag0 |
   if $k == null then
     { tag: "unattributed", prose: "unattributed (no rung at or below the knee)" }
   elif ($k.spurious_429 // 0) > 0 then
     { tag: "admission-control",
       prose: "admission control — \($k.spurious_429) refusals truncated the rung, so this knee reads early rather than marking a machine limit" }
-  elif (($k.worker_cpu_util | tonumber?) // 0) >= $wcpu_pct then
+  elif (($k.host_cpu_util | tonumber?) // 0) >= $host_pct or $hmax >= $host_pct then
+    # THE WHOLE MACHINE, before any single tier. Measured: 395 turns/s with the worker tier at 52% of
+    # the box and the box itself at 99% (0.9% idle) -- the balance in the supervisor hand-off loop, the
+    # relay, Redis, the stub, the sandbox leaves and 21% system time for 400 connections a second.
+    # Naming a tier there would send a reader to raise SH_WORKERS, which was measured to do nothing
+    # (395 -> 371 turns/s at twice the workers). A bigger box, or less work per turn, is the lever.
+    { tag: "host-cpu",
+      prose: "the target host ran out of CPU — \($k.host_cpu_util)% of \($k.worker_tier_cores | tonumber? // 0 | if . > 0 then . else "its" end) cores non-idle at the knee (worker processes only \($k.worker_cpu_util_box)% of it, the rest being the supervisor hand-off, relay, Redis, stub, sandbox leaves and kernel time), so this is the machine and not one tier. More workers will not help; a larger host or a cheaper turn will" }
+  elif (($k.worker_cpu_util | tonumber?) // 0) >= $wcpu_pct or $wmax >= $wcpu_pct then
     # MEASURED worker CPU. This is the attribution §5.2 lacked: with only lag and RSS, "the worker
     # tier is actually full" and "the stub is slow" produce identical records, and the first
     # published run was ambiguous between them at every rung.
@@ -656,7 +687,11 @@ BOUND_JSON="$(printf '%s' "$RECORDS" | jq -c \
     # No apostrophes in this comment: it sits inside a single-quoted jq program, where one would
     # terminate the quote and hand the rest of the file to bash as code.
     { tag: "worker-cpu",
-      prose: "worker CPU — the worker tier ran at \($k.worker_cpu_util)% of the \($k.worker_tier_cores) cores its \($k.worker_cpu_util_box)%-of-box workers can occupy at the knee (\($k.worker_cpu_ms_per_turn)ms of CPU per turn served), so the tier is genuinely full rather than waiting on the model stub. Raise SH_WORKERS to buy more of the box" }
+      prose: ("worker CPU — the worker tier ran at \($k.worker_cpu_util)% of the \($k.worker_tier_cores) cores its workers can occupy at the knee (\($k.worker_cpu_ms_per_turn)ms of CPU per turn served, \($k.worker_cpu_util_box)% of the whole box)"
+        + (if $wsat_c != null and (($k.worker_cpu_util | tonumber?) // 0) < $wcpu_pct
+           then ", reaching \($wmax)% by c=\($wsat_c) — the tier runs out just above the knee, which is why the knee is here"
+           else "" end)
+        + ". Each worker is one event loop and cannot exceed one core, so raise SH_WORKERS to buy more of the box") }
   elif (($k.lease_saturation | tonumber?) // 0) >= 0.95
         and (($k.sandbox_util | tonumber?) // 0) >= $sbx_bound_pct then
     # BOTH halves are required, and the second one is why. `lease_saturation` is leases per SANDBOX, so

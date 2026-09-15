@@ -94,4 +94,52 @@ for expr in \
   fi
 done
 
+# --- 7. Real hardware rungs must attribute to worker CPU. --------------------------------------
+# Fixture from the 2026-09-15 capacity-arm run (target c6i.2xlarge, 8 cores, W=4, S=64, 16 sandboxes).
+# Two verdicts were wrong on this exact data before the fixes it pins:
+#
+#   bound=sandbox-pool   because lease_saturation 1.81 cleared 0.95, for a tier measured 5.3% busy --
+#                        and the record then advised "provision more containers" for an idle pool.
+#   bound=unattributed   because the knee rung read 79.6% of the worker tier ceiling, 0.4 points under
+#                        the threshold, while the very next rung read 102.3% and throughput plateaued.
+#
+# Real rungs rather than synthetic ones, because both defects turned on the RELATIONSHIP between
+# columns that a hand-made fixture would have gotten conveniently wrong.
+FIXTURE='[
+ {"c":1,"worker_cpu_util":"6.1","worker_cpu_util_box":"3.1","worker_tier_cores":"4","worker_cpu_ms_per_turn":"26.0","sandbox_util":"0.2","lease_saturation":"0","loop_lag_p99":[1.84],"rss_bytes":[222298112],"spurious_429":0,"throughput":9.422},
+ {"c":32,"worker_cpu_util":"79.6","worker_cpu_util_box":"39.8","worker_tier_cores":"4","worker_cpu_ms_per_turn":"15.0","sandbox_util":"5.3","lease_saturation":"1.8125","loop_lag_p99":[3.62],"rss_bytes":[240000000],"spurious_429":0,"throughput":211.967},
+ {"c":64,"worker_cpu_util":"102.3","worker_cpu_util_box":"51.2","worker_tier_cores":"4","worker_cpu_ms_per_turn":"12.9","sandbox_util":"8.7","lease_saturation":"0.1875","loop_lag_p99":[5.12],"rss_bytes":[250000000],"spurious_429":0,"throughput":316.989},
+ {"c":128,"worker_cpu_util":"105.1","worker_cpu_util_box":"52.6","worker_tier_cores":"4","worker_cpu_ms_per_turn":"10.6","sandbox_util":"11.2","lease_saturation":"1.9375","loop_lag_p99":[12.37],"rss_bytes":[260000000],"spurious_429":0,"throughput":395.265}
+]'
+
+# Extract the driver's OWN program rather than restating it; a copy would drift and prove nothing. It
+# begins after the opening quote (the --argjson lines come first) and ends at the closing `end')"`.
+PROG="$(awk "
+  /^BOUND_JSON=\"\\\$\\(printf/ { seen = 1; next }
+  seen && !cap && /'\$/ { cap = 1; next }
+  cap && /^  end.\\)\"\$/ { print \"  end\"; exit }
+  cap { print }
+" e8-density.sh)"
+if [ -z "$PROG" ]; then
+  ko "could not extract the attribution program from e8-density.sh"
+else
+  # host_cpu_util is deliberately ABSENT from these rows: they were recorded before that metric
+  # existed, so this also pins that an older record still attributes rather than erroring out.
+  VERDICT="$(printf '%s' "$FIXTURE" | jq -c --argjson knee 32 --argjson budget 0 \
+    --argjson wcpu_pct 80 --argjson sbx_bound_pct 50 --argjson host_pct 85 "$PROG" 2>&1)"
+  TAG="$(printf '%s' "$VERDICT" | jq -r .tag 2>/dev/null)"
+  case "$TAG" in
+  worker-cpu) ok "real hardware rungs attribute to worker CPU" ;;
+  sandbox-pool) ko "the idle-pool misattribution is back: a tier measured 5.3% busy was named the bound" ;;
+  unattributed) ko "unattributed for a tier at 79.6% of its ceiling at the knee and 102.3% above it" ;;
+  *) ko "attribution failed on real rungs: $VERDICT" ;;
+  esac
+  # The prose has to carry the per-worker explanation, or a reader cannot act on the verdict.
+  if printf '%s' "$VERDICT" | grep -q 'cannot exceed one core'; then
+    ok "the verdict explains that a worker is one event loop, so SH_WORKERS is the lever"
+  else
+    ko "the worker-CPU verdict does not name the lever"
+  fi
+fi
+
 exit "$FAIL"
