@@ -392,6 +392,72 @@ for fn in assert_capacity_headroom assert_arm_stub_profile; do
 done
 
 # =============================================================================================
+# 6b. No apostrophe may appear inside the single-quoted jq programs.
+# =============================================================================================
+# This has bitten three times while editing this driver: the attribution block and the report block are
+# single-quoted jq programs, so one apostrophe in a comment or a message closes the quote and hands the
+# remainder of the file to bash as code. `bash -n` catches it, but only if someone runs it -- and the
+# failure is a confusing "syntax error near unexpected token" pointing at a line that is fine.
+JQ_APOSTROPHE=0
+# Delimited by the assignment that opens the program and the `end')"` that closes it, so this inspects
+# only the jq source. The surrounding shell comments may contain apostrophes freely, and an earlier
+# version of this check flagged those -- a false positive is as bad as a miss in a guard nobody trusts.
+awk '
+  /^BOUND_JSON="\$\(printf/ { injq = 1; next }
+  injq && /^  end.\)"$/ { injq = 0 }
+  injq && /^ *#/ && /'"'"'/ { print NR ": " $0; bad = 1 }
+  END { exit bad ? 1 : 0 }
+' e8-density.sh || JQ_APOSTROPHE=1
+if [ "$JQ_APOSTROPHE" = 0 ]; then
+  ok "no apostrophe inside the jq attribution program"
+else
+  ko "an apostrophe appears in a comment inside the single-quoted jq program -- it terminates the quote"
+fi
+# And the whole file must parse, which is the backstop for every quoting mistake of this class.
+if bash -n e8-density.sh 2>/dev/null; then
+  ok "e8-density.sh parses"
+else
+  ko "e8-density.sh does not parse: $(bash -n e8-density.sh 2>&1 | head -2)"
+fi
+if bash -n lib-vm.sh 2>/dev/null; then
+  ok "lib-vm.sh parses"
+else
+  ko "lib-vm.sh does not parse"
+fi
+
+# =============================================================================================
+# 6c. The worker tier's utilisation denominator is its WORKER COUNT, not the box's cores.
+# =============================================================================================
+# Measured on hardware: W=4 on an 8-core box, 10.2ms of worker CPU per turn at 402 turns/s = 4.1 cores,
+# which is 51% of the box and 102% of the four cores four single-threaded event loops can occupy. The
+# tier was saturated (throughput plateaued, p99 lag rose 6.7x) while the box figure sat at half, so an
+# 80%-of-box threshold could never fire. Both figures must be recorded, and the ATTRIBUTION one must be
+# against min(W, cores).
+if printf '%s' "$CODE" | grep -q 'WORKER_TIER_CORES'; then
+  ok "the worker tier's own core ceiling is computed"
+else
+  ko "no worker-tier ceiling: worker_cpu_util against box cores cannot show a saturated tier when W < cores"
+fi
+printf '%s' "$CODE" | grep -q 'worker_cpu_util_box' &&
+  ok "the box-normalised figure is recorded too, for sizing" ||
+  ko "the box-normalised worker CPU figure is gone"
+# min(), not max(): a box smaller than W still bounds the tier.
+if printf '%s' "$CODE" | grep -A3 'WORKER_TIER_CORES=' | grep -q 'w < c ? w : c'; then
+  ok "the ceiling is min(W, cores)"
+else
+  ko "the worker-tier ceiling is not min(W, cores)"
+fi
+
+# The sandbox-pool verdict must require the tier to be MEASURABLY busy, not just leases over a
+# mis-scaled threshold. Observed: a tier at 5.5% was convicted on lease_saturation 1.81, and the record
+# advised provisioning containers for an idle pool.
+if printf '%s' "$CODE" | grep -A2 'lease_saturation | tonumber' | grep -q 'sandbox_util'; then
+  ok "a sandbox-pool verdict requires measured sandbox utilisation to agree"
+else
+  ko "the sandbox-pool branch still convicts on lease saturation alone -- it named an idle tier once already"
+fi
+
+# =============================================================================================
 # 7. Reporting: per-turn worker CPU recorded, the arm labelled, and no "% of ideal" capacity claim.
 # =============================================================================================
 

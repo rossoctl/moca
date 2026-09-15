@@ -78,10 +78,20 @@ if [ "$BAD" = "1.33" ]; then
 else
   ko "expected the unparenthesised form to yield 1.33, got '$BAD'"
 fi
-if grep -q 'elif ((\$k.lease_saturation | tonumber?) // 0) >= 0.95 then' e8-density.sh; then
-  ok "the driver's threshold keeps its outer parentheses"
-else
-  ko "the driver's lease_saturation threshold is no longer parenthesised as ((x) // 0) >= n"
-fi
+# Asserted as the PROPERTY (each `// 0` is parenthesised before its comparison) rather than as one
+# exact line: the sandbox-pool condition now spans two lines, because convicting the lease pool also
+# requires the tier's MEASURED utilisation to agree -- a tier at 5.5% busy was once named the bound on
+# lease saturation alone. Every numeric threshold in the branch is checked here, so a new one cannot be
+# added unparenthesised.
+for expr in \
+  '(($k.lease_saturation | tonumber?) // 0) >= 0.95' \
+  '(($k.sandbox_util | tonumber?) // 0) >= $sbx_bound_pct' \
+  '(($k.worker_cpu_util | tonumber?) // 0) >= $wcpu_pct'; do
+  if grep -qF "$expr" e8-density.sh; then
+    ok "parenthesised threshold present: $expr"
+  else
+    ko "missing or unparenthesised threshold: $expr"
+  fi
+done
 
 exit "$FAIL"

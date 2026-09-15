@@ -252,8 +252,17 @@ cpu_delta() {
 # tiers, which is why it is not named for either — the sandbox tier's units are CONTAINERS (one
 # container is one "sandbox-equivalent", the quantity §2.3's duty is expressed against, so this
 # reproduces the findings' own arithmetic: 2.35 sandbox-equivalents busy out of 3 = 78%, from measured
-# CPU rather than from a duty the capacity arm deliberately does not have), and the worker tier's units
-# are the box's CORES, since that is what bounds it.
+# CPU rather than from a duty the capacity arm deliberately does not have).
+#
+# THE WORKER TIER'S UNITS ARE WORKERS, NOT CORES, and getting that wrong hides a saturated tier.
+# Measured on hardware (W=4 on an 8-core target, capacity arm at c=128): 10.2 ms of worker CPU per turn
+# at 402 turns/s = 4.1 cores busy, which reads as 51% of the box and 102% of the four cores four
+# single-threaded event loops can actually occupy. Throughput plateaued and p99 loop lag rose 6.7x at
+# that rung, i.e. the tier WAS full — while a box-normalised figure sat at half, below any sane
+# threshold. An 80%-of-box threshold is unreachable by construction whenever W < cores. So the driver
+# records BOTH: utilisation of the tier's own ceiling (min(W, cores) — a worker cannot use more than one
+# core, and W workers cannot use more cores than the box has) for ATTRIBUTION, and utilisation of the
+# box for SIZING.
 #
 # Any unmeasurable input yields NaN, never a number: a NaN in the numerator (no podman, off-box, a
 # failed hook) must not silently become 0% headroom, and a zero wall time or container count has no

@@ -109,6 +109,10 @@ CAPACITY_MAX_TOKEN_DELAY_MS="${V_CAPACITY_MAX_TOKEN_DELAY_MS:-2}"
 # real worker CPU rather than to anything else. 80%, deliberately short of 100: a tier does not need
 # every core saturated to knee, because scheduling delay grows well before the last cycle is spent.
 WORKER_CPU_BOUND_PCT="${V_WORKER_CPU_BOUND_PCT:-80}"
+# Measured sandbox-tier utilisation at or above which the lease pool may be convicted as the bound. A
+# lease saturation over its threshold is not enough on its own: that metric is leases per sandbox and a
+# healthy run crosses it routinely, which is how a tier measured 5.5% busy was once named the bound.
+SANDBOX_BOUND_PCT="${V_SANDBOX_BOUND_PCT:-50}"
 # Optional. Unset means the memory bound is never attributed, rather than attributed against a
 # number nobody chose: "RSS looked high" is not a budget, and how much RSS is too much depends
 # on what else the VM runs. Set it to the per-worker RSS you are actually willing to pay for.
@@ -466,7 +470,17 @@ for C in $LADDER; do
   # ceiling. That is the safe direction for a gate to be wrong in, so it is recorded rather than
   # re-plumbed; the pool-never-observed refusal above catches the pathological case first.
   SANDBOX_UTIL="$(cpu_utilisation "$SANDBOX_CPU" "$WALL_MS" "$SANDBOX_COUNT")"
-  WORKER_CPU_UTIL="$(cpu_utilisation "$WORKER_CPU" "$WALL_MS" "$TARGET_CORES")"
+  # Two denominators, deliberately. WORKER_CPU_UTIL is against the worker tier's OWN ceiling: each
+  # worker is one Node event loop and cannot exceed one core, so W workers cannot exceed min(W, cores).
+  # That is the figure a saturation threshold can be set against. WORKER_CPU_UTIL_BOX is against the
+  # box, which is what a reader needs for sizing ("half the machine was idle") and is NOT a saturation
+  # signal when W < cores.
+  WORKER_TIER_CORES="$(awk -v w="$WORKERS" -v c="$TARGET_CORES" 'BEGIN {
+    if (c !~ /^[0-9]+$/) { print w; exit }
+    print (w < c ? w : c)
+  }')"
+  WORKER_CPU_UTIL="$(cpu_utilisation "$WORKER_CPU" "$WALL_MS" "$WORKER_TIER_CORES")"
+  WORKER_CPU_UTIL_BOX="$(cpu_utilisation "$WORKER_CPU" "$WALL_MS" "$TARGET_CORES")"
   # A worker that served turns cannot really have consumed zero CPU, so a 0.00 delta here is a
   # SAMPLING artefact, not a reading: workers report stats on an interval (SH_STATS_INTERVAL_MS,
   # default 1000ms), and a rung shorter than one interval can see the same stats message at both ends.
@@ -508,11 +522,13 @@ for C in $LADDER; do
     --arg load1 "$CONTENTION_LOAD1" --arg arm "$ARM" \
     --arg sutil "$SANDBOX_UTIL" --arg wcpu "$WORKER_CPU" \
     --arg wutil "$WORKER_CPU_UTIL" --arg wper "$WORKER_CPU_MS_PER_TURN" \
+    --arg wutilbox "$WORKER_CPU_UTIL_BOX" --arg wtier "$WORKER_TIER_CORES" \
     --arg lagres "$LAG_RESOLUTION_MS" \
     '. + [{c: $c, arm: $arm, throughput: $t, p50Ms: $p50, p95Ms: $p95,
            loop_lag_p99: $lag, lag_resolution_ms: $lagres,
            rss_bytes: $rss, file_op_ms: $fop, sandbox_cpu: $scpu, sandbox_util: $sutil,
            worker_cpu_s: $wcpu, worker_cpu_util: $wutil, worker_cpu_ms_per_turn: $wper,
+           worker_cpu_util_box: $wutilbox, worker_tier_cores: $wtier,
            lease_saturation: $lease, over_admission: $over, spurious_refusals: $recon,
            spurious_429: $s429, conns_per_turn: 1, duty_basis: $basis,
            attempts: $attempts, ok_n: $ok_n, contention_load1: $load1}]')"
@@ -609,7 +625,8 @@ BOUND_JSON='{ "tag": "not-observed", "prose": "not observed — the top rung was
 if [ "$SATURATED" = yes ]; then
 BOUND_JSON="$(printf '%s' "$RECORDS" | jq -c \
   --argjson knee "$KNEE" --argjson budget "$RSS_BUDGET_BYTES" \
-  --argjson wcpu_pct "$WORKER_CPU_BOUND_PCT" '
+  --argjson wcpu_pct "$WORKER_CPU_BOUND_PCT" \
+  --argjson sbx_bound_pct "$SANDBOX_BOUND_PCT" '
   def num($x): if ($x | type) == "number" then $x else null end;
   def peak($a): [($a // [])[] | num(.)] | map(select(. != null))
                 | if length == 0 then null else max end;
@@ -639,10 +656,18 @@ BOUND_JSON="$(printf '%s' "$RECORDS" | jq -c \
     # No apostrophes in this comment: it sits inside a single-quoted jq program, where one would
     # terminate the quote and hand the rest of the file to bash as code.
     { tag: "worker-cpu",
-      prose: "worker CPU — the worker tier consumed \($k.worker_cpu_util)% of the cores on this box at the knee (\($k.worker_cpu_ms_per_turn)ms of CPU per turn served), so the tier is genuinely full rather than waiting on the model stub" }
-  elif (($k.lease_saturation | tonumber?) // 0) >= 0.95 then
+      prose: "worker CPU — the worker tier ran at \($k.worker_cpu_util)% of the \($k.worker_tier_cores) cores its \($k.worker_cpu_util_box)%-of-box workers can occupy at the knee (\($k.worker_cpu_ms_per_turn)ms of CPU per turn served), so the tier is genuinely full rather than waiting on the model stub. Raise SH_WORKERS to buy more of the box" }
+  elif (($k.lease_saturation | tonumber?) // 0) >= 0.95
+        and (($k.sandbox_util | tonumber?) // 0) >= $sbx_bound_pct then
+    # BOTH halves are required, and the second one is why. `lease_saturation` is leases per SANDBOX, so
+    # it saturates at KAGENTI_SANDBOX_CAP rather than at 1.0 and its 0.95 threshold fires at roughly one
+    # lease per sandbox — which a healthy run crosses constantly. Observed on hardware: a capacity arm
+    # whose sandbox tier measured 5.5% busy at the knee was reported as `bound=sandbox-pool` on a
+    # saturation of 1.81 (about 2% of a 16 x 86 lease capacity), and the record advised
+    # "provision more containers" for a tier that was almost entirely idle. Now the measured CPU of the
+    # tier has to agree before it can be convicted.
     { tag: "sandbox-pool",
-      prose: "the sandbox lease pool (saturation \($k.lease_saturation)) — provision more containers and re-run before quoting this as a VM limit" }
+      prose: "the sandbox lease pool (saturation \($k.lease_saturation), tier measured \($k.sandbox_util)% busy) — provision more containers and re-run before quoting this as a VM limit" }
   elif ($lag != null and $lag0 != null and $lag0 > 0 and ($lag / $lag0) >= 4) then
     { tag: "event-loop",
       prose: "the event loop — worst-worker p99 loop lag \($lag)ms against \($lag0)ms at c=1" }
