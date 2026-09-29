@@ -4,7 +4,7 @@ Version: 1.0 — June 17, 2026
 Status: Design (approved for implementation planning)
 Scope: Sandbox-track hardening increment of the serverless harness — cut per-op
 `kubectl exec` latency, close the `BashOperations.env` gap, and honour find's ignore list
-Parent plan: [Serverless Harness: Revised Plan](../../../docs/research/2026-06-10-serverless-harness-revised-plan.md) §8 (residual risks — "flagged for M3 — a persistent in-pod channel")
+Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §8 (residual risks — "flagged for M3 — a persistent in-pod channel")
 Predecessor: [M2 Design — K8sSandboxClient](2026-06-17-m2-k8s-sandbox-client-design.md)
 
 ---

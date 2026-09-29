@@ -117,7 +117,7 @@ jobs:
       - name: Verify sandbox inventory against the image
         run: |
           jq --version
-          IMAGE=ghcr.io/rossoctl/serverless-harness-sandbox:latest
+          IMAGE=ghcr.io/rossoctl/moca-sandbox:latest
           docker pull "$IMAGE" || {
             echo "::warning title=Sandbox inventory drift check skipped::could not pull $IMAGE; inventory drift is UNVERIFIED"
             exit 0

@@ -2,8 +2,8 @@
 
 Version: 1.0 — July 2, 2026
 Status: Design (approved for implementation planning)
-Scope: **Phase 1 (P1)** of the [two-tier FS-free harness epic](https://github.com/kagenti/serverless-harness/issues/49)
-([P1 issue #45](https://github.com/kagenti/serverless-harness/issues/45)). Make the credentialed
+Scope: **Phase 1 (P1)** of the [two-tier FS-free harness epic](https://github.com/rossoctl/moca/issues/49)
+([P1 issue #45](https://github.com/rossoctl/moca/issues/45)). Make the credentialed
 **harness** perform **no filesystem I/O**: move the leaf envelope (inputs, verdict, done-marker) and
 the human-gate markers off the shared `/work` PVC, and move the sandbox working set from `emptyDir`
 to durable storage via the agent-sandbox `Sandbox` CR. Single sandbox / RWO is fine here.
@@ -209,7 +209,7 @@ spec:
             - { name: workspace, mountPath: /workspace } # durable, was emptyDir
 ```
 
-### 6.2 Harness exec resolution — `@sh/k8s-sandbox`
+### 6.2 Harness exec resolution — `@moca/k8s-sandbox`
 
 Today the client execs by a **fixed** pod name (`config.ts:20` `KAGENTI_SANDBOX_POD`; `exec.ts:21-22`
 `kubectl exec -i -n <ns> <pod>`). agent-sandbox assigns the pod name (kagenti discovers it by
@@ -273,7 +273,7 @@ the pod from a **label selector**, authoritatively, from the CR's own status:
     path writes a `paused` record and reads `env.decision`.
   - `server`: parses inline `item`/`decision`; rejects the old `inputsRef`/`resultRef` shape with
     `400`; `/runs/status?sessionId` reads the record.
-  - `@sh/k8s-sandbox`: given a `.status.selector`, builds the correct `kubectl get pod` args;
+  - `@moca/k8s-sandbox`: given a `.status.selector`, builds the correct `kubectl get pod` args;
     re-resolves after an exec failure; `KAGENTI_SANDBOX_POD` fallback short-circuits.
 - **Live smoke (Kind).**
   - Existing sync + async leaf smoke, adapted to the inline/Redis contract.

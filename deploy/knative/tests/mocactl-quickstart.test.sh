@@ -39,8 +39,8 @@ case "$args" in
   *" get ksvc "*" -o json "*)
     echo '{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"SH_REQUIRE_AUTH","value":"false"},{"name":"SH_SESSION_TOKEN_PUBLIC_KEYS","value":"old:KEY"}]}]}}}}'
     exit 0 ;;
-  *" get ksvc "*"latestReadyRevisionName"*) echo "serverless-harness-00007"; exit 0 ;;
-  *" get pod "*) echo "pod/serverless-harness-00007-deployment-abc"; exit 0 ;;
+  *" get ksvc "*"latestReadyRevisionName"*) echo "moca-00007"; exit 0 ;;
+  *" get pod "*) echo "pod/moca-00007-deployment-abc"; exit 0 ;;
   *" get secret "*"jsonpath"*) printf 'RVhJU1RJTkctS0VZ'; exit 0 ;;
   *" get secret "*) [ "${MOCK_SECRETS:-0}" = 1 ] && exit 0 || exit 1 ;;
 esac
@@ -152,9 +152,9 @@ echo "== with port-forwards: forwards the latest revision's pod and prints the o
 code="$(run "$TMP/out" SH_GITHUB_CLIENT_ID=Ov23li.mock --)"
 check "forwards the control plane" "$(count 'port-forward -n default svc/sh-control-plane 18080:8080')" "1"
 check "picks the latest ready revision's running pod" \
-  "$(count 'get pod -n default -l serving.knative.dev/revision=serverless-harness-00007 --field-selector=status.phase=Running')" "1"
+  "$(count 'get pod -n default -l serving.knative.dev/revision=moca-00007 --field-selector=status.phase=Running')" "1"
 check "forwards that pod, not Kourier" \
-  "$(count 'port-forward -n default pod/serverless-harness-00007-deployment-abc 18081:8080')" "1"
+  "$(count 'port-forward -n default pod/moca-00007-deployment-abc 18081:8080')" "1"
 check "checks discovery through the forward" "$(count 'localhost:18080/v1/discovery')" "1"
 check "prints the one URL to export" "$(grep -c 'export SH_CONTROL_PLANE_URL=http://localhost:18080' "$TMP/out")" "1"
 # The mocked forwards exit at once, so the script reports it and exits 1 -- the reconnect path.

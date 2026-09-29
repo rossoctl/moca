@@ -1,5 +1,5 @@
 # Default owners for everything
-* @kagenti/serverless-harness-maintainers
+* @rossoctl/moca-maintainers
 
 # CI and deployment
 .github/ @kagenti/platform

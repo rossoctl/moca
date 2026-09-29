@@ -5,7 +5,7 @@ Status: Proposed
 Scope: Replace the sandbox tier's `bash -c`-in-a-container with **one ephemeral microVM per `Exec`**,
 warm-standby-provisioned so VM creation never happens inside a request, and measure what a single host
 sustains (**E10** lifecycle primitives, **E11** density and the replenishment ceiling). Lands the
-isolation slice [P4](https://github.com/rossoctl/serverless-harness/issues/57) that
+isolation slice [P4](https://github.com/rossoctl/moca/issues/57) that
 [P6](2026-09-08-p6-vm-process-manager-design.md) §8 defers, on the VM substrate P6 establishes rather
 than in-cluster.
 Milestone: **P4**, in the existing `P` (two-tier rearchitecture) track. Source of truth for numbering:
@@ -948,7 +948,7 @@ note, not this paragraph, is the current state of the question.
 | `docs/experiment-results.md`                       | Pointer to `deploy/microvm/EXPERIMENTS.md` (§7.6)                                      |
 | `docs/specs/README.md`                             | P4 row: `planned` → this design                                                        |
 
-**Go layout.** One module at `remote-worker/go.mod` (`github.com/kagenti/serverless-harness/remote-worker`,
+**Go layout.** One module at `remote-worker/go.mod` (`github.com/rossoctl/moca/remote-worker`,
 go 1.25.0), with `cmd/worker` and `internal/{exec,relaytest,session}` today. New packages go inside it —
 do **not** create a second module.
 
@@ -1009,7 +1009,7 @@ later step's cost differs by arm.
 ## 11. References
 
 - [ADR-0035](../adrs/0035-per-exec-microvm-warm-standby.md) — the decision this spec records.
-- [P4 / #57](https://github.com/rossoctl/serverless-harness/issues/57) and
+- [P4 / #57](https://github.com/rossoctl/moca/issues/57) and
   [`docs/specs/README.md:84`](README.md) — the milestone and the infra gate §1 retires.
 - [P6](2026-09-08-p6-vm-process-manager-design.md) — the VM substrate, the model stub with a tool-call
   rate (§5.4), the vocabulary discipline (§5.1), the missing gRPC fast channel (§3.1a), and §8's
@@ -1025,7 +1025,7 @@ later step's cost differs by arm.
 - [P3.1](2026-07-03-e6-workload-parameterized-sandbox-load-design.md) ·
   [`deploy/knative/EXPERIMENTS.md`](../../deploy/knative/EXPERIMENTS-MOVED.md) (since moved to rossoctl/moca-experiments) — E6/E7, `detectKnee`, and the
   knee-as-a-floor discipline.
-- [#245](https://github.com/rossoctl/serverless-harness/issues/245) — the gRPC transport's missing
+- [#245](https://github.com/rossoctl/moca/issues/245) — the gRPC transport's missing
   persistent fast channel. §5.4 gets its benefit inside the guest, where the multi-tenancy problem that
   makes it delicate on the container path does not exist.
 - [Firecracker snapshot support](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md)

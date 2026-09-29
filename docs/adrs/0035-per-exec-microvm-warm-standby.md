@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-09
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-09-09-p4-microvm-sandbox-design.md`](../specs/2026-09-09-p4-microvm-sandbox-design.md)
 
 ## Context
@@ -10,7 +10,7 @@
 The sandbox tier's isolation boundary is a container: `remote-worker` runs every command it receives in
 a local `bash -c` (`remote-worker/DESIGN.md:1-5`). Agent-authored code — the output of a model that repo
 content, tool output or the task itself may have prompt-injected — executes behind namespaces and
-seccomp. [P4](https://github.com/rossoctl/serverless-harness/issues/57) has always been the slice that
+seccomp. [P4](https://github.com/rossoctl/moca/issues/57) has always been the slice that
 changes this, and [P6](../specs/2026-09-08-p6-vm-process-manager-design.md) §8 explicitly defers
 Firecracker/gVisor/Kata to it.
 
@@ -124,7 +124,7 @@ cannot be escaped.
   down.
 - Positive: §2.3's cross-tenant reads — sibling workspaces and the relay token in `/proc` — are closed on
   this path, and the cross-run-bleed test is what proves it.
-- Positive: the guest gets the persistent fast channel [#245](https://github.com/rossoctl/serverless-harness/issues/245)
+- Positive: the guest gets the persistent fast channel [#245](https://github.com/rossoctl/moca/issues/245)
   wants (a parked `bash`), and safely, because a VM serves exactly one command in its life — the
   multi-tenancy problem that makes it delicate on the container path does not exist.
 - Negative / accepted cost: **`microvm-worker` is privileged** (`/dev/kvm`, spawning VMMs) where

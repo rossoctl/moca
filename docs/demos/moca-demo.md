@@ -19,15 +19,15 @@ Two differentiators, two acts:
 ## Act 0: Install
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git && cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git && cd moca
 ./deploy/knative/setup-kind.sh
 ```
 
 > By default `setup-kind.sh` **pulls the published image**
-> (`ghcr.io/rossoctl/serverless-harness:latest`) and loads it into the cluster — a first-time
+> (`ghcr.io/rossoctl/moca:latest`) and loads it into the cluster — a first-time
 > run needs no local Docker build (it falls back to a build only if the pull is unavailable).
 > Testing local source changes? Pass `--build` to build from this checkout; `--skip-build`
-> reuses an image you already loaded as `dev.local/serverless-harness:local`.
+> reuses an image you already loaded as `dev.local/moca:local`.
 > See [`deploy/knative/README-kind.md`](../../deploy/knative/README-kind.md) for more setup options.
 
 `setup-kind.sh` installs everything Act 1 needs (Knative + Kourier, Redis, the
@@ -61,7 +61,7 @@ kubectl port-forward -n kourier-system svc/kourier 8080:80
 In a second T2 shell (leave the port-forward running):
 
 ```bash
-export HOST="serverless-harness.default.example.com"
+export HOST="moca.default.example.com"
 export BASE="http://localhost:8080"
 ```
 
@@ -74,10 +74,10 @@ remember everything._
 
 ### 1a. Confirm you're at zero
 
-T1 should show no `serverless-harness-...` pod. Confirm in T2:
+T1 should show no `moca-...` pod. Confirm in T2:
 
 ```bash
-kubectl get pods -l serving.knative.dev/service=serverless-harness
+kubectl get pods -l serving.knative.dev/service=moca
 # => No resources found  (a normal agent is a resident process — never at zero)
 ```
 
@@ -101,7 +101,7 @@ Expected:
 export SID="<paste sessionId from above>"
 ```
 
-In **T1** a `serverless-harness-...` pod flips to `Running` in under a second.
+In **T1** a `moca-...` pod flips to `Running` in under a second.
 
 ### 1c. Walk away — watch it scale to zero
 

@@ -4,7 +4,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/kagenti/serverless-harness/gen/go
+      value: github.com/rossoctl/moca/gen/go
 plugins:
   # TypeScript (backend) — grpc-js service defs + message types.
   - remote: buf.build/community/stephenh-ts-proto:v2.6.1

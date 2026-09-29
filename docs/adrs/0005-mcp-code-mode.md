@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-18
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-18-m10-mcp-code-mode-design.md`](../specs/2026-06-18-m10-mcp-code-mode-design.md)
 
 ## Context

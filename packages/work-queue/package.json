@@ -1,5 +1,5 @@
 {
-  "name": "@sh/work-queue",
+  "name": "@moca/work-queue",
   "type": "module",
   "version": "0.0.0",
   "exports": {

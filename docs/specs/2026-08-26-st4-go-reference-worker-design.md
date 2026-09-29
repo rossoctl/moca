@@ -1,6 +1,6 @@
 # ST4 — Go reference worker: design
 
-**Issue:** [#87](https://github.com/rossoctl/serverless-harness/issues/87) ·
+**Issue:** [#87](https://github.com/rossoctl/moca/issues/87) ·
 **Epic:** #89 · **Parent spec:** [`2026-07-08-sandbox-transport-grpc-design.md`](2026-07-08-sandbox-transport-grpc-design.md) §7, §8 ·
 **Date:** 2026-08-26
 

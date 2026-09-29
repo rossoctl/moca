@@ -1,6 +1,6 @@
 # Deploying on generic Kubernetes
 
-`deploy/knative/setup-k8s.sh` stands up the serverless-harness stack on a **vanilla
+`deploy/knative/setup-k8s.sh` stands up the moca stack on a **vanilla
 Kubernetes cluster** — the sibling of `setup-kind.sh` (Kind) and `setup-ocp.sh`
 (OpenShift). It installs Knative Serving + Kourier, the agent-sandbox controller,
 Redis, the sandbox pool, the LLM-credentials secret, and the harness Knative Service,
@@ -38,16 +38,16 @@ ingress domain (so you reach the service by port-forward or NodePort).
 ```bash
 export ANTHROPIC_API_KEY=sk-...
 ./deploy/knative/setup-k8s.sh \
-  --namespace serverless-harness \
-  --image ghcr.io/rossoctl/serverless-harness:latest \
-  --sandbox-image ghcr.io/rossoctl/serverless-harness-sandbox:latest
+  --namespace moca \
+  --image ghcr.io/rossoctl/moca:latest \
+  --sandbox-image ghcr.io/rossoctl/moca-sandbox:latest
 ```
 
 When it finishes it prints how to reach the service (port-forward by default):
 
 ```bash
 kubectl port-forward -n kourier-system svc/kourier 8080:80
-curl -H 'Host: serverless-harness.serverless-harness.example.com' \
+curl -H 'Host: moca.moca.example.com' \
      -H 'Content-Type: application/json' \
      -d '{"prompt":"Hello"}' http://localhost:8080/turn
 ```
@@ -86,8 +86,8 @@ To install a specific release, pass the versioned tag explicitly instead of rely
 the default:
 
 ```bash
---image ghcr.io/rossoctl/serverless-harness:0.3.0 \
---sandbox-image ghcr.io/rossoctl/serverless-harness-sandbox:0.3.0
+--image ghcr.io/rossoctl/moca:0.3.0 \
+--sandbox-image ghcr.io/rossoctl/moca-sandbox:0.3.0
 ```
 
 ## Building the images
@@ -108,11 +108,11 @@ harness code for testing/experimentation. Whatever you pick, pass the resulting 
 
 - **Local build + push** to any registry the cluster can reach:
   ```bash
-  docker build -t <registry>/serverless-harness:dev .            # harness (repo root)
-  docker build -f deploy/knative/sandbox.Dockerfile -t <registry>/serverless-harness-sandbox:dev deploy/knative
-  docker push <registry>/serverless-harness:dev && docker push <registry>/serverless-harness-sandbox:dev
-  ./deploy/knative/setup-k8s.sh --image <registry>/serverless-harness:dev \
-      --sandbox-image <registry>/serverless-harness-sandbox:dev ...
+  docker build -t <registry>/moca:dev .            # harness (repo root)
+  docker build -f deploy/knative/sandbox.Dockerfile -t <registry>/moca-sandbox:dev deploy/knative
+  docker push <registry>/moca:dev && docker push <registry>/moca-sandbox:dev
+  ./deploy/knative/setup-k8s.sh --image <registry>/moca:dev \
+      --sandbox-image <registry>/moca-sandbox:dev ...
   ```
 - **In-cluster build with Shipwright** — if your cluster has the
   [Shipwright](https://shipwright.io) Build controller installed, use
@@ -121,8 +121,8 @@ harness code for testing/experimentation. Whatever you pick, pass the resulting 
   internet:
   ```bash
   ./deploy/knative/setup-shipwright-build.sh \
-    --image-repo registry.cr-system.svc.cluster.local:5000/serverless-harness \
-    --namespace serverless-harness --with-sandbox
+    --image-repo registry.cr-system.svc.cluster.local:5000/moca \
+    --namespace moca --with-sandbox
   ```
   It prints `HARNESS_IMAGE=`/`SANDBOX_IMAGE=` lines — pass those straight to
   `setup-k8s.sh --image`/`--sandbox-image`. Requires a `ClusterBuildStrategy` already on

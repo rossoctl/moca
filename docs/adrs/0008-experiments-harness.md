@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-24
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-24-m6-experiments-design.md`](../specs/2026-06-24-m6-experiments-design.md)
 
 ## Context

@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-23
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-23-m5-compaction-checkpoint-design.md`](../specs/2026-06-23-m5-compaction-checkpoint-design.md)
 
 ## Context

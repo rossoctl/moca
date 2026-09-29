@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { canonicalTar, contentDigest } from '@sh/config-bundle';
+import { canonicalTar, contentDigest } from '@moca/config-bundle';
 import {
   DefaultResourceLoader,
   formatSkillsForPrompt,
@@ -159,7 +159,7 @@ describe('promotedLoaderOptions', () => {
 //
 // loadProjectContextFiles (pi-fork resource-loader.ts:62) walks ancestor directories for
 // CLAUDE.md/AGENTS.md. Run inside this repository, that walk reaches OUR OWN CLAUDE.md
-// ("Serverless Harness ... pnpm workspace ... DCO sign-off required"). Unsuppressed, every
+// ("MOCA ... pnpm workspace ... DCO sign-off required"). Unsuppressed, every
 // promoted session would silently inherit the harness project's instructions as if they were
 // the user's. It fails as plausible-but-wrong behavior, never as an error, so nothing else
 // would catch it.
@@ -173,7 +173,7 @@ describe('harness CLAUDE.md leak', () => {
     const { tar, digest } = bundle();
     const promoted = unpackBundle(tar, digest, base);
     const repoRoot = resolve(__dirname, '..', '..');
-    expect(readFileSync(join(repoRoot, 'CLAUDE.md'), 'utf8')).toContain('Serverless Harness');
+    expect(readFileSync(join(repoRoot, 'CLAUDE.md'), 'utf8')).toContain('MOCA');
 
     const loader = new DefaultResourceLoader({
       cwd: repoRoot,
@@ -183,7 +183,7 @@ describe('harness CLAUDE.md leak', () => {
     await loader.reload();
 
     const files = loader.getAgentsFiles().agentsFiles;
-    expect(files.some((f) => f.content.includes('Serverless Harness'))).toBe(false);
+    expect(files.some((f) => f.content.includes('MOCA'))).toBe(false);
     expect(files.some((f) => f.content.includes('promoted project rules'))).toBe(true);
   });
 

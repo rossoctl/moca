@@ -1,5 +1,5 @@
-import type { RecordStore, SandboxRecord } from '@sh/harness';
-import type { Exec, ExecEvent, ServerFrame, WorkerFrame } from '@sh/k8s-sandbox';
+import type { RecordStore, SandboxRecord } from '@moca/harness';
+import type { Exec, ExecEvent, ServerFrame, WorkerFrame } from '@moca/k8s-sandbox';
 
 export interface AttachStream {
   metadata?: { get: (k: string) => string[] };

@@ -1,15 +1,15 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
-import { keyIdFor, makeSigner, publicKeyToBase64 } from '@sh/control-plane';
+import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 
-vi.mock('@sh/harness/run-turn', () => ({
+vi.mock('@moca/harness/run-turn', () => ({
   runTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
   executeTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
 }));
 
 import { startServer } from '../src/server.js';
-import { executeTurn, runTurn } from '@sh/harness/run-turn';
+import { executeTurn, runTurn } from '@moca/harness/run-turn';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());

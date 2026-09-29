@@ -15,15 +15,15 @@ Needs Docker (or podman's `docker` CLI) with Compose (`docker compose` or `docke
 `curl`. A turn needs a model, so pass a credential through:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rossoctl/serverless-harness/main/deploy/compose/install.sh \
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/install.sh \
   | ANTHROPIC_API_KEY=sk-ant-... sh
 ```
 
 `install.sh`:
 
-1. fetches `docker-compose.yml` into `~/.serverless-harness` (`SH_COMPOSE_DIR` overrides the
+1. fetches `docker-compose.yml` into `~/.moca` (`SH_COMPOSE_DIR` overrides the
    location),
-2. writes `~/.serverless-harness/.env` (mode 0600) **once**. A re-run never overwrites it. It
+2. writes `~/.moca/.env` (mode 0600) **once**. A re-run never overwrites it. It
    holds:
    - `SH_RELAY_TOKEN`: yours if you set it, otherwise 32 random bytes from `/dev/urandom`. It
      reaches the relay and the sandbox through `.env` only, never a command line.
@@ -39,8 +39,8 @@ Then:
 ```bash
 curl -s -H 'Content-Type: application/json' -d '{"prompt":"Run uname -a and tell me the kernel."}' \
   http://127.0.0.1:8080/turn
-cd ~/.serverless-harness && docker compose logs -f     # watch it
-cd ~/.serverless-harness && docker compose down        # stop it (Redis state goes with it)
+cd ~/.moca && docker compose logs -f     # watch it
+cd ~/.moca && docker compose down        # stop it (Redis state goes with it)
 ```
 
 ## What runs, and the one constraint on its shape
@@ -76,15 +76,15 @@ Only the addressing changes: `REDIS_URL=redis://redis:6379` and
 `SH_RELAY_ADDR=sandbox-relay:<port>` name compose services instead of `127.0.0.1`. Set these in
 `.env`:
 
-| Variable                               | Default                                                       | Notes                                                                                                                                                                                                                                                                   |
-| -------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SH_RELAY_TOKEN`                       | **required**                                                  | The relay's validation is fail-closed, so `docker compose` refuses to start without it.                                                                                                                                                                                 |
-| `SH_TURNS_PER_WORKER`                  | **required**                                                  | `install.sh` writes `4`. The VM template ships none on purpose, because for E8 this value is a _measured output_. Treat `4` as a trial setting, not a result.                                                                                                           |
-| `SH_WORKERS`                           | CPUs this container may use                                   | `os.availableParallelism()`, which respects a CPU limit since #341. Set it to pin W.                                                                                                                                                                                    |
-| `SH_RELAY_PORT`                        | `9443`                                                        | Moves the relay's bind port and both dial addresses (`SH_RELAY_ADDR`, the sandbox's `RELAY_ADDR`) together. That's the `relay.env.example` "must agree" footgun, removed by construction.                                                                               |
-| `SH_PORT`                              | `8080`                                                        | Host port for the supervisor (always bound to `127.0.0.1`).                                                                                                                                                                                                             |
-| `SH_HARNESS_IMAGE`, `SH_SANDBOX_IMAGE` | `ghcr.io/rossoctl/serverless-harness{,-remote-worker}:latest` | Published by `.github/workflows/build.yaml` on every push to `main`.                                                                                                                                                                                                    |
-| model variables                        | unset                                                         | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `SH_MODEL`, `SH_MODEL_PROVIDER`, `SH_MODEL_API`, `SH_MODEL_BASE_URL`, `SH_MODEL_AUTH`, `SH_MODEL_CUSTOM`. An unset one stays unset in the container, not empty. |
+| Variable                               | Default                                         | Notes                                                                                                                                                                                                                                                                   |
+| -------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SH_RELAY_TOKEN`                       | **required**                                    | The relay's validation is fail-closed, so `docker compose` refuses to start without it.                                                                                                                                                                                 |
+| `SH_TURNS_PER_WORKER`                  | **required**                                    | `install.sh` writes `4`. The VM template ships none on purpose, because for E8 this value is a _measured output_. Treat `4` as a trial setting, not a result.                                                                                                           |
+| `SH_WORKERS`                           | CPUs this container may use                     | `os.availableParallelism()`, which respects a CPU limit since #341. Set it to pin W.                                                                                                                                                                                    |
+| `SH_RELAY_PORT`                        | `9443`                                          | Moves the relay's bind port and both dial addresses (`SH_RELAY_ADDR`, the sandbox's `RELAY_ADDR`) together. That's the `relay.env.example` "must agree" footgun, removed by construction.                                                                               |
+| `SH_PORT`                              | `8080`                                          | Host port for the supervisor (always bound to `127.0.0.1`).                                                                                                                                                                                                             |
+| `SH_HARNESS_IMAGE`, `SH_SANDBOX_IMAGE` | `ghcr.io/rossoctl/moca{,-remote-worker}:latest` | Published by `.github/workflows/build.yaml` on every push to `main`.                                                                                                                                                                                                    |
+| model variables                        | unset                                           | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `SH_MODEL`, `SH_MODEL_PROVIDER`, `SH_MODEL_API`, `SH_MODEL_BASE_URL`, `SH_MODEL_AUTH`, `SH_MODEL_CUSTOM`. An unset one stays unset in the container, not empty. |
 
 After editing `.env`, run `docker compose up -d` again to apply it.
 

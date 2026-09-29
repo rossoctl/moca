@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 // countingHooks records the HIGH WATER MARK of concurrent RestoreOne calls. That is the

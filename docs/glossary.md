@@ -1,7 +1,7 @@
 # Glossary
 
 Canonical definitions for the two identity terms the harness actually uses. See
-[#279](https://github.com/rossoctl/serverless-harness/issues/279) for the decision that produced
+[#279](https://github.com/rossoctl/moca/issues/279) for the decision that produced
 this doc.
 
 ## session

@@ -131,7 +131,7 @@ interface CredentialInjector:
 ```
 
 The interface does not depend on SPIRE, Envoy, or Keycloak — a non-kagenti cluster can implement it
-with a minimal secret-holding sidecar behind the same contract. This is what keeps serverless-harness
+with a minimal secret-holding sidecar behind the same contract. This is what keeps moca
 portable (parent §2.3) and what makes Z3 (provider key) and Z5 (per-user egress) two _implementations_
 of one idea rather than two designs.
 

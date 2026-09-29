@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
 
 // fakeStream is a Stream whose Recv is scripted and whose Sends are recorded.

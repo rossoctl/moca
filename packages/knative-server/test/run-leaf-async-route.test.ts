@@ -2,8 +2,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Keep the result store hermetic — no live Redis in unit tests.
-vi.mock('@sh/harness/leaf-result-store', async (orig) => {
-  const actual = await orig<typeof import('@sh/harness/leaf-result-store')>();
+vi.mock('@moca/harness/leaf-result-store', async (orig) => {
+  const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
   const mem = new Map<string, string>();
   class FakeStore {
     async set(k: string, v: string) {
@@ -19,7 +19,7 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
 
 const enqueue = vi.fn(async () => '1-0');
 const ensureGroup = vi.fn(async () => {});
-vi.mock('@sh/work-queue', () => ({
+vi.mock('@moca/work-queue', () => ({
   RedisWorkQueue: class {
     ensureGroup = ensureGroup;
     enqueue = enqueue;
@@ -27,7 +27,7 @@ vi.mock('@sh/work-queue', () => ({
   },
 }));
 
-vi.mock('@sh/harness/run-leaf', () => ({
+vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: vi.fn(),
   validateItem: (o: any) =>
     o &&

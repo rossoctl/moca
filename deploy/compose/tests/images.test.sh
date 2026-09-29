@@ -60,7 +60,7 @@ while ((${#queue[@]})); do
       "node_modules for $dir and the compose service running it cannot load tsx"
   while read -r dep; do
     [[ -n "$dep" && -n "${DIR_OF[$dep]:-}" ]] && queue+=("${DIR_OF[$dep]}")
-  done < <(grep -oE '"@sh/[^"]+": "workspace:' "$REPO_ROOT/$dir/package.json" | cut -d'"' -f2)
+  done < <(grep -oE '"@moca/[^"]+": "workspace:' "$REPO_ROOT/$dir/package.json" | cut -d'"' -f2)
 done
 pass "the harness image installs dependencies for all ${#SEEN[@]} workspace packages compose runs"
 

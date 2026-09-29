@@ -87,7 +87,7 @@ The relay is inert until the harness opts in. Point the harness at the relay and
 turn the path on:
 
 ```bash
-oc set env ksvc/serverless-harness \
+oc set env ksvc/moca \
   SH_REMOTE_SANDBOX=1 \
   SH_RELAY_ADDR=sandbox-relay.default.svc:8443 \
   -n default
@@ -174,7 +174,7 @@ docker run --rm -d -p 6380:6379 --name sh-live-relay-redis redis:7
 
 # Relay
 SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6380 \
-  pnpm --filter @sh/sandbox-relay start &
+  pnpm --filter @moca/sandbox-relay start &
 
 # Reference worker, under the default SANDBOX_ID the test expects
 cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
@@ -182,7 +182,7 @@ cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
 cd ..
 
 # The live cases
-SH_LIVE_RELAY=1 pnpm --filter @sh/k8s-sandbox test live-relay
+SH_LIVE_RELAY=1 pnpm --filter @moca/k8s-sandbox test live-relay
 
 # Teardown
 kill %1 %2   # relay, worker (job numbers from your shell)
@@ -229,13 +229,13 @@ overrides:
 | Variable       | Why                                                                                                                                                                                                          |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `KSVC_URL`     | The harness Route. `lib.sh` then targets it directly, drops the `Host` header, and adds `curl -k` for the router's cert.                                                                                     |
-| `RELAY_IMAGE`  | `relay-deployment.yaml` pins `dev.local/serverless-harness:local`, which exists only in kind. Without this the apply **replaces a working relay with an unpullable one** and aborts at the rollout.          |
+| `RELAY_IMAGE`  | `relay-deployment.yaml` pins `dev.local/moca:local`, which exists only in kind. Without this the apply **replaces a working relay with an unpullable one** and aborts at the rollout.                        |
 | `WORKER_IMAGE` | A pre-published worker image; skips the `kind load` path. Build one with [`build-image.sh`](../../remote-worker/build-image.sh), which packages a `linux/amd64` binary into the OpenShift internal registry. |
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
-KSVC_URL=https://serverless-harness-default.apps.<domain> \
-RELAY_IMAGE=<registry>/serverless-harness:latest \
+KSVC_URL=https://moca-default.apps.<domain> \
+RELAY_IMAGE=<registry>/moca:latest \
 WORKER_IMAGE=image-registry.openshift-image-registry.svc:5000/default/remote-worker:latest \
 RELAY_LIVE_SMOKE=1 bash deploy/knative/relay-leaf-smoke.sh
 ```
@@ -258,14 +258,14 @@ Four things to know before running it:
   `relay-deployment.yaml` directly. On OpenShift the relay is a resource of the
   `overlays/ocp` kustomization, whose `images:` transformer rewrites the pin and whose
   render pipeline then substitutes `$HARNESS_IMAGE`; applying the raw manifest puts
-  back `image: dev.local/serverless-harness:local`, reproducing the exact
+  back `image: dev.local/moca:local`, reproducing the exact
   `ImagePullBackOff` this override exists to avoid. Rendering the overlay by hand has
   the same trap in a different form — it emits the `ghcr.io/rossoctl/…` path, which
   currently 403s (see #177) — so it needs the image substituted too:
 
   ```bash
   oc kustomize --load-restrictor LoadRestrictionsNone deploy/knative/overlays/ocp \
-    | sed "s#ghcr.io/rossoctl/serverless-harness:latest#<pullable-image>#g" \
+    | sed "s#ghcr.io/rossoctl/moca:latest#<pullable-image>#g" \
     | oc apply -f -
   ```
 
@@ -402,7 +402,7 @@ fiddly; start in-cluster and graduate only if you need external reachability.
 - **Proto (source of truth):** `proto/sandbox/v1/sandbox.proto` — §4 messages/
   services, §8 wire semantics.
 - **Go stubs:** `gen/go/sandbox/v1/` (module
-  `github.com/kagenti/serverless-harness/gen/go`); a `contract_test.go` lives
+  `github.com/rossoctl/moca/gen/go`); a `contract_test.go` lives
   alongside them.
 - **Relay behavior to interoperate with:** `packages/sandbox-relay/src/relay.ts`
   (park / presence / routing), `main.ts` (fail-closed token validator).
@@ -415,6 +415,6 @@ fiddly; start in-cluster and graduate only if you need external reachability.
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Worker connects but the Attach is immediately closed    | Token unset or mismatched. Set `SH_RELAY_TOKEN` on the relay (Step 1) and give the worker the same value as `SANDBOX_TOKEN`. Auth is fail-closed. On an OCP overlay deployment, rotate the `sh-relay-token` Secret and `oc rollout restart deploy/sandbox-relay` instead of using `oc set env` — see the note in Step 1. |
 | No field in `sh:sandbox:records`                        | The Attach never succeeded (see above), the worker isn't sending `authorization: Bearer <token>` metadata, or it isn't sending `Hello` with `sandbox_id` as the first frame.                                                                                                                                             |
-| Presence is there but the harness never uses the worker | `SH_REMOTE_SANDBOX` / `SH_RELAY_ADDR` not set on the harness ksvc (Step 2). Confirm with `oc set env ksvc/serverless-harness --list -n default`.                                                                                                                                                                         |
+| Presence is there but the harness never uses the worker | `SH_REMOTE_SANDBOX` / `SH_RELAY_ADDR` not set on the harness ksvc (Step 2). Confirm with `oc set env ksvc/moca --list -n default`.                                                                                                                                                                                       |
 | A second worker for the same id won't connect           | Expected — one live Attach per `SANDBOX_ID`. Give each worker a distinct id.                                                                                                                                                                                                                                             |
 | `exit_code` comes back `null`                           | The child was signalled (or the worker sent `exit_code < 0`). Not an error by itself.                                                                                                                                                                                                                                    |

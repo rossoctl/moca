@@ -29,8 +29,8 @@
 # microvm-worker.service's own cgroup for a VM's (see cgroup.go's H1 block).
 
 [Unit]
-Description=Parent slice for ephemeral microVM sandboxes (serverless-harness P4)
-Documentation=https://github.com/kagenti/serverless-harness
+Description=Parent slice for ephemeral microVM sandboxes (moca P4)
+Documentation=https://github.com/rossoctl/moca
 
 [Slice]
 # Swap is off host-wide already (spec §2.4) -- this makes that explicit for the

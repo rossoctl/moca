@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-16
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-16-m1-redis-session-backend-design.md`](../specs/2026-06-16-m1-redis-session-backend-design.md)
 
 ## Context

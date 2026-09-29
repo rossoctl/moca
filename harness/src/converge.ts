@@ -1,4 +1,4 @@
-import type { SandboxTransport } from '@sh/k8s-sandbox';
+import type { SandboxTransport } from '@moca/k8s-sandbox';
 
 /** Single-quote-escape a string for safe interpolation into a bash command. */
 function sq(s: string): string {

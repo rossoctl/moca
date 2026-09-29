@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve, sep } from 'node:path';
 import type { LoadSkillsResult } from '@earendil-works/pi-coding-agent';
-import { assertValidDigest, digestDirName, untar, type TarEntry } from '@sh/config-bundle';
+import { assertValidDigest, digestDirName, untar, type TarEntry } from '@moca/config-bundle';
 import { getBundle, type BundleRedisLike } from './config-store.js';
 
 /** The harness pod mounts no writable volume except an emptyDir /tmp (ADR-0020). */

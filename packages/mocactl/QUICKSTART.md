@@ -18,8 +18,8 @@ cluster wiring behind it.
 ## 1. Build and deploy the harness
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 pnpm install
 
 kind create cluster --name sh-knative
@@ -35,8 +35,8 @@ To pick up a later change on the same cluster, rebuild and reload, then run the 
 script again. It rolls both the control plane and the harness onto the new image:
 
 ```bash
-docker build --load -t dev.local/serverless-harness:local .
-kind load docker-image dev.local/serverless-harness:local --name sh-knative
+docker build --load -t dev.local/moca:local .
+kind load docker-image dev.local/moca:local --name sh-knative
 ```
 
 ## 2. Register a GitHub OAuth app (once)

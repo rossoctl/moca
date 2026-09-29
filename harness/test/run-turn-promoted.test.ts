@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { canonicalTar, contentDigest } from '@sh/config-bundle';
+import { canonicalTar, contentDigest } from '@moca/config-bundle';
 import { unpackBundle, promotedLoaderOptions } from '../src/config-resolver.js';
 import { resourceLoaderOptionsFor } from '../src/run-turn.js';
 

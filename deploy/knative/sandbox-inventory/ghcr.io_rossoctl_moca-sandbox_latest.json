@@ -1,5 +1,5 @@
 {
-  "image": "ghcr.io/rossoctl/serverless-harness-sandbox:latest",
+  "image": "ghcr.io/rossoctl/moca-sandbox:latest",
   "binaries": [
     "[",
     "[[",

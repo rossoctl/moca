@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-07-02
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-07-02-p2-shared-sandbox-pool-design.md`](../specs/2026-07-02-p2-shared-sandbox-pool-design.md)
 
 ## Context

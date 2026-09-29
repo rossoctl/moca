@@ -2,7 +2,7 @@
 
 - **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-09-25
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-09-25-mocactl-control-plane-client-design.md`](../specs/2026-09-25-mocactl-control-plane-client-design.md)
 
 ## Context
@@ -32,9 +32,9 @@ Four forces shape what kind of client this should be:
 
 ## Decision
 
-We will build **`mocactl`** (`packages/mocactl`, `@sh/mocactl`) as a standalone terminal client that
+We will build **`mocactl`** (`packages/mocactl`, `@moca/mocactl`) as a standalone terminal client that
 communicates **exclusively** over MU1's `/v1` HTTP API. It declares **no `workspace:*` dependency on
-any `@sh/*` package** and makes no assumption about what deployment substrate — Knative today, P6's
+any `@moca/*` package** and makes no assumption about what deployment substrate — Knative today, P6's
 VM/supervisor path once RA1 lands — sits behind the one URL it is given: the control plane's. The
 control plane says where the harness is through a public `GET /v1/discovery` (set by the operator
 with `SH_PUBLIC_HARNESS_URL`); a local `--harness-url` overrides it. It is built on **Ink/React**, the first TUI framework introduced into this monorepo, and its

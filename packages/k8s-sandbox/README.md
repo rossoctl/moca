@@ -1,4 +1,4 @@
-# @sh/k8s-sandbox
+# @moca/k8s-sandbox
 
 Routes Pi tool execution (read/write/edit/bash/ls/grep/find) to a remote
 Kubernetes pod via `kubectl exec`, using Pi's native `Operations` seam. Part of

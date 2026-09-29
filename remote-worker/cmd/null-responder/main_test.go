@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // startResponder serves the real responder on an ephemeral loopback port and returns a

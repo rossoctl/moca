@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { CP_ERROR_CODES, CpError, statusFor, type CpErrorCode } from '@sh/control-plane';
-import { keyIdFor, makeSigner, publicKeyToBase64 } from '@sh/control-plane';
+import { CP_ERROR_CODES, CpError, statusFor, type CpErrorCode } from '@moca/control-plane';
+import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 
 // Fix round 1, Important 2: lets the retry test control connect() success/failure per attempt
 // without a live Redis. Nothing else in this file touches Redis (sharedRuntimeReporter's own test
@@ -526,12 +526,12 @@ describe('assertKeysetUsable', () => {
 describe('runtimeFieldsForTurn', () => {
   it('reports pod identity from the environment Knative already provides', async () => {
     const fields = runtimeFieldsForTurn(
-      { HOSTNAME: 'harness-abc', K_REVISION: 'serverless-harness-00003' },
+      { HOSTNAME: 'harness-abc', K_REVISION: 'moca-00003' },
       'start',
     );
     expect(fields).toMatchObject({
       harnessPod: 'harness-abc',
-      revision: 'serverless-harness-00003',
+      revision: 'moca-00003',
     });
     expect(Number(fields.turnStartedAt)).toBeGreaterThan(0);
     expect(fields.turnEndedAt).toBeUndefined();

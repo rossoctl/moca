@@ -79,12 +79,12 @@ UNIT_PACKAGES=(
 for pair in "${UNIT_PACKAGES[@]}"; do
   unit="${pair%%:*}"
   pkg="${pair##*:}"
-  grep -qE "^WorkingDirectory=/opt/serverless-harness/packages/$pkg\$" "$unit" ||
+  grep -qE "^WorkingDirectory=/opt/moca/packages/$pkg\$" "$unit" ||
     fail "$unit: WorkingDirectory must be the $pkg package dir, not the repo root"
   grep -qE '^ExecStart=/usr/bin/node --import tsx src/main\.ts$' "$unit" ||
     fail "$unit: ExecStart must run src/main.ts relative to WorkingDirectory"
   for directive in ProtectSystem=strict NoNewPrivileges=true SystemCallFilter TimeoutStopSec \
-    StateDirectory=serverless-harness; do
+    StateDirectory=moca; do
     # These are the VM analogue of the pod securityContext. Present, and asserted so a future
     # edit cannot quietly drop them -- §4.3 does not CLAIM parity, but it does claim presence.
     grep -q "$directive" "$unit" || fail "$unit is missing $directive"
@@ -126,15 +126,15 @@ grep -qE '^Environment=HOME=' "$UNIT_SUPERVISOR" ||
     "code sets HOME=/tmp; here ProtectHome=true and a --no-create-home user leave \$HOME unusable)"
 HOME_PATH="$(grep -oE '^Environment=HOME=.*' "$UNIT_SUPERVISOR" | head -1 | cut -d= -f3-)"
 # Whatever it is set to must be writable under this unit's own sandboxing: PrivateTmp gives /tmp,
-# StateDirectory gives /var/lib/serverless-harness. Anything else is a path ProtectSystem=strict
+# StateDirectory gives /var/lib/moca. Anything else is a path ProtectSystem=strict
 # masks, i.e. the same runtime failure with an extra step.
 case "$HOME_PATH" in
-/tmp | /tmp/* | /var/lib/serverless-harness | /var/lib/serverless-harness/*)
+/tmp | /tmp/* | /var/lib/moca | /var/lib/moca/*)
   pass "supervisor unit sets HOME=$HOME_PATH, writable under its own PrivateTmp/StateDirectory"
   ;;
 *)
   fail "sh-supervisor.service sets HOME=$HOME_PATH, which ProtectSystem=strict/ProtectHome=true" \
-    "leave unwritable -- use /tmp (PrivateTmp) or /var/lib/serverless-harness (StateDirectory)"
+    "leave unwritable -- use /tmp (PrivateTmp) or /var/lib/moca (StateDirectory)"
   ;;
 esac
 
@@ -147,7 +147,7 @@ for unit in "$UNIT_SUPERVISOR" "$UNIT_RELAY"; do
   # right here -- before the `[[ -n "$name" ]] || fail ...` guard below can ever run. `|| true`
   # makes the guard reachable so a future unit missing EnvironmentFile= gets the diagnostic
   # instead of a raw abort.
-  name=$( (grep -oE '^EnvironmentFile=/etc/serverless-harness/[A-Za-z0-9_.-]+\.env$' "$unit" ||
+  name=$( (grep -oE '^EnvironmentFile=/etc/moca/[A-Za-z0-9_.-]+\.env$' "$unit" ||
     true) | sed -E 's#.*/([A-Za-z0-9_.-]+)\.env$#\1#')
   [[ -n "$name" ]] || fail "$unit: no EnvironmentFile= line found"
   [[ -f "$ENV_SRC_DIR/$name.env.example" ]] ||
@@ -199,11 +199,11 @@ pass "relay bind port and supervisor dial port agree"
 
 # --- SANDBOX_IMAGE default matches the rest of the repo (B1) --------------------------------
 # deploy/knative/setup-ocp.sh:42 and setup-k8s.sh:30 both default to
-# ghcr.io/rossoctl/serverless-harness-sandbox:latest -- the repo-name segment, not just the
+# ghcr.io/rossoctl/moca-sandbox:latest -- the repo-name segment, not just the
 # namespace, was dropped here. ghcr.io/rossoctl/sandbox:latest exists nowhere else in the repo.
-[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/serverless-harness-sandbox:latest" ]] ||
+[[ "$SANDBOX_IMAGE" == "ghcr.io/rossoctl/moca-sandbox:latest" ]] ||
   fail "SANDBOX_IMAGE default is '$SANDBOX_IMAGE', expected" \
-    "ghcr.io/rossoctl/serverless-harness-sandbox:latest (matching setup-ocp.sh/setup-k8s.sh)"
+    "ghcr.io/rossoctl/moca-sandbox:latest (matching setup-ocp.sh/setup-k8s.sh)"
 pass "SANDBOX_IMAGE defaults to the image the rest of the repo actually publishes"
 
 # --- sandbox count is honoured --------------------------------------------------------------
@@ -341,7 +341,7 @@ fi
 
 # --- require_root fails for a non-root uid and passes for uid 0 (B3) -------------------------
 # The README shows a bare invocation with no `sudo`, but install -d -m 0750
-# /etc/serverless-harness and systemctl enable both need root -- the script must say so plainly
+# /etc/moca and systemctl enable both need root -- the script must say so plainly
 # rather than dying on a confusing `install` permission error. require_root takes an optional
 # uid override so this is testable without actually running as root or as another user.
 if require_root 1000 2>/dev/null; then

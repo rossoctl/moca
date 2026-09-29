@@ -1,5 +1,5 @@
 {
-  "name": "@sh/control-plane",
+  "name": "@moca/control-plane",
   "type": "module",
   "version": "0.0.0",
   "exports": {

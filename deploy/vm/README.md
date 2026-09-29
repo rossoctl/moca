@@ -31,7 +31,7 @@ containers as podman containers alongside them. `setup-vm.sh` is the sibling of
 ## Bring it up
 
 ```bash
-cd /opt/serverless-harness   # this checkout, on the VM, already built (see Prerequisites)
+cd /opt/moca   # this checkout, on the VM, already built (see Prerequisites)
 sudo ./deploy/vm/setup-vm.sh
 ```
 
@@ -42,7 +42,7 @@ never attach — see "Sandbox container networking and the relay token" below). 
 
 ```bash
 sudo ./deploy/vm/setup-vm.sh        # writes the env files, then stops at the token check
-sudoedit /etc/serverless-harness/relay.env   # set SH_RELAY_TOKEN=<a shared secret>
+sudoedit /etc/moca/relay.env   # set SH_RELAY_TOKEN=<a shared secret>
 sudo ./deploy/vm/setup-vm.sh        # installs units, starts containers, enables the services
 ```
 
@@ -52,7 +52,7 @@ edited (`install_env` never clobbers an existing one) and continues past the che
 
 Across those two runs, the script does the following, in this order:
 
-1. Writes `/etc/serverless-harness/supervisor.env` and `relay.env` from their `env/*.example`
+1. Writes `/etc/moca/supervisor.env` and `relay.env` from their `env/*.example`
    templates — only the first time each; an operator-edited env file is never clobbered on a
    re-run.
 2. **Checks `relay.env` for a non-empty `SH_RELAY_TOKEN`, and stops here if there is none.**
@@ -73,7 +73,7 @@ the supervisor unit is _expected_ to fail if it starts before the operator sets 
 trips systemd's default 5-starts-in-10s limit in about ten seconds, and the unit then refuses
 even the ordinary recovery command until you `systemctl reset-failed` it. `setup-vm.sh` avoids
 that entirely by enabling the unit (so it starts on future boots) without starting it now.
-Before starting it for the first time, edit `/etc/serverless-harness/supervisor.env` and set
+Before starting it for the first time, edit `/etc/moca/supervisor.env` and set
 `SH_TURNS_PER_WORKER`, then:
 
 ```bash
@@ -115,17 +115,17 @@ default), so `setup-vm.sh` checks the _installed_ `relay.env` for a non-empty
 `SH_RELAY_TOKEN` before starting any sandbox container, and refuses to continue with a clear
 message if it is missing, rather than starting containers that can never attach.
 
-`/etc/serverless-harness/relay.env` is created by `setup-vm.sh` itself, so on a fresh VM there is
+`/etc/moca/relay.env` is created by `setup-vm.sh` itself, so on a fresh VM there is
 nothing to edit until the script has run once — this is the two-invocation first run described under
 "Bring it up". After that first run:
 
 ```bash
-sudoedit /etc/serverless-harness/relay.env   # set SH_RELAY_TOKEN=<a shared secret>
+sudoedit /etc/moca/relay.env   # set SH_RELAY_TOKEN=<a shared secret>
 sudo ./deploy/vm/setup-vm.sh                 # re-run; the edited file is preserved
 ```
 
 Appending instead of editing works equally well once the file exists
-(`echo 'SH_RELAY_TOKEN=…' | sudo tee -a /etc/serverless-harness/relay.env`) — but only then, since
+(`echo 'SH_RELAY_TOKEN=…' | sudo tee -a /etc/moca/relay.env`) — but only then, since
 the directory and file do not exist before `install_env` creates them.
 
 Whichever way you set it, the value must match each sandbox worker's `SANDBOX_TOKEN`;
@@ -174,7 +174,7 @@ bring the container back, not the data that was in it.
 
 ## Where the env file lives
 
-`/etc/serverless-harness/supervisor.env` (mode 0640, root-owned — `install_env` runs as
+`/etc/moca/supervisor.env` (mode 0640, root-owned — `install_env` runs as
 root and does not `chown` to `harness`; that's fine, since systemd reads `EnvironmentFile=`
 as PID 1, before dropping privileges to `User=harness`), installed once from
 `deploy/vm/env/supervisor.env.example`. `SH_TURNS_PER_WORKER` — the per-worker cap on
@@ -205,7 +205,7 @@ oversight, and `deploy/vm/tests/setup-vm.test.sh` asserts `SH_ADMIN_PORT`'s abse
   `supervisor.env`, and no unit-file line to set it either.
 
 If an operator needs to change either of these, set them directly in
-`/etc/serverless-harness/supervisor.env` (they are ordinary env vars the supervisor process
+`/etc/moca/supervisor.env` (they are ordinary env vars the supervisor process
 reads at startup) — just be aware that adding an uncommented `SH_ADMIN_PORT` line there will
 change what `deploy/vm/tests/setup-vm.test.sh` expects if the test is ever extended to check
 for it.

@@ -8,7 +8,7 @@ import {
 } from '../src/select-sandbox.js';
 import type { LeaseStore } from '../src/sandbox-lease.js';
 import type { RecordStore, SandboxRecord } from '../src/pool-records.js';
-import type { ExecClientLike } from '@sh/k8s-sandbox';
+import type { ExecClientLike } from '@moca/k8s-sandbox';
 
 // Spy on the RedisRecordStore constructor select-sandbox.ts falls back to when
 // deps.records isn't injected, so we can assert its lifecycle (list + close)

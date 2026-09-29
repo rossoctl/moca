@@ -1,5 +1,5 @@
 # deploy/knative/overlays/ocp/kustomization.yaml
-# OpenShift overlay for the serverless-harness data plane (issue #41).
+# OpenShift overlay for the moca data plane (issue #41).
 #
 # Divergences from the Kind base, all expressed as patches/transformers so the
 # base YAMLs stay shared:
@@ -9,11 +9,11 @@
 #   - Sandbox image + pod: the pre-baked image (sandbox.Dockerfile) and the
 #     non-root securityContext are set via a JSON6902 patch onto the Sandbox CR
 #     (patch-sandbox.yaml): runAsUser/fsGroup 65532, seccomp RuntimeDefault,
-#     drop ALL caps, and serviceAccountName serverless-harness-sandbox. The
+#     drop ALL caps, and serviceAccountName moca-sandbox. The
 #     command is `sleep infinity` (no root apk-add).
 #
 # Both tiers run non-root: setup-ocp.sh grants nonroot-v2 to the harness SA
-# (serverless-harness) AND the sandbox SA (serverless-harness-sandbox), since the
+# (moca) AND the sandbox SA (moca-sandbox), since the
 # GHCR harness image declares no USER and the SCC does not reliably inject a UID.
 #
 # The sandbox's /workspace is backed by the Sandbox CR's durable RWO PVC
@@ -31,8 +31,8 @@ resources:
   - ../../relay-deployment.yaml
 
 images:
-  - name: dev.local/serverless-harness
-    newName: ghcr.io/rossoctl/serverless-harness
+  - name: dev.local/moca
+    newName: ghcr.io/rossoctl/moca
     newTag: latest
 
 patches:

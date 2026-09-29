@@ -186,8 +186,8 @@ else
 The cluster is serving a harness image without PR #214. Rebuild, load and force a new Revision
 (the tag is mutable, so re-applying an unchanged spec rolls NOTHING):
 
-  docker build --load -t dev.local/serverless-harness:local "$REPO_ROOT"
-  kind load docker-image dev.local/serverless-harness:local --name sh-knative
+  docker build --load -t dev.local/moca:local "$REPO_ROOT"
+  kind load docker-image dev.local/moca:local --name sh-knative
   kubectl -n $NS patch ksvc $KSVC --type merge \\
     -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy.sh/build-ts\":\"\$(date +%s)\"}}}}}"
   kubectl wait ksvc/$KSVC -n $NS --for=condition=Ready --timeout=180s

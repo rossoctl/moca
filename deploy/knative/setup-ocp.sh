@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/knative/setup-ocp.sh
-# One-shot setup of the serverless-harness stack on OpenShift (4.20+).
+# One-shot setup of the moca stack on OpenShift (4.20+).
 #
 # Sibling of setup-kind.sh, but OpenShift-native (see issue #41):
 #   - Knative Serving (+ Kourier) via the Red Hat OpenShift Serverless Operator
@@ -38,12 +38,12 @@ ASYNC_OVERLAY_DIR="$SCRIPT_DIR/overlays/ocp-async"    # only rendered/applied wh
 # ----------------------------------------------------------------------------
 DRY_RUN=false
 NAMESPACE="default"
-HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/serverless-harness-sandbox:latest}"  # pre-baked, pulled from GHCR
+HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"  # pre-baked, pulled from GHCR
 SKIP_KEDA=true             # base bring-up: async leaf / KEDA is opt-in (--with-keda)
 SERVERLESS_CHANNEL="stable"
 KEDA_CHANNEL="stable"
-LOG_DIR="${LOG_DIR:-/tmp/serverless-harness-ocp}"
+LOG_DIR="${LOG_DIR:-/tmp/moca-ocp}"
 
 # ----------------------------------------------------------------------------
 # Logging + command helpers
@@ -79,7 +79,7 @@ usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Stand up the serverless-harness stack on OpenShift (4.20+): OpenShift Serverless
+Stand up the moca stack on OpenShift (4.20+): OpenShift Serverless
 (Knative + Kourier), Redis, the sandbox pod, the LLM secret,
 and the harness Knative Service — reachable over its auto-created Route.
 
@@ -104,8 +104,8 @@ Environment:
 
 Examples:
   $0                                   # default namespace, GHCR harness + sandbox images
-  $0 --namespace serverless-harness    # dedicated namespace
-  $0 --image ghcr.io/rossoctl/serverless-harness:v1.2.3 --dry-run
+  $0 --namespace moca    # dedicated namespace
+  $0 --image ghcr.io/rossoctl/moca:v1.2.3 --dry-run
 EOF
 }
 
@@ -442,19 +442,19 @@ fi
 # UID. Granting by SA name is idempotent and works before the SA exists.
 # (issue #41 item #4, approach b.)
 echo
-log_info "Granting nonroot-v2 SCC to serviceaccount/serverless-harness in $NAMESPACE"
+log_info "Granting nonroot-v2 SCC to serviceaccount/moca in $NAMESPACE"
 if [ "$KUBECTL" = "oc" ]; then
-  run_cmd oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness -n "$NAMESPACE"
+  run_cmd oc adm policy add-scc-to-user nonroot-v2 -z moca -n "$NAMESPACE"
 else
-  log_warn "kubectl in use — cannot grant SCC; run: oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness -n $NAMESPACE"
+  log_warn "kubectl in use — cannot grant SCC; run: oc adm policy add-scc-to-user nonroot-v2 -z moca -n $NAMESPACE"
 fi
-log_info "Ensuring sandbox ServiceAccount + nonroot-v2 SCC (serverless-harness-sandbox) in $NAMESPACE"
-$KUBECTL create serviceaccount serverless-harness-sandbox -n "$NAMESPACE" \
+log_info "Ensuring sandbox ServiceAccount + nonroot-v2 SCC (moca-sandbox) in $NAMESPACE"
+$KUBECTL create serviceaccount moca-sandbox -n "$NAMESPACE" \
   --dry-run=client -o yaml | apply_stdin >/dev/null
 if [ "$KUBECTL" = "oc" ]; then
-  run_cmd oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness-sandbox -n "$NAMESPACE"
+  run_cmd oc adm policy add-scc-to-user nonroot-v2 -z moca-sandbox -n "$NAMESPACE"
 else
-  log_warn "kubectl in use — cannot grant SCC; run: oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness-sandbox -n $NAMESPACE"
+  log_warn "kubectl in use — cannot grant SCC; run: oc adm policy add-scc-to-user nonroot-v2 -z moca-sandbox -n $NAMESPACE"
 fi
 
 # ============================================================================
@@ -497,8 +497,8 @@ render_overlay_dir() {
   local dir="$1"
   $KUBECTL kustomize --load-restrictor LoadRestrictionsNone "$dir" \
     | sed \
-        -e "s#ghcr.io/rossoctl/serverless-harness:latest#${HARNESS_IMAGE}#g" \
-        -e "s#ghcr.io/rossoctl/serverless-harness-sandbox:latest#${SANDBOX_IMAGE}#g" \
+        -e "s#ghcr.io/rossoctl/moca:latest#${HARNESS_IMAGE}#g" \
+        -e "s#ghcr.io/rossoctl/moca-sandbox:latest#${SANDBOX_IMAGE}#g" \
     | if [ "$NAMESPACE" != "default" ]; then
         sed -e "s#namespace: default#namespace: ${NAMESPACE}#g" \
             -e "s#redis.default.svc#redis.${NAMESPACE}.svc#g"
@@ -520,7 +520,7 @@ fi
 
 # ----------------------------------------------------------------------------
 # 6a. Async leaf ScaledJob (--with-keda). Applied after the base overlay so the
-# serverless-harness SA + Role/RoleBinding (from service.yaml) the worker Jobs
+# moca SA + Role/RoleBinding (from service.yaml) the worker Jobs
 # reuse already exist, and after Section 2 installed the scaledjobs.keda.sh CRD.
 # render_overlay_dir rewrites dev.local -> $HARNESS_IMAGE (no raw dev.local pull).
 # ----------------------------------------------------------------------------
@@ -719,7 +719,7 @@ if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then
   # llm-credentials (placeholder + ANTHROPIC_BASE_URL=http://authbridge-ab1:8080, an
   # in-cluster Service that resolves in-cluster — no Route needed for this hop). Mirrors
   # setup-kind.sh's build-ts annotation patch (step 9).
-  run_cmd $KUBECTL -n "$NAMESPACE" patch ksvc serverless-harness --type merge \
+  run_cmd $KUBECTL -n "$NAMESPACE" patch ksvc moca --type merge \
     -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy.sh/build-ts\":\"$(date +%s)\"}}}}}"
 fi
 
@@ -728,18 +728,18 @@ fi
 # ============================================================================
 echo
 if ! $DRY_RUN; then
-  log_info "Waiting for ksvc/serverless-harness to be Ready (up to 5m)..."
-  if $KUBECTL wait ksvc/serverless-harness -n "$NAMESPACE" --for=condition=Ready --timeout=300s \
+  log_info "Waiting for ksvc/moca to be Ready (up to 5m)..."
+  if $KUBECTL wait ksvc/moca -n "$NAMESPACE" --for=condition=Ready --timeout=300s \
        >"$LOG_DIR/ksvc-wait.log" 2>&1; then
-    log_success "ksvc/serverless-harness Ready"
+    log_success "ksvc/moca Ready"
   else
     die "ksvc not Ready (see $LOG_DIR/ksvc-wait.log)"
   fi
 fi
 
-URL="$($KUBECTL get ksvc serverless-harness -n "$NAMESPACE" -o jsonpath='{.status.url}' 2>/dev/null || echo "")"
+URL="$($KUBECTL get ksvc moca -n "$NAMESPACE" -o jsonpath='{.status.url}' 2>/dev/null || echo "")"
 if [ -z "$URL" ] && [ -n "$DOMAIN" ]; then
-  URL="https://serverless-harness-${NAMESPACE}.${DOMAIN}"
+  URL="https://moca-${NAMESPACE}.${DOMAIN}"
 fi
 
 echo
@@ -756,6 +756,6 @@ if [ -n "$URL" ]; then
   echo
   echo "  curl -sk -X POST $URL/runs -H 'Content-Type: application/json' -d '{...leaf config...}'"
 else
-  echo "Route URL not yet available; check: $KUBECTL get ksvc serverless-harness -n $NAMESPACE"
+  echo "Route URL not yet available; check: $KUBECTL get ksvc moca -n $NAMESPACE"
 fi
 echo

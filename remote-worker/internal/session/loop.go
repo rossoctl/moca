@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
 const (

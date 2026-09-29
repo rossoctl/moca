@@ -8,7 +8,7 @@ import {
   type K8sSandboxConfig,
   type SandboxTransport,
   type ExecClientLike,
-} from '@sh/k8s-sandbox';
+} from '@moca/k8s-sandbox';
 import { RedisLeaseStore, type LeaseStore } from './sandbox-lease.js';
 import { RedisRecordStore, type RecordStore, type SandboxRecord } from './pool-records.js';
 

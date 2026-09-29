@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-10
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-07-10-authbridge-egress-control-plane-poc-design.md`](../specs/2026-07-10-authbridge-egress-control-plane-poc-design.md)
 - **Refined by:** [ADR-0026](0026-rc1-static-inject-plugin.md) — RC1 injection is a dedicated `static-inject` plugin, **superseding the "injection uses the stateless `token-broker` plugin backed by a small `static-broker`" clause** in the Decision below. The topology decision (shared AB1 `Deployment`/`Service` vs. per-sandbox AB2) is unchanged.
 

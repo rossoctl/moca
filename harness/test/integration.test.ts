@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { SessionManager, type FileEntry } from '@earendil-works/pi-coding-agent';
-import { RedisSessionBackend } from '@sh/session-backend';
+import { RedisSessionBackend } from '@moca/session-backend';
 import { BufferedRedisBackend } from '../src/buffered-redis-backend';
 
 const REDIS = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';

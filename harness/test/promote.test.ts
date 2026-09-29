@@ -67,7 +67,7 @@ describe('parsePromoteArgs', () => {
     expect(a).toEqual({
       entry: 'go',
       mode: 'unattended',
-      sandboxImage: 'ghcr.io/rossoctl/serverless-harness-sandbox:latest',
+      sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
       deny: [],
       excludePrompts: [],
       dryRun: false,
@@ -189,9 +189,9 @@ describe('resolveProjectDir', () => {
 
   it('redirects the memory lookup: projectMemoryDir differs for the resolved project vs. the harness subdirectory', () => {
     // This is the actual defect from C1: `cd harness && pnpm promote` (no --project) slugs to
-    // ".../serverless-harness/harness", which Claude Code never created, so memory is always
+    // ".../moca/harness", which Claude Code never created, so memory is always
     // empty. With --project pointed at the repo root, the slug matches the real project dir.
-    const repoRoot = '/Users/p/Projects/aiplatform/serverless-harness';
+    const repoRoot = '/Users/p/Projects/aiplatform/moca';
     const harnessSubdir = join(repoRoot, 'harness');
     const withoutProjectFlag = resolveProjectDir({}, harnessSubdir);
     const withProjectFlag = resolveProjectDir({ project: repoRoot }, harnessSubdir);
@@ -199,7 +199,7 @@ describe('resolveProjectDir', () => {
       projectMemoryDir(withProjectFlag, '/Users/p'),
     );
     expect(projectMemoryDir(withProjectFlag, '/Users/p')).toBe(
-      '/Users/p/.claude/projects/-Users-p-Projects-aiplatform-serverless-harness/memory',
+      '/Users/p/.claude/projects/-Users-p-Projects-aiplatform-moca/memory',
     );
   });
 });
@@ -327,8 +327,8 @@ describe('LOCKFILE_OUT', () => {
 });
 
 describe('readInventory', () => {
-  const IMAGE = 'ghcr.io/rossoctl/serverless-harness-sandbox:latest';
-  const FILE = 'ghcr.io_rossoctl_serverless-harness-sandbox_latest.json';
+  const IMAGE = 'ghcr.io/rossoctl/moca-sandbox:latest';
+  const FILE = 'ghcr.io_rossoctl_moca-sandbox_latest.json';
 
   it('derives the filename readInventory/promote-cli agree on', () => {
     // Off by one character here and preflight degrades to inventory_unavailable forever.

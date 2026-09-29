@@ -53,7 +53,7 @@ export function loadConfig(path: string): Record<string, unknown>[] {
  * passes whatever the config provides through unchanged (after __FIRE__ substitution).
  */
 function buildPost(): (env: Record<string, unknown>) => Promise<boolean> {
-  const base = process.env.SH_SERVICE_URL ?? 'http://serverless-harness.default.svc.cluster.local';
+  const base = process.env.SH_SERVICE_URL ?? 'http://moca.default.svc.cluster.local';
   return async (env) => {
     const res = await fetch(`${base}/runs`, {
       method: 'POST',

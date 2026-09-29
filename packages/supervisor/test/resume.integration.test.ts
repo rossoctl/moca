@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { RedisSessionBackend } from '@sh/session-backend';
+import { RedisSessionBackend } from '@moca/session-backend';
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 

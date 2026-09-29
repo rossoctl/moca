@@ -80,16 +80,16 @@ orchestrator polls the done-marker on its own volume   (or GET /runs/status?sess
 
 **Components** (each independently testable):
 
-| Unit              | Responsibility                                                                   | Lives in                                 |
-| ----------------- | -------------------------------------------------------------------------------- | ---------------------------------------- |
-| enqueue handler   | validate envelope, `XADD` to `leaf-queue`, return `202` + handle                 | `knative-server/src/server.ts`           |
-| status handler    | report `queued\|running\|done\|failed` from the marker (+ queue state)           | `knative-server/src/server.ts`           |
-| `WorkQueue`       | Redis Streams primitive: `ensureGroup`/`enqueue`/`claim`/`ack`/`touch`/`pending` | `packages/work-queue` (`@sh/work-queue`) |
-| `leaf-job-runner` | wrapper loop: claim → `runLeaf` → classify → marker → ack/reclaim                | `harness/src/leaf-job-runner.ts`         |
-| `classifyOutcome` | pure ack-vs-reclaim decision (see §6)                                            | `harness/src/classify-outcome.ts`        |
-| done-marker       | atomic write/read of `<result_ref>.status`                                       | `harness/src/done-marker.ts`             |
-| job entrypoint    | thin `main`: real queue + backend → `leaf-job-runner`                            | `knative-server/src/leaf-job.ts`         |
-| KEDA `ScaledJob`  | redis-streams trigger → Job per pending entry, scale-to-zero, cap                | `deploy/knative/leaf-scaledjob.yaml`     |
+| Unit              | Responsibility                                                                   | Lives in                                   |
+| ----------------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
+| enqueue handler   | validate envelope, `XADD` to `leaf-queue`, return `202` + handle                 | `knative-server/src/server.ts`             |
+| status handler    | report `queued\|running\|done\|failed` from the marker (+ queue state)           | `knative-server/src/server.ts`             |
+| `WorkQueue`       | Redis Streams primitive: `ensureGroup`/`enqueue`/`claim`/`ack`/`touch`/`pending` | `packages/work-queue` (`@moca/work-queue`) |
+| `leaf-job-runner` | wrapper loop: claim → `runLeaf` → classify → marker → ack/reclaim                | `harness/src/leaf-job-runner.ts`           |
+| `classifyOutcome` | pure ack-vs-reclaim decision (see §6)                                            | `harness/src/classify-outcome.ts`          |
+| done-marker       | atomic write/read of `<result_ref>.status`                                       | `harness/src/done-marker.ts`               |
+| job entrypoint    | thin `main`: real queue + backend → `leaf-job-runner`                            | `knative-server/src/leaf-job.ts`           |
+| KEDA `ScaledJob`  | redis-streams trigger → Job per pending entry, scale-to-zero, cap                | `deploy/knative/leaf-scaledjob.yaml`       |
 
 **Key properties:** true background (Jobs outlive the request); scale-to-zero (no always-on worker);
 **at-least-once** delivery, where a crashed leaf re-runs the same `sessionId` → **gate-7 resume**; the
@@ -97,7 +97,7 @@ orchestrator owns the result store (charter G3 — the marker travels on its vol
 on the completion critical path).
 
 **RBAC note:** the harness Service does **not** create Jobs — **KEDA** does, from the `ScaledJob`. So
-no Job-management RBAC is added to the harness; the Job pod reuses the existing `serverless-harness`
+no Job-management RBAC is added to the harness; the Job pod reuses the existing `moca`
 ServiceAccount (sandbox `pods/exec`).
 
 ---
@@ -200,7 +200,7 @@ jobTargetRef:
   template:                           # same image, job-mode entrypoint
     # command: node --import tsx src/leaf-job.ts
     # env: REDIS_URL, SH_MODEL, KAGENTI_SANDBOX_POD, ANTHROPIC_* (llm-credentials)
-    # volumeMounts: /work (leaf-work PVC);  serviceAccountName: serverless-harness
+    # volumeMounts: /work (leaf-work PVC);  serviceAccountName: moca
 ttlSecondsAfterFinished + history limits   # GC finished Jobs
 ```
 

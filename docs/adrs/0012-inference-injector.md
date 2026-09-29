@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-26
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-26-inference-injector-design.md`](../specs/2026-06-26-inference-injector-design.md)
 
 ## Context

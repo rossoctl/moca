@@ -3,7 +3,7 @@
 Version: 1.0 — June 17, 2026
 Status: Design (approved for implementation planning)
 Scope: Milestone 2 of the serverless harness — route Pi tool execution to a remote Kubernetes pod
-Parent plan: [Serverless Harness: Revised Plan](../../../docs/research/2026-06-10-serverless-harness-revised-plan.md) §4, §6 (M2), §7.3
+Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §4, §6 (M2), §7.3
 Predecessor: [M1 Design — Redis SessionStorageBackend](2026-06-16-m1-redis-session-backend-design.md)
 
 ---
@@ -27,7 +27,7 @@ operations plus one real `kubectl exec` smoke on a kind cluster.
 
 ### In scope
 
-- A standalone `@sh/k8s-sandbox` package: an injectable `execInPod` transport seam,
+- A standalone `@moca/k8s-sandbox` package: an injectable `execInPod` transport seam,
   seven Operations factories, and a Pi extension that registers/wraps the tools.
 - Env-gated wiring into `harness/cli.ts` (inert unless sandbox env is set).
 - A checked-in plain `Deployment + PVC` manifest used as the smoke/experiment fixture.
@@ -54,7 +54,7 @@ operations plus one real `kubectl exec` smoke on a kind cluster.
 | D2  | Operation coverage      | **Route all seven** (`read/write/edit/bash/ls/grep/find`). The SSH example leaves `ls/grep/find` local; for a real sandbox that silently shows the head's FS, so M2 closes the gap.                   |
 | D3  | Pod lifecycle           | **Client targets an existing pod** identified by env (`namespace` + `pod`); ship one plain `Deployment + PVC` manifest as the fixture, applied out-of-band. No dynamic create/teardown in the client. |
 | D4  | Verification gate       | **Injectable seam + deterministic fake-exec unit tests (all 7 ops) + one real kind smoke.** Direct mirror of M1's gate.                                                                               |
-| D5  | Code placement          | **New `@sh/k8s-sandbox` package + thin env-gated `cli.ts` wiring.** **No pi-fork change** — the Operations seam is already native.                                                                    |
+| D5  | Code placement          | **New `@moca/k8s-sandbox` package + thin env-gated `cli.ts` wiring.** **No pi-fork change** — the Operations seam is already native.                                                                  |
 | D6  | Headless config surface | **Env vars / factory argument, not CLI flags.** `KAGENTI_SANDBOX_POD` is the on/off gate; unset ⇒ extension inert, all tools local.                                                                   |
 | D7  | Path mapping            | **Mirror the SSH example:** announce the pod cwd in the system prompt via `before_agent_start`; map head-cwd → pod-cwd in the operations (naive `path.replace`, fragility accepted for M2).           |
 

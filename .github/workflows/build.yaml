@@ -26,14 +26,14 @@ jobs:
       matrix:
         include:
           # Main harness image.
-          - image: ghcr.io/rossoctl/serverless-harness
+          - image: ghcr.io/rossoctl/moca
             context: .
             file: Dockerfile
           # Pre-baked sandbox image for OpenShift (deploy/knative/setup-ocp.sh).
           # Built the same way as the harness so OCP can pull it from GHCR instead
           # of building it in-cluster (issue #41). Scoped context — sandbox.Dockerfile
           # has no COPY, so deploy/knative keeps the build context small.
-          - image: ghcr.io/rossoctl/serverless-harness-sandbox
+          - image: ghcr.io/rossoctl/moca-sandbox
             context: deploy/knative
             file: deploy/knative/sandbox.Dockerfile
           # RC1-2 (Hop 2) plain-HTTP echo target for the AuthBridge egress smoke.
@@ -41,14 +41,14 @@ jobs:
           # from GHCR instead of a local dev.local build; the OCP overlay remaps
           # dev.local/echo-target:rc1 -> this image. Context is echo-target/ because
           # its Dockerfile COPYs echo.js.
-          - image: ghcr.io/rossoctl/serverless-harness-echo-target
+          - image: ghcr.io/rossoctl/moca-echo-target
             context: deploy/knative/echo-target
             file: deploy/knative/echo-target/Dockerfile
           # The remote-worker sandbox for the dev-machine compose trial (deploy/compose, #342): it
           # dials OUT to the relay, unlike the sleep-infinity sandbox image above. Published so a
           # `curl | sh` install has something to pull; context is the repo root because its
           # Dockerfile COPYs go.work and gen/go alongside remote-worker/.
-          - image: ghcr.io/rossoctl/serverless-harness-remote-worker
+          - image: ghcr.io/rossoctl/moca-remote-worker
             context: .
             file: remote-worker/Dockerfile
     steps:

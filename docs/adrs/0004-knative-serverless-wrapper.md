@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-17
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-17-m4-knative-serverless-wrapper-design.md`](../specs/2026-06-17-m4-knative-serverless-wrapper-design.md)
 
 ## Context
@@ -11,7 +11,7 @@ M1–M3 externalized session state to Redis and tool execution to a remote pod, 
 
 ## Decision
 
-We will extract a reusable `runTurn()` from `cli.ts` and wrap it in a new `@sh/knative-server` package serving `POST /turn`, deployed as a Knative Serving service with `min-scale: 0` and `containerConcurrency: 1` so it scales 0→1→0 per request.
+We will extract a reusable `runTurn()` from `cli.ts` and wrap it in a new `@moca/knative-server` package serving `POST /turn`, deployed as a Knative Serving service with `min-scale: 0` and `containerConcurrency: 1` so it scales 0→1→0 per request.
 
 ### Alternatives considered
 

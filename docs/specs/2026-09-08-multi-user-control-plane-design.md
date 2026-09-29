@@ -17,7 +17,7 @@ Builds on (reuse, no redesign): [Z1](2026-06-26-identity-spine-design.md) trust 
 [Glossary](../glossary.md) canonical `session`/`turn` vocabulary.
 Composes with: **P5** multi-session isolation ([`2026-09-06-p5-session-isolation-design.md`](2026-09-06-p5-session-isolation-design.md),
 [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md)) — **design merged** in
-[#228](https://github.com/rossoctl/serverless-harness/pull/228), implementation on a separate
+[#228](https://github.com/rossoctl/moca/pull/228), implementation on a separate
 contributor's track. P5 reserved `Authorization` for caller auth, which is exactly this spec; §3.5–§3.6
 set the split, what MU1 does before P5 lands, and the three interactions MU1 carries.
 Decision record: [ADR-0033](../adrs/0033-multi-user-control-plane.md).
@@ -128,7 +128,7 @@ an ADR-0028 amendment): _"Whether a workload's pool should bound its prompt leav
 decision … until it is taken, warn rather than change behavior here."_ A per-user session turn is
 exactly that case, so §8.2's tenant partition inherits an already-deferred decision rather than
 inventing one. §11.1 records it as owed; tracked as
-[#237](https://github.com/rossoctl/serverless-harness/issues/237).
+[#237](https://github.com/rossoctl/moca/issues/237).
 
 ### 2.7 Pi does not need changing
 
@@ -237,7 +237,7 @@ Two consequences follow, and they are the reason §3.5 changed:
 ### 3.5 Composition with P5 — and what MU1 does before it lands
 
 P5's design is **merged** ([ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md), via
-[#228](https://github.com/rossoctl/serverless-harness/pull/228)); its **implementation** is a separate
+[#228](https://github.com/rossoctl/moca/pull/228)); its **implementation** is a separate
 contributor's track on a different timeline. The two specs turn out to be complementary by
 construction, because P5 §3.2 step 1 reserved `Authorization` for precisely this spec:
 
@@ -369,7 +369,7 @@ string comparison against a URL segment, and makes token and path two sources of
 `server.ts:482-494`, which is mid-migration on `/run-leaf → /runs`. Forcing a second simultaneous
 version break on `/turn` would run two migrations at once against live orchestrators.
 
-### 4.2 Control plane (`@sh/control-plane`)
+### 4.2 Control plane (`@moca/control-plane`)
 
 | Route                             | Slice | Notes                                                                                                    |
 | --------------------------------- | ----- | -------------------------------------------------------------------------------------------------------- |
@@ -898,7 +898,7 @@ ServiceAccount reach into it. The split has to carry the RBAC with it: `sh-contr
 (`control-plane.yaml:110-118`), the Role backing `/resources`'s pod-phase read (§7.4), needs `get`/
 `list` on Pods in the **workload** namespace, not in `sh-credentials`, so it cannot move with the
 Deployment and has to be split out as a separate, narrower grant. Not done in slice 1 — tracked as
-[#248](https://github.com/rossoctl/serverless-harness/issues/248), which must land before any
+[#248](https://github.com/rossoctl/moca/issues/248), which must land before any
 deployment sets `SH_REQUIRE_AUTH=true`. A CI tripwire in
 `packages/knative-server/test/control-plane-manifest.test.ts` refuses that combination until it does.
 
@@ -1009,7 +1009,7 @@ holds with the deployment's own key present in the environment.
 - [Z3 Inference Injector](2026-06-26-inference-injector-design.md) — provider-key chokepoint
 - [Z5 Generalized Credentialed Egress](2026-06-19-m13-generalized-credentialed-egress-design.md) — sandbox forward proxy
 - [RC1 AuthBridge Egress Control Plane](2026-07-10-authbridge-egress-control-plane-poc-design.md) — placeholder swap
-- [P5 Multi-Session Isolation](2026-09-06-p5-session-isolation-design.md) + [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md) — design **merged** via [#228](https://github.com/rossoctl/serverless-harness/pull/228), implementation pending on a separate track. §2.2/§2.7 reuse its tracing; §3.4 corrects this spec's credential mechanism from it; §3.5 sets the composition. Issue #220 was closed in favour of new issues matching that PR, so #228 — not #220 — is the reference.
+- [P5 Multi-Session Isolation](2026-09-06-p5-session-isolation-design.md) + [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md) — design **merged** via [#228](https://github.com/rossoctl/moca/pull/228), implementation pending on a separate track. §2.2/§2.7 reuse its tracing; §3.4 corrects this spec's credential mechanism from it; §3.5 sets the composition. Issue #220 was closed in favour of new issues matching that PR, so #228 — not #220 — is the reference.
 - [ADR-0028](../adrs/0028-async-prompt-dispatch.md) — the prompt-leaf selector deferral in §2.6
 - [ADR-0033](../adrs/0033-multi-user-control-plane.md) — this spec's decision record
 

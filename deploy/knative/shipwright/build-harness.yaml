@@ -1,6 +1,6 @@
 # deploy/knative/shipwright/build-harness.yaml
 #
-# Shipwright Build for the main serverless-harness image (built from the repo-root
+# Shipwright Build for the main moca image (built from the repo-root
 # Dockerfile). Rendered by setup-shipwright-build.sh, which fills in the git URL,
 # revision, build strategy, and output image below — do not apply this file directly.
 #
@@ -12,7 +12,7 @@ metadata:
   name: __NAME__
   namespace: __NAMESPACE__
   labels:
-    app: serverless-harness
+    app: moca
 spec:
   source:
     type: Git

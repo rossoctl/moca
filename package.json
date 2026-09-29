@@ -1,5 +1,5 @@
 {
-  "name": "serverless-harness",
+  "name": "moca",
   "private": true,
   "description": "Workspace root. Holds only repo-wide tooling -- runtime code lives in harness/ and packages/*.",
   "scripts": {

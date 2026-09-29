@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/knative/lib.sh
 # Shared helpers for the Knative smoke + experiment drivers.
-# Source this; do not execute. Targets ksvc serverless-harness in namespace default.
+# Source this; do not execute. Targets ksvc moca in namespace default.
 #
 # Kind (default): Kourier port-forward on localhost + a Host header.
 # OpenShift: export KSVC_URL=<https route> (see setup-ocp.sh output) to target the
@@ -12,7 +12,7 @@
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-default}"
-KSVC="${KSVC:-serverless-harness}"
+KSVC="${KSVC:-moca}"
 PORT="${PORT:-8080}"
 HOST_HEADER="${HOST_HEADER:-Host: ${KSVC}.${NS}.example.com}"
 BASE="${BASE:-http://localhost:${PORT}}"

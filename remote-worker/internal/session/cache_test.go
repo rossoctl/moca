@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
 
 func endFrame(reqID uint64, code int32) *pb.WorkerFrame {

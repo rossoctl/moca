@@ -131,7 +131,7 @@ implementations of this one interface.
 ### What does NOT change
 
 The Pi orchestration loop, `run-turn`, the session backend (`RedisSessionBackend`), the
-leaf queue (`@sh/work-queue`), and the sandbox **pool/lease** logic. The change slots
+leaf queue (`@moca/work-queue`), and the sandbox **pool/lease** logic. The change slots
 strictly _below_ the current `ExecInPod` call sites (`converge.ts`, `run-leaf.ts`,
 `run-turn.ts`, `select-sandbox.ts`).
 
@@ -517,7 +517,7 @@ dual timeout, output cap — §8) **verbatim**, and changes only the encoding an
 protobuf over one gRPC bidi stream on `:443`. What survives unchanged from the earlier
 work is the `SandboxTransport` interface and the `KubectlTransport` rename (a pure,
 behavior-preserving refactor). What is **dropped** is the Redis-specific machinery — the
-`RedisChannelTransport` and the TS `@sh/sandbox-worker` are **not built**; Redis returns
+`RedisChannelTransport` and the TS `@moca/sandbox-worker` are **not built**; Redis returns
 to being only the pool/session/leaf-queue substrate, never the exec wire.
 
 ## 13. Rollout & scope

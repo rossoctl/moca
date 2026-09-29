@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { BuildBundleInput, PromoteMode } from '@sh/config-bundle';
+import type { BuildBundleInput, PromoteMode } from '@moca/config-bundle';
 
 /** Where the generated lockfile is written, for committing alongside the code it configures. */
 export const LOCKFILE_OUT = '.claude/promoted.lock.json';
@@ -26,7 +26,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
     entry: '',
     mode: 'unattended',
     // Matches deploy/knative/setup-k8s.sh:30 so the checked-in inventory (Task 14) resolves.
-    sandboxImage: 'ghcr.io/rossoctl/serverless-harness-sandbox:latest',
+    sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
     deny: [],
     excludePrompts: [],
     dryRun: false,
@@ -110,7 +110,7 @@ export function resolveHomeDir(args: Pick<PromoteArgs, 'home'>, home: string): s
  *
  * This scheme is lossy -- `/a/my-project` and `/a/my/project` both slug to `-a-my-project` -- and
  * that is INHERITED ON PURPOSE. Verified against a real install: the directory Claude Code created
- * for this repo is `-Users-paolo-Projects-aiplatform-serverless-harness`, hyphen in the final
+ * for this repo is `-Users-paolo-Projects-aiplatform-moca`, hyphen in the final
  * segment and all. Our job is to FIND the directory Claude Code already made, so a "safer",
  * collision-free scheme would simply miss it and silently promote no memory at all. Do not
  * "improve" this.

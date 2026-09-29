@@ -6,8 +6,8 @@ import {
   SettingsManager,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
-import { RedisSessionBackend } from '@sh/session-backend';
-import { k8sSandboxExtension, KubectlTransport } from '@sh/k8s-sandbox';
+import { RedisSessionBackend } from '@moca/session-backend';
+import { k8sSandboxExtension, KubectlTransport } from '@moca/k8s-sandbox';
 import {
   selectPoolSandbox,
   SandboxPoolSaturatedError,
@@ -52,7 +52,7 @@ import {
 import { requestApprovalExtension } from './request-approval-tool.js';
 import { gzipSync } from 'node:zlib';
 import { createClient } from 'redis';
-import { canonicalTar } from '@sh/config-bundle';
+import { canonicalTar } from '@moca/config-bundle';
 import { resolvePromotedConfig, type PromotedConfig } from './config-resolver.js';
 import { overlayConfig, buildConfigCleanupScript } from './config-overlay.js';
 import type { BundleRedisLike } from './config-store.js';

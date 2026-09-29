@@ -40,8 +40,8 @@
 # simplification the sweep no longer needs.
 
 [Unit]
-Description=microvm-worker: ephemeral microVM sandbox tier (serverless-harness P4)
-Documentation=https://github.com/kagenti/serverless-harness
+Description=microvm-worker: ephemeral microVM sandbox tier (moca P4)
+Documentation=https://github.com/rossoctl/moca
 After=network-online.target
 Wants=network-online.target
 # Spec §6: "KVM unavailable at startup ... Fail the unit at start with an explicit

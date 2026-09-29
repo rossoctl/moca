@@ -1,5 +1,5 @@
 // harness/src/leaf-job-runner.ts
-import type { WorkQueue } from '@sh/work-queue';
+import type { WorkQueue } from '@moca/work-queue';
 import { classifyOutcome } from './classify-outcome.js';
 import { leafSessionId, type LeafEnvelope, type LeafResult } from './run-leaf.js';
 import { toResultRecord, writeResult, type RedisLike } from './leaf-result-store.js';

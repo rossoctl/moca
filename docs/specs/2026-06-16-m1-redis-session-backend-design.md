@@ -3,7 +3,7 @@
 Version: 1.0 — June 16, 2026
 Status: Design (approved for implementation planning)
 Scope: Milestone 1 of the serverless harness — externalize Pi session state to Redis
-Parent plan: [Serverless Harness: Revised Plan](../../../docs/research/2026-06-10-serverless-harness-revised-plan.md) §4, §6 (M1)
+Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §4, §6 (M1)
 Discovery basis: [`NOTES-pi-sessionmanager.md`](../../packages/session-backend/NOTES-pi-sessionmanager.md) (pinned Pi commit `406a2214`)
 
 ---
@@ -46,7 +46,7 @@ smoke run.
 | D4  | Storage envelope          | **Thin envelope** around the opaque Pi entry, keeping `position` + `content_sha256`.                                                                                                                                                                        |
 | D5  | Checkpoint representation | Pi **`custom` entry** with `customType: "checkpoint"` (distinct from native `compaction`).                                                                                                                                                                  |
 | D6  | M1 gate                   | **Deterministic integration test** (faux provider + disposable Redis) **+ one real headless smoke**.                                                                                                                                                        |
-| D7  | Ownership split           | Generic seam in `pi-fork`; Redis specifics in `@sh/session-backend` + `harness`. Dependency arrow points one way only.                                                                                                                                      |
+| D7  | Ownership split           | Generic seam in `pi-fork`; Redis specifics in `@moca/session-backend` + `harness`. Dependency arrow points one way only.                                                                                                                                    |
 
 ---
 
@@ -60,7 +60,7 @@ the PR that would eventually be opened upstream.
 Three changes:
 
 1. **Define the interface** `SessionStorageBackend` (async), identical to the one already
-   built in `@sh/session-backend`:
+   built in `@moca/session-backend`:
 
    ```ts
    export interface SessionStorageBackend {
@@ -112,7 +112,7 @@ All write-behind machinery lives in a harness-side decorator, never in Pi core.
 
 ```
 harness:   BufferedRedisBackend  implements SessionStorageBackend   // queue + drain worker + flush()
-              └─ wraps ─> RedisSessionBackend  (@sh/session-backend)
+              └─ wraps ─> RedisSessionBackend  (@moca/session-backend)
 pi core:    SessionStorageBackend  // pristine 5 methods, exactly #2032 — no flush
 ```
 
@@ -139,7 +139,7 @@ and the #2032 interface contributed upstream is unchanged.
 
 ### 4.2 The storage envelope
 
-`@sh/session-backend/src/entry.ts` is refactored from the semantic enum to a thin
+`@moca/session-backend/src/entry.ts` is refactored from the semantic enum to a thin
 envelope wrapping Pi's opaque native entry:
 
 ```ts
@@ -188,17 +188,17 @@ the Redis backend.
 
 ## 5. Ownership split (the dependency arrow points one way)
 
-**Governing principle: Pi core never depends on Redis or on `@sh/session-backend`.**
+**Governing principle: Pi core never depends on Redis or on `@moca/session-backend`.**
 Anything Redis-flavored lives in `harness` or the backend package. This keeps the fork
 diff a clean, self-contained refactor that could be opened as a PR, and isolates the
 experiment's glue from the contribution.
 
-| Lives in                  | What                                                                                                                                                                                                                                                                                                    | Why                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **`pi-fork` core**        | `SessionStorageBackend` interface + `FileSessionStorageBackend` (extraction) + factory injection                                                                                                                                                                                                        | The upstreamable slice; Pi core owns the interface and its default.                                                               |
-| **`pi-fork` test dir**    | Backend **contract/parity** test parametrized over `InMemory` + `File` (no Redis dependency)                                                                                                                                                                                                            | Proves the extraction is behavior-preserving; ships _with_ the #2032 contribution; runs in Pi's own suite.                        |
-| **`@sh/session-backend`** | `RedisSessionBackend` (plain interface impl) + the envelope refactor (`entry.ts`)                                                                                                                                                                                                                       | Our code, injected — Pi never imports it.                                                                                         |
-| **`harness` package**     | `BufferedRedisBackend` decorator (queue + drain worker + `flush()`) + the wiring (inject the decorator into Pi's factory; call `flush()` from harness-owned `turn_end` / `session_shutdown` hooks; headless entry wrapper) **+ the Redis integration / mobility / recovery tests + the headless smoke** | Depends on _both_ `pi-fork` and `@sh/session-backend`; keeps that dependency — and all async/buffering concerns — out of Pi core. |
+| Lives in                    | What                                                                                                                                                                                                                                                                                                    | Why                                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **`pi-fork` core**          | `SessionStorageBackend` interface + `FileSessionStorageBackend` (extraction) + factory injection                                                                                                                                                                                                        | The upstreamable slice; Pi core owns the interface and its default.                                                                 |
+| **`pi-fork` test dir**      | Backend **contract/parity** test parametrized over `InMemory` + `File` (no Redis dependency)                                                                                                                                                                                                            | Proves the extraction is behavior-preserving; ships _with_ the #2032 contribution; runs in Pi's own suite.                          |
+| **`@moca/session-backend`** | `RedisSessionBackend` (plain interface impl) + the envelope refactor (`entry.ts`)                                                                                                                                                                                                                       | Our code, injected — Pi never imports it.                                                                                           |
+| **`harness` package**       | `BufferedRedisBackend` decorator (queue + drain worker + `flush()`) + the wiring (inject the decorator into Pi's factory; call `flush()` from harness-owned `turn_end` / `session_shutdown` hooks; headless entry wrapper) **+ the Redis integration / mobility / recovery tests + the headless smoke** | Depends on _both_ `pi-fork` and `@moca/session-backend`; keeps that dependency — and all async/buffering concerns — out of Pi core. |
 
 The `harness` package is already declared in `pnpm-workspace.yaml` but does not yet exist;
 M1 creates it.
@@ -255,7 +255,7 @@ confirming the headless one-shot entry point drives the externalized store end-t
 
 ## 8. References
 
-- Parent plan: [Serverless Harness: Revised Plan](../../../docs/research/2026-06-10-serverless-harness-revised-plan.md)
+- Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md)
 - Discovery: [`NOTES-pi-sessionmanager.md`](../../packages/session-backend/NOTES-pi-sessionmanager.md)
 - Pi session-storage proposal: [earendil-works/pi#2032](https://github.com/badlogic/pi-mono/issues/2032)
 - Pi faux provider: `pi-fork/packages/ai/src/providers/faux.ts`

@@ -1,5 +1,5 @@
 {
-  "name": "@sh/k8s-sandbox",
+  "name": "@moca/k8s-sandbox",
   "type": "module",
   "version": "0.0.0",
   "exports": {

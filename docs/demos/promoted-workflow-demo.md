@@ -38,11 +38,11 @@ document is the version you drive by hand so you can explain each move.
 ## Act 0: Install
 
 You need a **warm** harness cluster whose image contains the promotion feature (merged in
-[#214](https://github.com/rossoctl/serverless-harness/pull/214)). If you do not have one:
+[#214](https://github.com/rossoctl/moca/pull/214)). If you do not have one:
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 cd pi-fork && npm ci && npm run build && cd ..
 pnpm install
 
@@ -57,18 +57,18 @@ tag is mutable, so re-applying an unchanged spec rolls nothing and you would kee
 code:
 
 ```bash
-docker build --load -t dev.local/serverless-harness:local .
-kind load docker-image dev.local/serverless-harness:local --name sh-knative
-kubectl -n default patch ksvc serverless-harness --type merge \
+docker build --load -t dev.local/moca:local .
+kind load docker-image dev.local/moca:local --name sh-knative
+kubectl -n default patch ksvc moca --type merge \
   -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy.sh/build-ts\":\"$(date +%s)\"}}}}}"
-kubectl wait ksvc/serverless-harness -n default --for=condition=Ready --timeout=180s
+kubectl wait ksvc/moca -n default --for=condition=Ready --timeout=180s
 ```
 
 Set the convenience vars used throughout:
 
 ```bash
-export NS=default KSVC=serverless-harness
-export HOSTHDR='Host: serverless-harness.default.example.com'
+export NS=default KSVC=moca
+export HOSTHDR='Host: moca.default.example.com'
 export BASE=http://localhost:8080
 
 # The SH_* names are the ones demo-promoted-workflow.sh and the make targets read, so the
@@ -273,7 +273,7 @@ there. Expect output like:
 ```
 project:    /tmp/sh-demo
 user scope: /tmp/sh-demo (--home)
-inventory:  …/sandbox-inventory/ghcr.io_rossoctl_serverless-harness-sandbox_latest.json (347 binaries)
+inventory:  …/sandbox-inventory/ghcr.io_rossoctl_moca-sandbox_latest.json (347 binaries)
   resolved   1 skills
   travels    1
   dropped    0
@@ -296,7 +296,7 @@ dispatch with:  {"sessionId":"<run>/<item>","kind":"prompt","prompt":"…","conf
 > only. The command it runs is:
 >
 > ```bash
-> pnpm --dir /path/to/serverless-harness/harness promote --entry ship-note \
+> pnpm --dir /path/to/moca/harness promote --entry ship-note \
 >   --project /tmp/sh-demo --home /tmp/sh-demo --redis-url redis://localhost:16379
 > #   ...plus --exclude-prompt promote under Option B, which /promote adds for you
 > ```
@@ -306,7 +306,7 @@ dispatch with:  {"sessionId":"<run>/<item>","kind":"prompt","prompt":"…","conf
 >
 > `--project` looks redundant next to `--home` and is not: without it the CLI promotes the directory
 > the process started in, which through `pnpm --dir` is the harness checkout. Measured — it reports
-> `project: …/serverless-harness/harness`.
+> `project: …/moca/harness`.
 >
 > **Why every path is written out in full.** `--home /tmp/sh-demo` is doing what `HOME="$PWD"` did
 > here, and `--redis-url` what `REDIS_URL=` did — same bundle, byte for byte, digest for digest.
@@ -386,7 +386,7 @@ done | sed 's|.*/sha256-[0-9a-f]*/||'
 > report, so an unscoped listing would point you at the wrong one.
 
 > **Verify, do not purge.** Earlier versions of this walkthrough had you `rm -rf` the cache here,
-> because it used to outlive its leaf ([#216](https://github.com/rossoctl/serverless-harness/issues/216)).
+> because it used to outlive its leaf ([#216](https://github.com/rossoctl/moca/issues/216)).
 > Don't reintroduce that: an `rm` cleans up after a teardown regression and hides it, and the
 > control's honesty goes back to depending on you running the right command rather than on the
 > harness. If the command above prints file names, that is a **bug to report**, not a step to repeat.
@@ -621,8 +621,8 @@ kubectl exec -n $NS deploy/redis -- redis-cli DEL "config:bundle:$DIGEST"
   overlay makes it read-only — but read-only is not invisible. A leaf leasing that sandbox while
   another holds a ref can read that workflow's promoted `CLAUDE.md` and `memory/`, with or without a
   `configRef` of its own. That much is an accepted non-goal (P2 §9, one trust domain; Kata isolation
-  is P3/[#48](https://github.com/rossoctl/serverless-harness/issues/48)).
-  [#216](https://github.com/rossoctl/serverless-harness/issues/216) was the narrower part and is
+  is P3/[#48](https://github.com/rossoctl/moca/issues/48)).
+  [#216](https://github.com/rossoctl/moca/issues/216) was the narrower part and is
   fixed: the cache used to outlive the leaf that made it, so a `configRef`-less leaf dispatched
   _later_ could answer from it, making spec §2 goal 6 ("absent a promoted bundle, harness behavior is
   unchanged") true in the harness process but not observably true. It is now refcounted and reclaimed

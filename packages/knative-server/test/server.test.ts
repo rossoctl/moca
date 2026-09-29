@@ -2,14 +2,14 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vites
 import http from 'node:http';
 
 // Mock runTurn before importing server
-vi.mock('@sh/harness/run-turn', () => ({
+vi.mock('@moca/harness/run-turn', () => ({
   runTurn: vi.fn(),
   executeTurn: vi.fn(),
 }));
 
 // Keep the result store hermetic — no live Redis in unit tests.
-vi.mock('@sh/harness/leaf-result-store', async (orig) => {
-  const actual = await orig<typeof import('@sh/harness/leaf-result-store')>();
+vi.mock('@moca/harness/leaf-result-store', async (orig) => {
+  const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
   const mem = new Map<string, string>();
   class FakeStore {
     async set(k: string, v: string) {
@@ -24,7 +24,7 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
 });
 
 const runLeaf = vi.fn();
-vi.mock('@sh/harness/run-leaf', () => ({
+vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...a: any[]) => runLeaf(...a),
   validateItem: (o: any) =>
     o &&
@@ -40,7 +40,7 @@ vi.mock('@sh/harness/run-leaf', () => ({
 }));
 
 import { startServer } from '../src/server.js';
-import { runTurn, executeTurn } from '@sh/harness/run-turn';
+import { runTurn, executeTurn } from '@moca/harness/run-turn';
 
 const mockedRunTurn = vi.mocked(runTurn);
 const mockedExecuteTurn = vi.mocked(executeTurn);

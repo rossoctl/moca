@@ -18,7 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // Relay accepts Attach streams and hands each one to the test as a *Conn.

@@ -25,7 +25,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 type responder struct {

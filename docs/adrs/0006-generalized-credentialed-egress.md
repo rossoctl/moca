@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-19
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-19-m13-generalized-credentialed-egress-design.md`](../specs/2026-06-19-m13-generalized-credentialed-egress-design.md)
 
 ## Context

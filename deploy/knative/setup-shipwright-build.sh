@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/knative/setup-shipwright-build.sh
-# Builds the serverless-harness (and optionally sandbox) image IN-CLUSTER using
+# Builds the moca (and optionally sandbox) image IN-CLUSTER using
 # Shipwright, so you don't need a local Docker daemon or a registry reachable from
 # your laptop. Prints the resulting image ref(s) to feed into
 # setup-k8s.sh --image/--sandbox-image.
@@ -24,7 +24,7 @@
 #     Dockerfile you want built — this defaults to the current repo's origin/HEAD
 #
 # Usage:
-#   ./deploy/knative/setup-shipwright-build.sh --image-repo <registry>/serverless-harness [OPTIONS]
+#   ./deploy/knative/setup-shipwright-build.sh --image-repo <registry>/moca [OPTIONS]
 
 set -euo pipefail
 
@@ -59,11 +59,11 @@ usage() {
   cat <<EOF
 Usage: $0 --image-repo <ref> [OPTIONS]
 
-Build the serverless-harness image (and optionally the sandbox image) in-cluster
+Build the moca image (and optionally the sandbox image) in-cluster
 via Shipwright, then print the resulting image ref(s) for setup-k8s.sh.
 
 Required:
-  --image-repo <ref>     Registry + repo to push to, e.g. registry.example.com:5000/serverless-harness
+  --image-repo <ref>     Registry + repo to push to, e.g. registry.example.com:5000/moca
                          (the sandbox image is pushed to the same repo with "-sandbox" appended)
 
 Options:
@@ -73,8 +73,8 @@ Options:
   --strategy <name>      ClusterBuildStrategy to use (default: ${STRATEGY})
   --tag <tag>            Image tag (default: ${TAG})
   --build-name <name>    Build object name prefix, so this doesn't collide with an existing
-                         Build named "serverless-harness" in the namespace (default: derived
-                         from --tag, e.g. "serverless-harness-dev")
+                         Build named "moca" in the namespace (default: derived
+                         from --tag, e.g. "moca-dev")
   --with-sandbox         Also build the sandbox image (deploy/knative/sandbox.Dockerfile)
   --wait-timeout <dur>   Max time to wait per build (default: ${WAIT_TIMEOUT})
   --context <ctx>        kubectl context to target (default: current-context)
@@ -87,11 +87,11 @@ Output:
     SANDBOX_IMAGE=<image-repo>-sandbox:<tag>   (only with --with-sandbox)
 
 Examples:
-  $0 --image-repo registry.cr-system.svc.cluster.local:5000/serverless-harness \\
-     --namespace serverless-harness --with-sandbox
+  $0 --image-repo registry.cr-system.svc.cluster.local:5000/moca \\
+     --namespace moca --with-sandbox
 
   # Then:
-  ./deploy/knative/setup-k8s.sh --namespace serverless-harness \\
+  ./deploy/knative/setup-k8s.sh --namespace moca \\
      --image <ref printed above> --sandbox-image <ref printed above>
 EOF
 }
@@ -156,10 +156,10 @@ SANDBOX_IMAGE="${IMAGE_REPO}-sandbox:${TAG}"
 
 # Default Build object names include the tag, so a test/experimental run (different
 # --tag) doesn't silently overwrite an existing Build's revision/output — e.g. a real
-# "serverless-harness" Build already pointed at a stable branch. Pass --build-name to
+# "moca" Build already pointed at a stable branch. Pass --build-name to
 # reuse/update a specific existing Build on purpose — it's a prefix, so the sandbox
 # Build gets "-sandbox" appended rather than colliding with the harness Build's name.
-BUILD_NAME_PREFIX="${BUILD_NAME:-serverless-harness-${TAG}}"
+BUILD_NAME_PREFIX="${BUILD_NAME:-moca-${TAG}}"
 BUILD_NAME_HARNESS="$BUILD_NAME_PREFIX"
 BUILD_NAME_SANDBOX="${BUILD_NAME_PREFIX}-sandbox"
 

@@ -15,8 +15,8 @@ Group=harness
 # tsx` resolves the tsx loader relative to the CWD, and tsx (a devDep) is linked only into
 # each package's own node_modules, never root-hoisted -- a CWD of the repo root crashes with
 # ERR_MODULE_NOT_FOUND 'tsx'. Do not "simplify" this back to the repo root.
-WorkingDirectory=/opt/serverless-harness/packages/supervisor
-EnvironmentFile=/etc/serverless-harness/supervisor.env
+WorkingDirectory=/opt/moca/packages/supervisor
+EnvironmentFile=/etc/moca/supervisor.env
 # Every manifest that runs this same harness code sets HOME explicitly with a writable path
 # behind it (deploy/knative/service.yaml:33, leaf-scaledjob.yaml:39, control-plane.yaml:190 all
 # use /tmp; relay-deployment.yaml does not, consistent with this being a harness-side need
@@ -51,9 +51,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-# systemd creates and owns /var/lib/serverless-harness for us; do not re-add a
+# systemd creates and owns /var/lib/moca for us; do not re-add a
 # ReadWritePaths= beside it -- that would name a path nothing creates.
-StateDirectory=serverless-harness
+StateDirectory=moca
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

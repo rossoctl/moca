@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 // writeSnapshotDir builds a snapshot directory whose manifest is CONSISTENT with the files

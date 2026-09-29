@@ -4,7 +4,7 @@
 # leaf-scaledjob.yaml is deliberately excluded from the base kustomization
 # (deploy/knative/kustomization.yaml) so it is not applied on non-KEDA installs.
 # This overlay is rendered + applied ONLY under `setup-ocp.sh --with-keda`, after
-# the base data-plane overlay (which provides the `serverless-harness`
+# the base data-plane overlay (which provides the `moca`
 # ServiceAccount + Role/RoleBinding the worker Jobs reuse for pod list + exec)
 # and after the scaledjobs.keda.sh CRD is installed.
 #
@@ -18,6 +18,6 @@ resources:
   - ../../leaf-scaledjob.yaml
 
 images:
-  - name: dev.local/serverless-harness
-    newName: ghcr.io/rossoctl/serverless-harness
+  - name: dev.local/moca
+    newName: ghcr.io/rossoctl/moca
     newTag: latest

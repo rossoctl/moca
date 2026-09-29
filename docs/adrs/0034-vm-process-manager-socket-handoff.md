@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-08
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-09-08-p6-vm-process-manager-design.md`](../specs/2026-09-08-p6-vm-process-manager-design.md)
 
 ## Context
@@ -44,7 +44,7 @@ pool of long-lived `sh-worker` processes, each multiplexing S concurrent in-flig
 addressable Pi sessions (the two axes the spec's §5.1 keeps apart), and we will **measure**
 what that sustains (E8 density/saturation, E9 deployment-tier comparison against the same model stub).
 This realizes the deployment-model slice that ADR-0032's follow-up defers, including
-[#55](https://github.com/rossoctl/serverless-harness/issues/55)'s shift of overload handling from
+[#55](https://github.com/rossoctl/moca/issues/55)'s shift of overload handling from
 pod-level to session-level, which lands as supervisor admission control.
 
 **The supervisor hands off accepted sockets over IPC and never touches a response byte.** This is the

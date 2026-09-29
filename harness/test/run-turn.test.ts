@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { RedisSessionBackend } from '@sh/session-backend';
+import { RedisSessionBackend } from '@moca/session-backend';
 import type { FileEntry } from '@earendil-works/pi-coding-agent';
 import { runTurn, executeTurn, wireAbort } from '../src/run-turn.js';
 

@@ -19,7 +19,7 @@ echo "1) relay token (fail-closed auth)"
 oc set env deploy/sandbox-relay "SH_RELAY_TOKEN=${TOKEN}" -n "$NS"
 
 echo "2) enable remote-sandbox path on the harness (rolls a new ksvc revision)"
-oc set env ksvc/serverless-harness \
+oc set env ksvc/moca \
   SH_REMOTE_SANDBOX=1 "SH_RELAY_ADDR=sandbox-relay.${NS}.svc:8443" -n "$NS"
 
 echo "3) port-forward relay -> localhost:${PORT}"

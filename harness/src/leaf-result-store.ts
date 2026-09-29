@@ -1,5 +1,5 @@
 import { createClient, type RedisClientType } from 'redis';
-import { resilientClientOptions, swallowRedisErrors } from '@sh/session-backend';
+import { resilientClientOptions, swallowRedisErrors } from '@moca/session-backend';
 import type { Verdict } from './verdict.js';
 import type { LeafResult, LeafUsage } from './run-leaf.js';
 

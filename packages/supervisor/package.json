@@ -1,5 +1,5 @@
 {
-  "name": "@sh/supervisor",
+  "name": "@moca/supervisor",
   "type": "module",
   "version": "0.0.0",
   "exports": {
@@ -12,7 +12,7 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "@sh/session-backend": "workspace:*",
+    "@moca/session-backend": "workspace:*",
     "@types/node": "^22.0.0",
     "redis": "^6.2.1",
     "tsx": "^4.23.13",

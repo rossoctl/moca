@@ -1,5 +1,5 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { contentDigest, untar } from '@sh/config-bundle';
+import { contentDigest, untar } from '@moca/config-bundle';
 
 /**
  * Minimal structural Redis surface — lets unit tests inject an in-memory fake, exactly as

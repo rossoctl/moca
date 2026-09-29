@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Keep the result store hermetic — no live Redis in unit tests. `resultSet` records every
 // write so tests can assert whether a result record was persisted (it must NOT be on 503).
 const resultSet = vi.fn();
-vi.mock('@sh/harness/leaf-result-store', async (orig) => {
-  const actual = await orig<typeof import('@sh/harness/leaf-result-store')>();
+vi.mock('@moca/harness/leaf-result-store', async (orig) => {
+  const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
   const mem = new Map<string, string>();
   class FakeStore {
     async set(k: string, v: string) {
@@ -20,7 +20,7 @@ vi.mock('@sh/harness/leaf-result-store', async (orig) => {
 });
 
 const runLeaf = vi.fn();
-vi.mock('@sh/harness/run-leaf', () => ({
+vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...a: any[]) => runLeaf(...a),
   validateItem: (o: any) =>
     o &&

@@ -84,7 +84,7 @@ modes: `up` (apply the AB path), `smoke` (run leaf-smoke against the Route), `re
 (return to the base direct-Anthropic state), and `gate` (= `up` → `smoke` →
 `restore`, the default). To keep the AB path applied for manual inspection, run
 `RC1_GATE_KEEP=1 ./deploy/knative/rc1-ocp-gate.sh gate` (then `restore` when done).
-The gate resolves the Route automatically (`oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}'`).
+The gate resolves the Route automatically (`oc get ksvc moca -n default -o jsonpath='{.status.url}'`).
 
 ## What it installs
 
@@ -156,7 +156,7 @@ kubectl -n default get secret llm-credentials \
 kubectl -n default get secret ab1-llm-cred -o jsonpath='{.data.api\.anthropic\.com}' | base64 -d | head -c 8; echo '...'
 
 # On a running harness revision pod, the injected env is the placeholder too:
-POD=$(kubectl -n default get pod -l serving.knative.dev/service=serverless-harness -o name | head -1)
+POD=$(kubectl -n default get pod -l serving.knative.dev/service=moca -o name | head -1)
 kubectl -n default exec "$POD" -c user-container -- printenv ANTHROPIC_BASE_URL   # => http://authbridge-ab1:8080
 ```
 

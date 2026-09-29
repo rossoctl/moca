@@ -1,5 +1,5 @@
 # Strategic-merge patch onto the ibac-stub Deployment (deploy/knative/ibac-stub.yaml).
-# ibac-stub rides the GHCR harness image (dev.local/serverless-harness, remapped by this
+# ibac-stub rides the GHCR harness image (dev.local/moca, remapped by this
 # overlay's `images:` block), which declares no USER and so runs as root by default — exactly
 # the reason documented at deploy/knative/leaf-cron.yaml:40-41. runAsNonRoot alone would refuse
 # to start under nonroot-v2 (MustRunAsNonRoot), so this pins runAsUser: 65532.
@@ -10,7 +10,7 @@ metadata:
 spec:
   template:
     spec:
-      serviceAccountName: serverless-harness
+      serviceAccountName: moca
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

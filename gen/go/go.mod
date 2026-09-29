@@ -1,4 +1,4 @@
-module github.com/kagenti/serverless-harness/gen/go
+module github.com/rossoctl/moca/gen/go
 
 go 1.25.0
 

@@ -10,7 +10,7 @@ it has no model-controlled egress surface — so it is defended by making any lo
 **unrewarding and unable to phone home**, not by mediating egress it never makes.
 Milestone relationship: **Refines the harness portion of parent M7/M8.** It _lightens_ M7 (no
 egress proxy for the harness) and sets up M8 (the provider-key injector, specified separately next).
-Parent design: [Zero-Trust, Multi-Agent Extensions to the Serverless Harness](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) — §2 spine, §2.2 load-bearing claims, §3.1 inference broker, §4.1 invariants.
+Parent design: [Zero-Trust, Multi-Agent Extensions to the MOCA](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) — §2 spine, §2.2 load-bearing claims, §3.1 inference broker, §4.1 invariants.
 Builds on / consumes: M2 ([`K8sSandboxClient`](2026-06-17-m2-k8s-sandbox-client-design.md)), M3 ([persistent channel](2026-06-17-m3-persistent-channel-design.md)), M4 ([Knative wrapper](2026-06-17-m4-knative-serverless-wrapper-design.md)).
 Sibling: [M13 — Generalized Credentialed Egress](2026-06-19-m13-generalized-credentialed-egress-design.md) (the **sandbox**'s heavyweight egress plane). This design explicitly argues that apparatus does **not** extend to the harness.
 
@@ -42,7 +42,7 @@ Sibling: [M13 — Generalized Credentialed Egress](2026-06-19-m13-generalized-cr
 
 ### The driving finding
 
-Verification of `K8sSandboxClient` (the `@sh/k8s-sandbox` extension) shows tool redirection is
+Verification of `K8sSandboxClient` (the `@moca/k8s-sandbox` extension) shows tool redirection is
 **override-based and fail-open**, not deny-by-default:
 
 - When the sandbox config resolves, the extension calls `pi.registerTool()` to **override** Pi's 7
@@ -203,7 +203,7 @@ non-sandboxed local runs; the _zero-trust harness deployment_ refuses them.
   injector still reaches the provider.
 - **Shipped (v1, issue #66):** `deploy/knative/harness-egress-policy.yaml` — a `policyTypes: [Egress]`
   policy (ingress deliberately untouched so the Knative activator can still route into the pod)
-  selecting the harness pod by its Knative label `serving.knative.dev/service: serverless-harness`,
+  selecting the harness pod by its Knative label `serving.knative.dev/service: moca`,
   with a three-rule allowlist:
   - **DNS** (`:53` UDP+TCP) — to resolve the external LLM hostname.
   - **Redis** (`podSelector app=redis`, `:6379`) — the durable log, scoped to the in-cluster pod.

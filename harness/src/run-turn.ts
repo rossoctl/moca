@@ -13,11 +13,15 @@ import {
   type AssistantMessage,
   type Model,
 } from '@earendil-works/pi-ai';
-import { RedisSessionBackend } from '@sh/session-backend';
+import { RedisSessionBackend } from '@moca/session-backend';
 import { BufferedRedisBackend } from './buffered-redis-backend.js';
 import { flushExtension } from './flush-extension.js';
 import { randomUUID } from 'node:crypto';
-import { k8sSandboxExtension, type K8sSandboxConfig, type SandboxTransport } from '@sh/k8s-sandbox';
+import {
+  k8sSandboxExtension,
+  type K8sSandboxConfig,
+  type SandboxTransport,
+} from '@moca/k8s-sandbox';
 // Value import, and safe: select-sandbox.ts imports nothing from run-turn.js, so unlike the
 // run-leaf↔run-turn pair below there is no cycle to avoid here.
 import {

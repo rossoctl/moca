@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { makeStoredEntry, type LogStore, type StoredEntry } from '@sh/session-backend';
+import { makeStoredEntry, type LogStore, type StoredEntry } from '@moca/session-backend';
 import type { FileEntry } from '@earendil-works/pi-coding-agent';
 import { BufferedRedisBackend } from '../src/buffered-redis-backend';
 

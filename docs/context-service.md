@@ -1,6 +1,6 @@
 # Optional Context Service integration
 
-Serverless Harness can use an external Context Service to allocate a workload-scoped sandbox pool
+MOCA can use an external Context Service to allocate a workload-scoped sandbox pool
 and workspace. This integration is optional. Without it, existing `/runs` requests and static
 sandbox-pool configuration behave as before.
 
@@ -16,7 +16,7 @@ Context Service requests time out after 5 seconds by default. Set
 `CONTEXT_SERVICE_TIMEOUT_MS` to a positive number of milliseconds to override this limit.
 
 `POST /workloads` asks Context Service to allocate the pool. A subsequent `/runs` request can pass
-the returned `workloadId`; Serverless Harness resolves it to the pool selector before leasing and
+the returned `workloadId`; MOCA resolves it to the pool selector before leasing and
 executing in a sandbox. Deleting the workload asks Context Service to release its resources.
 
 If `CONTEXT_SERVICE_URL` is unset, the workload lifecycle routes return
@@ -25,7 +25,7 @@ existing `KAGENTI_SANDBOX_POOL_SELECTOR` configuration.
 
 ## Security boundary
 
-These routes currently assume a trusted, single-tenant deployment. Serverless Harness forwards a
+These routes currently assume a trusted, single-tenant deployment. MOCA forwards a
 caller-provided `workspace.claimName` to Context Service and does not authenticate the caller,
 authorize PVC access, or tenant-scope workload names. Context Service also does not currently
 enforce those controls. Do not expose `/workloads` to untrusted or mutually untrusted clients.

@@ -8,7 +8,7 @@ import {
   renderPreflight,
   serializeLockfile,
   SecretScanError,
-} from '@sh/config-bundle';
+} from '@moca/config-bundle';
 import { putBundle, type BundleRedisLike } from './config-store.js';
 import {
   LOCKFILE_OUT,

@@ -1,9 +1,9 @@
 // packages/knative-server/src/leaf-job.ts
-import { RedisWorkQueue } from '@sh/work-queue';
-import { processOne } from '@sh/harness/leaf-job-runner';
-import { runLeaf, leafSessionId, type LeafEnvelope } from '@sh/harness/run-leaf';
-import { RedisResultStore, toResultRecord, writeResult } from '@sh/harness/leaf-result-store';
-import { type TurnConfig } from '@sh/harness/run-turn';
+import { RedisWorkQueue } from '@moca/work-queue';
+import { processOne } from '@moca/harness/leaf-job-runner';
+import { runLeaf, leafSessionId, type LeafEnvelope } from '@moca/harness/run-leaf';
+import { RedisResultStore, toResultRecord, writeResult } from '@moca/harness/leaf-result-store';
+import { type TurnConfig } from '@moca/harness/run-turn';
 
 const MIN_IDLE_MS = 90_000;
 const MAX_ATTEMPTS = 3;

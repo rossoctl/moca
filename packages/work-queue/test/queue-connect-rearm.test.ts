@@ -16,7 +16,7 @@ import { EventEmitter } from 'node:events';
  *    re-arm above cannot see it.
  *
  * The second is the one this file exists for; it is the shape a reviewer caught after the first was
- * fixed. Full citations into node-redis 6.2.1 live on `resilientClientOptions` (@sh/session-backend),
+ * fixed. Full citations into node-redis 6.2.1 live on `resilientClientOptions` (@moca/session-backend),
  * and the sibling proof for the session store is `redis-backend-rearm.test.ts` -- not duplicated here.
  *
  * `queue.test.ts` drives a real Redis and so can exercise neither failure; this mock is why.

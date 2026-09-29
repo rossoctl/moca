@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { handler } from './server.js';
 // Boot-time validation of the sandbox-discovery enum; see its use below.
-import { resolveDiscoverySource } from '@sh/harness/select-sandbox';
+import { resolveDiscoverySource } from '@moca/harness/select-sandbox';
 // Boot-time validation of the token keyset -- #249's fix, which this path has to call itself
 // because it never goes through startServer. See its use below.
 import { assertKeysetUsable } from './turn-auth.js';
@@ -250,7 +250,7 @@ if (isMainModule) {
   }
   const channel = process.send;
   if (typeof channel !== 'function') {
-    console.error('sh-worker must be forked by @sh/supervisor (no IPC channel available)');
+    console.error('sh-worker must be forked by @moca/supervisor (no IPC channel available)');
     process.exit(2);
   }
   // Validate SH_SANDBOX_DISCOVERY at BOOT, not on the first turn. resolveDiscoverySource throws on
@@ -264,7 +264,7 @@ if (isMainModule) {
   // keyset parsed per request rather than at boot, giving "failure arrives per request on a
   // healthy-looking deployment" -- and assertKeysetUsable, the fix there, lives in this same package.
   //
-  // In the worker rather than the supervisor because resolveDiscoverySource is in @sh/harness and
+  // In the worker rather than the supervisor because resolveDiscoverySource is in @moca/harness and
   // packages/supervisor ships `dependencies: {}` deliberately. A throw here still surfaces as a
   // crashloop with the reason in the journal, via the supervisor's restart backoff. The records-
   // without-SH_REMOTE_SANDBOX=1 combination is covered by the same call, and deserves to be: it is a

@@ -2,14 +2,14 @@
 
 - **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-08-26
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-08-26-turn-sse-streaming-design.md`](../specs/2026-08-26-turn-sse-streaming-design.md)
 
 ## Context
 
 `POST /turn` runs one Pi turn to completion and returns the assistant's text as a single JSON body,
 holding the connection open with nothing visible until the turn finishes. Issue
-[#167](https://github.com/rossoctl/serverless-harness/issues/167) asks to let an interactive caller
+[#167](https://github.com/rossoctl/moca/issues/167) asks to let an interactive caller
 **watch the turn unfold** — assistant-text deltas and tool-call events, live — without changing
 anything for callers who don't ask for it. This is distinct from the async "background and poll" path
 ([ADR-0028](0028-async-prompt-dispatch.md), issue #168): that trades liveness for durability;

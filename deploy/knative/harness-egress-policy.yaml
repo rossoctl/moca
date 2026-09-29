@@ -31,14 +31,14 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: serverless-harness-egress
+  name: moca-egress
   namespace: default
 spec:
   # Knative stamps this label on the user pod; select it, not an app= label the
   # Knative pod does not carry.
   podSelector:
     matchLabels:
-      serving.knative.dev/service: serverless-harness
+      serving.knative.dev/service: moca
   policyTypes:
     - Egress
   egress:

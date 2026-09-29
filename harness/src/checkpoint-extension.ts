@@ -1,5 +1,5 @@
 import type { ExtensionFactory, FileEntry, SessionManager } from '@earendil-works/pi-coding-agent';
-import type { LogStore } from '@sh/session-backend';
+import type { LogStore } from '@moca/session-backend';
 
 /**
  * On each native compaction, append a tiny resume-pointer marker recording the log

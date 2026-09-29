@@ -11,10 +11,10 @@
 #
 # Env overrides:
 #   SH_UNIT_DIR       Where systemd unit files are installed (default /etc/systemd/system)
-#   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/serverless-harness)
-#   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/serverless-harness)
+#   SH_ENV_DIR        Where the supervisor/relay env files live (default /etc/moca)
+#   SH_INSTALL_DIR    Where the harness checkout lives on the VM (default /opt/moca)
 #   SH_SANDBOX_COUNT     Number of sandbox containers to start (default 2)
-#   SANDBOX_IMAGE        Sandbox container image (default ghcr.io/rossoctl/serverless-harness-sandbox:latest)
+#   SANDBOX_IMAGE        Sandbox container image (default ghcr.io/rossoctl/moca-sandbox:latest)
 #   SH_SANDBOX_RELAY_ADDR  Address each sandbox container uses to dial the relay (default
 #                          host.containers.internal:<SH_RELAY_PORT from relay.env>). Reaching
 #                          the host from inside a container is the part of this script least
@@ -24,10 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SH_UNIT_DIR:=/etc/systemd/system}"
-: "${SH_ENV_DIR:=/etc/serverless-harness}"
-: "${SH_INSTALL_DIR:=/opt/serverless-harness}"
+: "${SH_ENV_DIR:=/etc/moca}"
+: "${SH_INSTALL_DIR:=/opt/moca}"
 : "${SH_SANDBOX_COUNT:=2}"
-: "${SANDBOX_IMAGE:=ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
+: "${SANDBOX_IMAGE:=ghcr.io/rossoctl/moca-sandbox:latest}"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -44,7 +44,7 @@ require_cmds() {
 # policy, shell, and home are an operator decision, not this script's to make). Fail loudly
 # before install_units, naming the account and the units that need it, instead of letting
 # systemd fail later with a confusing "user harness does not exist".
-# install -d -m 0750 /etc/serverless-harness and systemctl enable both need root. Failing here
+# install -d -m 0750 /etc/moca and systemctl enable both need root. Failing here
 # with a clear message beats dying partway through on a confusing `install: Permission denied`.
 # uid defaults to the real effective uid (via `id -u`, not $EUID, so a test can override it
 # without actually running as another user). main() always calls this with zero arguments --

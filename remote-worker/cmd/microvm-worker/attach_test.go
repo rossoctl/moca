@@ -12,10 +12,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/relaytest"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	"github.com/rossoctl/moca/remote-worker/internal/relaytest"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 // This is build-step 6 without a cluster: the REAL session frame loop, the REAL

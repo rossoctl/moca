@@ -141,7 +141,7 @@ claim "Deploy relay + worker"
 # manifest unmodified there would replace a working relay with an unpullable one and
 # abort at the rollout below. Unset = kind behavior, unchanged.
 if [ -n "${RELAY_IMAGE:-}" ]; then
-  RELAY_RENDERED=$(sed "s#image: dev.local/serverless-harness:local#image: ${RELAY_IMAGE}#" relay-deployment.yaml)
+  RELAY_RENDERED=$(sed "s#image: dev.local/moca:local#image: ${RELAY_IMAGE}#" relay-deployment.yaml)
   # Verify the substitution rather than assuming it, in both directions -- they catch
   # different regressions and neither implies the other:
   #   (a) no kind-local pin survives. Guards a manifest that grows a second image line,
@@ -149,10 +149,10 @@ if [ -n "${RELAY_IMAGE:-}" ]; then
   #   (b) the new image is actually present. Guards the pin being renamed, where sed
   #       matches nothing, (a) is vacuously true, and we would deploy the renamed
   #       kind-local image -- surfacing later as a confusing ImagePullBackOff.
-  printf '%s' "$RELAY_RENDERED" | grep -qF 'image: dev.local/serverless-harness:local' \
-    && abort "RELAY_IMAGE=$RELAY_IMAGE set, but a kind-local 'image: dev.local/serverless-harness:local' line survived the rewrite"
+  printf '%s' "$RELAY_RENDERED" | grep -qF 'image: dev.local/moca:local' \
+    && abort "RELAY_IMAGE=$RELAY_IMAGE set, but a kind-local 'image: dev.local/moca:local' line survived the rewrite"
   printf '%s' "$RELAY_RENDERED" | grep -qF "image: ${RELAY_IMAGE}" \
-    || abort "RELAY_IMAGE=$RELAY_IMAGE set, but relay-deployment.yaml has no 'image: dev.local/serverless-harness:local' line to replace"
+    || abort "RELAY_IMAGE=$RELAY_IMAGE set, but relay-deployment.yaml has no 'image: dev.local/moca:local' line to replace"
   printf '%s\n' "$RELAY_RENDERED" | kubectl apply -f - >/dev/null \
     || abort "kubectl apply relay-deployment.yaml (RELAY_IMAGE=$RELAY_IMAGE) failed"
 else

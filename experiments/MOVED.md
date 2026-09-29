@@ -1,6 +1,6 @@
 # Moved
 
-The `@sh/experiments` workspace package (M6's E2/E5 in-process experiment runners, the E11
+The `@moca/experiments` workspace package (M6's E2/E5 in-process experiment runners, the E11
 density-analysis module, and the SWE-bench evaluation harness, including
 `scripts/gen_swebench_deck.py` which now lives at `experiments/swebench/gen_swebench_deck.py`
 there) has moved to [rossoctl/moca-experiments](https://github.com/rossoctl/moca-experiments),

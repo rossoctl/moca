@@ -60,7 +60,7 @@ gates the mechanism; the verification gate.
 - **Session-scoped working memory.** P4 keys the workspace on the **run** (`workspace_key` is "populated by
   the harness from the lease's run id", P4 §3.4), so short-term memory cannot span a session's turns. P4 §9
   sidesteps this by keeping interactive `/turn` on the container tier. A real gap, filed as
-  [#267](https://github.com/rossoctl/serverless-harness/issues/267), not fixed here.
+  [#267](https://github.com/rossoctl/moca/issues/267), not fixed here.
 - **Non-HTTP protocols.** `ssh` and anything on raw sockets do not work on this tier, by construction (§7).
 
 ## 4. Key decisions
@@ -164,8 +164,8 @@ is not mitigated.**
 ## 9. Experiments
 
 > **STATUS, 2026-09-22 — E12 has answered: yes. T1 stands, and the hold below is lifted.**
-> [#271](https://github.com/rossoctl/serverless-harness/issues/271) is closed COMPLETED and
-> [#273](https://github.com/rossoctl/serverless-harness/pull/273) is merged. `EXPERIMENTS.md`'s E12
+> [#271](https://github.com/rossoctl/moca/issues/271) is closed COMPLETED and
+> [#273](https://github.com/rossoctl/moca/pull/273) is merged. `EXPERIMENTS.md`'s E12
 > section records rungs A, B, D and C@8 passing with two independent witnesses and the
 > pristine-snapshot check intact, so a guest-initiated connection on a second vsock port does
 > survive restore and the NIC option does not return. Rung C@128's dropped connections were traced
@@ -183,7 +183,7 @@ restore in the _host-initiated_ direction. This design adds a **second port** in
 direction across restore, and neither the repo nor Firecracker's docs establish that it works. If E12
 fails, T1 is dead and the NIC option in §2 returns. **Build nothing before E12 answers** — the hold as
 written before the run; **discharged, see the status note above.** E12 was tracked independently as
-[#271](https://github.com/rossoctl/serverless-harness/issues/271), written to be picked up without
+[#271](https://github.com/rossoctl/moca/issues/271), written to be picked up without
 implementing any of this spec.
 
 | #       | Question                                                                                                           | Substrate                          | Falsifiable prediction, to seal before running                                                                                                                                                                                                                |
@@ -219,7 +219,7 @@ vsock-_initiating_ client in the rootfs, and that changes the rootfs digest. The
 numbers were legitimised precisely by that digest being verified identical before and after every run
 (`sha256:668af589...` — quoted at the same truncation `EXPERIMENTS.md` records, since nothing
 committed to this repo carries more of it). Folding E12's helper into the snapshot a repeat metal
-run uses would invalidate the comparison that run exists to make — and it would do so invisibly. [#266](https://github.com/rossoctl/serverless-harness/issues/266)
+run uses would invalidate the comparison that run exists to make — and it would do so invisibly. [#266](https://github.com/rossoctl/moca/issues/266)
 reaches the same conclusion from the other side (its open question 4: Firecracker restores only on
 identical hardware, so a nested rig needs its own snapshot regardless). Building E12's snapshot on
 `nested-m8i` therefore contaminates nothing, and costs no metal time on a box that is currently contended.
@@ -267,7 +267,7 @@ Z5 §9's criteria 1, 2, 5 and 6 apply **unchanged** and are not restated. This s
 
 Mirrors P4 §10's purpose: decide what can be decided, so a planner starting cold does not have to guess.
 
-**[#271](https://github.com/rossoctl/serverless-harness/issues/271) (E12) has answered yes, so this
+**[#271](https://github.com/rossoctl/moca/issues/271) (E12) has answered yes, so this
 work is unblocked** — see the status note at the head of §9. The gate that stood here is discharged,
 not merely stale: T1 is confirmed, and `remote-worker/cmd/e12-guest-client` is already on `main`.
 E13 and E14 remain open, but neither gates the slice below.
@@ -316,9 +316,9 @@ written up as one rather than absorbed silently.
 - [RC1 — AuthBridge egress control-plane PoC](2026-07-10-authbridge-egress-control-plane-poc-design.md) — Profile B, the per-sandbox sidecar T3 replaces; fail-closed `token-broker`; the deferred Z1 note §5 acts on
 - [P4 — MicroVM sandbox tier](2026-09-09-p4-microvm-sandbox-design.md) — §2.4 platform facts incl. no virtio-fs; §3.4 `workspace_key`; §3.5 and §5.3 the jail as confinement; §5.2 nothing unique in the snapshot; §8 the bleed gate
 - [Milestone registry](README.md) — P-track, Z-track, MU2's `sandbox-egress` ownership
-- [#266](https://github.com/rossoctl/serverless-harness/issues/266) — metal/nested ratio for the E10/E11 ladders; its open question 3 (does the knee move under nesting?) gates E14 on nested, and its question 4 (a nested rig needs its own snapshot) is why §9.1's snapshot separation is free
-- [#267](https://github.com/rossoctl/serverless-harness/issues/267) — the session-scoped working-memory gap §3 puts out of scope
-- [#271](https://github.com/rossoctl/serverless-harness/issues/271) — E12, the gating probe, specified to be executable independently of this spec
+- [#266](https://github.com/rossoctl/moca/issues/266) — metal/nested ratio for the E10/E11 ladders; its open question 3 (does the knee move under nesting?) gates E14 on nested, and its question 4 (a nested rig needs its own snapshot) is why §9.1's snapshot separation is free
+- [#267](https://github.com/rossoctl/moca/issues/267) — the session-scoped working-memory gap §3 puts out of scope
+- [#271](https://github.com/rossoctl/moca/issues/271) — E12, the gating probe, specified to be executable independently of this spec
 - Firecracker [`vsock.md`](https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md) — guest-initiated `<uds>_<PORT>` convention, no handshake, `vsock_override`, "vsock snapshot support is currently limited"
 - Firecracker [`network-for-clones.md`](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/network-for-clones.md) — the netns/veth/MASQUERADE recipe §2 rejects, and its own disclaimer
 - `packages/control-plane/src/credential-store.ts:13` — `sandbox-egress` as an existing `Consumer`

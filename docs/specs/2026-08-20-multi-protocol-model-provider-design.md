@@ -10,7 +10,7 @@ Builds on (reuse, no redesign): the existing `SH_MODEL_CUSTOM=1` custom-model su
 `requireModel`/`synthesizeCustomModel` (`harness/src/run-turn.ts`), the `toolChoiceExtension`
 (`harness/src/tool-choice-extension.ts`), and Pi's provider layer (`pi-fork/packages/ai`, which
 already ships `anthropic-messages`, `openai-completions`, and `openai-responses`).
-Tracking: rossoctl/serverless-harness#157.
+Tracking: rossoctl/moca#157.
 
 > **What this slice is NOT.** Not a new provider implementation — Pi already implements all three
 > wire protocols; this is a thin dispatch + config layer in the harness wrapper. Not model-registry
@@ -195,7 +195,7 @@ before committing it to a run.**
 
 ## 9. References
 
-- Issue: rossoctl/serverless-harness#157.
+- Issue: rossoctl/moca#157.
 - Current seams: `harness/src/run-turn.ts` (`requireModel`, `synthesizeCustomModel`,
   `applyModelGateway`), `harness/src/tool-choice-extension.ts`.
 - Pi substrate: `pi-fork/packages/ai/src/providers/openai-completions.ts` (`createClient` →

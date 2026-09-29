@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { createRelay } from '../src/relay.js';
-import type { SandboxRecord, RecordStore } from '@sh/harness';
+import type { SandboxRecord, RecordStore } from '@moca/harness';
 
 function fakeRecords() {
   const map = new Map<string, SandboxRecord>();

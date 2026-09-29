@@ -1,5 +1,5 @@
 import type { FileEntry, SessionStorageBackend } from '@earendil-works/pi-coding-agent';
-import type { LogStore } from '@sh/session-backend';
+import type { LogStore } from '@moca/session-backend';
 
 /**
  * Write-behind decorator adapting a generic LogStore to Pi's SessionStorageBackend.

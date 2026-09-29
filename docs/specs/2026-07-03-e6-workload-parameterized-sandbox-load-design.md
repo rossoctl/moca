@@ -4,11 +4,11 @@ Version: 1.0 — July 3, 2026
 Status: Design (approved for implementation planning)
 Scope: Hardens the **P3** sandbox sharing-ratio experiment
 ([`2026-07-03-p3-sandbox-sharing-ratio-experiments-design.md`](2026-07-03-p3-sandbox-sharing-ratio-experiments-design.md),
-merged PR #58). Resolves [#62](https://github.com/kagenti/serverless-harness/issues/62) (noise-sensitive
+merged PR #58). Resolves [#62](https://github.com/rossoctl/moca/issues/62) (noise-sensitive
 knee) **and** a deeper validity gap surfaced in review: the E6/E7 leaf workload is a trivial
 `marker.txt` check, so the reported ratio N ≈ 29–48:1 is an optimistic _upper bound_, not a
 representative Archetype-A figure. Builds on the two-tier epic
-([#49](https://github.com/kagenti/serverless-harness/issues/49)).
+([#49](https://github.com/rossoctl/moca/issues/49)).
 
 ---
 

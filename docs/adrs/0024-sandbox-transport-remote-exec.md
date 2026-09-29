@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-08
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-07-08-sandbox-transport-grpc-design.md`](../specs/2026-07-08-sandbox-transport-grpc-design.md)
 
 ## Context
@@ -15,7 +15,7 @@ We will delegate remote command execution over a single **worker-dialed gRPC bid
 
 ### Alternatives considered
 
-- **Redis-Streams transport + TS `@sh/sandbox-worker`** (this PR's prior revision) — rejected: TS lock-in through JSON+base64 frames, and Redis-on-its-port is blocked by `:443`-only egress while forcing a Redis dependency into exec.
+- **Redis-Streams transport + TS `@moca/sandbox-worker`** (this PR's prior revision) — rejected: TS lock-in through JSON+base64 frames, and Redis-on-its-port is blocked by `:443`-only egress while forcing a Redis dependency into exec.
 - **Connect / HTTP-1.1 fallback** — rejected: full-duplex bidi needs HTTP/2 regardless, so Connect adds a second toolchain for no gain on the streaming core.
 - **Relay owning matching / multi-replica HA** — deferred: a single replica needs no presence glue beyond the pool mirror, and matching stays in the existing pool.
 

@@ -7,8 +7,8 @@ import {
   verifyToken,
   type CpRedisLike,
   type ExchangeResponse,
-} from '@sh/control-plane';
-import type { UpstreamCredential } from '@sh/harness/run-turn';
+} from '@moca/control-plane';
+import type { UpstreamCredential } from '@moca/harness/run-turn';
 
 /**
  * Caller authentication on the `/turn` path (MU1 spec §4.3, §4.3.1, §5.3).

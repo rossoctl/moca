@@ -1,22 +1,22 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { runTurn, executeTurn, type TurnConfig } from '@sh/harness/run-turn';
-import { terminalFrame, type TurnStreamFrame } from '@sh/harness/turn-stream';
+import { runTurn, executeTurn, type TurnConfig } from '@moca/harness/run-turn';
+import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
 import {
   runLeaf,
   leafSessionId,
   validateItem,
   type LeafEnvelope,
   type LeafResult,
-} from '@sh/harness/run-leaf';
-import { RedisWorkQueue } from '@sh/work-queue';
+} from '@moca/harness/run-leaf';
+import { RedisWorkQueue } from '@moca/work-queue';
 import {
   RedisResultStore,
   toResultRecord,
   writeResult,
   readResult,
-} from '@sh/harness/leaf-result-store';
+} from '@moca/harness/leaf-result-store';
 import {
   contextServiceConfigured,
   createWorkload,
@@ -25,7 +25,7 @@ import {
   type WorkloadRecord,
   type WorkloadRequest,
 } from './context-service.js';
-import { CpError, statusFor } from '@sh/control-plane';
+import { CpError, statusFor } from '@moca/control-plane';
 import {
   assertKeysetUsable,
   resolveTurnAuth,
@@ -99,7 +99,7 @@ function buildConfig(auth?: TurnAuth | null): TurnConfig {
 // caches a stale keyset, matching how saturationWaitConfig() already behaves.
 const turnAuthDeps = () => turnAuthDepsFromEnv(process.env);
 
-/** One mapping for control-plane codes, reusing @sh/control-plane's table so the tiers agree. */
+/** One mapping for control-plane codes, reusing @moca/control-plane's table so the tiers agree. */
 function writeAuthError(res: ServerResponse, err: unknown, sessionId?: string): void {
   if (!(err instanceof CpError)) throw err;
   res.writeHead(statusFor(err.code), JSON_HEADERS).end(
@@ -215,7 +215,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
  * `instanceof` would be the idiom (run-leaf.ts uses it for this very class) but it is only sound
  * WITHIN the harness package. Reaching across the workspace boundary makes the status depend on
  * both packages resolving the identical module instance — which is false whenever a test mocks
- * `@sh/harness/run-turn` wholesale, as server.test.ts does: the import then yields vitest's
+ * `@moca/harness/run-turn` wholesale, as server.test.ts does: the import then yields vitest's
  * "no export" stub and `instanceof` throws, turning three unrelated turn errors into 500s. That
  * was observed, not hypothesised. The paired test constructs the REAL class, so this string stays
  * pinned to the class rather than drifting from it.
@@ -704,7 +704,7 @@ export function startServer(port = PORT): ReturnType<typeof createServer> {
   });
 
   server.listen(port, () => {
-    console.log(`serverless-harness listening on :${port}`);
+    console.log(`moca listening on :${port}`);
   });
 
   return server;

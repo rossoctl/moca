@@ -80,7 +80,7 @@ metadata:
     # filters by resourceNames, never by label, so "read the credential store" can only be a
     # different permission from "read any Secret in the app namespace" if they are different
     # namespaces (spec §6.5).
-    app.kubernetes.io/part-of: serverless-harness
+    app.kubernetes.io/part-of: moca
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -176,7 +176,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sh-control-plane
-          image: dev.local/serverless-harness:local
+          image: dev.local/moca:local
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -316,7 +316,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      serving.knative.dev/service: serverless-harness
+      serving.knative.dev/service: moca
   policyTypes:
     - Egress
   egress:

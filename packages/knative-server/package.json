@@ -1,5 +1,5 @@
 {
-  "name": "@sh/knative-server",
+  "name": "@moca/knative-server",
   "type": "module",
   "version": "0.0.0",
   "exports": {
@@ -11,9 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sh/control-plane": "workspace:*",
-    "@sh/harness": "workspace:*",
-    "@sh/work-queue": "workspace:*",
+    "@moca/control-plane": "workspace:*",
+    "@moca/harness": "workspace:*",
+    "@moca/work-queue": "workspace:*",
     "redis": "^6.2.1"
   },
   "devDependencies": {

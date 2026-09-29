@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // ChunkSize caps one Chunk frame's payload. It is also the pipe read size, so

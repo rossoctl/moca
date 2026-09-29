@@ -2,7 +2,7 @@
 
 - **Status:** Proposed, amended 2026-09-01 (see [Amendment](#amendment-2026-09-01-prompt-leaves-lease-a-pool-sandbox)) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-08-25
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-08-25-async-prompt-dispatch-design.md`](../specs/2026-08-25-async-prompt-dispatch-design.md)
 
 ## Context
@@ -11,7 +11,7 @@
 for the whole turn. An orchestrator that wants to fire a long-running prompt and collect the answer
 later has no path to do so — the exact problem [ADR-0015](0015-async-leaf-completion.md) already
 solved for review (`converge`) and patch (`solve`) leaves via the async KEDA queue and `GET
-/runs/status`. Issue [#168](https://github.com/rossoctl/serverless-harness/issues/168) asks for a
+/runs/status`. Issue [#168](https://github.com/rossoctl/moca/issues/168) asks for a
 prompt to ride that same substrate. The maintainer's governing constraint was **cleanest design
 over fewest changes**: the answer must reuse existing seams rather than fork the turn path or grow a
 parallel one.

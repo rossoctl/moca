@@ -1,8 +1,8 @@
-# Capability Charter — Serverless Harness as a Leaf-Session Backend
+# Capability Charter — MOCA as a Leaf-Session Backend
 
 Version: 1.0 — June 26, 2026
 Status: Charter (roadmap anchor; informs Phase-2 priority and the MVP target)
-Scope: Answers one question — _does the serverless-harness design generalize beyond a single
+Scope: Answers one question — _does the moca design generalize beyond a single
 pipeline?_ — by testing it against three independent agentic-pipeline archetypes, and uses the
 answer to **repoint** the Phase-2 roadmap and define the MVP target. This is a positioning/charter
 doc, not a milestone implementation spec.
@@ -62,7 +62,7 @@ does each actually need?_
 
 ## 3. The generalized contract
 
-> The serverless-harness is a **scale-to-zero, durable, sandboxed, model-tiered leaf-session
+> The moca is a **scale-to-zero, durable, sandboxed, model-tiered leaf-session
 > backend**, invoked over a stable contract (HTTP/CLI) by an **arbitrary external deterministic
 > orchestrator** — a state machine, a staged script, _or a CI/cron scheduler_ — offering optional
 > primitives for **checkpoint/resume, human-gates, workspace isolation, and credentialed egress**.

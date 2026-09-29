@@ -2,8 +2,8 @@
 
 Version: 1.2 — September 26, 2026 (v1.1: a UX/extensibility review; v1.2: one URL — see §0)
 Status: Proposed
-Naming: MOCA is the new name of serverless-harness, so the client is `mocactl` (it was drafted as `sh-tui`).
-Scope: A new, standalone terminal UI — `packages/mocactl` (`@sh/mocactl`), binary `mocactl` — that logs a user
+Naming: MOCA is the new name of moca, so the client is `mocactl` (it was drafted as `sh-tui`).
+Scope: A new, standalone terminal UI — `packages/mocactl` (`@moca/mocactl`), binary `mocactl` — that logs a user
 in against the MU1 control plane, lets them manage their own sessions and inference credentials, and
 drives interactive turns against the harness over SSE. It talks **exclusively** over the `/v1` HTTP
 contract already shipped in `packages/control-plane` and `packages/knative-server`, plus **one small
@@ -23,7 +23,7 @@ Decision record: [ADR-0036](../adrs/0036-tui-decoupled-http-client.md).
 > **The one-sentence thesis.** Everything this TUI needs already exists over HTTP — login, owned
 > sessions, credential management, streaming turns — so the whole of this design is a terminal
 > client and nothing else: one discovery route as the only backend change, zero runtime dependency on
-> any `@sh/*` package, zero assumption about what runs behind the one URL it is given, and a first
+> any `@moca/*` package, zero assumption about what runs behind the one URL it is given, and a first
 > streamed token within a minute of first launch.
 
 ---
@@ -186,7 +186,7 @@ this client's tokens. That is an operator prerequisite (§12) — but unlike v1.
 ### 3.1 Package
 
 ```
-packages/mocactl/                        @sh/mocactl, binary `mocactl`
+packages/mocactl/                        @moca/mocactl, binary `mocactl`
   src/
     cli.ts                           entrypoint: interactive (default), `run`, `doctor`
     config.ts                        XDG paths, config + auth cache
@@ -219,8 +219,8 @@ packages/mocactl/                        @sh/mocactl, binary `mocactl`
 ```
 
 **Hard constraint, checkable rather than assumed:** `packages/mocactl/package.json` declares **no**
-`workspace:*` dependency. It imports nothing from `@sh/harness`, `@sh/control-plane`,
-`@sh/session-backend`, or `@sh/k8s-sandbox`. Frame and API types are redeclared locally and held
+`workspace:*` dependency. It imports nothing from `@moca/harness`, `@moca/control-plane`,
+`@moca/session-backend`, or `@moca/k8s-sandbox`. Frame and API types are redeclared locally and held
 honest by the contract test (§7.4), not by sharing a module.
 
 **Layering rule:** `api/` and `core/` never import from `views/`, `render/`, or `ink`. That is what lets

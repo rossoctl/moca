@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 // realProduceVerdict (exercised via the exported runLeaf() below, with no `deps.produceVerdict`
 // override) drives real Redis/Pi/model machinery in production. Mock those module boundaries so
 // the transport-wiring tests stay hermetic — mirrors the whole-module vi.mock style already used
-// for @sh/harness/run-leaf in packages/knative-server/test/run-leaf-route.test.ts.
+// for @moca/harness/run-leaf in packages/knative-server/test/run-leaf-route.test.ts.
 // vi.mock factories are hoisted above the rest of this module, so any value a factory returns
 // DIRECTLY (as opposed to referencing lazily inside a closure) must already be initialized by
 // the time the hoisted factory runs. vi.hoisted() runs its callback as part of that same hoisted
@@ -33,7 +33,7 @@ const { k8sSandboxExtensionMock, kubectlTransportMock } = vi.hoisted(() => ({
     close: vi.fn(async () => {}),
   })),
 }));
-vi.mock('@sh/k8s-sandbox', () => ({
+vi.mock('@moca/k8s-sandbox', () => ({
   k8sSandboxExtension: (...args: unknown[]) => k8sSandboxExtensionMock(...args),
   KubectlTransport: (...args: unknown[]) => kubectlTransportMock(...args),
 }));
@@ -56,7 +56,7 @@ const { FakeRedisSessionBackend } = vi.hoisted(() => {
   }
   return { FakeRedisSessionBackend };
 });
-vi.mock('@sh/session-backend', () => ({
+vi.mock('@moca/session-backend', () => ({
   RedisSessionBackend: FakeRedisSessionBackend,
 }));
 

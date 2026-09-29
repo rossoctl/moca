@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SandboxPoolSaturatedError, SandboxPoolEmptyError } from '@sh/harness/run-turn';
+import { SandboxPoolSaturatedError, SandboxPoolEmptyError } from '@moca/harness/run-turn';
 import { turnErrorStatus, turnErrorHeaders } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so

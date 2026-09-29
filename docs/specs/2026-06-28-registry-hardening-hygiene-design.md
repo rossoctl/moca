@@ -114,7 +114,7 @@ applied unconditionally regardless.
 
 ## 4. Verification
 
-- **Unit:** `@sh/harness` and `@sh/knative-server` suites stay green (the only code change is the
+- **Unit:** `@moca/harness` and `@moca/knative-server` suites stay green (the only code change is the
   `isMainModule` guard; the server suite proves no auto-start on import).
 - **Live gate (the gate that matters):** rebuild the image (it includes the `isMainModule` change)
   with **`docker buildx build --load` and verify the image actually contains the change before

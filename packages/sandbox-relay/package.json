@@ -1,5 +1,5 @@
 {
-  "name": "@sh/sandbox-relay",
+  "name": "@moca/sandbox-relay",
   "type": "module",
   "version": "0.0.0",
   "exports": {
@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sh/harness": "workspace:*",
-    "@sh/k8s-sandbox": "workspace:*",
+    "@moca/harness": "workspace:*",
+    "@moca/k8s-sandbox": "workspace:*",
     "@grpc/grpc-js": "^1.14.5"
   },
   "devDependencies": {

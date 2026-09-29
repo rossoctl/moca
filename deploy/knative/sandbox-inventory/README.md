@@ -21,10 +21,10 @@ people stop checking it. Re-run the verify script whenever the sandbox Dockerfil
 
 ## Provenance
 
-`ghcr.io_rossoctl_serverless-harness-sandbox_latest.json` was generated from the real
+`ghcr.io_rossoctl_moca-sandbox_latest.json` was generated from the real
 published image, not curated by hand:
 
-- Image: `ghcr.io/rossoctl/serverless-harness-sandbox:latest`
+- Image: `ghcr.io/rossoctl/moca-sandbox:latest`
 - Digest: `sha256:0683379d6368ab14c41d9bb46683178946091abba47b1832756d89f39afcdb9f`
 - 347 binaries
 - Enumerated 2026-09-03 by listing every executable on `PATH` inside the image

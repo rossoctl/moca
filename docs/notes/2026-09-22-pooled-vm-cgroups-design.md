@@ -4,13 +4,13 @@ Version: 0.1 — September 22, 2026
 Status: **Proposed. §4's open decision is RESOLVED by measurement (2026-09-22); ready to implement.**
 Scope: stop creating and destroying one cgroup per microVM. Reuse a small set of long-lived
 cgroups instead, to remove what is now the largest single cost in an `Exec`.
-Issue: [#258](https://github.com/rossoctl/serverless-harness/issues/258). Depends on nothing;
+Issue: [#258](https://github.com/rossoctl/moca/issues/258). Depends on nothing;
 supersedes two measured dead ends recorded there.
 
 ## 1. Why: the measurements that point here
 
 `Destroy` is the largest phase of an `Exec`, and its sub-phases say why
-([#258 Task 3.1](https://github.com/rossoctl/serverless-harness/issues/258)):
+([#258 Task 3.1](https://github.com/rossoctl/moca/issues/258)):
 
 | slots | kill | wait  | removeall | cgroupwait | **cgrouprmdir** | total  |
 | ----- | ---- | ----- | --------- | ---------- | --------------- | ------ |
@@ -164,7 +164,7 @@ startup is an orphan to be removed, whereas a `pool-N` cgroup at startup is norm
   Firecracker holding a 256 MiB `MAP_SHARED` mapping must have that address space torn down before
   it is reaped. This change does not approach that.
 - The Cloud Hypervisor arm, whose cgroup is a systemd transient scope. Out of scope here; see
-  [#316](https://github.com/rossoctl/serverless-harness/issues/316) for the other CHV question.
+  [#316](https://github.com/rossoctl/moca/issues/316) for the other CHV question.
 
 ## 7. How it would be verified
 

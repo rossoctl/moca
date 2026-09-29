@@ -1,7 +1,7 @@
 // harness/test/leaf-job-runner.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { processOne, type LeafJobDeps } from '../src/leaf-job-runner';
-import type { ClaimedEntry, WorkQueue } from '@sh/work-queue';
+import type { ClaimedEntry, WorkQueue } from '@moca/work-queue';
 import type { LeafEnvelope } from '../src/run-leaf';
 import type { RedisLike, LeafResultRecord } from '../src/leaf-result-store';
 

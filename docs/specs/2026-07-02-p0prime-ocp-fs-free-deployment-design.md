@@ -2,8 +2,8 @@
 
 Version: 1.0 — July 2, 2026
 Status: Design (approved for implementation planning)
-Scope: **P0′** of the [two-tier FS-free harness epic](https://github.com/kagenti/serverless-harness/issues/49)
-([P0′ issue #47](https://github.com/kagenti/serverless-harness/issues/47)) — **the P1 slice only**.
+Scope: **P0′** of the [two-tier FS-free harness epic](https://github.com/rossoctl/moca/issues/49)
+([P0′ issue #47](https://github.com/rossoctl/moca/issues/47)) — **the P1 slice only**.
 Deploy the now-merged FS-free harness ([P1](2026-07-02-p1-fs-free-harness-design.md), #45) plus a
 **single durable RWO sandbox** on the live OpenShift 4.20.8 cluster, and prove it with the existing
 full leaf smoke through the OCP Route. Realize on OCP exactly what `setup-kind.sh` already does on
@@ -16,9 +16,9 @@ Substrate: OpenShift Serverless (Knative Serving v1.17, **installed**), KEDA (**
 installed on the cluster**), AWS EBS `gp3-csi`/`gp2-csi` (RWO only, no RWX), Redis.
 
 > **What this slice is NOT.** Not the shared sandbox pool or N:M routing, and **not** RWX on the
-> sandbox tier (P2 — [#46](https://github.com/kagenti/serverless-harness/issues/46); RWX, if ever
+> sandbox tier (P2 — [#46](https://github.com/rossoctl/moca/issues/46); RWX, if ever
 > needed, relocates there, not to the harness). Not Kata isolation or ratio experiments
-> (P3 — [#48](https://github.com/kagenti/serverless-harness/issues/48), deferred). Not
+> (P3 — [#48](https://github.com/rossoctl/moca/issues/48), deferred). Not
 > `leaf-orchestrator.yaml` or the gate/cron smokes (a separate P1 follow-up — they still reference
 > removed envelope files; **do not expand into them here**). Not the superseded
 > `docs/archetype-a-ocp-support` branch (NFS-RWX-for-harness) — after P1 the harness mounts nothing,
@@ -90,14 +90,14 @@ grep` but **not `ripgrep`**. The leaf's `find`/`grep` tools route to `rg` inside
 ## 4. Approach decision — sandbox image source
 
 The sandbox image can be **built in-cluster** (existing BuildConfig → internal registry) or **pulled
-from GHCR** (`build.yaml` publishes `ghcr.io/rossoctl/serverless-harness-sandbox` on every push to
+from GHCR** (`build.yaml` publishes `ghcr.io/rossoctl/moca-sandbox` on every push to
 `main`, explicitly "instead of building it in-cluster").
 
 **Decision: keep the in-cluster build (Option A) for P0′.** We live-verify **before** merging, and
 GHCR `:latest` only rebuilds on merge — so the `ripgrep` fix (§3.2.4) cannot reach GHCR in time for a
 pre-merge smoke. The in-cluster BuildConfig honors the local Dockerfile fix immediately and keeps the
 phase self-contained (no dependency on GHCR freshness/pullability). The harness image stays
-GHCR-pulled (`ghcr.io/rossoctl/serverless-harness:latest`, auto-published post-P1).
+GHCR-pulled (`ghcr.io/rossoctl/moca:latest`, auto-published post-P1).
 
 > **Follow-up (not P0′).** Once the `ripgrep` fix merges and CI republishes the GHCR sandbox image,
 > switching the OCP overlay to pull it (Option B, symmetric with the harness, drops the BuildConfig)
@@ -107,14 +107,14 @@ GHCR-pulled (`ghcr.io/rossoctl/serverless-harness:latest`, auto-published post-P
 
 ### 5.1 Target topology (P1 architecture, realized on OCP)
 
-- **Harness** — Knative Service, image `ghcr.io/rossoctl/serverless-harness:latest`, runs **non-root**
+- **Harness** — Knative Service, image `ghcr.io/rossoctl/moca:latest`, runs **non-root**
   (UID 65532, `nonroot-v2`), mounts only `/tmp` (emptyDir). Resolves the sandbox pod via
   `KAGENTI_SANDBOX_NAME=sandbox-0` → the `Sandbox` CR's `.status.selector` label query → `kubectl
 exec`s all 7 Pi tool ops into it. External access via the Knative **Route** (`KSVC_URL` contract in
   `lib.sh`: Route host, `-k`, no Host header).
 - **Sandbox** — one `Sandbox` CR (`sandbox-0`, `agents.x-k8s.io`), managed by the agent-sandbox
   **v0.5.0** controller. `/workspace` backed by a **durable RWO EBS PVC** from the CR's
-  `volumeClaimTemplates` (`gp3-csi`, 1Gi). Image = the in-cluster-built `serverless-harness-sandbox`
+  `volumeClaimTemplates` (`gp3-csi`, 1Gi). Image = the in-cluster-built `moca-sandbox`
   (alpine + `bash coreutils findutils grep ripgrep`), `command: [sleep infinity]`, non-root.
 - **Redis** — `deploy/knative/redis.yaml` (result record + async queue), unchanged.
 
@@ -126,8 +126,8 @@ Chosen approach: **non-root + `fsGroup`, bound under `nonroot-v2`.** Realized by
 - Pod `securityContext`: `runAsUser: 65532`, `runAsNonRoot: true`, **`fsGroup: 65532`**,
   `seccompProfile.type: RuntimeDefault`.
 - Container `securityContext`: `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`.
-- `serviceAccountName: serverless-harness-sandbox` (a dedicated SA, distinct from the harness SA),
-  granted `nonroot-v2` (`oc adm policy add-scc-to-user nonroot-v2 -z serverless-harness-sandbox …` in
+- `serviceAccountName: moca-sandbox` (a dedicated SA, distinct from the harness SA),
+  granted `nonroot-v2` (`oc adm policy add-scc-to-user nonroot-v2 -z moca-sandbox …` in
   `setup-ocp.sh`).
 - **Keep** the durable PVC from `volumeClaimTemplates` (remove the `emptyDir` override). `fsGroup:
 65532` makes the EBS volume group-owned/writable, so the sandbox — and the smoke's `sexec`
@@ -192,7 +192,7 @@ logs into the main context).
 | agent-sandbox v0.5.0 controller may not propagate `podTemplate` `fsGroup`/`runAsUser`/`serviceAccountName` from the CR | **Stage-1 walking skeleton catches it first**, before any harness work. If not propagated, patch the generated pod directly or fall back to a Sandbox-CR field the controller does honor. |
 | Kustomize can't cleanly merge a container inside a CRD `podTemplate`                                                   | Use a **JSON6902** patch with explicit paths (§5.2); verify with `kustomize build` render before applying.                                                                                |
 | EBS `WaitForFirstConsumer` → PVC `Pending` until pod schedules                                                         | The readiness poll tolerates the `Pending` → `Bound` window (matches Kind's selector-then-Ready poll shape).                                                                              |
-| GHCR harness image stale (pre-P1)                                                                                      | `build.yaml` publishes `serverless-harness` on **every push to `main`**; P1 is merged, so `:latest` is post-P1. Confirm image digest/date in Stage 2 if the smoke misbehaves.             |
+| GHCR harness image stale (pre-P1)                                                                                      | `build.yaml` publishes `moca` on **every push to `main`**; P1 is merged, so `:latest` is post-P1. Confirm image digest/date in Stage 2 if the smoke misbehaves.                           |
 | `restricted-v2` didn't cleanly inject a UID for the harness (ocp-setup memory)                                         | We **pin** `runAsUser: 65532` and bind under **`nonroot-v2`** (not `restricted-v2`), sidestepping SCC UID injection entirely.                                                             |
 
 ## 8. Out of scope / explicit non-goals

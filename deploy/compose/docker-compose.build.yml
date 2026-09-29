@@ -6,12 +6,12 @@
 # Dockerfile builds it, so no host-side pi-fork build is required.
 services:
   sandbox-relay:
-    image: dev.local/serverless-harness:compose
+    image: dev.local/moca:compose
     build:
       context: ../..
       dockerfile: Dockerfile
   supervisor:
-    image: dev.local/serverless-harness:compose
+    image: dev.local/moca:compose
     build:
       context: ../..
       dockerfile: Dockerfile

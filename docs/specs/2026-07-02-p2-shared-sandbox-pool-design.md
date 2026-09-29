@@ -2,9 +2,9 @@
 
 Version: 1.0 — July 2, 2026
 Status: Design (approved for implementation planning)
-Scope: **Phase 2 (P2)** of the [two-tier FS-free harness epic](https://github.com/kagenti/serverless-harness/issues/49)
-([P2 issue #46](https://github.com/kagenti/serverless-harness/issues/46)). Depends on **P1** (FS-free harness,
-[#45](https://github.com/kagenti/serverless-harness/issues/45)), which is merged. Scales Archetype A from one
+Scope: **Phase 2 (P2)** of the [two-tier FS-free harness epic](https://github.com/rossoctl/moca/issues/49)
+([P2 issue #46](https://github.com/rossoctl/moca/issues/46)). Depends on **P1** (FS-free harness,
+[#45](https://github.com/rossoctl/moca/issues/45)), which is merged. Scales Archetype A from one
 sandbox to **many leaf harnesses sharing a smaller pool of sandboxes** (N:M), with the repo distributed as
 per-sandbox copies and no RWX on the deployable path.
 
@@ -32,7 +32,7 @@ These were settled during brainstorming and are not relitigated here:
 | #   | Decision                                                                                                                                                                                                                                                  | Rationale                                                                                                                                                     |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D1  | **Storage topology: per-sandbox RWO copy.** Each sandbox pod holds its own repo copy on its own RWO PVC. **No RWX** on the deployable path. RWX (fleet-wide single repo) is documented as the alternative only.                                           | Runs on the EBS-only OCP 4.20 cluster today; matches "the harness mounts nothing"; RWX is heavier infra (EFS/CSI), slower networked FS, cross-pod contention. |
-| D2  | **Routing: harness-side pick + Redis leases.** Selection logic stays in the harness/`@sh/k8s-sandbox` layer; Redis holds per-pod lease counters for least-loaded + capacity backpressure. **No new deployable component.**                                | Reuses the existing hard Redis dependency; crash-safe lease reclaim via TTL mirrors the existing leaf-resume model.                                           |
+| D2  | **Routing: harness-side pick + Redis leases.** Selection logic stays in the harness/`@moca/k8s-sandbox` layer; Redis holds per-pod lease counters for least-loaded + capacity backpressure. **No new deployable component.**                              | Reuses the existing hard Redis dependency; crash-safe lease reclaim via TTL mirrors the existing leaf-resume model.                                           |
 | D3  | **Repo seeding: ref-pinned lazy converge.** The envelope carries a git ref; on leaf start the leased pod's repo is fetched/converged to that ref, then a worktree is created. Idempotent (pod already at ref = no-op). **Eager pre-warm deferred to P3.** | Guarantees batch-wide commit consistency regardless of which pod a leaf lands on; amortizes clone cost across the sharing ratio; survives pod churn for free. |
 | D4  | **Pool scaling: static N, config knob.** N `Sandbox` CRs declared in kustomize; N and per-pod cap are values tuned empirically in P3. **Autoscaling is future work only.**                                                                                | Deterministic, no new controller; saturation backpressures through the existing async Redis/KEDA queue and a bounded sync wait.                               |
 | D5  | **Soft capacity cap.** ~20 is an empirical figure, not a safety bound; rare concurrent overshoot is acceptable.                                                                                                                                           | Avoids a hard-CAS hot path; the true safety boundary is Kata at the pod level (P3).                                                                           |
@@ -206,7 +206,7 @@ one trust domain in P2. Documented here as the known limitation P3 resolves.
 
 ## 13. Non-goals (this phase)
 
-- **Kata isolation and the ~20:1 ratio experiments** — P3 ([#48](https://github.com/kagenti/serverless-harness/issues/48)).
+- **Kata isolation and the ~20:1 ratio experiments** — P3 ([#48](https://github.com/rossoctl/moca/issues/48)).
 - **Eager pod-start pre-warm** — P3 optimization layered on the §5 converge contract.
 - **Autoscaling the pool** — future; P2 is static N.
 - **RWX / fleet-wide single repo** — documented alternative below, not implemented. Would require an RWX

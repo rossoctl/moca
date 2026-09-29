@@ -23,16 +23,16 @@ importers:
       '@grpc/grpc-js':
         specifier: ^1.14.5
         version: 1.14.5
-      '@sh/config-bundle':
+      '@moca/config-bundle':
         specifier: workspace:*
         version: link:../packages/config-bundle
-      '@sh/k8s-sandbox':
+      '@moca/k8s-sandbox':
         specifier: workspace:*
         version: link:../packages/k8s-sandbox
-      '@sh/session-backend':
+      '@moca/session-backend':
         specifier: workspace:*
         version: link:../packages/session-backend
-      '@sh/work-queue':
+      '@moca/work-queue':
         specifier: workspace:*
         version: link:../packages/work-queue
       redis:
@@ -122,13 +122,13 @@ importers:
 
   packages/knative-server:
     dependencies:
-      '@sh/control-plane':
+      '@moca/control-plane':
         specifier: workspace:*
         version: link:../control-plane
-      '@sh/harness':
+      '@moca/harness':
         specifier: workspace:*
         version: link:../../harness
-      '@sh/work-queue':
+      '@moca/work-queue':
         specifier: workspace:*
         version: link:../work-queue
       redis:
@@ -156,10 +156,10 @@ importers:
       '@grpc/grpc-js':
         specifier: ^1.14.5
         version: 1.14.5
-      '@sh/harness':
+      '@moca/harness':
         specifier: workspace:*
         version: link:../../harness
-      '@sh/k8s-sandbox':
+      '@moca/k8s-sandbox':
         specifier: workspace:*
         version: link:../k8s-sandbox
     devDependencies:
@@ -194,7 +194,7 @@ importers:
 
   packages/supervisor:
     devDependencies:
-      '@sh/session-backend':
+      '@moca/session-backend':
         specifier: workspace:*
         version: link:../session-backend
       '@types/node':

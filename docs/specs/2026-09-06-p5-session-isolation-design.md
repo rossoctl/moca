@@ -5,7 +5,7 @@ Status: Proposed
 Scope: Make **N concurrent Pi sessions in one harness process** provably isolated, by carrying the
 LLM identity **per request** and removing every ambient (process-global) credential source that a
 second session could inherit. Realizes the concurrency-safety half of
-[issue #220](https://github.com/rossoctl/serverless-harness/issues/220).
+[issue #220](https://github.com/rossoctl/moca/issues/220).
 Builds on (reuse, no redesign): the harness lock-down's secret-free container
 ([Z2](2026-06-26-harness-lockdown-design.md), [ADR-0011](../adrs/0011-harness-lockdown.md)), the
 inference injector's "harness holds no provider key"
@@ -242,7 +242,7 @@ skip it once and the failure mode is an order-dependent test that passes for the
 **Land the scrub as a small exported function that `startServer()` calls, not inline inside it.**
 The assertability argument above is unaffected — the function still runs on the `startServer()` path
 and the sentinel is still checkable in-process — but it stops the scrub from being reachable by
-exactly one entry point. [P6](https://github.com/rossoctl/serverless-harness/pull/244)'s VM worker is
+exactly one entry point. [P6](https://github.com/rossoctl/moca/pull/244)'s VM worker is
 a **third** entry point: it builds `createServer(handler)` and never calls `listen()`, serving sockets
 handed to it over IPC, so it never calls `startServer()` and would run **unscrubbed** — with W×S
 multiplexed sessions, which is precisely the exposure the scrub exists for. A shared function is the
@@ -485,7 +485,7 @@ it is the pin that proves §3.2 step 2's fail-open, which is why the 401 carries
 - **The deployment model.** `ScaledJob` → elastic pod pool, the pod-count and activation-latency
   numbers, and #55's overload shift from pod-level to session-level. Separate slice, separate issue;
   this one is its prerequisite. That slice now has a spec —
-  [P6](https://github.com/rossoctl/serverless-harness/pull/244), which realizes it as a VM process
+  [P6](https://github.com/rossoctl/moca/pull/244), which realizes it as a VM process
   manager plus session mux rather than on Kubernetes — so the three forward references above (the
   shared scrub function in §3.2 step 3, the non-CLI entry-point pin in §4, and the parameterizable
   test entry point in §5) have a named consumer rather than a hypothetical one.
@@ -562,7 +562,7 @@ stage new files first or it may lint nothing.
 
 ## 9. References
 
-- Issue [#220](https://github.com/rossoctl/serverless-harness/issues/220) — multi-session
+- Issue [#220](https://github.com/rossoctl/moca/issues/220) — multi-session
   multiplexing (this slice realizes its concurrency-safety half; see §2.1 for corrections to its
   severity table).
 - [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md) — the decision this spec records.
@@ -575,7 +575,7 @@ stage new files first or it may lint nothing.
 - [ADR-0025](../adrs/0025-authbridge-deployment-topology.md) · [ADR-0026](../adrs/0026-rc1-static-inject-plugin.md) · [RC1](2026-07-10-authbridge-egress-control-plane-poc-design.md) — placeholder swap, fail-closed.
 - [ADR-0006](../adrs/0006-generalized-credentialed-egress.md) — `(subject ⊕ destination)` → credential resolution.
 - [Z5](2026-06-19-m13-generalized-credentialed-egress-design.md) — home of the deferred per-user work.
-- Epic [#49](https://github.com/rossoctl/serverless-harness/issues/49) · [P1](2026-07-02-p1-fs-free-harness-design.md) — the two-tier split this assumes.
+- Epic [#49](https://github.com/rossoctl/moca/issues/49) · [P1](2026-07-02-p1-fs-free-harness-design.md) — the two-tier split this assumes.
 
 ---
 

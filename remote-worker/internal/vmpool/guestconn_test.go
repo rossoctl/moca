@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	ga "github.com/kagenti/serverless-harness/remote-worker/internal/guestagent"
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // fakeGuest speaks the protocol on one side of a net.Pipe, driven by a script, so the

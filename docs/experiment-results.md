@@ -1,4 +1,4 @@
-# Serverless Harness — Experiment Results (E1–E5)
+# MOCA — Experiment Results (E1–E5)
 
 _Consolidated findings, June 2026. Source data:
 [`moca-experiments/experiments/RESULTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/RESULTS.md)
@@ -139,8 +139,8 @@ E2/E5 (`experiments/`) and the E1/E3/E4 cluster drivers (`deploy/knative/`) move
 [rossoctl/moca-experiments](https://github.com/rossoctl/moca-experiments) on 2026-09-25, with git
 history preserved.
 
-**Caveat on `experiments/` (E2/E5) specifically:** it depends on `@sh/harness` and
-`@sh/session-backend` as `workspace:*` packages and on `pi-fork` via a `link:` path — none of
+**Caveat on `experiments/` (E2/E5) specifically:** it depends on `@moca/harness` and
+`@moca/session-backend` as `workspace:*` packages and on `pi-fork` via a `link:` path — none of
 which exist standalone in `moca-experiments`. `pnpm -C experiments test` only actually runs from
 _inside this monorepo's workspace, before the split_ (i.e. checked out at or before
 commit `3057c5f`, the last commit before the split). The code in `moca-experiments/experiments/`

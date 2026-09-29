@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 func envFrom(m map[string]string) func(string) string {

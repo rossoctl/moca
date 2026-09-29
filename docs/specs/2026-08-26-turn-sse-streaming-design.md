@@ -5,7 +5,7 @@ Status: Proposed
 Scope: Add a **streaming response mode** to `POST /turn`, selected by content negotiation
 (`Accept: text/event-stream`), that surfaces assistant-text deltas, thinking deltas, and tool-call
 events **live** as Server-Sent Events — while the default (non-streaming) `/turn` JSON contract stays
-byte-for-byte unchanged. Realizes [issue #167](https://github.com/rossoctl/serverless-harness/issues/167).
+byte-for-byte unchanged. Realizes [issue #167](https://github.com/rossoctl/moca/issues/167).
 Builds on (reuse, no redesign): the shared `executeTurn` turn core and its extension-factory wiring
 ([`2026-08-25-async-prompt-dispatch-design.md`](2026-08-25-async-prompt-dispatch-design.md);
 [`2026-06-17-m4-knative-serverless-wrapper-design.md`](2026-06-17-m4-knative-serverless-wrapper-design.md)),
@@ -13,7 +13,7 @@ Pi's session event surface (`pi.on(...)`), and the Knative HTTP entrypoint's exi
 
 > **What this slice is NOT.** Not a new route — streaming is a _representation_ of `/turn`, chosen by
 > `Accept`, not a `/turn/stream` alias. Not the async "fire-and-poll" path: that is the companion
-> `kind:"prompt"` leaf ([#168](https://github.com/rossoctl/serverless-harness/issues/168),
+> `kind:"prompt"` leaf ([#168](https://github.com/rossoctl/moca/issues/168),
 > [ADR-0028](../adrs/0028-async-prompt-dispatch.md)) — orthogonal ("watch live" vs. "background and
 > poll"). Not an auth/credential change. Not a new turn engine: streaming and non-streaming run the
 > **same** `executeTurn`; the only new thing is an event _sink_ and its SSE serialization.
@@ -160,7 +160,7 @@ if (wantsStream) return handleTurnStream(prompt, sessionId, req, res);
 ```
 
 `handleTurnStream` is a new sibling in `server.ts` (transport lives with the server; only the _frame
-types_ are imported from `@sh/harness/turn-stream`). Its shape:
+types_ are imported from `@moca/harness/turn-stream`). Its shape:
 
 - **Lazy header flush.** It does **not** write the `200` on entry. A single private `writeFrame(res,
 frame)` helper flushes the SSE headers on the **first** frame and serializes every frame to the SSE
@@ -319,7 +319,7 @@ parity**.
 
 ## 7. References
 
-- Issue [#167 — streaming responses for `/turn` (SSE)](https://github.com/rossoctl/serverless-harness/issues/167)
+- Issue [#167 — streaming responses for `/turn` (SSE)](https://github.com/rossoctl/moca/issues/167)
 - [`2026-08-25-async-prompt-dispatch-design.md`](2026-08-25-async-prompt-dispatch-design.md) — the shared `executeTurn` core this rides; the orthogonal "background and poll" path
 - [`2026-06-17-m4-knative-serverless-wrapper-design.md`](2026-06-17-m4-knative-serverless-wrapper-design.md) — `runTurn` / `/turn` / the Knative wrapper
 - [ADR-0029](../adrs/0029-turn-sse-streaming.md) — the decision record for this design

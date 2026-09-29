@@ -27,7 +27,7 @@ describe('relay-deployment.yaml', () => {
   it('runs the relay entrypoint from its package dir so tsx + deps resolve (issue #102 follow-up)', () => {
     const dep = docs().find((o) => o.kind === 'Deployment');
     const c = dep.spec.template.spec.containers[0];
-    expect(c.image).toContain('serverless-harness');
+    expect(c.image).toContain('moca');
     // `node --import tsx` resolves the tsx loader relative to the CWD, and the published
     // image links tsx only into packages/sandbox-relay/node_modules (no /app/node_modules
     // hoist). A CWD of /app crashes ERR_MODULE_NOT_FOUND 'tsx'; run from the package dir.

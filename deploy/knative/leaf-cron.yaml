@@ -35,7 +35,7 @@ spec:
       template:
         spec:
           restartPolicy: Never
-          serviceAccountName: serverless-harness
+          serviceAccountName: moca
           # The dispatcher only reads the mounted config and makes HTTP POSTs — lock it down.
           # runAsUser 65532 ("nonroot") is required because the harness image has no USER (runs as
           # root by default), so runAsNonRoot alone would refuse to start.
@@ -45,7 +45,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: cron-dispatch
-              image: dev.local/serverless-harness:local
+              image: dev.local/moca:local
               imagePullPolicy: IfNotPresent
               workingDir: /app/packages/knative-server
               command: ['node', '--import', 'tsx', 'src/cron-dispatch.ts']
@@ -59,7 +59,7 @@ spec:
                 - name: CRON_CONFIG
                   value: /config/schedule.json
                 - name: SH_SERVICE_URL
-                  value: http://serverless-harness.default.svc.cluster.local
+                  value: http://moca.default.svc.cluster.local
               volumeMounts:
                 - name: config
                   mountPath: /config

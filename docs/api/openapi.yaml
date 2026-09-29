@@ -10,7 +10,7 @@
 #     read-back path at all.
 openapi: 3.1.0
 info:
-  title: Serverless Harness control plane
+  title: MOCA control plane
   version: 1.0.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).

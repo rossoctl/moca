@@ -1,4 +1,4 @@
-import type { SandboxTransport } from '@sh/k8s-sandbox';
+import type { SandboxTransport } from '@moca/k8s-sandbox';
 
 function sq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;

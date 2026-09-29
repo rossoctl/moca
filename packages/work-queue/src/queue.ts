@@ -40,7 +40,7 @@ export class RedisWorkQueue implements WorkQueue {
     // failed connect() reject, so an absent Redis leaves connect() pending forever instead — a silent
     // wedge in place of a loud crash. The bound keeps a transient blip recoverable and a genuinely
     // absent Redis loud. Inline rather than shared: the equivalent helper is `resilientClientOptions` /
-    // `swallowRedisErrors` in @sh/session-backend (with the full rationale and the probe numbers), and
+    // `swallowRedisErrors` in @moca/session-backend (with the full rationale and the probe numbers), and
     // a queue depending on the session store to reach it would invert the layering.
     //
     // Two notes from that shared rationale apply here verbatim. A REFUSED port rejects in ~5.5 s at this

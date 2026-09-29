@@ -2,8 +2,8 @@ import { EventEmitter } from 'node:events';
 import { status } from '@grpc/grpc-js';
 import { describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../src/main.js';
-import type { RecordStore } from '@sh/harness';
-import { MAX_EXEC_MESSAGE_BYTES } from '@sh/k8s-sandbox';
+import type { RecordStore } from '@moca/harness';
+import { MAX_EXEC_MESSAGE_BYTES } from '@moca/k8s-sandbox';
 
 const records: RecordStore = { put: async () => {}, remove: async () => {}, list: async () => [] };
 

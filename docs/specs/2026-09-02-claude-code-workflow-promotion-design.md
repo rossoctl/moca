@@ -243,7 +243,7 @@ new DefaultResourceLoader({
 
 **`noContextFiles: true` is load-bearing.** `loadProjectContextFiles` walks ancestor
 directories for `CLAUDE.md`/`AGENTS.md` (`resource-loader.ts:62`). On the harness pod that walk
-reaches _this repository's own_ `CLAUDE.md` — "Serverless Harness … pnpm workspace … DCO
+reaches _this repository's own_ `CLAUDE.md` — "MOCA … pnpm workspace … DCO
 sign-off required." Unsuppressed, every promoted session silently inherits the harness
 project's instructions as if they were the user's. `noSkills` / `noPromptTemplates` are set for
 the same reason: the harness image ships none today, and explicit suppression keeps that true.
@@ -481,7 +481,7 @@ Revision. It has since been taken (see **In-cluster result**, below).
 
 The snippet originally recorded here forced `--replicas=0` and slept 5 s. Do not use it: it does
 not produce a cold start (see the second false start below), and its selector named `harness`
-rather than `serverless-harness`. What was actually run:
+rather than `moca`. What was actually run:
 
 ```bash
 # Wait for Knative's OWN scale-to-zero -- do not force --replicas=0, the KPA re-scales.

@@ -2,13 +2,13 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-06
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-09-06-p5-session-isolation-design.md`](../specs/2026-09-06-p5-session-isolation-design.md)
 
 ## Context
 
 Running N Pi sessions in one harness process is the largest density lever available
-([#220](https://github.com/rossoctl/serverless-harness/issues/220)): sessions idle 80–90% of
+([#220](https://github.com/rossoctl/moca/issues/220)): sessions idle 80–90% of
 wall-clock, yet each owns a pod. #220 attributes the blockage to five process-global mutable states,
 four of them in `pi-fork`, and proposes threading a `SessionContext` through the call chain.
 

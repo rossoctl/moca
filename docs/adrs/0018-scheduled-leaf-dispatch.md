@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-28
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-28-scheduled-leaf-dispatch-design.md`](../specs/2026-06-28-scheduled-leaf-dispatch-design.md)
 
 ## Context

@@ -1,4 +1,4 @@
-# Serverless Harness
+# MOCA
 
 **Run stateful AI coding agents serverless — scale to zero between turns, resume exactly where they left off.**
 
@@ -8,7 +8,7 @@
 ![node](https://img.shields.io/badge/node-22%2B-green)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-Serverless Harness turns a long-lived AI agent into a **scale-to-zero workload** on Kubernetes.
+MOCA turns a long-lived AI agent into a **scale-to-zero workload** on Kubernetes.
 An agent process normally has to stay resident — holding its conversation, tool state, and working
 directory in memory — even while it sits idle waiting for the next turn or for a human to approve a
 step. That idle time is pure cost. The harness decouples the agent's **state** (durable in Redis)
@@ -40,7 +40,7 @@ rest.
 
 ## Why
 
-| Persistent agent                                    | Serverless Harness                                                    |
+| Persistent agent                                    | MOCA                                                                  |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
 | Process stays resident between turns                | Scales to **zero** when idle, cold-starts in sub-second               |
 | State lives in process memory — lost on crash/evict | State lives in **Redis** — survives eviction, restart, and cold start |
@@ -116,20 +116,20 @@ scales to zero and resumes from cold — no local image build required.
 > **Prerequisites:** `kind`, `kubectl`, `docker`, and an Anthropic-compatible model credential.
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 export ANTHROPIC_API_KEY=sk-...    # ...or a gateway: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 
 ./deploy/knative/setup-kind.sh     # installs Knative + Kourier, Redis, the sandbox, and KEDA
 ```
 
-`setup-kind.sh` **pulls the published image** (`ghcr.io/rossoctl/serverless-harness:latest`) by
+`setup-kind.sh` **pulls the published image** (`ghcr.io/rossoctl/moca:latest`) by
 default, so a first run needs no local Docker build. The default model is `claude-haiku-4-5` (fast and
 cheap — ideal for a live demo).
 
 **Next — take the guided tour:**
-[`docs/demos/serverless-harness-demo.md`](docs/demos/serverless-harness-demo.md) is a ~10-minute,
+[`docs/demos/moca-demo.md`](docs/demos/moca-demo.md) is a ~10-minute,
 two-act walkthrough where you watch the agent **cold-start from zero, drop back to zero and resume
 with full memory** (Act 1), then **fan out into a fleet of worker pods** that appear on demand and
 vanish when the queue drains (Act 2). It's the fastest way to see what a serverless agent does that
@@ -189,7 +189,7 @@ promote it from inside Claude Code, in the project you want to promote:
 ```bash
 mkdir -p ~/.claude/commands                                    # once
 cp deploy/claude/commands/promote.md ~/.claude/commands/       # once
-export SH_HARNESS_DIR=/path/to/serverless-harness              # once, per shell
+export SH_HARNESS_DIR=/path/to/moca              # once, per shell
 
 # launch with the CLI granted at session level, so the grant outlives the command's own turn
 claude --allowedTools "Bash(pnpm --dir $SH_HARNESS_DIR/harness promote:*)"
@@ -278,7 +278,7 @@ The same backend serves three orchestration patterns, all validated end-to-end o
 ## Repository Layout
 
 ```text
-serverless-harness/
+moca/
 ├── packages/
 │   ├── session-backend/   # Generic append-only LogStore + Redis Streams impl
 │   ├── k8s-sandbox/       # Routes Pi tool execution to a remote pod (kubectl exec)
@@ -301,7 +301,7 @@ Behaviour and economics are backed by reproducible experiments rather than claim
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`docs/experiment-results.md`](docs/experiment-results.md)** — E2 (reconstruction cost) and E5
-  (budget enforcement); the `@sh/experiments` workspace these ran from moved to
+  (budget enforcement); the `@moca/experiments` workspace these ran from moved to
   [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments)
   on 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)** — the 6/6 cold-start + resume smoke claims.

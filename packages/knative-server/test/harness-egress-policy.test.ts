@@ -40,7 +40,7 @@ describe('harness egress NetworkPolicy manifest', () => {
     // Knative stamps this label on the user pod; the policy must target it, not
     // an arbitrary app= label the Knative pod does not carry.
     expect(np.spec?.podSelector?.matchLabels).toMatchObject({
-      'serving.knative.dev/service': 'serverless-harness',
+      'serving.knative.dev/service': 'moca',
     });
   });
 
@@ -139,16 +139,16 @@ describe('tightened AB1 egress variant', () => {
   const AB1_POLICY_PATH = resolve(DEPLOY, 'authbridge/harness-egress-ab1.yaml');
   const policies = networkPolicies(AB1_POLICY_PATH);
 
-  it('defines exactly one NetworkPolicy named serverless-harness-egress', () => {
+  it('defines exactly one NetworkPolicy named moca-egress', () => {
     expect(policies).toHaveLength(1);
-    expect(policies[0]?.metadata?.name).toBe('serverless-harness-egress');
+    expect(policies[0]?.metadata?.name).toBe('moca-egress');
   });
 
   const np = policies[0] ?? {};
 
   it('selects the same Knative harness pods as the base policy', () => {
     expect(np.spec?.podSelector?.matchLabels).toMatchObject({
-      'serving.knative.dev/service': 'serverless-harness',
+      'serving.knative.dev/service': 'moca',
     });
   });
 

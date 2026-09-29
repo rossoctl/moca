@@ -3,8 +3,8 @@
 # RC1-4 (OCP) targeted live-gate wrapper.
 #
 # This is NOT setup-ocp.sh. It does not stand up a cluster or the base
-# serverless-harness stack — it assumes an EXISTING, already-deployed
-# serverless-harness stack in namespace `default` (ksvc + redis + sandbox pool +
+# moca stack — it assumes an EXISTING, already-deployed
+# moca stack in namespace `default` (ksvc + redis + sandbox pool +
 # operators already up) and layers the RC1 AuthBridge two-hop egress-control path
 # (deploy/knative/overlays/ocp-authbridge) onto it, runs the live leaf-smoke against
 # the OpenShift Route, and then RESTORES the namespace to its pre-gate state
@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-default}"
-KSVC=serverless-harness
+KSVC=moca
 LOG_DIR="${LOG_DIR:-/tmp/kagenti/rc1/ocp}"
 OVERLAY="$SCRIPT_DIR/overlays/ocp-authbridge"
 BASE_OVERLAY="$SCRIPT_DIR/overlays/ocp"
@@ -49,7 +49,7 @@ usage() {
 Usage: $0 [MODE] [-h|--help]
 
 RC1-4 OCP targeted live-gate wrapper. Runs the RC1 AuthBridge gate against an
-ALREADY-DEPLOYED serverless-harness stack in namespace "default" (does not stand
+ALREADY-DEPLOYED moca stack in namespace "default" (does not stand
 up the cluster or base stack — see setup-ocp.sh for that). Applies the
 AuthBridge overlay, runs leaf-smoke.sh against the Route, then restores the
 namespace to its pre-gate state.

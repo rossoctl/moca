@@ -1,6 +1,6 @@
-# @sh/harness
+# @moca/harness
 
-Serverless-harness glue: adapts the generic `@sh/session-backend` log store to Pi's
+Serverless-harness glue: adapts the generic `@moca/session-backend` log store to Pi's
 `SessionStorageBackend`, with write-behind durability.
 
 ## Components
@@ -35,5 +35,5 @@ for p in ai agent tui coding-agent; do pnpm -C pi-fork/packages/$p build; done
 
 ## Dependency direction
 
-`harness → { pi-fork, @sh/session-backend }`. Pi core never imports Redis or
-`@sh/session-backend`.
+`harness → { pi-fork, @moca/session-backend }`. Pi core never imports Redis or
+`@moca/session-backend`.

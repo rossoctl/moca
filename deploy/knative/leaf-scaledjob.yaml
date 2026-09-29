@@ -14,7 +14,7 @@ spec:
     template:
       spec:
         restartPolicy: Never
-        serviceAccountName: serverless-harness
+        serviceAccountName: moca
         securityContext:
           runAsNonRoot: true
           runAsUser: 65532
@@ -22,7 +22,7 @@ spec:
           seccompProfile: { type: RuntimeDefault }
         containers:
           - name: leaf-job
-            image: dev.local/serverless-harness:local
+            image: dev.local/moca:local
             imagePullPolicy: IfNotPresent
             workingDir: /app/packages/knative-server
             command: ['node', '--import', 'tsx', 'src/leaf-job.ts']

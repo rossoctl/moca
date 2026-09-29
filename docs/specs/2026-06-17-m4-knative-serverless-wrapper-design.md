@@ -4,7 +4,7 @@ Version: 1.0 — June 17, 2026
 Status: Design (approved for implementation planning)
 Scope: Wrap the serverless harness as a Knative Serving service that scales to zero,
 triggered by HTTP requests carrying a user message.
-Parent plan: [Serverless Harness: Revised Plan](../../../docs/research/2026-06-10-serverless-harness-revised-plan.md) §6 M3 (Knative serverless wrapper + `user_message` trigger)
+Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §6 M3 (Knative serverless wrapper + `user_message` trigger)
 Predecessor: [M3 Design — Persistent Channel](2026-06-17-m3-persistent-channel-design.md)
 
 ---
@@ -33,7 +33,7 @@ M4 is **done** when:
 ### In scope
 
 - Extract reusable `runTurn()` function from `cli.ts` into `harness/src/run-turn.ts`.
-- New `@sh/knative-server` package with a minimal HTTP server (`POST /turn`, `GET /health`).
+- New `@moca/knative-server` package with a minimal HTTP server (`POST /turn`, `GET /health`).
 - Multi-stage Dockerfile at repo root.
 - Knative Service manifest (`deploy/knative/service.yaml`).
 - Kind + Knative setup script (`deploy/knative/setup-kind.sh`).
@@ -60,7 +60,7 @@ M4 is **done** when:
 | D2  | Sandbox model     | **Pre-provisioned.** The sandbox pod already exists; the Knative service receives `KAGENTI_SANDBOX_POD` as an env var. Sandbox lifecycle is a separate concern.                                  |
 | D3  | Deployment target | **Kind cluster + Knative Serving** (Kourier networking). Proves real scale-to-zero locally.                                                                                                      |
 | D4  | Container build   | **Multi-stage Dockerfile.** Node 20 alpine, pnpm workspace install, pi-fork build chain, kubectl for sandbox exec.                                                                               |
-| D5  | Package structure | **New `@sh/knative-server`** package for the HTTP server. Shared `runTurn()` extracted to `harness/src/run-turn.ts`. `cli.ts` becomes a thin wrapper.                                            |
+| D5  | Package structure | **New `@moca/knative-server`** package for the HTTP server. Shared `runTurn()` extracted to `harness/src/run-turn.ts`. `cli.ts` becomes a thin wrapper.                                          |
 | D6  | HTTP framework    | **Node built-in `http` module.** Zero additional deps, keeps the image small.                                                                                                                    |
 | D7  | Concurrency       | **`containerConcurrency: 1`** on the Knative Service. One request per pod; Knative scales horizontally for concurrent sessions. Avoids shared-state complexity.                                  |
 | D8  | Session lifecycle | **Single endpoint.** Omit `sessionId` to create a new session; include it to resume. Response always includes `sessionId` for the caller to capture.                                             |
@@ -78,12 +78,12 @@ M4 is **done** when:
 ┌───────────────────────────────────────────▼───────────────────────┐
 │  Knative Pod (scale-to-zero)                                       │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │ @sh/knative-server  (server.ts)                              │  │
+│  │ @moca/knative-server  (server.ts)                              │  │
 │  │   ↓ calls                                                    │  │
 │  │ harness/src/run-turn.ts  (shared turn logic)                 │  │
 │  │   ↓ uses                                                     │  │
-│  │ @sh/session-backend  (Redis read/write)                      │  │
-│  │ @sh/k8s-sandbox      (remote pod tools, if env set)          │  │
+│  │ @moca/session-backend  (Redis read/write)                      │  │
+│  │ @moca/k8s-sandbox      (remote pod tools, if env set)          │  │
 │  │ pi-fork              (session.prompt, model, etc.)            │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────┘
@@ -99,7 +99,7 @@ M4 is **done** when:
 ### File layout
 
 ```
-serverless-harness/
+moca/
   harness/
     src/
       cli.ts               # edit — thin wrapper calling runTurn()
@@ -188,7 +188,7 @@ Minimal Node `http` — no framework:
 
 ```ts
 import { createServer } from 'node:http';
-import { runTurn } from '@sh/harness/run-turn';
+import { runTurn } from '@moca/harness/run-turn';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -270,7 +270,7 @@ CMD ["node", "--import", "tsx", "packages/knative-server/src/server.ts"]
 
 Notes:
 
-- `kubectl` in the runtime image for `@sh/k8s-sandbox` pod exec.
+- `kubectl` in the runtime image for `@moca/k8s-sandbox` pod exec.
 - Source-only packages (`harness/`, `packages/`) run via `tsx` (no compile step needed).
 - Pi-fork is pre-built in stage 1 (ships compiled JS).
 - Image size ~200MB (node:20-alpine + kubectl binary).
@@ -285,7 +285,7 @@ Notes:
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: serverless-harness
+  name: moca
   namespace: default
 spec:
   template:
@@ -298,7 +298,7 @@ spec:
       containerConcurrency: 1
       timeoutSeconds: 300
       containers:
-        - image: serverless-harness:local
+        - image: moca:local
           ports:
             - containerPort: 8080
           env:
@@ -334,7 +334,7 @@ The setup script performs:
 4. Deploy Redis (single-pod Deployment + Service, port 6379).
 5. Deploy the sandbox pod (alpine + ripgrep, same as M3's `deploy/sandbox.yaml`).
 6. Build the harness Docker image locally.
-7. Load image into kind (`kind load docker-image serverless-harness:local`).
+7. Load image into kind (`kind load docker-image moca:local`).
 8. Create `llm-credentials` Secret from `$ANTHROPIC_API_KEY` env var.
 9. Apply `service.yaml`.
 10. Wait for Knative Service to become Ready.

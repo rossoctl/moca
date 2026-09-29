@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
 // capturePhaseLog points phaseLog at a recorder for one test and restores it after.

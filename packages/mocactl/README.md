@@ -84,7 +84,7 @@ plane older than `/v1/discovery` needs upgrading, or `--harness-url` in the mean
 
 If it reports that the harness does not trust this control plane, the harness
 must be given `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CONTROL_PLANE_URL`, `SH_EXCHANGE_TOKEN` and
-`SH_REQUIRE_AUTH`: on the VM/P6 path, add them to `/etc/serverless-harness/supervisor.env` (the
+`SH_REQUIRE_AUTH`: on the VM/P6 path, add them to `/etc/moca/supervisor.env` (the
 `EnvironmentFile` of `deploy/vm/systemd/sh-supervisor.service` — the shipped
 `supervisor.env.example` doesn't include them yet); on the Knative path they're set in
 `deploy/knative/service.yaml`.

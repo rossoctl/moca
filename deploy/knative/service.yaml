@@ -1,7 +1,7 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: serverless-harness
+  name: moca
   namespace: default
 spec:
   template:
@@ -15,14 +15,14 @@ spec:
     spec:
       containerConcurrency: 1
       timeoutSeconds: 300
-      serviceAccountName: serverless-harness
+      serviceAccountName: moca
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
-        - image: dev.local/serverless-harness:local
+        - image: dev.local/moca:local
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -107,13 +107,13 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: serverless-harness
+  name: moca
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: serverless-harness-sandbox
+  name: moca-sandbox
   namespace: default
 rules:
   - apiGroups: ['']
@@ -129,13 +129,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: serverless-harness-sandbox
+  name: moca-sandbox
   namespace: default
 subjects:
   - kind: ServiceAccount
-    name: serverless-harness
+    name: moca
     namespace: default
 roleRef:
   kind: Role
-  name: serverless-harness-sandbox
+  name: moca-sandbox
   apiGroup: rbac.authorization.k8s.io

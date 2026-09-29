@@ -14,8 +14,8 @@
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules https://github.com/kagenti/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 # Build pi-fork type declarations
 cd pi-fork && npm ci && npm run build && cd ..
@@ -41,13 +41,13 @@ version pinned in the root `package.json`, so local and CI formatting cannot div
 ### Workspace Structure
 
 ```
-serverless-harness/
-├── harness/              # Core harness (@sh/harness)
+moca/
+├── harness/              # Core harness (@moca/harness)
 ├── packages/
-│   ├── k8s-sandbox/      # K8s sandbox client (@sh/k8s-sandbox)
-│   ├── knative-server/   # Knative HTTP server (@sh/knative-server)
-│   ├── session-backend/  # Redis session backend (@sh/session-backend)
-│   └── work-queue/       # Redis work queue (@sh/work-queue)
+│   ├── k8s-sandbox/      # K8s sandbox client (@moca/k8s-sandbox)
+│   ├── knative-server/   # Knative HTTP server (@moca/knative-server)
+│   ├── session-backend/  # Redis session backend (@moca/session-backend)
+│   └── work-queue/       # Redis work queue (@moca/work-queue)
 ├── deploy/knative/       # Deployment scripts and smoke tests (experiment drivers moved to
 │                         # rossoctl/moca-experiments, 2026-09-25)
 ├── pi-fork/              # Submodule: Pi AI framework

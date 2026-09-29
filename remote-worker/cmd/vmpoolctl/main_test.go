@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 // testPerVMBytes stands in for the real vmpool.PerVMBytes(cfg) figure realMain

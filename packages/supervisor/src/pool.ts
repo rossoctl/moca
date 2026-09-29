@@ -3,7 +3,7 @@ import { refuse } from './admission.js';
 import { pickLeastLoaded, type WorkerView } from './routing.js';
 
 /**
- * Duplicated from `@sh/knative-server/src/worker.ts` deliberately (spec §9): the supervisor
+ * Duplicated from `@moca/knative-server/src/worker.ts` deliberately (spec §9): the supervisor
  * forks the worker as a PROCESS, and a shared type module would advertise an in-process
  * coupling that does not exist. Drift fails a test rather than rotting, because
  * `test/real-worker.integration.test.ts` forks the REAL worker and drives all four rows across

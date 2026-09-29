@@ -1,8 +1,8 @@
 # ST6 — Seam-wide output cap + explicit truncation contract: design
 
-**Issues:** [#180](https://github.com/rossoctl/serverless-harness/issues/180),
-[#181](https://github.com/rossoctl/serverless-harness/issues/181),
-[#185](https://github.com/rossoctl/serverless-harness/issues/185) ·
+**Issues:** [#180](https://github.com/rossoctl/moca/issues/180),
+[#181](https://github.com/rossoctl/moca/issues/181),
+[#185](https://github.com/rossoctl/moca/issues/185) ·
 **Epic:** #89 (closed) · **Parent spec:**
 [`2026-07-08-sandbox-transport-grpc-design.md`](2026-07-08-sandbox-transport-grpc-design.md) §8 ·
 **Date:** 2026-08-30 · **Status:** Proposed

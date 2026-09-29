@@ -1,5 +1,5 @@
 import { createClient, type RedisClientType } from 'redis';
-import { resilientClientOptions, swallowRedisErrors } from '@sh/session-backend';
+import { resilientClientOptions, swallowRedisErrors } from '@moca/session-backend';
 
 /** Redis key holding the per-pod lease set (member = leaf id, score = expiry ms). */
 export function leaseKey(pod: string): string {

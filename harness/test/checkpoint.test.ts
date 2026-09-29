@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { SessionManager, type FileEntry } from '@earendil-works/pi-coding-agent';
-import { RedisSessionBackend } from '@sh/session-backend';
+import { RedisSessionBackend } from '@moca/session-backend';
 import { BufferedRedisBackend } from '../src/buffered-redis-backend';
 import { checkpointExtension } from '../src/checkpoint-extension';
 

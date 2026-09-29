@@ -3,7 +3,7 @@ package vmpool
 import (
 	"testing"
 
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
 // Spec §4.1: honour the existing pin, do not declare a new mechanism. From the

@@ -8,7 +8,7 @@ with per-user credentials resolved and injected **only at the egress proxy**, ne
 the harness, the sandbox, the prompt, or the log.
 Milestone number: **M13 (provisional)** — a new sibling milestone extending the parent
 roadmap's M7–M12. Adjust the number to fit the parent roadmap when slotted.
-Parent design: [Zero-Trust, Multi-Agent Extensions to the Serverless Harness](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) §2 spine, §3.2 sandbox egress, §4.1 invariants, M7–M9 credential plane
+Parent design: [Zero-Trust, Multi-Agent Extensions to the MOCA](../../../docs/research/2026-06-18-zero-trust-multiagent-harness-extension.md) §2 spine, §3.2 sandbox egress, §4.1 invariants, M7–M9 credential plane
 Sibling / specializes: [M10 — MCP via Code-Mode in the Sandbox](2026-06-18-m10-mcp-code-mode-design.md) — **M10's MCP-over-HTTP path becomes one interception case of this design.**
 Builds on: M1 (Redis session backend), M2 (`K8sSandboxClient`), M3 (persistent channel), M4 (Knative wrapper), M10 (MCP code-mode + credential/identity model §5, placeholder-swap §5.3)
 

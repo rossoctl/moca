@@ -1,9 +1,9 @@
-module github.com/kagenti/serverless-harness/remote-worker
+module github.com/rossoctl/moca/remote-worker
 
 go 1.26.0
 
 require (
-	github.com/kagenti/serverless-harness/gen/go v0.0.0
+	github.com/rossoctl/moca/gen/go v0.0.0
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.2
 )
@@ -16,4 +16,4 @@ require (
 )
 
 // Use the proto stubs vendored in this repo.
-replace github.com/kagenti/serverless-harness/gen/go => ../gen/go
+replace github.com/rossoctl/moca/gen/go => ../gen/go

@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from 'redis';
-import { buildBundle } from '@sh/config-bundle';
+import { buildBundle } from '@moca/config-bundle';
 import { putBundle, type BundleRedisLike } from '../src/config-store.js';
 import { runLeaf } from '../src/run-leaf.js';
 
@@ -45,7 +45,7 @@ describe('promoted workflow, end to end', () => {
         promptsDir: join(FIXTURES, 'commands'),
         entry: 'say-the-word',
         mode: 'unattended',
-        sandboxImage: 'ghcr.io/rossoctl/serverless-harness-sandbox:latest',
+        sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
         versions: { pi: 'live', harness: 'live' },
       });
       expect(built.findings.filter((f) => f.severity === 'error')).toEqual([]);

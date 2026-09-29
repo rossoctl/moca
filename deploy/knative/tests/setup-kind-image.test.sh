@@ -44,8 +44,8 @@ run_case() {
     # shellcheck source=/dev/null
     SH_SOURCE_ONLY=1 source "$SCRIPT"
     SKIP_BUILD="$sb" FORCE_BUILD="$fb"
-    SH_IMAGE="ghcr.io/rossoctl/serverless-harness:latest"
-    LOCAL_IMAGE="dev.local/serverless-harness:local"
+    SH_IMAGE="ghcr.io/rossoctl/moca:latest"
+    LOCAL_IMAGE="dev.local/moca:local"
     CLUSTER_NAME="sh-test"
     export MOCK_PULL_RC="$prc"
     ensure_harness_image
@@ -59,7 +59,7 @@ assert_absent() { if grep -q -- "$1" "$MOCK_LOG"; then echo "  FAIL: $2 (unexpec
 
 echo "case 1: default (pull succeeds) -> pull + tag + load, no build"
 run_case false false 0
-assert_grep   "docker pull ghcr.io/rossoctl/serverless-harness:latest" "pulls the published image"
+assert_grep   "docker pull ghcr.io/rossoctl/moca:latest" "pulls the published image"
 assert_grep   "docker tag"        "retags to the local image"
 assert_grep   "kind load"         "loads into kind"
 assert_absent "docker build"      "does not build locally"

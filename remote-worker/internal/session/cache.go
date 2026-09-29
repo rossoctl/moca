@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"sync"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // CacheSize bounds the dedup cache (spec §6.3).

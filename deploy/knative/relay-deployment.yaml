@@ -20,13 +20,13 @@ spec:
     spec:
       containers:
         - name: sandbox-relay
-          image: dev.local/serverless-harness:local
+          image: dev.local/moca:local
           imagePullPolicy: IfNotPresent
           # Run from the relay's own package dir. `node --import tsx` resolves the tsx
           # loader relative to the CWD, and the published image links tsx (a devDep) into
           # packages/sandbox-relay/node_modules — NOT a root-hoisted /app/node_modules — so
           # a CWD of /app crashes with ERR_MODULE_NOT_FOUND 'tsx' (issue #102 follow-up).
-          # From the package dir, tsx and all runtime deps (@grpc/grpc-js, @sh/*) resolve
+          # From the package dir, tsx and all runtime deps (@grpc/grpc-js, @moca/*) resolve
           # locally. Matches the package.json `start` script (`node --import tsx src/main.ts`).
           workingDir: /app/packages/sandbox-relay
           command: ['node', '--import', 'tsx', 'src/main.ts']

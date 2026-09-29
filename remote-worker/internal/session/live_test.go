@@ -12,9 +12,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
 
 // TestLiveRelayInterop runs a subset of the battery against the REAL TypeScript
@@ -26,7 +26,7 @@ import (
 //
 //	docker run --rm -p 6379:6379 redis:7
 //	SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6379 \
-//	  pnpm --filter @sh/sandbox-relay start
+//	  pnpm --filter @moca/sandbox-relay start
 //	SH_LIVE_RELAY=1 go test ./internal/session/ -run TestLiveRelay -v
 func TestLiveRelayInterop(t *testing.T) {
 	if os.Getenv("SH_LIVE_RELAY") != "1" {

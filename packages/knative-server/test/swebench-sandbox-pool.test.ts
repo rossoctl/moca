@@ -99,11 +99,9 @@ describe('swebench-sandbox-pool manifest', () => {
   );
 
   it.each(sandboxes.map((s, i) => [i, s]))(
-    'sandbox %s: podTemplate uses the serverless-harness-sandbox SA',
+    'sandbox %s: podTemplate uses the moca-sandbox SA',
     (_i, sandbox: any) => {
-      expect(sandbox.spec?.podTemplate?.spec?.serviceAccountName).toBe(
-        'serverless-harness-sandbox',
-      );
+      expect(sandbox.spec?.podTemplate?.spec?.serviceAccountName).toBe('moca-sandbox');
     },
   );
 

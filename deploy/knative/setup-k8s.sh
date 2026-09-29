@@ -26,8 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ----------------------------------------------------------------------------
 DRY_RUN=false
 NAMESPACE="default"
-HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/serverless-harness:latest}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/serverless-harness-sandbox:latest}"
+HARNESS_IMAGE="${HARNESS_IMAGE:-ghcr.io/rossoctl/moca:latest}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"
 STORAGE_CLASS=""                       # empty => use the cluster's default StorageClass
 SKIP_KEDA=true                         # async-leaf / KEDA is opt-in (--with-keda)
 INGRESS="none"                         # none | nodeport
@@ -49,7 +49,7 @@ usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Stand up the serverless-harness stack on a generic Kubernetes cluster:
+Stand up the moca stack on a generic Kubernetes cluster:
 Knative Serving + Kourier, agent-sandbox controller, Redis, the sandbox pool,
 the LLM secret, and the harness Knative Service (reachable in-cluster; see --ingress).
 
@@ -84,7 +84,7 @@ registry the cluster can pull works, including an in-cluster registry.
 
 Examples:
   $0                                              # default ns, GHCR images, cluster-default storage
-  $0 --namespace serverless-harness --with-keda   # dedicated ns + async-leaf support
+  $0 --namespace moca --with-keda   # dedicated ns + async-leaf support
   $0 --storage-class ibm-scale-csi                # GPFS-backed sandbox workspaces
   $0 --image my-registry.example.com/sh:dev --sandbox-image my-registry.example.com/sbx:dev
 EOF
@@ -115,7 +115,7 @@ case "$INGRESS" in none|nodeport) ;; *) log_error "--ingress must be none|nodepo
 KUBECTL=(kubectl)
 [ -n "$KUBECTL_CONTEXT" ] && KUBECTL=(kubectl --context "$KUBECTL_CONTEXT")
 
-log_info "serverless-harness setup on Kubernetes"
+log_info "moca setup on Kubernetes"
 log_info "context=$("${KUBECTL[@]}" config current-context) namespace=$NAMESPACE"
 log_info "harness=$HARNESS_IMAGE sandbox=$SANDBOX_IMAGE storage=${STORAGE_CLASS:-<default>} ingress=$INGRESS keda=$([ "$SKIP_KEDA" = true ] && echo off || echo on)"
 
@@ -134,8 +134,8 @@ log_info "harness=$HARNESS_IMAGE sandbox=$SANDBOX_IMAGE storage=${STORAGE_CLASS:
 render_base() {
   local file="$1"
   sed \
-    -e "s#dev.local/serverless-harness:local#${HARNESS_IMAGE}#g" \
-    -e "s#dev.local/serverless-harness-sandbox:local#${SANDBOX_IMAGE}#g" \
+    -e "s#dev.local/moca:local#${HARNESS_IMAGE}#g" \
+    -e "s#dev.local/moca-sandbox:local#${SANDBOX_IMAGE}#g" \
     -e "s#alpine:3.20#${SANDBOX_IMAGE}#g" \
     "$file" \
   | if [ "$NAMESPACE" != "default" ]; then
@@ -278,7 +278,7 @@ log_info "Deploying harness Knative Service"
 # we do NOT `kubectl set env` a Knative Service (that CRD is not a built-in workload kind, so
 # `set env` errors and, under set -euo pipefail, would abort the script).
 apply_base "$SCRIPT_DIR/service.yaml"
-$DRY_RUN || "${KUBECTL[@]}" -n "$NAMESPACE" wait ksvc/serverless-harness --for=condition=Ready --timeout=180s
+$DRY_RUN || "${KUBECTL[@]}" -n "$NAMESPACE" wait ksvc/moca --for=condition=Ready --timeout=180s
 
 # ----------------------------------------------------------------------------
 # 8. Ingress (optional)
@@ -294,15 +294,15 @@ fi
 $DRY_RUN && { log_success "dry-run complete (no changes applied)"; exit 0; }
 log_success "Setup complete."
 echo ""
-echo "In-cluster URL: http://serverless-harness.${NAMESPACE}.svc.cluster.local"
+echo "In-cluster URL: http://moca.${NAMESPACE}.svc.cluster.local"
 if [ "$INGRESS" = "nodeport" ]; then
   NP=$("${KUBECTL[@]}" -n kourier-system get svc kourier -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}' 2>/dev/null || echo "<pending>")
   echo "NodePort (HTTP): reach any node at :$NP with a Host header:"
-  echo "  curl -H 'Host: serverless-harness.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
+  echo "  curl -H 'Host: moca.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
   echo "       -d '{\"prompt\":\"Hello\"}' http://<node-ip>:$NP/turn"
 else
   echo "Reach it via a port-forward (no external ingress configured):"
   echo "  kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT} port-forward -n kourier-system svc/kourier 8080:80"
-  echo "  curl -H 'Host: serverless-harness.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
+  echo "  curl -H 'Host: moca.${NAMESPACE}.example.com' -H 'Content-Type: application/json' \\"
   echo "       -d '{\"prompt\":\"Hello\"}' http://localhost:8080/turn"
 fi

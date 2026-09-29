@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 // `runPromptLeaf` leases a sandbox via selectPoolSandbox, which reads real process.env — with no
 // KAGENTI_SANDBOX_POOL_SELECTOR and no resolvable pod config it returns null, so the `if (selected)`
 // overlay branch would never run and any test aiming at it would be unreachable. Mock the module the
-// way harness/test/run-leaf.test.ts:11-34 already does, and mock @sh/k8s-sandbox so KubectlTransport
+// way harness/test/run-leaf.test.ts:11-34 already does, and mock @moca/k8s-sandbox so KubectlTransport
 // is a spy rather than a real kubectl invocation.
 const { selectPoolSandboxMock, FakeSandboxPoolSaturatedError } = vi.hoisted(() => {
   class FakeSandboxPoolSaturatedError extends Error {
@@ -29,7 +29,7 @@ const { k8sSandboxExtensionMock, kubectlTransportMock } = vi.hoisted(() => ({
     close: vi.fn(async () => {}),
   })),
 }));
-vi.mock('@sh/k8s-sandbox', () => ({
+vi.mock('@moca/k8s-sandbox', () => ({
   k8sSandboxExtension: (...args: unknown[]) => k8sSandboxExtensionMock(...args),
   KubectlTransport: (...args: unknown[]) => kubectlTransportMock(...args),
 }));

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	ga "github.com/kagenti/serverless-harness/remote-worker/internal/guestagent"
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // runOverConn drives exactly one command over an established guest connection.

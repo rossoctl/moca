@@ -1,6 +1,6 @@
 # M2 K8sSandboxClient — real kind smoke
 
-End-to-end proof that the `@sh/k8s-sandbox` extension routes Pi tool execution
+End-to-end proof that the `@moca/k8s-sandbox` extension routes Pi tool execution
 into a remote Kubernetes pod (not the harness head). This is the real-cluster
 half of the M2 gate. It is a **manual runbook** (cluster + model gateway
 dependent); run once and record the result below.

@@ -1,4 +1,4 @@
-# Serverless Harness — Milestone Registry
+# MOCA — Milestone Registry
 
 **This document is the source of truth for milestone numbering and status.** It supersedes the
 milestone table in the parent research doc
@@ -36,7 +36,7 @@ The decoupled scale-to-zero pattern. These are done and referenced across commit
 | M3  | Persistent in-pod channel                       | [`2026-06-17-m3-persistent-channel-design.md`](2026-06-17-m3-persistent-channel-design.md)                 |
 | M4  | Knative serverless wrapper (`runTurn`)          | [`2026-06-17-m4-knative-serverless-wrapper-design.md`](2026-06-17-m4-knative-serverless-wrapper-design.md) |
 | M5  | Compaction-checkpoint fast path + budget voter  | [`2026-06-23-m5-compaction-checkpoint-design.md`](2026-06-23-m5-compaction-checkpoint-design.md)           |
-| M6  | Experiments E2/E5 (`@sh/experiments`)           | [`2026-06-24-m6-experiments-design.md`](2026-06-24-m6-experiments-design.md)                               |
+| M6  | Experiments E2/E5 (`@moca/experiments`)         | [`2026-06-24-m6-experiments-design.md`](2026-06-24-m6-experiments-design.md)                               |
 | M7  | Cluster experiments E1/E3/E4                    | [`2026-06-25-m7-cluster-experiments-design.md`](2026-06-25-m7-cluster-experiments-design.md)               |
 
 > **Collision note:** Phase-1 `M7` (_cluster experiments_, built) is **not** the parent doc's `M7`
@@ -67,7 +67,7 @@ built. Hardening hygiene across these is tracked in
 
 ## Two-tier Rearchitecture (`P`-prefix)
 
-The [two-tier FS-free harness epic](https://github.com/kagenti/serverless-harness/issues/49): split
+The [two-tier FS-free harness epic](https://github.com/rossoctl/moca/issues/49): split
 the fleet into an FS-free **harness** (agent brain — credentials, model loop, network I/O only) and a
 durable **sandbox** (sole filesystem/syscall surface). Started as "run Archetype-A on OpenShift"; the
 OCP RWX pain turned out to be a _symptom_ of harness filesystem I/O, not the problem. Distinct from
@@ -178,7 +178,7 @@ stop being held by anything model-influenced.
   does if P5's implementation has not landed.
 - **MU1 diverges from Z1 §2** by holding identity and credentials in one tier
   ([ADR-0033](../adrs/0033-multi-user-control-plane.md)); **Z3/Z5 retire that divergence** as MU3.
-- **MU2 is _not_ gated on [#237](https://github.com/rossoctl/serverless-harness/issues/237).** That
+- **MU2 is _not_ gated on [#237](https://github.com/rossoctl/moca/issues/237).** That
   issue governs the **workload-addressed** pool selector; MU2's partition uses the **envelope**
   selector, which prompt leaves already honour (`run-leaf.ts:124-128`, reached at `:390`). MU2's real
   work is that the `/turn` path resolves a single pod (`run-turn.ts:57`) rather than leasing from the

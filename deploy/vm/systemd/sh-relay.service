@@ -13,8 +13,8 @@ Group=harness
 # each package's own node_modules, never root-hoisted -- a CWD of the repo root crashes with
 # ERR_MODULE_NOT_FOUND 'tsx'. Do not "simplify" this back to the repo root. The relay's own
 # package is packages/sandbox-relay, not packages/relay -- that path never existed.
-WorkingDirectory=/opt/serverless-harness/packages/sandbox-relay
-EnvironmentFile=/etc/serverless-harness/relay.env
+WorkingDirectory=/opt/moca/packages/sandbox-relay
+EnvironmentFile=/etc/moca/relay.env
 ExecStart=/usr/bin/node --import tsx src/main.ts
 Restart=always
 RestartSec=2
@@ -30,9 +30,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-# systemd creates and owns /var/lib/serverless-harness for us; do not re-add a
+# systemd creates and owns /var/lib/moca for us; do not re-add a
 # ReadWritePaths= beside it -- that would name a path nothing creates.
-StateDirectory=serverless-harness
+StateDirectory=moca
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

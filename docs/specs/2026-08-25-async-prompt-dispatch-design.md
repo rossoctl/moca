@@ -5,7 +5,7 @@ Status: Proposed
 Scope: Add a `kind:"prompt"` leaf envelope that dispatches a **free-form prompt** through the
 existing async KEDA queue, so a single sync `/turn` interaction can be **backgrounded** and polled
 for completion — mirroring the `kind:"solve"` precedent. Realizes
-[issue #168](https://github.com/rossoctl/serverless-harness/issues/168).
+[issue #168](https://github.com/rossoctl/moca/issues/168).
 Builds on (reuse, no redesign): the run-envelope contract + `runLeaf` dispatch (solve slice), the
 KEDA `ScaledJob` + Redis Streams queue and Redis result record (async-leaf-completion,
 [`2026-06-27-async-leaf-completion-design.md`](2026-06-27-async-leaf-completion-design.md); P1
@@ -297,7 +297,7 @@ existing dispatch/poll helpers — no new script.
 
 ## 7. References
 
-- Issue [#168 — async prompt dispatch](https://github.com/rossoctl/serverless-harness/issues/168)
+- Issue [#168 — async prompt dispatch](https://github.com/rossoctl/moca/issues/168)
 - [`2026-06-27-async-leaf-completion-design.md`](2026-06-27-async-leaf-completion-design.md) — the KEDA/queue substrate this rides
 - [`2026-07-02-p1-fs-free-harness-design.md`](2026-07-02-p1-fs-free-harness-design.md) — Redis result record + `GET /runs/status`
 - [`2026-06-17-m4-knative-serverless-wrapper-design.md`](2026-06-17-m4-knative-serverless-wrapper-design.md) — `runTurn` / `/turn`

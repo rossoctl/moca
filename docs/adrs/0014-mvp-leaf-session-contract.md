@@ -2,7 +2,7 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-26
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-26-mvp-leaf-session-contract-design.md`](../specs/2026-06-26-mvp-leaf-session-contract-design.md)
 
 ## Context

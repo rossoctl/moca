@@ -10,7 +10,7 @@
 # non-root sandbox container, same rationale as the base overlay's patch-sandbox.yaml.
 - op: add
   path: /spec/podTemplate/spec/serviceAccountName
-  value: serverless-harness-sandbox
+  value: moca-sandbox
 - op: add
   path: /spec/podTemplate/spec/securityContext
   value:

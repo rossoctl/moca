@@ -19,8 +19,8 @@ import {
   type AbortRequest,
   type AbortResponse,
   MAX_EXEC_MESSAGE_BYTES,
-} from '@sh/k8s-sandbox';
-import { RedisRecordStore } from '@sh/harness';
+} from '@moca/k8s-sandbox';
+import { RedisRecordStore } from '@moca/harness';
 import { createRelay, type RelayDeps, type AttachStream } from './relay.js';
 
 /**

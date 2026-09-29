@@ -65,14 +65,14 @@ operator/orchestrator reads markers under the fire-stamped resultRef dir
 
 **Components** (each independently testable):
 
-| Unit                 | Responsibility                                                                                                                                                                                                                                                                           | Lives in                                       |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `cron-dispatch`      | read config + fire id → POST each templated envelope async; aggregate result → exit code                                                                                                                                                                                                 | `packages/knative-server/src/cron-dispatch.ts` |
-| schedule + item list | **one manifest, two YAML docs:** a ConfigMap (envelope list + `sessionId`/`resultRef` templates with `__FIRE__`) and the CronJob (schedule, `concurrencyPolicy: Forbid`, downward-API Job-name env, ConfigMap mount, harness image, `serverless-harness` SA). Single `kubectl apply -f`. | `deploy/knative/leaf-cron.yaml`                |
-| live gate            | gated smoke: a fire dispatches the list → leaves complete; dispatcher-retry is idempotent                                                                                                                                                                                                | `deploy/knative/leaf-cron-smoke.sh`            |
+| Unit                 | Responsibility                                                                                                                                                                                                                                                             | Lives in                                       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `cron-dispatch`      | read config + fire id → POST each templated envelope async; aggregate result → exit code                                                                                                                                                                                   | `packages/knative-server/src/cron-dispatch.ts` |
+| schedule + item list | **one manifest, two YAML docs:** a ConfigMap (envelope list + `sessionId`/`resultRef` templates with `__FIRE__`) and the CronJob (schedule, `concurrencyPolicy: Forbid`, downward-API Job-name env, ConfigMap mount, harness image, `moca` SA). Single `kubectl apply -f`. | `deploy/knative/leaf-cron.yaml`                |
+| live gate            | gated smoke: a fire dispatches the list → leaves complete; dispatcher-retry is idempotent                                                                                                                                                                                  | `deploy/knative/leaf-cron-smoke.sh`            |
 
 **Key properties:** no new harness logic on the enqueue path (the dispatcher is a client of the
-existing contract); no Job RBAC beyond the existing `serverless-harness` ServiceAccount; the schedule
+existing contract); no Job RBAC beyond the existing `moca` ServiceAccount; the schedule
 lives in `CronJob.spec.schedule` so Kubernetes owns cron semantics.
 
 ---
@@ -163,13 +163,13 @@ _schedule_ half is a `CronJob`. This supersedes the async spec's passing note.
 The dispatcher POSTs to the Knative service over cluster-internal networking:
 
 - URL: `SH_SERVICE_URL` (default `http://kourier-internal.kourier-system.svc.cluster.local`), with
-  `Host: serverless-harness.default.example.com` so Kourier routes to the ksvc. (Knative also exposes
-  `serverless-harness.default.svc.cluster.local`; the exact address is pinned in the plan against the
+  `Host: moca.default.example.com` so Kourier routes to the ksvc. (Knative also exposes
+  `moca.default.svc.cluster.local`; the exact address is pinned in the plan against the
   live cluster.)
 - The service cold-starts from zero on the request (scale-from-zero), so no always-on cost between
   fires.
 - The dispatcher needs only network egress to the in-cluster service; it reuses the
-  `serverless-harness` ServiceAccount (no new RBAC).
+  `moca` ServiceAccount (no new RBAC).
 
 ---
 

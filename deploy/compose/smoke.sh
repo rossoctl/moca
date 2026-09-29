@@ -51,9 +51,9 @@ if [[ "${SH_COMPOSE_BUILD:-}" == 1 ]]; then
   # contexts against the PROJECT directory, which for this throwaway project is not the checkout.
   REPO_ROOT="$(cd "$COMPOSE_DIR/../.." && pwd)"
   echo "building images from $REPO_ROOT"
-  docker build --load -q -t dev.local/serverless-harness:compose -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
+  docker build --load -q -t dev.local/moca:compose -f "$REPO_ROOT/Dockerfile" "$REPO_ROOT"
   docker build --load -q -t dev.local/remote-worker:compose -f "$REPO_ROOT/remote-worker/Dockerfile" "$REPO_ROOT"
-  IMAGE_ENV=(SH_HARNESS_IMAGE=dev.local/serverless-harness:compose SH_SANDBOX_IMAGE=dev.local/remote-worker:compose)
+  IMAGE_ENV=(SH_HARNESS_IMAGE=dev.local/moca:compose SH_SANDBOX_IMAGE=dev.local/remote-worker:compose)
 fi
 # A unique project name, so a smoke run never adopts or tears down someone's real trial stack.
 dc() { "${COMPOSE[@]}" -p "sh-smoke-$$" --project-directory "$PROJ" "${FILES[@]}" "$@"; }

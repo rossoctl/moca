@@ -1,7 +1,7 @@
 # Leaf-Session Backend — Executive Overview
 
 **Status:** MVP complete (Phase 1 + Leaf-Session shipped). Zero-trust deferred to Phase 2.
-**Repo:** `kagenti/serverless-harness` (private)
+**Repo:** `rossoctl/moca` (private)
 **Date:** 2026-06-28
 
 ---
@@ -36,7 +36,7 @@ The leaf-session backend supports three dispatch patterns for running AI agent "
 ┌─────────────────────┐         ┌──────────────────────────┐
 │  External           │  POST   │  Knative Service         │
 │  Orchestrator       │────────▶│  /runs                   │
-│  (leaf-orchestrator)│         │  (serverless-harness)    │
+│  (leaf-orchestrator)│         │  (moca)    │
 └─────────────────────┘         │  scale 0-5, concurrency=1│
         │                       └───────────┬──────────────┘
         │ {async:true}                      │ kubectl exec
@@ -74,7 +74,7 @@ The leaf-session backend supports three dispatch patterns for running AI agent "
 
 ### Single Image, Two Entry Points
 
-The Knative Service and leaf-worker are the **same container image** (`serverless-harness`) with different entry points:
+The Knative Service and leaf-worker are the **same container image** (`moca`) with different entry points:
 
 |                              | Knative Service                                        | leaf-worker (KEDA ScaledJob)     |
 | ---------------------------- | ------------------------------------------------------ | -------------------------------- |

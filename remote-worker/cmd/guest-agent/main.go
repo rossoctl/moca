@@ -17,7 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/guestagent"
+	"github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 func main() {

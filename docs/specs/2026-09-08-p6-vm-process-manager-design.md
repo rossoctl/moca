@@ -7,7 +7,7 @@ long-lived worker processes that each multiplex N Pi sessions, and measure what 
 (**E8** density/saturation, **E9** deployment-tier comparison). Realizes the deployment-model slice
 that [P5](2026-09-06-p5-session-isolation-design.md) §6 and
 [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md) defer — `ScaledJob` → elastic
-pool, and [#55](https://github.com/rossoctl/serverless-harness/issues/55)'s overload shift from
+pool, and [#55](https://github.com/rossoctl/moca/issues/55)'s overload shift from
 pod-level to session-level — on a non-Kubernetes substrate.
 Milestone: **P6**, in the existing `P` (two-tier rearchitecture) track. Source of truth for
 numbering: [Milestone Registry](README.md).
@@ -207,7 +207,7 @@ framing, cap-at-source and fallback are transport-agnostic and already declare `
 a container-exec variant is a parameterized argv rather than a new protocol. It would lift **both**
 substrates, which is precisely why it belongs to the `ST` track and not to a slice whose job is to
 measure the deployment tier — tracked as
-[#245](https://github.com/rossoctl/serverless-harness/issues/245), and listed in §8.
+[#245](https://github.com/rossoctl/moca/issues/245), and listed in §8.
 
 ### 3.2 The supervisor hands off sockets; it does not proxy bytes
 
@@ -714,7 +714,7 @@ Homes: `packages/knative-server/test` and `harness/test`, both typechecked since
 - **The MU1 control plane on the VM.** E8/E9 need no auth, no ownership index, no `/resources`.
 - **Async leaf and cron on the VM** beyond the `--role` flag existing (§3.3).
 - **A `PlatformAdapter` abstraction** (§4.1).
-- **A persistent fast channel for the gRPC transport** (§3.1a, [#245](https://github.com/rossoctl/serverless-harness/issues/245)). Real and worth doing — file ops are
+- **A persistent fast channel for the gRPC transport** (§3.1a, [#245](https://github.com/rossoctl/moca/issues/245)). Real and worth doing — file ops are
   the highest-frequency tool calls and currently cost a round trip plus a process each on that path —
   but it lifts **both** substrates equally, so folding it into P6 would improve the VM arm and the
   Knative arm at once while adding transport surface to a slice that exists to measure the deployment
@@ -731,7 +731,7 @@ Homes: `packages/knative-server/test` and `harness/test`, both typechecked since
 | --------------------------------------- | ------------------------------------------------------------------------------ |
 | `packages/knative-server/src/server.ts` | Export `handler` (one word); `startServer()` untouched                         |
 | `packages/knative-server/src/worker.ts` | **New** — the `sh-worker` entry point (§3.3)                                   |
-| `packages/supervisor/`                  | **New** package `@sh/supervisor` — lifecycle, `RoutingPolicy`, admission       |
+| `packages/supervisor/`                  | **New** package `@moca/supervisor` — lifecycle, `RoutingPolicy`, admission     |
 | `harness/src/select-sandbox.ts`         | Discovery-source selector at `:87` (§4.2)                                      |
 | `deploy/vm/`                            | **New** — systemd units, `setup-vm.sh`, `EXPERIMENTS.md`, E8/E9 drivers        |
 | `deploy/knative/model-stub/`            | **New** — Dockerfile + service, beside `echo-target/`; **both** E9 arms use it |
@@ -743,7 +743,7 @@ manages processes and sockets — which is why it is its own package and not a s
 
 **Experiment driver homes** follow the existing split: shell drivers in `deploy/vm/` (siblings of
 `deploy/knative/e6-saturation.sh`, and where `lib.sh`-style helpers belong), reusing the pure
-analysis from `@sh/experiments`. In particular **reuse `detectKnee`**
+analysis from `@moca/experiments`. In particular **reuse `detectKnee`**
 (`experiments/src/sharing.ts:13`) rather than writing a second detector; note its contract — it takes
 `LadderPoint { c, throughput, p95Ms }` and **throws without a `c === 1` baseline point**, so the E8
 ladder must include the single-session rung, which is also §5.2's W=1 baseline.
@@ -768,7 +768,7 @@ ladder must include the single-session rung, which is also §5.2's W=1 baseline.
 - [ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md) — the decision this spec records.
 - [P5](2026-09-06-p5-session-isolation-design.md) · [ADR-0032](../adrs/0032-per-request-subject-no-ambient-credential.md)
   — in-process multiplexing; §6 and the ADR's follow-up defer the deployment-model slice to here.
-- [P4](https://github.com/rossoctl/serverless-harness/issues/57) — Kata/VM/gVisor isolation, where
+- [P4](https://github.com/rossoctl/moca/issues/57) — Kata/VM/gVisor isolation, where
   the sandbox-boundary question already lives.
 - [P3.1](2026-07-03-e6-workload-parameterized-sandbox-load-design.md) ·
   [`EXPERIMENTS.md`](../../deploy/knative/EXPERIMENTS-MOVED.md) (since moved to rossoctl/moca-experiments) — E6/E7, the saturation machinery and the three
@@ -782,14 +782,14 @@ ladder must include the single-session rung, which is also §5.2's W=1 baseline.
   worker-dialed relay that make the sandbox tier substrate-neutral.
 - [P2](2026-07-02-p2-shared-sandbox-pool-design.md) — Redis leases and least-loaded selection, reused
   one tier up.
-- [#245](https://github.com/rossoctl/serverless-harness/issues/245) — the gRPC transport's missing
+- [#245](https://github.com/rossoctl/moca/issues/245) — the gRPC transport's missing
   persistent fast channel (§3.1a). Deferred to `ST` because it lifts both substrates; §5.3's
   constant-tool-path pin is what keeps E9 valid without it.
 - [MU1](2026-09-08-multi-user-control-plane-design.md) — `CredentialStore` seam; its control plane is
   out of scope here.
-- [#55](https://github.com/rossoctl/serverless-harness/issues/55) — overload handling, realized as
+- [#55](https://github.com/rossoctl/moca/issues/55) — overload handling, realized as
   §3.5.
-- [#220](https://github.com/rossoctl/serverless-harness/issues/220) — the multiplexing epic P5 and
+- [#220](https://github.com/rossoctl/moca/issues/220) — the multiplexing epic P5 and
   this slice split between them.
 
 ---

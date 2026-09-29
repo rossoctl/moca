@@ -1,5 +1,5 @@
 {
-  "name": "@sh/harness",
+  "name": "@moca/harness",
   "type": "module",
   "version": "0.0.0",
   "exports": {
@@ -25,10 +25,10 @@
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.5",
-    "@sh/config-bundle": "workspace:*",
-    "@sh/session-backend": "workspace:*",
-    "@sh/k8s-sandbox": "workspace:*",
-    "@sh/work-queue": "workspace:*",
+    "@moca/config-bundle": "workspace:*",
+    "@moca/session-backend": "workspace:*",
+    "@moca/k8s-sandbox": "workspace:*",
+    "@moca/work-queue": "workspace:*",
     "@earendil-works/pi-ai": "link:../pi-fork/packages/ai",
     "@earendil-works/pi-coding-agent": "link:../pi-fork/packages/coding-agent",
     "redis": "^6.2.1"

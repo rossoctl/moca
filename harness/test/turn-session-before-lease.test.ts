@@ -44,7 +44,7 @@ const { selectCalls, FakeRedisSessionBackend } = vi.hoisted(() => {
   return { selectCalls: [] as string[], FakeRedisSessionBackend };
 });
 
-vi.mock('@sh/session-backend', () => ({
+vi.mock('@moca/session-backend', () => ({
   RedisSessionBackend: FakeRedisSessionBackend,
   swallowRedisErrors: () => {},
 }));

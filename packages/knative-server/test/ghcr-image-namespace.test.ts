@@ -63,11 +63,7 @@ describe('GHCR image namespace', () => {
 
   it('publishes all three images to the live namespace', () => {
     const workflow = read('.github/workflows/build.yaml');
-    for (const name of [
-      'serverless-harness',
-      'serverless-harness-sandbox',
-      'serverless-harness-echo-target',
-    ]) {
+    for (const name of ['moca', 'moca-sandbox', 'moca-echo-target']) {
       expect(workflow).toContain(`image: ${LIVE_NS}${name}`);
     }
   });

@@ -24,16 +24,16 @@ resources:
   - ../../authbridge/harness-egress-ab1.yaml
 
 images:
-  # ibac-stub reuses the harness image (dev.local/serverless-harness:local in ibac-stub.yaml);
+  # ibac-stub reuses the harness image (dev.local/moca:local in ibac-stub.yaml);
   # this images: transformer matches by name regardless of tag and remaps it to GHCR.
-  - name: dev.local/serverless-harness
-    newName: ghcr.io/rossoctl/serverless-harness
+  - name: dev.local/moca
+    newName: ghcr.io/rossoctl/moca
     newTag: latest
   - name: dev.local/echo-target
-    newName: ghcr.io/rossoctl/serverless-harness-echo-target
+    newName: ghcr.io/rossoctl/moca-echo-target
     newTag: latest
   - name: dev.local/sandbox-rc1
-    newName: ghcr.io/rossoctl/serverless-harness-sandbox
+    newName: ghcr.io/rossoctl/moca-sandbox
     newTag: latest
   # NOTE: the AuthBridge sidecar/gateway image (ghcr.io/rossoctl/kagenti-extensions/authbridge)
   # is already the official public image on both AB1 and AB2 — no remap needed.

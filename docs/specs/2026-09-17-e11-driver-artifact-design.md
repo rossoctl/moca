@@ -1,7 +1,7 @@
 # E11 density: repairing the instrument (issue #291)
 
 Date: 2026-09-17
-Issue: [rossoctl/serverless-harness#291](https://github.com/rossoctl/serverless-harness/issues/291)
+Issue: [rossoctl/moca#291](https://github.com/rossoctl/moca/issues/291)
 Status: approved for implementation
 
 ## Problem

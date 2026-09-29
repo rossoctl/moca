@@ -14,10 +14,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
-	pb "github.com/kagenti/serverless-harness/gen/go/sandbox/v1"
-	wexec "github.com/kagenti/serverless-harness/remote-worker/internal/exec"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/relaytest"
-	"github.com/kagenti/serverless-harness/remote-worker/internal/session"
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
+	"github.com/rossoctl/moca/remote-worker/internal/relaytest"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
 
 const testToken = "dev-token"

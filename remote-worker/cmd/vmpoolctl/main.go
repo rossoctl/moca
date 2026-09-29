@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kagenti/serverless-harness/remote-worker/internal/vmpool"
+	"github.com/rossoctl/moca/remote-worker/internal/vmpool"
 )
 
 // runResult is the record E10's shell driver parses. Every field exists because a

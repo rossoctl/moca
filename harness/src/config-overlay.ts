@@ -1,5 +1,5 @@
-import { assertValidDigest, digestDirName } from '@sh/config-bundle';
-import type { SandboxTransport } from '@sh/k8s-sandbox';
+import { assertValidDigest, digestDirName } from '@moca/config-bundle';
+import type { SandboxTransport } from '@moca/k8s-sandbox';
 
 /** Single-quote-escape for safe bash interpolation. Copied from converge.ts:4 by design. */
 function sq(s: string): string {

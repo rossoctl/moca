@@ -3,7 +3,7 @@
 **Date:** 2026-06-18
 **Cluster:** Kind (`sh-knative`), Kubernetes v1.34.0
 **Knative Serving:** v1.14.0 + Kourier v1.14.0
-**Image:** `dev.local/serverless-harness:local` (667MB)
+**Image:** `dev.local/moca:local` (667MB)
 **Gateway:** LiteLLM at `https://ete-litellm.bx.cloud9.ibm.com`
 
 ## Results: 6/6 PASS
@@ -86,7 +86,7 @@ The Kind smoke/experiment drivers run against the Route — export `KSVC_URL`
 (instead of starting a Kourier port-forward):
 
 ```bash
-KSVC_URL=$(oc get ksvc serverless-harness -n default -o jsonpath='{.status.url}') \
+KSVC_URL=$(oc get ksvc moca -n default -o jsonpath='{.status.url}') \
   ./deploy/knative/smoke.sh
 ```
 

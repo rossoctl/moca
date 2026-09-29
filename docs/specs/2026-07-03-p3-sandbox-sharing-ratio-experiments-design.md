@@ -2,12 +2,12 @@
 
 Version: 1.0 — July 3, 2026
 Status: Design (approved for implementation planning)
-Scope: **Phase 3 (P3)** of the [two-tier FS-free harness epic](https://github.com/kagenti/serverless-harness/issues/49)
-([P3 issue #48](https://github.com/kagenti/serverless-harness/issues/48)). Depends on **P2** (shared sandbox
-pool + routing, [#46](https://github.com/kagenti/serverless-harness/issues/46)) and **P0′** (OCP deploy,
-[#47](https://github.com/kagenti/serverless-harness/issues/47)), both merged. Measures the harness→sandbox
+Scope: **Phase 3 (P3)** of the [two-tier FS-free harness epic](https://github.com/rossoctl/moca/issues/49)
+([P3 issue #48](https://github.com/rossoctl/moca/issues/48)). Depends on **P2** (shared sandbox
+pool + routing, [#46](https://github.com/rossoctl/moca/issues/46)) and **P0′** (OCP deploy,
+[#47](https://github.com/rossoctl/moca/issues/47)), both merged. Measures the harness→sandbox
 **sharing ratio** on the runc runtime to set the pool's capacity knobs. **Kata/VM isolation and intra-pod
-hardening are split out to a new [P4 (#57)](https://github.com/kagenti/serverless-harness/issues/57)** and are
+hardening are split out to a new [P4 (#57)](https://github.com/rossoctl/moca/issues/57)** and are
 _not_ in scope here.
 
 ---
@@ -136,7 +136,7 @@ Read-only and disposable; it holds no state the experiments depend on beyond the
 
 ## 7. Artifacts & conventions
 
-Matches the existing experiments framework (see `@sh/experiments` and `deploy/knative/`):
+Matches the existing experiments framework (see `@moca/experiments` and `deploy/knative/`):
 
 - **Structural vitest:** `experiments/test/e6-saturation-structural.test.ts`, `experiments/test/e7-converge-contention-structural.test.ts` — CI-gated, no model key; exercise the lease/duty-cycle accounting and mixed-ref worktree assertions against a local/mocked or real-Redis harness where feasible.
 - **Live drivers:** `deploy/knative/e6-saturation.sh`, `deploy/knative/e7-converge-contention.sh` — key-gated (`SH_RUN_LIVE=1` + `ANTHROPIC_AUTH_TOKEN`), reuse `lib.sh` helpers (`start_sampler`/`stop_sampler`/`pod_seconds_from`, `turn`, `set_min_scale`, `ensure_port_forward`, `wait_ksvc_ready`). New helpers as needed: a **concurrent-leaf launcher** (fire `C` leaves and join), a **duty-cycle sampler** (attribute exec time per leaf), and a **git-daemon deploy/seed** step.

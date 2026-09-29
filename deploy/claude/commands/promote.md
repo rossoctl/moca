@@ -80,7 +80,7 @@ These are not hypothetical — each one produced a confident, wrong result durin
    installed binary, and the sandbox inventory is resolved relative to the harness _module_, so
    running it from here would silently degrade the binary check to `inventory_unavailable`. If the
    Context says `UNSET`, stop and tell the user to
-   `export SH_HARNESS_DIR=/path/to/serverless-harness`. Otherwise confirm the CLI is really there,
+   `export SH_HARNESS_DIR=/path/to/moca`. Otherwise confirm the CLI is really there,
    with that path written out in full:
    `test -f <harness-checkout>/harness/package.json && echo yes || echo NO`.
 

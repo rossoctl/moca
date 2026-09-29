@@ -1,5 +1,5 @@
 {
-  "name": "@sh/mocactl",
+  "name": "@moca/mocactl",
   "type": "module",
   "version": "0.0.0",
   "description": "Terminal client for the harness control plane (docs/specs/2026-09-25-mocactl-control-plane-client-design.md).",

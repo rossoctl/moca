@@ -2,7 +2,7 @@
 
 - **Status:** Accepted <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-09-08
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-09-08-multi-user-control-plane-design.md`](../specs/2026-09-08-multi-user-control-plane-design.md)
 
 > P5's session-isolation design took ADR-0032 and is now **merged**, so this is simply the next free
@@ -35,7 +35,7 @@ Three forces shape the answer:
 
 ## Decision
 
-We will introduce **`@sh/control-plane`**, an always-on Deployment that owns the authenticated `/v1`
+We will introduce **`@moca/control-plane`**, an always-on Deployment that owns the authenticated `/v1`
 API, the session-ownership index, per-user credential storage, and resource introspection, as **MU1**
 in a new `MU` (multi-user service) track rather than as a Phase-2 `Z` id — Phase 2 is a security
 architecture, this is a product surface. It

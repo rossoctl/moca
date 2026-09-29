@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: ibac-stub
-          image: dev.local/serverless-harness:local
+          image: dev.local/moca:local
           imagePullPolicy: IfNotPresent
           # Run from the knative-server package dir (which the published image links tsx into) and load
           # ibac-stub's entrypoint by absolute path: the published GHCR image does not link tsx into

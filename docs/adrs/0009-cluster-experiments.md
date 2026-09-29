@@ -2,12 +2,12 @@
 
 - **Status:** Implemented
 - **Date:** 2026-06-25
-- **Deciders:** Serverless Harness team
+- **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-06-25-m7-cluster-experiments-design.md`](../specs/2026-06-25-m7-cluster-experiments-design.md)
 
 ## Context
 
-M4 deployed the harness as a Knative service, and its `smoke.sh` informally proved scale-to-zero and cold-start resume. The serverless thesis needs those turned into reproducible end-to-end cluster experiments with explicit metrics: E1 (scale-to-zero economics), E3 (mobility onto a fresh instance), E4 (crash recovery). The parent plan specified Python drivers against a `pi-harness` ksvc, but the real deploy is ksvc `serverless-harness` in `default`, and `smoke.sh` already implements ~80% of the cluster choreography.
+M4 deployed the harness as a Knative service, and its `smoke.sh` informally proved scale-to-zero and cold-start resume. The serverless thesis needs those turned into reproducible end-to-end cluster experiments with explicit metrics: E1 (scale-to-zero economics), E3 (mobility onto a fresh instance), E4 (crash recovery). The parent plan specified Python drivers against a `pi-harness` ksvc, but the real deploy is ksvc `moca` in `default`, and `smoke.sh` already implements ~80% of the cluster choreography.
 
 ## Decision
 

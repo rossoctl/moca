@@ -14,8 +14,8 @@ import {
   type WorkerFrame,
   type ServerFrame,
   type ExecEvent,
-} from '@sh/k8s-sandbox';
-import type { RecordStore } from '@sh/harness';
+} from '@moca/k8s-sandbox';
+import type { RecordStore } from '@moca/harness';
 
 // These tests go over a REAL grpc-js transport -- a bound server, a real client, real
 // trailers -- because the terminal status is a property of the transport, not of the

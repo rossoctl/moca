@@ -1,6 +1,6 @@
 # Deploying on Kind
 
-`deploy/knative/setup-kind.sh` stands up the serverless-harness stack on a
+`deploy/knative/setup-kind.sh` stands up the moca stack on a
 **Kind** (Kubernetes-in-Docker) cluster — Knative Serving + Kourier, KEDA,
 Redis, the sandbox pod, the `leaf-work` PVC, the LLM-credentials secret, and
 the harness Knative Service.
@@ -18,8 +18,8 @@ the harness Knative Service.
 
 ```bash
 # 1. Clone (the Pi agent is a submodule)
-git clone --recurse-submodules https://github.com/kagenti/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 # 2. Provide a model credential — direct key...
 export ANTHROPIC_API_KEY=sk-...
@@ -38,7 +38,7 @@ When it finishes, the script prints Kourier access instructions:
 kubectl port-forward -n kourier-system svc/kourier 8080:80
 
 # Send a request with the Host header:
-curl -H 'Host: serverless-harness.default.example.com' \
+curl -H 'Host: moca.default.example.com' \
      -H 'Content-Type: application/json' \
      -d '{"prompt": "Remember the secret word: pineapple. Reply only with OK."}' \
      http://localhost:8080/turn | jq .
@@ -53,7 +53,7 @@ single JSON body. Streaming is a _representation_ of `/turn` chosen by content n
 separate route.
 
 ```bash
-curl -N -H 'Host: serverless-harness.default.example.com' \
+curl -N -H 'Host: moca.default.example.com' \
      -H 'Content-Type: application/json' \
      -H 'Accept: text/event-stream' \
      -d '{"prompt":"Count from 1 to 5, one number per line."}' \
@@ -92,7 +92,7 @@ default `2048`) and `SH_TURN_STREAM_KEEPALIVE_MS` (heartbeat interval, default `
 ```
 --build                  Force a local harness build from this checkout
 --skip-build             Do not build/pull the harness image (use existing dev.local tag)
---image <ref>            Published harness image to pull (default: ghcr.io/rossoctl/serverless-harness:latest)
+--image <ref>            Published harness image to pull (default: ghcr.io/rossoctl/moca:latest)
 --cluster-name <name>    Kind cluster name (default: sh-knative)
 ```
 
@@ -102,13 +102,13 @@ loads it into the cluster, falling back to a local build only if the pull is una
 
 Environment variables:
 
-| Variable          | Default                                      | Description                                                   |
-| ----------------- | -------------------------------------------- | ------------------------------------------------------------- |
-| `CLUSTER_NAME`    | `sh-knative`                                 | Kind cluster name                                             |
-| `KNATIVE_VERSION` | `v1.14.0`                                    | Knative Serving version                                       |
-| `SH_IMAGE`        | `ghcr.io/rossoctl/serverless-harness:latest` | Published harness image pulled by default (same as `--image`) |
-| `FORCE_BUILD`     | `false`                                      | Force a local build (same as `--build`)                       |
-| `KEDA_VERSION`    | `v2.14.0`                                    | KEDA version                                                  |
+| Variable          | Default                        | Description                                                   |
+| ----------------- | ------------------------------ | ------------------------------------------------------------- |
+| `CLUSTER_NAME`    | `sh-knative`                   | Kind cluster name                                             |
+| `KNATIVE_VERSION` | `v1.14.0`                      | Knative Serving version                                       |
+| `SH_IMAGE`        | `ghcr.io/rossoctl/moca:latest` | Published harness image pulled by default (same as `--image`) |
+| `FORCE_BUILD`     | `false`                        | Force a local build (same as `--build`)                       |
+| `KEDA_VERSION`    | `v2.14.0`                      | KEDA version                                                  |
 
 > **Pinning a release:** `:latest` tracks `main`, not any specific tag — to install a
 > specific release, pass the versioned image tag explicitly (e.g. `:0.3.0`) via `--image`/
@@ -131,7 +131,7 @@ To use a different model, edit `service.yaml` before running the setup script:
 Or patch the running Knative Service after deployment:
 
 ```bash
-kubectl set env ksvc/serverless-harness SH_MODEL=claude-sonnet-4-6
+kubectl set env ksvc/moca SH_MODEL=claude-sonnet-4-6
 ```
 
 This triggers an automatic revision rollout. Available model IDs:
@@ -214,7 +214,7 @@ injection + allow/deny control on both harness egress hops — see
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | `ksvc` never Ready, pod `CrashLoopBackOff` | Check `kubectl logs` — likely missing `llm-credentials` secret or broken image.                               |
 | `/turn` returns `"Connection error"`       | The harness can't reach its Anthropic endpoint from the cluster (gateway unreachable). `/health` still works. |
-| Image not found after `--skip-build`       | Load the image manually: `kind load docker-image dev.local/serverless-harness:local --name sh-knative`        |
+| Image not found after `--skip-build`       | Load the image manually: `kind load docker-image dev.local/moca:local --name sh-knative`                      |
 | Scale-to-zero doesn't happen               | Verify `config-autoscaler` settings: `kubectl get cm config-autoscaler -n knative-serving -o yaml`            |
 
 ## Cleanup

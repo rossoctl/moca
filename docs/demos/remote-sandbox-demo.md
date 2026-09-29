@@ -37,8 +37,8 @@ You need a **warm** harness cluster — this demo adds the remote path to it, it
 If you do not have one:
 
 ```bash
-git clone --recurse-submodules https://github.com/rossoctl/serverless-harness.git
-cd serverless-harness
+git clone --recurse-submodules https://github.com/rossoctl/moca.git
+cd moca
 
 export ANTHROPIC_API_KEY=sk-...    # ...or a gateway: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 
@@ -53,8 +53,8 @@ export ANTHROPIC_API_KEY=sk-...    # ...or a gateway: ANTHROPIC_BASE_URL + ANTHR
 Set the convenience vars used throughout:
 
 ```bash
-export NS=default KSVC=serverless-harness
-export HOSTHDR='Host: serverless-harness.default.example.com'
+export NS=default KSVC=moca
+export HOSTHDR='Host: moca.default.example.com'
 export BASE=http://localhost:8080
 mkdir -p /tmp/demo-remote
 ```
@@ -530,7 +530,7 @@ make demo-remote-sandbox-teardown   # asks before deleting the cluster; DEMO_ARG
   probes for this and escalates automatically, with a warning.
 - **Live streaming, abort mid-stream, dual-ended timeout and reconnect→dedup** are implemented and
   unit-tested but not shown here — tracked in
-  [#198](https://github.com/rossoctl/serverless-harness/issues/198). The honest line: _the
+  [#198](https://github.com/rossoctl/moca/issues/198). The honest line: _the
   transport does it, this demo doesn't show it yet._
 
 Reference: [`../../deploy/knative/README-worker.md`](../../deploy/knative/README-worker.md)

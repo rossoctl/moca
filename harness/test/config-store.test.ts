@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildBundle, canonicalTar, contentDigest, untar } from '@sh/config-bundle';
+import { buildBundle, canonicalTar, contentDigest, untar } from '@moca/config-bundle';
 import {
   bundleKey,
   putBundle,

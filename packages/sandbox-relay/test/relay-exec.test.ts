@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { createRelay } from '../src/relay.js';
-import type { RecordStore } from '@sh/harness';
+import type { RecordStore } from '@moca/harness';
 
 const records: RecordStore = { put: async () => {}, remove: async () => {}, list: async () => [] };
 

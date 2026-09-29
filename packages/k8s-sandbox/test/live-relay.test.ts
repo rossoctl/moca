@@ -21,10 +21,10 @@ import { SandboxExecClient } from '../src/gen/sandbox/v1/sandbox.js';
  *
  *   docker run --rm -d -p 6380:6379 --name sh-live-relay-redis redis:7
  *   SH_RELAY_TOKEN=dev-token SH_RELAY_PORT=8443 REDIS_URL=redis://127.0.0.1:6380 \
- *     pnpm --filter @sh/sandbox-relay start &
+ *     pnpm --filter @moca/sandbox-relay start &
  *   cd remote-worker && SANDBOX_ID=sbx-dev-1 RELAY_ADDR=localhost:8443 \
  *     SANDBOX_TOKEN=dev-token go run ./cmd/worker &
- *   SH_LIVE_RELAY=1 pnpm --filter @sh/k8s-sandbox test live-relay
+ *   SH_LIVE_RELAY=1 pnpm --filter @moca/k8s-sandbox test live-relay
  *
  * The first two cases exercise the externally-started worker above. The third
  * (worker-disconnect) spawns and kills its OWN worker process under a distinct
