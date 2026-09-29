@@ -29,7 +29,7 @@ describe('layering (spec §3.1)', () => {
     const all = { ...pkg.dependencies, ...pkg.devDependencies };
     for (const [name, range] of Object.entries(all)) {
       expect(String(range), name).not.toMatch(/^workspace:/);
-      expect(name).not.toMatch(/^@sh\//);
+      expect(name).not.toMatch(/^@moca\//);
     }
   });
 });

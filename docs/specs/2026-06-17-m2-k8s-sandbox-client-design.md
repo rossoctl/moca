@@ -2,7 +2,7 @@
 
 Version: 1.0 — June 17, 2026
 Status: Design (approved for implementation planning)
-Scope: Milestone 2 of the serverless harness — route Pi tool execution to a remote Kubernetes pod
+Scope: Milestone 2 of MOCA — route Pi tool execution to a remote Kubernetes pod
 Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §4, §6 (M2), §7.3
 Predecessor: [M1 Design — Redis SessionStorageBackend](2026-06-16-m1-redis-session-backend-design.md)
 

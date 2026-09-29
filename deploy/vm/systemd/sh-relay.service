@@ -1,5 +1,5 @@
 [Unit]
-Description=Serverless harness relay (P6 VM process manager)
+Description=MOCA relay (P6 VM process manager)
 After=network-online.target
 Wants=network-online.target
 

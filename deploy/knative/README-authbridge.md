@@ -1,7 +1,7 @@
 # AuthBridge Two-Hop Egress Control (RC1)
 
 This demo shows **Rosso Cortex / AuthBridge** acting as the zero-trust credential
-plane on the serverless harness: it does both **credential injection** and
+plane on MOCA: it does both **credential injection** and
 **action control** on the harness's two HTTP egress hops, and the real credential
 is **never held by any model-influenced workload** — only a placeholder is, and the
 real value is swapped in at the proxy, _after_ an allow/deny gate.

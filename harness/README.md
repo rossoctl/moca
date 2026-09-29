@@ -1,6 +1,6 @@
 # @moca/harness
 
-Serverless-harness glue: adapts the generic `@moca/session-backend` log store to Pi's
+MOCA glue: adapts the generic `@moca/session-backend` log store to Pi's
 `SessionStorageBackend`, with write-behind durability.
 
 ## Components

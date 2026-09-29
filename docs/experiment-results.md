@@ -10,7 +10,7 @@ _Consolidated findings, June 2026. Source data:
 
 ## The thesis under test
 
-The serverless harness runs a [Pi](https://github.com/earendil-works) coding agent as a
+MOCA runs a [Pi](https://github.com/earendil-works) coding agent as a
 **scale-to-zero** Knative service over an **externalized session log** (Redis Streams) and a
 **remote sandbox**, so a session is durable infrastructure rather than a long-lived process.
 The five experiments test whether that architecture pays off without breaking correctness:
@@ -168,7 +168,7 @@ knative/run-experiments.sh         # setup + E1 + E3 + E4, writes knative/EXPERI
 
 ## Conclusion
 
-The serverless harness delivers its thesis: **~75% lower idle cost (E1)** with **O(tail)
+MOCA delivers its thesis: **~75% lower idle cost (E1)** with **O(tail)
 cold-start reconstruction (E2)**, while **preserving session fidelity and mobility (E3)**,
 **recovering from crashes for free (E4)**, and **enforcing a token budget (E5)** — with no change
 to the agent's own logic (Pi is forked only for the pluggable storage backend). This completes the

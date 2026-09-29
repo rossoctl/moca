@@ -2,7 +2,7 @@
 
 Version: 1.0 — June 16, 2026
 Status: Design (approved for implementation planning)
-Scope: Milestone 1 of the serverless harness — externalize Pi session state to Redis
+Scope: Milestone 1 of MOCA — externalize Pi session state to Redis
 Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §4, §6 (M1)
 Discovery basis: [`NOTES-pi-sessionmanager.md`](../../packages/session-backend/NOTES-pi-sessionmanager.md) (pinned Pi commit `406a2214`)
 
@@ -10,7 +10,7 @@ Discovery basis: [`NOTES-pi-sessionmanager.md`](../../packages/session-backend/N
 
 ## 1. Goal & scope
 
-Make the serverless harness's hard dependency real: Pi persists session state to
+Make MOCA's hard dependency real: Pi persists session state to
 **Redis instead of local JSONL**, transparently, so a session can be resumed by a
 _fresh process_ with no local files.
 

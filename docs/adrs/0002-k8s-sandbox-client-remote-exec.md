@@ -7,7 +7,7 @@
 
 ## Context
 
-For a serverless harness the agent's "hands" (file and shell tools) must run in an isolated remote sandbox, not on the harness head. Pi exposes pluggable `Operations` interfaces and a shipped SSH example demonstrates delegating them over a transport, so no Pi fork is needed — only a new transport and wiring.
+For MOCA, the agent's "hands" (file and shell tools) must run in an isolated remote sandbox, not on the harness head. Pi exposes pluggable `Operations` interfaces and a shipped SSH example demonstrates delegating them over a transport, so no Pi fork is needed — only a new transport and wiring.
 
 ## Decision
 

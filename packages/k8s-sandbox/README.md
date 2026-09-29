@@ -2,7 +2,7 @@
 
 Routes Pi tool execution (read/write/edit/bash/ls/grep/find) to a remote
 Kubernetes pod via `kubectl exec`, using Pi's native `Operations` seam. Part of
-the serverless harness (Milestone 2). See
+MOCA (Milestone 2). See
 [`docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md`](../../docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md).
 
 ## Use

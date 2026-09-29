@@ -1,5 +1,5 @@
 [Unit]
-Description=Serverless harness supervisor (P6 VM process manager)
+Description=MOCA supervisor (P6 VM process manager)
 # Redis is a bare podman container started by start_redis() in setup-vm.sh, not a systemd
 # unit -- there is nothing here for Requires= to name. The client retries on connect, so
 # ordering against Redis is not load-bearing.

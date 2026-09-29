@@ -1,5 +1,5 @@
 ---
-description: Promote this project's Claude Code workflow into the serverless harness
+description: Promote this project's Claude Code workflow into MOCA
 argument-hint: <entry-prompt> [--dry-run] [--deny <skill>] [--sandbox-image <ref>]
 allowed-tools: Bash(pnpm --dir:*), Bash(kubectl port-forward:*), Bash(kubectl exec:*), Bash(test:*), Bash(ls:*), Bash(lsof:*), Bash(pwd), Bash(printenv:*), Bash(echo:*), Bash(git init:*)
 ---

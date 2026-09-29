@@ -2,7 +2,7 @@
 
 Version: 1.0 — June 17, 2026
 Status: Design (approved for implementation planning)
-Scope: Wrap the serverless harness as a Knative Serving service that scales to zero,
+Scope: Wrap MOCA as a Knative Serving service that scales to zero,
 triggered by HTTP requests carrying a user message.
 Parent plan: [MOCA: Revised Plan](../../../docs/research/2026-06-10-moca-revised-plan.md) §6 M3 (Knative serverless wrapper + `user_message` trigger)
 Predecessor: [M3 Design — Persistent Channel](2026-06-17-m3-persistent-channel-design.md)

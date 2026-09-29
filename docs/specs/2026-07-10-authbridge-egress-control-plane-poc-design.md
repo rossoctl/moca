@@ -44,7 +44,7 @@
 ## 1. Goal
 
 Prove, end-to-end and single-tenant, that **Rosso Cortex / AuthBridge** can be the concrete mechanism for
-the zero-trust credential plane on the serverless harness — doing both **credential injection** and
+the zero-trust credential plane on MOCA — doing both **credential injection** and
 **action control** on the harness's HTTP egress hops, with the credential itself never held by any
 model-influenced workload. The PoC is a **reference slice** (approach B): every seam is the shape it would
 harden into, even though the credential is static and the control plugin's _judge_ is canned.

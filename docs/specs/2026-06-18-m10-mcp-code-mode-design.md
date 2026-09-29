@@ -2,7 +2,7 @@
 
 Version: 1.1 — June 19, 2026
 Status: Design (approved for implementation planning)
-Scope: How MCP tool calls are originated in the serverless harness — as **code the model
+Scope: How MCP tool calls are originated in MOCA — as **code the model
 runs in the sandbox**, not as harness-native tool calls and not through a standalone
 terminating gateway — and the **credential/identity model** that injects per-user,
 unattended-session credentials at egress.
