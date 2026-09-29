@@ -16,6 +16,7 @@ moca/
 │   ├── knative-server/   # Knative HTTP entrypoint (@moca/knative-server)
 │   ├── session-backend/  # Redis session storage (@moca/session-backend)
 │   ├── work-queue/       # Redis Streams work queue (@moca/work-queue)
+│   ├── sandbox-relay/    # gRPC relay between control plane and remote-worker sandboxes (@moca/sandbox-relay)
 │   ├── supervisor/       # P6 VM process manager / socket-handoff supervisor (@moca/supervisor)
 │   ├── control-plane/    # Multi-user control plane, credential issuance (@moca/control-plane)
 │   ├── config-bundle/    # Promoted config bundle loading (@moca/config-bundle)
@@ -25,10 +26,12 @@ moca/
 ├── deploy/
 │   ├── knative/          # Kubernetes/Knative/KEDA deployment (experiment drivers moved to
 │   │                     # rossoctl/moca-experiments, 2026-09-25)
-│   ├── vm/                # P6 single-VM systemd deployment
-│   └── microvm/           # P4 Firecracker microVM deployment
+│   ├── vm/               # P6 single-VM systemd deployment
+│   ├── microvm/          # P4 Firecracker microVM deployment
+│   ├── compose/          # Docker Compose trial of the P6 runtime (no root, five minutes)
+│   └── claude/           # Claude Code workflow-promotion tooling (the /promote command)
 ├── pi-fork/              # Git submodule: Pi AI framework (must be built)
-└── Dockerfile             # Container image (node:22-alpine)
+└── Dockerfile            # Container image (node:22-alpine)
 ```
 
 ## Key Commands
