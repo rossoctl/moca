@@ -301,7 +301,7 @@ Behaviour and economics are backed by reproducible experiments rather than claim
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`docs/experiment-results.md`](docs/experiment-results.md)** — E2 (reconstruction cost) and E5
-  (budget enforcement); the `@moca/experiments` workspace these ran from moved to
+  (budget enforcement); the `@sh/experiments` workspace these ran from moved to
   [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments)
   on 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`deploy/knative/SMOKE.md`](deploy/knative/SMOKE.md)** — the 6/6 cold-start + resume smoke claims.

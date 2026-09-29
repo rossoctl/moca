@@ -110,7 +110,7 @@ export function resolveHomeDir(args: Pick<PromoteArgs, 'home'>, home: string): s
  *
  * This scheme is lossy -- `/a/my-project` and `/a/my/project` both slug to `-a-my-project` -- and
  * that is INHERITED ON PURPOSE. Verified against a real install: the directory Claude Code created
- * for this repo is `-Users-paolo-Projects-aiplatform-moca`, hyphen in the final
+ * for this repo is `-Users-paolo-Projects-aiplatform-serverless-harness`, hyphen in the final
  * segment and all. Our job is to FIND the directory Claude Code already made, so a "safer",
  * collision-free scheme would simply miss it and silently promote no memory at all. Do not
  * "improve" this.
