@@ -15,12 +15,20 @@ moca/
 │   ├── k8s-sandbox/      # K8s pod exec client (@moca/k8s-sandbox)
 │   ├── knative-server/   # Knative HTTP entrypoint (@moca/knative-server)
 │   ├── session-backend/  # Redis session storage (@moca/session-backend)
-│   ├── mocactl/          # MOCA terminal client for the control plane (@moca/mocactl)
-│   └── work-queue/       # Redis Streams work queue (@moca/work-queue)
-├── deploy/knative/       # Deployment scripts and smoke tests (experiment drivers moved to
-│                         # rossoctl/moca-experiments, 2026-09-25)
+│   ├── work-queue/       # Redis Streams work queue (@moca/work-queue)
+│   ├── supervisor/       # P6 VM process manager / socket-handoff supervisor (@moca/supervisor)
+│   ├── control-plane/    # Multi-user control plane, credential issuance (@moca/control-plane)
+│   ├── config-bundle/    # Promoted config bundle loading (@moca/config-bundle)
+│   ├── ibac-stub/        # IBAC stub (@moca/ibac-stub)
+│   └── mocactl/          # MOCA terminal client for the control plane (@moca/mocactl)
+├── remote-worker/        # Go module: container + microVM sandbox workers, vmpoolctl
+├── deploy/
+│   ├── knative/          # Kubernetes/Knative/KEDA deployment (experiment drivers moved to
+│   │                     # rossoctl/moca-experiments, 2026-09-25)
+│   ├── vm/                # P6 single-VM systemd deployment
+│   └── microvm/           # P4 Firecracker microVM deployment
 ├── pi-fork/              # Git submodule: Pi AI framework (must be built)
-└── Dockerfile            # Container image (node:22-alpine)
+└── Dockerfile             # Container image (node:22-alpine)
 ```
 
 ## Key Commands

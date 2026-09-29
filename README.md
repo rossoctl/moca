@@ -1,4 +1,4 @@
-# MOCA
+# MOCA — Micro Orchestrator for Cloud Agents
 
 **Run stateful AI coding agents serverless — scale to zero between turns, resume exactly where they left off.**
 
