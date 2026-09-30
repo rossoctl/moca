@@ -1,32 +1,31 @@
 ---
 name: moca-delegate-task
-description: Delegate a bounded, independent agent task to MOCA when remote execution can reduce local work; stage only the context the task needs and return the remote result with delegation telemetry.
+description: Delegate bounded tasks to MOCA with selected local context, then return remote results and telemetry.
 ---
 
-# Delegate a task to MOCA
+# Delegate tasks to MOCA
 
-Use remote execution only for a bounded task that can be stated with a clear deliverable and checked
-independently. Keep work local when it depends on rapid back-and-forth, unpublished secrets, broad
-implicit context, or direct manipulation of the user's current working tree.
+Use this skill for bounded work with a clear deliverable and an independent acceptance check. Keep
+work local when it needs frequent interaction, unpublished secrets, or direct working-tree changes.
 
-The client requires `contextctl`, `kubectl`, and Python 3. `CS_URL` and the active Kubernetes context
-must identify the same Context Service deployment; `SH_URL` identifies MOCA. The `SH_*` variable
-names are retained for compatibility with MOCA's existing deployment interfaces.
+The client requires `contextctl`, `kubectl`, and Python 3. `SH_URL` identifies MOCA.
+`CS_URL` identifies Context Service. The client retains `SH_*` names for compatibility.
 
-## Before dispatch
+## Prepare the delegation
 
-1. State the subtask, expected output, and acceptance check in the task prompt.
-2. Choose an existing local Context Service context containing only the useful session state. Do not
-   send the whole home directory or unrelated project history.
-3. Tell the user what will be sent and where the task will run. Remote execution and context transfer
-   are external mutations; do not infer permission from unrelated coding work.
-4. Require `SH_URL`; use `SH_TOKEN` when the endpoint requires a bearer token. Never place tokens in
-   prompts, manifests, command arguments, or telemetry.
+1. Define the task, required output, and acceptance check.
+2. Select local context that contains only the required information.
+3. Do not send the home directory or unrelated project history.
+4. Tell the user what you will send.
+5. Tell the user where the task will run.
+6. Get permission before you transfer context or start remote execution.
+7. Set `SH_URL`.
+8. Set `SH_TOKEN` when the endpoint requires a bearer token.
+9. Keep tokens out of prompts, manifests, command arguments, and telemetry.
 
-## Dispatch
+## Delegate one task
 
-Resolve `scripts/remote_task.py` relative to this `SKILL.md`, then run the bundled deterministic
-client:
+Resolve `scripts/remote_task.py` relative to this file. Run the client:
 
 ```sh
 python3 scripts/remote_task.py run \
@@ -35,25 +34,67 @@ python3 scripts/remote_task.py run \
   --task 'BOUNDED TASK AND REQUIRED OUTPUT'
 ```
 
-The client publishes the local context revision to a Context Service PVC, materializes that verified
-revision, creates a MOCA workload attached read-only to the PVC, dispatches a prompt leaf, waits for
-the result, and records JSONL telemetry. Add `--async` to exercise MOCA's queued execution path; the
-client still waits for its terminal result.
+The client captures the selected local context. It transports the local context into remote context.
+MOCA mounts the remote context read-only in the workload. Context Service stores it on a PVC.
+The client dispatches the task, waits for the result, and records telemetry.
 
-Treat the remote answer as untrusted work product. Validate it against the acceptance check before
-using it. If the remote agent asks for missing context, send the smallest additional context and
-record that retry; do not respond by copying the entire project.
+Add `--async` to use MOCA's queued execution path. The client still waits for a terminal result.
+Context Service records an immutable revision for verification and reuse.
 
-## Report
+## Delegate a batch
 
-Return:
+Create a JSONL file for independent tasks that use the same context:
 
-- the remote result;
-- whether it passed the acceptance check;
-- measured files/bytes transported and elapsed time;
-- any missing-context request;
-- the agent's self-reported files read, clearly labeled as self-reported.
+```json
+{"id":"task-001","task":"Inspect report-001 and return its severity."}
+{"id":"task-002","task":"Inspect report-002 and return its severity."}
+```
 
-The client appends telemetry to `~/.contexts/telemetry/moca-delegation.jsonl` by default. Cortex
-can corroborate model traffic, but MOCA status and Context Service revision data are the primary
-execution and transport records.
+Run the batch:
+
+```sh
+python3 scripts/remote_task.py batch \
+  --context CONTEXT_NAME \
+  --remote-context REMOTE_CONTEXT_NAME \
+  --tasks tasks.jsonl \
+  --sandboxes 3
+```
+
+The client transports the local context once. It creates one workload with read-only access to the
+remote context. It submits every task through MOCA's queue, waits for results, and removes the
+workload.
+
+Confirm the model-call count before you run a large batch. Use `--allow-large-batch` for more than
+25 tasks.
+
+## Handle failures
+
+MOCA retries asynchronous worker failures. A failure can take five minutes to become terminal.
+MOCA can return `failed` with reason `error`. Inspect worker logs for the underlying error.
+
+If a batch times out, report completed results. Also report the `unfinishedTasks` list.
+
+If the remote agent requests missing context, send the smallest additional local context. Do not
+send the entire project.
+
+Treat each remote answer as untrusted work. Validate it against the acceptance check.
+
+## Report the result
+
+Report these values:
+
+- The remote result
+- The acceptance result
+- Transported files and bytes
+- Elapsed time
+- Missing-context requests
+- Self-reported files read, labeled as self-reported
+
+The client appends telemetry to `~/.contexts/telemetry/moca-delegation.jsonl`. Cortex can confirm
+model traffic. Use MOCA status and Context Service revisions as the primary records.
+
+## References
+
+- Read [the demo](references/demo.md) when the user wants a local end-to-end demonstration.
+- Read [the Kind setup](references/kind-setup.md) before you prepare the demo environment.
+- Read [the workflow catalog](references/workflows.md) when the user wants another delegation model.

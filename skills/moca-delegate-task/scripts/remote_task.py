@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage Context Service state and run a bounded prompt in MOCA."""
+"""Delegate a bounded prompt to MOCA with context transported by Context Service."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ from typing import Any
 
 
 NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
-TERMINAL = {"responded", "done", "solved", "failed", "paused"}
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+TERMINAL = {"responded", "done", "solved", "failed", "aborted", "paused"}
+SUCCESS_TERMINAL = {"responded", "done", "solved"}
 
 
 class RemoteTaskError(RuntimeError):
@@ -45,6 +47,9 @@ def contextctl(*args: str) -> dict[str, Any]:
 
 def request(base_url: str, method: str, path: str, body: Any | None = None) -> Any:
     headers = {"accept": "application/json"}
+    host = os.environ.get("SH_HOST", "").strip()
+    if host:
+        headers["host"] = host
     token = os.environ.get("SH_TOKEN", "").strip()
     if token:
         headers["authorization"] = f"Bearer {token}"
@@ -153,69 +158,148 @@ def wait_for_result(base_url: str, session_id: str, timeout: float, interval: fl
     raise RemoteTaskError(f"timed out waiting for session {session_id}")
 
 
-def run_task(args: argparse.Namespace) -> int:
-    if not NAME.fullmatch(args.remote_context):
-        raise RemoteTaskError("--remote-context must be a lowercase Kubernetes name")
-    base_url = args.sh_url or os.environ.get("SH_URL", "")
-    if not base_url:
-        raise RemoteTaskError("SH_URL or --sh-url is required")
-    telemetry = Path(args.telemetry).expanduser()
-    delegation_id = f"d-{uuid.uuid4().hex[:12]}"
-    session_id = args.session_id or f"remote/{delegation_id}"
-    workload_id = f"delegate-{delegation_id[2:]}"
-    started = time.time()
-
-    local = contextctl("ctx", "get", args.context, "--backend", "filesystem")
+def stage_context(
+    context: str,
+    remote_context: str,
+    namespace: str,
+    delegation_id: str,
+    telemetry: Path,
+) -> tuple[str, str, int, int]:
+    """Capture local context and materialize it as remote context."""
+    local = contextctl("ctx", "get", context, "--backend", "filesystem")
     context_type = "state" if local.get("type") == "history" else local.get("type")
     try:
         remote = contextctl(
-            "ctx", "get", args.remote_context, "--backend", "pvc", "--namespace", args.namespace
+            "ctx", "get", remote_context, "--backend", "pvc", "--namespace", namespace
         )
     except RemoteTaskError as exc:
         if "not found" not in str(exc).lower() and "404" not in str(exc):
             raise
         remote = contextctl(
-            "ctx", "create", args.remote_context, "--type", str(context_type),
-            "--backend", "pvc", "--namespace", args.namespace,
+            "ctx", "create", remote_context, "--type", str(context_type),
+            "--backend", "pvc", "--namespace", namespace,
         )
 
     sync_start = time.time()
     run_command([
-        os.environ.get("CONTEXTCTL", "contextctl"), "ctx", "sync", "push", args.context,
-        "--remote-name", args.remote_context, "--namespace", args.namespace,
+        os.environ.get("CONTEXTCTL", "contextctl"), "ctx", "sync", "push", context,
+        "--remote-name", remote_context, "--namespace", namespace,
     ])
     remote = contextctl(
-        "ctx", "get", args.remote_context, "--backend", "pvc", "--namespace", args.namespace
+        "ctx", "get", remote_context, "--backend", "pvc", "--namespace", namespace
     )
-    revision, files, byte_count = latest_stats(contextctl("ctx", "get", args.context, "--backend", "filesystem"))
-    remote_namespace = str(remote.get("namespace") or args.namespace)
-    workspace_path = materialize(remote_namespace, claim_name(remote), delegation_id)
+    revision, files, byte_count = latest_stats(
+        contextctl("ctx", "get", context, "--backend", "filesystem")
+    )
+    remote_namespace = str(remote.get("namespace") or namespace)
+    claim = claim_name(remote)
+    workspace_path = materialize(remote_namespace, claim, delegation_id)
     emit(telemetry, {
-        "event": "context_staged", "delegationId": delegation_id, "sessionId": session_id,
-        "context": args.context, "remoteContext": args.remote_context, "revision": revision,
-        "files": files, "bytes": byte_count, "elapsedMs": round((time.time() - sync_start) * 1000),
+        "event": "context_staged", "delegationId": delegation_id,
+        "context": context, "remoteContext": remote_context, "revision": revision,
+        "files": files, "bytes": byte_count,
+        "elapsedMs": round((time.time() - sync_start) * 1000),
     })
+    return claim, workspace_path, files, byte_count
 
+
+def create_ready_workload(
+    base_url: str,
+    workload_id: str,
+    claim: str,
+    sandboxes: int,
+    timeout: float,
+    interval: float,
+    cleanup_on_failure: bool = True,
+) -> dict[str, Any]:
     workload = request(base_url, "POST", "/workloads", {
         "name": workload_id,
-        "sandboxes": 1,
-        "workspace": {"claimName": claim_name(remote), "readOnly": True},
+        "sandboxes": sandboxes,
+        "workspace": {"claimName": claim, "readOnly": True},
     })
-    terminal = False
     try:
-        deadline = time.monotonic() + args.timeout
+        deadline = time.monotonic() + timeout
         while str(workload.get("status", "")).lower() != "ready" or workload.get("readyReplicas", 0) < 1:
             if time.monotonic() >= deadline:
                 raise RemoteTaskError(f"timed out waiting for workload {workload_id}")
-            time.sleep(args.poll_interval)
+            time.sleep(interval)
             workload = request(base_url, "GET", f"/workloads/{workload_id}")
+    except Exception:
+        if cleanup_on_failure:
+            try:
+                request(base_url, "DELETE", f"/workloads/{workload_id}")
+            except RemoteTaskError:
+                pass
+        raise
+    return workload
 
-        prompt = (
-            f"{args.task.rstrip()}\n\n"
-            f"Relevant captured context is mounted read-only at {workspace_path}. "
-            "Inspect only the files needed for this task. End your answer with exactly one line "
-            "`CONTEXT_FILES_USED: path1, path2` (or `CONTEXT_FILES_USED: none`)."
+
+def task_prompt(task: str, workspace_path: str) -> str:
+    return (
+        f"{task.rstrip()}\n\n"
+        f"Relevant captured context is mounted read-only at {workspace_path}. "
+        "Inspect only the files needed for this task. End your answer with exactly one line "
+        "`CONTEXT_FILES_USED: path1, path2` (or `CONTEXT_FILES_USED: none`)."
+    )
+
+
+def load_tasks(path: str) -> list[dict[str, str]]:
+    tasks: list[dict[str, str]] = []
+    seen: set[str] = set()
+    with Path(path).open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RemoteTaskError(f"{path}:{line_number}: invalid JSON") from exc
+            task_id = item.get("id") if isinstance(item, dict) else None
+            prompt = item.get("task") if isinstance(item, dict) else None
+            if not isinstance(task_id, str) or not NAME.fullmatch(task_id):
+                raise RemoteTaskError(f"{path}:{line_number}: id must be a lowercase Kubernetes name")
+            if task_id in seen:
+                raise RemoteTaskError(f"{path}:{line_number}: duplicate id {task_id}")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise RemoteTaskError(f"{path}:{line_number}: task must be a non-empty string")
+            seen.add(task_id)
+            tasks.append({"id": task_id, "task": prompt})
+    if not tasks:
+        raise RemoteTaskError(f"{path}: no tasks found")
+    return tasks
+
+
+def validate_session_id(value: str) -> str:
+    if not SESSION_ID.fullmatch(value):
+        raise RemoteTaskError(
+            "session ID must be 1-128 letters, numbers, dots, underscores, or hyphens; slashes are not allowed"
         )
+    return value
+
+
+def run_task(args: argparse.Namespace) -> int:
+    if not NAME.fullmatch(args.remote_context):
+        raise RemoteTaskError("--remote-context must be a lowercase Kubernetes name")
+    if args.sandboxes < 1:
+        raise RemoteTaskError("--sandboxes must be at least 1")
+    base_url = args.sh_url or os.environ.get("SH_URL", "")
+    if not base_url:
+        raise RemoteTaskError("SH_URL or --sh-url is required")
+    delegation_id = f"d-{uuid.uuid4().hex[:12]}"
+    session_id = validate_session_id(args.session_id or f"remote-{delegation_id[2:]}")
+    telemetry = Path(args.telemetry).expanduser()
+    workload_id = f"delegate-{delegation_id[2:]}"
+    started = time.time()
+    claim, workspace_path, files, byte_count = stage_context(
+        args.context, args.remote_context, args.namespace, delegation_id, telemetry
+    )
+    create_ready_workload(
+        base_url, workload_id, claim, args.sandboxes, args.timeout, args.poll_interval,
+        cleanup_on_failure=not args.keep_workload,
+    )
+    terminal = False
+    try:
+        prompt = task_prompt(args.task, workspace_path)
         body = {"sessionId": session_id, "kind": "prompt", "prompt": prompt, "workloadId": workload_id}
         if args.async_run:
             body["async"] = True
@@ -251,7 +335,109 @@ def run_task(args: argparse.Namespace) -> int:
         "delegationId": delegation_id, "sessionId": session_id, "workloadId": workload_id,
         "workspacePath": workspace_path, "result": result, "telemetry": str(telemetry),
     }, indent=2))
-    return 0
+    status_name = str(result.get("status", "")) if isinstance(result, dict) else ""
+    return 0 if status_name in SUCCESS_TERMINAL else 1
+
+
+def run_batch(args: argparse.Namespace) -> int:
+    if not NAME.fullmatch(args.remote_context):
+        raise RemoteTaskError("--remote-context must be a lowercase Kubernetes name")
+    if args.sandboxes < 1:
+        raise RemoteTaskError("--sandboxes must be at least 1")
+    tasks = load_tasks(args.tasks)
+    if len(tasks) > 25 and not args.allow_large_batch:
+        raise RemoteTaskError(
+            f"{len(tasks)} tasks require --allow-large-batch because each task makes a model call"
+        )
+    base_url = args.sh_url or os.environ.get("SH_URL", "")
+    if not base_url:
+        raise RemoteTaskError("SH_URL or --sh-url is required")
+
+    telemetry = Path(args.telemetry).expanduser()
+    delegation_id = f"d-{uuid.uuid4().hex[:12]}"
+    workload_id = f"delegate-{delegation_id[2:]}"
+    started = time.time()
+    claim, workspace_path, files, byte_count = stage_context(
+        args.context, args.remote_context, args.namespace, delegation_id, telemetry
+    )
+    create_ready_workload(
+        base_url, workload_id, claim, args.sandboxes, args.timeout, args.poll_interval,
+        cleanup_on_failure=not args.keep_workload,
+    )
+
+    session_ids: dict[str, str] = {}
+    results: dict[str, Any] = {}
+    try:
+        for item in tasks:
+            session_id = validate_session_id(f"batch-{delegation_id[2:]}-{item['id']}")
+            session_ids[item["id"]] = session_id
+            request(base_url, "POST", "/runs", {
+                "sessionId": session_id,
+                "kind": "prompt",
+                "prompt": task_prompt(item["task"], workspace_path),
+                "workloadId": workload_id,
+                "async": True,
+            })
+            emit(telemetry, {
+                "event": "submitted", "delegationId": delegation_id,
+                "sessionId": session_id, "workloadId": workload_id, "taskId": item["id"],
+                "async": True,
+            })
+
+        pending = set(session_ids)
+        deadline = time.monotonic() + args.timeout
+        while pending and time.monotonic() < deadline:
+            for task_id in list(pending):
+                query = urllib.parse.urlencode({"sessionId": session_ids[task_id]})
+                result = request(base_url, "GET", f"/runs/status?{query}")
+                if isinstance(result, dict) and result.get("status") in TERMINAL:
+                    results[task_id] = result
+                    pending.remove(task_id)
+                    emit(telemetry, {
+                        "event": "completed", "delegationId": delegation_id,
+                        "sessionId": session_ids[task_id], "workloadId": workload_id,
+                        "taskId": task_id, "status": result.get("status"),
+                        "selfReportedFilesUsed": used_files(result),
+                    })
+            if pending:
+                print(f"Completed {len(results)}/{len(tasks)} tasks", file=sys.stderr)
+                time.sleep(args.poll_interval)
+    finally:
+        if not args.keep_workload:
+            try:
+                request(base_url, "DELETE", f"/workloads/{workload_id}")
+            except RemoteTaskError as cleanup_error:
+                emit(telemetry, {
+                    "event": "cleanup_failed", "delegationId": delegation_id,
+                    "workloadId": workload_id, "error": str(cleanup_error),
+                })
+
+    status_counts: dict[str, int] = {}
+    for result in results.values():
+        status_name = str(result.get("status", "unknown"))
+        status_counts[status_name] = status_counts.get(status_name, 0) + 1
+    failed = len(pending) + sum(
+        count for status_name, count in status_counts.items() if status_name not in SUCCESS_TERMINAL
+    )
+    summary = {
+        "delegationId": delegation_id,
+        "workloadId": workload_id,
+        "workspacePath": workspace_path,
+        "transportedFiles": files,
+        "transportedBytes": byte_count,
+        "tasks": len(tasks),
+        "completed": len(results),
+        "failed": failed,
+        "statusCounts": status_counts,
+        "timedOut": bool(pending),
+        "unfinishedTasks": sorted(pending),
+        "totalElapsedMs": round((time.time() - started) * 1000),
+        "results": results,
+        "telemetry": str(telemetry),
+    }
+    emit(telemetry, {"event": "batch_completed", **{k: v for k, v in summary.items() if k != "results"}})
+    print(json.dumps(summary, indent=2))
+    return 1 if failed else 0
 
 
 def status(args: argparse.Namespace) -> int:
@@ -268,17 +454,34 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="stage context and dispatch a remote task")
     run.add_argument("--context", required=True, help="local filesystem context")
-    run.add_argument("--remote-context", required=True, help="PVC context name")
+    run.add_argument("--remote-context", required=True, help="remote context name")
     run.add_argument("--task", required=True)
     run.add_argument("--session-id")
     run.add_argument("--namespace", default=os.environ.get("CS_NAMESPACE", "serverless-harness"))
     run.add_argument("--sh-url")
     run.add_argument("--async", dest="async_run", action="store_true")
+    run.add_argument("--sandboxes", type=int, default=1)
     run.add_argument("--keep-workload", action="store_true")
     run.add_argument("--timeout", type=float, default=900)
     run.add_argument("--poll-interval", type=float, default=2)
     run.add_argument("--telemetry", default="~/.contexts/telemetry/moca-delegation.jsonl")
     run.set_defaults(handler=run_task)
+    batch = commands.add_parser("batch", help="stage context once and dispatch JSONL tasks")
+    batch.add_argument("--context", required=True, help="local filesystem context")
+    batch.add_argument("--remote-context", required=True, help="remote context name")
+    batch.add_argument("--tasks", required=True, help="JSONL file with id and task fields")
+    batch.add_argument("--sandboxes", type=int, default=3)
+    batch.add_argument(
+        "--allow-large-batch", action="store_true",
+        help="confirm intentional dispatch of more than 25 model calls",
+    )
+    batch.add_argument("--namespace", default=os.environ.get("CS_NAMESPACE", "serverless-harness"))
+    batch.add_argument("--sh-url")
+    batch.add_argument("--keep-workload", action="store_true")
+    batch.add_argument("--timeout", type=float, default=1800)
+    batch.add_argument("--poll-interval", type=float, default=2)
+    batch.add_argument("--telemetry", default="~/.contexts/telemetry/moca-delegation.jsonl")
+    batch.set_defaults(handler=run_batch)
     get = commands.add_parser("status", help="read an asynchronous task status")
     get.add_argument("session_id")
     get.add_argument("--sh-url")

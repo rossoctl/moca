@@ -1,91 +1,109 @@
-# Context transport and remote-agent workflows
+# Delegate tasks to MOCA
 
-Context Service and MOCA can support several workflows depending on where context begins, where an
-agent runs, and whether the context is private or shared. The current delegation skill implements
-only the first workflow.
+`moca-delegate-task` sends one task or many independent tasks from a local agent to MOCA. MOCA uses
+Context Service to transport the required local context. MOCA mounts the remote context read-only
+and returns the results.
 
-| Workflow | Context and execution flow | Typical use |
-| --- | --- | --- |
-| **Single-user local-to-remote task delegation** *(implemented)* | Select local context → copy a point-in-time revision to a remote PVC → run one bounded task in an isolated MOCA sandbox → return the result | Offload a test, investigation, or other independent subtask while continuing local work |
-| **Preloaded remote dataset for repeated tasks** | Load a dataset into a remote PVC once → attach it to multiple sandboxes over time | Avoid repeatedly uploading a large corpus, repository, benchmark, or test dataset |
-| **Shared read-only reference context** | Maintain one remote context → mount it read-only into multiple agents' sandboxes | Let many agents analyze the same trusted source without allowing them to modify it |
-| **Shared read-write collaboration workspace** | Attach several agents or users to one writable remote context | Let agents contribute files, intermediate results, or coordinated work to a common workspace |
-| **Remote-result return for local continuation** | Run remotely → capture the resulting context revision → sync selected results back to the local harness | Continue locally after cloud compute, hardware access, or remote validation |
-| **Agent-to-agent context handoff** | Capture context from one agent → transport it to another local or remote agent | Move work between harnesses, specialized agents, clusters, or execution environments |
-| **Parallel analysis with result aggregation** | Fan one base context out to several remote agents → collect their outputs into a result context | Compare approaches, divide a large investigation, or run independent reviews in parallel |
-| **Continuous local-to-remote context replication** | Periodically copy changed context to remote storage instead of waiting for task dispatch | Maintain a recoverable remote copy and reduce staging time when delegation is needed |
+Use remote delegation to:
 
-## Current skill
+- Run independent tasks in parallel.
+- Use cloud compute, hardware, capacity, data, services, or private networks.
+- Isolate remote work from your local environment.
 
-`moca-delegate-task` is a **single-user local-to-remote task delegation** workflow. It:
+```text
+MOCA delegation: local agent → remote context (Context Service) → MOCA sandbox → result
+```
 
-1. Selects an existing local Context Service context.
-2. Publishes a point-in-time revision to a remote PVC.
-3. Creates an isolated MOCA workload with that PVC mounted read-only.
-4. Runs a bounded task and returns its result.
-5. Records transport and execution telemetry.
+The skill supports one remote task and batch fan-out from a shared remote context.
 
-The other workflows are design possibilities, not behavior implemented by this skill.
+## Requirements
+
+- A reachable MOCA deployment
+- [`contextctl`](https://github.com/rossoctl/context-service#install)
+- A reachable [Context Service](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md)
+- `kubectl` access to the cluster that runs MOCA and Context Service
+- Python 3
+
+You can capture local context without Kubernetes. Delegation requires MOCA and Context Service.
 
 ## Install the skill
 
-Clone the experimental branch, then link the skill into the shared agent configuration:
+Clone the experimental branch:
 
 ```sh
-git clone --branch experiment/moca-context-delegation \
-  https://github.com/moonlight16/moca.git
+git clone --branch experiment/moca-context-delegation https://github.com/moonlight16/moca.git
 cd moca
+```
+
+### Claude Code
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/moca-delegate-task" ~/.claude/skills/moca-delegate-task
+```
+
+Invoke the skill with `/moca-delegate-task`.
+
+### Codex
+
+```sh
 mkdir -p ~/.agents/skills
 ln -s "$PWD/skills/moca-delegate-task" ~/.agents/skills/moca-delegate-task
 ```
 
-Restart the agent application after adding the skill. The helper requires Python 3, `contextctl`,
-and `kubectl` configured for the cluster where MOCA and Context Service run.
+Invoke the skill with `$moca-delegate-task`.
+
+### OpenCode
+
+```sh
+mkdir -p ~/.config/opencode/skills
+cp -R "$PWD/skills/moca-delegate-task" ~/.config/opencode/skills/
+```
+
+Ask OpenCode to use the `moca-delegate-task` skill.
 
 ## Configure access
 
-Set the Context Service and MOCA connection details for the target environment:
+Set the connection details for MOCA and Context Service:
 
 ```sh
 export CS_URL=https://context-service.example.com
 export CS_NAMESPACE=moca
 export SH_URL=https://moca.example.com
-export SH_TOKEN=<bearer-token> # omit when the endpoint does not require one
+export SH_TOKEN=<bearer-token> # omit when authentication is disabled
 ```
 
-For the agentic-node test environment, `SH_URL` is
-`https://12c73248-ca-tor.lb.appdomain.cloud/moca`. Keep credentials outside prompts and committed
-files.
+Keep credentials outside prompts and committed files. Configure `CS_URL` and your active Kubernetes
+context for the same cluster.
 
-The skill delegates from an existing local filesystem context. Confirm that the intended context
-exists and contains only the files the remote task needs:
+Protected MOCA routes require `SH_TOKEN`. Without it, a route can return `403 RBAC: access denied`.
+Ask the MOCA operator for a token. The helper does not perform the MOCA login flow.
 
-```sh
-contextctl ctx get CONTEXT_NAME --backend filesystem
-```
+## Delegate a task
 
-## Use it from an agent
-
-Invoke the skill explicitly and provide a bounded task with a checkable result:
+Create or select local context. Then ask your agent to use the skill:
 
 ```text
-Use $moca-delegate-task to run this task remotely using local context CONTEXT_NAME.
-Publish it as remote context REMOTE_CONTEXT_NAME. Analyze the failing tests and return
-the likely cause with supporting file references.
+Use the moca-delegate-task skill to run this bounded task remotely using local context CONTEXT_NAME.
+Publish it as REMOTE_CONTEXT_NAME. Analyze the failing tests and return the likely cause with file
+references.
 ```
 
-The agent should state what context it will transport before dispatching. It then runs the bundled
-helper, checks the remote result, and reports the files and bytes transported, elapsed time, and
-self-reported files read.
+The skill reports results, transported files, bytes, elapsed time, and self-reported files read. It
+stores telemetry in `~/.contexts/telemetry/moca-delegation.jsonl`.
 
-The helper can also be exercised directly:
+## Run the demo
 
-```sh
-python3 ~/.agents/skills/moca-delegate-task/scripts/remote_task.py run \
-  --context CONTEXT_NAME \
-  --remote-context REMOTE_CONTEXT_NAME \
-  --namespace "$CS_NAMESPACE" \
-  --task 'Analyze the failing tests and identify the likely cause.'
-```
+The [Kind demo](references/demo.md) fans one local context out to 12 Claude tasks. The demo includes
+an explicit 100-task option.
 
-Telemetry is appended to `~/.contexts/telemetry/moca-delegation.jsonl`.
+## Explore other workflows
+
+See [Context and execution workflows](references/workflows.md) for more workflow patterns.
+
+## References
+
+- [Install `contextctl`](https://github.com/rossoctl/context-service#install)
+- [Run Context Service on Kind](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#guided-kind-quickstart)
+- [Deploy Context Service to Kubernetes](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#deploy-to-kubernetes)
+- [Configure Context Service clients](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#cli)
