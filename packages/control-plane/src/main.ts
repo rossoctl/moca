@@ -230,11 +230,37 @@ export function credentialStoreFromEnv(env: NodeJS.ProcessEnv): CredentialStore 
 export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
-  const client = createClient({ url: env.REDIS_URL ?? 'redis://127.0.0.1:6379' });
-  // Connect eagerly and log; readyz reports the failure, so a Redis outage is visible rather than
-  // turning every session route into an opaque 500.
-  void client.connect().catch((err) => console.error('[control-plane] redis connect failed', err));
+  const client = createClient({
+    url: env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+    // Retry FOREVER, backing off to 2 s. This is a long-running server, and on Kubernetes it is
+    // routinely up before Redis (setup.sh applies every workload at once): a client that gave up --
+    // as node-redis does on a refused FIRST connect -- left /readyz failing until someone restarted
+    // the pod, while /healthz kept the kubelet from doing so (#423, spike F2). RedisRecordStore's
+    // bounded give-up is right for its callers, which re-arm; nothing here would.
+    socket: { reconnectStrategy: (retries: number) => Math.min(retries * 100, 2000) },
+  });
+  // Without a listener an 'error' event is an uncaught exception and the process exits. The message
+  // only: node-redis socket errors name host:port, never userinfo, and the error object itself is not
+  // logged in case some future one carries the URL (the test checks the password never appears).
+  client.on('error', (err: unknown) =>
+    console.error('[control-plane] redis client error:', (err as Error)?.message ?? String(err)),
+  );
+  // Connect eagerly. With the strategy above this settles only once connected (or on close); readyz
+  // reports the outage meanwhile, so it is visible rather than an opaque 500 on every session route.
+  void client
+    .connect()
+    .catch((err: unknown) =>
+      console.error(
+        '[control-plane] redis connect failed:',
+        (err as Error)?.message ?? String(err),
+      ),
+    );
   return {
+    redisReady: () => client.isReady,
+    // destroy, not close: close() waits on queued commands, which never drain while disconnected.
+    close: async () => {
+      if (client.isOpen) client.destroy();
+    },
     index: new OwnershipIndex(client as unknown as CpRedisLike),
     credentials: credentialStoreFromEnv(env),
     identity: new GithubOAuthProvider({

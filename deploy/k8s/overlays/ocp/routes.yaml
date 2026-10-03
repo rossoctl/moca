@@ -1,0 +1,23 @@
+# Hosts are placeholders: setup.sh's generated overlay replaces both with <name>-moca.<apps domain>,
+# the host the TLS certificate is issued for.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: { name: moca, namespace: moca }
+spec:
+  host: moca.apps.example.invalid
+  to: { kind: Service, name: moca-supervisor-tls }
+  port: { targetPort: https }
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  host: moca-control-plane.apps.example.invalid
+  to: { kind: Service, name: moca-control-plane }
+  port: { targetPort: http }
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,53 @@
+# Additive policies (NetworkPolicies union): the base ones stay exactly as tested.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-supervisor-from-router, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: moca-supervisor } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { policy-group.network.openshift.io/ingress: '' } }
+      ports:
+        - { protocol: TCP, port: 8443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-control-plane-from-router, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: moca-control-plane } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { policy-group.network.openshift.io/ingress: '' } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# OpenShift DNS answers on 5353 behind the 53 Service port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-openshift-dns, namespace: moca }
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [moca-supervisor, sandbox-relay, moca-control-plane] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: openshift-dns } }
+      ports:
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-openshift-dns, namespace: moca-sandbox }
+spec:
+  podSelector: { matchLabels: { app: moca-sandbox } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: openshift-dns } }
+      ports:
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }

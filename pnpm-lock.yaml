@@ -255,6 +255,9 @@ importers:
       vitest:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+      yaml:
+        specifier: ^2.5.0
+        version: 2.9.0
 
   packages/work-queue:
     dependencies:

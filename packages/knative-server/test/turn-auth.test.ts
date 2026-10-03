@@ -645,6 +645,7 @@ describe('makeRuntimeReporter', () => {
     vi.mocked(createClient).mockImplementation(
       () =>
         ({
+          on: vi.fn(), // the 'error' listener (#423 Task 16b)
           connect: vi.fn(async () => {
             attempt += 1;
             if (attempt === 1) throw new Error('ECONNREFUSED');
@@ -684,6 +685,7 @@ describe('makeRuntimeReporter', () => {
         const rec = { destroy: vi.fn(), connected: false };
         made.push(rec);
         return {
+          on: vi.fn(), // the 'error' listener (#423 Task 16b)
           connect: vi.fn(async () => {
             if (failConnect) throw new Error('ECONNREFUSED');
             rec.connected = true;
@@ -749,6 +751,7 @@ describe('makeRuntimeReporter', () => {
         };
         made.push(rec);
         return {
+          on: vi.fn(), // the 'error' listener (#423 Task 16b)
           connect: vi.fn(async () => {
             throw new Error('ECONNREFUSED');
           }),

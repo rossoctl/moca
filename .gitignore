@@ -40,3 +40,6 @@ go.work.sum
 
 # Python bytecode cache -- regenerated on every run wherever a .py file lives.
 __pycache__/
+
+# deploy/k8s/setup.sh's per-run overlay and (OCP) self-signed CA
+deploy/k8s/.generated/

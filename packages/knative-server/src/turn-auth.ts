@@ -361,6 +361,8 @@ export function sharedRuntimeReporter(
  */
 export function makeRuntimeReporter(
   redisUrl: string | undefined,
+  // A seam for tests, as in RedisRecordStore: lets a refused connect give up in milliseconds.
+  maxReconnectAttempts = 10,
 ): (sessionId: string, fields: Record<string, string>) => Promise<void> {
   if (!redisUrl) return async () => undefined;
   // HOISTED out of the `if (!ready)` block so the catch can close what it discards. Block-scoped, the
@@ -371,7 +373,30 @@ export function makeRuntimeReporter(
   return async (sessionId, fields) => {
     try {
       if (!ready) {
-        client = createClient({ url: redisUrl });
+        // The 'error' listener and the bounded reconnect travel together (#423, Task 16b; the full
+        // rationale is on `resilientClientOptions` in @moca/session-backend, which this package does
+        // not depend on). Without the listener, node-redis re-emitting a dropped socket as 'error' is
+        // an uncaught exception: every worker that had served a turn crashed on a Redis restart, and
+        // took its in-flight turns with it. With the listener but the default unbounded strategy, a
+        // refused connect() would never settle, so the catch below could never re-arm. Past the
+        // bound the client gives up for good; its next command rejects ClientClosedError, which
+        // lands in the same catch and rebuilds it.
+        client = createClient({
+          url: redisUrl,
+          socket: {
+            reconnectStrategy: (retries: number) =>
+              retries > maxReconnectAttempts
+                ? new Error(`runtime reporter: redis unreachable after ${retries} attempts`)
+                : Math.min(retries * 100, 1000),
+          },
+        });
+        // Display-only data: log one line and carry on. The message only, never the error object or
+        // the URL (node-redis socket errors name host:port, not userinfo; the give-up error above
+        // names neither).
+        client.on('error', (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[redis] runtime reporter: ${message} (display-only; will retry)`);
+        });
         // Captured, because `client` is now mutable and the catch may have cleared it by the time a
         // slow connect() resolves -- in which case `index` would silently never be built.
         const c = client;

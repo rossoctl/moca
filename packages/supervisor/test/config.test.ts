@@ -101,4 +101,28 @@ describe('readConfig', () => {
     // 0 twice is not a collision: the kernel picks two different ephemeral ports.
     expect(readConfig(env({ PORT: '0', SH_ADMIN_PORT: '0' })).adminPort).toBe(0);
   });
+
+  it('binds the admin listener to loopback unless SH_ADMIN_HOST says otherwise', () => {
+    expect(readConfig(env()).adminHost).toBe('127.0.0.1');
+    // Blank is unset, as for every other knob here (readInt): `SH_ADMIN_HOST=` in an env file is
+    // how an operator returns to the default.
+    expect(readConfig(env({ SH_ADMIN_HOST: '' })).adminHost).toBe('127.0.0.1');
+    expect(readConfig(env({ SH_ADMIN_HOST: '   ' })).adminHost).toBe('127.0.0.1');
+  });
+
+  it('accepts IPv4 and IPv6 literals, trimmed', () => {
+    expect(readConfig(env({ SH_ADMIN_HOST: '0.0.0.0' })).adminHost).toBe('0.0.0.0');
+    expect(readConfig(env({ SH_ADMIN_HOST: ' 0.0.0.0 ' })).adminHost).toBe('0.0.0.0');
+    expect(readConfig(env({ SH_ADMIN_HOST: '::' })).adminHost).toBe('::');
+    expect(readConfig(env({ SH_ADMIN_HOST: '10.1.2.3' })).adminHost).toBe('10.1.2.3');
+  });
+
+  it('refuses a hostname or garbage for SH_ADMIN_HOST, naming the variable', () => {
+    // A hostname would make the bind depend on DNS at boot; the kubelet probes a pod IP anyway.
+    expect(() => readConfig(env({ SH_ADMIN_HOST: 'localhost' }))).toThrow(
+      /SH_ADMIN_HOST='localhost'/,
+    );
+    expect(() => readConfig(env({ SH_ADMIN_HOST: '0.0.0.0:8081' }))).toThrow(/SH_ADMIN_HOST/);
+    expect(() => readConfig(env({ SH_ADMIN_HOST: '999.1.1.1' }))).toThrow(/SH_ADMIN_HOST/);
+  });
 });

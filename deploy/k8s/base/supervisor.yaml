@@ -1,0 +1,141 @@
+# The P6 supervisor and its whole forked worker pool, in ONE container: fork() cannot cross
+# containers (ADR-0034). W is SH_WORKERS; capacity beyond one pod is `replicas` (spec §3.1).
+#
+# L4 ONLY. The supervisor routes and admits per CONNECTION, never per request. Never put an L7 hop in
+# front of port 8080 -- an Ingress, an edge Route, a mesh sidecar, Knative's queue-proxy -- because
+# its upstream connection pooling funnels many sessions' turns down one socket to one worker and
+# silently defeats the S cap. deploy/k8s/README.md, "The front door is L4".
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: moca-supervisor, namespace: moca }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector: { matchLabels: { app: moca-supervisor } }
+  template:
+    metadata: { labels: { app: moca-supervisor } }
+    spec:
+      serviceAccountName: moca-supervisor
+      automountServiceAccountToken: false
+      # Matches TimeoutStopSec=120 in sh-supervisor.service. Kubernetes signals PID 1 only, which
+      # is the KillMode=mixed behaviour main.ts::close() relies on: drain, stop accepting, then
+      # awaitIdle(SHUTDOWN_GRACE_MS = 20s).
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: supervisor
+          image: moca-harness
+          workingDir: /app/packages/supervisor
+          command: [node, --import, tsx, src/main.ts]
+          # Variable for variable with deploy/vm/env/supervisor.env.example; only addressing and
+          # credential transport differ (packages/supervisor/test/k8s/env-parity.test.ts).
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: PORT, value: '8080' }
+            - { name: SH_ADMIN_PORT, value: '8081' }
+            - { name: SH_ADMIN_HOST, value: '0.0.0.0' }
+            # W pinned, not inferred from the CPU limit: the memory below is sized for it, and a
+            # CPU-limit change must not silently change the memory needed. Move all three together.
+            - { name: SH_WORKERS, value: '2' }
+            # A TRIAL value, as in deploy/compose: S's real value is an output of E8.
+            - { name: SH_TURNS_PER_WORKER, value: '4' }
+            - { name: SH_ROUTING_POLICY, value: leastInFlight }
+            - { name: SH_WORKER_RESTART_BACKOFF_MS, value: '250' }
+            - { name: SH_SANDBOX_DISCOVERY, value: records }
+            - { name: SH_REMOTE_SANDBOX, value: '1' }
+            - { name: SH_RELAY_ADDR, value: 'sandbox-relay-exec.moca.svc:9444' }
+            - name: REDIS_URL
+              valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }
+            - { name: KAGENTI_SANDBOX_POOL_SELECTOR, value: app=sandbox }
+            - { name: KAGENTI_SANDBOX_CAP, value: '4' }
+            - name: MOCA_RELAY_EXEC_TOKEN
+              valueFrom: { secretKeyRef: { name: moca-relay, key: MOCA_RELAY_EXEC_TOKEN } }
+            - name: SH_SESSION_TOKEN_PUBLIC_KEYS
+              valueFrom: { secretKeyRef: { name: moca-mu1, key: SH_SESSION_TOKEN_PUBLIC_KEYS } }
+            - { name: SH_CONTROL_PLANE_URL, value: 'http://moca-control-plane.moca.svc:8080' }
+            - { name: SH_REQUIRE_AUTH, value: 'true' }
+            # The exchange token is a FILE here (credentialValue reads $CREDENTIALS_DIRECTORY), the
+            # analogue of LoadCredential=. Never also set it as env: the workers refuse to boot.
+            - { name: CREDENTIALS_DIRECTORY, value: /run/credentials }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: admin, containerPort: 8081 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          # tsx compiles every worker at boot; 30 x 5s covers it with room.
+          startupProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 10
+          lifecycle:
+            # Let the endpoint leave the Service before drainAll() stops accepting.
+            preStop:
+              exec: { command: [sleep, '5'] }
+          resources:
+            requests: { cpu: 500m, memory: 768Mi }
+            limits: { cpu: '2', memory: 1Gi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: credentials, mountPath: /run/credentials, readOnly: true }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - name: credentials
+          secret:
+            secretName: moca-mu1
+            # Only the exchange token: the signing key and KEK stay in the control plane's pod.
+            items: [{ key: SH_EXCHANGE_TOKEN, path: SH_EXCHANGE_TOKEN }]
+            defaultMode: 256 # 0400
+---
+apiVersion: v1
+kind: Service
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  selector: { app: moca-supervisor }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: admin, port: 8081, targetPort: admin }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: moca-supervisor } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Admin (/metrics, /healthz, /readyz): in-namespace scrapers. Kubelet probes come from the node;
+    # most CNIs admit host-to-pod implicitly (spec §10 -- verified in Task 10's spike).
+    # The data port 8080 has NO rule on purpose: Kind users arrive by port-forward and the OCP
+    # sidecar over loopback, and NetworkPolicy filters neither.
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 8081 }
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: redis } } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    - to: [{ podSelector: { matchLabels: { app: sandbox-relay } } }]
+      ports: [{ protocol: TCP, port: 9444 }]
+    - to: [{ podSelector: { matchLabels: { app: moca-control-plane } } }]
+      ports: [{ protocol: TCP, port: 8080 }]
+    # The model API.
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
+      ports: [{ protocol: TCP, port: 443 }]

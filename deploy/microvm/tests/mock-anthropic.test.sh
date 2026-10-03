@@ -58,5 +58,17 @@ check "READ step 0" "$(grep -c 'continuity-ok' "$TMP/body")" "1"
 echo "== an unscripted prompt is a 400, not a guess"
 check "400" "$(post '{"model":"mock-p4","stream":true,"messages":[{"role":"user","content":"hello"}]}')" "400"
 
+echo "== the K8s smoke scripts (#423) are scripted, and do not disturb the P4 ones"
+for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN; do
+  code="$(post '{"model":"mock-k8s","stream":true,"messages":[{"role":"user","content":"run it. '"$m"'"}]}')"
+  check "$m step 0 is 200" "$code" "200"
+  check "$m step 0 is a bash tool_use" "$(grep -c '"name":"bash"' "$TMP/body")" "1"
+done
+code="$(post '{"model":"mock-k8s","stream":true,"messages":[
+  {"role":"user","content":"K8S-SMOKE-DRAIN"},
+  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{}}]},
+  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"drained"}]}]}')"
+check "DRAIN ends with its done text and the tool output" "$(grep -c 'done-k8s-drain\\ndrained' "$TMP/body")" "1"
+
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

@@ -5,3 +5,4 @@ export {
   type RecordStore,
   type SandboxRecord,
 } from './pool-records.js';
+export { redactUrl } from './redact-url.js';

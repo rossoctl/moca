@@ -4,7 +4,11 @@ import {
   SessionManager,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
-import { RedisSessionBackend } from '@moca/session-backend';
+import {
+  RedisSessionBackend,
+  resilientClientOptions,
+  swallowRedisErrors,
+} from '@moca/session-backend';
 import { k8sSandboxExtension, KubectlTransport } from '@moca/k8s-sandbox';
 import {
   selectPoolSandbox,
@@ -139,18 +143,45 @@ function sandboxEnvironment(env: LeafEnvelope): NodeJS.ProcessEnv {
  * referenced again. Awaiting one shared promise makes concurrent callers converge on one client.
  */
 let bundleRedisPromise: Promise<BundleRedisLike> | undefined;
-function getBundleRedis(redisUrl?: string): Promise<BundleRedisLike> {
+let bundleRedisClient: { isOpen: boolean } | undefined;
+/**
+ * Exported for its test only (bundle-redis-error-listener.test.ts).
+ *
+ * This runs in the WORKER process (`POST /runs` with a `configRef`) and lives as long as it does, so it
+ * takes the same pairing as every other long-lived client (redis-errors.ts in @moca/session-backend):
+ * the `'error'` listener, without which a Redis restart is an uncaught exception that kills the worker
+ * and its in-flight turns (#423, Task 16b); the bounded reconnect, without which that listener would
+ * leave a refused connect pending forever and hang the leaf; and the `!isOpen` re-arm, because past
+ * the bound node-redis gives up on an ESTABLISHED client for good and every later command would
+ * reject `ClientClosedError` against a memo that still looks resolved.
+ */
+export function getBundleRedis(redisUrl?: string): Promise<BundleRedisLike> {
+  if (bundleRedisClient && !bundleRedisClient.isOpen) {
+    // Given up for good (or closed): drop the memo and build afresh. A connect still in flight keeps
+    // isOpen true (node-redis sets it synchronously in connect()), so this cannot race one.
+    bundleRedisPromise = undefined;
+    bundleRedisClient = undefined;
+  }
   if (!bundleRedisPromise) {
-    bundleRedisPromise = (async () => {
-      const client = createClient({ url: redisUrl ?? process.env.REDIS_URL });
+    const attempt: Promise<BundleRedisLike> = (async () => {
+      const client = createClient(
+        resilientClientOptions(redisUrl ?? process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'),
+      );
+      swallowRedisErrors(client, 'config bundle store');
+      bundleRedisClient = client;
       await client.connect();
       return client as unknown as BundleRedisLike;
     })().catch((err) => {
       // Do not cache a failed connect: clear the slot so the next leaf retries rather than
-      // inheriting a permanently rejected promise.
-      bundleRedisPromise = undefined;
+      // inheriting a permanently rejected promise. Only if it is still OURS: the !isOpen re-arm
+      // above may already have replaced it, and clearing a newer attempt would orphan its client.
+      if (bundleRedisPromise === attempt) {
+        bundleRedisPromise = undefined;
+        bundleRedisClient = undefined;
+      }
       throw err;
     });
+    bundleRedisPromise = attempt;
   }
   return bundleRedisPromise;
 }

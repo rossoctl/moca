@@ -10,16 +10,35 @@ export interface AttachStream {
   end(): void;
 }
 
+/** The two timer calls the presence retry needs; injectable so tests do not wait in real time. */
+export interface RelayTimers {
+  setTimeout: (fn: () => void, ms: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+}
+
 export interface RelayDeps {
   records: RecordStore;
   validateToken: (token: string | undefined, sandboxId: string) => boolean;
+  /** Defaults to the global timers. */
+  timers?: RelayTimers;
 }
 
 interface Parked {
   stream: AttachStream;
   // per-reqId sinks for in-flight execs, populated by routeExec
   sinks: Map<number, (ev: ExecEvent) => void>;
+  // Cancels a pending presence-put retry; set by Hello, called by teardown.
+  cancelPresence?: () => void;
 }
+
+/** Presence-put backoff: 250 ms, doubling, capped at 10 s, with no attempt limit (#423, Task 16b). */
+const PRESENCE_RETRY_BASE_MS = 250;
+const PRESENCE_RETRY_MAX_MS = 10_000;
+
+const defaultTimers: RelayTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+};
 
 export interface Relay {
   onAttach(stream: AttachStream): void;
@@ -45,6 +64,62 @@ function bearer(md?: { get: (k: string) => string[] }): string | undefined {
 
 export function createRelay(deps: RelayDeps): Relay {
   const sessions = new Map<string, Parked>();
+  const timers = deps.timers ?? defaultTimers;
+
+  /**
+   * Write presence for `session`, retrying until it lands or that session is torn down.
+   *
+   * One put used to be the whole story, so a Redis that was not reachable at attach time -- on
+   * Kubernetes, where setup.sh applies every workload at once, Redis routinely comes up after the
+   * sandboxes -- left an attached sandbox missing from sh:sandbox:records for good: the stream stayed
+   * up, so the worker never re-Hello'd, and no turn could lease it (#423, Task 16b). RedisRecordStore's
+   * client gives up after a bounded reconnect, and the store then reconnects that same client on its
+   * next call -- both after a failed first connect and after an established connection was given up
+   * on -- so retrying the put is enough.
+   *
+   * Every attempt first checks that the session map still holds THIS session object, by identity.
+   * After teardown it does not, so no attempt starts after teardown's remove: a late write would point
+   * turns at a gone worker. A reattach under the same id is a different object, so a stale retry
+   * cannot write on its behalf either. An attempt already in flight when teardown runs is ordered
+   * before the remove: both go through RedisRecordStore's one client (a re-arm reconnects that client,
+   * it never builds a second one), whose command queue is FIFO, so the hSet is queued ahead of the
+   * hDel. If the put is still waiting on a reconnect, the remove waits on the same connect promise
+   * and is issued after it.
+   */
+  function putPresence(id: string, session: Parked, rec: SandboxRecord): void {
+    let delay = PRESENCE_RETRY_BASE_MS;
+    let failures = 0;
+    let handle: unknown;
+    const live = () => sessions.get(id) === session;
+    const attempt = () => {
+      handle = undefined;
+      if (!live()) return;
+      // A synchronous throw from a store is a failed attempt too, not an escape from the retry.
+      new Promise<void>((resolve) => resolve(deps.records.put(rec))).then(
+        () => {
+          if (failures > 0 && live()) {
+            console.log(`presence put for ${id} landed after ${failures} failed attempt(s)`);
+          }
+        },
+        (e: unknown) => {
+          if (!live()) return;
+          failures += 1;
+          // One line, message only. RedisRecordStore's errors are already URL-redacted (Task 3).
+          const message = e instanceof Error ? e.message : String(e);
+          console.error(
+            `presence put failed for ${id} (attempt ${failures}, retrying in ${delay} ms): ${message}`,
+          );
+          handle = timers.setTimeout(attempt, delay);
+          delay = Math.min(delay * 2, PRESENCE_RETRY_MAX_MS);
+        },
+      );
+    };
+    session.cancelPresence = () => {
+      if (handle !== undefined) timers.clearTimeout(handle);
+      handle = undefined;
+    };
+    attempt();
+  }
 
   function onAttach(stream: AttachStream): void {
     let sandboxId: string | undefined;
@@ -67,7 +142,8 @@ export function createRelay(deps: RelayDeps): Relay {
           return;
         }
         sandboxId = id;
-        sessions.set(id, { stream, sinks: new Map() });
+        const session: Parked = { stream, sinks: new Map() };
+        sessions.set(id, session);
         const rec: SandboxRecord = {
           sandboxId: id,
           labels: frame.hello.labels,
@@ -78,7 +154,7 @@ export function createRelay(deps: RelayDeps): Relay {
           capacityMax: frame.hello.capacityMax,
           transport: 'grpc',
         };
-        void deps.records.put(rec).catch((e) => console.error('presence put failed', e));
+        putPresence(id, session, rec);
         return;
       }
       // chunk/end/error frames are dispatched to the per-reqId sink registered by routeExec
@@ -93,6 +169,7 @@ export function createRelay(deps: RelayDeps): Relay {
         // generators parked forever on a frame that will never arrive.
         const parked = sessions.get(sandboxId);
         if (parked) {
+          parked.cancelPresence?.();
           for (const [reqId, sink] of parked.sinks) {
             sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
           }

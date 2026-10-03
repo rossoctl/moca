@@ -1,0 +1,14 @@
+# Kind plus a scripted, loopback-only mock model in the supervisor pod (deploy/microvm/mock-anthropic.mjs),
+# so the CI smoke drives REAL turns -- agent loop, relay, sandboxes -- with no model key.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../kind
+patches:
+  - path: patch-mock-model.yaml
+# Repeated from overlays/kind on purpose: kind's image transformer ran inside ITS build, before this
+# patch added the mock-model container, so only a transformer here rewrites that container's image.
+images:
+  - name: ghcr.io/rossoctl/moca
+    newName: dev.local/moca
+    newTag: local

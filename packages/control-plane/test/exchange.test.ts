@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { checkExchangeAuth, exchangeCredential, placeholderFor } from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
 import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
@@ -322,6 +322,25 @@ describe('readyz', () => {
         status: 200,
       },
     );
+  });
+
+  it('answers redis_unavailable at once while the client is not ready, without touching the index', async () => {
+    // A command issued while node-redis is disconnected waits in its offline queue forever, so a
+    // readyz that awaited the index hung the probe instead of failing it (#423, spike finding F2).
+    const get = vi.fn(async () => {
+      throw new Error('index.get must not be called while Redis is not ready');
+    });
+    const d = makeDeps({
+      index: { get } as unknown as OwnershipIndex,
+      redisReady: () => false,
+    });
+    expect(await codeOf(() => HANDLERS.readyz!(ctx(), d))).toBe('redis_unavailable');
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('is ok when the client is ready and the index answers', async () => {
+    const d = makeDeps({ redisReady: () => true });
+    expect(await HANDLERS.readyz!(ctx(), d)).toEqual({ status: 200, body: 'ok' });
   });
 });
 

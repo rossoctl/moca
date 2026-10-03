@@ -1,0 +1,13 @@
+# Kind (dev and CI). setup.sh --target kind loads these two images into the cluster. Users reach
+# the supervisor and control plane by `kubectl port-forward` (setup.sh prints the commands).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/rossoctl/moca
+    newName: dev.local/moca
+    newTag: local
+  - name: ghcr.io/rossoctl/moca-remote-worker
+    newName: dev.local/moca-remote-worker
+    newTag: local

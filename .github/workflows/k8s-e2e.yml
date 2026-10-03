@@ -1,0 +1,90 @@
+# deploy/k8s end to end on kind (#423): setup.sh --target kind-ci builds both images from this checkout,
+# then smoke.sh drives real turns through the in-pod mock model -- no model key needed.
+#
+# NOT a required check until it has passed ten consecutive runs on main (deploy/k8s/README.md, "CI").
+name: k8s-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'deploy/k8s/**'
+      - 'deploy/microvm/mock-anthropic.mjs'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'pi-fork'
+      - 'harness/**'
+      - 'remote-worker/**'
+      - 'go.work'
+      - 'gen/go/**'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - '.github/workflows/k8s-e2e.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  k8s-kind-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install kind
+        env:
+          KIND_VERSION: v0.33.0
+          KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+        run: |
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Bring up P6 on kind (images built from this checkout)
+        run: deploy/k8s/setup.sh --target kind-ci --build
+
+      - name: Live smoke
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/k8s-logs
+          K8S_LIVE_SMOKE=1 deploy/k8s/smoke.sh --target kind-ci 2>&1 | tee /tmp/k8s-logs/smoke.log
+
+      - name: Collect cluster state
+        if: failure()
+        run: |
+          mkdir -p /tmp/k8s-logs
+          for ns in moca moca-sandbox; do
+            kubectl --context kind-moca -n "$ns" get pods -o wide >"/tmp/k8s-logs/$ns-pods.txt" 2>&1 || true
+            kubectl --context kind-moca -n "$ns" describe pods >"/tmp/k8s-logs/$ns-describe.txt" 2>&1 || true
+            kubectl --context kind-moca -n "$ns" logs --all-containers --prefix -l app --tail=-1 >"/tmp/k8s-logs/$ns.log" 2>&1 || true
+          done
+          kubectl --context kind-moca get events -A --sort-by=.lastTimestamp >/tmp/k8s-logs/events.txt 2>&1 || true
+          # Copy any /tmp/tmp.* dirs printed by smoke
+          if [ -f /tmp/k8s-logs/smoke.log ]; then
+            while read -r line; do
+              if [[ "$line" =~ "logs kept in" ]]; then
+                tmpdir=$(echo "$line" | sed -E 's/.*logs kept in ([^ ]+).*/\1/')
+                if [ -d "$tmpdir" ]; then
+                  cp -r "$tmpdir" /tmp/k8s-logs/ || true
+                fi
+              fi
+            done < /tmp/k8s-logs/smoke.log
+          fi
+          # Belt-and-braces: delete any *.hdr files
+          find /tmp/k8s-logs -name '*.hdr' -delete
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: k8s-kind-e2e-logs
+          path: /tmp/k8s-logs

@@ -1,14 +1,17 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileCredentialStore } from '../src/file-store.js';
 import { formatEnvLines, generateMu1Secrets } from '../src/genkeys.js';
 import { K8sSecretStore } from '../src/k8s-secret-store.js';
+import { HANDLERS } from '../src/handlers.js';
 import {
   configFromEnv,
+  depsFromEnv,
   credentialStoreFromEnv,
   portFromEnv,
   verifyKeysFromEnv,
@@ -18,6 +21,7 @@ import {
 import { keyIdFor, makeSigner, parseKeyset, publicKeyToBase64, verifyToken } from '../src/token.js';
 import { VaultCredentialStore } from '../src/vault-store.js';
 import { withCredentials } from '../src/systemd-credentials.js';
+import { codeOf, ctx } from './helpers/deps.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const PRIVATE_PEM = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
@@ -288,5 +292,62 @@ describe('the control plane`s secrets as systemd credentials (deploy/vm)', () =>
       ttlSeconds: 60,
     });
     expect(verifyToken(token, parseKeyset(s.SH_SESSION_TOKEN_PUBLIC_KEYS)).sub).toBe('github:1');
+  });
+});
+
+/** A port nothing listens on: bind an ephemeral one, read it, release it. */
+async function freePort(): Promise<number> {
+  const s = createServer();
+  await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve));
+  const { port } = s.address() as AddressInfo;
+  await new Promise<void>((resolve) => s.close(() => resolve()));
+  return port;
+}
+
+describe('depsFromEnv against a Redis that starts AFTER the control plane (#423, spike finding F2)', () => {
+  it('fails readyz fast, keeps reconnecting, and never logs the Redis password', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const port = await freePort();
+    const deps = depsFromEnv({
+      ...baseEnv,
+      REDIS_URL: `redis://:topsecret@127.0.0.1:${port}`, // notsecret
+    });
+    let server: Server | undefined;
+    const sockets = new Set<Socket>();
+    try {
+      // Raced against a timer, so the old behaviour -- a readyz parked in the offline queue -- fails
+      // this assertion rather than hanging the suite.
+      const started = Date.now();
+      const code = await Promise.race([
+        codeOf(() => HANDLERS.readyz!(ctx(), deps)),
+        new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1000).unref()),
+      ]);
+      expect(code).toBe('redis_unavailable');
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(deps.redisReady?.()).toBe(false);
+
+      // "Redis" comes up. It need not speak RESP: accepting and dropping every connection is enough
+      // to count reconnect attempts, and two prove the client retries rather than giving up.
+      let connections = 0;
+      server = createServer((sock) => {
+        connections++;
+        sockets.add(sock);
+        sock.destroy();
+      });
+      await new Promise<void>((resolve) => server!.listen(port, '127.0.0.1', resolve));
+      await vi.waitFor(() => expect(connections).toBeGreaterThanOrEqual(2), {
+        timeout: 5000,
+        interval: 50,
+      });
+
+      const logged = errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(logged).toContain('[control-plane] redis client error');
+      expect(logged).not.toContain('topsecret');
+    } finally {
+      await deps.close?.();
+      for (const s of sockets) s.destroy();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      errors.mockRestore();
+    }
   });
 });

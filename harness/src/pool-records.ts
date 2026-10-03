@@ -1,4 +1,5 @@
 import { createClient, type RedisClientType } from 'redis';
+import { redactUrl } from './redact-url.js';
 
 export interface SandboxRecord {
   sandboxId: string;
@@ -46,10 +47,21 @@ export function recordsKey(): string {
  *    for the experiment drivers, which start redis with `docker run -d` (returns as soon as
  *    the container exists, not when it accepts) and then immediately start the relay. Now a
  *    failed attempt clears the memo so the next call reconnects.
+ *
+ * 3. THE CONNECT RE-ARMS AFTER AN ESTABLISHED SOCKET GIVES UP. Past the reconnect bound node-redis
+ *    sets `isOpen` false and stops for good, rejecting every later command with
+ *    `ClientClosedError`. The connect before the outage SUCCEEDED, so `ready` stays resolved and
+ *    point 2 cannot see it. The relay holds one store for its whole life, so a Redis restart left
+ *    it unable to write or remove presence ever again (#423). `connectOnce` now clears `ready`
+ *    when the client is no longer open and reconnects the SAME client (as session-backend's and
+ *    work-queue's `open()` do). One client means one command queue, so a put issued before a
+ *    remove still reaches Redis first. A store `close()`d on purpose (select-sandbox's dropMemo)
+ *    is never reopened: its calls reject instead.
  */
 export class RedisRecordStore implements RecordStore {
   private client: RedisClientType;
   private ready: Promise<void> | undefined;
+  private closed = false;
   private readonly url: string;
   private readonly maxReconnectAttempts: number;
   /**
@@ -81,7 +93,7 @@ export class RedisRecordStore implements RecordStore {
       socket: {
         reconnectStrategy: (retries: number) =>
           retries > this.maxReconnectAttempts
-            ? new Error(`redis at ${this.url} unreachable after ${retries} attempts`)
+            ? new Error(`redis at ${redactUrl(this.url)} unreachable after ${retries} attempts`)
             : Math.min(retries * 100, 1000),
       },
     }) as RedisClientType;
@@ -90,16 +102,22 @@ export class RedisRecordStore implements RecordStore {
     // command, so logging is the whole job.
     c.on('error', (err: unknown) => {
       console.error(
-        `RedisRecordStore: redis client error (commands will reject until it reconnects): ${String(err)}`,
+        `RedisRecordStore: redis client error (commands will reject until it reconnects): ${String(err).split(this.url).join(redactUrl(this.url))}`,
       );
     });
     return c;
   }
   /**
    * Connect once, but do not memoise a FAILURE. On rejection the memo is cleared so the next
-   * caller retries, instead of the store being permanently dead after one transient blip.
+   * caller retries, instead of the store being permanently dead after one transient blip. A
+   * resolved memo whose client node-redis has since closed for good (past the reconnect bound) is
+   * cleared too, and the same client reconnects. `connect()` throws only while `isOpen` is true,
+   * which this branch excludes; node-redis clears `isOpen` synchronously inside the give-up, and
+   * sets it synchronously inside `connect()`, so concurrent callers still share one attempt.
    */
   private connectOnce(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('RedisRecordStore is closed'));
+    if (this.ready && !this.client.isOpen) this.ready = undefined;
     if (!this.ready) {
       this.ready = this.client
         .connect()
@@ -127,13 +145,18 @@ export class RedisRecordStore implements RecordStore {
   async close(): Promise<void> {
     // close() must not resurrect a connection just to shut it down, and must not throw when
     // nothing was ever connected — a caller tearing down after a failed start is the normal
-    // path, not an error.
+    // path, not an error. It is idempotent, and it marks the store closed so no later call
+    // reopens it (connectOnce re-arms a client that is not open, which would otherwise include
+    // one closed here).
+    this.closed = true;
     if (!this.ready) return;
     try {
       await this.ready;
     } catch {
       return;
     }
+    // A client node-redis already gave up on, or a second close(), has nothing left to close.
+    if (!this.client.isOpen) return;
     await this.client.close();
   }
 }

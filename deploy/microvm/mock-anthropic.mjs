@@ -20,6 +20,21 @@ const SCRIPTS = {
     done: 'done-read',
   },
   'P4-SMOKE-SLEEP': { steps: ['sleep 90; echo slept'], done: 'done-sleep' },
+  // deploy/k8s/smoke.sh (#423). Each smoke prompt ALSO spells out its command in words, so a real
+  // model can run the same smoke; the mock keys on the marker alone.
+  'K8S-SMOKE-WRITE': {
+    steps: ['uname -s; echo k8s-proof | tee proof.txt; pwd'],
+    done: 'done-k8s-write',
+  },
+  'K8S-SMOKE-AGAIN': { steps: ['echo second-turn'], done: 'done-k8s-again' },
+  'K8S-SMOKE-RESEARCH': {
+    steps: [
+      'curl -sI https://example.com | head -1; echo "git-head=$(git ls-remote https://github.com/rossoctl/moca HEAD | cut -c1-12)"',
+    ],
+    done: 'done-k8s-research',
+  },
+  // Well inside the supervisor's 20s SHUTDOWN_GRACE_MS, so a drain lets it finish.
+  'K8S-SMOKE-DRAIN': { steps: ['sleep 8; echo drained'], done: 'done-k8s-drain' },
 };
 
 const isToolResult = (m) =>
@@ -173,3 +188,6 @@ const server = createServer((req, res) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`mock-anthropic listening on 127.0.0.1:${server.address().port}`);
 });
+// As a container's PID 1 (deploy/k8s kind-ci) Node gets no default SIGTERM action, so without this
+// the mock ignores the stop signal and holds its pod for the whole termination grace period.
+process.on('SIGTERM', () => process.exit(0));

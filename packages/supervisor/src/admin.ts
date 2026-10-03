@@ -4,8 +4,8 @@ import type { WorkerPool } from './pool.js';
 
 /**
  * Env vars a run record is allowed to quote. An allowlist because this body is served
- * unauthenticated on loopback and ends up pasted into EXPERIMENTS.md; a denylist would leak
- * the first credential someone adds to the unit file.
+ * unauthenticated (on loopback unless `SH_ADMIN_HOST` widens it) and ends up pasted into
+ * EXPERIMENTS.md; a denylist would leak the first credential someone adds to the unit file.
  */
 const ENV_ALLOWLIST = [
   'PORT',
@@ -78,31 +78,64 @@ export function metricsBody(pool: WorkerPool, env: NodeJS.ProcessEnv): MetricsBo
   };
 }
 
+/**
+ * What a kubelet readiness probe needs: can this supervisor hand a connection to anyone? True when
+ * at least one worker is healthy. Saturation deliberately does not count -- the 429 at the data
+ * port is the overload signal (P6 spec §3.5), and tying readiness to it would pull a loaded pod
+ * out of the Service and push its load onto the siblings.
+ */
+export function readiness(pool: WorkerPool): {
+  ready: boolean;
+  workers: number;
+  healthy: number;
+} {
+  const views = pool.views();
+  const healthy = views.filter((v) => v.healthy).length;
+  return { ready: healthy > 0, workers: views.length, healthy };
+}
+
 export async function startAdminServer(opts: {
   pool: WorkerPool;
   port: number;
+  /** Bind address; loopback unless the deployment says otherwise (SH_ADMIN_HOST). */
+  host?: string;
   env?: NodeJS.ProcessEnv;
-}): Promise<{ port: number; close(): Promise<void> }> {
+}): Promise<{ port: number; address: string; close(): Promise<void> }> {
   const env = opts.env ?? process.env;
+  const host = opts.host ?? '127.0.0.1';
   const server: HttpServer = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok\n');
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/readyz') {
+      const r = readiness(opts.pool);
+      res.writeHead(r.ready ? 200 : 503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(r));
+      return;
+    }
     if (req.method !== 'GET' || req.url !== '/metrics') {
       // No hand-off, no redirect: real traffic arriving here is a misconfiguration and must
       // look like one rather than quietly working.
       res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('admin: GET /metrics only\n');
+      res.end('admin: GET /metrics, /healthz or /readyz only\n');
       return;
     }
     const body = JSON.stringify(metricsBody(opts.pool, env));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(body);
   });
-  // Loopback only. Unauthenticated and configuration-echoing; it has no business off-box.
-  server.listen(opts.port, '127.0.0.1');
+  // Loopback by default: unauthenticated and configuration-echoing, it has no business off-box.
+  // A Kubernetes pod widens it so the kubelet can probe, and NetworkPolicy limits who reaches it.
+  server.listen(opts.port, host);
   await once(server, 'listening');
-  const address = server.address();
-  const port = typeof address === 'object' && address !== null ? address.port : opts.port;
+  const bound = server.address();
+  const port = typeof bound === 'object' && bound !== null ? bound.port : opts.port;
+  const address = typeof bound === 'object' && bound !== null ? bound.address : host;
   return {
     port,
+    address,
     async close(): Promise<void> {
       // Captured BEFORE close() can fire it: `once()` registered after the event has already
       // been emitted waits for something that will never happen again.

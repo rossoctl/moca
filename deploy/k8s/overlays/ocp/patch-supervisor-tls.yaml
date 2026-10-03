@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        # A byte-for-byte TCP proxy: TLS ends here, and every client connection becomes exactly one
+        # connection to 127.0.0.1:8080, so the supervisor's per-connection hand-off, routing and
+        # admission see what they would see with no proxy at all. NOT an HTTP proxy: never replace
+        # it with one.
+        - name: tls
+          image: ghostunnel
+          args:
+            - server
+            - --listen
+            - 0.0.0.0:8443
+            - --target
+            - 127.0.0.1:8080
+            - --cert
+            - /tls/tls.crt
+            - --key
+            - /tls/tls.key
+            - --disable-authentication
+          ports:
+            - { name: https, containerPort: 8443 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            tcpSocket: { port: https }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: moca-supervisor-tls
+            defaultMode: 288 # 0440

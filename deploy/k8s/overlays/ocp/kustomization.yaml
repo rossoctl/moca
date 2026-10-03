@@ -1,0 +1,18 @@
+# OpenShift. The supervisor is reached through a ghostunnel L4 TLS sidecar behind a PASSTHROUGH Route,
+# so each client connection is exactly one supervisor connection (spec §7.2). The control plane gets
+# an ordinary edge Route. setup.sh --target ocp grants nonroot-v2 to each ServiceAccount, writes the
+# TLS Secret, and replaces both Route hosts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - supervisor-tls-service.yaml
+  - routes.yaml
+  - network-policy-ocp.yaml
+patches:
+  - path: patch-supervisor-tls.yaml
+images:
+  - name: ghostunnel
+    newName: docker.io/ghostunnel/ghostunnel
+    newTag: v1.11.3
+    digest: sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f

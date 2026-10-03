@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RedisRecordStore } from '../src/pool-records.js';
 
 /**
@@ -57,5 +57,25 @@ describe('RedisRecordStore resilience', () => {
     expect(() => client.emit('error', new Error('Socket closed unexpectedly'))).not.toThrow();
 
     await expect(store.close()).resolves.toBeUndefined();
+  });
+
+  it('never puts the Redis password into the unreachable error or the error log', async () => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      logged.push(a.map(String).join(' '));
+    });
+    try {
+      const store = new RedisRecordStore('redis://:topsecret@127.0.0.1:6399', 0);
+      const err = await store.list().then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(String(err)).toMatch(/unreachable/);
+      expect(String(err)).not.toContain('topsecret');
+      expect(logged.join('\n')).not.toContain('topsecret');
+      await store.close().catch(() => {});
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

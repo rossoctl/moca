@@ -55,6 +55,15 @@ export interface CpDeps {
   /** randomUUID by default. A control-plane-minted id is always its own leafSessionId (gap #10). */
   newId(): string;
   runKubectl?: RunKubectl;
+  /**
+   * Whether the Redis client is connected and ready (main.ts: `client.isReady`). A command issued
+   * while it is not ready waits in node-redis's offline queue for as long as the outage lasts, so
+   * readyz consults this first rather than awaiting a probe that cannot fail (#423, spike F2).
+   * Absent means "do not know", and readyz falls back to asking the index.
+   */
+  redisReady?: () => boolean;
+  /** Release the Redis client. A test that builds deps through depsFromEnv must call it. */
+  close?: () => Promise<void>;
 }
 
 export interface RequestCtx {
@@ -431,9 +440,13 @@ export const HANDLERS: Record<string, Handler> = {
   /**
    * Readiness is "can I serve session routes", i.e. is Redis answering. Credentials live in
    * Kubernetes Secrets, so they stay up while Redis is down (spec §7.1, §9.2) -- which is why this
-   * probe checks only the index.
+   * probe checks only the index. A client that is not ready fails at once: awaiting the index then
+   * would park the probe in the offline queue until Redis came back, a timeout rather than a 503.
    */
   readyz: async (_ctx, deps) => {
+    if (deps.redisReady?.() === false) {
+      throw new CpError('redis_unavailable', 'redis is not answering');
+    }
     try {
       await deps.index.get('__readyz__');
     } catch {

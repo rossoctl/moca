@@ -1,0 +1,111 @@
+# The sandbox relay (spec §3.2). Presence-only: each sandbox's Attach stream is held by exactly one
+# process, so exactly one replica, and Recreate rather than a rolling update that would briefly run
+# two. Attach and SandboxExec are separate listeners (MOCA_RELAY_EXEC_ADDR) behind separate
+# Services, and NetworkPolicy -- not the bind -- decides who reaches each (MI1 §5 R5/R8).
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: sandbox-relay, namespace: moca }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: sandbox-relay } }
+  template:
+    metadata: { labels: { app: sandbox-relay } }
+    spec:
+      serviceAccountName: sandbox-relay
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sandbox-relay
+          image: moca-harness
+          # From the package dir: tsx resolves from the CWD and is linked only into each package's
+          # own node_modules (deploy/knative/relay-deployment.yaml has the history).
+          workingDir: /app/packages/sandbox-relay
+          command: [node, --import, tsx, src/main.ts]
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: SH_RELAY_PORT, value: '9443' }
+            - { name: MOCA_RELAY_EXEC_ADDR, value: '0.0.0.0:9444' }
+            - name: REDIS_URL
+              valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }
+            - name: SH_RELAY_TOKEN
+              valueFrom: { secretKeyRef: { name: moca-relay, key: SH_RELAY_TOKEN } }
+            - name: MOCA_RELAY_EXEC_TOKEN
+              valueFrom: { secretKeyRef: { name: moca-relay, key: MOCA_RELAY_EXEC_TOKEN } }
+          ports:
+            - { name: attach, containerPort: 9443 }
+            - { name: exec, containerPort: 9444 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          # No health endpoint exists (spec §1); a bound attach port is the signal. startupProbe
+          # covers the tsx compile at boot (~224 MiB, several seconds).
+          startupProbe:
+            tcpSocket: { port: attach }
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            tcpSocket: { port: attach }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: attach }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: sandbox-relay-attach, namespace: moca }
+spec:
+  selector: { app: sandbox-relay }
+  ports:
+    - { name: attach, port: 9443, targetPort: attach }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: sandbox-relay-exec, namespace: moca }
+spec:
+  selector: { app: sandbox-relay }
+  ports:
+    - { name: exec, port: 9444, targetPort: exec }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: sandbox-relay } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Attach: sandboxes only (slice 2 adds the P4 hosts' CIDR here).
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: moca-sandbox } }
+          podSelector: { matchLabels: { app: moca-sandbox } }
+      ports:
+        - { protocol: TCP, port: 9443 }
+    # SandboxExec: the supervisor's workers only. A sandbox that could reach this could Exec into
+    # every other sandbox.
+    - from:
+        - podSelector: { matchLabels: { app: moca-supervisor } }
+      ports:
+        - { protocol: TCP, port: 9444 }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: redis } }
+      ports:
+        - { protocol: TCP, port: 6379 }

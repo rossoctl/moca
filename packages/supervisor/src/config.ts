@@ -1,4 +1,5 @@
 import { availableParallelism } from 'node:os';
+import { isIP } from 'node:net';
 import { policyFromName, type RoutingPolicy } from './routing.js';
 
 export interface SupervisorConfig {
@@ -10,6 +11,13 @@ export interface SupervisorConfig {
   readonly restartBackoffMs: number;
   /** Loopback-only /metrics listener (§5.2, Task 11) — a separate port from the data path. */
   readonly adminPort: number;
+  /**
+   * Bind address of the admin listener. Loopback by default (the VM and Compose posture); a
+   * Kubernetes pod sets 0.0.0.0 so the kubelet can probe /readyz on the pod IP, and NetworkPolicy
+   * (deploy/k8s) takes over the job loopback did. An IP literal only: a hostname would make the
+   * bind depend on DNS at boot.
+   */
+  readonly adminHost: string;
 }
 
 function readInt(
@@ -48,6 +56,17 @@ function readInt(
     throw new Error(`${name}='${raw}' must be an integer in [${bounds.min}, ${max}]`);
   }
   return n;
+}
+
+function readHost(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  if (isIP(raw) === 0) {
+    throw new Error(
+      `${name}='${raw}' must be an IPv4 or IPv6 address literal, not a hostname or host:port`,
+    );
+  }
+  return raw;
 }
 
 /**
@@ -107,5 +126,6 @@ export function readConfig(env: NodeJS.ProcessEnv): SupervisorConfig {
     policy: policyFromName(env.SH_ROUTING_POLICY),
     restartBackoffMs: readInt(env, 'SH_WORKER_RESTART_BACKOFF_MS', 250, { min: 0 }),
     adminPort,
+    adminHost: readHost(env, 'SH_ADMIN_HOST', '127.0.0.1'),
   };
 }

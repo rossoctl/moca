@@ -1,0 +1,76 @@
+# remote-worker container sandboxes (spec §3.3), the hands side. They dial OUT to the relay's attach
+# port and accept nothing. A StatefulSet so each pod's name -- moca-sandbox-0, -1, ... -- is its
+# SANDBOX_ID: unique and stable, so no two pods ever collide on one sh:sandbox:records entry.
+# setup.sh sets replicas from SH_SANDBOX_COUNT.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+automountServiceAccountToken: false
+---
+# Governing Service for the StatefulSet; nothing connects to a sandbox, so it has no ports.
+apiVersion: v1
+kind: Service
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  clusterIP: None
+  selector: { app: moca-sandbox }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  serviceName: moca-sandbox
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector: { matchLabels: { app: moca-sandbox } }
+  template:
+    metadata: { labels: { app: moca-sandbox } }
+    spec:
+      serviceAccountName: moca-sandbox
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001 # the image's USER; /workspace and /home/sandbox are 1001:0, mode 775
+        runAsGroup: 0
+        fsGroup: 0
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sandbox
+          image: moca-remote-worker
+          env:
+            - name: SANDBOX_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca.svc:9443' }
+            - name: SANDBOX_TOKEN
+              valueFrom: { secretKeyRef: { name: moca-relay-attach, key: SH_RELAY_TOKEN } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            # Writable root on purpose: this is where agent tools run (git, pip, editors), and the
+            # image keeps state under /home/sandbox. The workspace is container-local and lost on
+            # restart, as on the VM.
+            readOnlyRootFilesystem: false
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 512Mi } # 256Mi (worker-deployment.yaml) is too tight for git clone
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  podSelector: { matchLabels: { app: moca-sandbox } }
+  policyTypes: [Ingress, Egress]
+  egress:
+    # The only cluster destination a sandbox has.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: moca } }
+          podSelector: { matchLabels: { app: sandbox-relay } }
+      ports:
+        - { protocol: TCP, port: 9443 }
+    # Research turns (curl, git): the public internet. The private, CGNAT and link-local ranges are
+    # carved out, which covers Pod and Service CIDRs on Kind and OCP and cloud instance metadata
+    # (169.254.169.254, #357).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]

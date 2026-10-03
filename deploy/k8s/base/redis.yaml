@@ -1,0 +1,142 @@
+# Redis holds sh:sandbox:records -- whoever can write it chooses the executor for every turn -- so
+# it has a password (spec §3.4) and only three callers (NetworkPolicy below). AOF on a PVC, so
+# sessions and presence survive a pod restart (the VM's #410 pain).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redis
+  namespace: moca
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: moca
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: moca
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      serviceAccountName: redis
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999 # the image's redis user (uid 999, gid 1000)
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: docker.io/redis:7-alpine # the tag deploy/vm/setup-vm.sh pins
+          # The password is in redis.conf (requirepass), mounted from the Secret, never in argv:
+          # --requirepass would put it in /proc/<pid>/cmdline and in `ps` on the node.
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          env:
+            # redis-cli reads REDISCLI_AUTH, so the probes need no `-a <password>` either.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: moca-redis
+                  key: REDIS_PASSWORD
+          ports:
+            - name: redis
+              containerPort: 6379
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli ping | grep -q PONG
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli ping | grep -q PONG
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+      volumes:
+        - name: config
+          secret:
+            secretName: moca-redis
+            items:
+              - key: redis.conf
+                path: redis.conf
+            defaultMode: 288 # 0440: group-readable for fsGroup 1000
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: moca
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: moca-supervisor
+        - podSelector:
+            matchLabels:
+              app: sandbox-relay
+        - podSelector:
+            matchLabels:
+              app: moca-control-plane
+      ports:
+        - protocol: TCP
+          port: 6379

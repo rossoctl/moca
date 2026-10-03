@@ -1,0 +1,25 @@
+# Three namespaces so the sandbox boundary is a namespace boundary (spec §2.1). The only Secret any
+# MOCA object references in moca-sandbox is the attach token (OpenShift adds its own per-ServiceAccount
+# pull Secrets): the exec token, the Redis password and the MU1 keys never exist there.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moca
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moca-sandbox
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+# Per-user inference credentials (K8sSecretStore). Named apart from deploy/knative's sh-credentials so
+# both paths can share a cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: moca-credentials
+  labels:
+    pod-security.kubernetes.io/enforce: restricted

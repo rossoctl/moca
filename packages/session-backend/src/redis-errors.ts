@@ -1,4 +1,5 @@
 // packages/session-backend/src/redis-errors.ts
+import { redactUrl } from './redact-url.js';
 
 /** The slice of a node-redis client this needs: it is an EventEmitter. */
 type ErrorEmitter = { on(event: 'error', listener: (err: unknown) => void): unknown };
@@ -82,7 +83,7 @@ export function resilientClientOptions(
     socket: {
       reconnectStrategy: (retries: number) =>
         retries > maxReconnectAttempts
-          ? new Error(`redis at ${url} unreachable after ${retries} attempts`)
+          ? new Error(`redis at ${redactUrl(url)} unreachable after ${retries} attempts`)
           : Math.min(retries * 100, 1000),
     },
   };

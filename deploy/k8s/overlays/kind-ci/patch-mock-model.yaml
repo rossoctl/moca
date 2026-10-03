@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: supervisor
+          env:
+            - { name: SH_MODEL_CUSTOM, value: '1' }
+            - { name: SH_MODEL, value: mock-k8s }
+            - { name: SH_MODEL_BASE_URL, value: 'http://127.0.0.1:18099' }
+            - { name: ANTHROPIC_AUTH_TOKEN, value: mock-not-a-secret }
+      # A native sidecar (an init container that keeps running), not a second container: the kubelet
+      # stops it only AFTER the supervisor has exited, so the model outlives the supervisor's drain
+      # and a turn in flight at pod deletion can still finish. As a plain container it received
+      # SIGTERM together with the supervisor.
+      initContainers:
+        # Same pod, so loopback: the mock binds 127.0.0.1 by design and stays unreachable from
+        # anything else, NetworkPolicy or not.
+        - name: mock-model
+          image: ghcr.io/rossoctl/moca
+          restartPolicy: Always
+          command: [node, /mock/mock-anthropic.mjs, --port, '18099']
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: mock-model, mountPath: /mock, readOnly: true }
+      volumes:
+        - name: mock-model
+          configMap: { name: moca-mock-model }

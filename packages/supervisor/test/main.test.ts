@@ -26,6 +26,32 @@ describe('startSupervisor', () => {
     await sup.close();
   });
 
+  it('logs the admin bind address, not just the port', async () => {
+    // On Kubernetes SH_ADMIN_HOST is 0.0.0.0 (kubelet probes and the pod-network allowlist); on the
+    // VM it is loopback. The log line is how an operator tells which one a pod actually bound.
+    const logs: Array<Record<string, unknown>> = [];
+    const sup = await startSupervisor({
+      config: readConfig({
+        PORT: '0',
+        SH_ADMIN_PORT: '0',
+        SH_ADMIN_HOST: '127.0.0.1',
+        SH_WORKERS: '1',
+        SH_TURNS_PER_WORKER: '1',
+      } as NodeJS.ProcessEnv),
+      workerEntry: inertWorker,
+      log: (l) => logs.push(l),
+    });
+    try {
+      expect(logs.find((l) => l.event === 'admin_listening')).toEqual({
+        event: 'admin_listening',
+        port: sup.adminPort,
+        address: '127.0.0.1',
+      });
+    } finally {
+      await sup.close();
+    }
+  });
+
   it('refuses with 429 while no worker is ready yet', async () => {
     // Not a contrived state: it is every restart window, and a hang here would look like a
     // saturation knee on an E8 rung.

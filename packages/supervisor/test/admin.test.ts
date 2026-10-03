@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { metricsBody, startAdminServer } from '../src/admin.js';
+import { metricsBody, readiness, startAdminServer } from '../src/admin.js';
 import { harness } from './helpers/fake-worker.js';
 
 /** Task 6's harness, with both workers already `ready` — the steady state /metrics describes. */
@@ -101,6 +101,41 @@ describe('metricsBody', () => {
   });
 });
 
+describe('readiness', () => {
+  it('is ready when at least one worker is healthy', () => {
+    const h = harness({}, 2);
+    h.forked[0]!.ready();
+    expect(readiness(h.pool)).toEqual({ ready: true, workers: 2, healthy: 1 });
+  });
+
+  it('is not ready before any worker has announced itself', () => {
+    expect(readiness(harness({}, 2).pool)).toEqual({
+      ready: false,
+      workers: 2,
+      healthy: 0,
+    });
+  });
+
+  it('stays ready when every worker is saturated: overload is the 429, not readiness', () => {
+    const h = ready(2);
+    h.forked[0]!.load(1000);
+    h.forked[1]!.load(1000);
+    // Pulling a saturated pod out of the Service would flap it under exactly the load it exists
+    // to absorb, and shift that load onto its siblings.
+    expect(readiness(h.pool).ready).toBe(true);
+  });
+
+  it('goes unready while the only worker restarts, and ready again once it is back', () => {
+    const h = ready(1);
+    h.forked[0]!.exit(1);
+    expect(readiness(h.pool)).toEqual({ ready: false, workers: 1, healthy: 0 });
+    h.runTimers(); // the restart backoff elapses; the pool forks a replacement
+    expect(h.forked).toHaveLength(2);
+    h.forked[1]!.ready();
+    expect(readiness(h.pool)).toEqual({ ready: true, workers: 1, healthy: 1 });
+  });
+});
+
 describe('startAdminServer', () => {
   it('serves /metrics as JSON and 404s everything else', async () => {
     const admin = await startAdminServer({ pool: ready().pool, port: 0, env: { SH_WORKERS: '2' } });
@@ -128,6 +163,48 @@ describe('startAdminServer', () => {
     const second = await startAdminServer({ pool: h.pool, port });
     expect(second.port).toBe(port);
     await second.close();
+  });
+
+  it('answers /healthz 200 and /readyz with the readiness body', async () => {
+    const h = harness({}, 2);
+    const admin = await startAdminServer({ pool: h.pool, port: 0 });
+    try {
+      const health = await fetch(`http://127.0.0.1:${admin.port}/healthz`);
+      expect(health.status).toBe(200);
+      expect(await health.text()).toBe('ok\n');
+
+      const before = await fetch(`http://127.0.0.1:${admin.port}/readyz`);
+      expect(before.status).toBe(503);
+      expect(await before.json()).toEqual({ ready: false, workers: 2, healthy: 0 });
+
+      h.forked[1]!.ready();
+      const after = await fetch(`http://127.0.0.1:${admin.port}/readyz`);
+      expect(after.status).toBe(200);
+      expect(after.headers.get('content-type')).toMatch(/application\/json/);
+      expect(await after.json()).toEqual({ ready: true, workers: 2, healthy: 1 });
+
+      // Still a closed set: anything else is a misconfiguration and must look like one.
+      expect((await fetch(`http://127.0.0.1:${admin.port}/readyz/x`)).status).toBe(404);
+      const post = await fetch(`http://127.0.0.1:${admin.port}/readyz`, { method: 'POST' });
+      expect(post.status).toBe(404);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  it('binds loopback by default and the given host when told', async () => {
+    const pool = ready().pool;
+    const loop = await startAdminServer({ pool, port: 0 });
+    expect(loop.address).toBe('127.0.0.1');
+    await loop.close();
+
+    const any = await startAdminServer({ pool, port: 0, host: '0.0.0.0' });
+    try {
+      expect(any.address).toBe('0.0.0.0');
+      expect((await fetch(`http://127.0.0.1:${any.port}/healthz`)).status).toBe(200);
+    } finally {
+      await any.close();
+    }
   });
 });
 
