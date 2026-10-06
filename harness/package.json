@@ -33,7 +33,7 @@
     "@moca/work-queue": "workspace:*",
     "@earendil-works/pi-ai": "link:../pi-fork/packages/ai",
     "@earendil-works/pi-coding-agent": "link:../pi-fork/packages/coding-agent",
-    "redis": "^6.2.1"
+    "redis": "^6.3.0"
   },
   "devDependencies": {
     "tsx": "^4.23.15",
