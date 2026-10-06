@@ -1,39 +1,31 @@
 # Delegate tasks to MOCA
 
-`moca-delegate-task` sends one task or many independent tasks from a local agent to MOCA. MOCA uses
-Context Service to transport the required local context. MOCA mounts the remote context read-only
-and returns the results.
+`moca-delegate-task` sends one bounded task—or many independent tasks—to MOCA with a selected
+local context. Context Service stores the upload. MOCA then creates isolated Sandboxes, mounts the
+Context read-only, and returns the results.
 
-Use remote delegation to:
+Use it to:
 
-- Run independent tasks in parallel.
-- Use cloud compute, hardware, capacity, data, services, or private networks.
-- Isolate remote work from your local environment.
+- Run independent work in parallel.
+- Demonstrate hundreds of small serverless tasks from one shared context.
+- Use remote capacity or services without giving the remote agent your local environment.
 
-```text
-MOCA delegation: local agent → remote context (Context Service) → MOCA sandbox → result
-```
-
-The skill supports one remote task and batch fan-out from a shared remote context.
+The main README stays intentionally high level. The complete local walkthrough lives in the
+[Kind demo](references/demo.md).
 
 ## Requirements
 
-- A reachable MOCA deployment
+- A reachable MOCA deployment with workload context uploads enabled
 - [`contextctl`](https://github.com/rossoctl/context-service#install)
-- A reachable [Context Service](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md)
-- `kubectl` access to the cluster that runs MOCA and Context Service
 - Python 3
+- `SH_URL`, plus `SH_TOKEN` when MOCA authentication is enabled
 
-You can capture local context without Kubernetes. Delegation requires MOCA and Context Service.
+Users do not need cluster credentials or a direct Context Service endpoint. MOCA issues a
+short-lived capability for each upload.
 
-## Install the skill
+## Install
 
-Clone the experimental branch:
-
-```sh
-git clone --branch experiment/moca-context-delegation https://github.com/moonlight16/moca.git
-cd moca
-```
+From a MOCA checkout:
 
 ### Claude Code
 
@@ -60,50 +52,29 @@ mkdir -p ~/.config/opencode/skills
 cp -R "$PWD/skills/moca-delegate-task" ~/.config/opencode/skills/
 ```
 
-Ask OpenCode to use the `moca-delegate-task` skill.
-
-## Configure access
-
-Set the connection details for MOCA and Context Service:
+## Configure
 
 ```sh
-export CS_URL=https://context-service.example.com
-export CS_NAMESPACE=moca
 export SH_URL=https://moca.example.com
 export SH_TOKEN=<bearer-token> # omit when authentication is disabled
 ```
 
-Keep credentials outside prompts and committed files. Configure `CS_URL` and your active Kubernetes
-context for the same cluster.
+Keep credentials outside prompts and committed files. The helper does not perform MOCA login.
 
-Protected MOCA routes require `SH_TOKEN`. Without it, a route can return `403 RBAC: access denied`.
-Ask the MOCA operator for a token. The helper does not perform the MOCA login flow.
+## Use
 
-## Delegate a task
-
-Create or select local context. Then ask your agent to use the skill:
+Ask your agent to delegate a bounded task:
 
 ```text
-Use the moca-delegate-task skill to run this bounded task remotely using local context CONTEXT_NAME.
-Publish it as REMOTE_CONTEXT_NAME. Analyze the failing tests and return the likely cause with file
-references.
+Use the moca-delegate-task skill with local context CONTEXT_NAME. Analyze the failing tests and
+return the likely cause with file references.
 ```
 
-The skill reports results, transported files, bytes, elapsed time, and self-reported files read. It
-stores telemetry in `~/.contexts/telemetry/moca-delegation.jsonl`.
+For fan-out, provide a JSONL task file. The helper exports the context once, uploads it to one
+shared workload, submits every task, and removes the workload when the batch finishes.
 
-## Run the demo
+The [Kind demo](references/demo.md) includes synthetic incident triage with 12 tasks and an
+intentional 100-task option. See [workflow patterns](references/workflows.md) for other uses.
 
-The [Kind demo](references/demo.md) fans one local context out to 12 Claude tasks. The demo includes
-an explicit 100-task option.
-
-## Explore other workflows
-
-See [Context and execution workflows](references/workflows.md) for more workflow patterns.
-
-## References
-
-- [Install `contextctl`](https://github.com/rossoctl/context-service#install)
-- [Run Context Service on Kind](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#guided-kind-quickstart)
-- [Deploy Context Service to Kubernetes](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#deploy-to-kubernetes)
-- [Configure Context Service clients](https://github.com/rossoctl/context-service/blob/main/docs/getting-started.md#cli)
+See [how context delegation works](references/internal-flow.md) for the internal request, upload,
+storage, and execution flow.

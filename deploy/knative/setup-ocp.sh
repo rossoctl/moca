@@ -268,6 +268,7 @@ spec:
     features:
       kubernetes.podspec-persistent-volume-claim: enabled
       kubernetes.podspec-persistent-volume-write: enabled
+      kubernetes.podspec-fieldref: enabled
       kubernetes.podspec-securitycontext: enabled
     autoscaler:
       stable-window: "20s"
@@ -523,6 +524,7 @@ render_overlay_dir() {
     | sed \
         -e "s#ghcr.io/rossoctl/moca:latest#${HARNESS_IMAGE}#g" \
         -e "s#ghcr.io/rossoctl/moca-sandbox:latest#${SANDBOX_IMAGE}#g" \
+        -e "s#dev.local/moca-sandbox:local#${SANDBOX_IMAGE}#g" \
     | if [ "$NAMESPACE" != "default" ]; then
         sed -e "s#namespace: default#namespace: ${NAMESPACE}#g" \
             -e "s#redis.default.svc#redis.${NAMESPACE}.svc#g"

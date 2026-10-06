@@ -239,6 +239,36 @@ describe('kustomizations wire in the egress policy', () => {
   }
 });
 
+describe('Context Service egress policy', () => {
+  const policy = networkPolicies(resolve(DEPLOY, 'context-service-egress.yaml'))[0];
+
+  it('selects the harness and allows only Context Service on TCP 8080', () => {
+    expect(policy.spec.podSelector.matchLabels).toEqual({
+      'serving.knative.dev/service': 'serverless-harness',
+    });
+    expect(policy.spec.policyTypes).toEqual(['Egress']);
+    expect(policy.spec.egress).toHaveLength(1);
+    expect(policy.spec.egress[0]?.ports).toEqual([{ protocol: 'TCP', port: 8080 }]);
+    expect(policy.spec.egress[0]?.to).toEqual([
+      { podSelector: { matchLabels: { 'app.kubernetes.io/name': 'context-service' } } },
+      {
+        namespaceSelector: {
+          matchLabels: { 'kubernetes.io/metadata.name': 'context-service' },
+        },
+        podSelector: { matchLabels: { 'app.kubernetes.io/name': 'context-service' } },
+      },
+    ]);
+  });
+
+  for (const rel of ['kustomization.yaml', 'overlays/ocp/kustomization.yaml']) {
+    it(`${rel} includes context-service-egress.yaml`, () => {
+      const k = readYaml(resolve(DEPLOY, rel));
+      const resources: string[] = k.resources ?? [];
+      expect(resources.some((r) => r.endsWith('context-service-egress.yaml'))).toBe(true);
+    });
+  }
+});
+
 describe('the kind/k8s setup scripts actually apply the egress policy', () => {
   // Being listed in kustomization.yaml's resources is not enough on its own: setup-kind.sh and
   // setup-k8s.sh each apply individual files rather than running `kubectl apply -k`, so a
@@ -253,6 +283,11 @@ describe('the kind/k8s setup scripts actually apply the egress policy', () => {
     it(`${rel} applies harness-egress-policy.yaml`, () => {
       const src = readFileSync(resolve(DEPLOY, rel), 'utf8');
       expect(src).toMatch(/harness-egress-policy\.yaml/);
+    });
+
+    it(`${rel} applies context-service-egress.yaml`, () => {
+      const src = readFileSync(resolve(DEPLOY, rel), 'utf8');
+      expect(src).toMatch(/context-service-egress\.yaml/);
     });
   }
 });

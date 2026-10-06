@@ -28,6 +28,7 @@ resources:
   - ../../service.yaml
   - ../../gitd.yaml
   - ../../harness-egress-policy.yaml
+  - ../../context-service-egress.yaml
   - ../../relay-deployment.yaml
 
 images:

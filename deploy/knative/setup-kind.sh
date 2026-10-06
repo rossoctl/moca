@@ -9,7 +9,7 @@
 #   - ANTHROPIC_API_KEY env var set
 #
 # Usage:
-#   ./deploy/knative/setup-kind.sh [--skip-build] [--build] [--image <ref>] [--cluster-name <name>]
+#   ./deploy/knative/setup-kind.sh [--skip-build] [--build] [--image <ref>] [--sandbox-image <ref>] [--cluster-name <name>]
 #
 # Harness image (dev.local/moca:local, referenced by service.yaml):
 #   default      Pull the published image ($SH_IMAGE) and load it into kind; if the pull is
@@ -31,6 +31,8 @@ KNATIVE_VERSION="${KNATIVE_VERSION:-v1.14.0}"
 SH_IMAGE="${SH_IMAGE:-ghcr.io/rossoctl/moca:latest}"
 # Local tag the Knative manifests reference; the pulled/built image is (re)tagged to this.
 LOCAL_IMAGE="${LOCAL_IMAGE:-dev.local/moca:local}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"
+LOCAL_SANDBOX_IMAGE="${LOCAL_SANDBOX_IMAGE:-dev.local/moca-sandbox:local}"
 
 # Parse args
 for arg in "$@"; do
@@ -41,6 +43,8 @@ for arg in "$@"; do
     --cluster-name=*) CLUSTER_NAME="${arg#*=}" ;;
     --image) shift; SH_IMAGE="$1" ;;
     --image=*) SH_IMAGE="${arg#*=}" ;;
+    --sandbox-image) shift; SANDBOX_IMAGE="$1" ;;
+    --sandbox-image=*) SANDBOX_IMAGE="${arg#*=}" ;;
   esac
   shift 2>/dev/null || true
 done
@@ -72,6 +76,26 @@ ensure_harness_image() {
   echo "--- Loading built image into kind ---"
   kind load docker-image "$LOCAL_IMAGE" --name "$CLUSTER_NAME"
   HARNESS_IMAGE_LOADED=true
+}
+
+ensure_sandbox_image() {
+  if [ "$SKIP_BUILD" = "true" ]; then
+    echo "--- Skipping sandbox image build/pull (--skip-build): expecting $LOCAL_SANDBOX_IMAGE preloaded ---"
+    return 0
+  fi
+  if [ "$FORCE_BUILD" != "true" ]; then
+    echo "--- Pulling published sandbox image: $SANDBOX_IMAGE ---"
+    if docker pull "$SANDBOX_IMAGE"; then
+      docker tag "$SANDBOX_IMAGE" "$LOCAL_SANDBOX_IMAGE"
+      kind load docker-image "$LOCAL_SANDBOX_IMAGE" --name "$CLUSTER_NAME"
+      return 0
+    fi
+    echo "--- Pull unavailable ($SANDBOX_IMAGE); falling back to a local build ---"
+  else
+    echo "--- Building sandbox image locally (--build) ---"
+  fi
+  docker build --load -f "$SCRIPT_DIR/sandbox.Dockerfile" -t "$LOCAL_SANDBOX_IMAGE" "$SCRIPT_DIR"
+  kind load docker-image "$LOCAL_SANDBOX_IMAGE" --name "$CLUSTER_NAME"
 }
 
 # When sourced by tests (SH_SOURCE_ONLY=1), stop here so only the functions above are exposed.
@@ -124,12 +148,11 @@ kubectl patch configmap/config-deployment \
 # Enable persistent-volume-claim support (read + write) so the leaf-session contract can
 # mount the shared leaf-work PVC into the harness service (deploy/knative/leaf-pvc.yaml).
 # The validating webhook rejects a writable PVC mount unless both flags are enabled.
-# Also enable kubernetes.podspec-securitycontext so the harness pods can use pod-level
-# and container-level securityContext fields (runAsNonRoot, fsGroup, etc.).
+# Also enable fieldRef and securityContext support used by the harness pod template.
 kubectl patch configmap/config-features \
   --namespace knative-serving \
   --type merge \
-  --patch '{"data":{"kubernetes.podspec-persistent-volume-claim":"enabled","kubernetes.podspec-persistent-volume-write":"enabled","kubernetes.podspec-securitycontext":"enabled"}}'
+  --patch '{"data":{"kubernetes.podspec-persistent-volume-claim":"enabled","kubernetes.podspec-persistent-volume-write":"enabled","kubernetes.podspec-fieldref":"enabled","kubernetes.podspec-securitycontext":"enabled"}}'
 
 # Install KEDA (event-driven autoscaling) — async leaf completion uses a KEDA ScaledJob.
 KEDA_VERSION="${KEDA_VERSION:-v2.14.0}"
@@ -177,6 +200,7 @@ kubectl -n default wait --for=condition=Ready pod -l "$POOL_SELECTOR" --timeout=
 # 7. Provide the harness image ($LOCAL_IMAGE) referenced by service.yaml (pull by default,
 #    local build with --build, or reuse a preloaded image with --skip-build).
 ensure_harness_image
+ensure_sandbox_image
 
 # 7b. Deploy the harness's default-deny egress NetworkPolicy (DNS, Redis, relay, HTTPS —
 # see harness-egress-policy.yaml). Unconditional and BEFORE service.yaml: modern kindnet
@@ -189,6 +213,7 @@ ensure_harness_image
 # than stacking with it -- that swap only does the intended thing if this apply ran first.
 echo "--- Deploying harness egress NetworkPolicy ---"
 kubectl apply -f "$SCRIPT_DIR/harness-egress-policy.yaml"
+kubectl apply -f "$SCRIPT_DIR/context-service-egress.yaml"
 
 # 8. Create LLM credentials secret (supports direct API key or gateway bridge)
 if [ "${SH_AUTHBRIDGE:-0}" = "1" ]; then

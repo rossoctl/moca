@@ -19,6 +19,7 @@
 # Allowlist today (pre-M8 injector):
 #   - DNS   : resolve the external LLM hostname (api.anthropic.com, rotating CDN IPs).
 #   - Redis : the durable session log (in-cluster, scoped to the redis pod).
+#   - Context Service: optional workload storage and upload authorization.
 #   - :443  : the LLM provider AND the in-cluster K8s API server (pods/exec = the
 #             sandbox control channel).
 #

@@ -84,6 +84,42 @@ spec:
                   name: sh-exchange-token
                   key: SH_EXCHANGE_TOKEN
                   optional: true
+            - name: CONTEXT_SERVICE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: context-service-client
+                  key: url
+                  optional: true
+            - name: CONTEXT_SERVICE_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: context-service-client
+                  key: public-url
+                  optional: true
+            - name: CONTEXT_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: context-service-client
+                  key: token
+                  optional: true
+            - name: CONTEXT_SERVICE_SHARED_ACCESS_MODE
+              valueFrom:
+                secretKeyRef:
+                  name: context-service-client
+                  key: shared-access-mode
+                  optional: true
+            - name: CONTEXT_SERVICE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MOCA_SANDBOX_IMAGE
+              value: 'dev.local/moca-sandbox:local'
+            - name: MOCA_SANDBOX_SERVICE_ACCOUNT
+              value: 'serverless-harness-sandbox'
           readinessProbe:
             httpGet:
               path: /health
@@ -110,6 +146,13 @@ metadata:
   name: serverless-harness
   namespace: default
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: serverless-harness-sandbox
+  namespace: default
+automountServiceAccountToken: false
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -124,7 +167,10 @@ rules:
     verbs: ['create']
   - apiGroups: ['agents.x-k8s.io']
     resources: ['sandboxes']
-    verbs: ['get', 'list']
+    verbs: ['create', 'get', 'list', 'patch', 'update', 'delete']
+  - apiGroups: ['']
+    resources: ['persistentvolumeclaims']
+    verbs: ['delete']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

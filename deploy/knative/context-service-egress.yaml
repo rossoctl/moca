@@ -1,0 +1,28 @@
+# Additive egress permission for the optional Context Service integration.
+#
+# The base harness policy is default-deny. This policy permits only TCP 8080
+# to Context Service, whether it runs beside MOCA or in its own namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: context-service-egress-from-harness
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      serving.knative.dev/service: serverless-harness
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: context-service
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: context-service
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: context-service
+      ports:
+        - { protocol: TCP, port: 8080 }

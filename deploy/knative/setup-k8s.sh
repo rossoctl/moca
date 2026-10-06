@@ -197,7 +197,7 @@ if ! $DRY_RUN; then
     --patch '{"data":{"stable-window":"20s","scale-to-zero-grace-period":"10s","container-concurrency-target-percentage":"100"}}'
   # PVC read+write + securityContext feature flags (harness/sandbox mount PVCs, run non-root).
   "${KUBECTL[@]}" patch configmap/config-features -n knative-serving --type merge \
-    --patch '{"data":{"kubernetes.podspec-persistent-volume-claim":"enabled","kubernetes.podspec-persistent-volume-write":"enabled","kubernetes.podspec-securitycontext":"enabled"}}'
+    --patch '{"data":{"kubernetes.podspec-persistent-volume-claim":"enabled","kubernetes.podspec-persistent-volume-write":"enabled","kubernetes.podspec-fieldref":"enabled","kubernetes.podspec-securitycontext":"enabled"}}'
   "${KUBECTL[@]}" wait --for=condition=Available deployment --all -n knative-serving --timeout=180s
 fi
 
@@ -269,6 +269,7 @@ fi
 # "the harness is unavailable" because SH_CONTROL_PLANE_URL's hostname can't resolve.
 log_info "Deploying harness egress NetworkPolicy"
 apply_base "$SCRIPT_DIR/harness-egress-policy.yaml"
+apply_base "$SCRIPT_DIR/context-service-egress.yaml"
 
 # ----------------------------------------------------------------------------
 # 7. Harness Knative Service (+ SA/RBAC in service.yaml)

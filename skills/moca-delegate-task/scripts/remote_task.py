@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Delegate a bounded prompt to MOCA with context transported by Context Service."""
+"""Delegate bounded tasks to MOCA with an uploaded local context."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -22,14 +23,15 @@ NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TERMINAL = {"responded", "done", "solved", "failed", "aborted", "paused"}
 SUCCESS_TERMINAL = {"responded", "done", "solved"}
+CONTEXT_CONTENT_TYPE = "application/vnd.rossoctl.context"
 
 
 class RemoteTaskError(RuntimeError):
     pass
 
 
-def run_command(args: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, input=stdin, text=True, capture_output=True, check=False)
+def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(args, text=True, capture_output=True, check=False)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         raise RemoteTaskError(f"{' '.join(args[:3])}: {detail}")
@@ -40,12 +42,22 @@ def contextctl(*args: str) -> dict[str, Any]:
     executable = os.environ.get("CONTEXTCTL", "contextctl")
     result = run_command([executable, *args, "--json"])
     try:
-        return json.loads(result.stdout)
+        value = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise RemoteTaskError("contextctl did not return JSON") from exc
+    if not isinstance(value, dict):
+        raise RemoteTaskError("contextctl returned an unexpected JSON value")
+    return value
 
 
-def request(base_url: str, method: str, path: str, body: Any | None = None) -> Any:
+def request(
+    base_url: str,
+    method: str,
+    path: str,
+    body: Any | None = None,
+    timeout: float = 30,
+) -> Any:
+    """Call MOCA using its ordinary host override and session token."""
     headers = {"accept": "application/json"}
     host = os.environ.get("SH_HOST", "").strip()
     if host:
@@ -59,77 +71,92 @@ def request(base_url: str, method: str, path: str, body: Any | None = None) -> A
         headers["content-type"] = "application/json"
     req = urllib.request.Request(base_url.rstrip("/") + path, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         raise RemoteTaskError(f"MOCA {method} {path} returned {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RemoteTaskError(f"MOCA {method} {path} failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RemoteTaskError(f"MOCA {method} {path} timed out after {timeout:g} seconds") from exc
     return json.loads(raw) if raw else None
 
 
-def latest_stats(local: dict[str, Any]) -> tuple[str, int, int]:
-    revisions = local.get("revisions") or []
-    if not revisions:
-        return "", 0, 0
-    current = local.get("currentRevision")
-    revision = next((item for item in reversed(revisions) if item.get("id") == current), revisions[-1])
-    return str(revision.get("id", "")), int(revision.get("files", 0)), int(revision.get("bytes", 0))
-
-
-def claim_name(remote: dict[str, Any]) -> str:
-    claim = (remote.get("attachment") or {}).get("claimName")
-    if not isinstance(claim, str) or not claim:
-        raise RemoteTaskError("remote context is not backed by a PVC")
-    return claim
-
-
-def materialize(namespace: str, claim: str, delegation_id: str) -> str:
-    pod = f"context-stage-{delegation_id[-12:]}"
-    manifest = {
-        "apiVersion": "v1",
-        "kind": "Pod",
-        "metadata": {"name": pod, "namespace": namespace, "labels": {"app": "context-stage"}},
-        "spec": {
-            "restartPolicy": "Never",
-            "containers": [{
-                "name": "stage",
-                "image": os.environ.get("CS_HELPER_IMAGE", "busybox:1.36"),
-                "command": ["sh", "-c", "sleep 300"],
-                "volumeMounts": [{"name": "context", "mountPath": "/context"}],
-            }],
-            "volumes": [{"name": "context", "persistentVolumeClaim": {"claimName": claim}}],
-        },
-    }
-    run_command(["kubectl", "create", "-f", "-"], stdin=json.dumps(manifest))
+def upload_bundle(
+    upload_url: str,
+    token: str,
+    bundle: Path,
+    method: str,
+    content_type: str,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """PUT a bundle directly using only the one-time upload capability."""
+    parsed_url = urllib.parse.urlparse(upload_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise RemoteTaskError("MOCA returned an invalid context upload URL")
+    if method != "PUT":
+        raise RemoteTaskError("MOCA returned an unsupported context upload method")
+    if content_type != CONTEXT_CONTENT_TYPE:
+        raise RemoteTaskError("MOCA returned an unsupported context upload content type")
+    bundle_size = bundle.stat().st_size
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise RemoteTaskError("MOCA returned an invalid context upload size limit")
+    if bundle_size > max_bytes:
+        raise RemoteTaskError(
+            f"context bundle is {bundle_size} bytes; upload limit is {max_bytes} bytes"
+        )
     try:
-        run_command(["kubectl", "wait", "-n", namespace, f"pod/{pod}", "--for=condition=Ready", "--timeout=120s"])
-        script = (
-            "set -eu; digest=$(cat /context/.context-service/current); "
-            "case \"$digest\" in *[!0-9a-f]*|'') exit 21;; esac; "
-            "test ${#digest} -eq 64 || exit 21; "
-            "destination=/context/.context-service/materialized/$digest; "
-            "if [ ! -d \"$destination\" ]; then "
-            f"temporary=/context/.context-service/materialized/.{delegation_id}; "
-            "mkdir -p \"$temporary\"; "
-            "tar -xzf /context/.context-service/objects/$digest.context -C \"$temporary\"; "
-            "mv \"$temporary\" \"$destination\"; fi; "
-            "printf '%s\\n' \"$digest\""
-        )
-        result = run_command(["kubectl", "exec", "-n", namespace, pod, "--", "sh", "-c", script])
-    finally:
-        subprocess.run(
-            ["kubectl", "delete", "pod", "-n", namespace, pod, "--wait=true", "--timeout=60s"],
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    digest = result.stdout.strip()
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise RemoteTaskError("materialized context returned an invalid bundle digest")
-    return f"/workspace/.context-service/materialized/{digest}"
+        with bundle.open("rb") as stream:
+            req = urllib.request.Request(
+                upload_url,
+                data=stream,
+                headers={
+                    "accept": "application/json",
+                    "authorization": f"Bearer {token}",
+                    "content-length": str(bundle_size),
+                    "content-type": content_type,
+                },
+                method=method,
+            )
+            with urllib.request.urlopen(req, timeout=300) as response:
+                raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise RemoteTaskError(f"context upload returned {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RemoteTaskError(f"context upload failed: {exc.reason}") from exc
+    try:
+        result = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise RemoteTaskError("context upload did not return JSON") from exc
+    if not isinstance(result, dict):
+        raise RemoteTaskError("context upload returned an unexpected JSON value")
+    relative_path = result.get("workspacePath", result.get("path"))
+    if not isinstance(relative_path, str) or not relative_path:
+        raise RemoteTaskError("context upload response did not include a workspace path")
+    parsed_path = PurePosixPath(relative_path)
+    if parsed_path.is_absolute() or ".." in parsed_path.parts:
+        raise RemoteTaskError("context upload returned an invalid workspace path")
+    revision = result.get("revision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{64}", revision):
+        raise RemoteTaskError("context upload returned an invalid revision")
+    expected_path = PurePosixPath(".context-service") / "materialized" / revision
+    if parsed_path != expected_path:
+        raise RemoteTaskError("context upload returned a workspace path for a different revision")
+    result["workspacePath"] = "/workspace"
+    return result
+
+
+def export_context(context: str, bundle: Path) -> dict[str, Any]:
+    result = contextctl("ctx", "export", context, "--output", str(bundle))
+    if not bundle.is_file():
+        raise RemoteTaskError("contextctl did not create the exported context bundle")
+    return result
+
+
+def exported_bundle_bytes(bundle: Path, exported: dict[str, Any]) -> int:
+    return bundle.stat().st_size if bundle.is_file() else int(exported.get("bytes") or 0)
 
 
 def emit(path: Path, event: dict[str, Any]) -> None:
@@ -158,80 +185,81 @@ def wait_for_result(base_url: str, session_id: str, timeout: float, interval: fl
     raise RemoteTaskError(f"timed out waiting for session {session_id}")
 
 
-def stage_context(
-    context: str,
-    remote_context: str,
-    namespace: str,
-    delegation_id: str,
-    telemetry: Path,
-) -> tuple[str, str, int, int]:
-    """Capture local context and materialize it as remote context."""
-    local = contextctl("ctx", "get", context, "--backend", "filesystem")
-    context_type = "state" if local.get("type") == "history" else local.get("type")
-    try:
-        remote = contextctl(
-            "ctx", "get", remote_context, "--backend", "pvc", "--namespace", namespace
-        )
-    except RemoteTaskError as exc:
-        if "not found" not in str(exc).lower() and "404" not in str(exc):
-            raise
-        remote = contextctl(
-            "ctx", "create", remote_context, "--type", str(context_type),
-            "--backend", "pvc", "--namespace", namespace,
-        )
-
-    sync_start = time.time()
-    run_command([
-        os.environ.get("CONTEXTCTL", "contextctl"), "ctx", "sync", "push", context,
-        "--remote-name", remote_context, "--namespace", namespace,
-    ])
-    remote = contextctl(
-        "ctx", "get", remote_context, "--backend", "pvc", "--namespace", namespace
-    )
-    revision, files, byte_count = latest_stats(
-        contextctl("ctx", "get", context, "--backend", "filesystem")
-    )
-    remote_namespace = str(remote.get("namespace") or namespace)
-    claim = claim_name(remote)
-    workspace_path = materialize(remote_namespace, claim, delegation_id)
-    emit(telemetry, {
-        "event": "context_staged", "delegationId": delegation_id,
-        "context": context, "remoteContext": remote_context, "revision": revision,
-        "files": files, "bytes": byte_count,
-        "elapsedMs": round((time.time() - sync_start) * 1000),
-    })
-    return claim, workspace_path, files, byte_count
-
-
-def create_ready_workload(
+def create_workload(
     base_url: str,
     workload_id: str,
-    claim: str,
     sandboxes: int,
+    shared: bool,
     timeout: float,
     interval: float,
-    cleanup_on_failure: bool = True,
+    context_type: str | None = None,
 ) -> dict[str, Any]:
-    workload = request(base_url, "POST", "/workloads", {
+    body: dict[str, Any] = {
         "name": workload_id,
         "sandboxes": sandboxes,
-        "workspace": {"claimName": claim, "readOnly": True},
-    })
-    try:
-        deadline = time.monotonic() + timeout
-        while str(workload.get("status", "")).lower() != "ready" or workload.get("readyReplicas", 0) < 1:
-            if time.monotonic() >= deadline:
-                raise RemoteTaskError(f"timed out waiting for workload {workload_id}")
-            time.sleep(interval)
-            workload = request(base_url, "GET", f"/workloads/{workload_id}")
-    except Exception:
-        if cleanup_on_failure:
-            try:
-                request(base_url, "DELETE", f"/workloads/{workload_id}")
-            except RemoteTaskError:
-                pass
-        raise
+        "contextUpload": True,
+        "workspace": {"shared": shared, "readOnly": True},
+    }
+    # Context Service accepts an upload only into a Context of the bundle's type.
+    if context_type:
+        body["contextType"] = "state" if context_type == "history" else context_type
+    workload = request(base_url, "POST", "/workloads", body)
     return workload
+
+
+def activate_ready_workload(
+    base_url: str,
+    workload_id: str,
+    revision: str,
+    timeout: float,
+    interval: float,
+) -> dict[str, Any]:
+    workload = request(
+        base_url, "POST", f"/workloads/{workload_id}/activate", {"revision": revision}
+    )
+    deadline = time.monotonic() + timeout
+    while str(workload.get("status", "")).lower() != "ready" or workload.get("readyReplicas", 0) < 1:
+        if time.monotonic() >= deadline:
+            raise RemoteTaskError(f"timed out waiting for workload {workload_id}")
+        time.sleep(interval)
+        workload = request(base_url, "GET", f"/workloads/{workload_id}")
+    return workload
+
+
+def upload_context(
+    capability: dict[str, Any],
+    context: str,
+    bundle: Path,
+    exported: dict[str, Any],
+    delegation_id: str,
+    telemetry: Path,
+    started: float,
+) -> tuple[str, int, int, str]:
+    upload_url = capability.get("uploadUrl")
+    token = capability.get("token")
+    if not isinstance(upload_url, str) or not upload_url or not isinstance(token, str) or not token:
+        raise RemoteTaskError("MOCA returned an incomplete upload capability")
+    method = capability.get("method")
+    content_type = capability.get("contentType")
+    max_bytes = capability.get("maxBytes")
+    uploaded = upload_bundle(
+        upload_url,
+        token,
+        bundle,
+        method,
+        content_type,
+        max_bytes,
+    )
+    workspace_path = str(uploaded["workspacePath"])
+    files = int(uploaded.get("fileCount", uploaded.get("files", exported.get("files", 0))))
+    byte_count = int(uploaded.get("byteCount", uploaded.get("bytes", exported.get("bytes", 0))))
+    revision = str(uploaded.get("revision", ""))
+    emit(telemetry, {
+        "event": "context_uploaded", "delegationId": delegation_id,
+        "context": context, "revision": revision, "files": files, "bytes": byte_count,
+        "elapsedMs": round((time.time() - started) * 1000),
+    })
+    return workspace_path, files, byte_count, revision
 
 
 def task_prompt(task: str, workspace_path: str) -> str:
@@ -277,174 +305,221 @@ def validate_session_id(value: str) -> str:
     return value
 
 
+def base_url(args: argparse.Namespace) -> str:
+    value = args.sh_url or os.environ.get("SH_URL", "")
+    if not value:
+        raise RemoteTaskError("SH_URL or --sh-url is required")
+    return value
+
+
+def cleanup_workload(url: str, workload_id: str, delegation_id: str, telemetry: Path) -> bool:
+    emit(telemetry, {
+        "event": "workload_cleanup_requested", "delegationId": delegation_id,
+        "workloadId": workload_id,
+    })
+    try:
+        request(url, "DELETE", f"/workloads/{workload_id}", timeout=90)
+    except RemoteTaskError as cleanup_error:
+        emit(telemetry, {
+            "event": "cleanup_failed", "delegationId": delegation_id,
+            "workloadId": workload_id, "error": str(cleanup_error),
+        })
+        return False
+    else:
+        emit(telemetry, {
+            "event": "cleanup_succeeded", "delegationId": delegation_id,
+            "workloadId": workload_id,
+        })
+        return True
+
+
 def run_task(args: argparse.Namespace) -> int:
-    if not NAME.fullmatch(args.remote_context):
-        raise RemoteTaskError("--remote-context must be a lowercase Kubernetes name")
     if args.sandboxes < 1:
         raise RemoteTaskError("--sandboxes must be at least 1")
-    base_url = args.sh_url or os.environ.get("SH_URL", "")
-    if not base_url:
-        raise RemoteTaskError("SH_URL or --sh-url is required")
+    url = base_url(args)
     delegation_id = f"d-{uuid.uuid4().hex[:12]}"
     session_id = validate_session_id(args.session_id or f"remote-{delegation_id[2:]}")
     telemetry = Path(args.telemetry).expanduser()
     workload_id = f"delegate-{delegation_id[2:]}"
     started = time.time()
-    claim, workspace_path, files, byte_count = stage_context(
-        args.context, args.remote_context, args.namespace, delegation_id, telemetry
-    )
-    create_ready_workload(
-        base_url, workload_id, claim, args.sandboxes, args.timeout, args.poll_interval,
-        cleanup_on_failure=not args.keep_workload,
-    )
-    terminal = False
-    try:
-        prompt = task_prompt(args.task, workspace_path)
-        body = {"sessionId": session_id, "kind": "prompt", "prompt": prompt, "workloadId": workload_id}
-        if args.async_run:
-            body["async"] = True
-        dispatch_start = time.time()
-        result = request(base_url, "POST", "/runs", body)
-        emit(telemetry, {
-            "event": "submitted", "delegationId": delegation_id, "sessionId": session_id,
-            "workloadId": workload_id, "async": args.async_run,
-        })
-        if args.async_run:
-            result = wait_for_result(base_url, session_id, args.timeout, args.poll_interval)
+    cleanup_ok = True
 
-        terminal = isinstance(result, dict) and result.get("status") in TERMINAL
-        if terminal:
+    with tempfile.TemporaryDirectory(prefix="moca-context-") as directory:
+        bundle = Path(directory) / "context.context"
+        upload_started = time.time()
+        exported = export_context(args.context, bundle)
+        emit(telemetry, {
+            "event": "context_exported", "delegationId": delegation_id,
+            "context": args.context, "files": int(exported.get("files") or 0),
+            "bundleBytes": exported_bundle_bytes(bundle, exported),
+        })
+        try:
+            workload = create_workload(
+                url, workload_id, args.sandboxes, False, args.timeout, args.poll_interval,
+                context_type=exported.get("type"),
+            )
             emit(telemetry, {
-                "event": "completed", "delegationId": delegation_id, "sessionId": session_id,
-                "status": result.get("status"), "transportedFiles": files, "transportedBytes": byte_count,
-                "selfReportedFilesUsed": used_files(result),
-                "dispatchElapsedMs": round((time.time() - dispatch_start) * 1000),
-                "totalElapsedMs": round((time.time() - started) * 1000),
+                "event": "workload_created", "delegationId": delegation_id,
+                "workloadId": workload_id, "sandboxes": args.sandboxes,
             })
-    finally:
-        if not args.keep_workload:
-            try:
-                request(base_url, "DELETE", f"/workloads/{workload_id}")
-            except RemoteTaskError as cleanup_error:
+            capability = workload.get("upload")
+            if not isinstance(capability, dict):
+                raise RemoteTaskError("MOCA did not return an upload capability")
+            workspace_path, files, byte_count, revision = upload_context(
+                capability, args.context, bundle, exported, delegation_id, telemetry,
+                upload_started,
+            )
+            ready_workload = activate_ready_workload(
+                url, workload_id, revision, args.timeout, args.poll_interval,
+            )
+            emit(telemetry, {
+                "event": "workload_ready", "delegationId": delegation_id,
+                "workloadId": workload_id,
+                "readySandboxes": int(ready_workload.get("readyReplicas", 0)),
+                "sandboxes": args.sandboxes,
+            })
+            prompt = task_prompt(args.task, workspace_path)
+            body = {"sessionId": session_id, "kind": "prompt", "prompt": prompt, "workloadId": workload_id}
+            if args.async_run:
+                body["async"] = True
+            dispatch_start = time.time()
+            result = request(url, "POST", "/runs", body)
+            emit(telemetry, {
+                "event": "submitted", "delegationId": delegation_id, "sessionId": session_id,
+                "workloadId": workload_id, "async": args.async_run,
+            })
+            if args.async_run:
+                result = wait_for_result(url, session_id, args.timeout, args.poll_interval)
+            if isinstance(result, dict) and result.get("status") in TERMINAL:
                 emit(telemetry, {
-                    "event": "cleanup_failed", "delegationId": delegation_id,
-                    "workloadId": workload_id, "error": str(cleanup_error),
+                    "event": "completed", "delegationId": delegation_id, "sessionId": session_id,
+                    "status": result.get("status"), "transportedFiles": files,
+                    "transportedBytes": byte_count, "revision": revision,
+                    "selfReportedFilesUsed": used_files(result),
+                    "dispatchElapsedMs": round((time.time() - dispatch_start) * 1000),
+                    "totalElapsedMs": round((time.time() - started) * 1000),
                 })
+        finally:
+            if not args.keep_workload:
+                cleanup_ok = cleanup_workload(url, workload_id, delegation_id, telemetry)
 
     print(json.dumps({
         "delegationId": delegation_id, "sessionId": session_id, "workloadId": workload_id,
-        "workspacePath": workspace_path, "result": result, "telemetry": str(telemetry),
+        "workspacePath": workspace_path, "revision": revision, "result": result,
+        "telemetry": str(telemetry),
     }, indent=2))
     status_name = str(result.get("status", "")) if isinstance(result, dict) else ""
-    return 0 if status_name in SUCCESS_TERMINAL else 1
+    return 0 if status_name in SUCCESS_TERMINAL and cleanup_ok else 1
 
 
 def run_batch(args: argparse.Namespace) -> int:
-    if not NAME.fullmatch(args.remote_context):
-        raise RemoteTaskError("--remote-context must be a lowercase Kubernetes name")
     if args.sandboxes < 1:
         raise RemoteTaskError("--sandboxes must be at least 1")
     tasks = load_tasks(args.tasks)
     if len(tasks) > 25 and not args.allow_large_batch:
-        raise RemoteTaskError(
-            f"{len(tasks)} tasks require --allow-large-batch because each task makes a model call"
-        )
-    base_url = args.sh_url or os.environ.get("SH_URL", "")
-    if not base_url:
-        raise RemoteTaskError("SH_URL or --sh-url is required")
-
+        raise RemoteTaskError(f"{len(tasks)} tasks require --allow-large-batch because each task makes a model call")
+    url = base_url(args)
     telemetry = Path(args.telemetry).expanduser()
     delegation_id = f"d-{uuid.uuid4().hex[:12]}"
     workload_id = f"delegate-{delegation_id[2:]}"
     started = time.time()
-    claim, workspace_path, files, byte_count = stage_context(
-        args.context, args.remote_context, args.namespace, delegation_id, telemetry
-    )
-    create_ready_workload(
-        base_url, workload_id, claim, args.sandboxes, args.timeout, args.poll_interval,
-        cleanup_on_failure=not args.keep_workload,
-    )
-
     session_ids: dict[str, str] = {}
     results: dict[str, Any] = {}
-    try:
-        for item in tasks:
-            session_id = validate_session_id(f"batch-{delegation_id[2:]}-{item['id']}")
-            session_ids[item["id"]] = session_id
-            request(base_url, "POST", "/runs", {
-                "sessionId": session_id,
-                "kind": "prompt",
-                "prompt": task_prompt(item["task"], workspace_path),
-                "workloadId": workload_id,
-                "async": True,
-            })
-            emit(telemetry, {
-                "event": "submitted", "delegationId": delegation_id,
-                "sessionId": session_id, "workloadId": workload_id, "taskId": item["id"],
-                "async": True,
-            })
+    cleanup_ok = True
 
-        pending = set(session_ids)
-        deadline = time.monotonic() + args.timeout
-        while pending and time.monotonic() < deadline:
-            for task_id in list(pending):
-                query = urllib.parse.urlencode({"sessionId": session_ids[task_id]})
-                result = request(base_url, "GET", f"/runs/status?{query}")
-                if isinstance(result, dict) and result.get("status") in TERMINAL:
-                    results[task_id] = result
-                    pending.remove(task_id)
-                    emit(telemetry, {
-                        "event": "completed", "delegationId": delegation_id,
-                        "sessionId": session_ids[task_id], "workloadId": workload_id,
-                        "taskId": task_id, "status": result.get("status"),
-                        "selfReportedFilesUsed": used_files(result),
-                    })
-            if pending:
-                print(f"Completed {len(results)}/{len(tasks)} tasks", file=sys.stderr)
-                time.sleep(args.poll_interval)
-    finally:
-        if not args.keep_workload:
-            try:
-                request(base_url, "DELETE", f"/workloads/{workload_id}")
-            except RemoteTaskError as cleanup_error:
-                emit(telemetry, {
-                    "event": "cleanup_failed", "delegationId": delegation_id,
-                    "workloadId": workload_id, "error": str(cleanup_error),
+    with tempfile.TemporaryDirectory(prefix="moca-context-") as directory:
+        bundle = Path(directory) / "context.context"
+        upload_started = time.time()
+        exported = export_context(args.context, bundle)
+        emit(telemetry, {
+            "event": "context_exported", "delegationId": delegation_id,
+            "context": args.context, "files": int(exported.get("files") or 0),
+            "bundleBytes": exported_bundle_bytes(bundle, exported),
+        })
+        try:
+            workload = create_workload(
+                url, workload_id, args.sandboxes, True, args.timeout, args.poll_interval,
+                context_type=exported.get("type"),
+            )
+            emit(telemetry, {
+                "event": "workload_created", "delegationId": delegation_id,
+                "workloadId": workload_id, "sandboxes": args.sandboxes,
+            })
+            capability = workload.get("upload")
+            if not isinstance(capability, dict):
+                raise RemoteTaskError("MOCA did not return an upload capability")
+            workspace_path, files, byte_count, revision = upload_context(
+                capability, args.context, bundle, exported, delegation_id, telemetry,
+                upload_started,
+            )
+            ready_workload = activate_ready_workload(
+                url, workload_id, revision, args.timeout, args.poll_interval,
+            )
+            emit(telemetry, {
+                "event": "workload_ready", "delegationId": delegation_id,
+                "workloadId": workload_id,
+                "readySandboxes": int(ready_workload.get("readyReplicas", 0)),
+                "sandboxes": args.sandboxes,
+            })
+            for item in tasks:
+                session_id = validate_session_id(f"batch-{delegation_id[2:]}-{item['id']}")
+                session_ids[item["id"]] = session_id
+                request(url, "POST", "/runs", {
+                    "sessionId": session_id, "kind": "prompt",
+                    "prompt": task_prompt(item["task"], workspace_path),
+                    "workloadId": workload_id, "async": True,
                 })
+                emit(telemetry, {
+                    "event": "submitted", "delegationId": delegation_id,
+                    "sessionId": session_id, "workloadId": workload_id,
+                    "taskId": item["id"], "async": True,
+                })
+
+            pending = set(session_ids)
+            deadline = time.monotonic() + args.timeout
+            while pending and time.monotonic() < deadline:
+                for task_id in list(pending):
+                    query = urllib.parse.urlencode({"sessionId": session_ids[task_id]})
+                    result = request(url, "GET", f"/runs/status?{query}")
+                    if isinstance(result, dict) and result.get("status") in TERMINAL:
+                        results[task_id] = result
+                        pending.remove(task_id)
+                        emit(telemetry, {
+                            "event": "completed", "delegationId": delegation_id,
+                            "sessionId": session_ids[task_id], "workloadId": workload_id,
+                            "taskId": task_id, "status": result.get("status"),
+                            "selfReportedFilesUsed": used_files(result),
+                        })
+                if pending:
+                    print(f"Completed {len(results)}/{len(tasks)} tasks", file=sys.stderr)
+                    time.sleep(args.poll_interval)
+        finally:
+            if not args.keep_workload:
+                cleanup_ok = cleanup_workload(url, workload_id, delegation_id, telemetry)
 
     status_counts: dict[str, int] = {}
     for result in results.values():
         status_name = str(result.get("status", "unknown"))
         status_counts[status_name] = status_counts.get(status_name, 0) + 1
-    failed = len(pending) + sum(
-        count for status_name, count in status_counts.items() if status_name not in SUCCESS_TERMINAL
-    )
+    failed = len(pending) + sum(count for name, count in status_counts.items() if name not in SUCCESS_TERMINAL)
     summary = {
-        "delegationId": delegation_id,
-        "workloadId": workload_id,
-        "workspacePath": workspace_path,
-        "transportedFiles": files,
-        "transportedBytes": byte_count,
-        "tasks": len(tasks),
-        "completed": len(results),
-        "failed": failed,
-        "statusCounts": status_counts,
-        "timedOut": bool(pending),
+        "delegationId": delegation_id, "workloadId": workload_id,
+        "workspacePath": workspace_path, "revision": revision,
+        "transportedFiles": files, "transportedBytes": byte_count,
+        "tasks": len(tasks), "completed": len(results), "failed": failed,
+        "statusCounts": status_counts, "timedOut": bool(pending),
+        "cleanup": "retained" if args.keep_workload else ("succeeded" if cleanup_ok else "failed"),
         "unfinishedTasks": sorted(pending),
         "totalElapsedMs": round((time.time() - started) * 1000),
-        "results": results,
-        "telemetry": str(telemetry),
+        "results": results, "telemetry": str(telemetry),
     }
     emit(telemetry, {"event": "batch_completed", **{k: v for k, v in summary.items() if k != "results"}})
     print(json.dumps(summary, indent=2))
-    return 1 if failed else 0
+    return 1 if failed or not cleanup_ok else 0
 
 
 def status(args: argparse.Namespace) -> int:
-    base_url = args.sh_url or os.environ.get("SH_URL", "")
-    if not base_url:
-        raise RemoteTaskError("SH_URL or --sh-url is required")
-    result = request(base_url, "GET", "/runs/status?" + urllib.parse.urlencode({"sessionId": args.session_id}))
+    result = request(base_url(args), "GET", "/runs/status?" + urllib.parse.urlencode({"sessionId": args.session_id}))
     print(json.dumps(result, indent=2))
     return 0
 
@@ -452,12 +527,10 @@ def status(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="remote_task.py", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="stage context and dispatch a remote task")
+    run = commands.add_parser("run", help="upload context and dispatch a remote task")
     run.add_argument("--context", required=True, help="local filesystem context")
-    run.add_argument("--remote-context", required=True, help="remote context name")
     run.add_argument("--task", required=True)
     run.add_argument("--session-id")
-    run.add_argument("--namespace", default=os.environ.get("CS_NAMESPACE", "serverless-harness"))
     run.add_argument("--sh-url")
     run.add_argument("--async", dest="async_run", action="store_true")
     run.add_argument("--sandboxes", type=int, default=1)
@@ -466,16 +539,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--poll-interval", type=float, default=2)
     run.add_argument("--telemetry", default="~/.contexts/telemetry/moca-delegation.jsonl")
     run.set_defaults(handler=run_task)
-    batch = commands.add_parser("batch", help="stage context once and dispatch JSONL tasks")
+    batch = commands.add_parser("batch", help="upload context once and dispatch JSONL tasks")
     batch.add_argument("--context", required=True, help="local filesystem context")
-    batch.add_argument("--remote-context", required=True, help="remote context name")
     batch.add_argument("--tasks", required=True, help="JSONL file with id and task fields")
     batch.add_argument("--sandboxes", type=int, default=3)
-    batch.add_argument(
-        "--allow-large-batch", action="store_true",
-        help="confirm intentional dispatch of more than 25 model calls",
-    )
-    batch.add_argument("--namespace", default=os.environ.get("CS_NAMESPACE", "serverless-harness"))
+    batch.add_argument("--allow-large-batch", action="store_true", help="confirm more than 25 model calls")
     batch.add_argument("--sh-url")
     batch.add_argument("--keep-workload", action="store_true")
     batch.add_argument("--timeout", type=float, default=1800)
