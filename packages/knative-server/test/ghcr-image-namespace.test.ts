@@ -88,7 +88,9 @@ describe('GHCR image namespace', () => {
 
   it('loads the dynamic workload Sandbox image for Kind', () => {
     const setup = read('deploy/knative/setup-kind.sh');
-    expect(setup).toContain('SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"');
+    expect(setup).toContain(
+      'SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"',
+    );
     expect(setup).toContain('kind load docker-image "$LOCAL_SANDBOX_IMAGE"');
     expect(setup).toContain('ensure_sandbox_image');
   });

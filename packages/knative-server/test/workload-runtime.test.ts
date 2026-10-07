@@ -29,7 +29,7 @@ describe('Moca workload runtime', () => {
     );
     const rule = role?.rules?.find(
       (candidate: { apiGroups?: string[]; resources?: string[] }) =>
-        candidate.apiGroups?.includes('agents.x-k8s.io') &&
+        candidate.apiGroups?.some((apiGroup) => apiGroup === 'agents.x-k8s.io') &&
         candidate.resources?.includes('sandboxes'),
     );
 
