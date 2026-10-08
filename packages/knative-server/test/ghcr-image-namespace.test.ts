@@ -79,4 +79,19 @@ describe('GHCR image namespace', () => {
   ])('%s honours $%s from the environment', (script, varName) => {
     expect(read(script)).toContain(`${varName}="\${${varName}:-`);
   });
+
+  it('renders the dynamic workload Sandbox image for OpenShift', () => {
+    const setup = read('deploy/knative/setup-ocp.sh');
+    expect(setup).toContain('-e "s#dev.local/moca-sandbox:local#${SANDBOX_IMAGE}#g"');
+    expect(read('deploy/knative/service.yaml')).toContain("value: 'dev.local/moca-sandbox:local'");
+  });
+
+  it('loads the dynamic workload Sandbox image for Kind', () => {
+    const setup = read('deploy/knative/setup-kind.sh');
+    expect(setup).toContain(
+      'SANDBOX_IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-sandbox:latest}"',
+    );
+    expect(setup).toContain('kind load docker-image "$LOCAL_SANDBOX_IMAGE"');
+    expect(setup).toContain('ensure_sandbox_image');
+  });
 });

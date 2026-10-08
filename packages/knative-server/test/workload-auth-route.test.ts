@@ -7,12 +7,26 @@ import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
 // a workload is owned by the subject that created it, and a run can only inherit the pool selector
 // of a workload its own caller owns -- the selector /runs strips must not come back through here.
 
-const { records, runLeaf, createWorkload, getWorkload, deleteWorkload } = vi.hoisted(() => ({
+const {
+  records,
+  runLeaf,
+  createWorkload,
+  freezeWorkload,
+  deleteWorkload,
+  createWorkloadContextUpload,
+  createWorkloadRuntime,
+  getWorkloadRuntime,
+  deleteWorkloadRuntime,
+} = vi.hoisted(() => ({
   records: new Map<string, string>(),
   runLeaf: vi.fn(),
   createWorkload: vi.fn(),
-  getWorkload: vi.fn(),
+  freezeWorkload: vi.fn(),
   deleteWorkload: vi.fn(),
+  createWorkloadContextUpload: vi.fn(),
+  createWorkloadRuntime: vi.fn(),
+  getWorkloadRuntime: vi.fn(),
+  deleteWorkloadRuntime: vi.fn(),
 }));
 vi.mock('@moca/work-queue', () => ({
   RedisWorkQueue: class {
@@ -38,10 +52,27 @@ vi.mock('@moca/harness/run-leaf', () => ({
   leafSessionId: (env: any) => env.sessionId,
 }));
 vi.mock('../src/context-service.js', () => ({
+  ContextServiceRequestError: class ContextServiceRequestError extends Error {
+    constructor(
+      readonly status: number,
+      readonly code: string,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
   contextServiceConfigured: () => true,
-  createWorkload,
-  getWorkload,
-  deleteWorkload,
+  contextNamespace: () => 'default',
+  sharedContextAccessMode: () => 'ReadWriteMany',
+  createContext: createWorkload,
+  freezeContext: freezeWorkload,
+  deleteContext: deleteWorkload,
+  createWorkloadContextUpload,
+}));
+vi.mock('../src/workload-runtime.js', () => ({
+  createWorkloadRuntime,
+  getWorkloadRuntime,
+  deleteWorkloadRuntime,
 }));
 
 import { startServer } from '../src/server.js';
@@ -57,11 +88,26 @@ const BOB = tokenFor('github:bob');
 
 const record = {
   workloadId: 'demo-workload',
+  contextName: 'demo-workload',
+  contextId: 'pvc-uid-123',
   status: 'ready',
   replicas: 2,
   readyReplicas: 2,
-  sandboxSelector: 'context.rossoctl.io/pool=demo-workload',
-  workspace: { size: '1Gi', accessMode: 'ReadWriteMany', storageClass: 'ibm-scale-csi' },
+  sandboxSelector: 'moca.rossoctl.io/workload=demo-workload',
+  workspace: {
+    size: '1Gi',
+    accessMode: 'ReadWriteMany',
+    storageClass: 'ibm-scale-csi',
+    readOnly: true,
+  },
+  attachment: { kind: 'pvc', claimName: 'context-demo-workload' },
+};
+const context = {
+  contextId: 'pvc-uid-123',
+  namespace: 'default',
+  status: 'ready',
+  currentRevision: 'a'.repeat(64),
+  attachment: { kind: 'pvc', claimName: 'context-demo-workload' },
 };
 
 const KEYS = [
@@ -97,17 +143,49 @@ beforeEach(async () => {
   process.env.SH_EXCHANGE_TOKEN = 'shared-abc'; // notsecret
   records.clear();
   runLeaf.mockReset().mockResolvedValue({ status: 'responded', text: 'ok' });
-  createWorkload.mockReset().mockResolvedValue(record);
-  getWorkload.mockReset().mockResolvedValue(record);
+  createWorkload.mockReset().mockResolvedValue(context);
+  freezeWorkload.mockReset().mockResolvedValue({
+    contextId: 'pvc-uid-123',
+    namespace: 'default',
+    status: 'ready',
+    currentRevision: 'a'.repeat(64),
+    attachment: context.attachment,
+  });
   deleteWorkload.mockReset().mockResolvedValue(undefined);
+  createWorkloadRuntime.mockReset().mockResolvedValue({
+    status: 'provisioning',
+    readyReplicas: 0,
+    sandboxSelector: 'moca.rossoctl.io/workload=demo-workload',
+  });
+  getWorkloadRuntime.mockReset().mockResolvedValue({
+    status: 'ready',
+    readyReplicas: 2,
+    sandboxSelector: 'moca.rossoctl.io/workload=demo-workload',
+  });
+  deleteWorkloadRuntime.mockReset().mockResolvedValue(undefined);
+  createWorkloadContextUpload.mockReset().mockResolvedValue({
+    uploadUrl: 'https://context.example/v1/uploads/once',
+    token: 'one-time-token',
+    expiresAt: '2026-09-30T21:00:00Z',
+  });
   server = startServer(0);
-  await new Promise<void>((r) => server.once('listening', () => r()));
+  if (!server.listening) {
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+  }
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 
 afterEach(async () => {
-  await new Promise<void>((r) => server.close(() => r()));
-  await new Promise<void>((r) => cp.close(() => r()));
+  if (server.listening) {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+  if (cp.listening) {
+    await new Promise<void>((resolve, reject) =>
+      cp.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
   for (const k of KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
@@ -148,8 +226,9 @@ describe('/workloads under SH_REQUIRE_AUTH=true', () => {
     );
     expect((await call('GET', '/workloads/demo-workload')).status).toBe(401);
     expect((await call('DELETE', '/workloads/demo-workload')).status).toBe(401);
+    expect((await call('POST', '/workloads/demo-workload/uploads')).status).toBe(401);
     expect(createWorkload).not.toHaveBeenCalled();
-    expect(getWorkload).not.toHaveBeenCalled();
+    expect(freezeWorkload).not.toHaveBeenCalled();
     expect(deleteWorkload).not.toHaveBeenCalled();
   });
 
@@ -175,7 +254,7 @@ describe('/workloads under SH_REQUIRE_AUTH=true', () => {
       json: { error: 'workload_not_found' },
     });
     expect((await call('DELETE', '/workloads/demo-workload', BOB)).status).toBe(404);
-    expect(getWorkload).not.toHaveBeenCalled();
+    expect(freezeWorkload).not.toHaveBeenCalled();
     expect(deleteWorkload).not.toHaveBeenCalled();
     expect((await call('DELETE', '/workloads/demo-workload', ALICE)).status).toBe(204);
   });
@@ -197,11 +276,43 @@ describe('/workloads under SH_REQUIRE_AUTH=true', () => {
     expect(runLeaf).not.toHaveBeenCalled();
 
     // The owner still gets the selector: the check narrows, it does not break the route.
+    await call('GET', '/workloads/demo-workload', ALICE);
     expect((await run(ALICE)).status).toBe(200);
     expect(runLeaf).toHaveBeenCalledWith(
-      expect.objectContaining({ sandboxPoolSelector: 'context.rossoctl.io/pool=demo-workload' }),
+      expect.objectContaining({ sandboxPoolSelector: 'moca.rossoctl.io/workload=demo-workload' }),
       expect.any(Object),
     );
+  });
+
+  it('returns an upload capability only to the workload owner', async () => {
+    await call('POST', '/workloads', ALICE, { name: 'demo-workload', contextUpload: true });
+    createWorkloadContextUpload.mockClear();
+
+    expect(await call('POST', '/workloads/demo-workload/uploads', BOB)).toEqual({
+      status: 404,
+      json: { error: 'workload_not_found' },
+    });
+    expect(createWorkloadContextUpload).not.toHaveBeenCalled();
+
+    const alice = await call('POST', '/workloads/demo-workload/uploads', ALICE);
+    expect(alice).toMatchObject({
+      status: 201,
+      json: { uploadUrl: 'https://context.example/v1/uploads/once', token: 'one-time-token' },
+    });
+    expect(createWorkloadContextUpload).toHaveBeenCalledWith('demo-workload', 'github:alice');
+  });
+
+  it('returns the initial upload capability to the authenticated creator', async () => {
+    const alice = await call('POST', '/workloads', ALICE, {
+      name: 'demo-workload',
+      contextUpload: true,
+    });
+
+    expect(alice).toMatchObject({
+      status: 201,
+      json: { upload: { uploadUrl: 'https://context.example/v1/uploads/once' } },
+    });
+    expect(createWorkloadContextUpload).toHaveBeenCalledWith('demo-workload', 'github:alice');
   });
 });
 
@@ -211,36 +322,42 @@ describe('/workloads under SH_REQUIRE_AUTH=true: records the harness did not wri
   });
 
   it("stores the caller as owner, never an owner Context Service's reply carries", async () => {
-    createWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
-    const created = await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+    createWorkload.mockResolvedValue({ ...context, owner: 'github:carol' });
+    const created = await call('POST', '/workloads', ALICE, {
+      name: 'demo-workload',
+      contextUpload: true,
+    });
     expect(created.json.owner).toBe('github:alice');
     expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBe('github:alice');
 
-    getWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
     expect((await call('GET', '/workloads/demo-workload', ALICE)).json.owner).toBe('github:alice');
     expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBe('github:alice');
   });
 
-  it('refuses a Context Service reply that names a different workload', async () => {
+  it('refuses a Context Service reply from a different namespace', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    createWorkload.mockResolvedValue({ ...record, workloadId: 'someone-else' });
-    expect((await call('POST', '/workloads', ALICE, { name: 'demo-workload' })).status).toBe(502);
+    createWorkload.mockResolvedValue({ ...context, namespace: 'someone-else' });
+    expect(
+      (await call('POST', '/workloads', ALICE, { name: 'demo-workload', contextUpload: true }))
+        .status,
+    ).toBe(502);
     expect(records.size).toBe(0);
     log.mockRestore();
   });
 
-  it('refuses a GET reply that names a different workload, and stores nothing under it', async () => {
-    // GET writes back what Context Service returns. A reply naming `other` must not become a
-    // record at sh:workload:other owned by the caller, nor overwrite the one that was asked for.
-    await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
+  it('refuses an attachment reply with a different immutable Context identity', async () => {
+    await call('POST', '/workloads', ALICE, { name: 'demo-workload', contextUpload: true });
     const before = records.get('sh:workload:demo-workload');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    getWorkload.mockResolvedValue({ ...record, workloadId: 'other' });
-    expect(await call('GET', '/workloads/demo-workload', ALICE)).toEqual({
+    freezeWorkload.mockResolvedValue({ ...context, contextId: 'different-pvc-uid' });
+    expect(
+      await call('POST', '/workloads/demo-workload/activate', ALICE, {
+        revision: 'a'.repeat(64),
+      }),
+    ).toEqual({
       status: 502,
       json: { error: 'context_service_error' },
     });
-    expect(records.has('sh:workload:other')).toBe(false);
     expect(records.get('sh:workload:demo-workload')).toBe(before);
     log.mockRestore();
   });
@@ -258,11 +375,17 @@ describe('/workloads under SH_REQUIRE_AUTH=true: records the harness did not wri
       expect(createWorkload).not.toHaveBeenCalled();
     });
 
-    it('can be deleted by any authenticated caller, which frees the name', async () => {
-      expect((await call('DELETE', '/workloads/demo-workload', BOB)).status).toBe(204);
-      expect(deleteWorkload).toHaveBeenCalledWith('demo-workload');
-      const created = await call('POST', '/workloads', ALICE, { name: 'demo-workload' });
-      expect(created).toMatchObject({ status: 201, json: { owner: 'github:alice' } });
+    it('cannot receive an upload capability', async () => {
+      expect(await call('POST', '/workloads/demo-workload/uploads', ALICE)).toEqual({
+        status: 404,
+        json: { error: 'workload_not_found' },
+      });
+      expect(createWorkloadContextUpload).not.toHaveBeenCalled();
+    });
+
+    it('cannot be deleted by an authenticated caller', async () => {
+      expect((await call('DELETE', '/workloads/demo-workload', BOB)).status).toBe(404);
+      expect(deleteWorkload).not.toHaveBeenCalled();
     });
   });
 
@@ -299,12 +422,9 @@ describe('a caller-named workspace claim', () => {
     expect(createWorkload).not.toHaveBeenCalled();
   });
 
-  it('is passed through only for the anonymous caller of an unauthenticated deployment', async () => {
-    expect((await call('POST', '/workloads', undefined, withClaim)).status).toBe(201);
-    expect(createWorkload).toHaveBeenCalledWith(
-      'demo-workload',
-      expect.objectContaining({ workspace: { claimName: 'alice-data' } }),
-    );
+  it('is also refused from an anonymous caller', async () => {
+    expect((await call('POST', '/workloads', undefined, withClaim)).status).toBe(400);
+    expect(createWorkload).not.toHaveBeenCalled();
   });
 });
 
@@ -312,9 +432,14 @@ describe('/workloads with authentication optional', () => {
   it("leaves an unauthenticated create unowned, even when Context Service's reply names an owner", async () => {
     // With a caller subject the spread overwrites any inbound owner; this is the case only the
     // strip in withOwner handles.
-    createWorkload.mockResolvedValue({ ...record, owner: 'github:carol' });
+    createWorkload.mockResolvedValue({ ...context, owner: 'github:carol' });
     expect(
-      (await call('POST', '/workloads', undefined, { name: 'demo-workload' })).json.owner,
+      (
+        await call('POST', '/workloads', undefined, {
+          name: 'demo-workload',
+          contextUpload: true,
+        })
+      ).json.owner,
     ).toBe(undefined);
     expect(JSON.parse(records.get('sh:workload:demo-workload')!).owner).toBeUndefined();
     expect((await call('GET', '/workloads/demo-workload', tokenFor('github:carol'))).status).toBe(

@@ -19,12 +19,21 @@ import {
 } from '@moca/harness/leaf-result-store';
 import {
   contextServiceConfigured,
-  createWorkload,
-  deleteWorkload,
-  getWorkload,
+  ContextServiceRequestError,
+  contextNamespace,
+  createContext,
+  deleteContext,
+  freezeContext,
+  createWorkloadContextUpload,
+  sharedContextAccessMode,
   type WorkloadRecord,
   type WorkloadRequest,
 } from './context-service.js';
+import {
+  createWorkloadRuntime,
+  deleteWorkloadRuntime,
+  getWorkloadRuntime,
+} from './workload-runtime.js';
 import { CpError, statusFor } from '@moca/control-plane';
 import {
   authenticateSubject,
@@ -36,7 +45,6 @@ import {
   type TurnAuthDeps,
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
-import { readTenancy } from './tenancy.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -48,6 +56,8 @@ const SSE_HEADERS = {
 };
 const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
 const WORKLOAD_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
+// Context Service requires an uploaded bundle's type to match its Context.
+const CONTEXT_TYPES = new Set(['workspace', 'state', 'memory', 'knowledge', 'artifacts']);
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -481,6 +491,19 @@ async function findWorkload(id: string): Promise<WorkloadRecord | null> {
   }
 }
 
+function publicWorkload(
+  record: WorkloadRecord,
+): Omit<WorkloadRecord, 'attachment' | 'contextId' | 'contextName' | 'revision'> {
+  const {
+    attachment: _attachment,
+    contextId: _contextId,
+    contextName: _contextName,
+    revision: _revision,
+    ...visible
+  } = record;
+  return visible;
+}
+
 function requireContextService(res: ServerResponse): boolean {
   if (contextServiceConfigured()) return true;
   res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_not_configured' }));
@@ -489,7 +512,16 @@ function requireContextService(res: ServerResponse): boolean {
 
 function contextServiceFailure(operation: string, err: unknown, res: ServerResponse): void {
   console.error(`Context Service ${operation} failed:`, err);
+  if (err instanceof ContextServiceRequestError && err.status === 409) {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: err.code }));
+    return;
+  }
   res.writeHead(502, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_error' }));
+}
+
+function workloadRuntimeFailure(operation: string, err: unknown, res: ServerResponse): void {
+  console.error(`Moca workload runtime ${operation} failed:`, err);
+  res.writeHead(502, JSON_HEADERS).end(JSON.stringify({ error: 'workload_runtime_error' }));
 }
 
 /**
@@ -511,19 +543,7 @@ const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
  * reading or running on it would.
  */
 const mayDelete = (record: WorkloadRecord, subject: string | null): boolean =>
-  record.owner === undefined || ownedBy(record, subject);
-
-/**
- * Context Service's reply names the pool it acted on. Every lookup here keys on the ID the caller
- * asked for, so a reply naming a different pool is refused rather than stored under its own name --
- * the ownership checks and the store must agree on which record they mean.
- */
-function sameWorkload(record: WorkloadRecord, workloadId: string): WorkloadRecord {
-  if (record.workloadId !== workloadId) {
-    throw new Error(`Context Service answered for '${record.workloadId}', not '${workloadId}'`);
-  }
-  return record;
-}
+  ownedBy(record, subject);
 
 /**
  * The one place a run acquires a sandbox pool selector. `/runs` strips any caller-supplied selector
@@ -539,6 +559,10 @@ async function resolveRunWorkload(
   const record = await findWorkload(body.workloadId);
   if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
+    return null;
+  }
+  if (record.status !== 'ready') {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_ready' }));
     return null;
   }
   return { ...body, sandboxPoolSelector: record.sandboxSelector };
@@ -560,7 +584,6 @@ function workloadCaller(req: IncomingMessage, res: ServerResponse): string | nul
 async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const subject = workloadCaller(req, res);
   if (subject === undefined) return;
-  if (!requireContextService(res)) return;
   let spec: WorkloadRequest;
   try {
     spec = JSON.parse(await readBody(req)) as WorkloadRequest;
@@ -573,17 +596,45 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_invalid' }));
     return;
   }
-  // A caller-named claim is any PVC in the namespace: owning the workload says nothing about owning
-  // the volume, and nothing here or in Context Service authorizes one against the other. So it is
-  // refused wherever callers are told apart -- any authenticated caller (which is every caller under
-  // SH_REQUIRE_AUTH=true), and always under multi tenancy -- until claims are scoped to their
-  // subject (MI1 §4.3, §13). Only the anonymous caller of an unauthenticated deployment, which
-  // distinguishes no one, may still name one.
-  if (
-    spec.workspace?.claimName !== undefined &&
-    (subject !== null || readTenancy(process.env) === 'multi')
-  ) {
+  if (spec.workspace && 'claimName' in spec.workspace) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
+    return;
+  }
+  if (
+    spec.sandboxes !== undefined &&
+    (!Number.isInteger(spec.sandboxes) || spec.sandboxes < 1 || spec.sandboxes > 100)
+  ) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sandbox_count_invalid' }));
+    return;
+  }
+  if (spec.contextUpload !== undefined && typeof spec.contextUpload !== 'boolean') {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'context_upload_invalid' }));
+    return;
+  }
+  const shared = spec.workspace?.shared === true;
+  const replicas = spec.sandboxes ?? (shared ? 2 : 1);
+  const usesContext = spec.contextUpload === true;
+  if (
+    spec.contextType !== undefined &&
+    (typeof spec.contextType !== 'string' || !CONTEXT_TYPES.has(spec.contextType))
+  ) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'context_type_invalid' }));
+    return;
+  }
+  if (spec.contextType !== undefined && !usesContext) {
+    res
+      .writeHead(400, JSON_HEADERS)
+      .end(JSON.stringify({ error: 'context_upload_required_for_context_type' }));
+    return;
+  }
+  if (usesContext && replicas > 1 && !shared) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'shared_workspace_required' }));
+    return;
+  }
+  if (!usesContext && shared && replicas > 1) {
+    res
+      .writeHead(400, JSON_HEADERS)
+      .end(JSON.stringify({ error: 'context_upload_required_for_shared_workspace' }));
     return;
   }
   // A live workload of another subject's cannot be claimed by re-creating its name. Check-then-act:
@@ -595,14 +646,88 @@ async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): 
     res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_taken' }));
     return;
   }
+  if (!usesContext) {
+    let createdRuntime = false;
+    try {
+      const runtime = await createWorkloadRuntime({
+        workloadId,
+        replicas,
+        workspace: {
+          kind: 'native',
+          size: spec.workspace?.size ?? '1Gi',
+          ...(spec.workspace?.storageClass ? { storageClass: spec.workspace.storageClass } : {}),
+        },
+      });
+      createdRuntime = true;
+      const record: WorkloadRecord = withOwner(
+        {
+          workloadId,
+          ...runtime,
+          replicas,
+          workspace: {
+            size: spec.workspace?.size ?? '1Gi',
+            accessMode: 'ReadWriteOnce',
+            ...(spec.workspace?.storageClass ? { storageClass: spec.workspace.storageClass } : {}),
+            readOnly: false,
+          },
+        },
+        subject,
+      );
+      await saveWorkload(record);
+      res.writeHead(201, JSON_HEADERS).end(JSON.stringify(publicWorkload(record)));
+    } catch (err) {
+      if (createdRuntime) {
+        await deleteWorkloadRuntime(workloadId, replicas, true).catch((cleanupError) =>
+          console.error('Moca workload runtime create rollback failed:', cleanupError),
+        );
+      }
+      workloadRuntimeFailure('create', err, res);
+    }
+    return;
+  }
+  if (!requireContextService(res)) return;
+  let createdContext = false;
   try {
-    const record = withOwner(
-      sameWorkload(await createWorkload(workloadId, spec), workloadId),
+    const context = await createContext(workloadId, spec, subject);
+    createdContext = true;
+    if (context.namespace !== contextNamespace()) {
+      throw new Error(`Context Service answered for namespace '${context.namespace}'`);
+    }
+    if (context.attachment?.kind !== 'pvc' || !context.attachment.claimName) {
+      throw new Error('Context Service did not return a PVC attachment');
+    }
+    const record: WorkloadRecord = withOwner(
+      {
+        workloadId,
+        contextName: workloadId,
+        contextId: context.contextId,
+        status: 'awaiting_upload',
+        replicas,
+        readyReplicas: 0,
+        sandboxSelector: '',
+        workspace: {
+          size: spec.workspace?.size ?? '1Gi',
+          accessMode: shared ? sharedContextAccessMode() : 'ReadWriteOnce',
+          ...(spec.workspace?.storageClass ? { storageClass: spec.workspace.storageClass } : {}),
+          readOnly: true,
+        },
+        attachment: { kind: 'pvc', claimName: context.attachment.claimName },
+      },
       subject,
     );
+    const upload = spec.contextUpload
+      ? await createWorkloadContextUpload(workloadId, subject)
+      : undefined;
     await saveWorkload(record);
-    res.writeHead(201, JSON_HEADERS).end(JSON.stringify(record));
+    res
+      .writeHead(201, JSON_HEADERS)
+      .end(JSON.stringify({ ...publicWorkload(record), ...(upload ? { upload } : {}) }));
   } catch (err) {
+    if (createdContext) {
+      await deleteContext(workloadId, subject).catch((cleanupError) =>
+        console.error('Context Service create rollback failed:', cleanupError),
+      );
+    }
     contextServiceFailure('create', err, res);
   }
 }
@@ -614,19 +739,139 @@ async function handleGetWorkload(
 ): Promise<void> {
   const subject = workloadCaller(req, res);
   if (subject === undefined) return;
-  if (!requireContextService(res)) return;
   const stored = await findWorkload(id);
   if (!stored || !ownedBy(stored, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
   try {
-    // Context Service knows nothing of owners: carry the stored one over the refreshed record.
-    const record = withOwner(sameWorkload(await getWorkload(id), id), subject);
+    if (
+      stored.status === 'awaiting_upload' ||
+      stored.status === 'deleting' ||
+      stored.status === 'deleted'
+    ) {
+      res.writeHead(200, JSON_HEADERS).end(JSON.stringify(publicWorkload(stored)));
+      return;
+    }
+    const runtime = await getWorkloadRuntime(stored.workloadId, stored.replicas);
+    const record: WorkloadRecord = { ...stored, ...runtime };
     await saveWorkload(record);
-    res.writeHead(200, JSON_HEADERS).end(JSON.stringify(record));
+    res.writeHead(200, JSON_HEADERS).end(JSON.stringify(publicWorkload(record)));
   } catch (err) {
-    contextServiceFailure('get', err, res);
+    workloadRuntimeFailure('get', err, res);
+  }
+}
+
+async function handleCreateWorkloadUpload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
+  if (!requireContextService(res)) return;
+  const record = await findWorkload(id);
+  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
+    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
+    return;
+  }
+  if (!record.contextName || !record.contextId || !record.attachment) {
+    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
+    return;
+  }
+  if (record.status !== 'awaiting_upload') {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_awaiting_upload' }));
+    return;
+  }
+  try {
+    const capability = await createWorkloadContextUpload(record.contextName, subject);
+    res.writeHead(201, JSON_HEADERS).end(JSON.stringify(capability));
+  } catch (err) {
+    contextServiceFailure('create upload', err, res);
+  }
+}
+
+async function handleActivateWorkload(
+  req: IncomingMessage,
+  id: string,
+  res: ServerResponse,
+): Promise<void> {
+  const subject = workloadCaller(req, res);
+  if (subject === undefined) return;
+  if (!requireContextService(res)) return;
+  const record = await findWorkload(id);
+  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
+    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
+    return;
+  }
+  if (!record.contextName || !record.contextId || !record.attachment) {
+    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
+    return;
+  }
+  if (record.status === 'ready') {
+    res.writeHead(200, JSON_HEADERS).end(JSON.stringify(publicWorkload(record)));
+    return;
+  }
+  if (record.status !== 'awaiting_upload' && record.status !== 'provisioning') {
+    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_activatable' }));
+    return;
+  }
+  try {
+    let body: { revision?: string };
+    try {
+      body = JSON.parse(await readBody(req)) as { revision?: string };
+    } catch {
+      res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'invalid_json' }));
+      return;
+    }
+    if (typeof body.revision !== 'string' || !/^[a-f0-9]{64}$/.test(body.revision)) {
+      res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'revision_invalid' }));
+      return;
+    }
+    if (record.revision && record.revision !== body.revision) {
+      res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'context_revision_mismatch' }));
+      return;
+    }
+    const context = await freezeContext(record.contextName, body.revision, subject);
+    if (context.contextId !== record.contextId) {
+      throw new Error('Context Service returned a different Context identity');
+    }
+    if (context.currentRevision !== body.revision) {
+      res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'context_not_uploaded' }));
+      return;
+    }
+    if (
+      record.attachment &&
+      (record.attachment.kind !== context.attachment.kind ||
+        record.attachment.claimName !== context.attachment.claimName)
+    ) {
+      throw new Error('Context Service returned changed attachment metadata');
+    }
+    const attachment = context.attachment;
+    if (attachment?.kind !== 'pvc' || !attachment.claimName) {
+      throw new Error('Context Service did not return a PVC attachment');
+    }
+    const activating: WorkloadRecord = {
+      ...record,
+      status: 'provisioning',
+      revision: body.revision,
+      readyReplicas: 0,
+    };
+    await saveWorkload(activating);
+    const runtime = await createWorkloadRuntime({
+      workloadId: id,
+      replicas: record.replicas,
+      workspace: {
+        kind: 'context',
+        claimName: attachment.claimName,
+        revision: body.revision,
+      },
+    });
+    const activated: WorkloadRecord = { ...activating, ...runtime };
+    await saveWorkload(activated);
+    res.writeHead(202, JSON_HEADERS).end(JSON.stringify(publicWorkload(activated)));
+  } catch (err) {
+    contextServiceFailure('activate workload', err, res);
   }
 }
 
@@ -637,15 +882,19 @@ async function handleDeleteWorkload(
 ): Promise<void> {
   const subject = workloadCaller(req, res);
   if (subject === undefined) return;
-  if (!requireContextService(res)) return;
   const record = await findWorkload(id);
   if (!record || record.status === 'deleted' || !mayDelete(record, subject)) {
     res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
     return;
   }
+  if (record.contextName && !requireContextService(res)) return;
   try {
-    await deleteWorkload(id);
-    await saveWorkload({ ...record, status: 'deleted', readyReplicas: 0 });
+    const deleting: WorkloadRecord =
+      record.status === 'deleting' ? record : { ...record, status: 'deleting', readyReplicas: 0 };
+    if (record.status !== 'deleting') await saveWorkload(deleting);
+    await deleteWorkloadRuntime(record.workloadId, record.replicas, !record.contextName);
+    if (record.contextName) await deleteContext(record.contextName, subject);
+    await saveWorkload({ ...deleting, status: 'deleted', readyReplicas: 0 });
     res.writeHead(204).end();
   } catch (err) {
     contextServiceFailure('delete', err, res);
@@ -784,6 +1033,26 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 
   if (req.method === 'POST' && url === '/workloads') {
     handleCreateWorkload(req, res).catch((err) => {
+      if (!res.headersSent)
+        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
+    });
+    return;
+  }
+
+  const workloadUploadMatch = url.match(/^\/workloads\/([^/?]+)\/uploads$/);
+  if (workloadUploadMatch && req.method === 'POST') {
+    handleCreateWorkloadUpload(req, decodeURIComponent(workloadUploadMatch[1]), res).catch(
+      (err) => {
+        if (!res.headersSent)
+          res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
+      },
+    );
+    return;
+  }
+
+  const workloadActivateMatch = url.match(/^\/workloads\/([^/?]+)\/activate$/);
+  if (workloadActivateMatch && req.method === 'POST') {
+    handleActivateWorkload(req, decodeURIComponent(workloadActivateMatch[1]), res).catch((err) => {
       if (!res.headersSent)
         res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
     });
