@@ -215,10 +215,16 @@ export type ProduceVerdict = (
 ) => Promise<void>;
 
 export type SolveCapture = { patch?: string; usage?: LeafUsage };
+export type ProduceSolveDeps = {
+  resolvePromotedConfig?: typeof resolvePromotedConfig;
+  overlayConfig?: typeof overlayConfig;
+  bundleRedis?: BundleRedisLike;
+};
 export type ProduceSolve = (
   env: LeafEnvelope,
   config: TurnConfig | undefined,
   capture: SolveCapture,
+  deps?: ProduceSolveDeps,
 ) => Promise<void>;
 
 export function validateItem(o: unknown): LeafItem | null {
@@ -293,14 +299,43 @@ export async function runLeaf(
 export async function runSolveLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
-  deps?: { produceSolve?: ProduceSolve },
+  deps?: {
+    produceSolve?: ProduceSolve;
+    resolvePromotedConfig?: typeof resolvePromotedConfig;
+    overlayConfig?: typeof overlayConfig;
+    bundleRedis?: BundleRedisLike;
+  },
 ): Promise<LeafResult> {
   if (!env.problemStatement || !env.repoUrl || !env.ref)
     return { status: 'failed', reason: 'bad_inputs' };
+  // Reject a present-but-empty configRef up front, before leasing a sandbox: same guard
+  // runPromptLeaf applies before its own attachPromotedConfig call (issue #222 — "" was observed
+  // reaching leaves and silently running bare). A whitespace-only value is also empty after trim.
+  if (
+    env.configRef !== undefined &&
+    env.configRef !== null &&
+    String(env.configRef).trim() === ''
+  ) {
+    return {
+      status: 'failed',
+      reason: 'error',
+      message:
+        'configRef is present but empty: it must name a bundle digest (sha256:…). ' +
+        'Omit the field entirely to run without promoted configuration.',
+    };
+  }
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
+  const produceDeps: ProduceSolveDeps | undefined =
+    deps?.resolvePromotedConfig || deps?.overlayConfig || deps?.bundleRedis
+      ? {
+          resolvePromotedConfig: deps.resolvePromotedConfig,
+          overlayConfig: deps.overlayConfig,
+          bundleRedis: deps.bundleRedis,
+        }
+      : undefined;
   try {
-    await produce(env, config, capture);
+    await produce(env, config, capture, produceDeps);
   } catch (err) {
     if (err instanceof SandboxPoolSaturatedError)
       return { status: 'failed', reason: 'saturated', message: err.message };
@@ -466,7 +501,7 @@ async function runPromptLeaf(
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the
 // sandbox tools (no verdict/gate extensions), then capture the staged diff. Mirrors realProduceVerdict's
 // session/pool wiring. Exercised by the Kind smoke, not unit tests.
-export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
+export const realProduceSolve: ProduceSolve = async (env, config, capture, deps) => {
   const cwd = config?.cwd ?? process.cwd();
   const { provider, modelId } = resolveModelSelection({
     model: env.model ?? config?.model,
@@ -506,7 +541,29 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
       : SessionManager.create(cwd, undefined, { id: sid }, backend);
 
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let attached: AttachedPromotedConfig | undefined;
   try {
+    // Start the heartbeat BEFORE the overlay and the workspace converge: a multi-MB bundle fetch
+    // from Redis plus a kubectl-push into the pod can take seconds, and on a slow cluster that
+    // window would otherwise lapse the lease mid-overlay (same rationale as runPromptLeaf).
+    heartbeat = setInterval(() => {
+      // Best-effort: an unhandled rejection here would end the leaf, whereas letting the lease
+      // lapse just returns the sandbox to the pool.
+      void selected.heartbeat().catch(() => {});
+    }, solveTimings.heartbeatMs);
+    // Attach the promoted config bundle BEFORE workspace converge so a resolver or overlay failure
+    // fails the leaf without touching the worktree (fail-closed, matching runPromptLeaf). `null`
+    // means "no config requested" (same leaf-boundary pin as runPromptLeaf and configRefValid in
+    // knative-server). The empty-string case was rejected up in runSolveLeaf.
+    if (env.configRef !== undefined && env.configRef !== null) {
+      attached = await attachPromotedConfig({
+        digest: env.configRef,
+        sessionId: sid,
+        sandbox: selected,
+        redisUrl: config?.redisUrl,
+        deps,
+      });
+    }
     const transport = KubectlTransport(selected.config);
     const swebench = isSwebenchEnvelope(env);
     let workspaceRef: string;
@@ -528,11 +585,6 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
     // A solve leaf edits files in its worktree; point the agent's sandbox cwd at that worktree so the
     // model's edits (relative or absolute) land where captureWorkspaceDiff reads them.
     const agentConfig = { ...selected.config, podCwd: workspaceRef };
-    heartbeat = setInterval(() => {
-      // Best-effort, as in runPromptLeaf: an unhandled rejection here would end the leaf, whereas
-      // letting the lease lapse just returns the sandbox to the pool.
-      void selected.heartbeat().catch(() => {});
-    }, solveTimings.heartbeatMs);
 
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,
@@ -542,6 +594,7 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
+      ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
     const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
@@ -579,6 +632,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
     }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    // Detach the overlay before releasing the lease: `attached.detach()` runs cleanup through the
+    // sandbox we hold, so a release-before-detach would leave the overlay link until TTL expiry.
+    // Idempotent and best-effort — see promoted-config.ts:97-113.
+    await attached?.detach();
     if (isSwebenchEnvelope(env)) await cleanupSwebench(KubectlTransport(selected.config), sid);
     else await cleanupWorkspace(KubectlTransport(selected.config), sid);
     await selected.release();
