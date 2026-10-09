@@ -247,5 +247,55 @@ else
   ko "the stack did not come back after down && up"
 fi
 
+claim 8 "a detachable turn survives its client: re-attach replays what was missed, without repeats"
+# A fresh session; the first stream is cut after 3 s, then GET /v1/turn resumes from its last id.
+detach_turn() {
+  local session sid first="$PROJ/detach-1.sse" second="$PROJ/detach-2.sse" last_id
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  [[ -n "$sid" ]] || { ko "POST /v1/sessions returned no session: ${session:0:300}"; return; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$(jq -r '.token' <<<"$session")" >"$TURN_HDR")
+  curl -sN --max-time 3 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Write the numbers 1 to 200, one per line, nothing else.", detachable: true}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$first" || true
+  last_id="$(sed -n 's/^id: //p' "$first" | tail -1)"
+  [[ -n "$last_id" ]] || { ko "the detachable turn sent no ids: $(head -c 400 "$first")"; return; }
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H "Last-Event-ID: $last_id" \
+    "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$second" || true
+  if ! grep -q '^event: done' "$second"; then
+    ko "the re-attach did not reach done: $(tail -c 400 "$second")"
+  elif [[ -n "$(cat <(sed -n 's/^id: //p' "$first") <(sed -n 's/^id: //p' "$second" | tail -n +2) | sort | uniq -d)" ]]; then
+    ko "the re-attach repeated frames the first stream had"
+  else
+    ok "re-attached session $sid after $(grep -c '^id: ' "$first") frame(s) and streamed to done"
+  fi
+}
+detach_turn
+
+claim 9 "POST /v1/turn/cancel ends a running detachable turn with abortReason cancelled"
+cancel_turn() {
+  local session sid out="$PROJ/cancel.sse" pid status
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  [[ -n "$sid" ]] || { ko "POST /v1/sessions returned no session"; return; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$(jq -r '.token' <<<"$session")" >"$TURN_HDR")
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Write the numbers 1 to 500, one per line, nothing else.", detachable: true}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$out" &
+  pid=$!
+  wait_for 30 grep -q '^event: turn' "$out" || true
+  status="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H @"$TURN_HDR" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s}')" "http://127.0.0.1:$SH_PORT/v1/turn/cancel" || true)"
+  wait "$pid" || true
+  if [[ "$status" != 202 ]]; then
+    ko "cancel answered $status"
+  elif grep -q '"abortReason":"cancelled"' "$out"; then
+    ok "cancelled session $sid's turn"
+  else
+    ko "the stream did not end cancelled: $(tail -c 400 "$out")"
+  fi
+}
+cancel_turn
+
 printf '\n=== Results: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

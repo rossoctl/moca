@@ -254,3 +254,11 @@ The first three run in CI through `make test-deploy`.
 - **One sandbox.** To add another, copy the `sandbox` service with a new `SANDBOX_ID`. Replicas
   would all share one id and collide on a single `sh:sandbox:records` entry.
 - **No Firecracker/KVM tier.** P4 stays bare-metal/systemd-only.
+
+## Detachable turns
+
+`SH_TURN_DETACH=1` (the default here) lets a `mocactl` turn outlive its client: quit mid-turn, reopen,
+resume the session, and the turn's output is replayed, then streamed live. `GET /v1/turn?sessionId=`
+re-attaches (send `Last-Event-ID` to resume after a frame), `POST /v1/turn/cancel` cancels. A turn
+nobody watches ends after `SH_TURN_DETACHED_MAX_S` (1800); a finished turn stays replayable for
+`SH_TURN_LOG_TTL_S` (86400). See `docs/specs/2026-10-09-turn-reattach-design.md`.
