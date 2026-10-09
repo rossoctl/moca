@@ -12,6 +12,7 @@ vi.mock('@moca/harness/run-turn', () => ({
 
 import { handler, resetTurnRegistryForTests, startServer, turnRegistry } from '../src/server.js';
 import { attachTurnSlot } from '../src/turn-slot.js';
+import { TurnCounter } from '../src/worker.js';
 import { executeTurn, runTurn } from '@moca/harness/run-turn';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -29,6 +30,8 @@ const mint = (sid: string) =>
 let server: ReturnType<typeof startServer>;
 let base: string;
 let cp: http.Server;
+// When set, the stubbed control plane holds its credential-exchange reply until this settles.
+let cpGate: { reached: () => void; open: Promise<void> } | undefined;
 // Per test: the lease is per session, so tests must not share one.
 let sessionId: string;
 const saved: Record<string, string | undefined> = {};
@@ -61,7 +64,12 @@ beforeEach(async () => {
     sessionId,
     subject: 'github:1234',
   };
-  cp = http.createServer((_req, res) => {
+  cpGate = undefined;
+  cp = http.createServer(async (_req, res) => {
+    if (cpGate) {
+      cpGate.reached();
+      await cpGate.open;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(cpBody));
   });
@@ -692,5 +700,66 @@ describe('route coverage (review note)', () => {
     expect(res.headers['retry-after']).toMatch(/^\d+$/);
     expect(res.raw).not.toContain('hunter2');
     warn.mockRestore();
+  });
+});
+
+describe('a client that left before the detachable turn began', () => {
+  it('never begins the turn, and its slot is back to 0, when it leaves during the credential exchange', async () => {
+    const counter = new TurnCounter(() => {});
+    const wrap = http.createServer((req, res) => {
+      attachTurnSlot(res, counter.start());
+      handler(req, res);
+    });
+    await new Promise<void>((r) => wrap.listen(0, () => r()));
+    const at = `http://127.0.0.1:${(wrap.address() as { port: number }).port}`;
+    let open!: () => void;
+    let reached!: () => void;
+    const inExchange = new Promise<void>((r) => (reached = r));
+    cpGate = { reached, open: new Promise<void>((r) => (open = r)) };
+    const begin = vi.spyOn(turnRegistry(), 'begin');
+    const req = http.request(new URL('/v1/turn', at), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${mint(sessionId)}`,
+      },
+    });
+    req.on('error', () => {});
+    req.end(JSON.stringify({ sessionId, prompt: 'p', detachable: true }));
+    await inExchange;
+    expect(counter.inFlight).toBe(1);
+    req.destroy(); // the client leaves while the control plane is still answering
+    await new Promise((r) => setTimeout(r, 100));
+    open();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(begin).not.toHaveBeenCalled();
+    expect(executeTurn).not.toHaveBeenCalled();
+    expect(await redis.get(activeKey(sessionId))).toBeNull();
+    expect(counter.inFlight).toBe(0);
+    wrap.close();
+  });
+});
+
+describe('SH_TURN_REGISTRY_TIMEOUT_MS', () => {
+  afterEach(() => {
+    delete process.env.SH_TURN_REGISTRY_TIMEOUT_MS;
+  });
+  it('treats 0 and negative values as the default rather than answering 503', async () => {
+    for (const v of ['0', '-5']) {
+      process.env.SH_TURN_REGISTRY_TIMEOUT_MS = v;
+      // Same session both times: the first turn ends, and releases its lease, before the second.
+      vi.mocked(executeTurn).mockResolvedValueOnce({
+        sessionId,
+        response: 'x',
+        stopReason: 'stop',
+      } as any);
+      const res = await sse(
+        { sessionId, prompt: 'p', detachable: true },
+        { Authorization: `Bearer ${mint(sessionId)}` },
+      );
+      expect(res.status, v).toBe(200);
+      expect(res.raw).toContain('event: turn');
+    }
   });
 });

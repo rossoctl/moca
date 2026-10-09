@@ -130,7 +130,11 @@ const PEEK_TIMEOUT_MS = 250;
  * SH_TURN_REGISTRY_TIMEOUT_MS overrides it (read per request, like the other knobs).
  */
 const REGISTRY_TIMEOUT_MS = 5000;
-const registryTimeoutMs = () => intEnv('SH_TURN_REGISTRY_TIMEOUT_MS', REGISTRY_TIMEOUT_MS);
+// A bound of 0 (or less) would answer every call 503, so it means the default.
+const registryTimeoutMs = () => {
+  const ms = intEnv('SH_TURN_REGISTRY_TIMEOUT_MS', REGISTRY_TIMEOUT_MS);
+  return ms > 0 ? ms : REGISTRY_TIMEOUT_MS;
+};
 
 /**
  * The session's running detachable turn, or null when there is none or Redis cannot answer in
@@ -522,6 +526,11 @@ async function handleDetachableTurn(
   deps: TurnAuthDeps,
   res: ServerResponse,
 ): Promise<void> {
+  // A client that left before this point (during the credential exchange, say) already fired
+  // 'close', which ended the unadopted slot. Nobody waits for the turn, and beginning it would run
+  // an unwatched turn the worker no longer counts: return without writing. Synchronous with the
+  // adopt below, so a 'close' cannot land between the check and the adoption.
+  if (res.destroyed || res.writableEnded) return;
   // Adopted BEFORE begin(): a client that leaves during begin() must not end the slot of the turn
   // that then runs detached, or the worker under-counts it (§5.5). Every path below releases it.
   const releaseSlot = adoptTurnSlot(res);
