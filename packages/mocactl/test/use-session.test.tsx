@@ -1,8 +1,9 @@
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../src/api/errors.js';
 import { SessionManager, type ActiveSession } from '../src/core/session-manager.js';
-import { EMPTY_BLOCKS, INTERRUPTED_TURN_NOTICE } from '../src/render/blocks.js';
+import { EMPTY_BLOCKS, INTERRUPTED_TURN_NOTICE, fromTranscript } from '../src/render/blocks.js';
 import { COALESCE_MS, useSession, type SessionView } from '../src/views/useSession.js';
 import { doneFrame, fakeControlPlane, fakeHarness, type HarnessStep } from './helpers/fakes.js';
 import { tick, waitFor } from './helpers/ink.js';
@@ -204,6 +205,63 @@ describe('useSession on resume', () => {
       text: INTERRUPTED_TURN_NOTICE,
     });
     expect(view.current!.turn.phase).toBe('idle');
+  });
+
+  // I1: a resumed open detachable turn stays open until the attach step says how it stands.
+  const openMidTool = () =>
+    fromTranscript({
+      sessionId: 's1',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half' } },
+        { kind: 'frame', frame: { type: 'tool_use', id: 'x1', name: 'bash', args: {} } },
+        { kind: 'frame', frame: { type: 'text', delta: 'more' } },
+      ],
+      prompts: ['go'],
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, turns: 0 },
+    });
+
+  it.each([
+    [
+      'nothing to attach',
+      [] as HarnessStep[],
+      ['user', 'assistant', 'tool', 'assistant', 'notice'],
+    ],
+    [
+      'an attach error',
+      [{ error: new ApiError('harness', 500, 'internal') }] as HarnessStep[],
+      ['user', 'assistant', 'tool', 'assistant', 'end:error'],
+    ],
+  ])('settles the resumed open turn after %s', async (_how, attachSteps, kinds) => {
+    const manager = new SessionManager({
+      cp: fakeControlPlane(),
+      harness: fakeHarness([], {}, attachSteps),
+      now,
+      sleep: async () => undefined,
+      cancelPauseMs: 0,
+      detachable: true,
+    });
+    const session = await manager.resume('s1');
+    const initial = openMidTool();
+    const view: { current?: SessionView } = {};
+    function Probe({ s }: { s: ActiveSession }) {
+      view.current = useSession(s, { initial, now });
+      return <Text>{view.current.turn.phase}</Text>;
+    }
+    render(<Probe s={session} />);
+    await tick();
+    expect(view.current!.state.blocks[3]).toMatchObject({ kind: 'assistant', final: false });
+    session.attachExisting({ expectOpen: true });
+    await session.idle();
+    const v = view as { current: SessionView };
+    await waitFor(() => kindsOf(v).length === kinds.length);
+    expect(kindsOf(v)).toEqual(kinds);
+    expect(v.current.state.blocks[2]).toMatchObject({
+      result: { isError: true, preview: 'interrupted' },
+    });
+    expect(v.current.state.blocks[3]).toMatchObject({ final: true });
   });
 
   it('shows a failed server-side cancel as an error notice', async () => {

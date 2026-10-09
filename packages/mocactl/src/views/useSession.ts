@@ -9,6 +9,7 @@ import {
   INTERRUPTED_TURN_NOTICE,
   markSent,
   reduceFrame,
+  settleOpenTurn,
   type BlockState,
 } from '../render/blocks.js';
 import type { TurnState } from './status.js';
@@ -63,6 +64,8 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
     // record a bogus TTFT of now() - 0. Only an actual 'turn-start' event flips this true.
     let firstFrame = false;
     let sawTerminal = false;
+    // An attach job is running: a resumed open turn (left open by fromTranscript) is its to settle.
+    let attaching = false;
 
     const flush = () => {
       if (pending.length === 0) return;
@@ -78,6 +81,7 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           startedAt = opts.now();
           firstFrame = true;
           sawTerminal = false;
+          attaching = false;
           setState((s) => markSent(s));
           setTurn((t) => ({ ...t, phase: 'waiting', startedAt }));
           break;
@@ -85,10 +89,17 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           startedAt = opts.now();
           firstFrame = false; // a catch-up has no time-to-first-token
           sawTerminal = false;
+          attaching = true;
           setTurn((t) => ({ ...t, phase: 'waiting', startedAt }));
           break;
         case 'attach-none':
-          if (e.missed) setState((s) => addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning'));
+          attaching = false;
+          flush();
+          // Nothing more of the resumed turn is coming: settle what the transcript left open.
+          setState((s) => {
+            const settled = settleOpenTurn(s);
+            return e.missed ? addNotice(settled, INTERRUPTED_TURN_NOTICE, 'warning') : settled;
+          });
           setTurn((t) => ({ ...t, phase: 'idle', startedAt: undefined }));
           break;
         case 'notice':
@@ -134,8 +145,11 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           flush();
           if (!sawTerminal) {
             const message = e.error ? describeError(e.error) : undefined;
-            setState((s) => endTurn(s, e.outcome, message));
+            // An attach ended without the terminal: settle the resumed turn it left open.
+            const settle = attaching ? settleOpenTurn : (s: BlockState) => s;
+            setState((s) => endTurn(settle(s), e.outcome, message));
           }
+          attaching = false;
           setTurn((t) => ({ ...t, phase: 'idle', startedAt: undefined, retryUntil: undefined }));
           onTurnEnd.current?.(e);
           break;

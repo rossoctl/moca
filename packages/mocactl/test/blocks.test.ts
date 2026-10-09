@@ -10,6 +10,7 @@ import {
   lastTurnState,
   markSent,
   reduceFrame,
+  settleOpenTurn,
   splitStatic,
   type BlockState,
 } from '../src/render/blocks.js';
@@ -274,6 +275,79 @@ describe('fromTranscript', () => {
       usage,
     });
     expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'assistant']);
+  });
+
+  // A resume after quitting mid-tool: the turn may still run, so the attach step settles it.
+  const midTool = (extra: any[] = []) => ({
+    sessionId: 's',
+    createdAt: 0,
+    entries: [
+      { kind: 'prompt', text: 'first' },
+      { kind: 'frame', frame: { type: 'tool_use', id: 'old', name: 'bash', args: {} } },
+      { kind: 'prompt', text: 'go' },
+      { kind: 'turn', turnId: 't1' },
+      ...extra,
+      { kind: 'frame', frame: { type: 'tool_use', id: 'x1', name: 'bash', args: {} } },
+    ],
+    prompts: ['first', 'go'],
+    usage,
+  });
+
+  it('leaves an open detachable turn open: its tool has no result yet, earlier turns settle', () => {
+    const s = fromTranscript(
+      midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any,
+    );
+    expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'tool', 'user', 'assistant', 'tool']);
+    expect(s.blocks[1]).toMatchObject({ result: { preview: 'interrupted' } }); // the earlier turn
+    expect(s.blocks[4]).not.toHaveProperty('result');
+  });
+
+  it("leaves an open detachable turn's reply open, so the catch-up continues it", () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'hal' } },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks[1]).toMatchObject({ kind: 'assistant', final: false });
+    const after = apply(s, { type: 'text', delta: 'f' }, done);
+    expect(after.blocks.map((b) => b.kind)).toEqual(['user', 'assistant', 'turn-end']);
+    expect(after.blocks[1]).toMatchObject({ text: 'half', final: true });
+  });
+
+  it('a catch-up replaying the tool result and more text ends with one tool and one reply', () => {
+    const s = apply(
+      fromTranscript(midTool() as any),
+      { type: 'tool_result', id: 'x1', isError: false, preview: 'ok' },
+      { type: 'text', delta: 'all ' },
+      { type: 'text', delta: 'done' },
+      done,
+    );
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'user',
+      'tool',
+      'user',
+      'tool',
+      'assistant',
+      'turn-end',
+    ]);
+    expect(s.blocks[3]).toMatchObject({ result: { isError: false, preview: 'ok' } });
+    expect(s.blocks[4]).toMatchObject({ text: 'all done' });
+    expect(s.blocks.some((b) => b.kind === 'event')).toBe(false);
+  });
+
+  it('settleOpenTurn finalizes the reply and marks the open tools interrupted', () => {
+    const s = settleOpenTurn(
+      fromTranscript(midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any),
+    );
+    expect(s.blocks[3]).toMatchObject({ kind: 'assistant', final: true });
+    expect(s.blocks[4]).toMatchObject({ result: { isError: true, preview: 'interrupted' } });
+    expect(splitStatic(s.blocks).live).toEqual([]);
   });
 
   it('old transcript keeps the #472 notice once', () => {

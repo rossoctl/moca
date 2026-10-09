@@ -223,22 +223,40 @@ export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'op
   return state;
 }
 
-export function fromTranscript(t: Transcript): BlockState {
-  let s = EMPTY_BLOCKS;
-  for (const e of t.entries) {
-    if (e.kind === 'prompt') s = addUser(s, e.text);
-    else if (e.kind === 'frame') s = reduceFrame(s, e.frame);
-  }
-  s = finalizeOpen(s);
-  // Mark any tool block without a result as interrupted
-  const blocks = s.blocks.map((b) =>
-    b.kind === 'tool' && !b.result
+/** Marks every tool block in [from, to) that has no result as interrupted. */
+function interruptTools(s: BlockState, from = 0, to = Infinity): BlockState {
+  const blocks = s.blocks.map((b, i) =>
+    i >= from && i < to && b.kind === 'tool' && !b.result
       ? { ...b, result: { isError: true, preview: 'interrupted' } }
       : b,
   );
-  s = { ...s, blocks };
-  // An open detachable turn may still be running: the resume's attach step says what it finds.
-  return lastTurnState(t) === 'open' ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
+  return { ...s, blocks };
+}
+
+/**
+ * Settles a turn left open for the resume's attach step (see fromTranscript) once that step ends
+ * without the turn's terminal: its reply is final and its unfinished tools were interrupted.
+ */
+export function settleOpenTurn(s: BlockState): BlockState {
+  return interruptTools(finalizeOpen(s));
+}
+
+export function fromTranscript(t: Transcript): BlockState {
+  let s = EMPTY_BLOCKS;
+  let lastTurnFrom = 0; // where the last prompt's blocks start
+  for (const e of t.entries) {
+    if (e.kind === 'prompt') {
+      s = addUser(s, e.text);
+      lastTurnFrom = s.blocks.length - 1;
+    } else if (e.kind === 'frame') s = reduceFrame(s, e.frame);
+  }
+  const state = lastTurnState(t);
+  // An open detachable turn may still be running: the resume's attach step replays the rest into
+  // it (a tool result, more of the reply), so it stays open; settleOpenTurn closes it if that step
+  // finds nothing. Earlier turns are settled as ever.
+  if (state === 'open-detachable') return interruptTools(s, 0, lastTurnFrom);
+  s = interruptTools(finalizeOpen(s));
+  return state === 'open' ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
 }
 
 export function isSettled(b: Block): boolean {
