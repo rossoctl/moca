@@ -77,8 +77,11 @@ type Job =
  */
 type StreamEnd = 'terminal' | 'cancelled' | 'ended' | 'caught-up';
 
-/** Where one job's streams stand: the last frame id seen, and how many frames were consumed. */
-type Cursor = { last?: string; frames: number };
+/**
+ * Where one job's streams stand: the last frame id seen, how many frames were consumed, and how
+ * many of those were new output (not a `turn` frame, which every re-attach repeats first).
+ */
+type Cursor = { last?: string; frames: number; progress?: number };
 
 const isTokenRejection = (err: unknown): err is ApiError =>
   err instanceof ApiError &&
@@ -89,6 +92,15 @@ const isDropped = (err: unknown): boolean =>
   err instanceof ApiError &&
   err.source === 'harness' &&
   (err.code === 'network_error' || err.code === 'stream_truncated');
+
+/** A harness that cannot serve the re-attach right now (a worker drain, a gateway, Redis). */
+const isUnavailable = (err: unknown): boolean =>
+  err instanceof ApiError &&
+  err.source === 'harness' &&
+  (err.status === 502 ||
+    err.status === 503 ||
+    err.status === 504 ||
+    err.code === 'redis_unavailable');
 
 export class ActiveSession {
   private readonly listeners = new Set<(e: SessionEvent) => void>();
@@ -337,6 +349,7 @@ export class ActiveSession {
   private async consume(frames: AsyncGenerator<TurnFrame>, ids: Cursor): Promise<StreamEnd> {
     for await (const frame of frames) {
       ids.frames++;
+      if (frame.type !== 'turn') ids.progress = (ids.progress ?? 0) + 1;
       this.pending = false;
       const deferred = this.takeDeferred();
       if (deferred && frame.type !== 'turn') {
@@ -418,12 +431,15 @@ export class ActiveSession {
 
   /**
    * A detachable turn's stream dropped: re-attach with the last id (spec §6.5). Resolves true
-   * when the turn ended cancelled.
+   * when the turn ended cancelled. The budget is per drop: a try that delivered new frames
+   * restarts the count and the backoff, so a long turn behind a proxy that cuts streams survives.
+   * A harness that is briefly unavailable (5xx) is retried like a dropped stream.
    */
   private async reattach(controller: AbortController, ids: Cursor): Promise<boolean> {
-    for (let attempt = 0; attempt < REATTACH_TRIES; attempt++) {
+    for (let attempt = 0; attempt < REATTACH_TRIES; ) {
       await this.deps.sleep(REATTACH_BASE_MS * 2 ** attempt, controller.signal);
       if (controller.signal.aborted) throw new TurnCancelledError();
+      const before = ids.progress ?? 0;
       try {
         const end = await this.attachOnce(controller, ids, this.live?.lastEventId);
         if (end === 'caught-up') {
@@ -436,8 +452,9 @@ export class ActiveSession {
       } catch (err) {
         if (controller.signal.aborted || err instanceof TurnCancelledError)
           throw new TurnCancelledError();
-        if (!isDropped(err)) throw err;
+        if (!isDropped(err) && !isUnavailable(err)) throw err;
       }
+      attempt = (ids.progress ?? 0) > before ? 0 : attempt + 1;
     }
     this.live = undefined;
     throw new ApiError('harness', 0, 'stream_truncated', LOST_TURN_MESSAGE);

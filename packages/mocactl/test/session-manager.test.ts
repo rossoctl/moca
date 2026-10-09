@@ -462,6 +462,65 @@ describe('detachable turns', () => {
     expect(ends()).toMatchObject([{ outcome: 'error', error: { message: LOST_TURN_MESSAGE } }]);
   });
 
+  it('the re-attach budget is per drop: 6 drops, each after new frames, still finish', async () => {
+    const drop = () => new ApiError('harness', 0, 'network_error', 'x');
+    const reattaches: HarnessStep[] = Array.from({ length: 6 }, (_, i) => ({
+      frames: [turnF, text(`r${i}`)],
+      ids: [`t1:${i + 2}-0`, `t1:${i + 3}-0`],
+      error: drop(),
+    }));
+    const { session, ends, slept, harness } = await started(
+      [{ frames: [turnF, text('a')], ids: ['t1:1-0', 't1:2-0'], error: drop() }],
+      { detachable: true },
+      [...reattaches, { frames: [turnF, doneFrame()], ids: ['t1:8-0', 't1:9-0'] }],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(harness.attaches).toHaveLength(7);
+    expect(slept).toEqual([500, 500, 500, 500, 500, 500, 500]); // the backoff restarts too
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'done' }]);
+  });
+
+  it('a re-attach that only repeats the turn frame does not renew the budget', async () => {
+    const drop = () => ({
+      frames: [turnF],
+      ids: ['t1:1-0'],
+      error: new ApiError('harness', 0, 'network_error', 'x'),
+    });
+    const { session, ends, slept } = await started(
+      [drop()],
+      { detachable: true },
+      [drop(), drop(), drop(), drop(), drop()],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(slept).toEqual([500, 1000, 2000, 4000, 8000]);
+    expect(ends()).toMatchObject([{ outcome: 'error', error: { message: LOST_TURN_MESSAGE } }]);
+  });
+
+  it.each([
+    ['a 503 redis_unavailable', harnessError(503, 'redis_unavailable', 1)],
+    ['a gateway 502', harnessError(502, 'bad_gateway')],
+    ['a gateway 504', harnessError(504, 'gateway_timeout')],
+  ])('%s on a re-attach is retried', async (_how, error) => {
+    const { session, ends, harness } = await started(
+      [
+        {
+          frames: [turnF, text('a')],
+          ids: ['t1:1-0', 't1:2-0'],
+          error: new ApiError('harness', 0, 'network_error', 'x'),
+        },
+      ],
+      { detachable: true },
+      [{ error }, { frames: [turnF, doneFrame()], ids: ['t1:2-0', 't1:3-0'] }],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(harness.attaches).toHaveLength(2);
+    expect(harness.attaches[1]!.lastEventId).toBe('t1:2-0');
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'done' }]);
+  });
+
   it('Esc on a detachable turn cancels through the route and keeps reading', async () => {
     let release!: () => void;
     // The first stream ends after the turn frame, so the session re-attaches; that attach holds
