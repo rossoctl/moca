@@ -104,6 +104,26 @@ export function statsIntervalMs(env: NodeJS.ProcessEnv, def = 1000): number {
   return Number.isInteger(n) && n > 0 ? n : def;
 }
 
+/**
+ * How long a draining worker lets detached turns run before it aborts them with "harness
+ * restarting" (turn-reattach spec §5.5). Under compose and k8s the supervisor is PID 1, so its exit
+ * SIGKILLs the workers and the IPC `disconnect` path never runs: the terminal frame has to be
+ * written before then. Must stay below the supervisor's SHUTDOWN_GRACE_MS (20 s,
+ * packages/supervisor/src/main.ts) so the abort, its terminal writes, and the in-flight count
+ * dropping (which lets `awaitIdle` exit early) all land inside the grace.
+ */
+export const DETACHED_DRAIN_MS = 15_000;
+
+/** Arms the drain deadline for detached turns; unref'd, so it never holds the process open. */
+export function armDetachedDrain(
+  abort: () => unknown,
+  ms = DETACHED_DRAIN_MS,
+): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(() => void abort(), ms);
+  timer.unref();
+  return timer;
+}
+
 export function createWorkerRuntime(opts: {
   send: (msg: WorkerToSupervisor) => void;
   requestHandler?: RequestListener;
@@ -309,6 +329,7 @@ if (isMainModule) {
     send,
     intervalMs: statsIntervalMs(process.env),
   });
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
   process.on('message', (msg: SupervisorToWorker, handle) => {
     if (msg.type === 'conn') {
       runtime.accept(handle as Socket, msg.head ? Buffer.from(msg.head, 'base64') : undefined);
@@ -319,6 +340,11 @@ if (isMainModule) {
       // longer taking.
       stopStats();
       runtime.drain();
+      // Detached turns that finish within DETACHED_DRAIN_MS finish normally; the rest get their
+      // terminal frame before the supervisor's grace runs out and SIGKILLs this process.
+      drainTimer ??= armDetachedDrain(() =>
+        abortDetachedTurns('restarting').catch(() => undefined),
+      );
     }
   });
   // Supervisor crash or shutdown ⇒ the IPC channel closes ⇒ we exit, so systemd restarts the whole

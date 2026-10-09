@@ -6,7 +6,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   isTurnRequest,
   TurnCounter,
+  armDetachedDrain,
   createWorkerRuntime,
+  DETACHED_DRAIN_MS,
   parseRole,
   startStatsReporter,
   statsIntervalMs,
@@ -437,5 +439,29 @@ describe('detached turns keep their slot', () => {
     });
     await driveRequest(runtime, 'POST', '/v1/turn');
     expect(runtime.counter.inFlight).toBe(0);
+  });
+});
+
+describe('armDetachedDrain', () => {
+  it('aborts detached turns at the deadline after drain, not before', () => {
+    vi.useFakeTimers();
+    try {
+      const abort = vi.fn();
+      armDetachedDrain(abort);
+      vi.advanceTimersByTime(DETACHED_DRAIN_MS - 1);
+      expect(abort).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(abort).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds no process open, and fires inside the supervisor shutdown grace', () => {
+    const timer = armDetachedDrain(() => undefined, 60_000);
+    expect(timer.hasRef()).toBe(false);
+    clearTimeout(timer);
+    // packages/supervisor SHUTDOWN_GRACE_MS: the supervisor SIGKILLs its workers past it.
+    expect(DETACHED_DRAIN_MS).toBeLessThan(20_000);
   });
 });
