@@ -32,7 +32,7 @@ function post(
   path: string,
   body: unknown,
   headers: Record<string, string> = {},
-): Promise<{ status: number; json: unknown }> {
+): Promise<{ status: number; json: unknown; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       new URL(path, base),
@@ -42,7 +42,11 @@ function post(
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString();
-          resolve({ status: res.statusCode ?? 0, json: text ? JSON.parse(text) : undefined });
+          resolve({
+            status: res.statusCode ?? 0,
+            json: text ? JSON.parse(text) : undefined,
+            headers: res.headers,
+          });
         });
       },
     );
@@ -223,6 +227,9 @@ describe('POST /turn with a token', () => {
     );
     expect(res.status).toBe(503);
     expect(res.json).toMatchObject({ error: 'credential_unavailable' });
+    // The document promises EVERY 503 on the client surface carries Retry-After, this auth-503
+    // included — from the same knob the saturation path advertises.
+    expect(res.headers['retry-after']).toBe('5');
     expect(vi.mocked(executeTurn)).not.toHaveBeenCalled();
     expect(vi.mocked(runTurn)).not.toHaveBeenCalled();
   });

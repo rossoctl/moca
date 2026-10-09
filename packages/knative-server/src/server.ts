@@ -100,13 +100,34 @@ const turnAuthDeps = () => turnAuthDepsFromEnv(process.env);
 /** One mapping for control-plane codes, reusing @moca/control-plane's table so the tiers agree. */
 function writeAuthError(res: ServerResponse, err: unknown, sessionId?: string): void {
   if (!(err instanceof CpError)) throw err;
-  res.writeHead(statusFor(err.code), JSON_HEADERS).end(
+  const status = statusFor(err.code);
+  // credential_unavailable is this tier's other 503, and the document promises EVERY 503 on the
+  // client surface carries Retry-After — so the auth path advertises the same knob the saturation
+  // path does, rather than leaving an auth-503 client to guess its own backoff.
+  const headers =
+    status === 503
+      ? { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) }
+      : JSON_HEADERS;
+  res.writeHead(status, headers).end(
     JSON.stringify({
       error: err.code,
       ...(err.message && err.message !== err.code ? { message: err.message } : {}),
       ...(sessionId ? { sessionId } : {}),
     }),
   );
+}
+
+/**
+ * The route-level catch-all: an error nothing between the route and here classified. The body
+ * carries the stable `internal_error` code and never the error's own text — an arbitrary error's
+ * message can carry a Redis connection string or a presented token, and this body reaches an
+ * arbitrary caller (the control-plane document's rule for its `internal_error`). The text exists
+ * only in the server log.
+ */
+function internalError(res: ServerResponse, err: unknown): void {
+  console.error('[http] unclassified error:', err);
+  if (!res.headersSent)
+    res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: 'internal_error' }));
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -188,11 +209,14 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     const result = await runTurn(prompt, sessionId, buildConfig());
     res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     const status = turnErrorStatus(err);
+    // Only the UNCLASSIFIED case is logged: 503s are expected capacity signals, and 404/410 name
+    // the caller's own mistake. A 500's text never reaches the body (see turnErrorCode), so the
+    // server log is the only place it exists.
+    if (status === 500) console.error('[turn] unclassified error:', err);
     res.writeHead(status, turnErrorHeaders(status, err)).end(
       JSON.stringify({
-        error: turnErrorCode(status, message),
+        error: turnErrorCode(status),
         ...(sessionId ? { sessionId } : {}),
       }),
     );
@@ -241,11 +265,19 @@ export function turnErrorStatus(err: unknown): number {
   return message.includes('no session in backend') ? 404 : 500;
 }
 
-/** The `error` field of a failed turn, shared by the sync path and the SSE pre-first-frame window. */
-export function turnErrorCode(status: number, message: string): string {
+/**
+ * The `error` field of a failed turn, shared by the sync path and the SSE pre-first-frame window.
+ *
+ * A stable code, NEVER the exception's own text: an arbitrary error's message can carry a Redis
+ * connection string or a presented token, and this body reaches an arbitrary caller — the same
+ * rule the control-plane document states for its `internal_error`. The text goes to the server
+ * log (see the catch above), not the wire.
+ */
+export function turnErrorCode(status: number): string {
   if (status === 404) return 'session_not_found';
   if (status === 410) return 'config_bundle_not_found';
-  return message;
+  if (status === 503) return 'sandbox_unavailable';
+  return 'internal_error';
 }
 
 /**
@@ -356,11 +388,11 @@ async function handleTurnStream(
     if (!res.headersSent) {
       // Pre-first-frame: nothing streamed yet, so reuse the EXACT sync mapping — a bad sessionId
       // still returns real 404 JSON, byte-identical to the sync path (§3.4 regime 2).
-      const message = err instanceof Error ? err.message : String(err);
       const status = turnErrorStatus(err);
+      if (status === 500) console.error('[turn:sse] unclassified error:', err);
       res.writeHead(status, turnErrorHeaders(status, err)).end(
         JSON.stringify({
-          error: turnErrorCode(status, message),
+          error: turnErrorCode(status),
           ...(sessionId ? { sessionId } : {}),
         }),
       );
@@ -580,7 +612,7 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
   const url = req.url ?? '';
 
   if (req.method === 'GET' && url === '/health') {
-    res.writeHead(200).end('ok');
+    res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
     return;
   }
 
@@ -625,10 +657,7 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       }
       await handleLeafStatus(statusUrl, res);
     };
-    statusRoute().catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
+    statusRoute().catch((err) => internalError(res, err));
     return;
   }
 
@@ -683,19 +712,12 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       }
       return handleRunLeafParsed(parsed, raw, res, auth);
     };
-    route().catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
+    route().catch((err) => internalError(res, err));
     return;
   }
 
   if (req.method === 'POST' && (url === '/turn' || url === '/v1/turn')) {
-    handleTurn(req, res).catch((err) => {
-      if (!res.headersSent) {
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-      }
-    });
+    handleTurn(req, res).catch((err) => internalError(res, err));
     return;
   }
 

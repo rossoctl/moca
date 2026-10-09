@@ -51,7 +51,7 @@ function request(
   method: string,
   path: string,
   body?: unknown,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; contentType: string | undefined }> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl);
     const req = http.request(url, { method }, (res) => {
@@ -61,6 +61,7 @@ function request(
         resolve({
           status: res.statusCode ?? 0,
           body: Buffer.concat(chunks).toString(),
+          contentType: res.headers['content-type'],
         }),
       );
     });
@@ -128,6 +129,9 @@ describe('GET /health', () => {
     const res = await request('GET', '/health');
     expect(res.status).toBe(200);
     expect(res.body).toBe('ok');
+    // The spec declares text/plain; the handler used to send no Content-Type at all, leaving the
+    // wire form to Node's defaults while the document promised a media type.
+    expect(res.contentType).toBe('text/plain');
   });
 });
 
@@ -208,7 +212,10 @@ describe('POST /turn', () => {
 
     const res = await request('POST', '/turn', { prompt: 'hello' });
     expect(res.status).toBe(500);
-    expect(JSON.parse(res.body).error).toBe('LLM timeout');
+    // The stable code, never the exception's own text — that can carry connection strings or
+    // tokens, and this body reaches an arbitrary caller (the control-plane document's rule).
+    expect(JSON.parse(res.body).error).toBe('internal_error');
+    expect(JSON.parse(res.body)).not.toHaveProperty('message');
   });
 });
 

@@ -1,0 +1,632 @@
+# The data-plane /v1 contract, the twin of openapi.yaml's control-plane document. Pinned by
+# packages/knative-server/test/openapi-contract.test.ts, which asserts this document and
+# packages/knative-server/src/routes.ts describe the same route table, and that the handler
+# actually routes everything the table declares — without that pair, "API as a product"
+# degrades into documentation that lies (the control-plane spec §9.3 test 3 argument, verbatim).
+#
+# Scope, mirroring the control-plane document's own boundary note: only the client-facing
+# surface. The handler also serves the workload lifecycle (/workloads — currently 501-refused,
+# #455) and the pre-/v1 wire paths (/turn, /runs, /run-leaf*) — all listed in src/routes.ts as
+# surface: 'internal' and deliberately not described here. /runs/status has no /v1 form; it is
+# the canonical path.
+openapi: 3.1.0
+info:
+  title: MOCA harness (data plane)
+  version: 1.0.0
+  description: |
+    The agent execution tier: a Knative Service that runs turns and jobs against sandboxed
+    workspaces. It is a separate deployable from the control plane, and a client that knows only
+    the control-plane URL finds this one through `GET /v1/discovery` there (SH_PUBLIC_HARNESS_URL).
+
+    Authentication is the control plane's session token (see the sessionToken scheme below). A
+    deployment opts into requiring it with SH_REQUIRE_AUTH; a token that is PRESENT is verified
+    and refused if bad in either mode. Two rules hold on every authenticated route:
+
+      * THE TOKEN NAMES THE SESSION. token.sid must equal the request's sessionId — a token for
+        another session is a 400 session_mismatch, never silently resolved (MU1 §4.3).
+      * AN AUTHENTICATED CALLER MAY NOT NAME A TENANT. The session token alone scopes the work
+        (MI1 R7); tenant remains available only to unauthenticated deployments, where it
+        namespaces the session id. Enforced on the two routes that accept a tenant — /v1/runs
+        (body) and /runs/status (query); /v1/turn reads only prompt and sessionId, so a tenant
+        field there is inert, not refused.
+
+security:
+  - sessionToken: []
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Liveness — answers `ok` with no dependencies
+      description: |
+        Deliberately touches nothing (no Redis, no keyset): a probe that depended on either
+        would report a healthy harness as unready. This is the one route a client may call
+        before it has any token.
+      security: []
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum: [ok]
+  /v1/turn:
+    post:
+      operationId: createTurn
+      summary: Run one agent turn — sync JSON, or an SSE frame stream
+      description: |
+        One conversational turn against a session's sandboxed workspace. Send `Accept:
+        text/event-stream` for the streamed form; omit it for the sync form. The two run the
+        same execution core and report the same facts (§3.4): a failure before the first frame
+        is a real HTTP error byte-identical to the sync path's; a failure after streaming has
+        begun degrades to a terminal `error` frame, since the status code is spent.
+
+        Authenticated turns run on the caller's exchanged credential, with the session's
+        config bundle and sandbox tier taken from the control plane — never from the request
+        (ADR-0038) — and create the session if absent. Unauthenticated turns (SH_REQUIRE_AUTH
+        off, no token) run on the operator's ambient credential: a named session must already
+        exist (404 session_not_found otherwise), and an omitted sessionId starts a fresh one.
+
+        `X-SH-Subject` is accepted only as a trusted-orchestrator convenience and REJECTED when
+        it conflicts with the token's subject (spec §3.5) — a silent winner there is a
+        cross-tenant bug waiting.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TurnRequest' }
+      responses:
+        '200':
+          description: |
+            The completed turn. Sync callers get the final result as JSON; stream callers get
+            the same facts incrementally as frames.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnResult' }
+            text/event-stream:
+              schema:
+                type: string
+              description: |
+                SSE. Each frame is `event: <frame.type>` + `data: <frame JSON>`; idle gaps are
+                filled with `: keepalive` comments (invisible to EventSource). The frame
+                vocabulary is TurnStreamFrame below — incremental text/thinking/tool frames,
+                then exactly one terminal `done` or `error` frame. Client disconnect aborts the
+                in-flight turn.
+        '400':
+          description: |
+            prompt_required (no prompt in the body) · invalid_json · read_error (the body never
+            arrived whole) · session_mismatch (the token names another session) ·
+            subject_conflict (X-SH-Subject contradicts the token) · credential_required ·
+            credential_ambiguous · endpoint_unresolved (the control-plane exchange refused the
+            caller's credential or its endpoint)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required (this deployment requires a token) · token_invalid · token_expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            session_not_found — an unauthenticated turn named a session the backend does not
+            have, or an authenticated turn's token names a session the control plane does not
+            know: the exchange refuses it before the harness's own create-or-resume ever runs.
+            credential_not_found — the token's subject has no resolvable credential there.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: config_bundle_not_found — the session's promoted bundle digest is gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            Retryable, from either of two causes: no sandbox capacity right now (every candidate
+            is at its cap, none is present yet, or the session's own sandbox is briefly absent —
+            sandbox_unavailable), or the control-plane credential exchange failed
+            (credential_unavailable — the control plane is unreachable or its answer was
+            unusable). The turn can succeed unmodified on a retry.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: seconds to wait before retrying
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: internal_error — not retryable as-is
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/runs:
+    post:
+      operationId: createRun
+      summary: 'Run a leaf/solve/prompt job — inline, or queued with async: true'
+      description: |
+        The job mode of the data plane: a self-contained unit of agent work (review one finding,
+        solve one problem, answer one prompt) rather than a conversational turn. The `kind`
+        discriminator picks the shape; absent or `converge` means the leaf (finding-review)
+        shape.
+
+        On pool saturation the sync path bounded-waits with backoff before answering 503, and a
+        503 is never persisted — `/runs/status` must not report a retryable refusal as a
+        terminal failure.
+
+        `async: true` asks for queueing instead of inline execution. It is available only to
+        unauthenticated callers: running a queued job later on its caller's credential would
+        mean storing a bearer in the queue (MI1 §6.5), and running it on the ambient credential
+        would spend the operator's key for a user. Owned asynchronous runs are MU2's.
+
+        `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
+        never settable by an external caller. A run naming a `workloadId` is refused with 501
+        workloads_unavailable rather than run on the default pool — Context Service no longer
+        allocates sandbox pools for Moca (#455).
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunEnvelope' }
+      responses:
+        '200':
+          description: The completed job (sync execution).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeafResult' }
+        '202':
+          description: 'Accepted onto the queue (async: true, unauthenticated caller only).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedRun' }
+        '400':
+          description: |
+            envelope_invalid (the body matches no run shape) · configRef_invalid (an empty
+            configRef is a well-formed envelope making an unsatisfiable request, so the error
+            names the field) · tenant_not_allowed (an authenticated caller named a tenant) ·
+            session_mismatch · subject_conflict · credential_required · credential_ambiguous ·
+            endpoint_unresolved (the control-plane exchange refused the caller's credential or
+            its endpoint)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required · token_invalid · token_expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            session_not_found / credential_not_found — the control-plane exchange refused the
+            token's session or subject.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '501':
+          description: |
+            async_runs_unavailable — async: true with a token-bearing caller. Not a capability
+            this deployment grants; a token-less caller on a require-auth deployment never
+            reaches it (401 token_required fires first). workloads_unavailable — the envelope
+            named a workloadId, and the workload lifecycle is unavailable (#455).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            Retryable, from either of two causes — note the two body shapes. Saturation: still
+            no pool capacity after the bounded wait; the body is the LeafResult failed/saturated
+            branch, NOT an Error, and is never persisted. Or credential_unavailable — the
+            control-plane exchange failed (an Error body).
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: The saturated LeafResult branch — a 503 is "retry", not a terminal failure.
+                    required: [status, reason]
+                    properties:
+                      status: { type: string, enum: [failed] }
+                      reason: { type: string, enum: [saturated] }
+                  - $ref: '#/components/schemas/Error'
+        '500':
+          description: internal_error — not retryable as-is
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /runs/status:
+    get:
+      operationId: getRunStatus
+      summary: Poll an async run by session id
+      description: |
+        Reads the result record an async run wrote. A missing record is `queued`, not an error:
+        polling is the contract, and "not finished yet" is a normal answer. No credential is
+        exchanged — a status read spends nothing upstream — but the same token rules as a turn
+        apply (MI1 §5 R7): required under SH_REQUIRE_AUTH, verified when present, and the token
+        must name the polled session.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema: { type: string }
+          description: The run's session id — the same one the accepted run echoed back.
+        - name: tenant
+          in: query
+          required: false
+          schema: { type: string }
+          description: |
+            Unauthenticated deployments only, where it namespaces the session id. An
+            authenticated caller passing tenant gets 400 tenant_not_allowed (MI1 R7).
+      responses:
+        '200':
+          description: The run's current status — see RunStatus for the shapes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunStatus' }
+        '400':
+          description: sessionId_required · tenant_not_allowed · session_mismatch (the token names another session)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required · token_invalid · token_expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            credential_unavailable — the token keyset became unusable under an already-serving
+            pod. No credential exchange runs on a status read, so this is the only 503 here; an
+            operator fix, not a retry, resolves it.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: seconds to wait before retrying
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: internal_error — not retryable as-is
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  securitySchemes:
+    sessionToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Ed25519 (`alg: EdDSA`) JWT minted by the control plane at `POST /v1/sessions/{id}/token`
+        — scope `turn:write`, claim `sid` naming the session, 5-minute TTL. No credential
+        travels in the token; the data plane exchanges it with the control plane per turn, and
+        that exchange can refuse the caller with the control plane's own codes (token_expired,
+        credential_*, endpoint_unresolved, session_not_found) or, for any other exchange fault
+        — control plane unreachable, an unusable answer — 503 credential_unavailable. The
+        per-route response lists name every code.
+        Required on every route here when the deployment sets SH_REQUIRE_AUTH; verified, and
+        refused if bad, whenever presented in either mode.
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: |
+            A stable machine-readable code; the codes this document names in each response
+            description are the contract. The routes never put exception text here — a failure
+            no route could classify answers internal_error, with its text in the server log only.
+        message:
+          type: string
+          description: |
+            Operator-facing detail; never parse it. Absent on internal_error — an unclassified
+            failure's text can carry connection strings or credentials, and this body reaches an
+            arbitrary caller (the control-plane document's rule).
+        sessionId:
+          type: string
+          description: Echoed when the request named a session.
+    TurnRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+          description: The user turn to run.
+        sessionId:
+          type: string
+          description: |
+            The session to run the turn in. When a token is presented this must be the token's
+            `sid` (400 session_mismatch otherwise) and may be omitted — the token alone names
+            the session. An unauthenticated caller may also omit it: a fresh session is then
+            created and its id minted. A supplied id must already exist — 404
+            session_not_found otherwise.
+    TurnResult:
+      type: object
+      required: [sessionId, response, stopReason]
+      properties:
+        sessionId: { type: string }
+        response: { type: string }
+        stopReason: { type: string }
+        errorMessage: { type: string }
+        usage: { $ref: '#/components/schemas/LeafUsage' }
+        sandbox:
+          type: object
+          description: Where the turn ran; `workspaceReset` explains why earlier files are gone.
+          properties:
+            id: { type: string }
+            tier: { type: string }
+            workspaceReset:
+              type: object
+              description: Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE frame).
+              properties:
+                from: { type: string }
+                reason: { type: string, enum: [detached, retiered] }
+    LeafUsage:
+      type: object
+      description: Cumulative token usage, for run cost pricing.
+      required: [input, output, cacheRead, cacheWrite, total]
+      properties:
+        input: { type: integer }
+        output: { type: integer }
+        cacheRead: { type: integer }
+        cacheWrite: { type: integer }
+        total: { type: integer }
+    # The SSE frame vocabulary of POST /v1/turn (harness/src/turn-stream.ts). A discriminated
+    # union on `type`; old clients ignore unknown types, so this list only grows.
+    TurnStreamFrame:
+      oneOf:
+        - $ref: '#/components/schemas/FrameText'
+        - $ref: '#/components/schemas/FrameThinking'
+        - $ref: '#/components/schemas/FrameToolUse'
+        - $ref: '#/components/schemas/FrameToolResult'
+        - $ref: '#/components/schemas/FrameWorkspaceReset'
+        - $ref: '#/components/schemas/FrameDone'
+        - $ref: '#/components/schemas/FrameError'
+    FrameText:
+      type: object
+      required: [type, delta]
+      properties:
+        type: { type: string, enum: [text] }
+        delta: { type: string, description: Assistant-text token. }
+    FrameThinking:
+      type: object
+      required: [type, delta]
+      properties:
+        type: { type: string, enum: [thinking] }
+        delta: { type: string, description: Reasoning token; may never fire. }
+    FrameToolUse:
+      type: object
+      required: [type, id, name, args]
+      properties:
+        type: { type: string, enum: [tool_use] }
+        id: { type: string }
+        name: { type: string }
+        args:
+          description: The tool call's arguments, verbatim (fidelity B).
+    FrameToolResult:
+      type: object
+      required: [type, id, isError, preview]
+      properties:
+        type: { type: string, enum: [tool_result] }
+        id: { type: string }
+        isError: { type: boolean }
+        preview:
+          type: string
+          description: The clipped result — no transport ever sees the untruncated form.
+    FrameWorkspaceReset:
+      type: object
+      required: [type, sessionId, from, tier, reason]
+      description: |
+        First frame of a turn whose sandbox is not the one the session's previous turn used, so
+        the user learns at the turn itself why earlier files are gone (P6.3).
+      properties:
+        type: { type: string, enum: [workspace_reset] }
+        sessionId: { type: string }
+        from: { type: string }
+        tier: { type: string }
+        reason: { type: string, enum: [detached, retiered] }
+    FrameDone:
+      type: object
+      required: [type, sessionId, stopReason]
+      description: The terminal success frame, derived from the same TurnResult a sync caller reads.
+      properties:
+        type: { type: string, enum: [done] }
+        sessionId: { type: string }
+        stopReason: { type: string }
+        usage: { $ref: '#/components/schemas/LeafUsage' }
+    FrameError:
+      type: object
+      required: [type, sessionId, stopReason]
+      description: The terminal failure frame — also how post-first-frame errors are reported.
+      properties:
+        type: { type: string, enum: [error] }
+        sessionId: { type: string }
+        stopReason: { type: string }
+        errorMessage: { type: string }
+        usage: { $ref: '#/components/schemas/LeafUsage' }
+    # The POST /v1/runs body: one of three job shapes sharing a set of optional controls.
+    # Discriminated by `kind` — absent (or 'converge') means the leaf shape.
+    RunEnvelope:
+      oneOf:
+        - $ref: '#/components/schemas/LeafJob'
+        - $ref: '#/components/schemas/SolveJob'
+        - $ref: '#/components/schemas/PromptJob'
+    RunOptions:
+      type: object
+      description: Controls shared by every run shape.
+      properties:
+        model: { type: string }
+        provider: { type: string }
+        maxTurns: { type: integer }
+        async:
+          type: boolean
+          description: Queue instead of running inline. Unauthenticated callers only — a 501 otherwise.
+        tenant:
+          type: string
+          description: Unauthenticated deployments only; namespaces the session id.
+        configRef:
+          type: string
+          description: Digest of a promoted Claude Code config bundle (sha256:…). Absent ⇒ none.
+        repoUrl: { type: string, description: Git remote to converge the sandbox repo copy from. }
+        ref: { type: string, description: Commit/branch/tag the leaf's worktree is pinned to. }
+        workspaceRef:
+          { type: string, description: Derived from the worktree when repoUrl+ref are given. }
+    LeafJob:
+      allOf:
+        - $ref: '#/components/schemas/RunOptions'
+        - type: object
+          required: [sessionId, item]
+          properties:
+            kind:
+              type: string
+              enum: [converge]
+              description: Absent means this shape.
+            sessionId: { type: string }
+            item: { $ref: '#/components/schemas/LeafItem' }
+            decision:
+              type: object
+              description: Resume/approve only — answers a paused run's gate.
+    SolveJob:
+      allOf:
+        - $ref: '#/components/schemas/RunOptions'
+        - type: object
+          required: [sessionId, kind, problemStatement, repoUrl, ref]
+          properties:
+            kind: { type: string, enum: [solve] }
+            sessionId: { type: string }
+            problemStatement: { type: string, description: The task the agent must implement. }
+            repoUrl: { type: string }
+            ref: { type: string }
+            env_key:
+              type: string
+              description: swebench solve only — triggers the contained swebench-setup path.
+    PromptJob:
+      allOf:
+        - $ref: '#/components/schemas/RunOptions'
+        - type: object
+          required: [sessionId, kind, prompt]
+          properties:
+            kind: { type: string, enum: [prompt] }
+            sessionId: { type: string }
+            prompt: { type: string, description: The free-form prompt to run. }
+    LeafItem:
+      type: object
+      required: [item_id, file, pattern]
+      properties:
+        item_id: { type: string }
+        file:
+          type: string
+          description: Absolute path in the sandbox workspace — the agent reads exactly this.
+        pattern:
+          { type: string, description: The pattern of interest to review the finding against. }
+        require_approval: { type: boolean }
+    Verdict:
+      type: object
+      required: [item_id, verdict, reason]
+      properties:
+        item_id: { type: string }
+        verdict: { type: string, enum: [FLAGGED, CLEAR] }
+        reason: { type: string }
+    LeafResult:
+      oneOf:
+        - type: object
+          required: [status, verdict]
+          properties:
+            status: { type: string, enum: [done] }
+            verdict: { $ref: '#/components/schemas/Verdict' }
+        - type: object
+          required: [status, gateId, gate]
+          properties:
+            status: { type: string, enum: [paused] }
+            gateId: { type: integer }
+            gate:
+              type: object
+              required: [summary, proposed_action]
+              properties:
+                summary: { type: string }
+                proposed_action: { type: string }
+        - type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [aborted] }
+        - type: object
+          required: [status, patch]
+          properties:
+            status: { type: string, enum: [solved] }
+            patch: { type: string }
+            usage: { $ref: '#/components/schemas/LeafUsage' }
+        - type: object
+          required: [status, text]
+          properties:
+            status: { type: string, enum: [responded] }
+            text: { type: string }
+            usage: { $ref: '#/components/schemas/LeafUsage' }
+        - type: object
+          required: [status, reason]
+          properties:
+            status: { type: string, enum: [failed] }
+            reason:
+              type: string
+              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated]
+            message: { type: string }
+    AcceptedRun:
+      type: object
+      required: [status, sessionId]
+      properties:
+        status: { type: string, enum: [accepted] }
+        sessionId: { type: string, description: Poll /runs/status with this. }
+    RunStatus:
+      oneOf:
+        - type: object
+          required: [status]
+          description: No result record yet — keep polling.
+          properties:
+            status: { type: string, enum: [queued] }
+        - type: object
+          required: [status, verdict]
+          properties:
+            status: { type: string, enum: [done] }
+            verdict: { $ref: '#/components/schemas/Verdict' }
+        - type: object
+          required: [status, patch]
+          properties:
+            status: { type: string, enum: [solved] }
+            patch: { type: string }
+        - type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [paused] }
+            gateId: { type: integer }
+            gate:
+              type: object
+              properties:
+                summary: { type: string }
+                proposed_action: { type: string }
+        - type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [failed] }
+            reason: { type: string }
+        - type: object
+          required: [status, text]
+          properties:
+            status: { type: string, enum: [responded] }
+            text: { type: string }
+        - type: object
+          required: [status]
+          description: A run whose execution was aborted — persisted, so it polls back like any other outcome.
+          properties:
+            status: { type: string, enum: [aborted] }
+      description: |
+        A status not in this list passes through verbatim as `{ status }` — the record's own
+        status wins over an enum here, so a new server status reads as unknown, not as an error.

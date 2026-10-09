@@ -15,8 +15,9 @@ info:
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
-    -- `/v1/turn` and `/v1/runs`, on the harness Knative Service -- and they are deliberately not
-    described here; "the `/v1` API contract" in spec §1/§4 is therefore wider than this file.
+    -- `/v1/turn` and `/v1/runs`, on the harness Knative Service -- and they are described in
+    harness-openapi.yaml, this document's twin; "the `/v1` API contract" in spec §1/§4 is
+    therefore split across the two files.
     `/internal/credentials` is the data-plane-only credential exchange and is not part of the
     public surface; it is documented here because it is part of the contract between the tiers.
 servers:

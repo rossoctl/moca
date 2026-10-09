@@ -123,11 +123,12 @@ describe('an expired config bundle', () => {
   it('is 410 config_bundle_not_found, not a 500', () => {
     const err = new BundleNotFoundError('sha256:' + 'a'.repeat(64));
     expect(turnErrorStatus(err)).toBe(410);
-    expect(turnErrorCode(410, err.message)).toBe('config_bundle_not_found');
+    expect(turnErrorCode(410)).toBe('config_bundle_not_found');
   });
 
-  it('keeps 404 session_not_found and passes other messages through', () => {
-    expect(turnErrorCode(404, 'no session in backend')).toBe('session_not_found');
-    expect(turnErrorCode(500, 'boom')).toBe('boom');
+  it('answers a stable code for every status, never the exception text', () => {
+    expect(turnErrorCode(404)).toBe('session_not_found');
+    expect(turnErrorCode(503)).toBe('sandbox_unavailable');
+    expect(turnErrorCode(500)).toBe('internal_error');
   });
 });
