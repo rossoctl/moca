@@ -211,6 +211,19 @@ describe('POST /v1/turn detachable', () => {
     expect(await redis.get(activeKey(sessionId))).toBeNull();
   });
 
+  it('answers an unclassified pre-first-frame failure with the stable internal_error, not its text', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(executeTurn).mockRejectedValueOnce(new Error('redis://user:hunter2@host')); // notsecret
+    const res = await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    expect(res.status).toBe(500);
+    expect(JSON.parse(res.raw)).toEqual({ error: 'internal_error', sessionId });
+    expect(res.raw).not.toContain('hunter2');
+    err.mockRestore();
+  });
+
   it('ignores detachable without SH_TURN_DETACH, without a token, and without SSE', async () => {
     delete process.env.SH_TURN_DETACH;
     vi.mocked(executeTurn).mockResolvedValueOnce({

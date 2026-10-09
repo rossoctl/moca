@@ -150,11 +150,7 @@ function writeAuthError(res: ServerResponse, err: unknown, sessionId?: string): 
   // credential_unavailable is this tier's other 503, and the document promises EVERY 503 on the
   // client surface carries Retry-After — so the auth path advertises the same knob the saturation
   // path does, rather than leaving an auth-503 client to guess its own backoff.
-  const headers =
-    status === 503
-      ? { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) }
-      : JSON_HEADERS;
-  res.writeHead(status, headers).end(
+  res.writeHead(status, status === 503 ? retryHeaders() : JSON_HEADERS).end(
     JSON.stringify({
       error: err.code,
       ...(err.message && err.message !== err.code ? { message: err.message } : {}),
@@ -563,10 +559,12 @@ async function handleDetachableTurn(
       errorMessage: message,
     });
     if (!started && !res.headersSent) {
+      // The sync path's mapping, stable code included: the exception text goes to the log only.
       const status = turnErrorStatus(err);
+      if (status === 500) console.error('[turn:detach] unclassified error:', err);
       res
         .writeHead(status, turnErrorHeaders(status, err))
-        .end(JSON.stringify({ error: turnErrorCode(status, message), sessionId: auth.sessionId }));
+        .end(JSON.stringify({ error: turnErrorCode(status), sessionId: auth.sessionId }));
     } else {
       send(end.frame, end.id);
     }
@@ -987,18 +985,15 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
   }
 
   // Detachable turns (turn-reattach spec §4.2-4.3). Neither is a turn by isTurnRequest's exact match.
-  if (req.method === 'GET' && url.startsWith('/v1/turn?')) {
-    handleAttach(req, new URL(url, 'http://localhost'), res).catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
+  // A bare GET /v1/turn routes too, and answers 400 sessionId_required rather than a 404.
+  if (req.method === 'GET' && (url === '/v1/turn' || url.startsWith('/v1/turn?'))) {
+    handleAttach(req, new URL(url, 'http://localhost'), res).catch((err) =>
+      internalError(res, err),
+    );
     return;
   }
   if (req.method === 'POST' && url === '/v1/turn/cancel') {
-    handleCancel(req, res).catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
+    handleCancel(req, res).catch((err) => internalError(res, err));
     return;
   }
 
