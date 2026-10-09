@@ -3,7 +3,9 @@ import {
   envDirFromKey,
   buildSwebenchSetupScript,
   buildSwebenchDiffScript,
+  buildSwebenchCleanupScript,
   swebenchCheckoutDir,
+  swebenchVenvDir,
   buildSwebenchSolvePrompt,
   setupSwebenchWorkspace,
   captureSwebenchDiff,
@@ -39,6 +41,20 @@ describe('swebench-setup script builders', () => {
     const s = buildSwebenchDiffScript('run-1');
     expect(s).toContain(`git -C '${swebenchCheckoutDir('run-1')}' add -A`);
     expect(s).toContain('diff --cached');
+  });
+  it('cleanup script removes the checkout, the venv, and the leaf dir created by the overlay bind', () => {
+    // SWE-bench's real work lives in /workspace/co-<sid> and /workspace/venv-<sid>, but a solve
+    // leaf with configRef materialises leafConfigDir(sid) = /workspace/leaves/<sid>/.sh-config,
+    // whose parent is created by buildLeafBindScript's `mkdir -p`. attach.detach() removes the
+    // symlink; without this cleanup the empty /workspace/leaves/<sid> would leak on the pooled
+    // sandbox after a swebench solve.
+    const s = buildSwebenchCleanupScript('run-1');
+    expect(s).toContain(swebenchCheckoutDir('run-1'));
+    expect(s).toContain(swebenchVenvDir('run-1'));
+    expect(s).toContain('/workspace/leaves/run-1');
+    // One `rm -rf` call — not three serial ones — keeps teardown fast and all-or-nothing per the
+    // `set -u` surrounding (set -eu would bail; swebench cleanup is best-effort).
+    expect(s.match(/rm -rf/g)?.length).toBe(1);
   });
   it('solve prompt names the checkout root and the venv python', () => {
     const p = buildSwebenchSolvePrompt(

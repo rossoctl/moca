@@ -44,6 +44,23 @@ describe('buildConvergeScript', () => {
     const evil = buildConvergeScript("https://x/r.git'; rm -rf /; '", 'main', 'leaf-1');
     expect(evil).toContain(`'https://x/r.git'\\''; rm -rf /; '\\'''`);
   });
+  it('appends `.sh-config` to the repo info/exclude so the promoted-config overlay symlink is ignored by `git add -A`', () => {
+    // `leafConfigDir(sid)` is `/workspace/leaves/<sid>/.sh-config` — a child of the leaf worktree.
+    // Without this ignore, `git add -A` in buildDiffCaptureScript would stage the symlink into
+    // every captured solve patch. Idempotent: a repeat run must not re-append the line.
+    expect(s).toContain('.git/info/exclude');
+    expect(s).toContain('.sh-config');
+    // `grep -qxF .sh-config "$REPO/.git/info/exclude"` guards the append on an exact full-line
+    // match: a partial `grep .sh-config` would also match a user line like `# .sh-config` and
+    // skip the append the overlay actually needs.
+    expect(s).toContain('grep -qxF .sh-config');
+  });
+  it('writes the info/exclude entry inside the flock, before any worktree add', () => {
+    // The flock serializes writers of the shared repo at /workspace/repo. The info/exclude line
+    // belongs to that same shared repo, so a concurrent two-leaf converge mustn't append the
+    // line twice. Pin the ordering: fetch → info/exclude write → close flock → worktree add.
+    expect(s).toMatch(/fetch[\s\S]*info\/exclude[\s\S]*9>"\$LOCK"[\s\S]*worktree add/);
+  });
 });
 
 describe('convergeWorkspace', () => {

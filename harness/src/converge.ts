@@ -33,6 +33,12 @@ export function buildConvergeScript(repoUrl: string, ref: string, sessionId: str
     `  flock 9`,
     `  [ -d "$REPO/.git" ] || { ${init}; }`,
     `  ${fetch} || { ${init}; ${fetch}; }`,
+    // Ignore an untracked `.sh-config` under any worktree: on a solve leaf with a configRef the
+    // promoted-config overlay symlinks `.sh-config` into the leaf dir, and without this
+    // `git add -A` in buildDiffCaptureScript would stage that symlink into every captured patch.
+    // No-op when the entry is already present; a no-op when the overlay didn't run.
+    `  grep -qxF .sh-config "$REPO/.git/info/exclude" 2>/dev/null || `,
+    `    echo .sh-config >> "$REPO/.git/info/exclude"`,
     `) 9>"$LOCK"`,
     `COMMIT=$(git -C "$REPO" rev-parse FETCH_HEAD)`,
     `[ -d "$LEAF" ] || git -C "$REPO" worktree add --quiet --detach "$LEAF" "$COMMIT"`,
