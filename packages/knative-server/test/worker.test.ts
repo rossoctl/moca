@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createServer as createNetServer, connect, type Socket } from 'node:net';
 import { once } from 'node:events';
+import http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   isTurnRequest,
@@ -10,7 +11,9 @@ import {
   startStatsReporter,
   statsIntervalMs,
   type WorkerToSupervisor,
+  type WorkerRuntime,
 } from '../src/worker.js';
+import { adoptTurnSlot } from '../src/turn-slot.js';
 
 /** A connected loopback socket pair. Returns [serverSide, clientSide, cleanup]. */
 async function socketPair(): Promise<[Socket, Socket, () => void]> {
@@ -389,5 +392,50 @@ describe('statsIntervalMs', () => {
     // An absence-assertion that has never been shown capable of failing asserts nothing.
     expect(Number('abc')).toBeNaN();
     expect(Number('abc') > 0).toBe(false);
+  });
+});
+
+/** Drive an HTTP request through a WorkerRuntime and await its completion. */
+async function driveRequest(runtime: WorkerRuntime, method: string, path: string): Promise<void> {
+  const srv = createNetServer((sock) => runtime.accept(sock));
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+  await new Promise<void>((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path }, (res) => {
+      res.resume();
+      res.on('end', () => resolve());
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  await new Promise((r) => setTimeout(r, 20)); // let 'close' fire server-side
+  srv.close();
+}
+
+describe('detached turns keep their slot', () => {
+  it('an adopted slot survives the response closing and ends when released', async () => {
+    const loads: number[] = [];
+    let release!: () => void;
+    const runtime = createWorkerRuntime({
+      send: (m) => void (m.type === 'load' && loads.push(m.inFlight)),
+      requestHandler: (req, res) => {
+        release = adoptTurnSlot(res);
+        res.end('detached'); // the response closes; the turn goes on
+      },
+    });
+    await driveRequest(runtime, 'POST', '/v1/turn');
+    expect(runtime.counter.inFlight).toBe(1);
+    release();
+    expect(runtime.counter.inFlight).toBe(0);
+    expect(loads).toEqual([0, 1, 0]);
+  });
+
+  it('an un-adopted slot still ends with its response', async () => {
+    const runtime = createWorkerRuntime({
+      send: () => {},
+      requestHandler: (_req, res) => res.end('ok'),
+    });
+    await driveRequest(runtime, 'POST', '/v1/turn');
+    expect(runtime.counter.inFlight).toBe(0);
   });
 });
