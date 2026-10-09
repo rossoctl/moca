@@ -170,6 +170,23 @@ d.cancelRequested = true
 redis.call('SET', KEYS[1], cjson.encode(d), 'KEEPTTL')
 return {'requested', d.turnId}`;
 
+/**
+ * KEYS[1]=active KEYS[2]=events KEYS[3]=last ARGV=[turnId, frameJson, ttlS, maxLen]. Appends the
+ * owner-lost terminal ONLY if no lease names the turn and the log has no terminal yet -- checked
+ * and written atomically, so concurrent attaches write it once (§5.1).
+ */
+export const OWNER_LOST_LUA = `
+local v = redis.call('GET', KEYS[1])
+if v and cjson.decode(v).turnId == ARGV[1] then return false end
+local last = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
+if #last == 0 then return false end
+local f = cjson.decode(last[1][2][2])
+if f.type == 'done' or f.type == 'error' then return false end
+local id = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[2])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+if redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('EXPIRE', KEYS[3], ARGV[3]) end
+return id`;
+
 export class ActiveTurn {
   readonly signal: AbortSignal;
   abortReason?: AbortReason;
@@ -320,6 +337,7 @@ export class TurnRegistry {
   private sub?: Promise<RedisClientType>;
   private subClient?: RedisClientType;
   private readonly live = new Map<string, ActiveTurn>();
+  private readonly readers = new Set<RedisClientType>();
 
   /**
    * `maxReconnectAttempts` is a seam for tests, not a knob anyone is expected to set -- the same one
@@ -422,6 +440,90 @@ export class TurnRegistry {
     return { turnId: r[1]!, outcome: r[0] as 'requested' | 'ended' };
   }
 
+  /**
+   * Replay the session's current (or last retained) turn after `cursor`, then follow it live to
+   * its terminal frame (§4.2). A cursor naming another turn, or none, replays from the start. Each
+   * attach holds its own connection: XREAD BLOCK would stall every other command on a shared one.
+   */
+  async *attach(
+    sessionId: string,
+    cursor: string | undefined,
+    signal?: AbortSignal,
+  ): AsyncGenerator<LoggedFrame> {
+    await this.open();
+    const turnId = await this.client.get(lastKey(sessionId));
+    if (!turnId) throw new TurnNotFoundError();
+    const key = eventsKey(sessionId, turnId);
+    const first = (await this.client.xRange(key, '-', '+', { COUNT: 1 })) ?? [];
+    if (first.length === 0) throw new TurnNotFoundError();
+    const parsed = cursor ? parseEventId(cursor) : undefined;
+    const after = parsed?.turnId === turnId ? parsed.entryId : undefined;
+    const truncated = after !== undefined && compareEntryIds(after, first[0]!.id) < 0;
+    let lastId = after !== undefined && !truncated ? after : '0-0';
+    const start: TurnStreamFrame = {
+      type: 'turn',
+      turnId,
+      sessionId,
+      ...(truncated ? { truncated: true } : {}),
+    };
+    yield { id: eventId(turnId, first[0]!.id), frame: start };
+
+    const reader = this.client.duplicate() as RedisClientType;
+    swallowRedisErrors(reader, 'turn attach reader');
+    // close() destroys the readers still following a turn, and the generator then ends quietly.
+    this.readers.add(reader);
+    const stop = () => {
+      if (reader.isOpen) reader.destroy();
+    };
+    signal?.addEventListener('abort', stop, { once: true });
+    const blockMs = Math.max(10, Math.floor(this.timings.renewMs / 2));
+    let lastCheck = 0;
+    try {
+      if (signal?.aborted) return;
+      await reader.connect();
+      for (;;) {
+        if (signal?.aborted || this.closed) return;
+        const now = this.now();
+        if (now - lastCheck >= this.timings.renewMs) {
+          lastCheck = now;
+          await this.open();
+          await this.client.set(watchKey(sessionId, turnId), '1', { PX: this.timings.leaseMs });
+          await this.client.eval(OWNER_LOST_LUA, {
+            keys: [activeKey(sessionId), key, lastKey(sessionId)],
+            arguments: [
+              turnId,
+              JSON.stringify({
+                type: 'error',
+                sessionId,
+                stopReason: 'aborted',
+                abortReason: 'owner_lost',
+                errorMessage: abortMessage('owner_lost', this.timings),
+              }),
+              String(this.timings.logTtlS),
+              String(this.timings.maxLen),
+            ],
+          });
+        }
+        const res = await reader.xRead({ key, id: lastId }, { COUNT: 500, BLOCK: blockMs });
+        for (const m of res?.[0]?.messages ?? []) {
+          lastId = m.id;
+          const frame = JSON.parse(m.message.f) as TurnStreamFrame;
+          if (frame.type === 'turn') continue; // synthesized above, with the truncation flag
+          yield { id: eventId(turnId, m.id), frame };
+          if (frame.type === 'done' || frame.type === 'error') return;
+        }
+      }
+    } catch (err) {
+      // destroy() rejects whatever the reader was awaiting (connect or XREAD): that is the abort.
+      if (signal?.aborted || this.closed) return;
+      throw err;
+    } finally {
+      signal?.removeEventListener('abort', stop);
+      this.readers.delete(reader);
+      stop();
+    }
+  }
+
   /** Drain and exit (§5.5): abort every live turn, then wait up to waitMs for their terminals. */
   async abortAll(reason: AbortReason, waitMs = 2000): Promise<void> {
     const turns = [...this.live.values()];
@@ -436,6 +538,8 @@ export class TurnRegistry {
     this.closed = true;
     for (const t of this.live.values()) t.stop();
     this.live.clear();
+    for (const r of this.readers) if (r.isOpen) r.destroy();
+    this.readers.clear();
     const sub = await this.sub?.catch(() => undefined);
     if (sub?.isOpen) sub.destroy();
     await this.ready?.catch(() => undefined);
