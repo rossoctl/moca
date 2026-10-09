@@ -108,20 +108,30 @@ export interface LoggedFrame {
   frame: TurnStreamFrame;
 }
 
-/** KEYS[1]=active KEYS[2]=last ARGV=[leaseJson, leaseMs, turnId]. Nil when taken; else the holder. */
+/**
+ * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[leaseJson, leaseMs, turnId, ttlS]. Nil when
+ * taken; else the holder. `last` and the log carry the retention TTL from the start (renewal keeps
+ * refreshing it), so an owner that dies before END leaves nothing behind past ttlS.
+ */
 export const BEGIN_LUA = `
 local v = redis.call('GET', KEYS[1])
 if v then return v end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-redis.call('SET', KEYS[2], ARGV[3])
+redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+redis.call('EXPIRE', KEYS[3], ARGV[4])
 return false`;
 
-/** KEYS[1]=active ARGV=[turnId, leaseMs]. Extends OUR lease only; returns it, or nil if not ours. */
+/**
+ * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[turnId, leaseMs, ttlS]. Extends OUR lease only,
+ * and refreshes the retention TTL on `last` and the log; returns the lease, or nil if not ours.
+ */
 export const RENEW_LUA = `
 local v = redis.call('GET', KEYS[1])
 if not v then return false end
 if cjson.decode(v).turnId ~= ARGV[1] then return false end
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
+if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('EXPIRE', KEYS[2], ARGV[3]) end
+redis.call('EXPIRE', KEYS[3], ARGV[3])
 return v`;
 
 /** KEYS[1]=active ARGV=[turnId]. Drops the lease only if it is still ours. */
@@ -169,6 +179,7 @@ export class ActiveTurn {
   private unwatchedSince?: number;
   private lastRenewOk: number;
   private finished = false;
+  private renewing = false;
   private resolveEnded!: () => void;
   private readonly timer: ReturnType<typeof setInterval>;
 
@@ -244,18 +255,33 @@ export class ActiveTurn {
   }
 
   private async tick(): Promise<void> {
-    if (this.finished) return;
+    // A slow renew must not overlap the next tick: two in flight could judge the lease out of order.
+    if (this.finished || this.renewing) return;
+    this.renewing = true;
+    try {
+      await this.renewOnce();
+    } finally {
+      this.renewing = false;
+    }
+  }
+
+  private async renewOnce(): Promise<void> {
+    // Taken BEFORE the renew: the lease is extended at some instant after this, so crediting the
+    // earlier time is the conservative reading.
     const now = this.reg.now();
     let lease: { cancelRequested?: boolean } | null;
     try {
       lease = await this.reg.renew(this.sessionId, this.turnId);
       this.lastRenewOk = now;
     } catch {
-      // Keep running while the lease would still be ours, then stop: two owners must never both
-      // believe they hold the session (§5.1).
-      if (now - this.lastRenewOk >= this.reg.timings.leaseMs) this.abort('lease_lost');
+      // Stop one renewal interval BEFORE the lease can lapse in Redis, judged by the clock after the
+      // failed await, not at tick start: two owners must never both believe they hold the session
+      // (§5.1), and waiting for the next tick would come too late.
+      const { leaseMs, renewMs } = this.reg.timings;
+      if (this.reg.now() - this.lastRenewOk >= leaseMs - renewMs) this.abort('lease_lost');
       return;
     }
+    if (this.finished) return;
     if (lease === null) return this.abort('lease_lost');
     if (lease.cancelRequested) return this.abort('cancelled');
     let watched = this.ownWatched;
@@ -279,26 +305,54 @@ export class TurnRegistry {
   readonly timings: TurnRegistryTimings;
   readonly now: () => number;
   private readonly client: RedisClientType;
-  private readonly ready: Promise<void>;
+  private ready: Promise<void> | null;
+  private closed = false;
   private readonly url: string;
   private readonly ownerId: string;
   private sub?: Promise<RedisClientType>;
+  private subClient?: RedisClientType;
   private readonly live = new Map<string, ActiveTurn>();
 
+  /**
+   * `maxReconnectAttempts` is a seam for tests, not a knob anyone is expected to set -- the same one
+   * `resilientClientOptions` documents; unset means its default.
+   */
   constructor(opts: {
     url?: string;
     ownerId: string;
     timings?: Partial<TurnRegistryTimings>;
     now?: () => number;
+    maxReconnectAttempts?: number;
   }) {
     this.url = opts.url ?? process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
     this.ownerId = opts.ownerId;
     this.timings = { ...turnRegistryTimings(), ...opts.timings };
     this.now = opts.now ?? Date.now;
-    this.client = createClient(resilientClientOptions(this.url, 2)) as RedisClientType;
+    this.client = createClient(
+      resilientClientOptions(this.url, opts.maxReconnectAttempts),
+    ) as RedisClientType;
     swallowRedisErrors(this.client, 'turn registry');
-    this.ready = this.client.connect().then(() => undefined);
-    this.ready.catch(() => undefined); // surfaced per call, as TurnRegistryUnavailableError
+    this.ready = this.arm();
+  }
+
+  /** Connect, clearing the memo on rejection so the next call retries. Mirrors RedisSessionBackend.arm(). */
+  private arm(): Promise<void> {
+    const attempt = this.client.connect().then(() => undefined);
+    void attempt.catch(() => {
+      if (this.ready === attempt) this.ready = null;
+    });
+    return attempt;
+  }
+
+  /**
+   * Await the live attempt, re-arming if the last one FAILED or if node-redis permanently closed the
+   * socket past `resilientClientOptions`' bound -- the second is invisible to the `.catch` above,
+   * because that connect succeeded. Full rationale and citations on `resilientClientOptions`.
+   */
+  private open(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('turn registry closed'));
+    if (this.ready && !this.client.isOpen) this.ready = null;
+    return (this.ready ??= this.arm());
   }
 
   async begin(sessionId: string): Promise<ActiveTurn> {
@@ -311,11 +365,11 @@ export class TurnRegistry {
     });
     let held: unknown;
     try {
-      await this.ready;
+      await this.open();
       await this.subscribed();
       held = await this.client.eval(BEGIN_LUA, {
-        keys: [activeKey(sessionId), lastKey(sessionId)],
-        arguments: [lease, String(this.timings.leaseMs), turnId],
+        keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
+        arguments: [lease, String(this.timings.leaseMs), turnId, String(this.timings.logTtlS)],
       });
     } catch (err) {
       throw new TurnRegistryUnavailableError(err);
@@ -325,6 +379,8 @@ export class TurnRegistry {
     let entry: string;
     try {
       entry = await this.xadd(sessionId, turnId, frame);
+      // BEGIN's EXPIRE ran before the stream existed (a no-op); the log carries its TTL from here.
+      await this.client.expire(eventsKey(sessionId, turnId), this.timings.logTtlS);
     } catch (err) {
       await this.client
         .eval(RELEASE_LUA, { keys: [activeKey(sessionId)], arguments: [turnId] })
@@ -338,7 +394,7 @@ export class TurnRegistry {
 
   /** The session's running detachable turn, or null (§4.4). */
   async peek(sessionId: string): Promise<string | null> {
-    await this.ready;
+    await this.open();
     const v = await this.client.get(activeKey(sessionId));
     return v ? (JSON.parse(v) as { turnId: string }).turnId : null;
   }
@@ -347,7 +403,7 @@ export class TurnRegistry {
     sessionId: string,
     turnId?: string,
   ): Promise<{ turnId: string; outcome: 'requested' | 'ended' }> {
-    await this.ready;
+    await this.open();
     const r = (await this.client.eval(CANCEL_LUA, {
       keys: [activeKey(sessionId), lastKey(sessionId)],
       arguments: [turnId ?? ''],
@@ -369,17 +425,19 @@ export class TurnRegistry {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     for (const t of this.live.values()) t.stop();
     this.live.clear();
     const sub = await this.sub?.catch(() => undefined);
     if (sub?.isOpen) sub.destroy();
-    await this.ready.catch(() => undefined);
+    await this.ready?.catch(() => undefined);
     if (this.client.isOpen) this.client.destroy();
   }
 
   // ---- used by ActiveTurn and attach(); not part of the route-facing surface ----
 
   async xadd(sessionId: string, turnId: string, frame: TurnStreamFrame): Promise<string> {
+    await this.open();
     return this.client.xAdd(
       eventsKey(sessionId, turnId),
       '*',
@@ -389,6 +447,7 @@ export class TurnRegistry {
   }
 
   async endTurn(sessionId: string, turnId: string, frame: TurnStreamFrame): Promise<string> {
+    await this.open();
     return String(
       await this.client.eval(END_LUA, {
         keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
@@ -403,14 +462,16 @@ export class TurnRegistry {
   }
 
   async renew(sessionId: string, turnId: string): Promise<{ cancelRequested?: boolean } | null> {
+    await this.open();
     const v = await this.client.eval(RENEW_LUA, {
-      keys: [activeKey(sessionId)],
-      arguments: [turnId, String(this.timings.leaseMs)],
+      keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
+      arguments: [turnId, String(this.timings.leaseMs), String(this.timings.logTtlS)],
     });
     return typeof v === 'string' ? JSON.parse(v) : null;
   }
 
   async watching(sessionId: string, turnId: string): Promise<boolean> {
+    await this.open();
     return (await this.client.exists(watchKey(sessionId, turnId))) > 0;
   }
 
@@ -419,11 +480,23 @@ export class TurnRegistry {
   }
 
   private subscribed(): Promise<void> {
+    // A subscriber node-redis gave up on (past the reconnect bound) is rebuilt, not reused: the same
+    // silent permanent close `open()` re-arms the main client for.
+    if (this.subClient && !this.subClient.isOpen) {
+      this.sub = undefined;
+      this.subClient = undefined;
+    }
     this.sub ??= (async () => {
       const s = this.client.duplicate() as RedisClientType;
       swallowRedisErrors(s, 'turn cancel subscriber');
-      await s.connect();
-      await s.subscribe(CANCEL_CHANNEL, (msg: string) => this.live.get(msg)?.abort('cancelled'));
+      try {
+        await s.connect();
+        await s.subscribe(CANCEL_CHANNEL, (msg: string) => this.live.get(msg)?.abort('cancelled'));
+      } catch (err) {
+        if (s.isOpen) s.destroy();
+        throw err;
+      }
+      this.subClient = s;
       return s;
     })().catch((err: unknown) => {
       this.sub = undefined; // retry on the next begin rather than fail every turn forever

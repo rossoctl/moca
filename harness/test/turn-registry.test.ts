@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { createClient } from 'redis';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { createClient, type RedisClientType } from 'redis';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   abortMessage,
   activeKey,
@@ -119,10 +119,71 @@ describe('begin / append / end', () => {
     await turn.end(done(s));
   });
 
+  it('gives both keys a retention TTL while the turn runs, so a crashed owner leaks nothing', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    expect(await redis.ttl(lastKey(s))).toBeGreaterThan(0);
+    expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
+    await turn.append({ type: 'text', delta: 'hi' });
+    await sleep(T.renewMs * 2); // past a renewal, which refreshes them
+    expect(await redis.ttl(lastKey(s))).toBeGreaterThan(0);
+    expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
+    await turn.end(done(s));
+  });
+
   it('reports a Redis it cannot reach as unavailable', async () => {
-    const r = new TurnRegistry({ url: 'redis://127.0.0.1:1', ownerId: 'x', timings: T });
-    regs.push(r);
-    await expect(r.begin(sid())).rejects.toMatchObject({ name: 'TurnRegistryUnavailableError' });
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const r = new TurnRegistry({
+        url: 'redis://127.0.0.1:1',
+        ownerId: 'x',
+        timings: T,
+        maxReconnectAttempts: 2,
+      });
+      regs.push(r);
+      await expect(r.begin(sid())).rejects.toMatchObject({
+        name: 'TurnRegistryUnavailableError',
+      });
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('re-arms a client and a cancel subscriber that node-redis closed for good', async () => {
+    const r = reg();
+    const other = reg();
+    const s1 = sid();
+    await (await r.begin(s1)).end(done(s1));
+    // What node-redis leaves behind past its reconnect bound: both clients closed, isOpen false.
+    const inner = r as unknown as { client: RedisClientType; subClient: RedisClientType };
+    const deadSub = inner.subClient;
+    deadSub.destroy();
+    inner.client.destroy();
+    const s2 = sid();
+    const turn = await r.begin(s2);
+    expect(await r.peek(s2)).toBe(turn.turnId);
+    expect(inner.subClient).not.toBe(deadSub);
+    expect(inner.subClient.isOpen).toBe(true);
+    await other.cancel(s2, turn.turnId);
+    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('cancelled');
+    await turn.end(aborted(s2));
+  });
+
+  it('aborts with lease_lost before the lease can lapse when renewals fail', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    let abortedAt = 0;
+    turn.signal.addEventListener('abort', () => (abortedAt = Date.now()));
+    // A hash where the lease string was: RENEW_LUA's GET fails WRONGTYPE from here on. No renewal
+    // succeeds after this instant, so the lease lapses at most leaseMs after it.
+    const brokenAt = Date.now();
+    await redis.multi().del(activeKey(s)).hSet(activeKey(s), 'x', '1').exec(); // never absent
+    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('lease_lost');
+    expect(abortedAt - brokenAt).toBeLessThan(T.leaseMs);
+    await redis.del(activeKey(s)); // let END's GET succeed
+    await turn.end(aborted(s));
   });
 });
 
