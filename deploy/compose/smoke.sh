@@ -117,6 +117,9 @@ wait_for() {
 }
 metrics() { dc exec -T supervisor wget -qO- http://127.0.0.1:8081/metrics; }
 sandbox_attached() { [[ "$(dc exec -T redis redis-cli HEXISTS sh:sandbox:records sh-sandbox-0)" == 1 ]]; }
+# Extract ids from a file, handling incomplete final lines (e.g., from kill cutting mid-stream).
+# Portable across BSD and GNU tools. Only strips a newline-less final line; otherwise reads all ids.
+complete_ids() { if [[ -n "$(tail -c1 "$1")" ]]; then sed '$d' "$1"; else cat "$1"; fi | sed -n 's/^id: //p'; }
 
 claim 1 "the supervisor's worker pool is up, with SH_WORKERS=2 workers, all healthy"
 if wait_for 120 metrics; then
@@ -248,7 +251,7 @@ else
 fi
 
 claim 8 "a detachable turn survives its client: re-attach replays what was missed, without repeats"
-# A fresh session; the first stream is started in the background, cut after its first frame,
+# A fresh session; the first stream is started in the background, cut ~1 s after its first id,
 # then GET /v1/turn resumes from its last id, then a full replay verifies nothing was missed.
 detach_turn() {
   local session sid first="$PROJ/detach-1.sse" second="$PROJ/detach-2.sse" third="$PROJ/detach-3.sse" pid last_id
@@ -263,7 +266,7 @@ detach_turn() {
   wait_for 60 grep -q '^id: ' "$first" || true
   sleep 1
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
-  last_id="$({  cat "$first"; echo; } | sed -n 's/^id: //p' | head -n -1 | tail -1)"
+  last_id="$(complete_ids "$first" | tail -1)"
   [[ -n "$last_id" ]] || { ko "the detachable turn sent no ids: $(head -c 400 "$first")"; return; }
   curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H "Last-Event-ID: $last_id" \
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$second" || true
@@ -273,8 +276,8 @@ detach_turn() {
   fi
   # Extract complete ids from each stream (handle incomplete final lines from kill)
   local first_ids second_ids repeats expected actual
-  first_ids="$({  cat "$first"; echo; } | sed -n 's/^id: //p' | head -n -1)"
-  second_ids="$({  cat "$second"; echo; } | sed -n 's/^id: //p' | head -n -1 | tail -n +2)"
+  first_ids="$(complete_ids "$first")"
+  second_ids="$(sed -n 's/^id: //p' "$second" | tail -n +2)"
   # Check for repeats: no id from first + second (skip first line) should appear twice
   repeats="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort | uniq -d)"
   if [[ -n "$repeats" ]]; then
@@ -285,11 +288,11 @@ detach_turn() {
   curl -sN --max-time 60 -H @"$TURN_HDR" -H 'Accept: text/event-stream' \
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$third" || true
   local third_ids
-  third_ids="$({  cat "$third"; echo; } | sed -n 's/^id: //p' | head -n -1)"
+  third_ids="$(sed -n 's/^id: //p' "$third")"
   expected="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort -u)"
   actual="$(echo "$third_ids" | sort -u)"
   if ! diff <(echo "$expected") <(echo "$actual") >/dev/null 2>&1; then
-    ko "the re-attach missed frames"
+    ko "the re-attach missed frames: expected $(echo "$expected" | grep -c . || true) ids, got $(echo "$actual" | grep -c . || true)"
   else
     ok "re-attached session $sid, replayed $(echo "$first_ids" | grep -c . || true) + $(echo "$second_ids" | grep -c . || true) frames without loss"
   fi
