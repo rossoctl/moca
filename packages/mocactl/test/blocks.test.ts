@@ -7,6 +7,7 @@ import {
   addUser,
   endTurn,
   fromTranscript,
+  lastTurnState,
   markSent,
   reduceFrame,
   splitStatic,
@@ -236,6 +237,57 @@ describe('fromTranscript', () => {
       });
       expect(s.blocks.some((b) => b.kind === 'notice')).toBe(false);
     }
+  });
+
+  it('reports the last turn state', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    expect(lastTurnState(t([]))).toBe('none');
+    expect(
+      lastTurnState(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'frame', frame: done },
+        ]),
+      ),
+    ).toBe('finished');
+    expect(lastTurnState(t([{ kind: 'prompt', text: 'p' }]))).toBe('open');
+    expect(
+      lastTurnState(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'turn', turnId: 't1' },
+        ]),
+      ),
+    ).toBe('open-detachable');
+  });
+
+  it('leaves an open detachable turn to the attach step: no notice', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half' }, eventId: 't1:2-0' },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'assistant']);
+  });
+
+  it('old transcript keeps the #472 notice once', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half' } },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks.filter((b) => b.kind === 'notice')).toHaveLength(1);
   });
 
   it('adds no notice to a transcript without turns', () => {

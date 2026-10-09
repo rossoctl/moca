@@ -202,26 +202,32 @@ export function endTurn(
 }
 
 /**
- * Why a resumed session can stop mid-reply: a client disconnect (quitting mocactl) aborts the turn
- * on the harness, and nothing replays it (turn SSE spec §3.6). Without this note the cut-off reply
- * reads as one still being written.
+ * Why a resumed session can stop mid-reply on a turn that cannot be re-attached: a turn that was
+ * not detachable (no `turn` frame recorded, e.g. a transcript written before detachable turns, or
+ * a harness without them) aborts on a client disconnect and nothing replays it (turn SSE spec
+ * §3.6). Without this note the cut-off reply reads as one still being written.
  */
 export const INTERRUPTED_TURN_NOTICE =
   'the last turn didn\'t finish (mocactl closed, or it was cancelled or failed) and isn\'t running — send a prompt such as "go on" to continue';
 
 export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer available';
 
+/** Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to. */
+export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'open-detachable' {
+  let state: 'none' | 'finished' | 'open' | 'open-detachable' = 'none';
+  for (const e of t.entries) {
+    if (e.kind === 'prompt') state = 'open';
+    else if (e.kind === 'turn') state = state === 'open' ? 'open-detachable' : state;
+    else if (isTerminal(e.frame)) state = 'finished';
+  }
+  return state;
+}
+
 export function fromTranscript(t: Transcript): BlockState {
   let s = EMPTY_BLOCKS;
-  let open = false; // the latest prompt has no terminal frame yet
   for (const e of t.entries) {
-    if (e.kind === 'prompt') {
-      s = addUser(s, e.text);
-      open = true;
-    } else {
-      s = reduceFrame(s, e.frame);
-      if (isTerminal(e.frame)) open = false;
-    }
+    if (e.kind === 'prompt') s = addUser(s, e.text);
+    else if (e.kind === 'frame') s = reduceFrame(s, e.frame);
   }
   s = finalizeOpen(s);
   // Mark any tool block without a result as interrupted
@@ -231,7 +237,8 @@ export function fromTranscript(t: Transcript): BlockState {
       : b,
   );
   s = { ...s, blocks };
-  return open ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
+  // An open detachable turn may still be running: the resume's attach step says what it finds.
+  return lastTurnState(t) === 'open' ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
 }
 
 export function isSettled(b: Block): boolean {

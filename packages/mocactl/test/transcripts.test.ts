@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -144,6 +144,62 @@ describe('TranscriptStore', () => {
     expect(content).not.toContain('b secret');
     expect(content).not.toContain('b frame');
     expect(content).not.toContain('B Session');
+  });
+});
+
+describe('transcript frame ids', () => {
+  it('records the turn and the last id, merging deltas under the last delta id', () => {
+    const { s } = store();
+    s.appendPrompt('s1', 'go');
+    s.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    s.appendFrame('s1', { type: 'text', delta: 'a' }, 't1:2-0');
+    s.appendFrame('s1', { type: 'text', delta: 'b' }, 't1:3-0');
+    s.flush('s1');
+    const t = s.load('s1')!;
+    expect(t.entries).toEqual([
+      { kind: 'prompt', text: 'go' },
+      { kind: 'turn', turnId: 't1' },
+      { kind: 'frame', frame: { type: 'text', delta: 'ab' }, eventId: 't1:3-0' },
+    ]);
+    expect(t.lastEventId).toBe('t1:3-0');
+  });
+
+  it('records a turn once even when a re-attach repeats its turn frame', () => {
+    const { s } = store();
+    s.appendPrompt('s1', 'go');
+    s.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    s.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    expect(s.load('s1')!.entries.filter((e) => e.kind === 'turn')).toHaveLength(1);
+  });
+
+  it('records a turn once across store instances (a resumed process re-attaching)', () => {
+    const { dir, s } = store();
+    s.appendPrompt('s1', 'go');
+    s.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    const again = new TranscriptStore(dir, owner, () => 1000);
+    expect(again.load('s1')!.lastEventId).toBe('t1:1-0');
+    again.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    expect(again.load('s1')!.entries.filter((e) => e.kind === 'turn')).toHaveLength(1);
+  });
+
+  it('loads a file written before ids existed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-tx-'));
+    writeFileSync(
+      join(dir, 's1.jsonl'),
+      [
+        { kind: 'header', v: 1, createdAt: 1, ...owner },
+        { kind: 'prompt', at: 1, text: 'go' },
+        { kind: 'frame', at: 1, frame: { type: 'text', delta: 'x' } },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const t = new TranscriptStore(dir, owner, () => 1).load('s1')!;
+    expect(t.entries).toEqual([
+      { kind: 'prompt', text: 'go' },
+      { kind: 'frame', frame: { type: 'text', delta: 'x' } },
+    ]);
+    expect(t.lastEventId).toBeUndefined();
   });
 });
 
