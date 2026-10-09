@@ -70,6 +70,7 @@ export function LoginOverlay({
 
   useInput((input, key) => {
     if (key.escape) return onCancel();
+    if (key.ctrl) return; // Ctrl+C is the App's quit, not "copy the code"
     if (error && input === 'r') return setAttempt((a) => a + 1);
     if (!start) return;
     if (input === 'c' && copy)

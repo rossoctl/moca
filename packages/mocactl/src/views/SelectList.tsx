@@ -83,7 +83,8 @@ export function SelectList<T>({
       setFiltering(true);
       return;
     }
-    const handler = keys[input];
+    // A letter shortcut is the bare key: Ctrl+C is the App's quit, not a `c` shortcut.
+    const handler = key.ctrl ? undefined : keys[input];
     if (handler) handler(current);
   });
 

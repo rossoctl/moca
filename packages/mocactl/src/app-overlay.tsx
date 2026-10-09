@@ -48,8 +48,8 @@ interface Props {
   onDeleted: (id: string) => void;
   onInputless: (inputless: boolean) => void;
   bundle?: { digest: string; skills: number; dropped: number };
-  /** The leave-turn overlay's answers; esc (stay) is `close`. */
-  leave: { keep: () => void; cancel: () => void };
+  /** The leave-turn overlay's answers. */
+  leave: { keep: () => void; cancel: () => void; stay: () => void };
 }
 
 // Every overlay owns Esc on its interactive screens. Onboarding, Sessions, New Session and
@@ -177,6 +177,6 @@ export function AppOverlay({
     case 'help':
       return <HelpOverlay registry={registry} host={host} onClose={close} />;
     case 'leave-turn':
-      return <LeaveTurnOverlay onKeep={leave.keep} onCancel={leave.cancel} onStay={close} />;
+      return <LeaveTurnOverlay onKeep={leave.keep} onCancel={leave.cancel} onStay={leave.stay} />;
   }
 }

@@ -42,6 +42,31 @@ describe('LoginOverlay', () => {
     expect(copy).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores ctrl+c: quitting is not copying the code', async () => {
+    const copy = vi.fn();
+    const deps = { cp: fakeControlPlane(), now: () => 0, sleep: waitForAbort };
+    const { lastFrame, stdin } = render(
+      withTheme(
+        <LoginOverlay
+          deps={deps}
+          controlPlaneUrl="http://cp"
+          onLoggedIn={vi.fn()}
+          onCancel={vi.fn()}
+          copy={copy}
+        />,
+      ),
+    );
+    await waitFor(
+      () => (lastFrame() ?? '').includes('ABCD-1234') && inputReady(stdin),
+      1000,
+      lastFrame,
+    );
+    stdin.write(KEY.ctrl('c'));
+    await tick(50);
+    expect(copy).not.toHaveBeenCalled();
+    expect(lastFrame()).not.toContain('code copied');
+  });
+
   it('shows the code and URL with escape sequences stripped, and copies the sanitized code', async () => {
     const copy = vi.fn();
     const hostileCode = 'ABCD\u001b[8m-1234';

@@ -176,16 +176,23 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       then?.();
     },
     cancel: () => {
+      // The turn ended while the question was up: nothing is left to cancel, so just leave.
+      if (!sessionRef.current?.runningDetachable) return leaveChoice.keep();
       const then = pendingLeave.current;
       void (async () => {
-        // A failure is reported once, by the session's own notice in the chat (useSession).
-        if (!(await sessionRef.current?.cancelRemote())) return close();
-        // A keep pressed while the cancel was in flight already left.
+        const cancelled = await sessionRef.current?.cancelRemote();
+        // Stay, or a keep, answered while the cancel was in flight: the question is settled, and
+        // whatever is on screen now is not this overlay's to close.
         if (pendingLeave.current !== then) return;
         pendingLeave.current = undefined;
         close();
-        then?.();
+        // A failure stays; it is reported once, by the session's own notice in the chat.
+        if (cancelled) then?.();
       })();
+    },
+    stay: () => {
+      pendingLeave.current = undefined;
+      close();
     },
   };
   const quitApp = () => {
@@ -561,12 +568,23 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       onOnboardingCancel={cancelOnboarding}
       onLoggedIn={onLoggedIn}
       onCpError={(err) => loginIfExpired(err, overlay)}
-      // The overlay awaits this to show a failure, so the rejection must reach it. Choosing stay
-      // replaces the overlay with nothing, and the promise is left unsettled for nobody.
       onCreate={(req, values) =>
-        new Promise<void>((resolve, reject) =>
-          leave(() => void create(req, values).then(resolve, reject)),
-        )
+        new Promise<void>((resolve, reject) => {
+          // Created at once, the overlay that asked is still mounted and shows a failure itself.
+          // After the leave-turn question it is gone, so the App reports the failure instead.
+          let asked = false;
+          leave(() => {
+            const created = create(req, values);
+            if (!asked) return void created.then(resolve, reject);
+            created.then(resolve, (err: unknown) => {
+              if (!loginIfExpired(err, { name: 'new-session' }))
+                notify(describeError(err), 'error');
+              resolve();
+            });
+          });
+          asked = true;
+          // Choosing stay leaves this unsettled; the overlay that awaited it is gone.
+        })
       }
       onResume={resume}
       onDeleted={(id) => {
