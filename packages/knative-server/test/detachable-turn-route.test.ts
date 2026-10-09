@@ -31,6 +31,8 @@ let cp: http.Server;
 // Per test: the lease is per session, so tests must not share one.
 let sessionId: string;
 const saved: Record<string, string | undefined> = {};
+let sigtermBefore: NodeJS.SignalsListener[] = [];
+let logSpy: ReturnType<typeof vi.spyOn>;
 
 const redis = createClient({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379' });
 await redis.connect();
@@ -69,6 +71,10 @@ beforeEach(async () => {
   process.env.SH_TURN_DETACH = '1';
   vi.mocked(runTurn).mockClear();
   vi.mocked(executeTurn).mockClear();
+  // startServer adds a SIGTERM listener and logs on listen; one per test would pass Node's
+  // ten-listener warning, so afterEach removes the listener and the log is silenced.
+  sigtermBefore = process.listeners('SIGTERM');
+  logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   server = startServer(0);
   await new Promise<void>((r) => server.once('listening', () => r()));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -76,6 +82,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   server.close();
+  for (const l of process.listeners('SIGTERM')) {
+    if (!sigtermBefore.includes(l)) process.off('SIGTERM', l);
+  }
+  logSpy.mockRestore();
   cp.close();
   for (const [k, v] of Object.entries(saved)) {
     if (v === undefined) delete process.env[k];
@@ -254,5 +264,116 @@ describe('POST /v1/turn detachable', () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(res.raw)).toMatchObject({ response: 'x' });
     expect(Date.now() - t0).toBeLessThan(1000);
+  });
+});
+
+function get(
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; raw: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(new URL(path, base), { method: 'GET', headers }, (res) => {
+      let raw = '';
+      res.on('data', (c: Buffer) => (raw += c.toString()));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, raw }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+function postJson(path: string, body: unknown, headers: Record<string, string>) {
+  return new Promise<{ status: number; json: any }>((resolve, reject) => {
+    const req = http.request(
+      new URL(path, base),
+      { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers } },
+      (res) => {
+        let raw = '';
+        res.on('data', (c: Buffer) => (raw += c.toString()));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, json: raw ? JSON.parse(raw) : undefined }),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.end(JSON.stringify(body));
+  });
+}
+
+describe('GET /v1/turn (attach)', () => {
+  it('replays a finished turn after Last-Event-ID, without repeats', async () => {
+    vi.mocked(executeTurn).mockImplementationOnce(async (input: any) => {
+      input.onEvent?.({ type: 'text', delta: 'a' });
+      input.onEvent?.({ type: 'text', delta: 'b' });
+      return { sessionId, response: 'ab', stopReason: 'stop' };
+    });
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const first = await sse({ sessionId, prompt: 'p', detachable: true }, auth);
+    const cursor = ids(first.raw)[1]!; // after the first text frame
+    const res = await get(`/v1/turn?sessionId=${sessionId}`, { ...auth, 'Last-Event-ID': cursor });
+    expect(res.status).toBe(200);
+    expect(blocks(res.raw).map((x) => /event: (\w+)/.exec(x)![1])).toEqual([
+      'turn',
+      'text',
+      'done',
+    ]);
+    expect(res.raw).toContain('"delta":"b"');
+    expect(res.raw).not.toContain('"delta":"a"');
+  });
+
+  it('404 turn_not_found for a session with no turn; 401 without a token', async () => {
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const none = await get(`/v1/turn?sessionId=${sessionId}`, auth);
+    expect(none.status).toBe(404);
+    expect(JSON.parse(none.raw).error).toBe('turn_not_found');
+    const anon = await get(`/v1/turn?sessionId=${sessionId}`, {});
+    expect(anon.status).toBe(401);
+  });
+
+  it('refuses a token for another session', async () => {
+    const res = await get(`/v1/turn?sessionId=${sessionId}`, {
+      Authorization: `Bearer ${mint(`sid-${randomUUID()}`)}`,
+    });
+    // session_mismatch, through writeAuthError's shared table: @moca/control-plane maps it to 400.
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.raw).error).toBe('session_mismatch');
+  });
+});
+
+describe('POST /v1/turn/cancel', () => {
+  it('cancels the running turn; its stream ends with abortReason cancelled', async () => {
+    vi.mocked(executeTurn).mockImplementationOnce(
+      (input: any) =>
+        new Promise((resolve) =>
+          input.signal.addEventListener('abort', () =>
+            resolve({ sessionId, response: '', stopReason: 'aborted' }),
+          ),
+        ),
+    );
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const turn = sse({ sessionId, prompt: 'p', detachable: true }, auth);
+    await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).not.toBeNull());
+    const c = await postJson('/v1/turn/cancel', { sessionId }, auth);
+    expect(c.status).toBe(202);
+    const res = await turn;
+    expect(res.raw).toContain('"abortReason":"cancelled"');
+  });
+
+  it('409 turn_mismatch for another turn id, 404 with nothing to cancel', async () => {
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    expect((await postJson('/v1/turn/cancel', { sessionId }, auth)).status).toBe(404);
+    let release!: () => void;
+    vi.mocked(executeTurn).mockImplementationOnce(
+      () =>
+        new Promise(
+          (r) => (release = () => r({ sessionId, response: '', stopReason: 'stop' } as any)),
+        ),
+    );
+    const turn = sse({ sessionId, prompt: 'p', detachable: true }, auth);
+    await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).not.toBeNull());
+    const c = await postJson('/v1/turn/cancel', { sessionId, turnId: 'other' }, auth);
+    expect(c.status).toBe(409);
+    expect(c.json.error).toBe('turn_mismatch');
+    release();
+    await turn;
   });
 });

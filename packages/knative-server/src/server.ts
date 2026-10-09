@@ -580,6 +580,104 @@ async function handleDetachableTurn(
   }
 }
 
+/** Authorization for the attach and cancel routes: a session token is required, as for detach. */
+function authorizeTurnRoute(req: IncomingMessage, res: ServerResponse, sessionId: string): boolean {
+  let authenticated: boolean;
+  try {
+    authenticated = authorizeRunRead(req.headers, sessionId, turnAuthDeps());
+  } catch (err) {
+    writeAuthError(res, err, sessionId);
+    return false;
+  }
+  if (!authenticated) {
+    res.writeHead(401, JSON_HEADERS).end(JSON.stringify({ error: 'token_required', sessionId }));
+    return false;
+  }
+  return true;
+}
+
+const turnNotFound = (res: ServerResponse): void => {
+  res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'turn_not_found' }));
+};
+
+/** GET /v1/turn?sessionId= (turn-reattach spec §4.2). */
+async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse): Promise<void> {
+  const sessionId = url.searchParams.get('sessionId');
+  if (!sessionId) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
+    return;
+  }
+  if (!authorizeTurnRoute(req, res, sessionId)) return;
+  if (!detachEnabled()) return turnNotFound(res);
+  const ac = new AbortController();
+  res.on('close', () => ac.abort());
+  const cursor = req.headers['last-event-id'];
+  const gen = turnRegistry().attach(
+    sessionId,
+    typeof cursor === 'string' ? cursor : undefined,
+    ac.signal,
+  );
+  let first: IteratorResult<{ id: string; frame: TurnStreamFrame }>;
+  try {
+    first = await gen.next();
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TurnNotFoundError') return turnNotFound(res);
+    res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
+    return;
+  }
+  const { writeFrame, stop } = makeFrameWriter(res, intEnv('SH_TURN_STREAM_KEEPALIVE_MS', 20000));
+  try {
+    if (!first.done) writeFrame(first.value.frame, first.value.id);
+    for (let r = await gen.next(); !r.done; r = await gen.next()) {
+      if (res.writableEnded || res.destroyed) break;
+      writeFrame(r.value.frame, r.value.id);
+    }
+  } catch {
+    // Mid-follow failure: end the stream; the client reconnects with its last id (§6.5).
+  } finally {
+    stop();
+    await gen.return(undefined).catch(() => undefined);
+    if (!res.writableEnded) res.end();
+  }
+}
+
+/** POST /v1/turn/cancel (turn-reattach spec §4.3). */
+async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let parsed: { sessionId?: unknown; turnId?: unknown };
+  try {
+    parsed = JSON.parse(await readBody(req));
+  } catch {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'invalid_json' }));
+    return;
+  }
+  const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : '';
+  if (!sessionId) {
+    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
+    return;
+  }
+  if (!authorizeTurnRoute(req, res, sessionId)) return;
+  if (!detachEnabled()) return turnNotFound(res);
+  try {
+    const r = await turnRegistry().cancel(
+      sessionId,
+      typeof parsed.turnId === 'string' ? parsed.turnId : undefined,
+    );
+    res.writeHead(202, JSON_HEADERS).end(JSON.stringify({ turnId: r.turnId }));
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    if (name === 'TurnNotFoundError') return turnNotFound(res);
+    if (name === 'TurnMismatchError') {
+      res
+        .writeHead(409, JSON_HEADERS)
+        .end(
+          JSON.stringify({ error: 'turn_mismatch', turnId: (err as { turnId: string }).turnId }),
+        );
+      return;
+    }
+    res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
+  }
+}
+
 export function isLeafEnvelope(o: any): o is LeafEnvelope {
   return o && typeof o.sessionId === 'string' && validateItem(o.item) !== null;
 }
@@ -870,6 +968,22 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       return handleRunLeafParsed(parsed, raw, res, auth);
     };
     route().catch((err) => internalError(res, err));
+    return;
+  }
+
+  // Detachable turns (turn-reattach spec §4.2-4.3). Neither is a turn by isTurnRequest's exact match.
+  if (req.method === 'GET' && url.startsWith('/v1/turn?')) {
+    handleAttach(req, new URL(url, 'http://localhost'), res).catch((err) => {
+      if (!res.headersSent)
+        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
+    });
+    return;
+  }
+  if (req.method === 'POST' && url === '/v1/turn/cancel') {
+    handleCancel(req, res).catch((err) => {
+      if (!res.headersSent)
+        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
+    });
     return;
   }
 
