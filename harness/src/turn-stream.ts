@@ -13,7 +13,8 @@ export type AbortReasonCode =
  */
 export type TurnStreamFrame =
   // Detachable turns only (turn-reattach spec §4.1): first frame, names the turn its ids belong to.
-  | { type: 'turn'; turnId: string; sessionId: string; truncated?: boolean }
+  // `ended`: an attach whose cursor is at or past a finished turn's terminal; nothing follows it.
+  | { type: 'turn'; turnId: string; sessionId: string; truncated?: boolean; ended?: boolean }
   | { type: 'text'; delta: string } // assistant-text token
   | { type: 'thinking'; delta: string } // reasoning token (optional; may never fire — §3.5)
   | { type: 'tool_use'; id: string; name: string; args: unknown } // tool call started (args verbatim)

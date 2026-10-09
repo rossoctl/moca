@@ -136,7 +136,10 @@ export class HarnessClient implements HarnessApi {
     await res.body?.cancel().catch(() => undefined);
   }
 
-  /** Reads SSE frames to the first terminal one; a stream that ends before it is truncated. */
+  /**
+   * Reads SSE frames to the first terminal one, or to an ended `turn` frame (an attach already
+   * caught up on a finished turn); a stream that ends before either is truncated.
+   */
   private async *frames(
     res: Response,
     signal: AbortSignal | undefined,
@@ -149,7 +152,7 @@ export class HarnessClient implements HarnessApi {
         const frame = toFrame(event);
         if (event.id !== undefined) onEventId?.(event.id);
         yield frame;
-        if (isTerminal(frame)) return;
+        if (isTerminal(frame) || (frame.type === 'turn' && frame.ended)) return;
       }
     } catch (err) {
       if (signal?.aborted) throw new TurnCancelledError();

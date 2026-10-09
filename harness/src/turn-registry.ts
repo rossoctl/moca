@@ -143,10 +143,18 @@ return 1`;
 /**
  * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[turnId, ttlS, frameJson, maxLen]. Appends the
  * terminal, starts the retention clock, releases the lease -- one step, so a watcher never sees a
- * released lease before the terminal it would otherwise synthesize.
+ * released lease before the terminal it would otherwise synthesize. A log that already ends on a
+ * terminal (an attach wrote owner_lost while this owner stalled past its lease) gets no second one;
+ * the existing terminal's id is returned instead.
  */
 export const END_LUA = `
-local id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[3])
+local id
+local tail = redis.call('XREVRANGE', KEYS[3], '+', '-', 'COUNT', 1)
+if #tail > 0 then
+  local f = cjson.decode(tail[1][2][2])
+  if f.type == 'done' or f.type == 'error' then id = tail[1][1] end
+end
+if not id then id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[3]) end
 redis.call('EXPIRE', KEYS[3], ARGV[2])
 if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('EXPIRE', KEYS[2], ARGV[2]) end
 local v = redis.call('GET', KEYS[1])
@@ -476,6 +484,8 @@ export class TurnRegistry {
       turnId,
       sessionId,
       ...(truncated ? { truncated: true } : {}),
+      // Caught up on a finished turn: nothing follows, and the client must not read the EOF as a drop.
+      ...(ended ? { ended: true } : {}),
     };
     // A same-turn cursor stays the turn frame's id, so a reconnect right after it resumes where the
     // client was rather than replaying (or, after a trim, skipping) what follows.

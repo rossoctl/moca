@@ -62,8 +62,11 @@ type Job =
   | { kind: 'prompt'; prompt: string; resend: boolean; conflicts: number }
   | { kind: 'attach'; lastEventId?: string; expectOpen: boolean };
 
-/** How one stream ended: on a terminal frame (a cancel's own, or any other), or without one. */
-type StreamEnd = 'terminal' | 'cancelled' | 'ended';
+/**
+ * How one stream ended: on a terminal frame (a cancel's own, or any other), without one, or
+ * 'caught-up' -- an attach whose cursor was already at the finished turn's terminal.
+ */
+type StreamEnd = 'terminal' | 'cancelled' | 'ended' | 'caught-up';
 
 /** Where one job's streams stand: the last frame id seen, and how many frames were consumed. */
 type Cursor = { last?: string; frames: number };
@@ -271,6 +274,11 @@ export class ActiveSession {
         this.deps.transcripts?.appendFrame(this.sessionId, frame, ids.last),
       );
       this.emit({ kind: 'frame', frame });
+      if (frame.type === 'turn' && frame.ended) {
+        // Nothing more is coming: the turn finished, and this client already holds its terminal.
+        this.live = undefined;
+        return 'caught-up';
+      }
       if (isTerminal(frame)) {
         this.live = undefined;
         const cancelled = frame.type === 'error' && frame.abortReason === 'cancelled';
@@ -339,6 +347,12 @@ export class ActiveSession {
       if (controller.signal.aborted) throw new TurnCancelledError();
       try {
         const end = await this.attachOnce(controller, ids, this.live?.lastEventId);
+        if (end === 'caught-up') {
+          // The cursor already sat at the terminal, so its frame was read and rendered: a stream
+          // that delivered it ends 'terminal', so this is only a defensive close of the turn.
+          this.emit({ kind: 'turn-end', outcome: 'done' });
+          return false;
+        }
         if (end !== 'ended') return end === 'cancelled';
       } catch (err) {
         if (controller.signal.aborted || err instanceof TurnCancelledError)
@@ -450,6 +464,10 @@ export class ActiveSession {
     this.emit({ kind: 'attach-start' });
     try {
       const end = await this.attachOnce(controller, ids, job.lastEventId);
+      if (end === 'caught-up') {
+        this.emit({ kind: 'attach-none', missed: false });
+        return false;
+      }
       if (end !== 'ended') return end === 'cancelled';
       if (this.live) return await this.reattach(controller, ids);
       // An attach stream always ends on a terminal; one that does not has lost the turn.

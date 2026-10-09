@@ -179,7 +179,34 @@ describe('attach', () => {
     const t0 = Date.now();
     const got = await collect(reg().attach(s, id!));
     expect(types(got)).toEqual(['turn']);
+    // Marked ended: the client knows nothing more is coming, rather than reading a truncation.
+    expect(got[0]!.frame).toEqual({ type: 'turn', turnId: turn.turnId, sessionId: s, ended: true });
     expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it('a replay from the start does not mark the turn frame ended', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got[0]!.frame).not.toHaveProperty('ended');
+  });
+
+  it('a stalled owner ending after an attach wrote owner_lost adds no second terminal', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'half' });
+    // The owner's lease is gone from Redis (it stalled past the TTL) while it still runs.
+    await redis.del(activeKey(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ type: 'error', abortReason: 'owner_lost' });
+    const { id } = await turn.end(done(s));
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    const terminals = rows.filter((r) => ['done', 'error'].includes(JSON.parse(r.message.f).type));
+    expect(terminals).toHaveLength(1);
+    expect(id).toBe(got.at(-1)!.id); // the terminal already there
   });
 
   it('a cursor past the tail of a running turn still follows it', async () => {

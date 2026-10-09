@@ -16,6 +16,8 @@ export type TurnStartFrame = {
   turnId: string;
   sessionId: string;
   truncated?: boolean;
+  /** An attach caught up on a finished turn (cursor at or past its terminal): nothing follows. */
+  ended?: boolean;
 };
 export type TextFrame = { type: 'text'; delta: string };
 export type ThinkingFrame = { type: 'thinking'; delta: string };
