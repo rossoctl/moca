@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { TurnRegistry, type ActiveTurn } from '@moca/harness/turn-registry';
 import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
+import { forLog } from '@moca/harness/sandbox-affinity';
 import {
   runLeaf,
   leafSessionId,
@@ -600,6 +601,12 @@ const turnNotFound = (res: ServerResponse): void => {
   res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'turn_not_found' }));
 };
 
+/** An unexpected attach/cancel failure: answered as 503, so logged here or it is lost. */
+function logTurnRouteError(route: string, sessionId: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(`[turn] ${route} failed for session ${forLog(sessionId)}: ${forLog(message)}`);
+}
+
 /** GET /v1/turn?sessionId= (turn-reattach spec §4.2). */
 async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse): Promise<void> {
   const sessionId = url.searchParams.get('sessionId');
@@ -622,6 +629,7 @@ async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse)
     first = await gen.next();
   } catch (err) {
     if (err instanceof Error && err.name === 'TurnNotFoundError') return turnNotFound(res);
+    if (!ac.signal.aborted) logTurnRouteError('attach', sessionId, err);
     res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
     return;
   }
@@ -632,8 +640,9 @@ async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse)
       if (res.writableEnded || res.destroyed) break;
       writeFrame(r.value.frame, r.value.id);
     }
-  } catch {
+  } catch (err) {
     // Mid-follow failure: end the stream; the client reconnects with its last id (§6.5).
+    if (!ac.signal.aborted) logTurnRouteError('attach follow', sessionId, err);
   } finally {
     stop();
     await gen.return(undefined).catch(() => undefined);
@@ -643,13 +652,18 @@ async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse)
 
 /** POST /v1/turn/cancel (turn-reattach spec §4.3). */
 async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  let parsed: { sessionId?: unknown; turnId?: unknown };
+  let body: unknown;
   try {
-    parsed = JSON.parse(await readBody(req));
+    body = JSON.parse(await readBody(req));
   } catch {
+    body = undefined;
+  }
+  // A body that is not a JSON object (unparseable, null, a primitive) names no session.
+  if (typeof body !== 'object' || body === null) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'invalid_json' }));
     return;
   }
+  const parsed = body as { sessionId?: unknown; turnId?: unknown };
   const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : '';
   if (!sessionId) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'sessionId_required' }));
@@ -674,6 +688,7 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
         );
       return;
     }
+    logTurnRouteError('cancel', sessionId, err);
     res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
   }
 }

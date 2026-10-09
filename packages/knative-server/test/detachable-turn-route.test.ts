@@ -376,4 +376,87 @@ describe('POST /v1/turn/cancel', () => {
     release();
     await turn;
   });
+
+  it('400 invalid_json for a null or primitive body', async () => {
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    for (const body of [null, 42, 'x']) {
+      const c = await postJson('/v1/turn/cancel', body, auth);
+      expect(c.status).toBe(400);
+      expect(c.json.error).toBe('invalid_json');
+    }
+  });
+
+  it('logs an unexpected failure before answering 503', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'cancel').mockRejectedValueOnce(new TypeError('boom'));
+    const c = await postJson(
+      '/v1/turn/cancel',
+      { sessionId },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    expect(c.status).toBe(503);
+    expect(c.json.error).toBe('redis_unavailable');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
+    warn.mockRestore();
+  });
+});
+
+describe('GET /v1/turn (attach), following a running turn', () => {
+  it('delivers frames emitted after it connected, and ends with the terminal', async () => {
+    let release!: () => void;
+    vi.mocked(executeTurn).mockImplementationOnce(async (input: any) => {
+      input.onEvent?.({ type: 'text', delta: 'one' });
+      await new Promise<void>((r) => (release = r));
+      input.onEvent?.({ type: 'text', delta: 'two' });
+      return { sessionId, response: 'onetwo', stopReason: 'stop' };
+    });
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const turn = sse({ sessionId, prompt: 'p', detachable: true }, auth);
+    await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).not.toBeNull());
+    let raw = '';
+    let sawOne!: () => void;
+    const gotOne = new Promise<void>((r) => (sawOne = r));
+    const attached = new Promise<{ status: number; raw: string }>((resolve, reject) => {
+      const req = http.request(
+        new URL(`/v1/turn?sessionId=${sessionId}`, base),
+        { method: 'GET', headers: auth },
+        (res) => {
+          res.on('data', (c: Buffer) => {
+            raw += c.toString();
+            if (raw.includes('"delta":"one"')) sawOne();
+          });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, raw }));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    await gotOne;
+    expect(raw).not.toContain('"delta":"two"');
+    release();
+    const res = await attached;
+    expect(res.status).toBe(200);
+    expect(blocks(res.raw).map((x) => /event: (\w+)/.exec(x)![1])).toEqual([
+      'turn',
+      'text',
+      'text',
+      'done',
+    ]);
+    expect(res.raw).toContain('"delta":"two"');
+    await turn;
+  });
+
+  it('logs a failure before the first frame and answers 503', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'attach').mockImplementationOnce(async function* () {
+      throw new TypeError('kaput');
+    });
+    const res = await get(`/v1/turn?sessionId=${sessionId}`, {
+      Authorization: `Bearer ${mint(sessionId)}`,
+    });
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.raw).error).toBe('redis_unavailable');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('kaput'));
+    warn.mockRestore();
+  });
 });
