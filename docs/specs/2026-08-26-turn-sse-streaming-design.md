@@ -220,6 +220,10 @@ needed. But the frame is **best-effort and may never fire**: synthesized custom 
 
 ### 3.6 Client disconnect → abort → durable resume
 
+> **Amended (2026-10-09):** a turn sent with `"detachable": true` is not aborted by a disconnect;
+> it is logged, re-attachable, and cancelled explicitly. See
+> [turn-reattach-design](2026-10-09-turn-reattach-design.md) and [ADR-0040](../adrs/0040-detachable-turns.md).
+
 `handleTurnStream` creates an `AbortController ac` up front and registers `req.on("close", …)` to
 fire `ac.abort()` if the response hasn't finished. That signal is what `executeTurn` wires to
 `session.abort()` (§3.2). So a client hitting Ctrl-C on `curl -N` propagates: request close →
@@ -311,6 +315,7 @@ parity**.
 - **No resumable/replayable stream (Last-Event-ID).** A disconnect aborts the turn (§3.6); we do not
   buffer past frames for reconnect-and-replay. A caller that wants durability uses the async path
   (#168).
+  Amended for detachable turns by [turn-reattach-design](2026-10-09-turn-reattach-design.md).
 - **No client-selectable frame filtering / verbosity params.** Distinct event names already let a
   client subscribe to only what it wants; a query-param matrix is unneeded surface.
 - **No auth/credential change.** Out of scope per the issue.
