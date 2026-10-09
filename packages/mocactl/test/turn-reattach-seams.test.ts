@@ -4,10 +4,19 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { DiscoveringHarness } from '../src/api/discovery.js';
+import { ApiError } from '../src/api/errors.js';
+import type { TurnFrame } from '../src/api/frames.js';
 import { HarnessClient } from '../src/api/harness.js';
-import { ActiveSession, type SessionEvent } from '../src/core/session-manager.js';
+import {
+  ActiveSession,
+  LOST_TURN_MESSAGE,
+  PENDING_CANCEL_MS,
+  type SessionDeps,
+  type SessionEvent,
+} from '../src/core/session-manager.js';
 import { TranscriptStore } from '../src/core/transcripts.js';
-import { fakeControlPlane } from './helpers/fakes.js';
+import { doneFrame, fakeControlPlane, fakeHarness, type HarnessStep } from './helpers/fakes.js';
 
 const NOW = 1_000_000_000; // ms
 
@@ -88,5 +97,276 @@ describe('C1: resume after a finished turn', () => {
       .split('\n')
       .filter((l) => l.includes('"kind":"turn"'));
     expect(turns).toHaveLength(1);
+  });
+});
+
+const turnF = (turnId = 't1') => ({ type: 'turn', turnId, sessionId: 's1' }) as const;
+const text = (delta: string) => ({ type: 'text', delta }) as const;
+const cancelledF: TurnFrame = {
+  type: 'error',
+  sessionId: 's1',
+  stopReason: 'aborted',
+  abortReason: 'cancelled',
+  errorMessage: 'cancelled',
+};
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const gate = () => {
+  let open!: () => void;
+  const opened = new Promise<void>((r) => (open = r));
+  return { open, wait: () => opened };
+};
+
+function faked(
+  steps: HarnessStep[],
+  over: Partial<SessionDeps> = {},
+  attachSteps: HarnessStep[] = [],
+) {
+  const harness = fakeHarness(steps, {}, attachSteps);
+  const s = new ActiveSession(
+    {
+      cp: fakeControlPlane(),
+      harness,
+      now: () => NOW,
+      sleep: async () => undefined,
+      detachable: true,
+      cancelPauseMs: 0,
+      ...over,
+    },
+    's1',
+    { token: 'st', expiresAt: 4_000_000_000 },
+  );
+  const events: SessionEvent[] = [];
+  s.on((e) => events.push(e));
+  return {
+    session: s,
+    harness,
+    events,
+    ends: () => events.filter((e) => e.kind === 'turn-end'),
+  };
+}
+
+describe('I2: Esc before the turn frame', () => {
+  it('a detachable turn is pending from the request, so leaving asks', async () => {
+    const g = gate();
+    const { session: s } = faked([{ wait: g.wait, frames: [turnF(), doneFrame()] }]);
+    s.submit('go');
+    await tick();
+    expect(s.runningDetachable).toBe(true);
+    g.open();
+    await s.idle();
+  });
+
+  it('Esc, then the turn frame: exactly one server-side cancel, and the turn ends cancelled', async () => {
+    const g = gate();
+    const {
+      session: s,
+      harness,
+      ends,
+    } = faked(
+      [{ wait: g.wait, frames: [turnF()], ids: ['t1:1-0'] }],
+      {},
+      // The stream ends after the turn frame; the re-attach reads the cancel's terminal.
+      [{ frames: [turnF(), cancelledF], ids: ['t1:1-0', 't1:2-0'] }],
+    );
+    s.submit('go');
+    await tick();
+    s.cancel();
+    await tick();
+    expect(harness.turns[0]!.signal!.aborted).toBe(false); // still reading
+    expect(harness.cancels).toEqual([]);
+    g.open();
+    await s.idle();
+    await tick();
+    expect(harness.cancels.map((c) => c.turnId)).toEqual(['t1']);
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('Esc when the first frame is plain text (no detachable turn): the fetch is aborted', async () => {
+    const g = gate();
+    const {
+      session: s,
+      harness,
+      ends,
+    } = faked([{ wait: g.wait, frames: [text('a'), doneFrame()] }]);
+    s.submit('go');
+    await tick();
+    s.cancel();
+    g.open();
+    await s.idle();
+    expect(harness.turns[0]!.signal!.aborted).toBe(true);
+    expect(harness.cancels).toEqual([]);
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('Esc with no frame for the deadline: the fetch is aborted, not before', async () => {
+    const { session: s, harness, ends } = faked([{ hang: true }], { pendingCancelMs: 60 });
+    s.submit('go');
+    await tick();
+    s.cancel();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(harness.turns[0]!.signal!.aborted).toBe(false);
+    await s.idle();
+    expect(harness.turns[0]!.signal!.aborted).toBe(true);
+    expect(harness.cancels).toEqual([]);
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('waits 2 s by default', () => {
+    expect(PENDING_CANCEL_MS).toBe(2000);
+  });
+
+  it("the overlay's cancel while pending resolves once the turn frame's cancel is sent", async () => {
+    const g = gate();
+    const { session: s, harness } = faked([
+      { wait: g.wait, frames: [turnF()], ids: ['t1:1-0'], hang: true },
+    ]);
+    s.submit('go');
+    await tick();
+    const cancelled = s.cancelRemote();
+    g.open();
+    expect(await cancelled).toBe(true);
+    expect(harness.cancels.map((c) => c.turnId)).toEqual(['t1']);
+    s.detach();
+    await s.idle();
+  });
+
+  it('a refusal before any frame still ends the turn with its error', async () => {
+    const g = gate();
+    const refused = new ApiError('harness', 400, 'bad_request', 'no');
+    const { session: s, harness, ends } = faked([{ wait: g.wait, error: refused }]);
+    s.submit('go');
+    await tick();
+    s.cancel();
+    g.open();
+    await s.idle();
+    expect(harness.cancels).toEqual([]);
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'error', error: refused }]);
+  });
+});
+
+describe("I3: Esc during a 409's attach", () => {
+  const busy = () => new ApiError('harness', 409, 'turn_in_progress');
+
+  it("stops following the other device's turn, cancels nothing, and withdraws the prompt", async () => {
+    const {
+      session: s,
+      harness,
+      ends,
+    } = faked([{ error: busy() }, { frames: [doneFrame()] }], {}, [
+      { frames: [turnF('other')], ids: ['other:1-0'], hang: true },
+    ]);
+    s.submit('mine');
+    await expect.poll(() => s.runningDetachable && harness.attaches.length === 1).toBe(true);
+    s.cancel();
+    await s.idle();
+    expect(harness.cancels).toEqual([]);
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['mine']); // no resend
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it("the leave overlay's cancel detaches the same way", async () => {
+    const { session: s, harness } = faked([{ error: busy() }, { frames: [doneFrame()] }], {}, [
+      { frames: [turnF('other')], ids: ['other:1-0'], hang: true },
+    ]);
+    s.submit('mine');
+    await expect.poll(() => s.runningDetachable && harness.attaches.length === 1).toBe(true);
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toEqual([]);
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['mine']);
+  });
+});
+
+describe('M2: a failed resume attach when nothing was running', () => {
+  it.each([
+    ['a network error', new ApiError('harness', 0, 'network_error', 'down')],
+    ['a 503', new ApiError('harness', 503, 'redis_unavailable', undefined, 1)],
+  ])('%s shows no error', async (_how, error) => {
+    const { session: s, events, ends } = faked([], {}, [{ error }]);
+    s.attachExisting({ expectOpen: false });
+    await s.idle();
+    expect(events).toContainEqual({ kind: 'attach-none', missed: false });
+    expect(ends()).toEqual([]);
+  });
+
+  it('still reports one when a turn was expected', async () => {
+    const error = new ApiError('harness', 0, 'network_error', 'down');
+    const { session: s, ends } = faked([], {}, [{ error }]);
+    s.attachExisting({ expectOpen: true });
+    await s.idle();
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'error', error }]);
+  });
+});
+
+describe('M4: the cancel bound aborts the request', () => {
+  it('cancelRemote aborts the cancel call it gave up on', async () => {
+    const { session: s, harness } = faked([{ frames: [turnF()], ids: ['t1:1-0'], hang: true }], {
+      cancelTimeoutMs: 20,
+    });
+    let signal: AbortSignal | undefined;
+    harness.cancelTurn = (args) => {
+      signal = args.signal;
+      return new Promise<void>(() => undefined);
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(false);
+    expect(signal?.aborted).toBe(true);
+    s.detach();
+    await s.idle();
+  });
+
+  it('HarnessClient.cancelTurn hands the signal to fetch, through DiscoveringHarness', async () => {
+    let seen: AbortSignal | undefined;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return new Response('{"turnId":"t1"}', { status: 202 });
+    }) as unknown as typeof fetch;
+    const c = new AbortController();
+    await new DiscoveringHarness(async () => 'http://h', fetchImpl).cancelTurn({
+      sessionId: 's1',
+      turnId: 't1',
+      token: 'st',
+      signal: c.signal,
+    });
+    expect(seen).toBe(c.signal);
+  });
+});
+
+describe('ledger minors', () => {
+  it("a cancel still in flight for turn A does not stand in for turn B's", async () => {
+    const { session: s, harness } = faked([
+      { frames: [turnF('tA')], ids: ['tA:1-0'], hang: true },
+      { frames: [turnF('tB')], ids: ['tB:1-0'], hang: true },
+    ]);
+    const sent: string[] = [];
+    harness.cancelTurn = (args) => {
+      sent.push(args.turnId!);
+      return new Promise<void>(() => undefined); // never answers within the window
+    };
+    s.submit('a');
+    await tick();
+    void s.cancelRemote();
+    await tick();
+    s.detach(); // A ends while its cancel is in flight
+    await s.idle();
+    s.submit('b');
+    await tick();
+    s.cancel();
+    await tick();
+    expect(sent).toEqual(['tA', 'tB']);
+    s.detach();
+    await s.idle();
+  });
+
+  it('an attach that loses the turn after frames says so in words, not as a code', async () => {
+    const { session: s, ends } = faked([], {}, [
+      { frames: [turnF(), text('a')], ids: ['t1:1-0', 't1:2-0'] },
+    ]);
+    s.attachExisting({ expectOpen: true });
+    await s.idle();
+    expect(ends()).toMatchObject([
+      { outcome: 'error', error: { code: 'turn_not_found', message: LOST_TURN_MESSAGE } },
+    ]);
   });
 });

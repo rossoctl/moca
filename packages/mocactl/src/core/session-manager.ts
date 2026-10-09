@@ -28,8 +28,13 @@ export const REATTACH_TRIES = 5;
 export const REATTACH_BASE_MS = 500;
 export const LOST_TURN_MESSAGE =
   'lost the connection to the running turn — it may still be running; reopen the session to reattach';
-/** How long a server-side cancel may take before it counts as failed (cancelTurn has no signal). */
+/** How long a server-side cancel may take before it counts as failed; the request is then aborted. */
 export const CANCEL_TIMEOUT_MS = 5000;
+/**
+ * Esc on a detachable turn whose first frame has not come yet: how long the cancel waits for the
+ * `turn` frame (and its turnId) before it falls back to aborting the request.
+ */
+export const PENDING_CANCEL_MS = 2000;
 const MAX_CONFLICTS = 3;
 const CANCEL_FAILED_NOTICE = "couldn't cancel — the turn keeps running";
 
@@ -56,11 +61,15 @@ export interface SessionDeps {
   detachable?: boolean;
   /** The bound on a server-side cancel (default CANCEL_TIMEOUT_MS). */
   cancelTimeoutMs?: number;
+  /** How long an Esc before the first frame waits for it (default PENDING_CANCEL_MS). */
+  pendingCancelMs?: number;
 }
 
+type PromptJob = { kind: 'prompt'; prompt: string; resend: boolean; conflicts: number };
 type Job =
-  | { kind: 'prompt'; prompt: string; resend: boolean; conflicts: number }
-  | { kind: 'attach'; lastEventId?: string; expectOpen: boolean };
+  | PromptJob
+  // `conflict`: a 409's attach to a turn another client started, and the prompt it holds back.
+  | { kind: 'attach'; lastEventId?: string; expectOpen: boolean; conflict?: { resend: PromptJob } };
 
 /**
  * How one stream ended: on a terminal frame (a cancel's own, or any other), without one, or
@@ -91,8 +100,21 @@ export class ActiveSession {
   /** The running turn, once its `turn` frame named it; only detachable turns have one. */
   private live?: { turnId: string; lastEventId?: string };
   private detaching = false;
-  /** The server-side cancel in flight, shared by every cancel until it settles. */
-  private cancelling?: Promise<boolean>;
+  /** The server-side cancel in flight for one turn, shared by every cancel of it until it settles. */
+  private cancelling?: { turnId: string; promise: Promise<boolean> };
+  /**
+   * A detachable turn's request is out and no frame has come: the server may already hold its lease
+   * (it writes the `turn` frame lazily, with the first real one), so it counts as running.
+   */
+  private pending = false;
+  /** An Esc while pending, waiting for the first frame (or PENDING_CANCEL_MS) to say what to do. */
+  private deferred?: {
+    promise: Promise<boolean>;
+    resolve: (ok: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  /** The running attach job is a 409's, following a turn this client did not start. */
+  private conflict?: { resend: PromptJob };
 
   constructor(
     private readonly deps: SessionDeps,
@@ -115,7 +137,7 @@ export class ActiveSession {
   }
 
   get runningDetachable(): boolean {
-    return this.running && this.live !== undefined;
+    return this.running && (this.live !== undefined || this.pending);
   }
 
   // The server does not serialize concurrent turns of one session (spec §2.6); this queue does.
@@ -133,34 +155,80 @@ export class ActiveSession {
     void this.drain().catch(() => undefined);
   }
 
-  /** Esc: a detachable turn is cancelled on the server and read to its terminal (spec §6.4). */
+  /**
+   * Esc: a detachable turn is cancelled on the server and read to its terminal (spec §6.4). A 409's
+   * attach is not this client's turn: Esc stops following it and withdraws the held-back prompt.
+   */
   cancel(): void {
-    if (this.live) void this.cancelRemote();
+    if (this.conflict) this.withdraw();
+    else if (this.live || this.pending) void this.cancelRemote();
     else this.controller?.abort();
   }
 
   /**
    * Asks the server to cancel the running detachable turn; false (and a notice) if it could not.
-   * A second call while one is in flight (a double Esc) shares it rather than sending another.
+   * A second call for the same turn while one is in flight (a double Esc) shares it rather than
+   * sending another. Before the first frame the cancel waits for it (see `deferCancel`). A 409's
+   * attach is never cancelled: it is withdrawn, as Esc does, and that resolves true.
    */
   cancelRemote(): Promise<boolean> {
-    if (this.cancelling) return this.cancelling;
+    if (this.conflict) {
+      this.withdraw();
+      return Promise.resolve(true);
+    }
     const live = this.live;
-    if (!live) return Promise.resolve(false);
-    const pending = this.sendCancel(live.turnId).finally(() => {
-      if (this.cancelling === pending) this.cancelling = undefined;
+    if (!live) return this.pending ? this.deferCancel() : Promise.resolve(false);
+    if (this.cancelling?.turnId === live.turnId) return this.cancelling.promise;
+    const promise = this.sendCancel(live.turnId).finally(() => {
+      if (this.cancelling?.promise === promise) this.cancelling = undefined;
     });
-    this.cancelling = pending;
-    return pending;
+    this.cancelling = { turnId: live.turnId, promise };
+    return promise;
+  }
+
+  /**
+   * Esc before the first frame: keep reading. A `turn` frame names the turn to cancel on the server;
+   * any other frame (a harness without detachable turns), or no frame within PENDING_CANCEL_MS,
+   * means aborting the request, as Esc always did. Resolves as the cancel does.
+   */
+  private deferCancel(): Promise<boolean> {
+    if (this.deferred) return this.deferred.promise;
+    let resolve!: (ok: boolean) => void;
+    const promise = new Promise<boolean>((r) => (resolve = r));
+    const timer = setTimeout(() => {
+      if (this.deferred?.promise !== promise) return;
+      this.deferred = undefined;
+      this.controller?.abort();
+      resolve(true);
+    }, this.deps.pendingCancelMs ?? PENDING_CANCEL_MS);
+    this.deferred = { promise, resolve, timer };
+    return promise;
+  }
+
+  private takeDeferred(): { resolve: (ok: boolean) => void } | undefined {
+    const d = this.deferred;
+    if (d) clearTimeout(d.timer);
+    this.deferred = undefined;
+    return d;
+  }
+
+  /** Esc on a 409's attach: stop following the other client's turn; its prompt is not sent. */
+  private withdraw(): void {
+    const c = this.conflict;
+    if (!c) return;
+    this.queue = this.queue.filter((j) => j !== c.resend);
+    this.emit({ kind: 'queue', size: this.queued });
+    this.detach();
   }
 
   private async sendCancel(turnId: string): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = new AbortController();
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('cancel timed out')),
-        this.deps.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS,
-      );
+      timer = setTimeout(() => {
+        abort.abort(); // a cancel given up on must not linger as an open request
+        reject(new Error('cancel timed out'));
+      }, this.deps.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS);
     });
     const call = async () => {
       await this.ensureToken();
@@ -168,6 +236,7 @@ export class ActiveSession {
         sessionId: this.sessionId,
         turnId,
         token: this.token.token,
+        signal: abort.signal,
       });
     };
     try {
@@ -268,12 +337,22 @@ export class ActiveSession {
   private async consume(frames: AsyncGenerator<TurnFrame>, ids: Cursor): Promise<StreamEnd> {
     for await (const frame of frames) {
       ids.frames++;
+      this.pending = false;
+      const deferred = this.takeDeferred();
+      if (deferred && frame.type !== 'turn') {
+        // Esc came before the first frame of a turn that is not detachable: abort it, as ever.
+        this.controller?.abort();
+        deferred.resolve(true);
+        throw new TurnCancelledError();
+      }
       if (frame.type === 'turn') this.live = { turnId: frame.turnId, lastEventId: ids.last };
       else if (this.live && ids.last) this.live.lastEventId = ids.last;
       this.transcriptSafe(() =>
         this.deps.transcripts?.appendFrame(this.sessionId, frame, ids.last),
       );
       this.emit({ kind: 'frame', frame });
+      // Esc came before this turn frame: now it names the turn, cancel it on the server.
+      if (deferred) void this.cancelRemote().then(deferred.resolve);
       if (frame.type === 'turn' && frame.ended) {
         // Nothing more is coming: the turn finished, and this client already holds its terminal.
         this.live = undefined;
@@ -379,6 +458,8 @@ export class ActiveSession {
       for (;;) {
         await this.ensureToken();
         try {
+          // Until its first frame, a detachable turn may already run on the server (see `pending`).
+          this.pending = this.deps.detachable === true;
           const raw = this.deps.harness.streamTurn({
             sessionId: this.sessionId,
             prompt,
@@ -409,6 +490,20 @@ export class ActiveSession {
           if (this.live && isDropped(err)) return await this.reattach(controller, ids);
           // Once frames have flowed the status code is spent; never re-send a half-run turn.
           if (!(err instanceof ApiError) || err.source !== 'harness' || streamed) throw err;
+          this.pending = false;
+          const deferred = this.takeDeferred();
+          if (deferred) {
+            // Esc while the request was out, and the harness refused it: no turn runs, so there is
+            // nothing to cancel. The refusal ends the turn as ever; nothing sends it again (a retry,
+            // a remint, a 409's attach), since the user withdrew it.
+            deferred.resolve(true);
+            const again =
+              err.code === 'turn_in_progress' ||
+              TOKEN_CODES.has(err.code) ||
+              err.code === 'session_mismatch' ||
+              (err.status === 503 && err.retryAfterS !== undefined);
+            throw again ? new TurnCancelledError() : err;
+          }
           if (
             this.deps.detachable === true &&
             err.code === 'turn_in_progress' &&
@@ -416,10 +511,8 @@ export class ActiveSession {
           ) {
             // Another device's turn holds the session: show it, then send this prompt (spec §6.5).
             // Only a detachable session attaches: headless fails the turn, as it always has.
-            this.queue.unshift(
-              { kind: 'attach', expectOpen: false },
-              { ...job, resend: true, conflicts: job.conflicts + 1 },
-            );
+            const resend: PromptJob = { ...job, resend: true, conflicts: job.conflicts + 1 };
+            this.queue.unshift({ kind: 'attach', expectOpen: false, conflict: { resend } }, resend);
             return false;
           }
           if (TOKEN_CODES.has(err.code) || err.code === 'session_mismatch') {
@@ -452,6 +545,8 @@ export class ActiveSession {
       return false;
     } finally {
       this.live = undefined;
+      this.pending = false;
+      this.takeDeferred()?.resolve(true); // the turn is over: nothing is left to cancel
       if (this.controller === controller) this.controller = undefined;
     }
   }
@@ -461,6 +556,7 @@ export class ActiveSession {
     const controller = new AbortController();
     this.controller = controller;
     const ids: Cursor = { frames: 0 };
+    this.conflict = job.conflict;
     this.emit({ kind: 'attach-start' });
     try {
       const end = await this.attachOnce(controller, ids, job.lastEventId);
@@ -483,6 +579,17 @@ export class ActiveSession {
         this.emit({ kind: 'turn-end', outcome: 'cancelled' });
         return true;
       }
+      // Nothing was expected to run, and the harness could not be asked: there is nothing to show.
+      if (
+        !job.expectOpen &&
+        ids.frames === 0 &&
+        err instanceof ApiError &&
+        err.source === 'harness' &&
+        (err.code === 'network_error' || err.status === 503)
+      ) {
+        this.emit({ kind: 'attach-none', missed: false });
+        return false;
+      }
       if (this.live && isDropped(err)) {
         try {
           return await this.reattach(controller, ids);
@@ -494,10 +601,15 @@ export class ActiveSession {
           err = e;
         }
       }
+      // The turn went away after its frames showed (turn_not_found from here on): that is a lost
+      // turn, said in words rather than as the bare code.
+      if (err instanceof ApiError && err.code === 'turn_not_found')
+        err = new ApiError('harness', err.status, err.code, LOST_TURN_MESSAGE);
       this.emit({ kind: 'turn-end', outcome: 'error', error: err as Error });
       return false;
     } finally {
       this.live = undefined;
+      this.conflict = undefined;
       this.transcriptSafe(() => this.deps.transcripts?.flush(this.sessionId));
       if (this.controller === controller) this.controller = undefined;
     }

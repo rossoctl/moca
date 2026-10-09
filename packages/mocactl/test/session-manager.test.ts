@@ -477,7 +477,9 @@ describe('detachable turns', () => {
     await tick();
     session.cancel();
     await tick();
-    expect(harness.cancels).toEqual([{ sessionId: 's1', turnId: 't1', token: expect.any(String) }]);
+    expect(harness.cancels).toEqual([
+      { sessionId: 's1', turnId: 't1', token: expect.any(String), signal: expect.any(AbortSignal) },
+    ]);
     release();
     await session.idle();
     expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);

@@ -121,13 +121,14 @@ export class HarnessClient implements HarnessApi {
     yield* this.frames(res, signal, onEventId);
   }
 
-  async cancelTurn({ sessionId, turnId, token }: CancelTurnArgs): Promise<void> {
+  async cancelTurn({ sessionId, turnId, token, signal }: CancelTurnArgs): Promise<void> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.base}/v1/turn/cancel`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ sessionId, ...(turnId ? { turnId } : {}) }),
+        signal,
       });
     } catch (err) {
       throw networkError('harness', err);

@@ -144,6 +144,7 @@ export interface CancelTurnArgs {
   sessionId: string;
   turnId?: string;
   token: string;
+  signal?: AbortSignal;
 }
 
 export interface HarnessApi {
