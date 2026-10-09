@@ -251,7 +251,7 @@ claim 8 "a detachable turn survives its client: re-attach replays what was misse
 # A fresh session; the first stream is started in the background, cut after its first frame,
 # then GET /v1/turn resumes from its last id, then a full replay verifies nothing was missed.
 detach_turn() {
-  local session sid first="$PROJ/detach-1.sse" second="$PROJ/detach-2.sse" third="$PROJ/detach-3.sse" pid last_id expected actual
+  local session sid first="$PROJ/detach-1.sse" second="$PROJ/detach-2.sse" third="$PROJ/detach-3.sse" pid last_id
   session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
   sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
   [[ -n "$sid" ]] || { ko "POST /v1/sessions returned no session: ${session:0:300}"; return; }
@@ -263,7 +263,7 @@ detach_turn() {
   wait_for 60 grep -q '^id: ' "$first" || true
   sleep 1
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
-  last_id="$(sed -n 's/^id: //p' "$first" | tail -1)"
+  last_id="$({  cat "$first"; echo; } | sed -n 's/^id: //p' | head -n -1 | tail -1)"
   [[ -n "$last_id" ]] || { ko "the detachable turn sent no ids: $(head -c 400 "$first")"; return; }
   curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H "Last-Event-ID: $last_id" \
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$second" || true
@@ -271,14 +271,27 @@ detach_turn() {
     ko "the re-attach did not reach done: $(tail -c 400 "$second")"
     return
   fi
+  # Extract complete ids from each stream (handle incomplete final lines from kill)
+  local first_ids second_ids repeats expected actual
+  first_ids="$({  cat "$first"; echo; } | sed -n 's/^id: //p' | head -n -1)"
+  second_ids="$({  cat "$second"; echo; } | sed -n 's/^id: //p' | head -n -1 | tail -n +2)"
+  # Check for repeats: no id from first + second (skip first line) should appear twice
+  repeats="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort | uniq -d)"
+  if [[ -n "$repeats" ]]; then
+    ko "the re-attach repeated frames the first stream had"
+    return
+  fi
+  # Check for missed frames: full replay ids must equal first + second ids
   curl -sN --max-time 60 -H @"$TURN_HDR" -H 'Accept: text/event-stream' \
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$third" || true
-  expected="$(cat <(sed -n 's/^id: //p' "$first") <(sed -n 's/^id: //p' "$second" | tail -n +2) | sort -u)"
-  actual="$(sed -n 's/^id: //p' "$third" | sort -u)"
+  local third_ids
+  third_ids="$({  cat "$third"; echo; } | sed -n 's/^id: //p' | head -n -1)"
+  expected="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort -u)"
+  actual="$(echo "$third_ids" | sort -u)"
   if ! diff <(echo "$expected") <(echo "$actual") >/dev/null 2>&1; then
-    ko "the re-attach missed frames: expected $(echo "$expected" | wc -l) ids, got $(echo "$actual" | wc -l)"
+    ko "the re-attach missed frames"
   else
-    ok "re-attached session $sid, replayed $(grep -c '^id: ' "$first") + $(grep -c '^id: ' "$second") frames without loss"
+    ok "re-attached session $sid, replayed $(echo "$first_ids" | grep -c . || true) + $(echo "$second_ids" | grep -c . || true) frames without loss"
   fi
 }
 detach_turn
