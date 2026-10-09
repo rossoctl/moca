@@ -8,6 +8,15 @@ export interface Usage {
   total: number;
 }
 
+export type AbortReason = 'cancelled' | 'unwatched' | 'restarting' | 'lease_lost' | 'owner_lost';
+
+/** Detachable turns only: the first frame, naming the turn later frame ids belong to. */
+export type TurnStartFrame = {
+  type: 'turn';
+  turnId: string;
+  sessionId: string;
+  truncated?: boolean;
+};
 export type TextFrame = { type: 'text'; delta: string };
 export type ThinkingFrame = { type: 'thinking'; delta: string };
 export type ToolUseFrame = { type: 'tool_use'; id: string; name: string; args: unknown };
@@ -24,6 +33,7 @@ export type ErrorFrame = {
   stopReason: string;
   errorMessage?: string;
   usage?: Usage;
+  abortReason?: AbortReason;
 };
 export type WorkspaceResetFrame = {
   type: 'workspace_reset';
@@ -35,6 +45,7 @@ export type WorkspaceResetFrame = {
 export type UnknownFrame = { type: 'unknown'; event: string; data: unknown };
 
 export type TurnFrame =
+  | TurnStartFrame
   | TextFrame
   | ThinkingFrame
   | ToolUseFrame
@@ -45,6 +56,7 @@ export type TurnFrame =
   | UnknownFrame;
 
 export const KNOWN_FRAME_TYPES = [
+  'turn',
   'text',
   'thinking',
   'tool_use',

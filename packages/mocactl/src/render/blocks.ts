@@ -94,6 +94,8 @@ const eventReducer: FrameReducer = (s, frame) =>
 
 // Spec §7.2: one reducer per frame type; anything else falls to eventReducer.
 export const FRAME_REDUCERS: Record<string, FrameReducer> = {
+  turn: (s, f) =>
+    f.type === 'turn' && f.truncated ? addNotice(s, TRUNCATED_TURN_NOTICE, 'info') : s,
   text: (s, f) => (f.type === 'text' ? appendToAssistant(s, 'text', f.delta) : s),
   thinking: (s, f) => (f.type === 'thinking' ? appendToAssistant(s, 'thinking', f.delta) : s),
   tool_use: (s, f) =>
@@ -124,12 +126,19 @@ export const FRAME_REDUCERS: Record<string, FrameReducer> = {
       : s,
   error: (s, f) =>
     f.type === 'error'
-      ? push(finalizeOpen(s), {
-          kind: 'turn-end',
-          outcome: 'error',
-          message: f.errorMessage ?? f.stopReason,
-          usage: f.usage,
-        })
+      ? push(
+          finalizeOpen(s),
+          // The user's own cancel of a detachable turn arrives as an error frame; show it as the
+          // cancel it was, like Esc on a non-detachable turn.
+          f.abortReason === 'cancelled'
+            ? { kind: 'turn-end', outcome: 'cancelled', usage: f.usage }
+            : {
+                kind: 'turn-end',
+                outcome: 'error',
+                message: f.errorMessage ?? f.stopReason,
+                usage: f.usage,
+              },
+        )
       : s,
 };
 
@@ -199,6 +208,8 @@ export function endTurn(
  */
 export const INTERRUPTED_TURN_NOTICE =
   'the last turn didn\'t finish (mocactl closed, or it was cancelled or failed) and isn\'t running — send a prompt such as "go on" to continue';
+
+export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer available';
 
 export function fromTranscript(t: Transcript): BlockState {
   let s = EMPTY_BLOCKS;

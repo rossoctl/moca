@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TurnFrame } from '../src/api/frames.js';
 import {
   EMPTY_BLOCKS,
+  TRUNCATED_TURN_NOTICE,
   addNotice,
   addUser,
   endTurn,
@@ -252,5 +253,46 @@ describe('addNotice', () => {
     const assistants = blocks.filter((b) => b.kind === 'assistant');
     expect(assistants).toHaveLength(1);
     expect(assistants[0]).toMatchObject({ text: 'working', final: false });
+  });
+});
+
+describe('turn frames', () => {
+  it('a turn frame adds no block', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, { type: 'turn', turnId: 't1', sessionId: 's' });
+    expect(s.blocks).toEqual([]);
+  });
+
+  it('a truncated replay adds a notice', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'turn',
+      turnId: 't1',
+      sessionId: 's',
+      truncated: true,
+    });
+    expect(s.blocks).toMatchObject([{ kind: 'notice', text: TRUNCATED_TURN_NOTICE }]);
+  });
+
+  it('an error frame with abortReason cancelled ends the turn as cancelled', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'error',
+      sessionId: 's',
+      stopReason: 'aborted',
+      errorMessage: 'cancelled',
+      abortReason: 'cancelled',
+    });
+    expect(s.blocks).toMatchObject([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('any other abort stays an error with its message', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'error',
+      sessionId: 's',
+      stopReason: 'aborted',
+      errorMessage: 'harness restarting',
+      abortReason: 'restarting',
+    });
+    expect(s.blocks).toMatchObject([
+      { kind: 'turn-end', outcome: 'error', message: 'harness restarting' },
+    ]);
   });
 });
