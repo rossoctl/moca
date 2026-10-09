@@ -255,14 +255,27 @@ export class ActiveTurn {
   }
 
   private async tick(): Promise<void> {
+    if (this.finished) return;
     // A slow renew must not overlap the next tick: two in flight could judge the lease out of order.
-    if (this.finished || this.renewing) return;
+    // But a renew that never settles (a blackholed Redis keeps the socket open, and node-redis has no
+    // command timeout) never reaches its catch, so the skipped tick must still enforce the deadline.
+    if (this.renewing) return this.checkLeaseDeadline();
     this.renewing = true;
     try {
       await this.renewOnce();
     } finally {
       this.renewing = false;
     }
+  }
+
+  /**
+   * Stop one renewal interval BEFORE the lease can lapse in Redis, judged by the clock now (after a
+   * failed await, or while one hangs), not at tick start: two owners must never both believe they
+   * hold the session (§5.1), and waiting for the next tick would come too late.
+   */
+  private checkLeaseDeadline(): void {
+    const { leaseMs, renewMs } = this.reg.timings;
+    if (this.reg.now() - this.lastRenewOk >= leaseMs - renewMs) this.abort('lease_lost');
   }
 
   private async renewOnce(): Promise<void> {
@@ -274,12 +287,7 @@ export class ActiveTurn {
       lease = await this.reg.renew(this.sessionId, this.turnId);
       this.lastRenewOk = now;
     } catch {
-      // Stop one renewal interval BEFORE the lease can lapse in Redis, judged by the clock after the
-      // failed await, not at tick start: two owners must never both believe they hold the session
-      // (§5.1), and waiting for the next tick would come too late.
-      const { leaseMs, renewMs } = this.reg.timings;
-      if (this.reg.now() - this.lastRenewOk >= leaseMs - renewMs) this.abort('lease_lost');
-      return;
+      return this.checkLeaseDeadline();
     }
     if (this.finished) return;
     if (lease === null) return this.abort('lease_lost');

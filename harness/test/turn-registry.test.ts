@@ -126,9 +126,12 @@ describe('begin / append / end', () => {
     expect(await redis.ttl(lastKey(s))).toBeGreaterThan(0);
     expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
     await turn.append({ type: 'text', delta: 'hi' });
-    await sleep(T.renewMs * 2); // past a renewal, which refreshes them
-    expect(await redis.ttl(lastKey(s))).toBeGreaterThan(0);
-    expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
+    // Run both clocks down, then let a renewal pass: it must have put them back to logTtlS.
+    await redis.expire(lastKey(s), 1);
+    await redis.expire(eventsKey(s, turn.turnId), 1);
+    await sleep(T.renewMs * 2);
+    expect(await redis.ttl(lastKey(s))).toBeGreaterThan(1);
+    expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(1);
     await turn.end(done(s));
   });
 
@@ -170,8 +173,12 @@ describe('begin / append / end', () => {
     await turn.end(aborted(s2));
   });
 
+  // Slower clocks than T: the abort lands within renewMs of leaseMs - renewMs after the last good
+  // renew, so the headroom below the leaseMs bound is renewMs -- 200 ms here rather than 100.
+  const L = { ...T, leaseMs: 600, renewMs: 200 };
+
   it('aborts with lease_lost before the lease can lapse when renewals fail', async () => {
-    const r = reg();
+    const r = reg(L);
     const s = sid();
     const turn = await r.begin(s);
     let abortedAt = 0;
@@ -180,9 +187,23 @@ describe('begin / append / end', () => {
     // succeeds after this instant, so the lease lapses at most leaseMs after it.
     const brokenAt = Date.now();
     await redis.multi().del(activeKey(s)).hSet(activeKey(s), 'x', '1').exec(); // never absent
-    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('lease_lost');
-    expect(abortedAt - brokenAt).toBeLessThan(T.leaseMs);
+    await expect.poll(() => turn.abortReason, { timeout: 2000 }).toBe('lease_lost');
+    expect(abortedAt - brokenAt).toBeLessThan(L.leaseMs);
     await redis.del(activeKey(s)); // let END's GET succeed
+    await turn.end(aborted(s));
+  });
+
+  it('aborts with lease_lost before the lease can lapse when a renew never settles', async () => {
+    const r = reg(L);
+    const s = sid();
+    const turn = await r.begin(s);
+    let abortedAt = 0;
+    turn.signal.addEventListener('abort', () => (abortedAt = Date.now()));
+    // A blackholed Redis: the socket stays open, the eval never answers, its catch never runs.
+    const hungAt = Date.now();
+    vi.spyOn(r, 'renew').mockReturnValue(new Promise(() => {}));
+    await expect.poll(() => turn.abortReason, { timeout: 2000 }).toBe('lease_lost');
+    expect(abortedAt - hungAt).toBeLessThan(L.leaseMs);
     await turn.end(aborted(s));
   });
 });
