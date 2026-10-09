@@ -270,7 +270,10 @@ detach_turn() {
   [[ -n "$last_id" ]] || { ko "the detachable turn sent no ids: $(head -c 400 "$first")"; return; }
   curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H "Last-Event-ID: $last_id" \
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$second" || true
-  if ! grep -q '^event: done' "$second"; then
+  # Reaching the end is either a done frame in the re-attach, or, when the model finished before
+  # the cut so the first stream already holds the terminal, a turn frame marked "ended":true.
+  if ! grep -q '^event: done' "$second" &&
+    ! { grep -q '"ended":true' "$second" && grep -q '^event: done' "$first"; }; then
     ko "the re-attach did not reach done: $(tail -c 400 "$second")"
     return
   fi
@@ -279,7 +282,7 @@ detach_turn() {
   first_ids="$(complete_ids "$first")"
   second_ids="$(sed -n 's/^id: //p' "$second" | tail -n +2)"
   # Check for repeats: no id from first + second (skip first line) should appear twice
-  repeats="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort | uniq -d)"
+  repeats="$(printf '%s\n' "$first_ids" "$second_ids" | sed '/^$/d' | sort | uniq -d)"
   if [[ -n "$repeats" ]]; then
     ko "the re-attach repeated frames the first stream had"
     return
@@ -289,8 +292,9 @@ detach_turn() {
     "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$third" || true
   local third_ids
   third_ids="$(sed -n 's/^id: //p' "$third")"
-  expected="$(cat <(echo "$first_ids") <(echo "$second_ids") | sort -u)"
-  actual="$(echo "$third_ids" | sort -u)"
+  # Blank lines dropped: after an "ended":true re-attach, second_ids is empty.
+  expected="$(printf '%s\n' "$first_ids" "$second_ids" | sed '/^$/d' | sort -u)"
+  actual="$(printf '%s\n' "$third_ids" | sed '/^$/d' | sort -u)"
   if ! diff <(echo "$expected") <(echo "$actual") >/dev/null 2>&1; then
     ko "the re-attach missed frames: expected $(echo "$expected" | grep -c . || true) ids, got $(echo "$actual" | grep -c . || true)"
   else
