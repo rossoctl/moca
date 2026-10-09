@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { TurnRegistry, type ActiveTurn } from '@moca/harness/turn-registry';
 import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
 import {
@@ -26,6 +28,7 @@ import {
   type TurnAuthDeps,
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
+import { adoptTurnSlot } from './turn-slot.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -97,6 +100,29 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
 // caches a stale keyset, matching how saturationWaitConfig() already behaves.
 const turnAuthDeps = () => turnAuthDepsFromEnv(process.env);
 
+// Detachable turns (turn-reattach spec §4). Read per request, like the keyset: a deployment flips
+// it with an env change and a restart, and tests flip it per test.
+const detachEnabled = () => process.env.SH_TURN_DETACH === '1';
+
+let registry: TurnRegistry | undefined;
+export function turnRegistry(): TurnRegistry {
+  registry ??= new TurnRegistry({ ownerId: `${hostname()}:${process.pid}` });
+  return registry;
+}
+export async function resetTurnRegistryForTests(): Promise<void> {
+  const r = registry;
+  registry = undefined;
+  await r?.close();
+}
+/** Worker exit (§5.5): end every detached turn with a terminal frame before the process goes. */
+export async function abortDetachedTurns(reason: 'restarting'): Promise<void> {
+  await registry?.abortAll(reason);
+}
+
+function retryHeaders(): Record<string, string> {
+  return { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) };
+}
+
 /** One mapping for control-plane codes, reusing @moca/control-plane's table so the tiers agree. */
 function writeAuthError(res: ServerResponse, err: unknown, sessionId?: string): void {
   if (!(err instanceof CpError)) throw err;
@@ -148,7 +174,7 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
-  let parsed: { sessionId?: string; prompt?: string };
+  let parsed: { sessionId?: string; prompt?: string; detachable?: unknown };
   try {
     parsed = JSON.parse(body);
   } catch {
@@ -176,7 +202,23 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
+  // §4.4: with detach on, a session runs one live turn at a time; a turn of any kind is refused
+  // while a detachable one runs. A Redis that cannot answer does not block today's callers.
   const wantsStream = /text\/event-stream/i.test(req.headers.accept ?? '');
+  const detachable = detachEnabled() && auth !== null && wantsStream && parsed.detachable === true;
+  const lockedId = auth?.sessionId ?? sessionId;
+  if (detachEnabled() && !detachable && lockedId) {
+    const running = await turnRegistry()
+      .peek(lockedId)
+      .catch(() => null);
+    if (running) {
+      res
+        .writeHead(409, JSON_HEADERS)
+        .end(JSON.stringify({ error: 'turn_in_progress', turnId: running }));
+      return;
+    }
+  }
+  if (detachable) return handleDetachableTurn(prompt, auth!, deps, res);
   if (wantsStream) return handleTurnStream(prompt, sessionId, auth, deps, req, res);
 
   try {
@@ -328,9 +370,9 @@ function makeFrameWriter(res: ServerResponse, keepaliveMs: number) {
       if (!res.writableEnded) res.write(': keepalive\n\n'); // SSE comment — invisible to EventSource
     }, keepaliveMs);
   };
-  const writeFrame = (frame: TurnStreamFrame) => {
+  const writeFrame = (frame: TurnStreamFrame, id?: string) => {
     if (!res.headersSent) res.writeHead(200, SSE_HEADERS);
-    res.write(`event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`);
+    res.write(`${id ? `id: ${id}\n` : ''}event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`);
     arm(); // reset the idle timer on every real frame
   };
   const stop = () => {
@@ -419,6 +461,97 @@ async function handleTurnStream(
         auth.sessionId,
         runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
       );
+    if (!res.writableEnded) res.end();
+  }
+}
+
+/**
+ * A detachable turn (turn-reattach spec §4.1, §5): the same executeTurn core, but its life belongs
+ * to the registry, not the connection. Every frame is logged before it is sent, so the id a client
+ * holds always names a logged entry; the client write is lazy, as in handleTurnStream, so a failure
+ * before the first frame still answers with the sync path's status and JSON.
+ */
+async function handleDetachableTurn(
+  prompt: string,
+  auth: TurnAuth,
+  deps: TurnAuthDeps,
+  res: ServerResponse,
+): Promise<void> {
+  let turn: ActiveTurn;
+  try {
+    turn = await turnRegistry().begin(auth.sessionId);
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    if (name === 'TurnInProgressError') {
+      res.writeHead(409, JSON_HEADERS).end(
+        JSON.stringify({
+          error: 'turn_in_progress',
+          turnId: (err as { turnId: string }).turnId,
+        }),
+      );
+    } else {
+      res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
+    }
+    return;
+  }
+  const releaseSlot = adoptTurnSlot(res);
+  const { writeFrame, stop } = makeFrameWriter(res, intEnv('SH_TURN_STREAM_KEEPALIVE_MS', 20000));
+  let started = false;
+  const send = (frame: TurnStreamFrame, id?: string) => {
+    if (res.writableEnded || res.destroyed) return;
+    if (!started) {
+      started = true;
+      writeFrame(turn.start.frame, turn.start.id);
+    }
+    writeFrame(frame, id);
+  };
+  res.on('close', () => turn.watched(false));
+  // node-redis answers in command order on one connection; the chain also keeps the terminal
+  // behind every frame logged before it.
+  let chain = Promise.resolve();
+  void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
+  let result: TurnResult | undefined;
+  let placement: TurnResult['sandbox'];
+  try {
+    result = await executeTurn({
+      prompt,
+      sessionId: auth.sessionId,
+      config: buildConfig(auth),
+      createIfAbsent: true,
+      ...(auth.configRef ? { configRef: auth.configRef } : {}),
+      onEvent: (f) => {
+        chain = chain.then(async () => send(f, await turn.append(f)));
+      },
+      signal: turn.signal,
+      onPlacement: (p) => (placement = p),
+    });
+    await chain;
+    const end = await turn.end(terminalFrame(result));
+    send(end.frame, end.id);
+  } catch (err) {
+    await chain;
+    const message = err instanceof Error ? err.message : String(err);
+    const end = await turn.end({
+      type: 'error',
+      sessionId: auth.sessionId,
+      stopReason: 'error',
+      errorMessage: message,
+    });
+    if (!started && !res.headersSent) {
+      const status = turnErrorStatus(err);
+      res
+        .writeHead(status, turnErrorHeaders(status, err))
+        .end(JSON.stringify({ error: turnErrorCode(status, message), sessionId: auth.sessionId }));
+    } else {
+      send(end.frame, end.id);
+    }
+  } finally {
+    stop();
+    releaseSlot();
+    void deps.reportRuntime?.(
+      auth.sessionId,
+      runtimeFieldsForTurn(process.env, 'end', result?.sandbox ?? placement),
+    );
     if (!res.writableEnded) res.end();
   }
 }
