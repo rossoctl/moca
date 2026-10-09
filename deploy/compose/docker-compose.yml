@@ -79,8 +79,8 @@ services:
       SH_SANDBOX_AFFINITY_TTL_SECONDS:
       # Detachable turns (turn-reattach spec §5.6): a mocactl turn survives its client quitting.
       SH_TURN_DETACH: ${SH_TURN_DETACH:-1}
-      SH_TURN_DETACHED_MAX_S: ''
-      SH_TURN_LOG_TTL_S: ''
+      SH_TURN_DETACHED_MAX_S: ${SH_TURN_DETACHED_MAX_S:-}
+      SH_TURN_LOG_TTL_S: ${SH_TURN_LOG_TTL_S:-}
       SH_RELAY_ADDR: sandbox-relay:${MOCA_RELAY_EXEC_PORT:-9444}
       MOCA_RELAY_EXEC_TOKEN: ${MOCA_RELAY_EXEC_TOKEN:?MOCA_RELAY_EXEC_TOKEN is required -- set it in .env (install.sh generates one)}
       REDIS_URL: redis://redis:6379
