@@ -450,7 +450,7 @@ function getResultStore(): RedisResultStore {
 
 /**
  * Workloads are unavailable until Moca provisions them itself: Context Service no longer allocates
- * sandbox pools for Moca (rossoctl/moca#455). Answer every workload route, and any run that names a
+ * sandbox pools for Moca (rossoctl/moca#476). Answer every workload route, and any run that names a
  * workload, plainly rather than running it on the default pool.
  */
 function rejectWorkloads(res: ServerResponse): void {
