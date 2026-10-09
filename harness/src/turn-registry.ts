@@ -14,6 +14,8 @@ export const activeKey = (sid: string) => `sh:turn:${sid}:active`;
 export const lastKey = (sid: string) => `sh:turn:${sid}:last`;
 export const eventsKey = (sid: string, turnId: string) => `sh:turn:${sid}:${turnId}:events`;
 export const watchKey = (sid: string, turnId: string) => `sh:turn:${sid}:${turnId}:watch`;
+/** Set, with the log's TTL, in the step that logs the turn's terminal: nothing is appended after. */
+export const termKey = (sid: string, turnId: string) => `sh:turn:${sid}:${turnId}:term`;
 export const CANCEL_CHANNEL = 'sh:turn:cancel';
 
 /** The reasons the owner itself aborts; `owner_lost` is written by an attach (§5.1), never here. */
@@ -103,23 +105,57 @@ export class TurnRegistryUnavailableError extends Error {
   }
 }
 
+/**
+ * Bound a registry call: node-redis has no command timeout, so against a blackholed Redis (socket
+ * open, nothing answers) a call never settles. Past `ms` this rejects with
+ * TurnRegistryUnavailableError; the call itself is not cancelled and may still land later, so use
+ * it only where a late landing is harmless (a read, a cancel request). `begin` bounds itself.
+ */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new TurnRegistryUnavailableError(new Error(`no answer in ${ms} ms`))),
+      ms,
+    );
+    timer.unref();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 export interface LoggedFrame {
   id: string;
   frame: TurnStreamFrame;
 }
 
 /**
- * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[leaseJson, leaseMs, turnId, ttlS]. Nil when
- * taken; else the holder. `last` and the log carry the retention TTL from the start (renewal keeps
- * refreshing it), so an owner that dies before END leaves nothing behind past ttlS.
+ * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[leaseJson, leaseMs, turnId, ttlS, turnFrameJson,
+ * maxLen]. {'held', holder} when taken; else {'ok', turnFrameEntryId}. Takes the lease and logs the
+ * turn frame in one step, and `last` and the log carry the retention TTL from the start (renewal
+ * keeps refreshing it): an owner that dies before END leaves nothing behind past ttlS, and no step
+ * can leave a log without one.
  */
 export const BEGIN_LUA = `
 local v = redis.call('GET', KEYS[1])
-if v then return v end
+if v then return {'held', v} end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+local id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[6], '*', 'f', ARGV[5])
 redis.call('EXPIRE', KEYS[3], ARGV[4])
-return false`;
+return {'ok', id}`;
+
+/**
+ * KEYS[1]=active KEYS[2]=events KEYS[3]=term ARGV=[turnId, frameJson, maxLen]. Logs one of the
+ * owner's frames, or nil: once the lease no longer names the turn, or its terminal is logged, the
+ * owner's writes are fenced -- the node-redis offline queue would otherwise land them after an
+ * attach's owner_lost on reconnect (§5.1). A log that is gone (expired) is not recreated.
+ */
+export const APPEND_LUA = `
+if redis.call('EXISTS', KEYS[3]) == 1 then return false end
+local v = redis.call('GET', KEYS[1])
+if not v or cjson.decode(v).turnId ~= ARGV[1] then return false end
+if redis.call('EXISTS', KEYS[2]) == 0 then return false end
+return redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', 'f', ARGV[2])`;
 
 /**
  * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[turnId, leaseMs, ttlS]. Extends OUR lease only,
@@ -134,32 +170,29 @@ if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('EXPIRE', KEYS[2], ARGV
 redis.call('EXPIRE', KEYS[3], ARGV[3])
 return v`;
 
-/** KEYS[1]=active ARGV=[turnId]. Drops the lease only if it is still ours. */
-export const RELEASE_LUA = `
-local v = redis.call('GET', KEYS[1])
-if v and cjson.decode(v).turnId == ARGV[1] then redis.call('DEL', KEYS[1]) end
-return 1`;
-
 /**
- * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[turnId, ttlS, frameJson, maxLen]. Appends the
- * terminal, starts the retention clock, releases the lease -- one step, so a watcher never sees a
- * released lease before the terminal it would otherwise synthesize. A log that already ends on a
- * terminal (an attach wrote owner_lost while this owner stalled past its lease) gets no second one;
- * the existing terminal's id is returned instead.
+ * KEYS[1]=active KEYS[2]=last KEYS[3]=events KEYS[4]=term ARGV=[turnId, ttlS, frameJson, maxLen].
+ * Appends the terminal, sets the terminal marker, starts the retention clock, releases the lease --
+ * one step, so a watcher never sees a released lease before the terminal it would otherwise
+ * synthesize. A turn whose terminal is already logged (an attach wrote owner_lost while this owner
+ * stalled past its lease) gets no second one. Returns {entryId, frameJson} of the terminal actually
+ * logged, which is then that earlier one.
  */
 export const END_LUA = `
-local id
-local tail = redis.call('XREVRANGE', KEYS[3], '+', '-', 'COUNT', 1)
-if #tail > 0 then
-  local f = cjson.decode(tail[1][2][2])
-  if f.type == 'done' or f.type == 'error' then id = tail[1][1] end
+local id = redis.call('GET', KEYS[4])
+local f = ARGV[3]
+if id then
+  local e = redis.call('XRANGE', KEYS[3], id, id)
+  if #e > 0 then f = e[1][2][2] end
+else
+  id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[3])
+  redis.call('SET', KEYS[4], id, 'EX', ARGV[2])
 end
-if not id then id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[3]) end
 redis.call('EXPIRE', KEYS[3], ARGV[2])
 if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('EXPIRE', KEYS[2], ARGV[2]) end
 local v = redis.call('GET', KEYS[1])
 if v and cjson.decode(v).turnId == ARGV[1] then redis.call('DEL', KEYS[1]) end
-return id`;
+return {id, f}`;
 
 /**
  * KEYS[1]=active KEYS[2]=last ARGV=[turnId or '']. {'none'} | {'mismatch', running} |
@@ -179,18 +212,18 @@ redis.call('SET', KEYS[1], cjson.encode(d), 'KEEPTTL')
 return {'requested', d.turnId}`;
 
 /**
- * KEYS[1]=active KEYS[2]=events KEYS[3]=last ARGV=[turnId, frameJson, ttlS, maxLen]. Appends the
- * owner-lost terminal ONLY if no lease names the turn and the log has no terminal yet -- checked
- * and written atomically, so concurrent attaches write it once (§5.1).
+ * KEYS[1]=active KEYS[2]=events KEYS[3]=last KEYS[4]=term ARGV=[turnId, frameJson, ttlS, maxLen].
+ * Appends the owner-lost terminal ONLY if no lease names the turn and no terminal is logged yet (the
+ * marker, not the tail: a fenced owner can no longer append after one) -- checked and written
+ * atomically with the marker, so concurrent attaches write it once (§5.1).
  */
 export const OWNER_LOST_LUA = `
 local v = redis.call('GET', KEYS[1])
 if v and cjson.decode(v).turnId == ARGV[1] then return false end
-local last = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
-if #last == 0 then return false end
-local f = cjson.decode(last[1][2][2])
-if f.type == 'done' or f.type == 'error' then return false end
+if redis.call('EXISTS', KEYS[4]) == 1 then return false end
+if redis.call('EXISTS', KEYS[2]) == 0 then return false end
 local id = redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[2])
+redis.call('SET', KEYS[4], id, 'EX', ARGV[3])
 redis.call('EXPIRE', KEYS[2], ARGV[3])
 if redis.call('GET', KEYS[3]) == ARGV[1] then redis.call('EXPIRE', KEYS[3], ARGV[3]) end
 return id`;
@@ -213,10 +246,12 @@ export class ActiveTurn {
     readonly sessionId: string,
     readonly turnId: string,
     readonly start: LoggedFrame,
+    /** The clock read just before BEGIN: the lease was set at some instant after it (§5.1). */
+    leaseFrom: number,
   ) {
     this.signal = this.controller.signal;
     this.ended = new Promise((r) => (this.resolveEnded = r));
-    this.lastRenewOk = reg.now();
+    this.lastRenewOk = leaseFrom;
     this.timer = setInterval(() => void this.tick(), reg.timings.renewMs);
     this.timer.unref();
   }
@@ -232,10 +267,14 @@ export class ActiveTurn {
     this.controller.abort(reason);
   }
 
-  /** Logs one frame; the SSE id to send it with, or undefined when the write failed (§5.2). */
+  /**
+   * Logs one frame; the SSE id to send it with, or undefined when the write failed or was refused
+   * because the turn no longer holds its lease or its terminal is logged (§5.2).
+   */
   async append(frame: TurnStreamFrame): Promise<string | undefined> {
     try {
-      return eventId(this.turnId, await this.reg.xadd(this.sessionId, this.turnId, frame));
+      const entry = await this.reg.xadd(this.sessionId, this.turnId, frame);
+      return entry === null ? undefined : eventId(this.turnId, entry);
     } catch (err) {
       console.error(
         `[turn-registry] log write failed for ${forLog(this.sessionId)}/${this.turnId}: ${
@@ -246,7 +285,11 @@ export class ActiveTurn {
     }
   }
 
-  /** Writes the terminal (marked with the abort reason, if the registry aborted the turn). */
+  /**
+   * Writes the terminal (marked with the abort reason, if the registry aborted the turn). Returns
+   * the terminal actually logged: when one already was (an attach's owner_lost), that one and its
+   * id, not `terminal`. On a failed write, `terminal` (marked) and no id.
+   */
   async end(terminal: TurnStreamFrame): Promise<{ id?: string; frame: TurnStreamFrame }> {
     if (this.finished) throw new Error('turn already ended');
     this.finished = true;
@@ -260,8 +303,11 @@ export class ActiveTurn {
           }
         : terminal;
     let id: string | undefined;
+    let logged = frame;
     try {
-      id = eventId(this.turnId, await this.reg.endTurn(this.sessionId, this.turnId, frame));
+      const r = await this.reg.endTurn(this.sessionId, this.turnId, frame);
+      id = eventId(this.turnId, r.entryId);
+      logged = r.frame;
     } catch (err) {
       console.error(
         `[turn-registry] terminal write failed for ${forLog(this.sessionId)}/${this.turnId}: ${
@@ -271,7 +317,7 @@ export class ActiveTurn {
     }
     this.reg.forget(this);
     this.resolveEnded();
-    return { id, frame };
+    return { id, frame: logged };
   }
 
   /** Stops the renewal timer without ending the turn; only TurnRegistry.close() calls this. */
@@ -389,39 +435,85 @@ export class TurnRegistry {
     return (this.ready ??= this.arm());
   }
 
-  async begin(sessionId: string): Promise<ActiveTurn> {
-    const turnId = randomUUID();
-    const lease = JSON.stringify({
-      turnId,
-      owner: this.ownerId,
-      startedAt: this.now(),
-      cancelRequested: false,
+  /**
+   * Take the session's lease and log the turn frame. `timeoutMs` bounds the whole call (connect,
+   * subscribe, BEGIN): past it this rejects with TurnRegistryUnavailableError, and a BEGIN that
+   * still lands later is ended at once with an error terminal, so it holds no lease and renews
+   * nothing (there is nobody to run it).
+   */
+  async begin(sessionId: string, opts: { timeoutMs?: number } = {}): Promise<ActiveTurn> {
+    const ms = opts.timeoutMs;
+    if (ms === undefined) return this.beginOnce(sessionId);
+    return new Promise<ActiveTurn>((resolve, reject) => {
+      let settled = false; // one flag for both sides: a turn is either handed over or ended here
+      const timer = setTimeout(() => {
+        settled = true;
+        reject(new TurnRegistryUnavailableError(new Error(`no answer in ${ms} ms`)));
+      }, ms);
+      timer.unref();
+      this.beginOnce(sessionId).then(
+        (turn) => {
+          if (settled) {
+            void turn.end({
+              type: 'error',
+              sessionId,
+              stopReason: 'error',
+              errorMessage: 'the turn did not start in time',
+            });
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(turn);
+        },
+        (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
     });
-    let held: unknown;
+  }
+
+  private async beginOnce(sessionId: string): Promise<ActiveTurn> {
+    const turnId = randomUUID();
+    const frame: TurnStreamFrame = { type: 'turn', turnId, sessionId };
+    let r: [string, string];
+    let leaseFrom: number;
     try {
       await this.open();
       await this.subscribed();
-      held = await this.client.eval(BEGIN_LUA, {
-        keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
-        arguments: [lease, String(this.timings.leaseMs), turnId, String(this.timings.logTtlS)],
+      // Before BEGIN: the lease starts at some instant after this, so the deadline is conservative.
+      leaseFrom = this.now();
+      const lease = JSON.stringify({
+        turnId,
+        owner: this.ownerId,
+        startedAt: leaseFrom,
+        cancelRequested: false,
       });
+      r = (await this.client.eval(BEGIN_LUA, {
+        keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
+        arguments: [
+          lease,
+          String(this.timings.leaseMs),
+          turnId,
+          String(this.timings.logTtlS),
+          JSON.stringify(frame),
+          String(this.timings.maxLen),
+        ],
+      })) as [string, string];
     } catch (err) {
       throw new TurnRegistryUnavailableError(err);
     }
-    if (typeof held === 'string') throw new TurnInProgressError(JSON.parse(held).turnId);
-    const frame: TurnStreamFrame = { type: 'turn', turnId, sessionId };
-    let entry: string;
-    try {
-      entry = await this.xadd(sessionId, turnId, frame);
-      // BEGIN's EXPIRE ran before the stream existed (a no-op); the log carries its TTL from here.
-      await this.client.expire(eventsKey(sessionId, turnId), this.timings.logTtlS);
-    } catch (err) {
-      await this.client
-        .eval(RELEASE_LUA, { keys: [activeKey(sessionId)], arguments: [turnId] })
-        .catch(() => undefined);
-      throw new TurnRegistryUnavailableError(err);
-    }
-    const turn = new ActiveTurn(this, sessionId, turnId, { id: eventId(turnId, entry), frame });
+    if (r[0] === 'held') throw new TurnInProgressError(JSON.parse(r[1]).turnId);
+    const turn = new ActiveTurn(
+      this,
+      sessionId,
+      turnId,
+      { id: eventId(turnId, r[1]), frame },
+      leaseFrom,
+    );
     this.live.set(`${sessionId} ${turnId}`, turn);
     return turn;
   }
@@ -513,7 +605,7 @@ export class TurnRegistry {
           await this.open();
           await this.client.set(watchKey(sessionId, turnId), '1', { PX: this.timings.leaseMs });
           await this.client.eval(OWNER_LOST_LUA, {
-            keys: [activeKey(sessionId), key, lastKey(sessionId)],
+            keys: [activeKey(sessionId), key, lastKey(sessionId), termKey(sessionId, turnId)],
             arguments: [
               turnId,
               JSON.stringify({
@@ -572,29 +664,38 @@ export class TurnRegistry {
 
   // ---- used by ActiveTurn and attach(); not part of the route-facing surface ----
 
-  async xadd(sessionId: string, turnId: string, frame: TurnStreamFrame): Promise<string> {
+  /** The owner's fenced append (APPEND_LUA): the entry id, or null when refused. */
+  async xadd(sessionId: string, turnId: string, frame: TurnStreamFrame): Promise<string | null> {
     await this.open();
-    return this.client.xAdd(
-      eventsKey(sessionId, turnId),
-      '*',
-      { f: JSON.stringify(frame) },
-      { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: this.timings.maxLen } },
-    );
+    const id = await this.client.eval(APPEND_LUA, {
+      keys: [activeKey(sessionId), eventsKey(sessionId, turnId), termKey(sessionId, turnId)],
+      arguments: [turnId, JSON.stringify(frame), String(this.timings.maxLen)],
+    });
+    return typeof id === 'string' ? id : null;
   }
 
-  async endTurn(sessionId: string, turnId: string, frame: TurnStreamFrame): Promise<string> {
+  /** END_LUA: the entry id and frame of the terminal actually logged. */
+  async endTurn(
+    sessionId: string,
+    turnId: string,
+    frame: TurnStreamFrame,
+  ): Promise<{ entryId: string; frame: TurnStreamFrame }> {
     await this.open();
-    return String(
-      await this.client.eval(END_LUA, {
-        keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
-        arguments: [
-          turnId,
-          String(this.timings.logTtlS),
-          JSON.stringify(frame),
-          String(this.timings.maxLen),
-        ],
-      }),
-    );
+    const [entryId, f] = (await this.client.eval(END_LUA, {
+      keys: [
+        activeKey(sessionId),
+        lastKey(sessionId),
+        eventsKey(sessionId, turnId),
+        termKey(sessionId, turnId),
+      ],
+      arguments: [
+        turnId,
+        String(this.timings.logTtlS),
+        JSON.stringify(frame),
+        String(this.timings.maxLen),
+      ],
+    })) as [string, string];
+    return { entryId, frame: JSON.parse(f) as TurnStreamFrame };
   }
 
   async renew(sessionId: string, turnId: string): Promise<{ cancelRequested?: boolean } | null> {

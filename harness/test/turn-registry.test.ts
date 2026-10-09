@@ -9,9 +9,12 @@ import {
   eventsKey,
   lastKey,
   parseEventId,
+  termKey,
   turnRegistryTimings,
   TurnRegistry,
   watchKey,
+  withTimeout,
+  BEGIN_LUA,
 } from '../src/turn-registry.js';
 
 const URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -46,6 +49,7 @@ describe('helpers', () => {
     expect(lastKey('s')).toBe('sh:turn:s:last');
     expect(eventsKey('s', 't')).toBe('sh:turn:s:t:events');
     expect(watchKey('s', 't')).toBe('sh:turn:s:t:watch');
+    expect(termKey('s', 't')).toBe('sh:turn:s:t:term');
   });
   it('builds and parses event ids', () => {
     expect(eventId('t1', '5-0')).toBe('t1:5-0');
@@ -95,6 +99,60 @@ describe('begin / append / end', () => {
     expect(await redis.get(lastKey(s))).toBe(turn.turnId);
     expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
     expect(await redis.ttl(lastKey(s))).toBeGreaterThan(0);
+    // The terminal marker fences later writes, and lives exactly as long as the log.
+    expect(await redis.get(termKey(s, turn.turnId))).toBe(parseEventId(end.id!)?.entryId);
+    expect(await redis.ttl(termKey(s, turn.turnId))).toBeGreaterThan(0);
+  });
+
+  it('refuses an append once the lease names another turn', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await redis.set(activeKey(s), JSON.stringify({ turnId: 'someone-else' }), { PX: 5000 });
+      expect(await turn.append({ type: 'text', delta: 'late' })).toBeUndefined();
+    } finally {
+      quiet.mockRestore();
+    }
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(rows.map((x) => JSON.parse(x.message.f).type)).toEqual(['turn']);
+    await turn.end(aborted(s));
+  });
+
+  it('starts the lease clock before BEGIN, not when the turn object is built', async () => {
+    let clock = 1_000_000;
+    const r = new TurnRegistry({ url: URL, ownerId: 'clock', timings: T, now: () => clock });
+    regs.push(r);
+    const inner = r as unknown as { client: RedisClientType };
+    const real = inner.client.eval.bind(inner.client);
+    // Redis stalls 15 s inside BEGIN: the lease was set at some instant after the pre-BEGIN clock.
+    const spy = vi.spyOn(inner.client, 'eval').mockImplementation((async (
+      ...a: Parameters<typeof real>
+    ) => {
+      const v = await real(...a);
+      if (a[0] === BEGIN_LUA) clock += 15_000;
+      return v;
+    }) as typeof real);
+    const s = sid();
+    const turn = await r.begin(s);
+    expect((turn as unknown as { lastRenewOk: number }).lastRenewOk).toBe(1_000_000);
+    spy.mockRestore();
+    await turn.end(done(s));
+  });
+
+  it('begin is one atomic step: the log has its TTL even if a later EXPIRE would fail', async () => {
+    const r = reg();
+    const inner = r as unknown as { client: RedisClientType };
+    const spy = vi.spyOn(inner.client, 'expire').mockRejectedValue(new Error('boom'));
+    const s = sid();
+    const turn = await r.begin(s);
+    spy.mockRestore();
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(rows.map((x) => JSON.parse(x.message.f).type)).toEqual(['turn']);
+    expect(rows[0]!.id).toBe(parseEventId(turn.start.id)?.entryId);
+    expect(await redis.ttl(eventsKey(s, turn.turnId))).toBeGreaterThan(0);
+    await turn.end(done(s));
   });
 
   it('refuses a second turn of the same session, naming the running one', async () => {
@@ -176,19 +234,46 @@ describe('begin / append / end', () => {
   // Slower clocks than T: the abort lands within renewMs of leaseMs - renewMs after the last good
   // renew, so the headroom below the leaseMs bound is renewMs -- 200 ms here rather than 100.
   const L = { ...T, leaseMs: 600, renewMs: 200 };
+  let stall = false;
+  let renewalsOk = 0;
+  afterEach(() => {
+    stall = false;
+    renewalsOk = 0;
+    vi.restoreAllMocks();
+  });
+  /**
+   * The start time of the last renew that succeeded (or of begin, before any): the lease was
+   * extended at some instant after it, so it cannot lapse before it + leaseMs. `stall` makes every
+   * later renew hang, as against a blackholed Redis.
+   */
+  function trackRenewals(r: TurnRegistry): () => number {
+    let lastOk = Date.now();
+    const real = r.renew.bind(r);
+    vi.spyOn(r, 'renew').mockImplementation(async (...a) => {
+      if (stall) return new Promise(() => {});
+      const at = Date.now();
+      const v = await real(...a);
+      lastOk = at;
+      renewalsOk++;
+      return v;
+    });
+    return () => lastOk;
+  }
 
   it('aborts with lease_lost before the lease can lapse when renewals fail', async () => {
     const r = reg(L);
     const s = sid();
+    const lastOk = trackRenewals(r);
     const turn = await r.begin(s);
     let abortedAt = 0;
     turn.signal.addEventListener('abort', () => (abortedAt = Date.now()));
-    // A hash where the lease string was: RENEW_LUA's GET fails WRONGTYPE from here on. No renewal
-    // succeeds after this instant, so the lease lapses at most leaseMs after it.
-    const brokenAt = Date.now();
+    await sleep(L.renewMs * 2.5); // let renewals land, so the bound is not merely begin's
+    // A hash where the lease string was: RENEW_LUA's GET fails WRONGTYPE from here on.
     await redis.multi().del(activeKey(s)).hSet(activeKey(s), 'x', '1').exec(); // never absent
     await expect.poll(() => turn.abortReason, { timeout: 2000 }).toBe('lease_lost');
-    expect(abortedAt - brokenAt).toBeLessThan(L.leaseMs);
+    // The lease lapses leaseMs after the last renew that landed; the abort must come before that.
+    expect(renewalsOk).toBeGreaterThan(0);
+    expect(abortedAt - lastOk()).toBeLessThan(L.leaseMs);
     await redis.del(activeKey(s)); // let END's GET succeed
     await turn.end(aborted(s));
   });
@@ -196,14 +281,16 @@ describe('begin / append / end', () => {
   it('aborts with lease_lost before the lease can lapse when a renew never settles', async () => {
     const r = reg(L);
     const s = sid();
+    const lastOk = trackRenewals(r);
     const turn = await r.begin(s);
     let abortedAt = 0;
     turn.signal.addEventListener('abort', () => (abortedAt = Date.now()));
+    await sleep(L.renewMs * 2.5);
     // A blackholed Redis: the socket stays open, the eval never answers, its catch never runs.
-    const hungAt = Date.now();
-    vi.spyOn(r, 'renew').mockReturnValue(new Promise(() => {}));
+    stall = true;
     await expect.poll(() => turn.abortReason, { timeout: 2000 }).toBe('lease_lost');
-    expect(abortedAt - hungAt).toBeLessThan(L.leaseMs);
+    expect(renewalsOk).toBeGreaterThan(0);
+    expect(abortedAt - lastOk()).toBeLessThan(L.leaseMs);
     await turn.end(aborted(s));
   });
 });
@@ -302,5 +389,55 @@ describe('abortAll', () => {
       abortReason: 'restarting',
       errorMessage: 'harness restarting',
     });
+  });
+});
+
+describe('bounded calls', () => {
+  it('withTimeout passes a settled value through and turns a hang into unavailable', async () => {
+    expect(await withTimeout(Promise.resolve(7), 50)).toBe(7);
+    await expect(withTimeout(Promise.reject(new Error('x')), 50)).rejects.toThrow('x');
+    const t0 = Date.now();
+    await expect(withTimeout(new Promise(() => {}), 50)).rejects.toMatchObject({
+      name: 'TurnRegistryUnavailableError',
+    });
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('a bounded begin against a hung Redis fails within the bound', async () => {
+    const r = reg();
+    const inner = r as unknown as { client: RedisClientType };
+    await (await r.begin(sid())).end(done(sid())); // connected and subscribed: only the hang is timed
+    const spy = vi.spyOn(inner.client, 'eval').mockReturnValue(new Promise(() => {}));
+    const t0 = Date.now();
+    await expect(r.begin(sid(), { timeoutMs: 100 })).rejects.toMatchObject({
+      name: 'TurnRegistryUnavailableError',
+    });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    spy.mockRestore();
+  });
+
+  it('a begin that lands after its bound ends the orphaned turn rather than holding the lease', async () => {
+    const r = reg();
+    const inner = r as unknown as { client: RedisClientType; live: Map<string, unknown> };
+    await (await r.begin(sid())).end(done(sid()));
+    const real = inner.client.eval.bind(inner.client);
+    const spy = vi.spyOn(inner.client, 'eval').mockImplementation((async (
+      ...a: Parameters<typeof real>
+    ) => {
+      if (a[0] === BEGIN_LUA) await sleep(200);
+      return real(...a);
+    }) as typeof real);
+    const s = sid();
+    await expect(r.begin(s, { timeoutMs: 50 })).rejects.toMatchObject({
+      name: 'TurnRegistryUnavailableError',
+    });
+    await expect.poll(() => redis.get(lastKey(s)), { timeout: 2000 }).not.toBeNull();
+    const turnId = (await redis.get(lastKey(s)))!;
+    await expect.poll(() => redis.exists(termKey(s, turnId)), { timeout: 2000 }).toBe(1);
+    expect(await redis.get(activeKey(s))).toBeNull();
+    expect(inner.live.size).toBe(0);
+    const rows = (await redis.xRange(eventsKey(s, turnId), '-', '+')) ?? [];
+    expect(JSON.parse(rows.at(-1)!.message.f)).toMatchObject({ type: 'error', sessionId: s });
+    spy.mockRestore();
   });
 });

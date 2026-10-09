@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   activeKey,
   eventsKey,
@@ -16,8 +16,12 @@ const T = { leaseMs: 300, renewMs: 100, detachedMaxMs: 60_000, logTtlS: 60, maxL
 const redis = createClient({ url: URL });
 await redis.connect();
 const regs: TurnRegistry[] = [];
-const reg = () => {
-  const r = new TurnRegistry({ url: URL, ownerId: `a-${regs.length}`, timings: T });
+const reg = (timings: Partial<typeof T> = {}) => {
+  const r = new TurnRegistry({
+    url: URL,
+    ownerId: `a-${regs.length}`,
+    timings: { ...T, ...timings },
+  });
   regs.push(r);
   return r;
 };
@@ -92,15 +96,25 @@ describe('attach', () => {
   });
 
   it('marks a replay truncated when the cursor was trimmed away', async () => {
-    const owner = reg();
+    // A tiny maxLen: MAXLEN ~ trims whole stream nodes (100 entries by default), so 300 appends
+    // really drop the oldest ones, the cursor's entry among them.
+    const owner = reg({ maxLen: 10 });
     const s = sid();
     const turn = await owner.begin(s);
-    await turn.append({ type: 'text', delta: 'a' });
+    const cursor = await turn.append({ type: 'text', delta: 'first' });
+    for (let i = 0; i < 300; i++) await turn.append({ type: 'text', delta: String(i) });
     await turn.end(done(s));
-    // A cursor older than every retained entry, in this turn.
-    const got = await collect(reg().attach(s, `${turn.turnId}:0-1`));
+    const key = eventsKey(s, turn.turnId);
+    const entryId = parseEventId(cursor!)!.entryId;
+    expect(await redis.xRange(key, entryId, entryId)).toEqual([]); // really trimmed
+    const retained = await redis.xLen(key);
+    expect(retained).toBeLessThan(302);
+    const got = await collect(reg().attach(s, cursor));
     expect(got[0]!.frame).toMatchObject({ type: 'turn', truncated: true });
-    expect(types(got)).toEqual(['turn', 'text', 'done']);
+    expect(got[0]!.id).toBe(cursor);
+    expect(got.at(-1)!.frame).toEqual(done(s));
+    expect(got).toHaveLength(retained + 1); // every retained entry, behind the synthesized turn frame
+    expect(got.slice(1, -1).every((f) => f.frame.type === 'text')).toBe(true);
   });
 
   it('writes one synthetic terminal when the owner is gone, under concurrent attaches', async () => {
@@ -202,11 +216,36 @@ describe('attach', () => {
     await redis.del(activeKey(s));
     const got = await collect(reg().attach(s, undefined));
     expect(got.at(-1)!.frame).toMatchObject({ type: 'error', abortReason: 'owner_lost' });
-    const { id } = await turn.end(done(s));
+    const end = await turn.end(done(s));
     const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
     const terminals = rows.filter((r) => ['done', 'error'].includes(JSON.parse(r.message.f).type));
     expect(terminals).toHaveLength(1);
-    expect(id).toBe(got.at(-1)!.id); // the terminal already there
+    // end() reports the terminal actually logged, under its own id, not the caller's `done`.
+    expect(end.id).toBe(got.at(-1)!.id);
+    expect(end.frame).toEqual(got.at(-1)!.frame);
+  });
+
+  it('an owner whose lease lapsed and was replaced by owner_lost cannot append after it', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'half' });
+    // The owner lost Redis past its lease; an attach seals the log with owner_lost.
+    await redis.del(activeKey(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ abortReason: 'owner_lost' });
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // Its queued writes land on reconnect: refused, with no lease and, below, even with one.
+      expect(await turn.append({ type: 'text', delta: 'queued' })).toBeUndefined();
+      await redis.set(activeKey(s), JSON.stringify({ turnId: turn.turnId }), { PX: 5000 });
+      expect(await turn.append({ type: 'text', delta: 'queued' })).toBeUndefined();
+    } finally {
+      quiet.mockRestore();
+    }
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(JSON.parse(rows.at(-1)!.message.f)).toMatchObject({ abortReason: 'owner_lost' });
+    await turn.end(done(s));
   });
 
   it('a cursor past the tail of a running turn still follows it', async () => {

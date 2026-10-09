@@ -87,7 +87,10 @@ paths:
         connection does NOT abort the turn. A frame is written to the turn's log before it is
         sent, so an id a client holds always names a logged entry. If that log write fails,
         the frame is still sent, but without an `id:` line, and a later attach may not replay
-        it. A detached turn nobody watches is aborted
+        it. The same holds once the turn has lost its lease or its log already holds a
+        terminal: nothing is logged after the terminal. If an attach ended the turn with
+        `owner_lost` while its owner was cut off, that `owner_lost` frame (with its id) is
+        also the terminal the starting connection receives. A detached turn nobody watches is aborted
         after SH_TURN_DETACHED_MAX_S (default 1800), and its log is retained for
         SH_TURN_LOG_TTL_S (default 86400). A turn the harness ended itself carries the reason
         on its terminal `error` frame (`abortReason`). The lazy flush is unchanged: the
