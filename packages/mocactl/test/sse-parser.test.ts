@@ -49,6 +49,13 @@ describe('SseParser', () => {
     expect(p.push('event: text\ndata: x')).toEqual([]);
     expect(p.flush()).toEqual([{ event: 'text', data: 'x' }]);
   });
+
+  it('reads the id field', () => {
+    const p = new SseParser();
+    expect(p.push('id: t1:5-0\nevent: text\ndata: {"type":"text","delta":"x"}\n\n')).toEqual([
+      { event: 'text', data: '{"type":"text","delta":"x"}', id: 't1:5-0' },
+    ]);
+  });
 });
 
 describe('readSse', () => {

@@ -199,3 +199,83 @@ describe('HarnessClient.health', () => {
     expect(calls[0]).toMatchObject({ url: 'http://h/health', method: 'GET' });
   });
 });
+
+describe('detachable turns', () => {
+  const turn = { type: 'turn', turnId: 't1', sessionId: 's1' };
+  const done = { type: 'done', sessionId: 's1', stopReason: 'stop' };
+  const withIds = (frames: Array<{ type: string; [k: string]: unknown }>) =>
+    frames.map((f, i) => `id: t1:${i + 1}-0\nevent: ${f.type}\ndata: ${JSON.stringify(f)}\n\n`);
+
+  it('sends detachable and reports each frame id before yielding it', async () => {
+    let body: any;
+    const client = new HarnessClient('http://h', (async (_u: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return sseResponse(withIds([turn, done]));
+    }) as typeof fetch);
+    const seen: string[] = [];
+    const frames = [];
+    for await (const f of client.streamTurn({
+      sessionId: 's1',
+      prompt: 'p',
+      token: 'tok',
+      detachable: true,
+      onEventId: (id) => seen.push(`${id}<${frames.length}`),
+    }))
+      frames.push(f.type);
+    expect(body).toEqual({ sessionId: 's1', prompt: 'p', detachable: true });
+    expect(frames).toEqual(['turn', 'done']);
+    expect(seen).toEqual(['t1:1-0<0', 't1:2-0<1']);
+  });
+
+  it('attach GETs /v1/turn with Last-Event-ID and yields to the terminal', async () => {
+    let url = '';
+    let headers: Record<string, string> = {};
+    const client = new HarnessClient('http://h', (async (u: string, init: RequestInit) => {
+      url = u;
+      headers = init.headers as Record<string, string>;
+      return sseResponse(withIds([turn, { type: 'text', delta: 'x' }, done]));
+    }) as typeof fetch);
+    const types = [];
+    for await (const f of client.attach({ sessionId: 's1', token: 'tok', lastEventId: 't1:1-0' }))
+      types.push(f.type);
+    expect(url).toBe('http://h/v1/turn?sessionId=s1');
+    expect(headers['last-event-id']).toBe('t1:1-0');
+    expect(headers.authorization).toBe('Bearer tok');
+    expect(types).toEqual(['turn', 'text', 'done']);
+  });
+
+  it('attach maps any 404 to turn_not_found, JSON or bare', async () => {
+    for (const res of [
+      () => Response.json({ error: 'turn_not_found' }, { status: 404 }),
+      () => new Response(null, { status: 404 }),
+    ]) {
+      const client = new HarnessClient('http://h', (async () => res()) as typeof fetch);
+      await expect(
+        (async () => {
+          for await (const _ of client.attach({ sessionId: 's1', token: 't' }));
+        })(),
+      ).rejects.toMatchObject({ code: 'turn_not_found', status: 404 });
+    }
+  });
+
+  it('cancelTurn POSTs the turn id and resolves on 202', async () => {
+    let req: { url: string; body: any } | undefined;
+    const client = new HarnessClient('http://h', (async (u: string, init: RequestInit) => {
+      req = { url: u, body: JSON.parse(String(init.body)) };
+      return Response.json({ turnId: 't1' }, { status: 202 });
+    }) as typeof fetch);
+    await client.cancelTurn({ sessionId: 's1', turnId: 't1', token: 'tok' });
+    expect(req).toEqual({
+      url: 'http://h/v1/turn/cancel',
+      body: { sessionId: 's1', turnId: 't1' },
+    });
+  });
+
+  it('cancelTurn throws the harness error otherwise', async () => {
+    const client = new HarnessClient('http://h', (async () =>
+      Response.json({ error: 'turn_mismatch', turnId: 't2' }, { status: 409 })) as typeof fetch);
+    await expect(client.cancelTurn({ sessionId: 's1', token: 't' })).rejects.toMatchObject({
+      code: 'turn_mismatch',
+    });
+  });
+});

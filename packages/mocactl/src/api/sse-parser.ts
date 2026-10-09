@@ -3,6 +3,7 @@ import { KNOWN_FRAME_TYPES, type TurnFrame } from './frames.js';
 export interface SseEvent {
   event: string;
   data: string;
+  id?: string;
 }
 
 export class SseParser {
@@ -39,6 +40,7 @@ export class SseParser {
 function parseBlock(block: string): SseEvent | undefined {
   let event = 'message';
   const data: string[] = [];
+  let id: string | undefined;
   for (const line of block.split('\n')) {
     if (line === '' || line.startsWith(':')) continue;
     const colon = line.indexOf(':');
@@ -47,8 +49,11 @@ function parseBlock(block: string): SseEvent | undefined {
     if (value.startsWith(' ')) value = value.slice(1);
     if (field === 'event') event = value;
     else if (field === 'data') data.push(value);
+    else if (field === 'id') id = value;
   }
-  return data.length === 0 ? undefined : { event, data: data.join('\n') };
+  return data.length === 0
+    ? undefined
+    : { event, data: data.join('\n'), ...(id !== undefined ? { id } : {}) };
 }
 
 export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {

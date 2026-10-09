@@ -126,6 +126,24 @@ export interface StreamTurnArgs {
   prompt: string;
   token: string;
   signal?: AbortSignal;
+  /** Ask for a turn that outlives this connection (turn-reattach spec §4.1). */
+  detachable?: boolean;
+  /** Called with each frame's SSE id just before the frame is yielded. */
+  onEventId?: (id: string) => void;
+}
+
+export interface AttachArgs {
+  sessionId: string;
+  token: string;
+  lastEventId?: string;
+  signal?: AbortSignal;
+  onEventId?: (id: string) => void;
+}
+
+export interface CancelTurnArgs {
+  sessionId: string;
+  turnId?: string;
+  token: string;
 }
 
 export interface HarnessApi {
@@ -134,4 +152,7 @@ export interface HarnessApi {
   health(): Promise<void>;
   streamTurn(args: StreamTurnArgs): AsyncGenerator<TurnFrame>;
   probeTrust(token: string, sessionId: string): Promise<'trusted' | 'untrusted'>;
+  /** Replays the session's current turn after lastEventId, then follows it (spec §4.2). */
+  attach(args: AttachArgs): AsyncGenerator<TurnFrame>;
+  cancelTurn(args: CancelTurnArgs): Promise<void>;
 }
