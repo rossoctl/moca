@@ -32,9 +32,17 @@ export const LOST_TURN_MESSAGE =
 export const CANCEL_TIMEOUT_MS = 5000;
 /**
  * Esc on a detachable turn whose first frame has not come yet: how long the cancel waits for the
- * `turn` frame (and its turnId) before it falls back to aborting the request.
+ * `turn` frame (and its turnId) before it aborts the request and cancels the session's running
+ * turn by session (no turnId).
  */
 export const PENDING_CANCEL_MS = 2000;
+/**
+ * That turnId-less cancel can land before the server's `begin()`, which answers turn_not_found:
+ * it is retried this many times in all, this far apart (3 tries over about 3 s). On a harness
+ * without the route every try answers 404 and the tries just run out.
+ */
+export const BLIND_CANCEL_TRIES = 3;
+export const BLIND_CANCEL_RETRY_MS = 1500;
 const MAX_CONFLICTS = 3;
 const CANCEL_FAILED_NOTICE = "couldn't cancel — the turn keeps running";
 
@@ -127,6 +135,11 @@ export class ActiveSession {
   };
   /** The running attach job is a 409's, following a turn this client did not start. */
   private conflict?: { resend: PromptJob };
+  /**
+   * The turnId-less cancel after a pending Esc's deadline, until it settles. The queue waits for
+   * it: a prompt sent meanwhile would start the very turn a late try could cancel.
+   */
+  private blindCancel?: Promise<boolean>;
 
   constructor(
     private readonly deps: SessionDeps,
@@ -200,8 +213,11 @@ export class ActiveSession {
 
   /**
    * Esc before the first frame: keep reading. A `turn` frame names the turn to cancel on the server;
-   * any other frame (a harness without detachable turns), or no frame within PENDING_CANCEL_MS,
-   * means aborting the request, as Esc always did. Resolves as the cancel does.
+   * any other frame (a harness without detachable turns) means aborting the request, as Esc always
+   * did. With no frame within PENDING_CANCEL_MS the request is aborted too, but the server may
+   * already hold the turn (it writes the `turn` frame lazily), and closing a detachable request
+   * detaches rather than cancels it: so the session's running turn is also cancelled on the server
+   * by session (see `cancelBySession`). Resolves as the cancel does.
    */
   private deferCancel(): Promise<boolean> {
     if (this.deferred) return this.deferred.promise;
@@ -211,7 +227,11 @@ export class ActiveSession {
       if (this.deferred?.promise !== promise) return;
       this.deferred = undefined;
       this.controller?.abort();
-      resolve(true);
+      const blind = this.cancelBySession().finally(() => {
+        if (this.blindCancel === blind) this.blindCancel = undefined;
+      });
+      this.blindCancel = blind;
+      void blind.then(resolve);
     }, this.deps.pendingCancelMs ?? PENDING_CANCEL_MS);
     this.deferred = { promise, resolve, timer };
     return promise;
@@ -234,6 +254,39 @@ export class ActiveSession {
   }
 
   private async sendCancel(turnId: string): Promise<boolean> {
+    try {
+      await this.cancelOnce(turnId);
+      return true;
+    } catch {
+      this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
+      return false;
+    }
+  }
+
+  /**
+   * Cancels whatever turn the session runs, before this client learned its turnId. True once the
+   * server accepted it (202). turn_not_found is retried: the cancel can land before `begin()`.
+   * Accepted risk: if this request never reached `begin()` and another device started a turn in
+   * these few seconds, that is the turn cancelled.
+   */
+  private async cancelBySession(): Promise<boolean> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.cancelOnce(undefined);
+        return true;
+      } catch (err) {
+        const notFound = err instanceof ApiError && err.code === 'turn_not_found';
+        if (!notFound || attempt >= BLIND_CANCEL_TRIES) {
+          this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
+          return false;
+        }
+      }
+      await this.deps.sleep(BLIND_CANCEL_RETRY_MS);
+    }
+  }
+
+  /** One server-side cancel, bounded by cancelTimeoutMs; throws when it was not accepted. */
+  private async cancelOnce(turnId: string | undefined): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = new AbortController();
     const timeout = new Promise<never>((_, reject) => {
@@ -246,17 +299,13 @@ export class ActiveSession {
       await this.ensureToken();
       await this.deps.harness.cancelTurn({
         sessionId: this.sessionId,
-        turnId,
+        ...(turnId !== undefined ? { turnId } : {}),
         token: this.token.token,
         signal: abort.signal,
       });
     };
     try {
       await Promise.race([call(), timeout]);
-      return true;
-    } catch {
-      this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
-      return false;
     } finally {
       clearTimeout(timer);
     }
@@ -299,6 +348,11 @@ export class ActiveSession {
     this.running = true;
     try {
       while (this.queue.length > 0) {
+        // A turnId-less cancel still trying would cancel the next job's turn: let it settle first.
+        if (this.blindCancel) {
+          await this.blindCancel;
+          continue; // the queue may have changed meanwhile (a clearQueue)
+        }
         const job = this.queue.shift()!;
         this.emit({ kind: 'queue', size: this.queued });
         const cancelled =

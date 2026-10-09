@@ -10,6 +10,8 @@ import type { TurnFrame } from '../src/api/frames.js';
 import { HarnessClient } from '../src/api/harness.js';
 import {
   ActiveSession,
+  BLIND_CANCEL_RETRY_MS,
+  BLIND_CANCEL_TRIES,
   LOST_TURN_MESSAGE,
   PENDING_CANCEL_MS,
   type SessionDeps,
@@ -198,17 +200,128 @@ describe('I2: Esc before the turn frame', () => {
     expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
   });
 
-  it('Esc with no frame for the deadline: the fetch is aborted, not before', async () => {
+  // #471 review: the server may hold the turn's lease before it writes the turn frame, and closing a
+  // detachable request detaches the turn rather than cancelling it. So the deadline aborts the
+  // fetch AND cancels the session's running turn on the server, by session (no turnId yet).
+  it('Esc with no frame for the deadline: the fetch is aborted, not before, then a turnId-less cancel', async () => {
     const { session: s, harness, ends } = faked([{ hang: true }], { pendingCancelMs: 60 });
     s.submit('go');
     await tick();
     s.cancel();
     await new Promise((r) => setTimeout(r, 20));
     expect(harness.turns[0]!.signal!.aborted).toBe(false);
+    expect(harness.cancels).toEqual([]);
     await s.idle();
     expect(harness.turns[0]!.signal!.aborted).toBe(true);
-    expect(harness.cancels).toEqual([]);
+    expect(harness.cancels).toHaveLength(1);
+    expect(harness.cancels[0]).toMatchObject({ sessionId: 's1', token: 'st' });
+    expect('turnId' in harness.cancels[0]! && harness.cancels[0]!.turnId).toBeFalsy();
     expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  const notFound = () => new ApiError('harness', 404, 'turn_not_found');
+
+  it('the turnId-less cancel retries turn_not_found (it can land before begin), then resolves true', async () => {
+    const slept: number[] = [];
+    const {
+      session: s,
+      harness,
+      events,
+    } = faked([{ hang: true }], {
+      pendingCancelMs: 10,
+      sleep: async (ms) => void slept.push(ms),
+    });
+    let calls = 0;
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      if (++calls < 3) throw notFound();
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(3);
+    expect(slept).toEqual([BLIND_CANCEL_RETRY_MS, BLIND_CANCEL_RETRY_MS]);
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
+  });
+
+  it("when every try finds no turn (an old or Knative harness), it reports it couldn't cancel", async () => {
+    const { session: s, harness, events } = faked([{ hang: true }], { pendingCancelMs: 10 });
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      throw notFound();
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(false);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(BLIND_CANCEL_TRIES);
+    expect(events).toContainEqual({
+      kind: 'notice',
+      text: "couldn't cancel — the turn keeps running",
+      tone: 'error',
+    });
+  });
+
+  it('3 tries over about 3 s', () => {
+    expect(BLIND_CANCEL_TRIES).toBe(3);
+    expect((BLIND_CANCEL_TRIES - 1) * BLIND_CANCEL_RETRY_MS).toBe(3000);
+  });
+
+  it('a cancel failure other than turn_not_found is not retried', async () => {
+    const { session: s, harness } = faked([{ hang: true }], { pendingCancelMs: 10 });
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      throw new ApiError('harness', 0, 'network_error', 'down');
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(false);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(1);
+  });
+
+  it('the next queued prompt waits for the turnId-less cancel to settle, so it cannot hit it', async () => {
+    const g = gate();
+    const { session: s, harness } = faked([{ hang: true }, { frames: [doneFrame()] }], {
+      pendingCancelMs: 10,
+    });
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      await g.wait();
+    };
+    s.submit('a');
+    s.submit('b');
+    await tick();
+    s.cancel();
+    await expect.poll(() => harness.cancels.length).toBe(1);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a']);
+    g.open();
+    await s.idle();
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a', 'b']);
+  });
+
+  it('a prompt submitted after the cancelled turn ended also waits for that cancel', async () => {
+    const g = gate();
+    const { session: s, harness } = faked([{ hang: true }, { frames: [doneFrame()] }], {
+      pendingCancelMs: 10,
+    });
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      await g.wait();
+    };
+    s.submit('a');
+    await tick();
+    s.cancel();
+    await expect.poll(() => harness.cancels.length).toBe(1);
+    await s.idle(); // 'a' ended cancelled; its cancel is still out
+    s.submit('b');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a']);
+    g.open();
+    await s.idle();
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a', 'b']);
   });
 
   it('waits 2 s by default', () => {
