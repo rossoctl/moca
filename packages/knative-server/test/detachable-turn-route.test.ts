@@ -10,7 +10,7 @@ vi.mock('@moca/harness/run-turn', () => ({
   executeTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
 }));
 
-import { resetTurnRegistryForTests, startServer } from '../src/server.js';
+import { resetTurnRegistryForTests, startServer, turnRegistry } from '../src/server.js';
 import { executeTurn, runTurn } from '@moca/harness/run-turn';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -182,6 +182,10 @@ describe('POST /v1/turn detachable', () => {
       expect(res.status).toBe(409);
       expect(JSON.parse(res.raw)).toMatchObject({ error: 'turn_in_progress' });
     }
+    // An anonymous caller holds no token for the session: refused, without the running turn's id.
+    const anon = await sse({ sessionId, prompt: 'q' }, {});
+    expect(anon.status).toBe(409);
+    expect(JSON.parse(anon.raw)).toEqual({ error: 'turn_in_progress' });
     release();
     await first;
   });
@@ -219,5 +223,36 @@ describe('POST /v1/turn detachable', () => {
     } as any);
     const anon = await sse({ sessionId, prompt: 'p', detachable: true }, {});
     expect(anon.raw).not.toContain('event: turn');
+    // Authenticated, but not SSE: the sync JSON path, and no lease taken while it runs.
+    let leaseDuringTurn: string | null = 'unset';
+    vi.mocked(executeTurn).mockImplementationOnce(async () => {
+      leaseDuringTurn = await redis.get(activeKey(sessionId));
+      return { sessionId, response: 'x', stopReason: 'stop' } as any;
+    });
+    const sync = await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}`, Accept: 'application/json' },
+    );
+    expect(sync.status).toBe(200);
+    expect(sync.raw).not.toContain('event: turn');
+    expect(JSON.parse(sync.raw)).toMatchObject({ sessionId, response: 'x' });
+    expect(leaseDuringTurn).toBeNull();
+  });
+
+  it('a Redis that never answers the one-live-turn check does not stall a non-detachable turn', async () => {
+    vi.spyOn(turnRegistry(), 'peek').mockReturnValue(new Promise(() => {}));
+    vi.mocked(executeTurn).mockResolvedValueOnce({
+      sessionId,
+      response: 'x',
+      stopReason: 'stop',
+    } as any);
+    const t0 = Date.now();
+    const res = await sse(
+      { sessionId, prompt: 'p' },
+      { Authorization: `Bearer ${mint(sessionId)}`, Accept: 'application/json' },
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.raw)).toMatchObject({ response: 'x' });
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 });

@@ -119,6 +119,25 @@ export async function abortDetachedTurns(reason: 'restarting'): Promise<void> {
   await registry?.abortAll(reason);
 }
 
+// A slow Redis (reconnecting, offline queue) must not stall non-detachable turns: fail open past this.
+const PEEK_TIMEOUT_MS = 250;
+
+/** The session's running detachable turn, or null when there is none or Redis cannot answer in time. */
+async function peekRunningTurn(sessionId: string): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((r) => (timer = setTimeout(() => r(null), PEEK_TIMEOUT_MS)));
+  try {
+    return await Promise.race([
+      turnRegistry()
+        .peek(sessionId)
+        .catch(() => null),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function retryHeaders(): Record<string, string> {
   return { ...JSON_HEADERS, 'Retry-After': String(saturationWaitConfig().retryAfterS) };
 }
@@ -208,13 +227,16 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   const detachable = detachEnabled() && auth !== null && wantsStream && parsed.detachable === true;
   const lockedId = auth?.sessionId ?? sessionId;
   if (detachEnabled() && !detachable && lockedId) {
-    const running = await turnRegistry()
-      .peek(lockedId)
-      .catch(() => null);
+    const running = await peekRunningTurn(lockedId);
     if (running) {
+      // An anonymous caller holds no token for the session: do not hand it the turn id.
       res
         .writeHead(409, JSON_HEADERS)
-        .end(JSON.stringify({ error: 'turn_in_progress', turnId: running }));
+        .end(
+          JSON.stringify(
+            auth ? { error: 'turn_in_progress', turnId: running } : { error: 'turn_in_progress' },
+          ),
+        );
       return;
     }
   }
@@ -506,6 +528,8 @@ async function handleDetachableTurn(
     writeFrame(frame, id);
   };
   res.on('close', () => turn.watched(false));
+  // A client that left during begin() fired 'close' before the listener existed.
+  if (res.destroyed || res.writableEnded) turn.watched(false);
   // node-redis answers in command order on one connection; the chain also keeps the terminal
   // behind every frame logged before it.
   let chain = Promise.resolve();
