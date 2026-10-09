@@ -606,6 +606,93 @@ describe('detachable turns', () => {
     expect(harness.turns.map((t) => t.prompt)).toEqual(['mine', 'mine']);
   });
 
+  it('a non-detachable session fails a 409 turn_in_progress turn: no attach, no cancel', async () => {
+    const busy = new ApiError('harness', 409, 'turn_in_progress');
+    const { session, harness, ends } = await started([{ error: busy }]);
+    session.submit('mine');
+    await session.idle();
+    session.cancel();
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'error', error: busy }]);
+    expect(harness.attaches).toEqual([]);
+    expect(harness.cancels).toEqual([]);
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['mine']);
+  });
+
+  it.each([
+    ['ends', undefined],
+    ['errors', new ApiError('harness', 0, 'network_error', 'x')],
+  ])(
+    'an attach job whose stream %s after frames, then re-attaches into turn_not_found, ends with one error turn-end',
+    async (_how, error) => {
+      const { session, events, ends } = await started([], { detachable: true }, [
+        { frames: [turnF, text('a')], ids: ['t1:1-0', 't1:2-0'], error },
+        // the re-attach: the fake's empty attach queue answers turn_not_found
+      ]);
+      session.attachExisting({ expectOpen: true });
+      await session.idle();
+      expect(ends()).toMatchObject([{ outcome: 'error', error: { code: 'turn_not_found' } }]);
+      expect(events.filter((e) => e.kind === 'attach-none')).toEqual([]);
+    },
+  );
+
+  it('an attach job remints once on a rejected token and retries', async () => {
+    const { session, cp, harness, ends } = await started([], { detachable: true }, [
+      { error: new ApiError('harness', 401, 'token_expired') },
+      { frames: [turnF, doneFrame()], ids: ['t1:1-0', 't1:2-0'] },
+    ]);
+    session.attachExisting({ expectOpen: true });
+    await session.idle();
+    expect(cp.calls.filter((c) => c === 'mintSessionToken')).toHaveLength(2); // resume + remint
+    expect(harness.attaches).toHaveLength(2);
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'done' }]);
+  });
+
+  it('a re-attach remints once on a rejected token and retries', async () => {
+    const { session, cp, harness, ends, slept } = await started(
+      [{ frames: [turnF], ids: ['t1:1-0'] }],
+      { detachable: true },
+      [
+        { error: new ApiError('harness', 401, 'token_invalid') },
+        { frames: [turnF, doneFrame()], ids: ['t1:1-0', 't1:2-0'] },
+      ],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(cp.calls.filter((c) => c === 'mintSessionToken')).toHaveLength(2);
+    expect(harness.attaches).toHaveLength(2);
+    expect(slept).toEqual([500]); // the remint is not a re-attach try
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'done' }]);
+  });
+
+  it('a double Esc sends one server-side cancel, and both share its answer', async () => {
+    const { session, harness } = await started([{ frames: [turnF], ids: ['t1:1-0'], hang: true }], {
+      detachable: true,
+    });
+    let answer!: () => void;
+    let calls = 0;
+    harness.cancelTurn = () => {
+      calls++;
+      return new Promise<void>((r) => (answer = r));
+    };
+    session.submit('go');
+    await tick();
+    const first = session.cancelRemote();
+    session.cancel();
+    const second = session.cancelRemote();
+    await tick();
+    expect(calls).toBe(1);
+    answer();
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    // Once settled, a later cancel is sent afresh.
+    void session.cancelRemote();
+    await tick();
+    expect(calls).toBe(2);
+    answer();
+    session.detach();
+    await session.idle();
+  });
+
   it('detach stops reading without cancelling on the server', async () => {
     const { session, harness } = await started([{ frames: [turnF], ids: ['t1:1-0'], hang: true }], {
       detachable: true,

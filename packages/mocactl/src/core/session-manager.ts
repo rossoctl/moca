@@ -65,6 +65,14 @@ type Job =
 /** How one stream ended: on a terminal frame (a cancel's own, or any other), or without one. */
 type StreamEnd = 'terminal' | 'cancelled' | 'ended';
 
+/** Where one job's streams stand: the last frame id seen, and how many frames were consumed. */
+type Cursor = { last?: string; frames: number };
+
+const isTokenRejection = (err: unknown): err is ApiError =>
+  err instanceof ApiError &&
+  err.source === 'harness' &&
+  (TOKEN_CODES.has(err.code) || err.code === 'session_mismatch');
+
 const isDropped = (err: unknown): boolean =>
   err instanceof ApiError &&
   err.source === 'harness' &&
@@ -80,6 +88,8 @@ export class ActiveSession {
   /** The running turn, once its `turn` frame named it; only detachable turns have one. */
   private live?: { turnId: string; lastEventId?: string };
   private detaching = false;
+  /** The server-side cancel in flight, shared by every cancel until it settles. */
+  private cancelling?: Promise<boolean>;
 
   constructor(
     private readonly deps: SessionDeps,
@@ -126,10 +136,22 @@ export class ActiveSession {
     else this.controller?.abort();
   }
 
-  /** Asks the server to cancel the running detachable turn; false (and a notice) if it could not. */
-  async cancelRemote(): Promise<boolean> {
+  /**
+   * Asks the server to cancel the running detachable turn; false (and a notice) if it could not.
+   * A second call while one is in flight (a double Esc) shares it rather than sending another.
+   */
+  cancelRemote(): Promise<boolean> {
+    if (this.cancelling) return this.cancelling;
     const live = this.live;
-    if (!live) return false;
+    if (!live) return Promise.resolve(false);
+    const pending = this.sendCancel(live.turnId).finally(() => {
+      if (this.cancelling === pending) this.cancelling = undefined;
+    });
+    this.cancelling = pending;
+    return pending;
+  }
+
+  private async sendCancel(turnId: string): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -141,7 +163,7 @@ export class ActiveSession {
       await this.ensureToken();
       await this.deps.harness.cancelTurn({
         sessionId: this.sessionId,
-        turnId: live.turnId,
+        turnId,
         token: this.token.token,
       });
     };
@@ -156,7 +178,11 @@ export class ActiveSession {
     }
   }
 
-  /** Quit or switch with "keep it running" (spec §6.3): stop reading; the server turn goes on. */
+  /**
+   * Quit or switch with "keep it running" (spec §6.3): stop reading; the server turn goes on.
+   * Callers should `clearQueue()` first: a prompt still queued is sent at once, meets the turn
+   * just detached from (`409 turn_in_progress`), and attaches straight back to it.
+   */
   detach(): void {
     if (!this.controller) return;
     this.detaching = true;
@@ -236,11 +262,9 @@ export class ActiveSession {
   }
 
   /** Feeds one stream's frames on, recording the turn and the last frame id. */
-  private async consume(
-    frames: AsyncGenerator<TurnFrame>,
-    ids: { last?: string },
-  ): Promise<StreamEnd> {
+  private async consume(frames: AsyncGenerator<TurnFrame>, ids: Cursor): Promise<StreamEnd> {
     for await (const frame of frames) {
+      ids.frames++;
       if (frame.type === 'turn') this.live = { turnId: frame.turnId, lastEventId: ids.last };
       else if (this.live && ids.last) this.live.lastEventId = ids.last;
       this.transcriptSafe(() =>
@@ -269,7 +293,7 @@ export class ActiveSession {
 
   private attachStream(
     controller: AbortController,
-    ids: { last?: string },
+    ids: Cursor,
     lastEventId?: string,
   ): AsyncGenerator<TurnFrame> {
     return this.deps.harness.attach({
@@ -282,19 +306,39 @@ export class ActiveSession {
   }
 
   /**
+   * One attach call, read to its end. A rejected token is reminted once and the call retried, as
+   * streamTurn does (clock skew passes ensureToken yet fails at the harness).
+   */
+  private async attachOnce(
+    controller: AbortController,
+    ids: Cursor,
+    lastEventId?: string,
+  ): Promise<StreamEnd> {
+    await this.ensureToken();
+    let reminted = false;
+    for (;;) {
+      const before = ids.frames;
+      try {
+        return await this.consume(this.attachStream(controller, ids, lastEventId), ids);
+      } catch (err) {
+        if (!isTokenRejection(err) || ids.frames !== before || controller.signal.aborted) throw err;
+        if (reminted) throw err.code === 'session_mismatch' ? err : new HarnessUntrustedError();
+        reminted = true;
+        this.token = await this.deps.cp.mintSessionToken(this.sessionId);
+      }
+    }
+  }
+
+  /**
    * A detachable turn's stream dropped: re-attach with the last id (spec §6.5). Resolves true
    * when the turn ended cancelled.
    */
-  private async reattach(controller: AbortController, ids: { last?: string }): Promise<boolean> {
+  private async reattach(controller: AbortController, ids: Cursor): Promise<boolean> {
     for (let attempt = 0; attempt < REATTACH_TRIES; attempt++) {
       await this.deps.sleep(REATTACH_BASE_MS * 2 ** attempt, controller.signal);
       if (controller.signal.aborted) throw new TurnCancelledError();
-      await this.ensureToken();
       try {
-        const end = await this.consume(
-          this.attachStream(controller, ids, this.live?.lastEventId),
-          ids,
-        );
+        const end = await this.attachOnce(controller, ids, this.live?.lastEventId);
         if (end !== 'ended') return end === 'cancelled';
       } catch (err) {
         if (controller.signal.aborted || err instanceof TurnCancelledError)
@@ -316,7 +360,7 @@ export class ActiveSession {
     this.emit({ kind: 'turn-start', prompt });
     let reminted = false;
     let streamed = false;
-    const ids: { last?: string } = {};
+    const ids: Cursor = { frames: 0 };
     try {
       for (;;) {
         await this.ensureToken();
@@ -351,8 +395,13 @@ export class ActiveSession {
           if (this.live && isDropped(err)) return await this.reattach(controller, ids);
           // Once frames have flowed the status code is spent; never re-send a half-run turn.
           if (!(err instanceof ApiError) || err.source !== 'harness' || streamed) throw err;
-          if (err.code === 'turn_in_progress' && job.conflicts < MAX_CONFLICTS) {
+          if (
+            this.deps.detachable === true &&
+            err.code === 'turn_in_progress' &&
+            job.conflicts < MAX_CONFLICTS
+          ) {
             // Another device's turn holds the session: show it, then send this prompt (spec §6.5).
+            // Only a detachable session attaches: headless fails the turn, as it always has.
             this.queue.unshift(
               { kind: 'attach', expectOpen: false },
               { ...job, resend: true, conflicts: job.conflicts + 1 },
@@ -397,17 +446,18 @@ export class ActiveSession {
   private async runAttach(job: Extract<Job, { kind: 'attach' }>): Promise<boolean> {
     const controller = new AbortController();
     this.controller = controller;
-    const ids: { last?: string } = {};
+    const ids: Cursor = { frames: 0 };
     this.emit({ kind: 'attach-start' });
     try {
-      await this.ensureToken();
-      const end = await this.consume(this.attachStream(controller, ids, job.lastEventId), ids);
+      const end = await this.attachOnce(controller, ids, job.lastEventId);
       if (end !== 'ended') return end === 'cancelled';
       if (this.live) return await this.reattach(controller, ids);
       // An attach stream always ends on a terminal; one that does not has lost the turn.
       throw new ApiError('harness', 0, 'stream_truncated', LOST_TURN_MESSAGE);
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'turn_not_found') {
+      // Nothing to attach is only "none" before any frame showed: a re-attach that finds the turn
+      // gone after its frames rendered has lost it, and ends as an error like any other.
+      if (err instanceof ApiError && err.code === 'turn_not_found' && ids.frames === 0) {
         this.emit({ kind: 'attach-none', missed: job.expectOpen });
         return false;
       }
