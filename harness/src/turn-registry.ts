@@ -460,13 +460,27 @@ export class TurnRegistry {
     const after = parsed?.turnId === turnId ? parsed.entryId : undefined;
     const truncated = after !== undefined && compareEntryIds(after, first[0]!.id) < 0;
     let lastId = after !== undefined && !truncated ? after : '0-0';
+    // A cursor at or past the tail: on a finished turn there is nothing left to send (§4.2: it
+    // "ends at once"); on a running one, XREAD after an id beyond the tail would never match.
+    let ended = false;
+    if (after !== undefined && !truncated) {
+      const tail = ((await this.client.xRevRange(key, '+', '-', { COUNT: 1 })) ?? [])[0];
+      if (tail && compareEntryIds(after, tail.id) >= 0) {
+        const t = (JSON.parse(tail.message.f) as TurnStreamFrame).type;
+        if (t === 'done' || t === 'error') ended = true;
+        else lastId = tail.id;
+      }
+    }
     const start: TurnStreamFrame = {
       type: 'turn',
       turnId,
       sessionId,
       ...(truncated ? { truncated: true } : {}),
     };
-    yield { id: eventId(turnId, first[0]!.id), frame: start };
+    // A same-turn cursor stays the turn frame's id, so a reconnect right after it resumes where the
+    // client was rather than replaying (or, after a trim, skipping) what follows.
+    yield { id: eventId(turnId, after ?? first[0]!.id), frame: start };
+    if (ended) return;
 
     const reader = this.client.duplicate() as RedisClientType;
     swallowRedisErrors(reader, 'turn attach reader');
@@ -477,7 +491,7 @@ export class TurnRegistry {
     };
     signal?.addEventListener('abort', stop, { once: true });
     const blockMs = Math.max(10, Math.floor(this.timings.renewMs / 2));
-    let lastCheck = 0;
+    let lastCheck = -Infinity;
     try {
       if (signal?.aborted) return;
       await reader.connect();

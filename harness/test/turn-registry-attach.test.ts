@@ -154,11 +154,13 @@ describe('attach', () => {
     await expect(pending).resolves.toMatchObject({ done: true });
     expect(Date.now() - t0).toBeLessThan(200);
   });
+
   it('close ends a following attach at once and quietly', async () => {
     const owner = reg();
     const s = sid();
     await owner.begin(s);
     const r = new TurnRegistry({ url: URL, ownerId: 'closer', timings: { ...T, renewMs: 2000 } });
+    regs.push(r);
     const gen = r.attach(s, undefined);
     await gen.next(); // the turn frame
     const pending = gen.next();
@@ -167,5 +169,45 @@ describe('attach', () => {
     await r.close();
     await expect(pending).resolves.toMatchObject({ done: true });
     expect(Date.now() - t0).toBeLessThan(200); // at once, not when the 1 s block times out
+  });
+  it('a cursor at the terminal ends at once with only the turn frame', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'a' });
+    const { id } = await turn.end(done(s));
+    const t0 = Date.now();
+    const got = await collect(reg().attach(s, id!));
+    expect(types(got)).toEqual(['turn']);
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it('a cursor past the tail of a running turn still follows it', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const gen = reg().attach(s, `${turn.turnId}:99999999999999-0`);
+    const got: LoggedFrame[] = [];
+    const reading = (async () => {
+      for await (const f of gen) got.push(f);
+    })();
+    await expect.poll(() => got.length).toBe(1);
+    await turn.append({ type: 'text', delta: 'live' });
+    await turn.end(done(s));
+    await reading;
+    expect(types(got)).toEqual(['turn', 'text', 'done']);
+  });
+
+  it('the turn frame carries a same-turn cursor as its id', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const first = await turn.append({ type: 'text', delta: 'a' });
+    await turn.append({ type: 'text', delta: 'b' });
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, first));
+    expect(got[0]!.id).toBe(first);
+    const trimmed = await collect(reg().attach(s, `${turn.turnId}:0-1`));
+    expect(trimmed[0]!.id).toBe(`${turn.turnId}:0-1`);
   });
 });
