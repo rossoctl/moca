@@ -62,6 +62,23 @@ export const ROUTES: RouteSpec[] = [
     aliasOf: '/v1/turn',
     summary: 'Pre-/v1 wire path for POST /v1/turn',
   },
+  // Detachable turns (#471). No pre-/v1 aliases: these routes were born under /v1.
+  {
+    method: 'GET',
+    path: '/v1/turn',
+    operationId: 'attachTurn',
+    auth: 'session',
+    surface: 'client',
+    summary: "Re-attach to a session's detachable turn — SSE replay from a cursor, then live",
+  },
+  {
+    method: 'POST',
+    path: '/v1/turn/cancel',
+    operationId: 'cancelTurn',
+    auth: 'session',
+    surface: 'client',
+    summary: "Cancel a session's running detachable turn",
+  },
   {
     method: 'POST',
     path: '/v1/runs',
