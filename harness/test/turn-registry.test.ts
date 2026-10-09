@@ -104,6 +104,16 @@ describe('begin / append / end', () => {
     expect(await redis.ttl(termKey(s, turn.turnId))).toBeGreaterThan(0);
   });
 
+  it('a marker whose entry is gone yields the caller frame with no id', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    await redis.set(termKey(s, turn.turnId), '1-1', { EX: 60 }); // names an entry not in the log
+    const end = await turn.end(done(s));
+    expect(end.id).toBeUndefined();
+    expect(end.frame).toEqual(done(s));
+  });
+
   it('refuses an append once the lease names another turn', async () => {
     const r = reg();
     const s = sid();
@@ -435,7 +445,7 @@ describe('bounded calls', () => {
     const turnId = (await redis.get(lastKey(s)))!;
     await expect.poll(() => redis.exists(termKey(s, turnId)), { timeout: 2000 }).toBe(1);
     expect(await redis.get(activeKey(s))).toBeNull();
-    expect(inner.live.size).toBe(0);
+    await expect.poll(() => inner.live.size, { timeout: 2000 }).toBe(0);
     const rows = (await redis.xRange(eventsKey(s, turnId), '-', '+')) ?? [];
     expect(JSON.parse(rows.at(-1)!.message.f)).toMatchObject({ type: 'error', sessionId: s });
     spy.mockRestore();

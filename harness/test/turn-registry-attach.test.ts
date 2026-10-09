@@ -6,6 +6,7 @@ import {
   eventsKey,
   lastKey,
   parseEventId,
+  termKey,
   type LoggedFrame,
   TurnRegistry,
   watchKey,
@@ -223,6 +224,39 @@ describe('attach', () => {
     // end() reports the terminal actually logged, under its own id, not the caller's `done`.
     expect(end.id).toBe(got.at(-1)!.id);
     expect(end.frame).toEqual(got.at(-1)!.frame);
+  });
+
+  it('a stalled owner ending after owner_lost extends the marker as long as the log', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await redis.del(activeKey(s));
+    await collect(reg().attach(s, undefined)); // owner_lost at t0: marker and log until t0+ttl
+    await new Promise((r) => setTimeout(r, 1100));
+    await turn.end(done(s)); // t1: END refreshes the log's TTL to t1+ttl, so the marker's too
+    const term = await redis.pTTL(termKey(s, turn.turnId));
+    const log = await redis.pTTL(eventsKey(s, turn.turnId));
+    expect(log).toBeGreaterThan(0);
+    expect(term).toBeGreaterThanOrEqual(log);
+  });
+
+  it('after the first marker TTL would have passed, an attach writes no second owner_lost', async () => {
+    const short = { logTtlS: 2 };
+    const owner = reg(short);
+    const s = sid();
+    const turn = await owner.begin(s);
+    await redis.del(activeKey(s));
+    await collect(reg(short).attach(s, undefined)); // t0: owner_lost, marker until t0+2 s
+    await new Promise((r) => setTimeout(r, 1200));
+    await turn.end(done(s)); // t1 = t0+1.2 s: log (and now marker) until t1+2 s
+    await new Promise((r) => setTimeout(r, 1100)); // t0+2.3 s: past the marker's original TTL
+    const before = await redis.xLen(eventsKey(s, turn.turnId));
+    expect(before).toBeGreaterThan(0);
+    const got = await collect(reg(short).attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ abortReason: 'owner_lost' });
+    expect(await redis.xLen(eventsKey(s, turn.turnId))).toBe(before);
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(rows.filter((r) => JSON.parse(r.message.f).type === 'error')).toHaveLength(1);
   });
 
   it('an owner whose lease lapsed and was replaced by owner_lost cannot append after it', async () => {

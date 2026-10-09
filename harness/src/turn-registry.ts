@@ -158,8 +158,9 @@ if redis.call('EXISTS', KEYS[2]) == 0 then return false end
 return redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', 'f', ARGV[2])`;
 
 /**
- * KEYS[1]=active KEYS[2]=last KEYS[3]=events ARGV=[turnId, leaseMs, ttlS]. Extends OUR lease only,
- * and refreshes the retention TTL on `last` and the log; returns the lease, or nil if not ours.
+ * KEYS[1]=active KEYS[2]=last KEYS[3]=events KEYS[4]=term ARGV=[turnId, leaseMs, ttlS]. Extends OUR
+ * lease only, and refreshes the retention TTL on `last`, the log and (if set) the terminal marker:
+ * wherever the log's TTL moves, the marker's moves with it. Returns the lease, or nil if not ours.
  */
 export const RENEW_LUA = `
 local v = redis.call('GET', KEYS[1])
@@ -168,6 +169,7 @@ if cjson.decode(v).turnId ~= ARGV[1] then return false end
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
 if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('EXPIRE', KEYS[2], ARGV[3]) end
 redis.call('EXPIRE', KEYS[3], ARGV[3])
+redis.call('EXPIRE', KEYS[4], ARGV[3])
 return v`;
 
 /**
@@ -176,14 +178,17 @@ return v`;
  * one step, so a watcher never sees a released lease before the terminal it would otherwise
  * synthesize. A turn whose terminal is already logged (an attach wrote owner_lost while this owner
  * stalled past its lease) gets no second one. Returns {entryId, frameJson} of the terminal actually
- * logged, which is then that earlier one.
+ * logged, which is then that earlier one -- or {'', frameJson} with the caller's frame if the entry
+ * the marker names is gone. The marker's TTL moves with the log's: a marker that expired before
+ * its log would let an attach write a second owner_lost.
  */
 export const END_LUA = `
 local id = redis.call('GET', KEYS[4])
 local f = ARGV[3]
 if id then
   local e = redis.call('XRANGE', KEYS[3], id, id)
-  if #e > 0 then f = e[1][2][2] end
+  if #e > 0 then f = e[1][2][2] else id = '' end
+  redis.call('EXPIRE', KEYS[4], ARGV[2])
 else
   id = redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[4], '*', 'f', ARGV[3])
   redis.call('SET', KEYS[4], id, 'EX', ARGV[2])
@@ -306,7 +311,7 @@ export class ActiveTurn {
     let logged = frame;
     try {
       const r = await this.reg.endTurn(this.sessionId, this.turnId, frame);
-      id = eventId(this.turnId, r.entryId);
+      if (r.entryId) id = eventId(this.turnId, r.entryId);
       logged = r.frame;
     } catch (err) {
       console.error(
@@ -674,12 +679,12 @@ export class TurnRegistry {
     return typeof id === 'string' ? id : null;
   }
 
-  /** END_LUA: the entry id and frame of the terminal actually logged. */
+  /** END_LUA: the entry id and frame of the terminal actually logged; no id if its entry is gone. */
   async endTurn(
     sessionId: string,
     turnId: string,
     frame: TurnStreamFrame,
-  ): Promise<{ entryId: string; frame: TurnStreamFrame }> {
+  ): Promise<{ entryId?: string; frame: TurnStreamFrame }> {
     await this.open();
     const [entryId, f] = (await this.client.eval(END_LUA, {
       keys: [
@@ -695,13 +700,18 @@ export class TurnRegistry {
         String(this.timings.maxLen),
       ],
     })) as [string, string];
-    return { entryId, frame: JSON.parse(f) as TurnStreamFrame };
+    return { ...(entryId ? { entryId } : {}), frame: JSON.parse(f) as TurnStreamFrame };
   }
 
   async renew(sessionId: string, turnId: string): Promise<{ cancelRequested?: boolean } | null> {
     await this.open();
     const v = await this.client.eval(RENEW_LUA, {
-      keys: [activeKey(sessionId), lastKey(sessionId), eventsKey(sessionId, turnId)],
+      keys: [
+        activeKey(sessionId),
+        lastKey(sessionId),
+        eventsKey(sessionId, turnId),
+        termKey(sessionId, turnId),
+      ],
       arguments: [turnId, String(this.timings.leaseMs), String(this.timings.logTtlS)],
     });
     return typeof v === 'string' ? JSON.parse(v) : null;
