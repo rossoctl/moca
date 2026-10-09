@@ -3,14 +3,15 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import http from 'node:http';
 import { createClient } from 'redis';
 import { keyIdFor, makeSigner, publicKeyToBase64 } from '@moca/control-plane';
-import { activeKey } from '@moca/harness/turn-registry';
+import { activeKey, TurnRegistryUnavailableError } from '@moca/harness/turn-registry';
 
 vi.mock('@moca/harness/run-turn', () => ({
   runTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
   executeTurn: vi.fn(async () => ({ sessionId: 'sid-1', response: 'ok', stopReason: 'end_turn' })),
 }));
 
-import { resetTurnRegistryForTests, startServer, turnRegistry } from '../src/server.js';
+import { handler, resetTurnRegistryForTests, startServer, turnRegistry } from '../src/server.js';
+import { attachTurnSlot } from '../src/turn-slot.js';
 import { executeTurn, runTurn } from '@moca/harness/run-turn';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -98,10 +99,11 @@ afterEach(async () => {
 function sse(
   body: unknown,
   headers: Record<string, string>,
-): Promise<{ status: number; raw: string }> {
+  at: string = base,
+): Promise<{ status: number; raw: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      new URL('/v1/turn', base),
+      new URL('/v1/turn', at),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...headers },
@@ -109,7 +111,7 @@ function sse(
       (res) => {
         let raw = '';
         res.on('data', (c: Buffer) => (raw += c.toString()));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, raw }));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, raw, headers: res.headers }));
       },
     );
     req.on('error', reject);
@@ -271,6 +273,7 @@ describe('POST /v1/turn detachable', () => {
 
   it('a Redis that never answers the one-live-turn check does not stall a non-detachable turn', async () => {
     vi.spyOn(turnRegistry(), 'peek').mockReturnValue(new Promise(() => {}));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.mocked(executeTurn).mockResolvedValueOnce({
       sessionId,
       response: 'x',
@@ -284,39 +287,48 @@ describe('POST /v1/turn detachable', () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(res.raw)).toMatchObject({ response: 'x' });
     expect(Date.now() - t0).toBeLessThan(1000);
+    // Fail-open is recorded: the overlap §4.4 prevents may now happen, so it must not be silent.
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/one-live-turn check.*timed out/));
+    warn.mockRestore();
   });
 });
 
 function get(
   path: string,
   headers: Record<string, string>,
-): Promise<{ status: number; raw: string }> {
+): Promise<{ status: number; raw: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request(new URL(path, base), { method: 'GET', headers }, (res) => {
       let raw = '';
       res.on('data', (c: Buffer) => (raw += c.toString()));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, raw }));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, raw, headers: res.headers }));
     });
     req.on('error', reject);
     req.end();
   });
 }
 function postJson(path: string, body: unknown, headers: Record<string, string>) {
-  return new Promise<{ status: number; json: any }>((resolve, reject) => {
-    const req = http.request(
-      new URL(path, base),
-      { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers } },
-      (res) => {
-        let raw = '';
-        res.on('data', (c: Buffer) => (raw += c.toString()));
-        res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, json: raw ? JSON.parse(raw) : undefined }),
-        );
-      },
-    );
-    req.on('error', reject);
-    req.end(JSON.stringify(body));
-  });
+  return new Promise<{ status: number; json: any; headers: http.IncomingHttpHeaders }>(
+    (resolve, reject) => {
+      const req = http.request(
+        new URL(path, base),
+        { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers } },
+        (res) => {
+          let raw = '';
+          res.on('data', (c: Buffer) => (raw += c.toString()));
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              json: raw ? JSON.parse(raw) : undefined,
+              headers: res.headers,
+            }),
+          );
+        },
+      );
+      req.on('error', reject);
+      req.end(JSON.stringify(body));
+    },
+  );
 }
 
 describe('GET /v1/turn (attach)', () => {
@@ -477,6 +489,208 @@ describe('GET /v1/turn (attach), following a running turn', () => {
     expect(res.status).toBe(503);
     expect(JSON.parse(res.raw).error).toBe('redis_unavailable');
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('kaput'));
+    warn.mockRestore();
+  });
+});
+
+/** A server that counts turns the way a P6 worker does: a slot per turn request (worker.ts). */
+async function withSlot(endSlot: () => void): Promise<{ at: string; close: () => void }> {
+  const wrap = http.createServer((req, res) => {
+    attachTurnSlot(res, endSlot);
+    handler(req, res);
+  });
+  await new Promise<void>((r) => wrap.listen(0, () => r()));
+  return {
+    at: `http://127.0.0.1:${(wrap.address() as { port: number }).port}`,
+    close: () => wrap.close(),
+  };
+}
+
+describe('detachable turn slot (worker accounting, §5.5)', () => {
+  it('a client that leaves during begin() does not end the slot of the turn that then runs', async () => {
+    const endSlot = vi.fn();
+    const w = await withSlot(endSlot);
+    const reg = turnRegistry();
+    const realBegin = reg.begin.bind(reg);
+    let openGate!: () => void;
+    const gate = new Promise<void>((r) => (openGate = r));
+    let beginCalled!: () => void;
+    const inBegin = new Promise<void>((r) => (beginCalled = r));
+    vi.spyOn(reg, 'begin').mockImplementationOnce(async (sid, opts) => {
+      beginCalled();
+      await gate;
+      return realBegin(sid, opts);
+    });
+    let release: (() => void) | undefined;
+    vi.mocked(executeTurn).mockImplementationOnce(
+      () =>
+        new Promise(
+          (r) => (release = () => r({ sessionId, response: '', stopReason: 'stop' } as any)),
+        ),
+    );
+    const req = http.request(new URL('/v1/turn', w.at), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${mint(sessionId)}`,
+      },
+    });
+    req.on('error', () => {});
+    req.end(JSON.stringify({ sessionId, prompt: 'p', detachable: true }));
+    await inBegin;
+    req.destroy(); // the client leaves while begin() is still in Redis
+    await new Promise((r) => setTimeout(r, 100));
+    openGate();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(await redis.get(activeKey(sessionId))).not.toBeNull();
+    expect(endSlot).not.toHaveBeenCalled(); // the detached turn is still counted
+    release!();
+    await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).toBeNull());
+    await vi.waitFor(() => expect(endSlot).toHaveBeenCalledTimes(1));
+    w.close();
+  });
+
+  it('releases the slot, once, when begin() fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const endSlot = vi.fn();
+    const w = await withSlot(endSlot);
+    vi.spyOn(turnRegistry(), 'begin').mockRejectedValueOnce(
+      new TurnRegistryUnavailableError(new Error('down')),
+    );
+    const res = await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+      w.at,
+    );
+    expect(res.status).toBe(503);
+    await vi.waitFor(() => expect(endSlot).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(endSlot).toHaveBeenCalledTimes(1);
+    w.close();
+    warn.mockRestore();
+  });
+});
+
+describe('detachable turn: a failing frame write', () => {
+  it('still ends the turn and releases the lease when a send throws', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(executeTurn).mockImplementationOnce(async (input: any) => {
+      // A BigInt cannot be serialized: logging it fails (append swallows that), and the SSE
+      // write throws inside the frame chain, which then rejects.
+      input.onEvent?.({ type: 'text', delta: 1n });
+      await new Promise((r) => setTimeout(r, 20));
+      return { sessionId, response: 'x', stopReason: 'stop' };
+    });
+    await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).toBeNull(), {
+      timeout: 1000,
+    });
+    err.mockRestore();
+  });
+});
+
+describe('a Redis that never answers (bounded registry calls)', () => {
+  beforeEach(() => {
+    process.env.SH_TURN_REGISTRY_TIMEOUT_MS = '200';
+  });
+  afterEach(() => {
+    delete process.env.SH_TURN_REGISTRY_TIMEOUT_MS;
+  });
+  const auth = () => ({ Authorization: `Bearer ${mint(sessionId)}` });
+
+  it('a begin() that never settles answers 503 redis_unavailable within the bound', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry() as any, 'beginOnce').mockReturnValue(new Promise(() => {}));
+    const t0 = Date.now();
+    const res = await sse({ sessionId, prompt: 'p', detachable: true }, auth());
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.raw)).toEqual({ error: 'redis_unavailable' });
+    expect(res.headers['retry-after']).toMatch(/^\d+$/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    warn.mockRestore();
+  });
+
+  it('an attach whose first read never settles answers 503 within the bound', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'attach').mockImplementationOnce(async function* () {
+      await new Promise(() => {});
+    });
+    const t0 = Date.now();
+    const res = await get(`/v1/turn?sessionId=${sessionId}`, auth());
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.raw)).toEqual({ error: 'redis_unavailable' });
+    expect(res.headers['retry-after']).toMatch(/^\d+$/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    warn.mockRestore();
+  });
+
+  it('a cancel that never settles answers 503 within the bound', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'cancel').mockReturnValueOnce(new Promise(() => {}));
+    const t0 = Date.now();
+    const c = await postJson('/v1/turn/cancel', { sessionId }, auth());
+    expect(c.status).toBe(503);
+    expect(c.json).toEqual({ error: 'redis_unavailable' });
+    expect(c.headers['retry-after']).toMatch(/^\d+$/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    warn.mockRestore();
+  });
+
+  it('warns when the one-live-turn check errors', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'peek').mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    vi.mocked(executeTurn).mockResolvedValueOnce({
+      sessionId,
+      response: 'x',
+      stopReason: 'stop',
+    } as any);
+    const res = await sse({ sessionId, prompt: 'p' }, { ...auth(), Accept: 'application/json' });
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(sessionId));
+    warn.mockRestore();
+  });
+});
+
+describe('route coverage (review note)', () => {
+  it('cancel refuses a token for another session', async () => {
+    const c = await postJson(
+      '/v1/turn/cancel',
+      { sessionId },
+      { Authorization: `Bearer ${mint(`sid-${randomUUID()}`)}` },
+    );
+    expect(c.status).toBe(400);
+    expect(c.json.error).toBe('session_mismatch');
+  });
+
+  it('attach and cancel answer 404 turn_not_found with SH_TURN_DETACH off', async () => {
+    delete process.env.SH_TURN_DETACH;
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const a = await get(`/v1/turn?sessionId=${sessionId}`, auth);
+    expect(a.status).toBe(404);
+    expect(JSON.parse(a.raw)).toEqual({ error: 'turn_not_found' });
+    const c = await postJson('/v1/turn/cancel', { sessionId }, auth);
+    expect(c.status).toBe(404);
+    expect(c.json).toEqual({ error: 'turn_not_found' });
+  });
+
+  it('a begin() that fails answers 503 redis_unavailable with Retry-After, no raw text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(turnRegistry(), 'begin').mockRejectedValueOnce(
+      new TurnRegistryUnavailableError(new Error('redis://user:hunter2@host')), // notsecret
+    );
+    const res = await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.raw)).toEqual({ error: 'redis_unavailable' });
+    expect(res.headers['retry-after']).toMatch(/^\d+$/);
+    expect(res.raw).not.toContain('hunter2');
     warn.mockRestore();
   });
 });

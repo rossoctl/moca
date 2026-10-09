@@ -248,14 +248,17 @@ stopped"}` and the `EXPIRE`s of `end`. Concurrent attaches therefore write it on
 
 ### 5.6 Configuration
 
-| Variable                 | Default | Meaning                                                   |
-| ------------------------ | ------- | --------------------------------------------------------- |
-| `SH_TURN_DETACH`         | unset   | `1` honors `detachable`. Set in vm, compose, k8s configs. |
-| `SH_TURN_DETACHED_MAX_S` | 1800    | Unwatched time before a detachable turn is aborted.       |
-| `SH_TURN_LOG_TTL_S`      | 86400   | Retention of a finished turn's log and `last` pointer.    |
+| Variable                      | Default | Meaning                                                                              |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------ |
+| `SH_TURN_DETACH`              | unset   | `1` honors `detachable`. Set in vm, compose, k8s configs.                            |
+| `SH_TURN_DETACHED_MAX_S`      | 1800    | Unwatched time before a detachable turn is aborted.                                  |
+| `SH_TURN_LOG_TTL_S`           | 86400   | Retention of a finished turn's log and `last` pointer.                               |
+| `SH_TURN_REGISTRY_TIMEOUT_MS` | 5000    | Bound on begin, the first attach read, and cancel; past it, `503 redis_unavailable`. |
 
 Wired into `deploy/compose/docker-compose.yml`, `deploy/vm/env/supervisor.env.example`, and
 `deploy/k8s` (`moca-settings`, sticky like the other `SH_*` settings). Not into `deploy/knative`.
+`SH_TURN_REGISTRY_TIMEOUT_MS` is a code default (it guards against a blackholed Redis) and is not
+wired into any deployment.
 
 ## 6. `mocactl`
 

@@ -101,7 +101,8 @@ paths:
         ONE LIVE TURN PER SESSION. With SH_TURN_DETACH=1, every /v1/turn — detachable or not —
         checks for a running detachable turn on its session before its first frame, and is
         refused 409 turn_in_progress while one runs. The check of a non-detachable turn is
-        bounded and fails open: a Redis that cannot answer in time does not block it.
+        bounded and fails open: a Redis that cannot answer in time does not block it (the
+        server logs each time it does).
         Non-detachable turns take no lease, so concurrent non-detachable turns behave as
         without the flag.
       security:
@@ -176,7 +177,8 @@ paths:
             sandbox_unavailable), the control-plane credential exchange failed
             (credential_unavailable — the control plane is unreachable or its answer was
             unusable), or a detachable turn could not take its lease because Redis did not
-            answer (redis_unavailable). The turn can succeed unmodified on a retry.
+            answer, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000) —
+            redis_unavailable. The turn can succeed unmodified on a retry.
           headers:
             Retry-After:
               schema: { type: integer }
@@ -265,8 +267,9 @@ paths:
         '503':
           description: |
             Retryable: redis_unavailable — the turn registry could not be read before the stream
-            began. Or credential_unavailable — the token keyset became unusable under an
-            already-serving pod.
+            began, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000). Or
+            credential_unavailable — the token keyset became unusable under an already-serving
+            pod.
           headers:
             Retry-After:
               schema: { type: integer }
@@ -348,7 +351,8 @@ paths:
               schema: { $ref: '#/components/schemas/TurnConflict' }
         '503':
           description: |
-            Retryable: redis_unavailable — the turn registry did not answer. Or
+            Retryable: redis_unavailable — the turn registry failed, or did not answer within
+            SH_TURN_REGISTRY_TIMEOUT_MS (default 5000). Or
             credential_unavailable — the token keyset became unusable under an already-serving
             pod.
           headers:

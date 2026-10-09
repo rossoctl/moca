@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { TurnRegistry, type ActiveTurn } from '@moca/harness/turn-registry';
+import { TurnRegistry, withTimeout, type ActiveTurn } from '@moca/harness/turn-registry';
 import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
 import { forLog } from '@moca/harness/sandbox-affinity';
@@ -123,17 +123,43 @@ export async function abortDetachedTurns(reason: 'restarting'): Promise<void> {
 // A slow Redis (reconnecting, offline queue) must not stall non-detachable turns: fail open past this.
 const PEEK_TIMEOUT_MS = 250;
 
-/** The session's running detachable turn, or null when there is none or Redis cannot answer in time. */
+/**
+ * The bound on a detachable-turn registry call that a client waits on: begin, the first attach
+ * read, cancel. node-redis has no command timeout, so against a blackholed Redis these would hang
+ * with no bytes; past the bound the route answers the documented 503 redis_unavailable instead.
+ * SH_TURN_REGISTRY_TIMEOUT_MS overrides it (read per request, like the other knobs).
+ */
+const REGISTRY_TIMEOUT_MS = 5000;
+const registryTimeoutMs = () => intEnv('SH_TURN_REGISTRY_TIMEOUT_MS', REGISTRY_TIMEOUT_MS);
+
+/**
+ * The session's running detachable turn, or null when there is none or Redis cannot answer in
+ * time. Failing open lets a non-detachable turn overlap a live detachable one (the overlap §4.4
+ * exists to prevent), so it is logged rather than silent.
+ */
 async function peekRunningTurn(sessionId: string): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((r) => (timer = setTimeout(() => r(null), PEEK_TIMEOUT_MS)));
+  const timeout = new Promise<'timeout'>(
+    (r) => (timer = setTimeout(() => r('timeout'), PEEK_TIMEOUT_MS)),
+  );
   try {
-    return await Promise.race([
+    const r = await Promise.race([
       turnRegistry()
         .peek(sessionId)
-        .catch(() => null),
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[turn] one-live-turn check failed for session ${forLog(sessionId)}, running unchecked: ${forLog(message)}`,
+          );
+          return null;
+        }),
       timeout,
     ]);
+    if (r !== 'timeout') return r;
+    console.warn(
+      `[turn] one-live-turn check timed out after ${PEEK_TIMEOUT_MS} ms for session ${forLog(sessionId)}, running unchecked`,
+    );
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -496,10 +522,14 @@ async function handleDetachableTurn(
   deps: TurnAuthDeps,
   res: ServerResponse,
 ): Promise<void> {
+  // Adopted BEFORE begin(): a client that leaves during begin() must not end the slot of the turn
+  // that then runs detached, or the worker under-counts it (§5.5). Every path below releases it.
+  const releaseSlot = adoptTurnSlot(res);
   let turn: ActiveTurn;
   try {
-    turn = await turnRegistry().begin(auth.sessionId);
+    turn = await turnRegistry().begin(auth.sessionId, { timeoutMs: registryTimeoutMs() });
   } catch (err) {
+    releaseSlot();
     const name = err instanceof Error ? err.name : '';
     if (name === 'TurnInProgressError') {
       res.writeHead(409, JSON_HEADERS).end(
@@ -514,7 +544,6 @@ async function handleDetachableTurn(
     }
     return;
   }
-  const releaseSlot = adoptTurnSlot(res);
   const { writeFrame, stop } = makeFrameWriter(res, intEnv('SH_TURN_STREAM_KEEPALIVE_MS', 20000));
   let started = false;
   const send = (frame: TurnStreamFrame, id?: string) => {
@@ -531,6 +560,20 @@ async function handleDetachableTurn(
   // node-redis answers in command order on one connection; the chain also keeps the terminal
   // behind every frame logged before it.
   let chain = Promise.resolve();
+  // A frame write that throws (a send, a writeFrame) must not cost the turn its terminal: a skipped
+  // end() renews the lease forever, and the session answers 409 until the process restarts. Each
+  // link catches its own failure, so one bad frame neither drops the frames behind it nor leaves a
+  // rejection unhandled while the turn runs; the chain is still settled, never rethrown, below.
+  const writeFailed = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[turn:detach] frame write failed for session ${forLog(auth.sessionId)}: ${forLog(message)}`,
+    );
+  };
+  const settleChain = () => chain.catch(writeFailed);
+  // end() runs once: the success path, the error path, or (if either threw first) the finally.
+  let ending: Promise<{ id?: string; frame: TurnStreamFrame }> | undefined;
+  const endTurn = (terminal: TurnStreamFrame) => (ending ??= turn.end(terminal));
   void deps.reportRuntime?.(auth.sessionId, runtimeFieldsForTurn(process.env, 'start'));
   let result: TurnResult | undefined;
   let placement: TurnResult['sandbox'];
@@ -542,16 +585,16 @@ async function handleDetachableTurn(
       createIfAbsent: true,
       ...(auth.configRef ? { configRef: auth.configRef } : {}),
       onEvent: (f) => {
-        chain = chain.then(async () => send(f, await turn.append(f)));
+        chain = chain.then(async () => send(f, await turn.append(f))).catch(writeFailed);
       },
       signal: turn.signal,
       onPlacement: (p) => (placement = p),
     });
-    await chain;
-    const end = await turn.end(terminalFrame(result));
+    await settleChain();
+    const end = await endTurn(terminalFrame(result));
     send(end.frame, end.id);
   } catch (err) {
-    await chain;
+    await settleChain();
     // The logged terminal is replayable by any later attach, so an UNCLASSIFIED failure's text
     // (which can carry a connection string or a token) is replaced by the stable code there, as in
     // the body below; the text exists only in the server log.
@@ -559,7 +602,7 @@ async function handleDetachableTurn(
     if (status === 500) console.error('[turn:detach] unclassified error:', err);
     const message =
       status === 500 ? turnErrorCode(status) : err instanceof Error ? err.message : String(err);
-    const end = await turn.end({
+    const end = await endTurn({
       type: 'error',
       sessionId: auth.sessionId,
       stopReason: 'error',
@@ -575,6 +618,14 @@ async function handleDetachableTurn(
     }
   } finally {
     stop();
+    // A no-op when a path above already ended the turn. If one threw before ending (its own send,
+    // say), the turn still ends here, with the stable code, so its lease is released.
+    await endTurn({
+      type: 'error',
+      sessionId: auth.sessionId,
+      stopReason: 'error',
+      errorMessage: turnErrorCode(500),
+    });
     releaseSlot();
     void deps.reportRuntime?.(
       auth.sessionId,
@@ -629,10 +680,14 @@ async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse)
   );
   let first: IteratorResult<{ id: string; frame: TurnStreamFrame }>;
   try {
-    first = await gen.next();
+    first = await withTimeout(gen.next(), registryTimeoutMs());
   } catch (err) {
     if (err instanceof Error && err.name === 'TurnNotFoundError') return turnNotFound(res);
     if (!ac.signal.aborted) logTurnRouteError('attach', sessionId, err);
+    // A timed-out read is still pending: once it lands, stop following and close its connection
+    // (return() queues behind the pending next()).
+    ac.abort();
+    void gen.return(undefined).catch(() => undefined);
     res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
     return;
   }
@@ -675,9 +730,12 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
   if (!authorizeTurnRoute(req, res, sessionId)) return;
   if (!detachEnabled()) return turnNotFound(res);
   try {
-    const r = await turnRegistry().cancel(
-      sessionId,
-      typeof parsed.turnId === 'string' ? parsed.turnId : undefined,
+    const r = await withTimeout(
+      turnRegistry().cancel(
+        sessionId,
+        typeof parsed.turnId === 'string' ? parsed.turnId : undefined,
+      ),
+      registryTimeoutMs(),
     );
     res.writeHead(202, JSON_HEADERS).end(JSON.stringify({ turnId: r.turnId }));
   } catch (err) {
