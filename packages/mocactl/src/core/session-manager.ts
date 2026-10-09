@@ -23,9 +23,22 @@ export class HarnessUntrustedError extends Error {
  */
 export const DOUBLE_ESC_MS = 1000;
 
+/** Re-attach after a dropped stream of a detachable turn (spec §6.5): tries and first backoff. */
+export const REATTACH_TRIES = 5;
+export const REATTACH_BASE_MS = 500;
+export const LOST_TURN_MESSAGE =
+  'lost the connection to the running turn — it may still be running; reopen the session to reattach';
+/** How long a server-side cancel may take before it counts as failed (cancelTurn has no signal). */
+export const CANCEL_TIMEOUT_MS = 5000;
+const MAX_CONFLICTS = 3;
+const CANCEL_FAILED_NOTICE = "couldn't cancel — the turn keeps running";
+
 export type SessionEvent =
   | { kind: 'turn-start'; prompt: string }
+  | { kind: 'attach-start' }
+  | { kind: 'attach-none'; missed: boolean }
   | { kind: 'frame'; frame: TurnFrame }
+  | { kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
   | { kind: 'retrying'; seconds: number }
   | { kind: 'turn-end'; outcome: 'done' | 'error' | 'cancelled'; error?: Error }
   | { kind: 'queue'; size: number };
@@ -39,15 +52,34 @@ export interface SessionDeps {
   remintMarginS?: number;
   /** The pause after a cancelled turn before the queue drains on (default DOUBLE_ESC_MS; 0: none). */
   cancelPauseMs?: number;
+  /** Ask for turns that outlive the connection (the TUI; not headless). */
+  detachable?: boolean;
+  /** The bound on a server-side cancel (default CANCEL_TIMEOUT_MS). */
+  cancelTimeoutMs?: number;
 }
+
+type Job =
+  | { kind: 'prompt'; prompt: string; resend: boolean; conflicts: number }
+  | { kind: 'attach'; lastEventId?: string; expectOpen: boolean };
+
+/** How one stream ended: on a terminal frame (a cancel's own, or any other), or without one. */
+type StreamEnd = 'terminal' | 'cancelled' | 'ended';
+
+const isDropped = (err: unknown): boolean =>
+  err instanceof ApiError &&
+  err.source === 'harness' &&
+  (err.code === 'network_error' || err.code === 'stream_truncated');
 
 export class ActiveSession {
   private readonly listeners = new Set<(e: SessionEvent) => void>();
-  private queue: Array<{ prompt: string; resend: boolean }> = [];
+  private queue: Job[] = [];
   private controller?: AbortController;
   private running = false;
   private idleWaiters: Array<() => void> = [];
   private endPause?: () => void;
+  /** The running turn, once its `turn` frame named it; only detachable turns have one. */
+  private live?: { turnId: string; lastEventId?: string };
+  private detaching = false;
 
   constructor(
     private readonly deps: SessionDeps,
@@ -64,25 +96,75 @@ export class ActiveSession {
     return this.running;
   }
 
+  /** Waiting prompts; a queued attach job is not one. */
   get queued(): number {
-    return this.queue.length;
+    return this.queue.filter((j) => j.kind === 'prompt').length;
+  }
+
+  get runningDetachable(): boolean {
+    return this.running && this.live !== undefined;
   }
 
   // The server does not serialize concurrent turns of one session (spec §2.6); this queue does.
   // A resend (the replay after a re-login) runs a prompt the transcript already holds, so it is
   // not recorded again.
   submit(prompt: string, opts: { resend?: boolean } = {}): void {
-    this.queue.push({ prompt, resend: opts.resend === true });
-    this.emit({ kind: 'queue', size: this.queue.length });
+    this.queue.push({ kind: 'prompt', prompt, resend: opts.resend === true, conflicts: 0 });
+    this.emit({ kind: 'queue', size: this.queued });
     void this.drain().catch(() => undefined);
   }
 
+  /** On resume (spec §6.5): ahead of any prompt, catch up on the session's last turn. */
+  attachExisting(opts: { lastEventId?: string; expectOpen: boolean }): void {
+    this.queue.unshift({ kind: 'attach', ...opts });
+    void this.drain().catch(() => undefined);
+  }
+
+  /** Esc: a detachable turn is cancelled on the server and read to its terminal (spec §6.4). */
   cancel(): void {
-    this.controller?.abort();
+    if (this.live) void this.cancelRemote();
+    else this.controller?.abort();
+  }
+
+  /** Asks the server to cancel the running detachable turn; false (and a notice) if it could not. */
+  async cancelRemote(): Promise<boolean> {
+    const live = this.live;
+    if (!live) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('cancel timed out')),
+        this.deps.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS,
+      );
+    });
+    const call = async () => {
+      await this.ensureToken();
+      await this.deps.harness.cancelTurn({
+        sessionId: this.sessionId,
+        turnId: live.turnId,
+        token: this.token.token,
+      });
+    };
+    try {
+      await Promise.race([call(), timeout]);
+      return true;
+    } catch {
+      this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Quit or switch with "keep it running" (spec §6.3): stop reading; the server turn goes on. */
+  detach(): void {
+    if (!this.controller) return;
+    this.detaching = true;
+    this.controller.abort();
   }
 
   clearQueue(): void {
-    this.queue = [];
+    this.queue = this.queue.filter((j) => j.kind !== 'prompt');
     this.emit({ kind: 'queue', size: 0 });
     this.endPause?.(); // nothing is left to wait for
   }
@@ -107,13 +189,19 @@ export class ActiveSession {
     this.running = true;
     try {
       while (this.queue.length > 0) {
-        const { prompt, resend } = this.queue.shift()!;
-        this.emit({ kind: 'queue', size: this.queue.length });
-        const cancelled = await this.runTurn(prompt, resend);
-        if (cancelled && this.queue.length > 0 && this.deps.cancelPauseMs !== 0) await this.pause();
+        const job = this.queue.shift()!;
+        this.emit({ kind: 'queue', size: this.queued });
+        const cancelled =
+          job.kind === 'prompt' ? await this.runTurn(job) : await this.runAttach(job);
+        // A detach is not an Esc: no second Esc is coming, so the queue need not wait for one.
+        const detached = this.detaching;
+        this.detaching = false;
+        if (cancelled && !detached && this.queue.length > 0 && this.deps.cancelPauseMs !== 0)
+          await this.pause();
       }
     } finally {
       this.running = false;
+      this.detaching = false;
       const waiters = this.idleWaiters;
       this.idleWaiters = [];
       for (const w of waiters) w();
@@ -147,8 +235,80 @@ export class ActiveSession {
     }
   }
 
+  /** Feeds one stream's frames on, recording the turn and the last frame id. */
+  private async consume(
+    frames: AsyncGenerator<TurnFrame>,
+    ids: { last?: string },
+  ): Promise<StreamEnd> {
+    for await (const frame of frames) {
+      if (frame.type === 'turn') this.live = { turnId: frame.turnId, lastEventId: ids.last };
+      else if (this.live && ids.last) this.live.lastEventId = ids.last;
+      this.transcriptSafe(() =>
+        this.deps.transcripts?.appendFrame(this.sessionId, frame, ids.last),
+      );
+      this.emit({ kind: 'frame', frame });
+      if (isTerminal(frame)) {
+        this.live = undefined;
+        const cancelled = frame.type === 'error' && frame.abortReason === 'cancelled';
+        this.emit(
+          frame.type === 'done'
+            ? { kind: 'turn-end', outcome: 'done' }
+            : cancelled
+              ? { kind: 'turn-end', outcome: 'cancelled' }
+              : {
+                  kind: 'turn-end',
+                  outcome: 'error',
+                  error: new Error(frame.errorMessage ?? frame.stopReason),
+                },
+        );
+        return cancelled ? 'cancelled' : 'terminal';
+      }
+    }
+    return 'ended';
+  }
+
+  private attachStream(
+    controller: AbortController,
+    ids: { last?: string },
+    lastEventId?: string,
+  ): AsyncGenerator<TurnFrame> {
+    return this.deps.harness.attach({
+      sessionId: this.sessionId,
+      token: this.token.token,
+      lastEventId,
+      signal: controller.signal,
+      onEventId: (id) => (ids.last = id),
+    });
+  }
+
+  /**
+   * A detachable turn's stream dropped: re-attach with the last id (spec §6.5). Resolves true
+   * when the turn ended cancelled.
+   */
+  private async reattach(controller: AbortController, ids: { last?: string }): Promise<boolean> {
+    for (let attempt = 0; attempt < REATTACH_TRIES; attempt++) {
+      await this.deps.sleep(REATTACH_BASE_MS * 2 ** attempt, controller.signal);
+      if (controller.signal.aborted) throw new TurnCancelledError();
+      await this.ensureToken();
+      try {
+        const end = await this.consume(
+          this.attachStream(controller, ids, this.live?.lastEventId),
+          ids,
+        );
+        if (end !== 'ended') return end === 'cancelled';
+      } catch (err) {
+        if (controller.signal.aborted || err instanceof TurnCancelledError)
+          throw new TurnCancelledError();
+        if (!isDropped(err)) throw err;
+      }
+    }
+    this.live = undefined;
+    throw new ApiError('harness', 0, 'stream_truncated', LOST_TURN_MESSAGE);
+  }
+
   /** Resolves true when the turn ended cancelled. */
-  private async runTurn(prompt: string, resend = false): Promise<boolean> {
+  private async runTurn(job: Extract<Job, { kind: 'prompt' }>): Promise<boolean> {
+    const { prompt, resend } = job;
     const controller = new AbortController();
     this.controller = controller;
     if (!resend)
@@ -156,33 +316,28 @@ export class ActiveSession {
     this.emit({ kind: 'turn-start', prompt });
     let reminted = false;
     let streamed = false;
+    const ids: { last?: string } = {};
     try {
       for (;;) {
         await this.ensureToken();
         try {
-          const frames = this.deps.harness.streamTurn({
+          const raw = this.deps.harness.streamTurn({
             sessionId: this.sessionId,
             prompt,
             token: this.token.token,
             signal: controller.signal,
+            detachable: this.deps.detachable === true,
+            onEventId: (id) => (ids.last = id),
           });
-          for await (const frame of frames) {
-            streamed = true;
-            this.transcriptSafe(() => this.deps.transcripts?.appendFrame(this.sessionId, frame));
-            this.emit({ kind: 'frame', frame });
-            if (isTerminal(frame)) {
-              this.emit(
-                frame.type === 'done'
-                  ? { kind: 'turn-end', outcome: 'done' }
-                  : {
-                      kind: 'turn-end',
-                      outcome: 'error',
-                      error: new Error(frame.errorMessage ?? frame.stopReason),
-                    },
-              );
-              return false;
+          const frames = (async function* () {
+            for await (const f of raw) {
+              streamed = true;
+              yield f;
             }
-          }
+          })();
+          const end = await this.consume(frames, ids);
+          if (end !== 'ended') return end === 'cancelled';
+          if (this.live) return await this.reattach(controller, ids);
           // Stream ended without a terminal frame; emit error
           this.emit({
             kind: 'turn-end',
@@ -193,8 +348,17 @@ export class ActiveSession {
         } catch (err) {
           if (controller.signal.aborted || err instanceof TurnCancelledError)
             throw new TurnCancelledError();
+          if (this.live && isDropped(err)) return await this.reattach(controller, ids);
           // Once frames have flowed the status code is spent; never re-send a half-run turn.
           if (!(err instanceof ApiError) || err.source !== 'harness' || streamed) throw err;
+          if (err.code === 'turn_in_progress' && job.conflicts < MAX_CONFLICTS) {
+            // Another device's turn holds the session: show it, then send this prompt (spec §6.5).
+            this.queue.unshift(
+              { kind: 'attach', expectOpen: false },
+              { ...job, resend: true, conflicts: job.conflicts + 1 },
+            );
+            return false;
+          }
           if (TOKEN_CODES.has(err.code) || err.code === 'session_mismatch') {
             // One remint covers an expired token and client/server clock skew. A token rejected
             // seconds after minting means the harness does not trust this control plane (§8.2).
@@ -215,6 +379,7 @@ export class ActiveSession {
         }
       }
     } catch (err) {
+      this.live = undefined;
       this.transcriptSafe(() => this.deps.transcripts?.flush(this.sessionId));
       if (controller.signal.aborted || err instanceof TurnCancelledError) {
         this.emit({ kind: 'turn-end', outcome: 'cancelled' });
@@ -223,6 +388,49 @@ export class ActiveSession {
       this.emit({ kind: 'turn-end', outcome: 'error', error: err as Error });
       return false;
     } finally {
+      this.live = undefined;
+      if (this.controller === controller) this.controller = undefined;
+    }
+  }
+
+  /** Catches up on the session's last turn: replays it, and follows it if it still runs. */
+  private async runAttach(job: Extract<Job, { kind: 'attach' }>): Promise<boolean> {
+    const controller = new AbortController();
+    this.controller = controller;
+    const ids: { last?: string } = {};
+    this.emit({ kind: 'attach-start' });
+    try {
+      await this.ensureToken();
+      const end = await this.consume(this.attachStream(controller, ids, job.lastEventId), ids);
+      if (end !== 'ended') return end === 'cancelled';
+      if (this.live) return await this.reattach(controller, ids);
+      // An attach stream always ends on a terminal; one that does not has lost the turn.
+      throw new ApiError('harness', 0, 'stream_truncated', LOST_TURN_MESSAGE);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'turn_not_found') {
+        this.emit({ kind: 'attach-none', missed: job.expectOpen });
+        return false;
+      }
+      if (controller.signal.aborted || err instanceof TurnCancelledError) {
+        this.emit({ kind: 'turn-end', outcome: 'cancelled' });
+        return true;
+      }
+      if (this.live && isDropped(err)) {
+        try {
+          return await this.reattach(controller, ids);
+        } catch (e) {
+          if (controller.signal.aborted || e instanceof TurnCancelledError) {
+            this.emit({ kind: 'turn-end', outcome: 'cancelled' });
+            return true;
+          }
+          err = e;
+        }
+      }
+      this.emit({ kind: 'turn-end', outcome: 'error', error: err as Error });
+      return false;
+    } finally {
+      this.live = undefined;
+      this.transcriptSafe(() => this.deps.transcripts?.flush(this.sessionId));
       if (this.controller === controller) this.controller = undefined;
     }
   }

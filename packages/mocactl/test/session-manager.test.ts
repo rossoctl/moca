@@ -6,6 +6,7 @@ import { ApiError } from '../src/api/errors.js';
 import type { TurnFrame } from '../src/api/frames.js';
 import {
   HarnessUntrustedError,
+  LOST_TURN_MESSAGE,
   SessionManager,
   type SessionDeps,
   type SessionEvent,
@@ -16,9 +17,13 @@ import { doneFrame, fakeControlPlane, fakeHarness, type HarnessStep } from './he
 const NOW = 1_000_000_000; // ms
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-function setup(steps: HarnessStep[], over: Partial<SessionDeps> = {}) {
+function setup(
+  steps: HarnessStep[],
+  over: Partial<SessionDeps> = {},
+  attachSteps: HarnessStep[] = [],
+) {
   const cp = fakeControlPlane();
-  const harness = fakeHarness(steps);
+  const harness = fakeHarness(steps, {}, attachSteps);
   const slept: number[] = [];
   const deps: SessionDeps = {
     cp,
@@ -30,8 +35,12 @@ function setup(steps: HarnessStep[], over: Partial<SessionDeps> = {}) {
   return { cp, harness, slept, deps, manager: new SessionManager(deps) };
 }
 
-async function started(steps: HarnessStep[], over: Partial<SessionDeps> = {}) {
-  const s = setup(steps, over);
+async function started(
+  steps: HarnessStep[],
+  over: Partial<SessionDeps> = {},
+  attachSteps: HarnessStep[] = [],
+) {
+  const s = setup(steps, over, attachSteps);
   const session = await s.manager.resume('s1');
   const events: SessionEvent[] = [];
   session.on((e) => events.push(e));
@@ -379,5 +388,232 @@ describe('SessionManager', () => {
     session.submit('p');
     await session.idle();
     expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'done' }]);
+  });
+});
+
+const turnF = { type: 'turn', turnId: 't1', sessionId: 's1' } as const;
+const text = (delta: string) => ({ type: 'text', delta }) as const;
+const cancelledF: TurnFrame = {
+  type: 'error',
+  sessionId: 's1',
+  stopReason: 'aborted',
+  abortReason: 'cancelled',
+  errorMessage: 'cancelled',
+};
+const COULD_NOT_CANCEL = {
+  kind: 'notice',
+  text: "couldn't cancel — the turn keeps running",
+  tone: 'error',
+} as const;
+
+describe('detachable turns', () => {
+  it('asks for a detachable turn and records the turn and its ids', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sm-'));
+    const transcripts = new TranscriptStore(dir, { subject: 'u', controlPlaneUrl: 'http://cp' });
+    const { session, harness } = await started(
+      [{ frames: [turnF, text('a'), doneFrame()], ids: ['t1:1-0', 't1:2-0', 't1:3-0'] }],
+      { detachable: true, transcripts },
+    );
+    session.submit('go');
+    await session.idle();
+    expect(harness.turns[0]!.detachable).toBe(true);
+    expect(transcripts.load('s1')!.lastEventId).toBe('t1:3-0');
+  });
+
+  it('a non-detachable session asks for a plain turn', async () => {
+    const { session, harness } = await started([{ frames: [doneFrame()] }]);
+    session.submit('go');
+    await session.idle();
+    expect(harness.turns[0]!.detachable).toBe(false);
+  });
+
+  it('re-attaches after a dropped stream with the last id, and finishes', async () => {
+    const drop = new ApiError('harness', 0, 'network_error', 'socket hang up');
+    const { session, harness, events, slept } = await started(
+      [{ frames: [turnF, text('a')], ids: ['t1:1-0', 't1:2-0'], error: drop }],
+      { detachable: true },
+      [{ frames: [turnF, text('b'), doneFrame()], ids: ['t1:1-0', 't1:3-0', 't1:4-0'] }],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(harness.attaches[0]!.lastEventId).toBe('t1:2-0');
+    expect(slept[0]).toBe(500);
+    expect(events.filter((e) => e.kind === 'turn-end')).toEqual([
+      { kind: 'turn-end', outcome: 'done' },
+    ]);
+  });
+
+  it('gives up after 5 tries with the lost-turn error', async () => {
+    const drop = () => ({ error: new ApiError('harness', 0, 'network_error', 'x') });
+    const { session, ends, slept } = await started(
+      [
+        {
+          frames: [turnF],
+          ids: ['t1:1-0'],
+          error: new ApiError('harness', 0, 'network_error', 'x'),
+        },
+      ],
+      { detachable: true },
+      [drop(), drop(), drop(), drop(), drop()],
+    );
+    session.submit('go');
+    await session.idle();
+    expect(slept).toEqual([500, 1000, 2000, 4000, 8000]);
+    expect(ends()).toMatchObject([{ outcome: 'error', error: { message: LOST_TURN_MESSAGE } }]);
+  });
+
+  it('Esc on a detachable turn cancels through the route and keeps reading', async () => {
+    let release!: () => void;
+    // The first stream ends after the turn frame, so the session re-attaches; that attach holds
+    // until `release`, then delivers the cancelled terminal.
+    const { session, harness, ends } = await started([{ frames: [turnF], ids: ['t1:1-0'] }], {
+      detachable: true,
+    });
+    harness.attachQueuePush({
+      wait: () => new Promise<void>((r) => (release = r)),
+      frames: [cancelledF],
+    });
+    session.submit('go');
+    await tick();
+    session.cancel();
+    await tick();
+    expect(harness.cancels).toEqual([{ sessionId: 's1', turnId: 't1', token: expect.any(String) }]);
+    release();
+    await session.idle();
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('a failed cancel says so and leaves the turn running', async () => {
+    const { session, harness, events } = await started(
+      [{ frames: [turnF], ids: ['t1:1-0'], hang: true }],
+      { detachable: true },
+    );
+    harness.cancelTurn = async () => {
+      throw new ApiError('harness', 0, 'network_error', 'down');
+    };
+    session.submit('go');
+    await tick();
+    expect(await session.cancelRemote()).toBe(false);
+    expect(events).toContainEqual(COULD_NOT_CANCEL);
+    expect(session.runningDetachable).toBe(true);
+    session.detach();
+    await session.idle();
+  });
+
+  it('a cancel the server never answers fails within the bound', async () => {
+    const { session, harness, events } = await started(
+      [{ frames: [turnF], ids: ['t1:1-0'], hang: true }],
+      { detachable: true, cancelTimeoutMs: 20 },
+    );
+    harness.cancelTurn = () => new Promise<void>(() => undefined);
+    session.submit('go');
+    await tick();
+    const startedAt = Date.now();
+    expect(await session.cancelRemote()).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(events).toContainEqual(COULD_NOT_CANCEL);
+    expect(session.runningDetachable).toBe(true);
+    session.detach();
+    await session.idle();
+  });
+
+  it('a server-cancelled turn still holds the next queued prompt for the double-Esc pause', async () => {
+    const { session, harness } = await started(
+      [{ frames: [turnF, cancelledF], ids: ['t1:1-0', 't1:2-0'] }],
+      { detachable: true, cancelPauseMs: 10_000 },
+    );
+    session.submit('a');
+    session.submit('b');
+    await tick();
+    await tick();
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a']); // 'b' waits out the pause
+    session.clearQueue();
+    await session.idle();
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['a']);
+  });
+
+  it('attachExisting replays a finished turn, then runs the queued prompt', async () => {
+    const { session, harness, events } = await started(
+      [{ frames: [doneFrame()] }],
+      { detachable: true },
+      [{ frames: [turnF, text('rest'), doneFrame()], ids: ['t1:1-0', 't1:5-0', 't1:6-0'] }],
+    );
+    session.attachExisting({ lastEventId: 't1:4-0', expectOpen: true });
+    session.submit('next');
+    await session.idle();
+    expect(harness.attaches[0]!.lastEventId).toBe('t1:4-0');
+    const order = events
+      .map((e) => e.kind)
+      .filter((k) => k === 'attach-start' || k === 'turn-start');
+    expect(order).toEqual(['attach-start', 'turn-start']);
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['next']);
+  });
+
+  it('detach during an attach job re-attaching ends it cancelled, not as an error', async () => {
+    let slept!: () => void;
+    const { session, harness, ends } = await started(
+      [],
+      {
+        detachable: true,
+        // The first re-attach backoff holds until detach aborts it.
+        sleep: (_ms, signal) =>
+          new Promise<void>((r) => {
+            slept = r;
+            signal?.addEventListener('abort', () => r(), { once: true });
+          }),
+      },
+      [
+        {
+          frames: [turnF],
+          ids: ['t1:1-0'],
+          error: new ApiError('harness', 0, 'network_error', 'x'),
+        },
+      ],
+    );
+    session.attachExisting({ expectOpen: true });
+    await tick();
+    expect(slept).toBeDefined();
+    session.detach();
+    await session.idle();
+    expect(ends()).toEqual([{ kind: 'turn-end', outcome: 'cancelled' }]);
+    expect(harness.cancels).toEqual([]);
+  });
+
+  it('an attach stream that ends with no frame at all ends as the lost-turn error', async () => {
+    const { session, ends } = await started([], { detachable: true }, [{ frames: [] }]);
+    session.attachExisting({ expectOpen: true });
+    await session.idle();
+    expect(ends()).toMatchObject([{ outcome: 'error', error: { message: LOST_TURN_MESSAGE } }]);
+  });
+
+  it('attachExisting with nothing to attach reports whether a turn was missed', async () => {
+    const { session, events } = await started([], { detachable: true });
+    session.attachExisting({ expectOpen: true });
+    await session.idle();
+    expect(events).toContainEqual({ kind: 'attach-none', missed: true });
+  });
+
+  it('409 turn_in_progress attaches to the running turn, then sends the prompt', async () => {
+    const busy = new ApiError('harness', 409, 'turn_in_progress');
+    const { session, harness } = await started(
+      [{ error: busy }, { frames: [doneFrame()] }],
+      { detachable: true },
+      [{ frames: [turnF, doneFrame()], ids: ['t9:1-0', 't9:2-0'] }],
+    );
+    session.submit('mine');
+    await session.idle();
+    expect(harness.attaches).toHaveLength(1);
+    expect(harness.turns.map((t) => t.prompt)).toEqual(['mine', 'mine']);
+  });
+
+  it('detach stops reading without cancelling on the server', async () => {
+    const { session, harness } = await started([{ frames: [turnF], ids: ['t1:1-0'], hang: true }], {
+      detachable: true,
+    });
+    session.submit('go');
+    await tick();
+    session.detach();
+    await session.idle();
+    expect(harness.cancels).toEqual([]);
   });
 });

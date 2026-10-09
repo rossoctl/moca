@@ -2,7 +2,7 @@ import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionManager, type ActiveSession } from '../src/core/session-manager.js';
-import { EMPTY_BLOCKS } from '../src/render/blocks.js';
+import { EMPTY_BLOCKS, INTERRUPTED_TURN_NOTICE } from '../src/render/blocks.js';
 import { COALESCE_MS, useSession, type SessionView } from '../src/views/useSession.js';
 import { doneFrame, fakeControlPlane, fakeHarness, type HarnessStep } from './helpers/fakes.js';
 import { tick, waitFor } from './helpers/ink.js';
@@ -176,5 +176,73 @@ describe('useSession', () => {
       outcome: 'error',
       message: 'cannot reach the harness: ECONNRESET',
     });
+  });
+});
+
+describe('useSession on resume', () => {
+  it('shows the interrupted notice when an expected turn could not be attached', async () => {
+    const manager = new SessionManager({
+      cp: fakeControlPlane(),
+      harness: fakeHarness([]), // no attach steps: attach answers turn_not_found
+      now,
+      sleep: async () => undefined,
+      cancelPauseMs: 0,
+      detachable: true,
+    });
+    const session = await manager.resume('s1');
+    const view: { current?: SessionView } = {};
+    function Probe({ s }: { s: ActiveSession }) {
+      view.current = useSession(s, { initial: EMPTY_BLOCKS, now });
+      return <Text>{view.current.turn.phase}</Text>;
+    }
+    render(<Probe s={session} />);
+    await tick();
+    session.attachExisting({ expectOpen: true });
+    await waitFor(() => view.current!.state.blocks.length === 1);
+    expect(view.current!.state.blocks[0]).toMatchObject({
+      kind: 'notice',
+      text: INTERRUPTED_TURN_NOTICE,
+    });
+    expect(view.current!.turn.phase).toBe('idle');
+  });
+
+  it('shows a failed server-side cancel as an error notice', async () => {
+    const { ApiError } = await import('../src/api/errors.js');
+    const harness = fakeHarness([
+      {
+        frames: [{ type: 'turn', turnId: 't1', sessionId: 's1' }],
+        ids: ['t1:1-0'],
+        hang: true,
+      },
+    ]);
+    harness.cancelTurn = async () => {
+      throw new ApiError('harness', 0, 'network_error', 'down');
+    };
+    const manager = new SessionManager({
+      cp: fakeControlPlane(),
+      harness,
+      now,
+      sleep: async () => undefined,
+      cancelPauseMs: 0,
+      detachable: true,
+    });
+    const session = await manager.resume('s1');
+    const view: { current?: SessionView } = {};
+    function Probe({ s }: { s: ActiveSession }) {
+      view.current = useSession(s, { initial: EMPTY_BLOCKS, now });
+      return <Text>{view.current.turn.phase}</Text>;
+    }
+    render(<Probe s={session} />);
+    await tick();
+    view.current!.submit('go');
+    await tick(5);
+    view.current!.cancel();
+    await waitFor(() => view.current!.state.blocks.some((b) => b.kind === 'notice'));
+    expect(view.current!.state.blocks.find((b) => b.kind === 'notice')).toMatchObject({
+      text: "couldn't cancel — the turn keeps running",
+      tone: 'error',
+    });
+    session.detach();
+    await session.idle();
   });
 });

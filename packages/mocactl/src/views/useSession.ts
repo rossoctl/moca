@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { isTerminal, type TurnFrame, type Usage } from '../api/frames.js';
 import { describeError } from '../core/messages.js';
 import type { ActiveSession, SessionEvent } from '../core/session-manager.js';
-import { addUser, endTurn, markSent, reduceFrame, type BlockState } from '../render/blocks.js';
+import {
+  addNotice,
+  addUser,
+  endTurn,
+  INTERRUPTED_TURN_NOTICE,
+  markSent,
+  reduceFrame,
+  type BlockState,
+} from '../render/blocks.js';
 import type { TurnState } from './status.js';
 
 export const COALESCE_MS = 40;
@@ -72,6 +80,20 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           sawTerminal = false;
           setState((s) => markSent(s));
           setTurn((t) => ({ ...t, phase: 'waiting', startedAt }));
+          break;
+        case 'attach-start':
+          startedAt = opts.now();
+          firstFrame = false; // a catch-up has no time-to-first-token
+          sawTerminal = false;
+          setTurn((t) => ({ ...t, phase: 'waiting', startedAt }));
+          break;
+        case 'attach-none':
+          if (e.missed) setState((s) => addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning'));
+          setTurn((t) => ({ ...t, phase: 'idle', startedAt: undefined }));
+          break;
+        case 'notice':
+          flush();
+          setState((s) => addNotice(s, e.text, e.tone));
           break;
         case 'frame': {
           const f = e.frame;
