@@ -79,6 +79,23 @@ spec:
               valueFrom: { secretKeyRef: { name: moca-mu1, key: SH_SESSION_TOKEN_PUBLIC_KEYS } }
             - { name: SH_CONTROL_PLANE_URL, value: 'http://moca-control-plane.moca.svc:8080' }
             - { name: SH_REQUIRE_AUTH, value: 'true' }
+            # Optional /workloads on Context Service (docs/context-service.md). Off unless the
+            # operator creates the moca-context-service ConfigMap and Secret.
+            - name: MOCA_CONTEXT_WORKLOADS_ENABLED
+              valueFrom:
+                { configMapKeyRef: { name: moca-context-service, key: enabled, optional: true } }
+            - name: CONTEXT_SERVICE_URL
+              valueFrom:
+                { configMapKeyRef: { name: moca-context-service, key: url, optional: true } }
+            - name: CONTEXT_SERVICE_PUBLIC_URL
+              valueFrom:
+                { configMapKeyRef: { name: moca-context-service, key: public-url, optional: true } }
+            - name: CONTEXT_SERVICE_NAMESPACE
+              valueFrom:
+                { configMapKeyRef: { name: moca-context-service, key: namespace, optional: true } }
+            - name: CONTEXT_SERVICE_TOKEN
+              valueFrom:
+                { secretKeyRef: { name: moca-context-service, key: token, optional: true } }
             # The exchange token is a FILE here (credentialValue reads $CREDENTIALS_DIRECTORY), the
             # analogue of LoadCredential=. Never also set it as env: the workers refuse to boot.
             - { name: CREDENTIALS_DIRECTORY, value: /run/credentials }
@@ -149,6 +166,11 @@ spec:
     - to: [{ podSelector: { matchLabels: { app: sandbox-relay } } }]
       ports: [{ protocol: TCP, port: 9444 }]
     - to: [{ podSelector: { matchLabels: { app: moca-control-plane } } }]
+      ports: [{ protocol: TCP, port: 8080 }]
+    # Context Service, for the optional /workloads routes.
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: context-service } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: context-service } }
       ports: [{ protocol: TCP, port: 8080 }]
     # The model API.
     - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]

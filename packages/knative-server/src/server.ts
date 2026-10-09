@@ -26,6 +26,7 @@ import {
   type TurnAuthDeps,
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
+import { handleWorkloads } from './workloads.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -449,12 +450,11 @@ function getResultStore(): RedisResultStore {
 }
 
 /**
- * Workloads are unavailable until Moca provisions them itself: Context Service no longer allocates
- * sandbox pools for Moca (rossoctl/moca#455). Answer every workload route, and any run that names a
- * workload, plainly rather than running it on the default pool.
+ * Running on a workload needs its frozen Context delivered to the sandbox, which is a later change.
+ * Until then a run that names a workload is refused rather than run on the default pool.
  */
-function rejectWorkloads(res: ServerResponse): void {
-  res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'workloads_unavailable' }));
+function rejectWorkloadRun(res: ServerResponse): void {
+  res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'workload_runs_unavailable' }));
 }
 
 async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<void> {
@@ -463,7 +463,7 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  if (body.workloadId !== undefined) return rejectWorkloads(res);
+  if (body.workloadId !== undefined) return rejectWorkloadRun(res);
   const q = getQueue();
   await q.ensureGroup();
   await q.enqueue(body);
@@ -483,7 +483,7 @@ async function handleRunLeafParsed(
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  if (body.workloadId !== undefined) return rejectWorkloads(res);
+  if (body.workloadId !== undefined) return rejectWorkloadRun(res);
 
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
   // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
@@ -584,8 +584,15 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
-  if (/^\/workloads(?:\/[^/?]+)?$/.test(url)) {
-    rejectWorkloads(res);
+  const path = url.split('?', 1)[0]!;
+  if (path === '/workloads' || path.startsWith('/workloads/')) {
+    handleWorkloads(req, res, path, { store: getResultStore, authDeps: turnAuthDeps }).catch(
+      (err) => {
+        console.error('workload request failed:', err);
+        if (!res.headersSent)
+          res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: 'internal_error' }));
+      },
+    );
     return;
   }
 

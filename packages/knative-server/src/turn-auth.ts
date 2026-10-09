@@ -300,6 +300,25 @@ export function authorizeRunRead(
 }
 
 /**
+ * Authentication for the `/workloads` routes, which name no session. They take the user's
+ * control-plane API token (scope `api`), not a session token: one workload can serve many sessions.
+ * A token is required even when SH_REQUIRE_AUTH is off, because every workload has an owner.
+ *
+ * Returns the token's subject.
+ */
+export function authenticateApiCaller(
+  headers: Record<string, string | string[] | undefined>,
+  deps: TurnAuthDeps,
+): string {
+  const presented = bearer(headers);
+  if (!presented) throw new CpError('token_required', 'workloads require an API token');
+  return verifyToken(presented, deps.keys, {
+    now: Math.floor((deps.now?.() ?? Date.now()) / 1000),
+    requiredScope: 'api',
+  }).sub;
+}
+
+/**
  * What the harness self-reports for /resources (spec §7.4, plan gap #5). Everything here is already in
  * this process's environment, so nothing in run-turn.ts has to change to produce it.
  */

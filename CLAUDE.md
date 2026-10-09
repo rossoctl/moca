@@ -76,7 +76,7 @@ pre-commit install
 ## Testing
 
 - vitest 2.x for all test suites
-- Redis required for work-queue and session-backend tests
+- Redis required for work-queue, session-backend and knative-server workload tests
 - Live smoke tests gated by env vars (M3_LIVE_SMOKE, etc.)
 
 ## Context Budget

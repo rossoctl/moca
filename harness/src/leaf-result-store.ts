@@ -124,6 +124,11 @@ export class RedisResultStore implements RedisLike {
     await this.open();
     return this.client.get(key);
   }
+  /** Run a Lua script atomically. The workload lifecycle uses it for compare-and-set transitions. */
+  async eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown> {
+    await this.open();
+    return this.client.eval(script, options);
+  }
   /**
    * Close what is open, without propagating a failed connect: `await this.ready` meant a client that
    * never connected could not be closed AT ALL. Same bug, same fix as RedisSessionBackend.close().

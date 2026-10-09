@@ -51,12 +51,21 @@ async function json(method: string, path: string, body?: unknown) {
 
 const envelope = { sessionId: 'run-1', kind: 'prompt', prompt: 'hi' };
 
-describe('workloads are unavailable until Moca provisions them', () => {
+describe('workloads are off unless enabled and Context Service is configured', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   it.each([
-    ['POST', '/workloads'],
-    ['GET', '/workloads/demo'],
-    ['DELETE', '/workloads/demo'],
-  ])('%s %s answers 501 without contacting Context Service', async (method, path) => {
+    ['POST', '/workloads', {}],
+    ['GET', '/workloads/demo', {}],
+    ['DELETE', '/workloads/demo', {}],
+    ['POST', '/workloads/demo/uploads', {}],
+    ['POST', '/workloads/demo/activate', {}],
+    // The flag alone is not enough: Context Service must be configured too.
+    ['POST', '/workloads', { MOCA_CONTEXT_WORKLOADS_ENABLED: '1' }],
+    // A Context Service URL alone does not turn the routes on.
+    ['POST', '/workloads', { CONTEXT_SERVICE_URL: 'http://cs.example' }],
+  ])('%s %s answers 501 without contacting Context Service (%o)', async (method, path, env) => {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const res = await json(method, path, method === 'POST' ? { name: 'demo' } : undefined);
     expect(res).toEqual({ status: 501, body: { error: 'workloads_unavailable' } });
@@ -67,14 +76,22 @@ describe('workloads are unavailable until Moca provisions them', () => {
 
   it('refuses a sync run that names a workload rather than running it on the default pool', async () => {
     const res = await json('POST', '/runs', { ...envelope, workloadId: 'demo' });
-    expect(res).toEqual({ status: 501, body: { error: 'workloads_unavailable' } });
+    expect(res).toEqual({ status: 501, body: { error: 'workload_runs_unavailable' } });
     expect(runLeaf).not.toHaveBeenCalled();
   });
 
   it('refuses an async run that names a workload rather than queueing it', async () => {
     const res = await json('POST', '/runs', { ...envelope, async: true, workloadId: 'demo' });
-    expect(res).toEqual({ status: 501, body: { error: 'workloads_unavailable' } });
+    expect(res).toEqual({ status: 501, body: { error: 'workload_runs_unavailable' } });
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('refuses a run that names a workload even when workloads are enabled', async () => {
+    vi.stubEnv('MOCA_CONTEXT_WORKLOADS_ENABLED', '1');
+    vi.stubEnv('CONTEXT_SERVICE_URL', 'http://cs.example');
+    const res = await json('POST', '/runs', { ...envelope, workloadId: 'demo' });
+    expect(res).toEqual({ status: 501, body: { error: 'workload_runs_unavailable' } });
+    expect(runLeaf).not.toHaveBeenCalled();
   });
 
   it('runs a request without a workload as before', async () => {
