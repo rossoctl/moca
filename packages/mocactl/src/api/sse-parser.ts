@@ -35,6 +35,17 @@ export class SseParser {
     const ev = rest.trim() ? parseBlock(rest) : undefined;
     return ev ? [ev] : [];
   }
+
+  /**
+   * End of stream, per the SSE spec: a held-back CR still ends its line, so events it completes
+   * are dispatched, but a block with no closing blank line is discarded, id and all.
+   */
+  end(): SseEvent[] {
+    const out = this.pendingCr ? this.push('\n') : [];
+    this.buf = '';
+    this.pendingCr = false;
+    return out;
+  }
 }
 
 function parseBlock(block: string): SseEvent | undefined {
@@ -63,7 +74,9 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
     yield* parser.push(decoder.decode(chunk, { stream: true }));
   }
   yield* parser.push(decoder.decode());
-  yield* parser.flush();
+  // Not flush(): a trailing block cut mid-event must not surface (its id would skip the frame on a
+  // re-attach); the stream reader reports the body as truncated instead.
+  yield* parser.end();
 }
 
 const KNOWN = new Set<string>(KNOWN_FRAME_TYPES);
