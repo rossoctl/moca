@@ -215,11 +215,37 @@ export type ProduceVerdict = (
 ) => Promise<void>;
 
 export type SolveCapture = { patch?: string; usage?: LeafUsage };
+export type ProduceSolveDeps = {
+  resolvePromotedConfig?: typeof resolvePromotedConfig;
+  overlayConfig?: typeof overlayConfig;
+  bundleRedis?: BundleRedisLike;
+};
 export type ProduceSolve = (
   env: LeafEnvelope,
   config: TurnConfig | undefined,
   capture: SolveCapture,
+  deps?: ProduceSolveDeps,
 ) => Promise<void>;
+
+/**
+ * The present-but-empty-configRef guard shared by prompt and solve leaves (issue #222):
+ * `""` reached leaves and silently ran bare because `if (env.configRef)` could not tell it
+ * apart from "no config requested". Trim catches a whitespace-only value too. `null` is the
+ * deliberate exception — present yet treated as absent — matching `configRefValid` at the
+ * knative-server boundary so the two layers can't drift. Returns the failure to use, or
+ * null when the field is acceptable (absent, null, or a real digest).
+ */
+export function emptyConfigRefFailure(env: LeafEnvelope): LeafResult | null {
+  if (env.configRef === undefined || env.configRef === null) return null;
+  if (String(env.configRef).trim() !== '') return null;
+  return {
+    status: 'failed',
+    reason: 'error',
+    message:
+      'configRef is present but empty: it must name a bundle digest (sha256:…). ' +
+      'Omit the field entirely to run without promoted configuration.',
+  };
+}
 
 export function validateItem(o: unknown): LeafItem | null {
   if (typeof o !== 'object' || o === null) return null;
@@ -293,14 +319,27 @@ export async function runLeaf(
 export async function runSolveLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
-  deps?: { produceSolve?: ProduceSolve },
+  deps?: { produceSolve?: ProduceSolve } & ProduceSolveDeps,
 ): Promise<LeafResult> {
   if (!env.problemStatement || !env.repoUrl || !env.ref)
     return { status: 'failed', reason: 'bad_inputs' };
+  // Catch an empty-or-whitespace configRef before leasing a sandbox (shared with runPromptLeaf).
+  const emptyRef = emptyConfigRefFailure(env);
+  if (emptyRef) return emptyRef;
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
+  // Forward only the overlay-related slice of deps; undefined when none set so existing 3-arg
+  // produceSolve fakes still receive the exact shape they were written against.
+  const produceDeps: ProduceSolveDeps | undefined =
+    deps?.resolvePromotedConfig || deps?.overlayConfig || deps?.bundleRedis
+      ? {
+          resolvePromotedConfig: deps.resolvePromotedConfig,
+          overlayConfig: deps.overlayConfig,
+          bundleRedis: deps.bundleRedis,
+        }
+      : undefined;
   try {
-    await produce(env, config, capture);
+    await produce(env, config, capture, produceDeps);
   } catch (err) {
     if (err instanceof SandboxPoolSaturatedError)
       return { status: 'failed', reason: 'saturated', message: err.message };
@@ -398,26 +437,9 @@ async function runPromptLeaf(
     // this AFTER the heartbeat starts (not before) matters operationally: resolve+overlay fetches a
     // multi-MB bundle from Redis and pushes it into the pod over up to three kubectl execs, and with
     // no heartbeat running during that window a slow cluster could have the lease reclaimed mid-overlay.
-    // Presence, not truthiness (issue #222). `if (env.configRef)` made `""` indistinguishable from
-    // "no config requested", so a dispatch built from an unset shell variable ran BARE and returned
-    // status: responded — plausible-but-wrong work, which is precisely the failure the paragraph
-    // above says this design exists to prevent. A field that is present is a REQUEST for promoted
-    // config; if it names no bundle, that request cannot be honoured, so fail it out loud.
-    //
-    // `null` is the deliberate exception: it is present, yet treated as absent. JSON null reads as
-    // "no value" for producers that emit it, `""` is the failure actually observed, and the API
-    // boundary agrees (`configRefValid` in knative-server's server.ts). Pinned by a test in both
-    // layers so the exception stays a choice.
+    const emptyRef = emptyConfigRefFailure(env);
+    if (emptyRef) return emptyRef;
     if (env.configRef !== undefined && env.configRef !== null) {
-      if (String(env.configRef).trim() === '') {
-        return {
-          status: 'failed',
-          reason: 'error',
-          message:
-            'configRef is present but empty: it must name a bundle digest (sha256:…). ' +
-            'Omit the field entirely to run without promoted configuration.',
-        };
-      }
       try {
         attached = await attachPromotedConfig({
           digest: env.configRef,
@@ -466,7 +488,7 @@ async function runPromptLeaf(
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the
 // sandbox tools (no verdict/gate extensions), then capture the staged diff. Mirrors realProduceVerdict's
 // session/pool wiring. Exercised by the Kind smoke, not unit tests.
-export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
+export const realProduceSolve: ProduceSolve = async (env, config, capture, deps) => {
   const cwd = config?.cwd ?? process.cwd();
   const { provider, modelId } = resolveModelSelection({
     model: env.model ?? config?.model,
@@ -506,7 +528,15 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
       : SessionManager.create(cwd, undefined, { id: sid }, backend);
 
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let attached: AttachedPromotedConfig | undefined;
   try {
+    // Heartbeat before any multi-second op (converge clone, overlay bundle fetch): on a slow
+    // cluster that window would otherwise lapse the lease (same rationale as runPromptLeaf).
+    heartbeat = setInterval(() => {
+      // Best-effort: an unhandled rejection here would end the leaf, whereas letting the lease
+      // lapse just returns the sandbox to the pool.
+      void selected.heartbeat().catch(() => {});
+    }, solveTimings.heartbeatMs);
     const transport = KubectlTransport(selected.config);
     const swebench = isSwebenchEnvelope(env);
     let workspaceRef: string;
@@ -525,14 +555,25 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
     } else {
       workspaceRef = await convergeWorkspace(transport, env.repoUrl!, env.ref!, sid);
     }
+    // Attach AFTER converge: `leafConfigDir(sid)` (/workspace/leaves/<sid>/.sh-config) is a child
+    // of `leafWorkspaceRef(sid)` (/workspace/leaves/<sid>), and `buildLeafBindScript`'s mkdir -p
+    // creates the parent as a side effect — if that ran first, `buildConvergeScript`'s `[ -d
+    // "$LEAF" ] || git worktree add` would skip the worktree and the leaf would run on an empty
+    // non-git dir. The convergeScript writes `.sh-config` into the main repo's info/exclude so
+    // the untracked overlay symlink isn't staged into the captured patch. Fail-closed is still
+    // preserved: an attach throw propagates to the outer catch below and surfaces failed:error.
+    if (env.configRef !== undefined && env.configRef !== null) {
+      attached = await attachPromotedConfig({
+        digest: env.configRef,
+        sessionId: sid,
+        sandbox: selected,
+        redisUrl: config?.redisUrl,
+        deps,
+      });
+    }
     // A solve leaf edits files in its worktree; point the agent's sandbox cwd at that worktree so the
     // model's edits (relative or absolute) land where captureWorkspaceDiff reads them.
     const agentConfig = { ...selected.config, podCwd: workspaceRef };
-    heartbeat = setInterval(() => {
-      // Best-effort, as in runPromptLeaf: an unhandled rejection here would end the leaf, whereas
-      // letting the lease lapse just returns the sandbox to the pool.
-      void selected.heartbeat().catch(() => {});
-    }, solveTimings.heartbeatMs);
 
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,
@@ -542,6 +583,7 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
+      ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
     const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
     await resourceLoader.reload();
@@ -579,6 +621,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture) => {
     }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    // Detach the overlay before releasing the lease: `attached.detach()` runs cleanup through the
+    // sandbox we hold, so a release-before-detach would leave the overlay link until TTL expiry.
+    // Idempotent and best-effort — see promoted-config.ts:97-113.
+    await attached?.detach();
     if (isSwebenchEnvelope(env)) await cleanupSwebench(KubectlTransport(selected.config), sid);
     else await cleanupWorkspace(KubectlTransport(selected.config), sid);
     await selected.release();

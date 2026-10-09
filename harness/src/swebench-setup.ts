@@ -1,4 +1,5 @@
 import type { SandboxTransport } from '@moca/k8s-sandbox';
+import { leafWorkspaceRef } from './converge.js';
 
 function sq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -52,9 +53,14 @@ export function buildSwebenchDiffScript(sessionId: string): string {
   return [`set -eu`, `git -C ${sq(CO)} add -A`, `git -C ${sq(CO)} diff --cached`].join('\n');
 }
 export function buildSwebenchCleanupScript(sessionId: string): string {
+  // Also clear /workspace/leaves/<sid>: the SWE-bench path uses /workspace/co-<sid> and
+  // /workspace/venv-<sid> for its real work, but a solve leaf with `configRef` lands
+  // leafConfigDir(sid) under /workspace/leaves/<sid>/.sh-config, whose parent is created by
+  // buildLeafBindScript's mkdir -p. attach.detach() removes the symlink; without this the
+  // empty parent dir would otherwise be left behind on the pooled sandbox.
   return [
     `set -u`,
-    `rm -rf ${sq(swebenchCheckoutDir(sessionId))} ${sq(swebenchVenvDir(sessionId))}`,
+    `rm -rf ${sq(swebenchCheckoutDir(sessionId))} ${sq(swebenchVenvDir(sessionId))} ${sq(leafWorkspaceRef(sessionId))}`,
   ].join('\n');
 }
 
