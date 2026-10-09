@@ -212,12 +212,16 @@ export const INTERRUPTED_TURN_NOTICE =
 
 export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer available';
 
-/** Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to. */
+/**
+ * Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to.
+ * A `turn` entry opens one after its prompt, and also with no prompt before it: a 409's attach
+ * records another device's turn on its own.
+ */
 export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'open-detachable' {
   let state: 'none' | 'finished' | 'open' | 'open-detachable' = 'none';
   for (const e of t.entries) {
     if (e.kind === 'prompt') state = 'open';
-    else if (e.kind === 'turn') state = state === 'open' ? 'open-detachable' : state;
+    else if (e.kind === 'turn') state = 'open-detachable';
     else if (isTerminal(e.frame)) state = 'finished';
   }
   return state;
@@ -243,12 +247,21 @@ export function settleOpenTurn(s: BlockState): BlockState {
 
 export function fromTranscript(t: Transcript): BlockState {
   let s = EMPTY_BLOCKS;
-  let lastTurnFrom = 0; // where the last prompt's blocks start
+  let lastTurnFrom = 0; // where the last turn's blocks start: its prompt, or a prompt-less turn
+  let open = false; // a prompt or turn entry came after the last terminal
   for (const e of t.entries) {
     if (e.kind === 'prompt') {
       s = addUser(s, e.text);
       lastTurnFrom = s.blocks.length - 1;
-    } else if (e.kind === 'frame') s = reduceFrame(s, e.frame);
+      open = true;
+    } else if (e.kind === 'turn') {
+      // Another device's turn, recorded by a 409's attach with no prompt of its own.
+      if (!open) lastTurnFrom = s.blocks.length;
+      open = true;
+    } else {
+      s = reduceFrame(s, e.frame);
+      if (isTerminal(e.frame)) open = false;
+    }
   }
   const state = lastTurnState(t);
   // An open detachable turn may still be running: the resume's attach step replays the rest into

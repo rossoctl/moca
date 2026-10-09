@@ -262,6 +262,71 @@ describe('fromTranscript', () => {
     ).toBe('open-detachable');
   });
 
+  // A 409's attach records another device's turn with no prompt of its own (#471 review).
+  it('a turn after a terminal, with no prompt, opens a new detachable turn', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    const finished = [
+      { kind: 'prompt', text: 'p' },
+      { kind: 'turn', turnId: 't1' },
+      { kind: 'frame', frame: done },
+    ];
+    expect(lastTurnState(t([...finished, { kind: 'turn', turnId: 't2' }]))).toBe('open-detachable');
+    expect(
+      lastTurnState(
+        t([...finished, { kind: 'turn', turnId: 't2' }, { kind: 'frame', frame: done }]),
+      ),
+    ).toBe('finished');
+    expect(lastTurnState(t([{ kind: 'turn', turnId: 't1' }]))).toBe('open-detachable');
+  });
+
+  it("renders a prompt-less turn, and leaves it open while earlier turns' tools settle", () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'mine' },
+        { kind: 'frame', frame: { type: 'tool_use', id: 'old', name: 'bash', args: {} } },
+        { kind: 'frame', frame: done },
+        { kind: 'turn', turnId: 't2' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: { type: 'tool_use', id: 'x1', name: 'bash', args: {} } },
+      ],
+      prompts: ['mine'],
+      usage,
+    } as any);
+    const tools = s.blocks.filter((b) => b.kind === 'tool') as any[];
+    expect(tools.map((b) => [b.toolId, b.result?.preview])).toEqual([
+      ['old', 'interrupted'],
+      ['x1', undefined],
+    ]);
+    expect(s.blocks.some((b) => b.kind === 'notice')).toBe(false);
+  });
+
+  it('a finished prompt-less turn renders without a prompt and without a notice', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: done },
+        { kind: 'prompt', text: 'mine' },
+        { kind: 'turn', turnId: 't2' },
+        { kind: 'frame', frame: { type: 'text', delta: 'ok' } },
+        { kind: 'frame', frame: done },
+      ],
+      prompts: ['mine'],
+      usage,
+    } as any);
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'user',
+      'assistant',
+      'turn-end',
+    ]);
+  });
+
   it('leaves an open detachable turn to the attach step: no notice', () => {
     const s = fromTranscript({
       sessionId: 's',

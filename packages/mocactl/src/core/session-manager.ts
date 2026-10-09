@@ -436,7 +436,7 @@ export class ActiveSession {
    * A harness that is briefly unavailable (5xx) is retried like a dropped stream.
    */
   private async reattach(controller: AbortController, ids: Cursor): Promise<boolean> {
-    for (let attempt = 0; attempt < REATTACH_TRIES; ) {
+    for (let attempt = 0; attempt < REATTACH_TRIES;) {
       await this.deps.sleep(REATTACH_BASE_MS * 2 ** attempt, controller.signal);
       if (controller.signal.aborted) throw new TurnCancelledError();
       const before = ids.progress ?? 0;
@@ -465,8 +465,16 @@ export class ActiveSession {
     const { prompt, resend } = job;
     const controller = new AbortController();
     this.controller = controller;
-    if (!resend)
+    // The prompt is recorded once its own turn is accepted (its first frame), or once the turn
+    // ends without one. Not before a 409's attach: that records another device's turn, which must
+    // not read as this prompt's answer; the prompt is recorded when its resend runs.
+    let recorded = resend;
+    let conflicted = false;
+    const record = () => {
+      if (recorded) return;
+      recorded = true;
       this.transcriptSafe(() => this.deps.transcripts?.appendPrompt(this.sessionId, prompt));
+    };
     this.emit({ kind: 'turn-start', prompt });
     let reminted = false;
     let streamed = false;
@@ -488,6 +496,7 @@ export class ActiveSession {
           const frames = (async function* () {
             for await (const f of raw) {
               streamed = true;
+              record();
               yield f;
             }
           })();
@@ -527,9 +536,11 @@ export class ActiveSession {
             job.conflicts < MAX_CONFLICTS
           ) {
             // Another device's turn holds the session: show it, then send this prompt (spec §6.5).
-            // Only a detachable session attaches: headless fails the turn, as it always has.
-            const resend: PromptJob = { ...job, resend: true, conflicts: job.conflicts + 1 };
+            // Only a detachable session attaches: headless fails the turn, as it always has. The
+            // resend keeps `resend` as it was: this prompt is not recorded yet, so the resend does.
+            const resend: PromptJob = { ...job, conflicts: job.conflicts + 1 };
             this.queue.unshift({ kind: 'attach', expectOpen: false, conflict: { resend } }, resend);
+            conflicted = true;
             return false;
           }
           if (TOKEN_CODES.has(err.code) || err.code === 'session_mismatch') {
@@ -561,6 +572,8 @@ export class ActiveSession {
       this.emit({ kind: 'turn-end', outcome: 'error', error: err as Error });
       return false;
     } finally {
+      // Ended with no frame (refused, cancelled before it, a stream with none): still the user's.
+      if (!conflicted) record();
       this.live = undefined;
       this.pending = false;
       this.takeDeferred()?.resolve(true); // the turn is over: nothing is left to cancel

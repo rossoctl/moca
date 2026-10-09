@@ -12,6 +12,7 @@ import {
   type SessionEvent,
 } from '../src/core/session-manager.js';
 import { TranscriptStore } from '../src/core/transcripts.js';
+import { lastTurnState } from '../src/render/blocks.js';
 import { doneFrame, fakeControlPlane, fakeHarness, type HarnessStep } from './helpers/fakes.js';
 
 const NOW = 1_000_000_000; // ms
@@ -487,11 +488,13 @@ describe('detachable turns', () => {
       ids: ['t1:1-0'],
       error: new ApiError('harness', 0, 'network_error', 'x'),
     });
-    const { session, ends, slept } = await started(
-      [drop()],
-      { detachable: true },
-      [drop(), drop(), drop(), drop(), drop()],
-    );
+    const { session, ends, slept } = await started([drop()], { detachable: true }, [
+      drop(),
+      drop(),
+      drop(),
+      drop(),
+      drop(),
+    ]);
     session.submit('go');
     await session.idle();
     expect(slept).toEqual([500, 1000, 2000, 4000, 8000]);
@@ -665,6 +668,84 @@ describe('detachable turns', () => {
     await session.idle();
     expect(harness.attaches).toHaveLength(1);
     expect(harness.turns.map((t) => t.prompt)).toEqual(['mine', 'mine']);
+  });
+
+  // #471 review: the other device's turn must not be recorded as this prompt's answer.
+  it("a 409 records the other device's turn on its own, then the prompt with its own turn", async () => {
+    const transcripts = new TranscriptStore(mkdtempSync(join(tmpdir(), 'sm-')), {
+      subject: 'u',
+      controlPlaneUrl: 'http://cp',
+    });
+    const busy = new ApiError('harness', 409, 'turn_in_progress');
+    const mineT = { type: 'turn', turnId: 't2', sessionId: 's1' } as const;
+    const { session } = await started(
+      [
+        { error: busy },
+        { frames: [mineT, text('mine'), doneFrame()], ids: ['t2:1-0', 't2:2-0', 't2:3-0'] },
+      ],
+      { detachable: true, transcripts },
+      [{ frames: [turnF, text('theirs'), doneFrame()], ids: ['t1:1-0', 't1:2-0', 't1:3-0'] }],
+    );
+    session.submit('P');
+    await session.idle();
+    const t = transcripts.load('s1')!;
+    expect(
+      t.entries.map((e) =>
+        e.kind === 'prompt'
+          ? `prompt ${e.text}`
+          : e.kind === 'turn'
+            ? `turn ${e.turnId}`
+            : `${e.frame.type}${e.frame.type === 'text' ? ` ${e.frame.delta}` : ''}`,
+      ),
+    ).toEqual(['turn t1', 'text theirs', 'done', 'prompt P', 'turn t2', 'text mine', 'done']);
+    expect(t.prompts).toEqual(['P']);
+    expect(t.title).toBe('P');
+  });
+
+  it('a 409 resend that is cut mid-turn reads as open-detachable on resume', async () => {
+    const transcripts = new TranscriptStore(mkdtempSync(join(tmpdir(), 'sm-')), {
+      subject: 'u',
+      controlPlaneUrl: 'http://cp',
+    });
+    const busy = new ApiError('harness', 409, 'turn_in_progress');
+    const mineT = { type: 'turn', turnId: 't2', sessionId: 's1' } as const;
+    const { session } = await started(
+      [{ error: busy }, { frames: [mineT, text('mine')], ids: ['t2:1-0', 't2:2-0'], hang: true }],
+      { detachable: true, transcripts },
+      [{ frames: [turnF, doneFrame()], ids: ['t1:1-0', 't1:2-0'] }],
+    );
+    session.submit('P');
+    // The resend's own turn frame is recorded: its stream is being read.
+    await expect
+      .poll(() =>
+        transcripts.load('s1')?.entries.some((e) => e.kind === 'turn' && e.turnId === 't2'),
+      )
+      .toBe(true);
+    session.detach(); // quit with "keep it running"
+    await session.idle();
+    expect(lastTurnState(transcripts.load('s1')!)).toBe('open-detachable');
+  });
+
+  it.each([
+    ['a refusal', [{ error: new ApiError('harness', 400, 'bad_request', 'no') }]],
+    [
+      'too many 409s',
+      Array.from({ length: 4 }, () => ({ error: harnessError(409, 'turn_in_progress') })),
+    ],
+  ])('a prompt that never ran is still recorded after %s', async (_how, steps) => {
+    const transcripts = new TranscriptStore(mkdtempSync(join(tmpdir(), 'sm-')), {
+      subject: 'u',
+      controlPlaneUrl: 'http://cp',
+    });
+    const other = { frames: [turnF, doneFrame()], ids: ['t1:1-0', 't1:2-0'] };
+    const { session } = await started(steps, { detachable: true, transcripts }, [
+      other,
+      other,
+      other,
+    ]);
+    session.submit('P');
+    await session.idle();
+    expect(transcripts.load('s1')!.prompts).toEqual(['P']);
   });
 
   it('a non-detachable session fails a 409 turn_in_progress turn: no attach, no cancel', async () => {
