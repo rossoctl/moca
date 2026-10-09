@@ -221,6 +221,13 @@ describe('POST /v1/turn detachable', () => {
     expect(res.status).toBe(500);
     expect(JSON.parse(res.raw)).toEqual({ error: 'internal_error', sessionId });
     expect(res.raw).not.toContain('hunter2');
+    // The logged terminal is replayable: an attach must not read the text back either.
+    const replay = await get(`/v1/turn?sessionId=${sessionId}`, {
+      Authorization: `Bearer ${mint(sessionId)}`,
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.raw).toContain('"errorMessage":"internal_error"');
+    expect(replay.raw).not.toContain('hunter2');
     err.mockRestore();
   });
 
@@ -392,7 +399,7 @@ describe('POST /v1/turn/cancel', () => {
 
   it('400 invalid_json for a null or primitive body', async () => {
     const auth = { Authorization: `Bearer ${mint(sessionId)}` };
-    for (const body of [null, 42, 'x']) {
+    for (const body of [null, 42, 'x', [{ sessionId: 's' }]]) {
       const c = await postJson('/v1/turn/cancel', body, auth);
       expect(c.status).toBe(400);
       expect(c.json.error).toBe('invalid_json');

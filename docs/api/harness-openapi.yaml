@@ -82,10 +82,12 @@ paths:
         harness accepts, and it asks for SSE (`Accept: text/event-stream`). Otherwise the field
         is ignored and the turn behaves exactly as above. A detachable turn's stream differs in
         three ways: its first event is a `turn` frame (FrameTurn — its presence is the
-        capability signal; there is no separate probe); every frame carries an SSE
+        capability signal; there is no separate probe); every LOGGED frame carries an SSE
         `id: <turnId>:<entryId>`, the cursor GET /v1/turn resumes from; and closing the
-        connection does NOT abort the turn. Every frame is logged before it is sent, so an id a
-        client holds always names a logged entry. A detached turn nobody watches is aborted
+        connection does NOT abort the turn. A frame is written to the turn's log before it is
+        sent, so an id a client holds always names a logged entry. If that log write fails,
+        the frame is still sent, but without an `id:` line, and a later attach may not replay
+        it. A detached turn nobody watches is aborted
         after SH_TURN_DETACHED_MAX_S (default 1800), and its log is retained for
         SH_TURN_LOG_TTL_S (default 86400). A turn the harness ended itself carries the reason
         on its terminal `error` frame (`abortReason`). The lazy flush is unchanged: the
@@ -123,8 +125,9 @@ paths:
                 vocabulary is TurnStreamFrame below — incremental text/thinking/tool frames,
                 then exactly one terminal `done` or `error` frame. Client disconnect aborts the
                 in-flight turn — except on a detachable turn, which opens with a `turn` frame,
-                puts `id: <turnId>:<entryId>` before every frame's `event:` line, and runs on
-                when the client leaves.
+                puts `id: <turnId>:<entryId>` before the `event:` line of every frame it logged
+                (a frame whose log write failed is sent without one), and runs on when the
+                client leaves.
         '400':
           description: |
             prompt_required (no prompt in the body) · invalid_json · read_error (the body never
@@ -281,12 +284,15 @@ paths:
         Asks the harness running the session's detachable turn to abort it. The turn ends
         through its normal path: a terminal `error` frame with `abortReason: cancelled` reaches
         the log and every attached watcher, so the cancelling client learns of the end by
-        watching the turn, not from this response. Cancelling a turn that has already ended is
-        a no-op that still answers 202.
+        watching the turn, not from this response. When no turn is running, the cancel is a
+        no-op that still answers 202, naming the session's LAST retained turn.
 
         Pass `turnId` to make the cancel conditional, so a stale cancel cannot kill a newer
         turn: if the running turn is another one, the answer is 409 turn_mismatch and nothing
-        is cancelled.
+        is cancelled. The `turnId` is compared only against a RUNNING turn. When none is
+        running, the 202 names the last turn, which may not be the one the caller sent. A
+        client sending a conditional cancel should compare the two ids: a different id means
+        its own turn had already ended, and nothing was cancelled.
 
         A token is REQUIRED here in every mode — 401 token_required without one — and it must
         name the session. With SH_TURN_DETACH off, every authorized cancel answers 404
@@ -301,8 +307,9 @@ paths:
       responses:
         '202':
           description: |
-            The cancel was requested of the running turn, or the turn had already ended. Either
-            way `turnId` names the turn it applied to.
+            The cancel was requested of the running turn, and `turnId` names it. Or no turn is
+            running, and `turnId` names the session's last retained turn (a no-op). In the second
+            case the id need not equal the request's `turnId`.
           content:
             application/json:
               schema:

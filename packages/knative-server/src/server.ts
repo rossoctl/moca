@@ -509,6 +509,7 @@ async function handleDetachableTurn(
         }),
       );
     } else {
+      logTurnRouteError('begin', auth.sessionId, err);
       res.writeHead(503, retryHeaders()).end(JSON.stringify({ error: 'redis_unavailable' }));
     }
     return;
@@ -551,7 +552,13 @@ async function handleDetachableTurn(
     send(end.frame, end.id);
   } catch (err) {
     await chain;
-    const message = err instanceof Error ? err.message : String(err);
+    // The logged terminal is replayable by any later attach, so an UNCLASSIFIED failure's text
+    // (which can carry a connection string or a token) is replaced by the stable code there, as in
+    // the body below; the text exists only in the server log.
+    const status = turnErrorStatus(err);
+    if (status === 500) console.error('[turn:detach] unclassified error:', err);
+    const message =
+      status === 500 ? turnErrorCode(status) : err instanceof Error ? err.message : String(err);
     const end = await turn.end({
       type: 'error',
       sessionId: auth.sessionId,
@@ -559,9 +566,7 @@ async function handleDetachableTurn(
       errorMessage: message,
     });
     if (!started && !res.headersSent) {
-      // The sync path's mapping, stable code included: the exception text goes to the log only.
-      const status = turnErrorStatus(err);
-      if (status === 500) console.error('[turn:detach] unclassified error:', err);
+      // The sync path's mapping, stable code included.
       res
         .writeHead(status, turnErrorHeaders(status, err))
         .end(JSON.stringify({ error: turnErrorCode(status), sessionId: auth.sessionId }));
@@ -656,8 +661,8 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
   } catch {
     body = undefined;
   }
-  // A body that is not a JSON object (unparseable, null, a primitive) names no session.
-  if (typeof body !== 'object' || body === null) {
+  // A body that is not a JSON object (unparseable, null, a primitive, an array) names no session.
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'invalid_json' }));
     return;
   }
