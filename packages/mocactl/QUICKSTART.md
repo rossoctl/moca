@@ -73,15 +73,22 @@ reconnects dropped port-forwards. Ports: `MOCACTL_CP_PORT` (18080) and `MOCACTL_
 
 ## 4. Run mocactl
 
-In a second terminal, from the checkout:
+In a second terminal:
 
 ```bash
-alias mocactl="node $PWD/packages/mocactl/bin/mocactl.mjs"
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | MOCACTL_VERSION=edge sh
 export SH_CONTROL_PLANE_URL=http://localhost:18080   # the only URL mocactl needs
 
 mocactl login     # open the printed URL, enter the code
 mocactl           # first run: onboarding
 ```
+
+`MOCACTL_VERSION=edge` matches a cluster built from `main`, as this one is. Against a released
+server, drop it. Working on `mocactl` itself? Run `node packages/mocactl/bin/mocactl.mjs` from the
+checkout instead.
+
+You stay logged in for 30 days after you last used `mocactl`, and 90 days at most. `mocactl logout`
+ends the login.
 
 Onboarding asks for the server URL (already filled in; press Enter). It skips login if you're
 already logged in, and then asks for an **inference credential**: the key and gateway your

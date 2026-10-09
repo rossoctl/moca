@@ -300,29 +300,6 @@ export function authorizeRunRead(
 }
 
 /**
- * Authentication for a route that names no session — the `/workloads` lifecycle. The same token
- * rules as a turn (required under SH_REQUIRE_AUTH, a present-but-bad token refused in either mode),
- * with no session binding and no credential exchange: a workload is owned by a subject, not a session.
- *
- * Returns the token's subject, or `null` when none was presented and none is required.
- */
-export function authenticateSubject(
-  headers: Record<string, string | string[] | undefined>,
-  deps: TurnAuthDeps,
-): string | null {
-  const presented = bearer(headers);
-  if (!presented) {
-    if (deps.requireAuth) throw new CpError('token_required', 'this deployment requires a token');
-    return null;
-  }
-  const claims = verifyToken(presented, deps.keys, {
-    now: Math.floor((deps.now?.() ?? Date.now()) / 1000),
-    requiredScope: 'turn:write',
-  });
-  return claims.sub;
-}
-
-/**
  * What the harness self-reports for /resources (spec §7.4, plan gap #5). Everything here is already in
  * this process's environment, so nothing in run-turn.ts has to change to produce it.
  */

@@ -150,7 +150,7 @@ re-running with just that one:
   `moca-settings`. A variable that is **unset** keeps the stored value. A variable set to empty
   **clears** it: `SH_ADMIN_SUBJECTS= deploy/k8s/setup.sh ...` removes every admin,
   `SH_GITHUB_CLIENT_ID=` takes the control plane back to 0 replicas, and an empty token lifetime is
-  the control plane's default (3600 seconds for the API token a login gets, 300 for a session
+  the control plane's default (900 seconds for the API token a login gets, 300 for a session
   token). A lifetime is a whole number of seconds; a change rolls the control plane.
 - `SH_SANDBOX_COUNT`, and on OpenShift `--image` and `--sandbox-image`, live in the ConfigMap
   `moca-setup` (namespace `moca`, nothing secret in it). A given value replaces the stored one.
@@ -510,9 +510,12 @@ export NODE_EXTRA_CA_CERTS=<the CA file>
 export SH_CONTROL_PLANE_URL=https://moca-control-plane-moca.<apps domain>
 ```
 
-The API token lasts an hour unless `setup.sh` was run with `SH_API_TOKEN_TTL_SECONDS` (§2's
-sticky settings). Set it to cover the demo, for example `SH_API_TOKEN_TTL_SECONDS=28800`, or log in
-close to the start of the acts. `MOCA_TENANCY` is unset, as on the VM demo; see its note on tenancy.
+`mocactl` renews its API token by itself, for 30 days after its last use (90 at most), so one
+login before the acts is enough. The token lasts 15 minutes unless `setup.sh` was run with
+`SH_API_TOKEN_TTL_SECONDS` (§2's sticky settings). A longer value buys nothing with a renewing
+login and costs revocation latency: `mocactl logout` stops new tokens at once, but a token already
+minted stays valid for its whole lifetime. `MOCA_TENANCY` is unset, as on the VM demo; see its note
+on tenancy.
 
 **L4 baseline (operator), before act 1.** Record the supervisor's counters:
 
@@ -638,8 +641,8 @@ rm -f "$HDR"; kill "$PF"
 Each delete answers 204.
 
 **On each laptop,** delete the run's sessions (`mocactl sessions delete ID`) and credentials
-(`mocactl credentials delete NAME`), and remove
-`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out. On the cluster, delete the
+(`mocactl credentials delete NAME`), and run
+`mocactl logout` (it revokes the login on the control plane and deletes `auth.json`). On the cluster, delete the
 three namespaces (`moca`, `moca-sandbox`, `moca-credentials`); deleting `moca` deletes the Redis
 PVC with it. The `nonroot-v2` grants are cluster objects:
 `oc adm policy remove-scc-from-user nonroot-v2 -z <sa> -n <ns>` for each ServiceAccount.

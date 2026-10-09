@@ -1,5 +1,4 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runTurn, executeTurn, type TurnConfig, type TurnResult } from '@moca/harness/run-turn';
 import { terminalFrame, type TurnStreamFrame } from '@moca/harness/turn-stream';
@@ -17,17 +16,8 @@ import {
   writeResult,
   readResult,
 } from '@moca/harness/leaf-result-store';
-import {
-  contextServiceConfigured,
-  createWorkload,
-  deleteWorkload,
-  getWorkload,
-  type WorkloadRecord,
-  type WorkloadRequest,
-} from './context-service.js';
 import { CpError, statusFor } from '@moca/control-plane';
 import {
-  authenticateSubject,
   authorizeRunRead,
   resolveTurnAuth,
   runtimeFieldsForTurn,
@@ -36,7 +26,6 @@ import {
   type TurnAuthDeps,
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
-import { readTenancy } from './tenancy.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
@@ -47,7 +36,6 @@ const SSE_HEADERS = {
   'X-Accel-Buffering': 'no', // belt-and-suspenders for any nginx fronting Kourier (Envoy ignores it)
 };
 const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
-const WORKLOAD_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -460,196 +448,13 @@ function getResultStore(): RedisResultStore {
   return resultStore;
 }
 
-const workloadKey = (id: string) => `sh:workload:${id}`;
-
-const withOwner = (record: WorkloadRecord, subject: string | null): WorkloadRecord => {
-  const { owner: _ignored, ...rest } = record;
-  return subject === null ? rest : { ...rest, owner: subject };
-};
-
-async function saveWorkload(record: WorkloadRecord): Promise<void> {
-  await getResultStore().set(workloadKey(record.workloadId), JSON.stringify(record));
-}
-
-async function findWorkload(id: string): Promise<WorkloadRecord | null> {
-  const raw = await getResultStore().get(workloadKey(id));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as WorkloadRecord;
-  } catch {
-    return null;
-  }
-}
-
-function requireContextService(res: ServerResponse): boolean {
-  if (contextServiceConfigured()) return true;
-  res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_not_configured' }));
-  return false;
-}
-
-function contextServiceFailure(operation: string, err: unknown, res: ServerResponse): void {
-  console.error(`Context Service ${operation} failed:`, err);
-  res.writeHead(502, JSON_HEADERS).end(JSON.stringify({ error: 'context_service_error' }));
-}
-
 /**
- * A workload belongs to the subject that created it. A caller may read or run on one only with the
- * same subject — an unowned workload (created unauthenticated) only without one. A mismatch reads as
- * `workload_not_found` there. Names are still one namespace, though: re-creating another subject's
- * live name answers `409`, and deleting an unowned one answers `204`, so a name's existence is
- * probeable — only its contents and its pool are not.
+ * Workloads are unavailable until Moca provisions them itself: Context Service no longer allocates
+ * sandbox pools for Moca (rossoctl/moca#455). Answer every workload route, and any run that names a
+ * workload, plainly rather than running it on the default pool.
  */
-const ownedBy = (record: WorkloadRecord, subject: string | null): boolean =>
-  (record.owner ?? null) === subject;
-
-/**
- * Who may DELETE a workload: its owner, and ANY caller for an unowned one. A record written before
- * workloads had owners carries none, and under SH_REQUIRE_AUTH=true no caller is unauthenticated --
- * so without this it could be neither read, deleted nor re-created, and its pool and volume would
- * leak with no API path to reclaim them. Deleting is the only thing a non-owner may do: an unowned
- * workload was reachable by every caller before, so reclaiming it grants nothing new, while
- * reading or running on it would.
- */
-const mayDelete = (record: WorkloadRecord, subject: string | null): boolean =>
-  record.owner === undefined || ownedBy(record, subject);
-
-/**
- * Context Service's reply names the pool it acted on. Every lookup here keys on the ID the caller
- * asked for, so a reply naming a different pool is refused rather than stored under its own name --
- * the ownership checks and the store must agree on which record they mean.
- */
-function sameWorkload(record: WorkloadRecord, workloadId: string): WorkloadRecord {
-  if (record.workloadId !== workloadId) {
-    throw new Error(`Context Service answered for '${record.workloadId}', not '${workloadId}'`);
-  }
-  return record;
-}
-
-/**
- * The one place a run acquires a sandbox pool selector. `/runs` strips any caller-supplied selector
- * as internal routing state, so this lookup must not re-admit another subject's pool: the workload
- * has to be owned by the run's caller (MI1 R7).
- */
-async function resolveRunWorkload(
-  body: any,
-  subject: string | null,
-  res: ServerResponse,
-): Promise<any | null> {
-  if (!body?.workloadId) return body;
-  const record = await findWorkload(body.workloadId);
-  if (!record || record.status === 'deleted' || !ownedBy(record, subject)) {
-    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
-    return null;
-  }
-  return { ...body, sandboxPoolSelector: record.sandboxSelector };
-}
-
-/**
- * Authenticate a `/workloads` request, writing the refusal itself. Resolves to the caller's subject,
- * `null` for an allowed unauthenticated caller, or `undefined` when the request was refused.
- */
-function workloadCaller(req: IncomingMessage, res: ServerResponse): string | null | undefined {
-  try {
-    return authenticateSubject(req.headers, turnAuthDeps());
-  } catch (err) {
-    writeAuthError(res, err);
-    return undefined;
-  }
-}
-
-async function handleCreateWorkload(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const subject = workloadCaller(req, res);
-  if (subject === undefined) return;
-  if (!requireContextService(res)) return;
-  let spec: WorkloadRequest;
-  try {
-    spec = JSON.parse(await readBody(req)) as WorkloadRequest;
-  } catch {
-    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'invalid_json' }));
-    return;
-  }
-  const workloadId = spec.name ?? `wl-${randomUUID().slice(0, 8)}`;
-  if (workloadId.length > 50 || !WORKLOAD_NAME.test(workloadId)) {
-    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_invalid' }));
-    return;
-  }
-  // A caller-named claim is any PVC in the namespace: owning the workload says nothing about owning
-  // the volume, and nothing here or in Context Service authorizes one against the other. So it is
-  // refused wherever callers are told apart -- any authenticated caller (which is every caller under
-  // SH_REQUIRE_AUTH=true), and always under multi tenancy -- until claims are scoped to their
-  // subject (MI1 §4.3, §13). Only the anonymous caller of an unauthenticated deployment, which
-  // distinguishes no one, may still name one.
-  if (
-    spec.workspace?.claimName !== undefined &&
-    (subject !== null || readTenancy(process.env) === 'multi')
-  ) {
-    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'claim_name_not_allowed' }));
-    return;
-  }
-  // A live workload of another subject's cannot be claimed by re-creating its name. Check-then-act:
-  // two subjects creating one NEW name at the same moment can both pass this, and the later
-  // saveWorkload's owner wins. Accepted for S1 -- the window is one Context Service round trip, and
-  // the store offers no set-if-absent -- and tracked in rossoctl/moca#356.
-  const existing = await findWorkload(workloadId);
-  if (existing && existing.status !== 'deleted' && !ownedBy(existing, subject)) {
-    res.writeHead(409, JSON_HEADERS).end(JSON.stringify({ error: 'workload_name_taken' }));
-    return;
-  }
-  try {
-    const record = withOwner(
-      sameWorkload(await createWorkload(workloadId, spec), workloadId),
-      subject,
-    );
-    await saveWorkload(record);
-    res.writeHead(201, JSON_HEADERS).end(JSON.stringify(record));
-  } catch (err) {
-    contextServiceFailure('create', err, res);
-  }
-}
-
-async function handleGetWorkload(
-  req: IncomingMessage,
-  id: string,
-  res: ServerResponse,
-): Promise<void> {
-  const subject = workloadCaller(req, res);
-  if (subject === undefined) return;
-  if (!requireContextService(res)) return;
-  const stored = await findWorkload(id);
-  if (!stored || !ownedBy(stored, subject)) {
-    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
-    return;
-  }
-  try {
-    // Context Service knows nothing of owners: carry the stored one over the refreshed record.
-    const record = withOwner(sameWorkload(await getWorkload(id), id), subject);
-    await saveWorkload(record);
-    res.writeHead(200, JSON_HEADERS).end(JSON.stringify(record));
-  } catch (err) {
-    contextServiceFailure('get', err, res);
-  }
-}
-
-async function handleDeleteWorkload(
-  req: IncomingMessage,
-  id: string,
-  res: ServerResponse,
-): Promise<void> {
-  const subject = workloadCaller(req, res);
-  if (subject === undefined) return;
-  if (!requireContextService(res)) return;
-  const record = await findWorkload(id);
-  if (!record || record.status === 'deleted' || !mayDelete(record, subject)) {
-    res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'workload_not_found' }));
-    return;
-  }
-  try {
-    await deleteWorkload(id);
-    await saveWorkload({ ...record, status: 'deleted', readyReplicas: 0 });
-    res.writeHead(204).end();
-  } catch (err) {
-    contextServiceFailure('delete', err, res);
-  }
+function rejectWorkloads(res: ServerResponse): void {
+  res.writeHead(501, JSON_HEADERS).end(JSON.stringify({ error: 'workloads_unavailable' }));
 }
 
 async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<void> {
@@ -658,9 +463,7 @@ async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  // Only an unauthenticated caller reaches the queue (an authenticated async run is a 501).
-  body = await resolveRunWorkload(body, null, res);
-  if (!body) return;
+  if (body.workloadId !== undefined) return rejectWorkloads(res);
   const q = getQueue();
   await q.ensureGroup();
   await q.enqueue(body);
@@ -680,8 +483,7 @@ async function handleRunLeafParsed(
     return;
   }
   if (rejectInvalidConfigRef(body, res)) return;
-  body = await resolveRunWorkload(body, auth?.subject ?? null, res);
-  if (!body) return;
+  if (body.workloadId !== undefined) return rejectWorkloads(res);
 
   // Spec §4.3: on pool saturation the sync path bounded-waits with backoff, then 503 Retry-After.
   // selectPoolSandbox throws before taking any lease or doing agent work, so re-running runLeaf on a
@@ -782,27 +584,8 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
-  if (req.method === 'POST' && url === '/workloads') {
-    handleCreateWorkload(req, res).catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
-    return;
-  }
-
-  const workloadMatch = url.match(/^\/workloads\/([^/?]+)$/);
-  if (workloadMatch && req.method === 'GET') {
-    handleGetWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
-    return;
-  }
-  if (workloadMatch && req.method === 'DELETE') {
-    handleDeleteWorkload(req, decodeURIComponent(workloadMatch[1]), res).catch((err) => {
-      if (!res.headersSent)
-        res.writeHead(500, JSON_HEADERS).end(JSON.stringify({ error: String(err) }));
-    });
+  if (/^\/workloads(?:\/[^/?]+)?$/.test(url)) {
+    rejectWorkloads(res);
     return;
   }
 
@@ -861,7 +644,7 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
         /* handled below */
       }
       // Pool selection is internal routing state. Never accept a Kubernetes selector directly
-      // from an external run request; a workload resolver may add one after this boundary.
+      // from an external run request.
       if (parsed && typeof parsed === 'object') delete parsed.sandboxPoolSelector;
 
       // The same caller rules as /turn (MI1 §5 R7): required under SH_REQUIRE_AUTH, a bad token

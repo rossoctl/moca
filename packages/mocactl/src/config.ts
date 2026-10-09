@@ -140,6 +140,10 @@ export interface CachedAuth {
   roles: string[];
   expiresAt: number;
   controlPlaneUrl: string;
+  /** Single-use; replaced on every refresh, and written BEFORE the new API token is used (B14). */
+  refreshToken?: string;
+  /** Epoch seconds: when this login ends however often it is refreshed. */
+  refreshExpiresAt?: number;
 }
 
 export function loadAuth(paths: Paths, controlPlaneUrl: string): CachedAuth | null {
@@ -158,6 +162,11 @@ export function saveAuth(paths: Paths, auth: CachedAuth): void {
 
 export function clearAuth(paths: Paths): void {
   rmSync(paths.authFile, { force: true });
+}
+
+/** The lock two mocactl processes take before refreshing, so only one spends the refresh token. */
+export function authLockPath(paths: Paths): string {
+  return `${paths.authFile}.lock`;
 }
 
 export interface Endpoints {

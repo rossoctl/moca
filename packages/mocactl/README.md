@@ -10,11 +10,24 @@ so it works the same whatever runs behind those URLs. Design:
 **New here?** [QUICKSTART.md](QUICKSTART.md) goes from a fresh checkout to a streamed reply on a
 local kind cluster, with one script doing the cluster wiring.
 
+**Install** (macOS or Linux, Node.js 22 or later):
+
 ```bash
-pnpm install
-node packages/mocactl/bin/mocactl.mjs            # interactive; the first run walks you through setup
-node packages/mocactl/bin/mocactl.mjs --setup    # re-run setup on a configured machine
+curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
+export SH_CONTROL_PLANE_URL=https://moca.example.com   # your MOCA server; the only URL mocactl needs
+mocactl            # interactive; the first run walks you through setup
+mocactl --setup    # re-run setup on a configured machine
 ```
+
+It installs `~/.local/bin/mocactl` (a symlink to `mocactl.mjs` beside it) from the latest release, after checking its SHA-256, and prints
+the `PATH` line to add if that directory isn't on your `PATH` yet. Re-run it to upgrade.
+`MOCACTL_VERSION=edge` installs the build of `main`, `MOCACTL_VERSION=v0.6.0` a given release, and
+`MOCACTL_INSTALL_DIR` sets another directory. `mocactl --version` says which one you have. To
+uninstall, `rm ~/.local/bin/mocactl ~/.local/bin/mocactl.mjs` (and `~/.config/mocactl` for its config and login).
+
+**From a checkout** (contributors): `pnpm install`, then `node packages/mocactl/bin/mocactl.mjs`,
+which runs the TypeScript sources directly. `pnpm --filter @moca/mocactl build` writes the
+release bundle to `packages/mocactl/dist/mocactl.mjs`.
 
 `mocactl` needs one URL: the server's (the control plane). It comes from `--control-plane-url`, then
 `SH_CONTROL_PLANE_URL`, then the saved config. The control plane says where the harness is
@@ -57,6 +70,8 @@ keys in `config.json` under `keybinds`, e.g. `{ "session.new": "ctrl+x s" }`.
 
 ```bash
 mocactl login                               # device-flow login, prints the code
+mocactl logout [--all]                      # end this login on the server (--all: all of yours)
+mocactl auth token [--json]                 # a valid API token for scripts and the Claude Code hook
 mocactl doctor [--json]                     # seven checks, one fix per failure; exit 1 on failure
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
 mocactl promote DIR [--dry-run] [--json]    # upload DIR's .claude/skills and .claude/commands
@@ -130,7 +145,10 @@ local history (the control plane stores no titles).
 ## Files
 
 - `$XDG_CONFIG_HOME/mocactl/config.json` — endpoints, theme, toggles, keybinds, presets.
-- `$XDG_CONFIG_HOME/mocactl/auth.json` — the 1-hour API token (mode 0600). No provider key is ever stored.
+- `$XDG_CONFIG_HOME/mocactl/auth.json` — the 15-minute API token and the refresh token that renews
+  it (mode 0600). A login renews itself for 30 days after its last use and 90 days at most; every
+  renewal replaces the refresh token, so a copied file stops working the next time either copy is
+  used. `mocactl logout` ends it. No provider key is ever stored.
 - `$XDG_STATE_HOME/mocactl/transcripts/` — local session history, per subject and per control plane
   (mode 0600). A session resumed from another machine shows no history — it belongs to a
   different transcript store.

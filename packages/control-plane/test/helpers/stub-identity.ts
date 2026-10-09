@@ -16,4 +16,9 @@ export class StubIdentity implements IdentityProvider {
     if (this.principal instanceof Error) throw this.principal;
     return this.principal;
   }
+  rolesFor(subject: string): string[] {
+    return this.principal instanceof Error || this.principal.subject !== subject
+      ? []
+      : this.principal.roles;
+  }
 }

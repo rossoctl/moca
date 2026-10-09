@@ -18,6 +18,7 @@ export const CP_ERROR_CODES = [
   'token_required',
   'token_invalid',
   'token_expired',
+  'invalid_grant',
   'subject_conflict',
   'unauthorized',
   'forbidden',
@@ -47,6 +48,9 @@ const STATUS: Record<CpErrorCode, number> = {
   token_required: 401,
   token_invalid: 401,
   token_expired: 401,
+  // 400, as RFC 6749 §5.2 answers a refused grant: the refresh token is unknown, revoked, expired
+  // or a replayed predecessor. One code for all four, so a client's only move is "log in again".
+  invalid_grant: 400,
   // A request carrying both a session token and a conflicting X-SH-Subject is REJECTED rather than
   // resolved by precedence -- a silent winner here is a cross-tenant bug waiting (spec §3.5).
   subject_conflict: 400,

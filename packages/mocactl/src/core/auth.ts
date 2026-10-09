@@ -78,6 +78,8 @@ export function toCachedAuth(login: ApiLogin, controlPlaneUrl: string): CachedAu
     roles: login.roles ?? [],
     expiresAt: login.expiresAt,
     controlPlaneUrl,
+    ...(login.refreshToken ? { refreshToken: login.refreshToken } : {}),
+    ...(login.refreshExpiresAt !== undefined ? { refreshExpiresAt: login.refreshExpiresAt } : {}),
   };
 }
 
@@ -86,7 +88,8 @@ export function apiTokenValid(auth: CachedAuth | null, nowMs: number): boolean {
 }
 
 export function loginExpiryMinutes(auth: CachedAuth | null, nowMs: number): number | undefined {
-  if (!auth) return undefined;
+  // With a refresh token the next 401 renews the API token by itself; only a login without one expires.
+  if (!auth || auth.refreshToken) return undefined;
   const leftMs = auth.expiresAt * 1000 - nowMs;
   if (leftMs <= 0 || leftMs >= 5 * 60_000) return undefined;
   return Math.ceil(leftMs / 60_000);

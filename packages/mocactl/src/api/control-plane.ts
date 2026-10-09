@@ -1,4 +1,4 @@
-import { ApiError, errorFromResponse, networkError } from './errors.js';
+import { ApiError, TOKEN_CODES, errorFromResponse, networkError } from './errors.js';
 import { trimTrailingSlashes } from './url.js';
 import type {
   ApiLogin,
@@ -17,6 +17,17 @@ import type {
 
 type Query = Record<string, string | number | undefined>;
 
+export interface ControlPlaneClientOptions {
+  /**
+   * Called once when an authenticated route answers 401 with a token_* code; resolving true retries
+   * the request with whatever getToken returns then. Runtime wires it to a forced refresh (B14), so a
+   * TUI left open past the 15-minute API token carries on.
+   */
+  onTokenRejected?: () => Promise<boolean>;
+  /** Sent as the device-flow `label`; the control plane shows it back and never trusts it. */
+  label?: string;
+}
+
 export class ControlPlaneClient implements ControlPlaneApi {
   private readonly base: string;
 
@@ -24,6 +35,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
     baseUrl: string,
     private readonly getToken: () => string | undefined,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly opts: ControlPlaneClientOptions = {},
   ) {
     this.base = trimTrailingSlashes(baseUrl);
   }
@@ -31,7 +43,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
   private async request(
     method: string,
     path: string,
-    opts: { body?: unknown; auth?: boolean; query?: Query } = {},
+    opts: { body?: unknown; auth?: boolean; query?: Query; retried?: boolean } = {},
   ): Promise<Response> {
     const url = new URL(this.base + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -53,14 +65,29 @@ export class ControlPlaneClient implements ControlPlaneApi {
     } catch (err) {
       throw networkError('control-plane', err);
     }
-    if (!res.ok) throw await errorFromResponse('control-plane', res);
+    if (!res.ok) {
+      const err = await errorFromResponse('control-plane', res);
+      // One retry, only for an authenticated call whose token was the problem: a refresh cannot fix
+      // anything else, and a second 401 means the new token is no better.
+      if (
+        res.status === 401 &&
+        opts.auth !== false &&
+        !opts.retried &&
+        TOKEN_CODES.has(err.code) &&
+        this.opts.onTokenRejected &&
+        (await this.opts.onTokenRejected())
+      ) {
+        return this.request(method, path, { ...opts, retried: true });
+      }
+      throw err;
+    }
     return res;
   }
 
   private async json<T>(
     method: string,
     path: string,
-    opts?: { body?: unknown; auth?: boolean; query?: Query },
+    opts?: { body?: unknown; auth?: boolean; query?: Query; retried?: boolean },
   ): Promise<T> {
     return (await (await this.request(method, path, opts)).json()) as T;
   }
@@ -85,13 +112,28 @@ export class ControlPlaneClient implements ControlPlaneApi {
     try {
       return await this.json<ApiLogin>('POST', '/v1/auth/device/token', {
         auth: false,
-        body: { deviceCode },
+        body: { deviceCode, ...(this.opts.label ? { label: this.opts.label } : {}) },
       });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'authorization_pending') return 'pending';
       if (err instanceof ApiError && err.code === 'device_code_expired') return 'expired';
       throw err;
     }
+  }
+
+  refreshAuth(refreshToken: string): Promise<ApiLogin> {
+    return this.json('POST', '/v1/auth/token', {
+      auth: false,
+      body: { grant_type: 'refresh_token', refresh_token: refreshToken },
+    });
+  }
+
+  async revokeAuth(refreshToken: string): Promise<void> {
+    await this.request('POST', '/v1/auth/revoke', { auth: false, body: { token: refreshToken } });
+  }
+
+  async revokeAllAuth(): Promise<number> {
+    return (await this.json<{ revoked: number }>('POST', '/v1/auth/revoke-all')).revoked;
   }
 
   me(): Promise<Me> {

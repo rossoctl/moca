@@ -214,6 +214,42 @@ sandbox-service design (kept outside this repository):
 - **Related:** [#274](https://github.com/rossoctl/moca/issues/274) (VM lifetime across `Exec`s) is the
   same question in a smaller form and should be decided with it.
 
+### 2026-10-08 — Resident mode revisited and not planned; per-`Exec` is the sandbox tier's product
+
+The 2026-10-02 revision left resident microVMs open as a separate mode. They have been revisited, and
+**no resident mode is planned** for the P4 tier or for the exploratory SBX1 sandbox service built on
+it (SBX1 v0.3, kept outside this repository, not adopted).
+
+The reason is product scope, not isolation. The 2026-10-02 finding stands: nothing in this ADR's
+evidence rules resident VMs out. But long-lived sandboxes with PTYs, background processes and ports are
+what every hosted sandbox already offers (E2B, Daytona, Modal and others). A fresh VM for every
+command is what none of them offers, so that is what the tier is for.
+
+**Decided:**
+
+- Per-`Exec` is the tier's only mode. The guarantees above (no VM reuse, per-call memory reclaim,
+  nothing persisting across a run's tool calls) define what the tier sells, not just how this slice
+  measured density. Harnesses that need a living environment use a resident provider.
+- The 2026-10-02 list of what a resident mode would have to address is kept as the assessment behind
+  this decision. It is no longer a work list.
+- **#274 is decided against reusing a VM across client `Exec`s.** Per-command lifetime is the
+  property being sold, so coarsening it to per-run or per-turn would remove it.
+
+**One narrow exception is anticipated, and must be gated before it ships.** SBX1 proposes _read
+coalescing_: consecutive read-only calls queued for **one** sandbox run in one VM, in queue order. This
+is VM reuse, and `TestGateNoVMReuse` forbids it as written. It is safe only under three conditions:
+
+- every call in the batch runs a command **the service builds** (a file read, an archive export, a
+  structured `stat`/`list`/`find`/`grep`), never client-supplied code. So no process a client started
+  can survive into another call;
+- all calls in the batch belong to the same sandbox and workspace;
+- the VM is destroyed after the batch, like any other.
+
+If it is built, it needs its own gate, alongside an amended `TestGateNoVMReuse` that names the
+exception. That gate must prove a coalesced VM runs only service-built read commands, and that a
+process started by an earlier `Exec` is never visible to a later batch. Client `Exec`s are never
+coalesced.
+
 ---
 
 _Assisted-By: Claude (Anthropic AI) <noreply@anthropic.com>_

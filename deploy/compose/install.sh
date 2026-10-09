@@ -276,6 +276,7 @@ main() {
   if [ -n "$CONTROL_PLANE" ]; then
     cp_url="http://127.0.0.1:$(published_port SH_CP_PORT 8090)"
     log "control plane: $cp_url  (mocactl --control-plane-url $cp_url login)"
+    log "no mocactl yet? curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh"
   else
     log "no control plane (mocactl needs one): re-run with SH_GITHUB_CLIENT_ID set to a GitHub OAuth" \
       "app's client id, device flow enabled"

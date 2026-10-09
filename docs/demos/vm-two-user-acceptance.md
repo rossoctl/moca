@@ -252,20 +252,21 @@ mocactl run "what did I just say?" --session <id>
 
 ## Act 2 — Neither can see or reach the other's
 
-Both users set up a header file from their own login cache. It keeps the API token off every
-command line:
+Both users set up a header file from `mocactl auth token`, which prints their own API token and
+renews it when it is due. The file keeps the token off every command line, and `api_hdr` rewrites
+it, so a token that lapsed during a long act is replaced instead of answering 401:
 
 ```bash
-AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
 CP=http://127.0.0.1:8090 HARNESS=http://127.0.0.1:8080
-API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
-curl -s -H @"$API_HDR" "$CP/v1/me"; echo
+API_HDR="$(mktemp)"
+api_hdr() { mocactl auth token | sed 's/^/Authorization: Bearer /' >"$API_HDR" && [ -s "$API_HDR" ]; }
+api_hdr && curl -s -H @"$API_HDR" "$CP/v1/me"; echo
 ```
 
 Expected: `{"subject":"github:<numeric id>","tenant":"github:<numeric id>","roles":[]}`. The two
 users' subjects differ.
 
-Three helpers. `probe <method> <session id> [suffix]` prints the response body (which carries
+Three helpers. `probe <method> <session id> [suffix]` refreshes the header file, then prints the response body (which carries
 the error code) and then the HTTP status. `ids_set` refuses an empty or unedited `MINE` or
 `THEIRS`, and a `THEIRS` that is your own `MINE`. `not_mine` runs `probe GET "$THEIRS"` and fails
 unless the answer is a 404, so 2b's DELETE never runs against a session you own. (The blocks on
@@ -280,6 +281,7 @@ ids_set() {
 }
 probe() {
   case "$2" in '' | *'<'*) echo 'set MINE and THEIRS to real session ids first' >&2; return 1 ;; esac
+  api_hdr || { echo 'no API token: run mocactl login' >&2; return 1; }
   curl -s -w ' %{http_code}\n' -H @"$API_HDR" -X "$1" "$CP/v1/sessions/$2${3:-}"
 }
 not_mine() {
@@ -435,21 +437,20 @@ Copy this into the run's report (the issue, or the PR that closes it):
 
 Found while preparing this run, checked against `main` @ 6836941. Add what the live run finds.
 
-| #   | Finding                                                                                                                                                                                                                                                                            | Status                                                                                                |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| 1   | **`/resources` without kubectl.** On a VM, `/v1/sessions/{id}/resources` answers `sandbox.phase: "unknown"`, and `mocactl` never calls the route, so nothing breaks. The route also reports `harness.mode: "knative"` on P6: `resources.ts` guesses the mode from the pod name.    | Cosmetic. Make the mode honest when the route gains a VM consumer.                                    |
-| 2   | **Token expiry mid-demo.** Session tokens (5 min) re-mint on their own. An expired API token (1 h) makes the TUI open its login overlay and replay the prompt, and makes headless `mocactl run` say to run `mocactl login`. So a demo longer than an hour asks for a second login. | Works as designed. For a long demo, set `SH_API_TOKEN_TTL_SECONDS` in `control-plane.env` beforehand. |
-| 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                               | #404: `mocactl --profile`.                                                                            |
-| 4   | **Login misconfiguration had no hint.** The login error was GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                              | Fixed (#405): mocactl names the operator's fix.                                                       |
-| 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                               | Fixed (#406): `mocactl sessions [--json]`, `mocactl credentials add` (2a, 1b).                        |
-| 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                              | Sequenced (#407): run at `v0.5.1` until S5, then on `main` under `multi`.                             |
-| 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                         | #408: per-session directory (not a boundary).                                                         |
+| #   | Finding                                                                                                                                                                                                                                                                                                                                | Status                                                                         |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1   | **`/resources` without kubectl.** On a VM, `/v1/sessions/{id}/resources` answers `sandbox.phase: "unknown"`, and `mocactl` never calls the route, so nothing breaks. The route also reports `harness.mode: "knative"` on P6: `resources.ts` guesses the mode from the pod name.                                                        | Cosmetic. Make the mode honest when the route gains a VM consumer.             |
+| 2   | **Token expiry mid-demo.** Session tokens (5 min) re-mint on their own. The API token lasts 15 minutes and `mocactl` renews it by itself for 30 days after last use (90 at most). Only a lapsed refresh token makes the TUI open its login overlay and replay the prompt, and makes headless `mocactl run` say to run `mocactl login`. | Works as designed. A long demo needs no setting.                               |
+| 3   | **One identity per `XDG_CONFIG_HOME`.** Two users on one machine overwrite each other's `auth.json`.                                                                                                                                                                                                                                   | #404: `mocactl --profile`.                                                     |
+| 4   | **Login misconfiguration had no hint.** The login error was GitHub's, verbatim: `device_flow_disabled` (device flow off) or `Not Found` (mistyped client id). It is diagnosable with this page or the QUICKSTART, but not on its own.                                                                                                  | Fixed (#405): mocactl names the operator's fix.                                |
+| 5   | **No headless `sessions` or `credentials` command.** Act 2 lists sessions with `curl`, and credentials can be added only in the TUI.                                                                                                                                                                                                   | Fixed (#406): `mocactl sessions [--json]`, `mocactl credentials add` (2a, 1b). |
+| 6   | **MI1 S2 first-subject pin.** Once it lands, this run under `MOCA_TENANCY=single` refuses user 2 with `403 single_tenant_deployment`.                                                                                                                                                                                                  | Sequenced (#407): run at `v0.5.1` until S5, then on `main` under `multi`.      |
+| 7   | **Shared `/workspace` on the container tier.** User 2's agent can see user 1's clone ("Notes and limits").                                                                                                                                                                                                                             | #408: per-session directory (not a boundary).                                  |
 
 ## Cleanup
 
 On each laptop: `rm -f "$API_HDR" "$TURN_HDR"`, and close the tunnel with
 `ssh -S ~/.ssh/moca-tunnel -O exit <vm>`. Delete this run's sessions in **Sessions**
-(`ctrl+x l`, then `d`), and remove `"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log
-out. On GitHub, each user can revoke the app under **Settings → Applications → Authorized OAuth
+(`ctrl+x l`, then `d`), and run `mocactl logout` (it revokes the login on the control plane and deletes `auth.json`). On GitHub, each user can revoke the app under **Settings → Applications → Authorized OAuth
 Apps**. The operator can delete the OAuth app when the demo is over. The control plane keeps no
 GitHub token, so there is nothing to revoke on the VM.

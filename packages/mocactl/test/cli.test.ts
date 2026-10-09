@@ -5,6 +5,9 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
+import { ApiError } from '../src/api/errors.js';
+import { loadAuth, saveAuth } from '../src/config.js';
+import { fakeControlPlane } from './helpers/fakes.js';
 import { testRuntime } from './helpers/runtime.js';
 
 const io = (): Io & { outs: string[]; errs: string[] } => {
@@ -28,6 +31,22 @@ describe('main', () => {
     const o = io();
     expect(await main(['--help'], {}, o, { buildRuntime: fakeBuild })).toBe(0);
     expect(o.outs.join('')).toContain(USAGE);
+  });
+
+  it('prints the version for --version and -V, reading no config and no network', async () => {
+    for (const flag of ['--version', '-V']) {
+      const o = io();
+      const build = vi.fn(fakeBuild);
+      expect(await main([flag], {}, o, { buildRuntime: build })).toBe(0);
+      // Under vitest (as under tsx) no build defined MOCACTL_VERSION.
+      expect(o.outs.join('')).toBe('dev\n');
+      expect(o.errs).toEqual([]);
+      expect(build).not.toHaveBeenCalled();
+    }
+  });
+
+  it('lists --version in the usage', () => {
+    expect(USAGE).toContain('mocactl --version');
   });
 
   it('rejects an unknown command and an unknown flag', async () => {
@@ -259,5 +278,69 @@ describe('main', () => {
       );
       expect(o.errs.join('')).toContain('--config');
     }
+  });
+});
+
+describe('B14: an expired login is refreshed before a command runs', () => {
+  it('refreshes once, then lists sessions with the new token', async () => {
+    const rt = testRuntime();
+    const expired = { ...rt.auth!, expiresAt: 1, refreshToken: 'mrt_old' };
+    saveAuth(rt.paths, expired);
+    rt.auth = expired;
+    const seen: string[] = [];
+    rt.cp = fakeControlPlane({
+      refreshAuth: async () => ({
+        token: 'api-new',
+        subject: 'github:1',
+        roles: [],
+        expiresAt: 4_000_000_000,
+        refreshToken: 'mrt_new',
+      }),
+      listSessions: async () => {
+        seen.push(rt.auth!.apiToken);
+        return { sessions: [], nextCursor: null };
+      },
+    });
+    expect(await main(['sessions'], {}, io(), { buildRuntime: () => rt })).toBe(0);
+    expect(seen).toEqual(['api-new']);
+    expect(loadAuth(rt.paths, 'http://cp')?.refreshToken).toBe('mrt_new');
+  });
+
+  it('says the login could not be refreshed, rather than "not logged in", when the control plane is down', async () => {
+    const rt = testRuntime();
+    const expired = { ...rt.auth!, expiresAt: 1, refreshToken: 'mrt_old' };
+    saveAuth(rt.paths, expired);
+    rt.auth = expired;
+    rt.cp = fakeControlPlane({
+      refreshAuth: async () => {
+        throw new ApiError('control-plane', 0, 'network_error', 'ECONNREFUSED');
+      },
+    });
+    const o = io();
+    expect(await main(['sessions'], {}, o, { buildRuntime: () => rt })).toBe(2);
+    expect(o.errs.join('')).toMatch(/could not be refreshed/);
+  });
+
+  it('says "not logged in" once the control plane refused the refresh token', async () => {
+    const rt = testRuntime();
+    const expired = { ...rt.auth!, expiresAt: 1, refreshToken: 'mrt_old' };
+    saveAuth(rt.paths, expired);
+    rt.auth = expired;
+    rt.cp = fakeControlPlane(); // refreshAuth: invalid_grant by default
+    const o = io();
+    expect(await main(['sessions'], {}, o, { buildRuntime: () => rt })).toBe(2);
+    expect(o.errs.join('')).toMatch(/not logged in/);
+    expect(rt.auth).not.toHaveProperty('refreshToken');
+  });
+});
+
+describe('B14 commands', () => {
+  it('routes auth token and logout, and refuses their misuse', async () => {
+    expect(await main(['auth'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['auth', 'nope'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['logout', 'extra'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['sessions', '--all'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(USAGE).toContain('mocactl auth token');
+    expect(USAGE).toContain('mocactl logout [--all]');
   });
 });

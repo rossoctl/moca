@@ -2,11 +2,21 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_CONFIG, loadAuth, resolvePaths } from '../src/config.js';
+import { DEFAULT_CONFIG, loadAuth, resolvePaths, saveAuth } from '../src/config.js';
 import { HarnessUntrustedError } from '../src/core/session-manager.js';
-import { cmdDoctor, cmdLogin, cmdPromote, cmdRun, type Io } from '../src/headless.js';
+import {
+  cmdAuthToken,
+  cmdDoctor,
+  cmdLogin,
+  cmdLogout,
+  cmdPromote,
+  cmdRun,
+  type Io,
+} from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
 import { ApiError } from '../src/api/errors.js';
+import type { ControlPlaneApi } from '../src/api/types.js';
+import { testRuntime } from './helpers/runtime.js';
 import { credential, doneFrame, fakeControlPlane, fakeHarness } from './helpers/fakes.js';
 
 function io(): Io & { stdout: string; stderr: string[] } {
@@ -480,5 +490,151 @@ describe('cmdRun --config', () => {
     });
     await cmdRun(rt, io(), { prompt: 'hi', options: {}, json: false, configRef: '' });
     expect(created[0]).toMatchObject({ configRef: '' });
+  });
+});
+
+describe('mocactl auth token (the hook contract, B14 §5.3)', () => {
+  const H12 = 12 * 3_600_000;
+
+  /** A runtime whose login is on disk, as after `mocactl login`, then 12 h asleep. */
+  function slept(over: Partial<ControlPlaneApi> = {}) {
+    const loginAt = 1_800_000_000_000;
+    const rt = testRuntime({ now: () => loginAt + H12 });
+    const auth = {
+      apiToken: 'api-old',
+      subject: 'github:1',
+      roles: [],
+      expiresAt: Math.floor(loginAt / 1000) + 900,
+      controlPlaneUrl: 'http://cp',
+      refreshToken: 'mrt_old',
+      refreshExpiresAt: Math.floor(loginAt / 1000) + 90 * 86_400,
+    };
+    saveAuth(rt.paths, auth);
+    rt.auth = auth;
+    rt.cp = fakeControlPlane({
+      refreshAuth: async () => ({
+        token: 'api-new',
+        subject: 'github:1',
+        roles: [],
+        expiresAt: Math.floor((loginAt + H12) / 1000) + 900,
+        refreshToken: 'mrt_new',
+        refreshExpiresAt: auth.refreshExpiresAt,
+      }),
+      ...over,
+    });
+    return rt;
+  }
+
+  it('ACCEPTANCE 1: after 12 h asleep, prints a fresh token with no device flow', async () => {
+    const rt = slept();
+    const o = io();
+    expect(await cmdAuthToken(rt, o, false)).toBe(0);
+    expect(o.stdout).toBe('api-new\n');
+    expect((rt.cp as ReturnType<typeof fakeControlPlane>).calls).not.toContain('startDeviceAuth');
+    expect(loadAuth(rt.paths, 'http://cp')?.refreshToken).toBe('mrt_new');
+  });
+
+  it('--json prints token, expiresAt and subject', async () => {
+    const o = io();
+    expect(await cmdAuthToken(slept(), o, true)).toBe(0);
+    expect(JSON.parse(o.stdout)).toEqual({
+      token: 'api-new',
+      expiresAt: Math.floor((1_800_000_000_000 + H12) / 1000) + 900,
+      subject: 'github:1',
+    });
+  });
+
+  it('exits 3 when a login is required, never prompting', async () => {
+    const rt = slept({
+      refreshAuth: async () => {
+        throw new ApiError('control-plane', 400, 'invalid_grant');
+      },
+    });
+    const o = io();
+    expect(await cmdAuthToken(rt, o, false)).toBe(3);
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('')).toMatch(/mocactl login/);
+    expect((rt.cp as ReturnType<typeof fakeControlPlane>).calls).not.toContain('startDeviceAuth');
+  });
+
+  it('exits 4 when the control plane is unreachable', async () => {
+    const rt = slept({
+      refreshAuth: async () => {
+        throw new ApiError('control-plane', 0, 'network_error', 'ECONNREFUSED');
+      },
+    });
+    expect(await cmdAuthToken(rt, io(), false)).toBe(4);
+  });
+});
+
+describe('mocactl logout', () => {
+  function loggedIn(over: Partial<ControlPlaneApi> = {}) {
+    const rt = testRuntime();
+    const auth = { ...rt.auth!, refreshToken: 'mrt_cur' };
+    saveAuth(rt.paths, auth);
+    rt.auth = auth;
+    const revoked: string[] = [];
+    rt.cp = fakeControlPlane({
+      revokeAuth: async (t) => void revoked.push(t),
+      ...over,
+    });
+    return { rt, revoked };
+  }
+
+  it('revokes this login on the server, then deletes auth.json', async () => {
+    const { rt, revoked } = loggedIn();
+    expect(await cmdLogout(rt, io(), { all: false })).toBe(0);
+    expect(revoked).toEqual(['mrt_cur']);
+    expect(loadAuth(rt.paths, 'http://cp')).toBeNull();
+    expect(rt.auth).toBeNull();
+  });
+
+  it('--all revokes every login of the subject', async () => {
+    const { rt } = loggedIn({ revokeAllAuth: async () => 3 });
+    const o = io();
+    expect(await cmdLogout(rt, o, { all: true })).toBe(0);
+    expect((rt.cp as ReturnType<typeof fakeControlPlane>).calls).toContain('revokeAllAuth');
+    expect(o.stderr.join('')).toMatch(/3 logins/);
+  });
+
+  it('still logs out locally when the server cannot be told, and says what that leaves', async () => {
+    const { rt } = loggedIn({
+      revokeAuth: async () => {
+        throw new ApiError('control-plane', 0, 'network_error', 'ECONNREFUSED');
+      },
+    });
+    const o = io();
+    expect(await cmdLogout(rt, o, { all: false })).toBe(1);
+    expect(loadAuth(rt.paths, 'http://cp')).toBeNull();
+    expect(o.stderr.join('')).toMatch(/mocactl login.*logout --all/);
+  });
+
+  it('--all refreshes an expired API token before revoking every login', async () => {
+    const rt = testRuntime();
+    const nowSec = Math.floor(rt.now() / 1000);
+    const auth = {
+      ...rt.auth!,
+      expiresAt: nowSec - 60,
+      refreshToken: 'mrt_cur',
+      refreshExpiresAt: nowSec + 86_400,
+    };
+    saveAuth(rt.paths, auth);
+    rt.auth = auth;
+    rt.cp = fakeControlPlane({
+      refreshAuth: async () => ({
+        token: 'api-new',
+        subject: 'github:1',
+        roles: [],
+        expiresAt: nowSec + 900,
+        refreshToken: 'mrt_new',
+        refreshExpiresAt: auth.refreshExpiresAt,
+      }),
+      revokeAllAuth: async () => 2,
+    });
+    expect(await cmdLogout(rt, io(), { all: true })).toBe(0);
+    const calls = (rt.cp as ReturnType<typeof fakeControlPlane>).calls;
+    expect(calls.indexOf('refreshAuth')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf('refreshAuth')).toBeLessThan(calls.indexOf('revokeAllAuth'));
+    expect(loadAuth(rt.paths, 'http://cp')).toBeNull();
   });
 });

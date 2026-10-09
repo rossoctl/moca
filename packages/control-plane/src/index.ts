@@ -52,6 +52,7 @@ export {
 export { formatEnvLines, generateMu1Secrets } from './genkeys.js';
 export { credentialValue, withCredentials } from './systemd-credentials.js';
 export {
+  AUDIT_MAXLEN,
   AUDIT_STREAM,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,

@@ -88,20 +88,9 @@ sudo podman run --rm --entrypoint sh ghcr.io/rossoctl/moca-remote-worker:latest 
 Expected: `/home/sandbox`, `/usr/bin/curl`, `/usr/bin/git`. The containers pick the new image up at
 0b's `setup-vm.sh` re-run.
 
-**Lengthen the login for the demo.** An API token lasts an hour (`SH_API_TOKEN_TTL_SECONDS=3600`).
-When it lapses mid-demo, the interactive UI opens its login overlay and replays the prompt. A
-headless `mocactl run` started after the lapse stops before it reaches the server, with
-``not logged in — run `mocactl login` first`` and exit 2. One that was mid-turn when the server
-refused the token says ``your login has expired — run `mocactl login` (or restart mocactl) to log
-in again``. All of them recover, but a second device-flow login in front of a room costs a minute.
-Set four hours instead:
-
-```bash
-sudoedit /etc/serverless-harness/control-plane.env   # SH_API_TOKEN_TTL_SECONDS=14400
-sudo systemctl restart sh-control-plane
-```
-
-Only tokens minted after the restart get the new lifetime, so the users log in after this (Act 1).
+**The login needs no lengthening.** An API token lasts 15 minutes, and `mocactl` renews it by itself
+for 30 days after its last use (90 days at most), so one device-flow login in Act 1 carries the whole
+demo and `SH_API_TOKEN_TTL_SECONDS` stays unset.
 Session tokens (300 s) re-mint on their own and need nothing.
 
 **On a cloud host, require IMDSv2 with a hop limit of 1.** Container sandboxes have open egress in
@@ -213,7 +202,6 @@ pid=$(systemctl show -p MainPID --value sh-control-plane.service)
 [ "${pid:-0}" -gt 0 ] || { echo 'sh-control-plane is not running' >&2; exit 1; }
 env=$(tr '\0' '\n' <"/proc/$pid/environ") || exit 1
 printf '%s\n' "$env" | grep -E '^SH_ALLOW_OPERATOR_FALLBACK=' || echo 'SH_ALLOW_OPERATOR_FALLBACK unset'
-printf '%s\n' "$env" | grep -E '^SH_API_TOKEN_TTL_SECONDS=' || echo 'SH_API_TOKEN_TTL_SECONDS unset'
 EOF
 systemctl is-enabled microvm-worker.service
 sudo podman exec sh-redis redis-cli HKEYS sh:sandbox:records
@@ -226,7 +214,6 @@ ok
 SH_REQUIRE_AUTH=true
 MOCA_TENANCY unset
 SH_ALLOW_OPERATOR_FALLBACK unset
-SH_API_TOKEN_TTL_SECONDS=14400
 disabled
 sh-sandbox-1
 sh-sandbox-0
@@ -470,12 +457,11 @@ research-user2
 ### 3a. Session lists are disjoint
 
 **Sessions** in `mocactl` (`ctrl+x l`) titles each session by its first prompt, and both users ran
-the same prompt, so the two lists look alike. Show the ids instead. Each user, from their own
-login cache:
+the same prompt, so the two lists look alike. Show the ids instead. Each user, with the API token
+`mocactl auth token` prints (renewed if it lapsed):
 
 ```bash
-AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"
-API_HDR="$(mktemp)"; jq -r '.apiToken // empty | "Authorization: Bearer " + .' "$AUTH" >"$API_HDR"
+API_HDR="$(mktemp)"; mocactl auth token | sed 's/^/Authorization: Bearer /' >"$API_HDR"
 curl -s -H @"$API_HDR" "$SH_CONTROL_PLANE_URL/v1/sessions" | jq -r '.sessions[].sessionId'
 rm -f "$API_HDR"
 ```
@@ -728,23 +714,23 @@ Say these in the room. They are what stops someone over-promising.
 Found while writing and running this demo, on top of `vm-two-user-acceptance.md`'s list. Items 4
 to 9 come from the 2026-10-01 run.
 
-| #   | Finding                                                                                                                                                                                                                                   | Status                                                                             |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1   | **Login expiry mid-demo.** The 1-hour API token makes a long demo ask for a second device-flow login. The TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again (0a quotes both messages). | Works as designed. 0a sets `SH_API_TOKEN_TTL_SECONDS=14400`.                       |
-| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                                                       | Fixed (#405, #413): mocactl names the operator's fix.                              |
-| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                                                        | #410. The demo switches once, to P4, and only Cleanup goes back.                   |
-| 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                                    | #414. 0a pulls by hand meanwhile.                                                  |
-| 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                                    | Fixed (#463): `/etc/gitconfig` in the image.                                       |
-| 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.                  | #417: show a short session id; count turns from the server. #406 adds `sessions`.  |
-| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                     | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
-| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                    | #419: a `mocactl run --show-tools` would replace the filter.                       |
-| 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).               | #404: `mocactl --profile`.                                                         |
-| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                         | #407: `v0.5.1` until S5, then `multi`.                                             |
+| #   | Finding                                                                                                                                                                                                                                                                                                                      | Status                                                                             |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1   | **Login expiry mid-demo.** The API token lasts 15 minutes and `mocactl` renews it by itself for 30 days after last use (90 at most), so a long demo needs one login. Only a lapsed refresh token asks for another: the TUI recovers by itself (login overlay, prompt replayed); headless `mocactl run` says to log in again. | Works as designed. Nothing to set.                                                 |
+| 2   | **`device_flow_disabled` and `Not Found` carried no hint.** The login error was GitHub's, verbatim.                                                                                                                                                                                                                          | Fixed (#405, #413): mocactl names the operator's fix.                              |
+| 3   | **The switch back to containers loses every session.** It needs a `setup-vm.sh` re-run, which recreates `sh-redis` with no volume.                                                                                                                                                                                           | #410. The demo switches once, to P4, and only Cleanup goes back.                   |
+| 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                                                                                                                       | #414. 0a pulls by hand meanwhile.                                                  |
+| 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                                                                                                                       | Fixed (#463): `/etc/gitconfig` in the image.                                       |
+| 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.                                                                                                     | #417: show a short session id; count turns from the server. #406 adds `sessions`.  |
+| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                                                                                                        | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects. |
+| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                                                                                                       | #419: a `mocactl run --show-tools` would replace the filter.                       |
+| 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).                                                                                                  | #404: `mocactl --profile`.                                                         |
+| 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                                                                                                            | #407: `v0.5.1` until S5, then `multi`.                                             |
 
 ## Cleanup
 
-**On each laptop:** delete this run's sessions in **Sessions** (`ctrl+x l`, then `d`), remove
-`"${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json"` to log out, and close the tunnel with
+**On each laptop:** delete this run's sessions in **Sessions** (`ctrl+x l`, then `d`), run
+`mocactl logout` (it revokes the login on the control plane and deletes `auth.json`), and close the tunnel with
 `ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`. 3a's block already removed its header file.
 Each user can delete their credential in **Credentials** first, and revoke the app on GitHub under
 **Settings → Applications → Authorized OAuth Apps**.
@@ -772,9 +758,6 @@ containers next to it. The re-run recreates Redis, which also drops whatever ses
 sudo systemctl disable --now microvm-worker.service
 cd /opt/serverless-harness && sudo ./deploy/vm/setup-vm.sh
 ```
-
-**Restore what 0a changed:** remove `SH_API_TOKEN_TTL_SECONDS` from `control-plane.env`, then
-`sudo systemctl restart sh-control-plane`.
 
 **Delete the research smoke's leftover subject record** (fix list 7). The file store names a
 subject's record by the first 16 hex digits of the subject's `sha256`, with `.json` after it. Use

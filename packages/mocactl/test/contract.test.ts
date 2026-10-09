@@ -27,9 +27,17 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
   {
     method: 'post',
     path: '/v1/auth/device/token',
-    reads: ['token', 'subject', 'expiresAt'],
-    sends: ['deviceCode'],
+    reads: ['token', 'subject', 'expiresAt', 'refreshToken', 'refreshExpiresAt'],
+    sends: ['deviceCode', 'label'],
   },
+  {
+    method: 'post',
+    path: '/v1/auth/token',
+    reads: ['token', 'subject', 'expiresAt', 'refreshToken', 'refreshExpiresAt'],
+    sends: ['grant_type', 'refresh_token'],
+  },
+  { method: 'post', path: '/v1/auth/revoke', sends: ['token'] },
+  { method: 'post', path: '/v1/auth/revoke-all', reads: ['revoked'] },
   { method: 'get', path: '/v1/me', reads: ['subject', 'tenant', 'roles'] },
   { method: 'get', path: '/v1/sessions', reads: ['sessions', 'nextCursor'] },
   {
@@ -122,6 +130,9 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
     await cProxy.discovery();
     await cProxy.startDeviceAuth();
     await cProxy.pollDeviceAuth('d');
+    await cProxy.refreshAuth('mrt_x');
+    await cProxy.revokeAuth('mrt_x');
+    await cProxy.revokeAllAuth();
     await cProxy.me();
     await cProxy.listSessions();
     await cProxy.createSession({});

@@ -48,13 +48,40 @@ describe('portFromEnv', () => {
 describe('configFromEnv', () => {
   it('uses the spec`s defaults', () => {
     const c = configFromEnv(baseEnv);
-    expect(c.apiTokenTtlSeconds).toBe(3600);
+    expect(c.apiTokenTtlSeconds).toBe(900); // B14: 15 minutes bounds revocation latency
     expect(c.sessionTokenTtlSeconds).toBe(300); // a session outlives a 5-minute token (spec §4.2)
+    expect(c.refreshIdleTtlSeconds).toBe(2_592_000); // 30 days
+    expect(c.refreshMaxTtlSeconds).toBe(7_776_000); // 90 days
+    expect(c.refreshReuseGraceSeconds).toBe(30);
     expect(c.allowOperatorFallback).toBe(false); // spec §6.4: default false
     expect(c.injectorConfigured).toBe(false);
     expect(c.sandboxNamespace).toBe('default');
     expect(c.bundleSubjectBytes).toBe(16 * 1024 * 1024);
     expect(c.bundleTotalBytes).toBe(64 * 1024 * 1024);
+  });
+
+  it('reads the refresh limits and refuses ones that cannot work, naming the variable', () => {
+    const c = configFromEnv({
+      ...baseEnv,
+      SH_REFRESH_IDLE_TTL_SECONDS: '3600',
+      SH_REFRESH_MAX_TTL_SECONDS: '7200',
+      SH_REFRESH_REUSE_GRACE_SECONDS: '5',
+    });
+    expect([c.refreshIdleTtlSeconds, c.refreshMaxTtlSeconds, c.refreshReuseGraceSeconds]).toEqual([
+      3600, 7200, 5,
+    ]);
+    // An absolute cap below the idle limit would make the idle limit a lie.
+    expect(() =>
+      configFromEnv({
+        ...baseEnv,
+        SH_REFRESH_IDLE_TTL_SECONDS: '7200',
+        SH_REFRESH_MAX_TTL_SECONDS: '3600',
+      }),
+    ).toThrow(/SH_REFRESH_MAX_TTL_SECONDS/);
+    // A grace window long enough to matter is a second live token.
+    expect(() => configFromEnv({ ...baseEnv, SH_REFRESH_REUSE_GRACE_SECONDS: '301' })).toThrow(
+      /SH_REFRESH_REUSE_GRACE_SECONDS/,
+    );
   });
 
   it('reads the config-bundle byte budgets and refuses a bad one, naming the variable', () => {

@@ -15,6 +15,10 @@ export interface ApiLogin {
   displayName?: string;
   roles?: string[];
   expiresAt: number;
+  /** The single-use refresh token behind this login (B14); absent from an older control plane. */
+  refreshToken?: string;
+  /** Epoch seconds: the login's absolute limit, however often it is refreshed. */
+  refreshExpiresAt?: number;
 }
 
 export interface Me {
@@ -94,6 +98,12 @@ export interface ControlPlaneApi {
   startDeviceAuth(): Promise<DeviceStart>;
   /** 'pending' until approved; 'expired' once the code lapsed unapproved (start a new one). */
   pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending' | 'expired'>;
+  /** The next API token and refresh token. ApiError `invalid_grant` means "log in again". */
+  refreshAuth(refreshToken: string): Promise<ApiLogin>;
+  /** End the login this refresh token belongs to (RFC 7009: answers alike for an unknown one). */
+  revokeAuth(refreshToken: string): Promise<void>;
+  /** End every login of the caller; how many there were. Needs a valid API token. */
+  revokeAllAuth(): Promise<number>;
   me(): Promise<Me>;
   listSessions(opts?: { limit?: number; cursor?: number }): Promise<SessionPage>;
   createSession(req: CreateSessionRequest): Promise<CreatedSession>;

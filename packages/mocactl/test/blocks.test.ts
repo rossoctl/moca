@@ -198,6 +198,49 @@ describe('fromTranscript', () => {
     });
     expect(splitStatic(s.blocks).live).toEqual([]);
   });
+
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, turns: 1 };
+  const done = { type: 'done', sessionId: 's', stopReason: 'stop' } as const;
+
+  it('ends with a notice when the last turn never finished', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'frame', frame: { type: 'text', delta: 'working on' } },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'assistant', 'notice']);
+    expect(s.blocks[2]).toMatchObject({ tone: 'warning' });
+    expect((s.blocks[2] as { text: string }).text).toMatch(/isn't running/);
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  it('adds no notice when the last turn finished, whatever came before', () => {
+    for (const last of [done, { type: 'error', sessionId: 's', stopReason: 'error' } as const]) {
+      const s = fromTranscript({
+        sessionId: 's',
+        createdAt: 0,
+        entries: [
+          { kind: 'prompt', text: 'first' },
+          { kind: 'frame', frame: { type: 'text', delta: 'cut short' } },
+          { kind: 'prompt', text: 'go on' },
+          { kind: 'frame', frame: last },
+        ],
+        prompts: ['first', 'go on'],
+        usage,
+      });
+      expect(s.blocks.some((b) => b.kind === 'notice')).toBe(false);
+    }
+  });
+
+  it('adds no notice to a transcript without turns', () => {
+    const s = fromTranscript({ sessionId: 's', createdAt: 0, entries: [], prompts: [], usage });
+    expect(s.blocks).toEqual([]);
+  });
 });
 
 describe('addNotice', () => {

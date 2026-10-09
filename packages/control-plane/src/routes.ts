@@ -58,6 +58,29 @@ export const ROUTES: readonly RouteSpec[] = [
     sessionScoped: false,
     operationId: 'completeDeviceAuth',
   },
+  // B14: the refresh token is the credential on the first two, so they take no API token.
+  {
+    method: 'POST',
+    path: '/v1/auth/token',
+    auth: 'none',
+    sessionScoped: false,
+    operationId: 'refreshAuth',
+  },
+  {
+    method: 'POST',
+    path: '/v1/auth/revoke',
+    auth: 'none',
+    sessionScoped: false,
+    operationId: 'revokeAuth',
+  },
+  {
+    method: 'POST',
+    path: '/v1/auth/revoke-all',
+    auth: 'api',
+    sessionScoped: false,
+    bodyRequired: false,
+    operationId: 'revokeAllAuth',
+  },
   { method: 'GET', path: '/v1/me', auth: 'api', sessionScoped: false, operationId: 'getMe' },
   {
     method: 'POST',

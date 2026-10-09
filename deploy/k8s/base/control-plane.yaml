@@ -81,7 +81,7 @@ spec:
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: SH_ALLOW_OPERATOR_FALLBACK } }
             # Token lifetimes in seconds (#432); setup.sh writes '' when unset, which is the
-            # control plane's default (3600 for an API token, 300 for a session token).
+            # control plane's default (900 for an API token, 300 for a session token).
             - name: SH_API_TOKEN_TTL_SECONDS
               valueFrom: { configMapKeyRef: { name: moca-settings, key: SH_API_TOKEN_TTL_SECONDS } }
             - name: SH_SESSION_TOKEN_TTL_SECONDS

@@ -160,6 +160,9 @@ services:
       SH_DEFAULT_INFERENCE_ENDPOINT:
       SH_API_TOKEN_TTL_SECONDS:
       SH_SESSION_TOKEN_TTL_SECONDS:
+      SH_REFRESH_IDLE_TTL_SECONDS:
+      SH_REFRESH_MAX_TTL_SECONDS:
+      SH_REFRESH_REUSE_GRACE_SECONDS:
     volumes:
       - moca-credentials:/var/lib/moca/credentials
     ports:

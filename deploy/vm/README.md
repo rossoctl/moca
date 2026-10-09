@@ -418,6 +418,9 @@ mkdir -p -m 0700 "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl"
 (umask 077 && cat > "${XDG_CONFIG_HOME:-$HOME/.config}/mocactl/auth.json")   # paste, then Ctrl-D
 ```
 
+A hand-minted cache carries no refresh token, so it works until its own `expiresAt` and then asks
+for `mocactl login`, exactly as before B14. Use the device flow for a login that renews itself.
+
 Then add an inference credential with `/credentials` in `mocactl`, and run `doctor`.
 
 ## Sandbox container networking and the relay token

@@ -316,3 +316,11 @@ describe('admin subjects', () => {
     expect(rolesFor('github:12', ['github:1'])).toEqual([]);
   });
 });
+
+describe('GithubOAuthProvider.rolesFor', () => {
+  it('answers from the CURRENT admin list, so a refresh sees a removal', () => {
+    const p = new GithubOAuthProvider({ clientId: 'Iv1.x', adminSubjects: ['github:1'] });
+    expect(p.rolesFor('github:1')).toEqual(['admin']);
+    expect(p.rolesFor('github:2')).toEqual([]);
+  });
+});

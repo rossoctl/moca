@@ -25,7 +25,7 @@ import {
   resolveSessionOptions,
 } from './core/session-options.js';
 import { workspaceResetText } from './render/blocks.js';
-import { sessionManager, setAuth, type Runtime } from './runtime.js';
+import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
 export interface Io {
   out(s: string): void;
@@ -71,6 +71,63 @@ export async function cmdLogin(rt: Runtime, io: Io, signal?: AbortSignal): Promi
   }
 }
 
+/** `mocactl auth token`'s exit codes beyond 0 and 2: the Claude Code hook branches on them. */
+export const AUTH_EXIT = { loginRequired: 3, unreachable: 4 } as const;
+
+/**
+ * Print a valid API token, refreshing it if needed; never prompts (B14 spec §5.3). This is the whole
+ * contract for the Claude Code hook: it never reads auth.json, whose format stays mocactl's own.
+ */
+export async function cmdAuthToken(rt: Runtime, io: Io, json: boolean): Promise<number> {
+  if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
+  const r = await ensureRuntimeAuth(rt);
+  if (r.kind === 'login_required') {
+    io.err('not logged in — run `mocactl login`');
+    return AUTH_EXIT.loginRequired;
+  }
+  if (r.kind === 'unreachable') {
+    io.err(`cannot refresh the login: ${describeError(r.error)}`);
+    return AUTH_EXIT.unreachable;
+  }
+  const { apiToken, expiresAt, subject } = r.auth;
+  io.out((json ? JSON.stringify({ token: apiToken, expiresAt, subject }) : apiToken) + '\n');
+  return 0;
+}
+
+/**
+ * End the login on the server, then locally. The local file goes even when the server cannot be
+ * told -- the user asked to be logged out of THIS machine -- and the message says what that leaves.
+ */
+export async function cmdLogout(rt: Runtime, io: Io, opts: { all: boolean }): Promise<number> {
+  if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp) return 2;
+  const auth = rt.auth;
+  if (!auth) {
+    io.err('not logged in');
+    return 0;
+  }
+  try {
+    if (opts.all) {
+      await ensureRuntimeAuth(rt); // revoke-all takes an API token; refresh one first if needed
+      const n = await rt.cp.revokeAllAuth();
+      io.err(`logged out: ${n} ${n === 1 ? 'login' : 'logins'} revoked`);
+    } else if (auth.refreshToken) {
+      await rt.cp.revokeAuth(auth.refreshToken);
+      io.err('logged out');
+    } else {
+      io.err('logged out (this login predates refresh tokens; nothing to revoke)');
+    }
+  } catch (err) {
+    setAuth(rt, null);
+    io.err(
+      `logged out of this machine, but the control plane did not confirm: ${describeError(err)} — ` +
+        'the login stays valid there until it expires; to end it now, run `mocactl login` and then `mocactl logout --all`',
+    );
+    return 1;
+  }
+  setAuth(rt, null);
+  return 0;
+}
+
 export async function cmdDoctor(rt: Runtime, io: Io, json: boolean): Promise<number> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp || !rt.harness) return 2;
   const results = await runDiagnostics({
@@ -81,6 +138,10 @@ export async function cmdDoctor(rt: Runtime, io: Io, json: boolean): Promise<num
     loggedIn: apiTokenValid(rt.auth, rt.now()),
   });
   io.out((json ? JSON.stringify(results) : formatDiagnostics(results)) + '\n');
+  if (!json && rt.auth?.refreshExpiresAt) {
+    const until = new Date(rt.auth.refreshExpiresAt * 1000).toISOString().slice(0, 10);
+    io.out(`login renews without asking until ${until} (\`mocactl logout\` ends it)\n`);
+  }
   return results.every((r) => r.status === 'pass') ? 0 : 1;
 }
 
@@ -97,7 +158,11 @@ export interface RunOptions {
 function ready(rt: Runtime, io: Io): rt is Runtime & Required<Pick<Runtime, 'cp' | 'harness'>> {
   if (missing(rt, io, ['controlPlaneUrl']) || !rt.cp || !rt.harness) return false;
   if (!apiTokenValid(rt.auth, rt.now())) {
-    io.err('not logged in — run `mocactl login` first');
+    io.err(
+      rt.auth?.refreshToken
+        ? 'the login could not be refreshed — is the control plane reachable? (`mocactl doctor`)'
+        : 'not logged in — run `mocactl login` first',
+    );
     return false;
   }
   return true;

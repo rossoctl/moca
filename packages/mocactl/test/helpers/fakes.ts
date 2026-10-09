@@ -1,4 +1,4 @@
-import { TurnCancelledError } from '../../src/api/errors.js';
+import { ApiError, TurnCancelledError } from '../../src/api/errors.js';
 import type { DoneFrame, TurnFrame } from '../../src/api/frames.js';
 import type {
   ControlPlaneApi,
@@ -38,6 +38,11 @@ export function fakeControlPlane(
       expiresIn: 900,
     }),
     pollDeviceAuth: async () => 'pending',
+    refreshAuth: async () => {
+      throw new ApiError('control-plane', 400, 'invalid_grant');
+    },
+    revokeAuth: async () => undefined,
+    revokeAllAuth: async () => 0,
     me: async () => ({ subject: 'github:1', tenant: 't', roles: [] }),
     listSessions: async () => ({ sessions: [], nextCursor: null }),
     createSession: async () => ({ sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 }),

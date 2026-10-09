@@ -24,8 +24,9 @@ test:
 # deploy/vm/tests covers setup-vm.sh, the single-VM systemd deployment (podman/systemctl mocked).
 # deploy/compose/tests covers the compose trial: install.sh (docker/curl mocked) and the compose file.
 # deploy/k8s/tests covers setup.sh, the Kubernetes deployment of P6 (kubectl/kind/docker/oc mocked).
+# scripts/tests covers install-mocactl.sh, the mocactl one-line installer (curl/node mocked).
 test-deploy:
-	@failed=''; for t in deploy/knative/tests/*.test.sh deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh; do \
+	@failed=''; for t in deploy/knative/tests/*.test.sh deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh scripts/tests/*.test.sh; do \
 		echo "== $$t"; \
 		bash "$$t" || failed="$$failed $$t"; \
 	done; \

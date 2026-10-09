@@ -30,6 +30,7 @@ moca/
 │   ├── microvm/          # P4 Firecracker microVM deployment
 │   ├── compose/          # Docker Compose trial of the P6 runtime (no root, five minutes)
 │   └── claude/           # Claude Code workflow-promotion tooling (the /promote command)
+├── scripts/              # install-mocactl.sh: the one-line mocactl installer (curl | sh)
 ├── pi-fork/              # Git submodule: Pi AI framework (must be built)
 └── Dockerfile            # Container image (node:22-alpine)
 ```

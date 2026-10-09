@@ -27,7 +27,12 @@ export interface CpRedisLike {
     opts?: { BY?: 'SCORE'; REV?: boolean; LIMIT?: { offset: number; count: number } },
   ): Promise<string[]>;
   del(keys: string[]): Promise<unknown>;
-  xAdd(key: string, id: string, fields: Record<string, string>): Promise<unknown>;
+  xAdd(
+    key: string,
+    id: string,
+    fields: Record<string, string>,
+    options?: { TRIM: { strategy: 'MAXLEN'; strategyModifier: '~'; threshold: number } },
+  ): Promise<unknown>;
   /**
    * The score of one member, or null when it is gone. `listByOwner` needs it to page from the zset's
    * own position rather than from a surviving record -- see the comment there for why.
@@ -56,6 +61,14 @@ export interface SessionRecord {
 }
 
 export const AUDIT_STREAM = 'sh:cp:audit';
+/** Every write to the audit stream trims it to about this many entries (MAXLEN ~). */
+export const AUDIT_MAXLEN = 1_000_000;
+/**
+ * Refusals of a refresh token nobody issued go to `<prefix>audit:anon`, trimmed to this many.
+ * Anyone can send one (POST /v1/auth/token takes no auth), so they get their own stream: sharing
+ * the main one would let anonymous traffic trim away the history of real principals (#467).
+ */
+export const ANON_AUDIT_MAXLEN = 100_000;
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 200;
 
@@ -243,17 +256,22 @@ export class OwnershipIndex {
     reason?: string;
   }): Promise<void> {
     await this.guard(() =>
-      this.redis.xAdd(AUDIT_STREAM, '*', {
-        ts: String(Date.now()),
-        subject: entry.subject,
-        decision: entry.decision,
-        ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
-        // The credential NAME, never its value (spec §7.2).
-        ...(entry.credential ? { credential: entry.credential } : {}),
-        ...(entry.configRef ? { configRef: entry.configRef } : {}),
-        ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
-        ...(entry.reason ? { reason: entry.reason } : {}),
-      }),
+      this.redis.xAdd(
+        AUDIT_STREAM,
+        '*',
+        {
+          ts: String(Date.now()),
+          subject: entry.subject,
+          decision: entry.decision,
+          ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+          // The credential NAME, never its value (spec §7.2).
+          ...(entry.credential ? { credential: entry.credential } : {}),
+          ...(entry.configRef ? { configRef: entry.configRef } : {}),
+          ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
+          ...(entry.reason ? { reason: entry.reason } : {}),
+        },
+        { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: AUDIT_MAXLEN } },
+      ),
     );
   }
 

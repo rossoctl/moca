@@ -8,6 +8,9 @@ describe('the route table', () => {
       [
         'POST /v1/auth/device',
         'POST /v1/auth/device/token',
+        'POST /v1/auth/token',
+        'POST /v1/auth/revoke',
+        'POST /v1/auth/revoke-all',
         'GET /v1/me',
         'POST /v1/sessions',
         'GET /v1/sessions',
@@ -43,6 +46,9 @@ describe('the route table', () => {
     expect(auth('GET', '/readyz')).toBe('none');
     expect(auth('POST', '/v1/auth/device')).toBe('none');
     expect(auth('POST', '/v1/auth/device/token')).toBe('none');
+    expect(auth('POST', '/v1/auth/token')).toBe('none');
+    expect(auth('POST', '/v1/auth/revoke')).toBe('none');
+    expect(auth('POST', '/v1/auth/revoke-all')).toBe('api');
     expect(auth('POST', '/internal/credentials')).toBe('exchange');
     // A client reads it before it has logged in; it carries no per-subject data.
     expect(auth('GET', '/v1/discovery')).toBe('none');

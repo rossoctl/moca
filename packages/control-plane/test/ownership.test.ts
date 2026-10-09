@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { subjectHash } from '../src/k8s-secret-store.js';
 import {
+  AUDIT_MAXLEN,
   AUDIT_STREAM,
   OwnershipIndex,
   ownerKey,
@@ -281,6 +282,23 @@ describe('runtime hash', () => {
 });
 
 describe('audit', () => {
+  it('caps the audit stream with an approximate MAXLEN on every write', async () => {
+    const f = fakeRedis();
+    const calls: unknown[] = [];
+    const redis = {
+      ...f.redis,
+      xAdd: async (...args: Parameters<typeof f.redis.xAdd>) => {
+        calls.push(args[3]);
+        return f.redis.xAdd(...args);
+      },
+    };
+    await new OwnershipIndex(redis).audit({ subject: 's', decision: 'x' });
+    expect(AUDIT_MAXLEN).toBe(1_000_000);
+    expect(calls).toEqual([
+      { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: AUDIT_MAXLEN } },
+    ]);
+  });
+
   it('appends decisions to its own stream, never values', async () => {
     const f = fakeRedis();
     const index = new OwnershipIndex(f.redis);

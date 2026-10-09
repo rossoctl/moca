@@ -1,4 +1,4 @@
-import type { TurnFrame, Usage } from '../api/frames.js';
+import { isTerminal, type TurnFrame, type Usage } from '../api/frames.js';
 import type { Transcript } from '../core/transcripts.js';
 
 export type Block =
@@ -192,9 +192,26 @@ export function endTurn(
   return push(finalizeOpen(s), { kind: 'turn-end', outcome, message });
 }
 
+/**
+ * Why a resumed session can stop mid-reply: a client disconnect (quitting mocactl) aborts the turn
+ * on the harness, and nothing replays it (turn SSE spec §3.6). Without this note the cut-off reply
+ * reads as one still being written.
+ */
+export const INTERRUPTED_TURN_NOTICE =
+  'the last turn didn\'t finish (mocactl closed, or it was cancelled or failed) and isn\'t running — send a prompt such as "go on" to continue';
+
 export function fromTranscript(t: Transcript): BlockState {
   let s = EMPTY_BLOCKS;
-  for (const e of t.entries) s = e.kind === 'prompt' ? addUser(s, e.text) : reduceFrame(s, e.frame);
+  let open = false; // the latest prompt has no terminal frame yet
+  for (const e of t.entries) {
+    if (e.kind === 'prompt') {
+      s = addUser(s, e.text);
+      open = true;
+    } else {
+      s = reduceFrame(s, e.frame);
+      if (isTerminal(e.frame)) open = false;
+    }
+  }
   s = finalizeOpen(s);
   // Mark any tool block without a result as interrupted
   const blocks = s.blocks.map((b) =>
@@ -202,7 +219,8 @@ export function fromTranscript(t: Transcript): BlockState {
       ? { ...b, result: { isError: true, preview: 'interrupted' } }
       : b,
   );
-  return { ...s, blocks };
+  s = { ...s, blocks };
+  return open ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
 }
 
 export function isSettled(b: Block): boolean {

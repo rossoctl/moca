@@ -17,7 +17,7 @@
 # SH_SANDBOX_EGRESS_EXCEPT (every target: comma-separated IPv4 CIDRs the sandbox's internet egress
 # rule excepts on top of the private, CGNAT and link-local ranges -- e.g. a publicly routable node
 # network; README §6, #446), SH_API_TOKEN_TTL_SECONDS and SH_SESSION_TOKEN_TTL_SECONDS (the
-# control plane's token lifetimes, whole seconds; empty means its defaults, 3600 and 300; #432),
+# control plane's token lifetimes, whole seconds; empty means its defaults, 900 and 300; #432),
 # SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every

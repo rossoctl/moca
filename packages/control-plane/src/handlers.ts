@@ -34,12 +34,19 @@ import { DEFAULT_PAGE_SIZE, type OwnershipIndex, type SessionRecord } from './ow
 import type { IdentityProvider } from './identity.js';
 import type { KeyObject } from 'node:crypto';
 import type { MintInput, TokenClaims } from './token.js';
+import { isRefreshTokenShape, type RefreshStore } from './refresh-store.js';
 import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 
 export interface CpConfig {
   apiTokenTtlSeconds: number;
   sessionTokenTtlSeconds: number;
+  /** A refresh family dies this long after its last use (`SH_REFRESH_IDLE_TTL_SECONDS`, B14). */
+  refreshIdleTtlSeconds: number;
+  /** ...and this long after login, however often it is used (`SH_REFRESH_MAX_TTL_SECONDS`). */
+  refreshMaxTtlSeconds: number;
+  /** How long a just-superseded refresh token still gets its successor back (spec §4.3 step 4). */
+  refreshReuseGraceSeconds: number;
   /** The shared bearer the data plane presents to /internal/credentials (spec §5.3.1). */
   exchangeToken?: string;
   /** Deployment-level gateway origin, used when a credential carries no `endpoint` (spec §6.2). */
@@ -78,6 +85,8 @@ export interface CpDeps {
   bundles: BundleRedisLike & BundleBudgetRedisLike;
   identity: IdentityProvider;
   signer: { kid: string; mint(input: MintInput): string };
+  /** Refresh-token families (B14). RedisRefreshStore in production; MemoryRefreshStore in tests. */
+  refresh: RefreshStore;
   /**
    * The public halves used to VERIFY a presented token at the exchange (Task 12). Normally just the
    * signer's own public key; a list during a rotation window.
@@ -163,6 +172,34 @@ function intQuery(query: URLSearchParams, name: string): number | undefined {
 }
 
 const seconds = (deps: CpDeps): number => Math.floor(deps.now() / 1000);
+
+/**
+ * The body both grants answer with (device flow and refresh, B14 §4.3): an API token now, and the
+ * refresh token behind it. Roles are the CALLER's current ones -- never replayed from a record.
+ */
+function loginBody(
+  deps: CpDeps,
+  who: { subject: string; displayName: string; roles: string[] },
+  refresh: { refreshToken: string; absExpS: number },
+) {
+  const iat = seconds(deps);
+  return {
+    token: deps.signer.mint({
+      sub: who.subject,
+      tenant: who.subject, // one subject is one tenant in MU1 (spec §11.2)
+      roles: who.roles,
+      scope: ['api'],
+      ttlSeconds: deps.config.apiTokenTtlSeconds,
+      now: iat,
+    }),
+    subject: who.subject,
+    displayName: who.displayName,
+    roles: who.roles,
+    expiresAt: iat + deps.config.apiTokenTtlSeconds,
+    refreshToken: refresh.refreshToken,
+    refreshExpiresAt: refresh.absExpS,
+  };
+}
 
 async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
   const runtime = await deps.index.getRuntime(sessionId);
@@ -328,24 +365,55 @@ export const HANDLERS: Record<string, Handler> = {
     }
     // A pending authorization propagates as authorization_pending (428) -- the client polls.
     const principal = await deps.identity.completeDeviceAuth(deviceCode);
-    const iat = seconds(deps);
+    const label = asRecord(ctx.body).label;
+    const issued = await deps.refresh.issue({
+      subject: principal.subject,
+      displayName: principal.displayName,
+      label: typeof label === 'string' ? label : '',
+      nowMs: deps.now(),
+    });
+    return { status: 200, body: loginBody(deps, principal, issued) };
+  },
+
+  refreshAuth: async (ctx, deps) => {
+    const body = asRecord(ctx.body);
+    // RFC 6749 §6's shape, so a standard OAuth client library can drive it.
+    if (body.grant_type !== 'refresh_token') {
+      throw new CpError('invalid_request', "grant_type must be 'refresh_token'");
+    }
+    const token = body.refresh_token;
+    if (typeof token !== 'string')
+      throw new CpError('invalid_request', 'refresh_token is required');
+    // The wrong shape is refused before it is hashed or looked up (B14 Review Focus 3).
+    if (!isRefreshTokenShape(token)) throw new CpError('invalid_grant', 'refresh token refused');
+    const r = await deps.refresh.rotate(token, deps.now());
+    // One code for every refusal: the client's only move is to log in again (errors.ts).
+    if (!r.ok) throw new CpError('invalid_grant', `refresh token refused: ${r.reason}`);
     return {
       status: 200,
-      body: {
-        token: deps.signer.mint({
-          sub: principal.subject,
-          tenant: principal.subject, // one subject is one tenant in MU1 (spec §11.2)
-          roles: principal.roles,
-          scope: ['api'],
-          ttlSeconds: deps.config.apiTokenTtlSeconds,
-          now: iat,
-        }),
-        subject: principal.subject,
-        displayName: principal.displayName,
-        roles: principal.roles,
-        expiresAt: iat + deps.config.apiTokenTtlSeconds,
-      },
+      body: loginBody(
+        deps,
+        {
+          subject: r.subject,
+          displayName: r.displayName,
+          roles: deps.identity.rolesFor(r.subject),
+        },
+        r,
+      ),
     };
+  },
+
+  revokeAuth: async (ctx, deps) => {
+    const token = asRecord(ctx.body).token;
+    if (typeof token !== 'string') throw new CpError('invalid_request', 'token is required');
+    // RFC 7009 §2.2: 200 whether or not the token named anything, so the answer is no oracle.
+    if (isRefreshTokenShape(token)) await deps.refresh.revoke(token, deps.now());
+    return { status: 200, body: {} };
+  },
+
+  revokeAllAuth: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    return { status: 200, body: { revoked: await deps.refresh.revokeAllFor(p.sub, deps.now()) } };
   },
 
   getMe: async (ctx) => {

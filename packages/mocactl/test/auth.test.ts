@@ -169,6 +169,27 @@ describe('cached auth helpers', () => {
     expect(loginExpiryMinutes(auth, 3_361_000)).toBe(4);
     expect(loginExpiryMinutes(auth, 3_600_000)).toBeUndefined();
   });
+
+  it('does not warn when a refresh token will renew the login', () => {
+    const renewing = { ...auth, refreshToken: 'mrt_x' };
+    expect(loginExpiryMinutes(renewing, 3_361_000)).toBeUndefined();
+  });
+});
+
+describe('toCachedAuth carries the refresh pair (B14)', () => {
+  it('keeps refreshToken and refreshExpiresAt when the control plane sent them', () => {
+    const a = toCachedAuth(
+      { token: 't', subject: 's', expiresAt: 1, refreshToken: 'mrt_x', refreshExpiresAt: 2 },
+      'http://cp',
+    );
+    expect(a).toMatchObject({ refreshToken: 'mrt_x', refreshExpiresAt: 2 });
+  });
+
+  it('omits them for a control plane that predates B14', () => {
+    const a = toCachedAuth({ token: 't', subject: 's', expiresAt: 1 }, 'http://cp');
+    expect(a).not.toHaveProperty('refreshToken');
+    expect(a).not.toHaveProperty('refreshExpiresAt');
+  });
 });
 
 describe('sleep', () => {

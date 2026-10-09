@@ -1,8 +1,14 @@
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { ControlPlaneClient } from './api/control-plane.js';
 import { DiscoveringHarness, discoverHarnessUrl } from './api/discovery.js';
 import { HarnessClient } from './api/harness.js';
 import type { ControlPlaneApi, HarnessApi } from './api/types.js';
+import {
+  ensureAuth,
+  REFRESH_MARGIN_MS,
+  withoutRefresh,
+  type EnsureResult,
+} from './auth-refresh.js';
 import {
   clearAuth,
   loadAuth,
@@ -52,7 +58,18 @@ function wireTranscripts(rt: Runtime): void {
 function wire(rt: Runtime): void {
   const { controlPlaneUrl, harnessUrl } = rt.endpoints;
   const cp = controlPlaneUrl
-    ? new ControlPlaneClient(controlPlaneUrl, () => rt.auth?.apiToken, rt.fetchImpl)
+    ? new ControlPlaneClient(controlPlaneUrl, () => rt.auth?.apiToken, rt.fetchImpl, {
+        label: hostname(),
+        // A TUI left open past the 15-minute API token: refresh once and retry (B14). Never throws:
+        // the client would surface our error instead of the original 401, so any failure is `false`.
+        onTokenRejected: async () => {
+          try {
+            return (await ensureRuntimeAuth(rt, { force: true })).kind === 'ok';
+          } catch {
+            return false;
+          }
+        },
+      })
     : undefined;
   rt.cp = cp;
   rt.harness = harnessUrl
@@ -92,6 +109,34 @@ export function setAuth(rt: Runtime, auth: CachedAuth | null): void {
   if (auth) saveAuth(rt.paths, auth);
   else clearAuth(rt.paths);
   wireTranscripts(rt);
+}
+
+/**
+ * ensureAuth for this runtime: rt.auth follows a successful refresh (already on disk by then), and
+ * loses its refresh pair when the control plane refused it, so the login check says "not logged in"
+ * rather than "could not be refreshed". A still-fresh in-memory login short-circuits without reading
+ * the file, so a runtime built around an in-memory login -- every test runtime -- behaves as before.
+ */
+export async function ensureRuntimeAuth(
+  rt: Runtime,
+  opts: { force?: boolean } = {},
+): Promise<EnsureResult> {
+  if (!opts.force && rt.auth && rt.auth.expiresAt * 1000 - rt.now() > REFRESH_MARGIN_MS) {
+    return { kind: 'ok', auth: rt.auth };
+  }
+  const controlPlaneUrl = rt.endpoints.controlPlaneUrl;
+  if (!controlPlaneUrl || !rt.cp) return { kind: 'login_required' };
+  const r = await ensureAuth(
+    { paths: rt.paths, controlPlaneUrl, cp: rt.cp, now: rt.now, sleep: rt.sleep },
+    opts,
+  );
+  if (r.kind === 'ok') {
+    rt.auth = r.auth;
+    wireTranscripts(rt);
+  } else if (r.kind === 'login_required' && rt.auth?.refreshToken) {
+    rt.auth = withoutRefresh(rt.auth);
+  }
+  return r;
 }
 
 export function saveRuntimeConfig(rt: Runtime): void {

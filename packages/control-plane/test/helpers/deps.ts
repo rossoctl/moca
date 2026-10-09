@@ -3,6 +3,7 @@ import { bundleKey } from '@moca/config-bundle';
 import { InMemoryCredentialStore, parseCredentialBody } from '../../src/credential-store.js';
 import type { CpConfig, CpDeps, RequestCtx } from '../../src/handlers.js';
 import { OwnershipIndex } from '../../src/ownership.js';
+import { MemoryRefreshStore, type AuditFields } from '../../src/refresh-store.js';
 import { makeSigner, publicKeyFromBase64, type TokenClaims } from '../../src/token.js';
 import { fakeBundleRedis, fakeRedis } from './fake-redis.js';
 import { StubIdentity } from './stub-identity.js';
@@ -14,6 +15,10 @@ export type TestDeps = CpDeps & {
   publicKeyBase64: string;
   /** The fake's audit-stream map, for asserting what was audited. */
   streams: Map<string, Record<string, string>[]>;
+  /** The memory refresh store's audit array, for asserting what was audited (B14). */
+  refreshAudit: AuditFields[];
+  /** ...and its separate stream for refusals of a token nobody issued. */
+  refreshAnonAudit: AuditFields[];
 };
 
 /**
@@ -34,26 +39,38 @@ export function makeDeps(
   const signer = makeSigner(privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
   const fake = fakeRedis();
   const { config: configOver, withStreams: _withStreams, ...rest } = over;
+  const config: CpConfig = {
+    apiTokenTtlSeconds: 3600,
+    sessionTokenTtlSeconds: 300,
+    refreshIdleTtlSeconds: 30 * 86_400,
+    refreshMaxTtlSeconds: 90 * 86_400,
+    refreshReuseGraceSeconds: 30,
+    allowOperatorFallback: false,
+    injectorConfigured: false,
+    sandboxNamespace: 'default',
+    sandboxTiers: null,
+    bundleSubjectBytes: 16 * 1024 * 1024,
+    bundleTotalBytes: 64 * 1024 * 1024,
+    ...configOver,
+  };
+  const refresh = new MemoryRefreshStore({
+    idleTtlS: config.refreshIdleTtlSeconds,
+    maxTtlS: config.refreshMaxTtlSeconds,
+    graceS: config.refreshReuseGraceSeconds,
+  });
   const base: TestDeps = {
     index: new OwnershipIndex(fake.redis),
     credentials: new InMemoryCredentialStore(),
     bundles: fakeBundleRedis(),
     identity: new StubIdentity({ subject: 'github:1234', displayName: 'Alice', roles: [] }),
     signer,
+    refresh,
+    refreshAudit: refresh.audit,
+    refreshAnonAudit: refresh.anonAudit,
     publicKeyBase64: signer.publicKeyBase64,
     verifyKeys: new Map([[signer.kid, publicKeyFromBase64(signer.publicKeyBase64)]]),
     streams: fake.streams,
-    config: {
-      apiTokenTtlSeconds: 3600,
-      sessionTokenTtlSeconds: 300,
-      allowOperatorFallback: false,
-      injectorConfigured: false,
-      sandboxNamespace: 'default',
-      sandboxTiers: null,
-      bundleSubjectBytes: 16 * 1024 * 1024,
-      bundleTotalBytes: 64 * 1024 * 1024,
-      ...configOver,
-    },
+    config,
     now: () => NOW_MS,
     newId: () => 'sid-fixed',
   };

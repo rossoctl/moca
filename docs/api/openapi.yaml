@@ -30,7 +30,7 @@ components:
       bearerFormat: JWT
       description: |
         Ed25519 (`alg: EdDSA`) JWT minted by the control plane. Two shapes: an API token
-        (`scope: ["api"]`, 1 hour) for `/v1` routes, and a session token (`scope: ["turn:write"]`
+        (`scope: ["api"]`, 15 minutes, renewed at /v1/auth/token) for `/v1` routes, and a session token (`scope: ["turn:write"]`
         plus `sid`, 5 minutes) for the data plane's `/turn`. No credential travels in the token.
     exchangeToken:
       type: http
@@ -65,6 +65,7 @@ components:
             - token_required
             - token_invalid
             - token_expired
+            - invalid_grant
             - subject_conflict
             - unauthorized
             - forbidden
@@ -259,6 +260,10 @@ paths:
               required: [deviceCode]
               properties:
                 deviceCode: { type: string }
+                label:
+                  type: string
+                  maxLength: 64
+                  description: a client hint such as the hostname; shown back, never trusted
       responses:
         '200':
           description: an api-scoped token
@@ -266,13 +271,19 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [token, subject, expiresAt]
+                required: [token, subject, expiresAt, refreshToken, refreshExpiresAt]
                 properties:
                   token: { type: string }
                   subject: { type: string }
                   displayName: { type: string }
                   roles: { type: array, items: { type: string } }
                   expiresAt: { type: integer, description: epoch seconds }
+                  refreshToken:
+                    type: string
+                    pattern: '^mrt_[A-Za-z0-9_-]{43}$'
+                    description: opaque, single-use; exchange at /v1/auth/token for the next pair
+                  refreshExpiresAt:
+                    { type: integer, description: epoch seconds; the login's absolute limit }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '428':
@@ -282,6 +293,98 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '410':
           description: device_code_expired — the code expired before it was approved; start a new one
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/auth/token:
+    post:
+      operationId: refreshAuth
+      summary: Exchange a refresh token for a new API token and a new refresh token (RFC 6749 §6)
+      description: |
+        Every use rotates the refresh token. Presenting the one just replaced within
+        SH_REFRESH_REUSE_GRACE_SECONDS answers the same successor again; presenting any older one
+        revokes the whole login (reuse detection). Every outcome is audited.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grant_type, refresh_token]
+              properties:
+                grant_type: { type: string, enum: [refresh_token] }
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: the same body as /v1/auth/device/token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, subject, expiresAt, refreshToken, refreshExpiresAt]
+                properties:
+                  token: { type: string }
+                  subject: { type: string }
+                  displayName: { type: string }
+                  roles: { type: array, items: { type: string } }
+                  expiresAt: { type: integer, description: epoch seconds }
+                  refreshToken: { type: string, pattern: '^mrt_[A-Za-z0-9_-]{43}$' }
+                  refreshExpiresAt: { type: integer, description: epoch seconds }
+        '400':
+          description: invalid_request, or invalid_grant — the refresh token is unknown, revoked, expired or replayed; log in again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/auth/revoke:
+    post:
+      operationId: revokeAuth
+      summary: Revoke the login a refresh token belongs to (RFC 7009)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: always, whether or not the token named a login
+          content:
+            application/json:
+              schema: { type: object }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/auth/revoke-all:
+    post:
+      operationId: revokeAllAuth
+      summary: Revoke every login of the calling subject
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: how many logins were revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: redis_unavailable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

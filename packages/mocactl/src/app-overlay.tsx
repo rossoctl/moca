@@ -5,7 +5,13 @@ import type { CachedAuth } from './config.js';
 import { apiTokenValid } from './core/auth.js';
 import { runDiagnostics } from './core/diagnostics.js';
 import type { OsDeps } from './os.js';
-import { applyEndpoints, sessionManager, setAuth, type Runtime } from './runtime.js';
+import {
+  applyEndpoints,
+  ensureRuntimeAuth,
+  sessionManager,
+  setAuth,
+  type Runtime,
+} from './runtime.js';
 import { CredentialsOverlay } from './views/overlays/Credentials.js';
 import { DoctorOverlay } from './views/overlays/Doctor.js';
 import { HelpOverlay } from './views/overlays/Help.js';
@@ -147,15 +153,17 @@ export function AppOverlay({
     case 'doctor':
       return (
         <DoctorOverlay
-          run={() =>
-            runDiagnostics({
+          run={async () => {
+            // Renew first (spec 5.2), so a refreshable login past its 15-minute API token still counts.
+            await ensureRuntimeAuth(rt);
+            return runDiagnostics({
               cp: rt.cp!,
               harness: rt.harness!,
               controlPlaneUrl: rt.endpoints.controlPlaneUrl!,
               harnessOverridden: rt.endpoints.harnessUrl !== undefined,
               loggedIn: apiTokenValid(rt.auth, rt.now()),
-            })
-          }
+            });
+          }}
           onClose={close}
           onError={onCpError}
         />

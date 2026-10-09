@@ -34,6 +34,11 @@ export interface IdentityProvider {
    * `device_code_expired` (410) once the code has lapsed unapproved.
    */
   completeDeviceAuth(deviceCode: string): Promise<Principal>;
+  /**
+   * The subject's roles NOW. A refresh calls this rather than replaying the roles recorded at login,
+   * so an SH_ADMIN_SUBJECTS change reaches a long-lived login within one API-token lifetime (B14).
+   */
+  rolesFor(subject: string): string[];
 }
 
 /** Structural subset of fetch, so tests inject a scripted transport and no test touches the network. */
@@ -196,6 +201,10 @@ export class GithubOAuthProvider implements IdentityProvider {
         (typeof user.login === 'string' ? user.login : subject),
       roles: rolesFor(subject, this.adminSubjects),
     };
+  }
+
+  rolesFor(subject: string): string[] {
+    return rolesFor(subject, this.adminSubjects);
   }
 }
 
