@@ -1,4 +1,5 @@
 import type { SandboxTransport } from '@moca/k8s-sandbox';
+import { leafWorkspaceRef } from './converge.js';
 
 function sq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -59,7 +60,7 @@ export function buildSwebenchCleanupScript(sessionId: string): string {
   // empty parent dir would otherwise be left behind on the pooled sandbox.
   return [
     `set -u`,
-    `rm -rf ${sq(swebenchCheckoutDir(sessionId))} ${sq(swebenchVenvDir(sessionId))} ${sq(`/workspace/leaves/${sessionId}`)}`,
+    `rm -rf ${sq(swebenchCheckoutDir(sessionId))} ${sq(swebenchVenvDir(sessionId))} ${sq(leafWorkspaceRef(sessionId))}`,
   ].join('\n');
 }
 

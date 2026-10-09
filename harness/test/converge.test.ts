@@ -1,4 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   leafWorkspaceRef,
   buildConvergeScript,
@@ -7,6 +11,7 @@ import {
   buildDiffCaptureScript,
   captureWorkspaceDiff,
 } from '../src/converge.js';
+import { buildLeafBindScript } from '../src/config-overlay.js';
 
 describe('leafWorkspaceRef', () => {
   it('is /workspace/leaves/<sessionId>', () => {
@@ -174,5 +179,68 @@ describe('captureWorkspaceDiff', () => {
       close: async () => {},
     };
     await expect(captureWorkspaceDiff(transport, 'run-1')).rejects.toThrow(/output cap/);
+  });
+});
+
+// End-to-end over a real local file:// repo: proves the overlay symlink inside the leaf
+// worktree is actually ignored by the diff capture, not just that the exclude line is in the
+// script. Mirrors config-overlay.test.ts's "cleanup scripts, executed" harness: tmp root stands
+// in for /workspace, flock is stubbed (macOS has none; the string tests above pin ordering),
+// GIT_CONFIG_{GLOBAL,SYSTEM}=/dev/null isolates from the developer's own git config.
+describe('converge + overlay + diff, executed end-to-end over a local repo', () => {
+  const DIGEST = 'sha256:' + 'a'.repeat(64);
+  const gitEnv = {
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@t',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@t',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  };
+  let root: string;
+  let bin: string;
+  let seedRepo: string;
+  const sh = (script: string) =>
+    execFileSync('bash', ['-c', script.replaceAll('/workspace', `${root}/workspace`)], {
+      env: { ...process.env, ...gitEnv, PATH: `${bin}:${process.env.PATH}` },
+    }).toString();
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', ['-C', cwd, ...args], { env: { ...process.env, ...gitEnv } }).toString();
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'converge-'));
+    bin = join(root, 'bin');
+    mkdirSync(bin);
+    mkdirSync(join(root, 'workspace'));
+    writeFileSync(join(bin, 'flock'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    seedRepo = join(root, 'seed.git-src');
+    execFileSync('git', ['init', '-q', '-b', 'main', seedRepo], {
+      env: { ...process.env, ...gitEnv },
+    });
+    writeFileSync(join(seedRepo, 'src.txt'), 'original\n');
+    git(seedRepo, 'add', '.');
+    git(seedRepo, 'commit', '-q', '-m', 'seed');
+    // Shared bundle cache so the bind's symlink has a target.
+    const cache = `${root}/workspace/.sh-config/sha256-${'a'.repeat(64)}`;
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, 'CLAUDE.md'), 'promoted\n');
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("writes `.sh-config` to info/exclude so the overlay symlink inside the worktree isn't staged into the captured patch", () => {
+    const sid = 'leaf-1';
+    sh(buildConvergeScript(`file://${seedRepo}`, 'main', sid));
+    // The bind places a `.sh-config` symlink inside the leaf worktree, exactly as a real solve
+    // leaf with configRef would. mkdir -p on the parent is a no-op because the worktree exists.
+    sh(buildLeafBindScript(DIGEST, sid));
+    const leaf = `${root}/workspace/leaves/${sid}`;
+    // Explicit check per the review ask: the leaf really is a git worktree (not just a dir with
+    // a symlink in it, which is what the pre-fix bug would have left).
+    expect(git(leaf, 'rev-parse', '--is-inside-work-tree').trim()).toBe('true');
+    writeFileSync(join(leaf, 'src.txt'), 'patched\n');
+    const patch = sh(buildDiffCaptureScript(sid));
+    expect(patch).toContain('src.txt');
+    expect(patch).toContain('+patched');
+    expect(patch).not.toContain('.sh-config');
   });
 });

@@ -36,7 +36,11 @@ export function buildConvergeScript(repoUrl: string, ref: string, sessionId: str
     // Ignore an untracked `.sh-config` under any worktree: on a solve leaf with a configRef the
     // promoted-config overlay symlinks `.sh-config` into the leaf dir, and without this
     // `git add -A` in buildDiffCaptureScript would stage that symlink into every captured patch.
-    // No-op when the entry is already present; a no-op when the overlay didn't run.
+    // Written on every converge (harmless when no overlay runs — the entry just has no match).
+    // `mkdir -p "$REPO/.git/info"` guards against a missing templates dir: `git init` normally
+    // creates it, but if it isn't there `echo >>` fails under `set -eu` and takes down the whole
+    // converge. Append is idempotent via `grep -qxF` on the exact line.
+    `  mkdir -p "$REPO/.git/info"`,
     `  grep -qxF .sh-config "$REPO/.git/info/exclude" 2>/dev/null || `,
     `    echo .sh-config >> "$REPO/.git/info/exclude"`,
     `) 9>"$LOCK"`,

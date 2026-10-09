@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 
 /**
- * Integration-level test for realProduceSolve: pins the ordering (converge → attach) that the
- * review on #468 flagged as a correctness bug. The attach cannot run first — `leafConfigDir(sid)`
- * is a child of `leafWorkspaceRef(sid)`, and the overlay's `mkdir -p` on the parent would make
- * `buildConvergeScript`'s `[ -d "$LEAF" ] || git worktree add` skip the worktree entirely.
+ * Integration-level test for realProduceSolve: pins the ordering (converge → attach). The attach
+ * cannot run first — `leafConfigDir(sid)` is a child of `leafWorkspaceRef(sid)`, and the overlay's
+ * `mkdir -p` on the parent would make `buildConvergeScript`'s `[ -d "$LEAF" ] || git worktree add`
+ * skip the worktree entirely.
  *
  * To stay hermetic the test short-circuits inside the attach's resolver so neither Pi nor the
  * agent model needs to run. The transport-mock records every script passed to `exec`, so the
@@ -61,8 +61,12 @@ vi.mock('../src/buffered-redis-backend.js', () => ({
     async flush() {}
   },
 }));
-// Stop the SessionManager/agent factories from reaching real Pi code. The test asserts on
-// transport.exec script ordering and never gets to session.prompt, so these can be empty.
+// Stop the SessionManager/agent factories from reaching real Pi code. `createAgentSession` is a
+// vi.fn so individual tests can override it — the opt-in-branch test (below) uses that to halt
+// the leaf after the configRef check instead of before convergeWorkspace returns.
+const { createAgentSessionMock } = vi.hoisted(() => ({
+  createAgentSessionMock: vi.fn(async () => ({ session: { prompt: async () => {} } })),
+}));
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   SessionManager: {
     create: () => ({}),
@@ -71,7 +75,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   DefaultResourceLoader: class {
     async reload() {}
   },
-  createAgentSession: async () => ({ session: { prompt: async () => {} } }),
+  createAgentSession: (...args: unknown[]) => createAgentSessionMock(...(args as [])),
 }));
 
 import { realProduceSolve, type LeafEnvelope, type SolveCapture } from '../src/run-leaf.js';
@@ -121,8 +125,8 @@ describe('realProduceSolve ordering (converge before attach)', () => {
     // Any truthy value satisfies the overlay dep check; the resolver below is where we assert.
     const bundleRedis = {} as never;
     const resolvePromotedConfig = vi.fn(async () => {
-      // By the time this fires, convergeWorkspace must have already executed its script. This is
-      // the exact invariant the #468 review pinned.
+      // By the time this fires, convergeWorkspace must have already executed its script — the
+      // ordering invariant this test exists to pin.
       const scriptsSoFar = execMock.mock.calls.map((c) => c[0] as string);
       expect(scriptsSoFar).toContain(expectedConverge);
       throw new Error('resolver halts the test here, after the ordering check');
@@ -149,11 +153,28 @@ describe('realProduceSolve ordering (converge before attach)', () => {
   it('does not call the resolver at all when configRef is absent (regression guard for the opt-in path)', async () => {
     // Pairs with the dispatcher-level test suite: realProduceSolve without configRef must leave
     // the resolver untouched, so an existing solve caller sees no change in behaviour.
+    //
+    // Convergescript MUST succeed so the leaf reaches the configRef check — otherwise the
+    // resolver is never called whether or not the opt-in guard is in place, and the test can't
+    // actually fail. Halt later from createAgentSession, which runs after converge AND after the
+    // configRef branch.
     selectPoolSandboxMock.mockReset().mockResolvedValue(podLease());
-    execMock.mockReset().mockImplementation(async () => {
-      // Any exec after convergeWorkspace (session.prompt → captureWorkspaceDiff → cleanup) would
-      // keep the test running against the real Pi stack; throw once converge returns to halt.
-      throw new Error('halt after converge');
+    const expectedConverge = buildConvergeScript(
+      'https://example.test/repo.git',
+      'main',
+      'run-1-solve',
+    );
+    execMock.mockReset().mockImplementation(async (script: string) => {
+      if (script === expectedConverge)
+        return {
+          stdout: Buffer.from('/workspace/leaves/run-1-solve'),
+          exitCode: 0,
+          truncated: false,
+        };
+      return { stdout: Buffer.from(''), exitCode: 0, truncated: false };
+    });
+    createAgentSessionMock.mockReset().mockImplementationOnce(async () => {
+      throw new Error('halt after configRef branch');
     });
     const resolvePromotedConfig = vi.fn();
     const envNoConfig = { ...solveEnv(), configRef: undefined };
@@ -164,5 +185,8 @@ describe('realProduceSolve ordering (converge before attach)', () => {
       bundleRedis: {} as never,
     }).catch(() => {});
     expect(resolvePromotedConfig).not.toHaveBeenCalled();
+    // Convergescript did execute (otherwise we never reached the configRef branch) — sanity.
+    const scripts = execMock.mock.calls.map((c) => c[0] as string);
+    expect(scripts).toContain(expectedConverge);
   });
 });
