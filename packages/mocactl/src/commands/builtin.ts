@@ -8,7 +8,8 @@ export type OverlayName =
   | 'help'
   | 'doctor'
   | 'login'
-  | 'onboarding';
+  | 'onboarding'
+  | 'leave-turn';
 
 /** What commands may ask of the app. Implemented by app.tsx. */
 export interface CommandHost {

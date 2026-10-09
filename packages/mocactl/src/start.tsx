@@ -13,7 +13,8 @@ export async function startInteractive(rt: Runtime, opts: InteractiveOptions): P
       os={realOs()}
       write={(s) => void process.stdout.write(s)}
     />,
-    { exitOnCtrlC: true },
+    // Ctrl+C is the App's: with a detachable turn running it asks first (turn-reattach spec §6.3).
+    { exitOnCtrlC: false },
   );
   await instance.waitUntilExit();
   return 0;

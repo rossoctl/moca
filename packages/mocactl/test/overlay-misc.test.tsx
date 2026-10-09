@@ -4,8 +4,9 @@ import { BUILTIN_COMMANDS, type CommandHost } from '../src/commands/builtin.js';
 import { CommandRegistry } from '../src/commands/registry.js';
 import { DoctorOverlay } from '../src/views/overlays/Doctor.js';
 import { HelpOverlay } from '../src/views/overlays/Help.js';
+import { LeaveTurnOverlay } from '../src/views/overlays/LeaveTurn.js';
 import { PaletteOverlay } from '../src/views/overlays/Palette.js';
-import { KEY, inputReady, waitFor, withTheme } from './helpers/ink.js';
+import { KEY, inputReady, tick, waitFor, withTheme } from './helpers/ink.js';
 
 const host = () =>
   ({
@@ -114,5 +115,37 @@ describe('HelpOverlay', () => {
     stdin.write('x');
     await waitFor(() => onClose.mock.calls.length > 0, 1000, lastFrame);
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe('LeaveTurnOverlay', () => {
+  it('k and ctrl+c keep, c cancels, esc stays', async () => {
+    for (const [key, expected] of [
+      ['k', 'keep'],
+      ['\u0003', 'keep'],
+      ['c', 'cancel'],
+      ['\u001b', 'stay'],
+    ] as const) {
+      const got: string[] = [];
+      const { stdin, lastFrame, unmount } = render(
+        withTheme(
+          <LeaveTurnOverlay
+            onKeep={() => got.push('keep')}
+            onCancel={() => got.push('cancel')}
+            onStay={() => got.push('stay')}
+          />,
+        ),
+      );
+      // useInput attaches after the first paint (test/helpers/ink.ts); a key written earlier is lost.
+      await waitFor(
+        () => (lastFrame() ?? '').includes('a turn is running') && inputReady(stdin),
+        1000,
+        lastFrame,
+      );
+      stdin.write(key);
+      await tick();
+      expect(got).toEqual([expected]);
+      unmount();
+    }
   });
 });
