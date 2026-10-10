@@ -269,13 +269,20 @@ wired into any deployment.
 - A `turn` frame marks the turn detachable: `ActiveSession` records its `turnId` and the last frame
   id. The block reducer ignores `turn` frames (no event block).
 - `HarnessClient` gains `attach({sessionId, token, lastEventId, signal})` and
-  `cancelTurn({sessionId, turnId, token})`. `readSse` surfaces the `id:` field.
+  `cancelTurn({sessionId, turnId?, token})`, which resolves with the `turnId` its `202` names.
+  `readSse` surfaces the `id:` field.
 
 ### 6.2 Transcript
 
 - A new record `{kind:"turn", at, turnId}`, and frame records gain `eventId?`. Coalesced text and
   thinking deltas take the id of the last delta merged.
 - `load` returns `lastTurnId` and `lastEventId`. Files written before this change load unchanged.
+- A prompt is recorded once its own turn is accepted (its first frame), or when the turn ends
+  without one. A `409`'s attach (§6.5) records the other device's turn before the prompt, as a `turn`
+  entry with no prompt ahead of it: `turn T1 … T1 terminal, prompt P, turn T2 …`. It renders as a
+  reply with no prompt, and its terminal counts toward usage like any other.
+- Any `turn` entry, with or without a prompt before it, opens a turn: the last one is open (a
+  resume re-attaches it) until a terminal frame follows.
 
 ### 6.3 Quit and switching sessions
 
@@ -297,6 +304,25 @@ A turn that is not detachable (older harness, Knative) quits as today.
   as now. Double Esc still clears the queue.
 - Cancel call fails: notice "couldn't cancel — the turn keeps running", and the stream stays open.
 - Not detachable: aborts the fetch, as today.
+- Before the first frame: the server may already hold the lease (§5.1) and writes the `turn` frame
+  lazily, so Esc keeps reading for up to 2 s (`PENDING_CANCEL_MS`).
+  - A `turn` frame: cancel that turn, as above.
+  - Any other frame (a harness without detachable turns): abort the fetch.
+  - A refusal (`4xx`, `503`): the turn ends with it, and nothing sends it again.
+  - No frame by the deadline: abort the fetch, then `POST /v1/turn/cancel` without a `turnId`.
+    Closing a detachable request detaches the turn rather than cancelling it, so the abort alone
+    would leave it running.
+- The turnId-less cancel can land before `begin()`. `turn_not_found`, or a `202` that names the
+  session's previous (ended) turn, is retried: 3 tries, 1.5 s apart.
+  - A `202` for a new turn: cancelled.
+  - Every try finds no turn: no turn holds the session (the abort stopped it, or it never began).
+    That is success, with no notice.
+  - Any other failure: the "couldn't cancel" notice.
+- Each try is bounded by the 5 s cancel timeout, so the cancel can take up to about 18 s in the worst
+  case. The queue holds the next prompt until it settles, so a late try cannot cancel that prompt's
+  turn. The leave overlay's `c` resolves the same way.
+- Accepted risk: if the request never reached `begin()` and another device started a turn inside
+  that window, the turnId-less cancel can cancel that turn.
 
 ### 6.5 Resume, reattach, and dropped streams
 
@@ -311,17 +337,23 @@ A turn that is not detachable (older harness, Knative) quits as today.
   automatically with the last id: up to 5 tries, backoff 0.5 s doubling. Then `turn-end: error`
   ("lost the connection to the running turn — it may still be running; reopen the session to
   reattach").
+- The budget is per drop: a try that delivered new frames restarts the count and the backoff. The
+  `turn` frame every attach repeats first does not count as new.
+- A dropped stream, a `502`/`503`/`504`, or `redis_unavailable` on the re-attach is retried (a worker
+  drain, a gateway). Any other error ends the turn.
+- `readSse` drops an event left without its closing blank line at EOF, id and all (the SSE spec's
+  rule), so a re-attach never resumes after a frame it did not receive.
 - `submit` answered `409 turn_in_progress` (another device's turn): attach to it, then send the
   prompt when it ends.
 - `truncated: true` adds the notice "earlier output of this turn is no longer available".
 
 ## 7. Compatibility
 
-| Client \ harness | P6 with `SH_TURN_DETACH=1`                                                | Older harness, or Knative                                                                                              |
-| ---------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Older mocactl    | Unchanged, except `409` while a detachable turn of the same session runs. | Unchanged.                                                                                                             |
-| curl and scripts | As above.                                                                 | Unchanged.                                                                                                             |
-| New mocactl      | Full feature.                                                             | No `turn` frame → today's behavior: Esc aborts, no quit overlay. Attach `404` → nothing to attach. #472 notice stands. |
+| Client \ harness | P6 with `SH_TURN_DETACH=1`                                                | Older harness, or Knative                                                                                                                                                                                                                                                                       |
+| ---------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Older mocactl    | Unchanged, except `409` while a detachable turn of the same session runs. | Unchanged.                                                                                                                                                                                                                                                                                      |
+| curl and scripts | As above.                                                                 | Unchanged.                                                                                                                                                                                                                                                                                      |
+| New mocactl      | Full feature.                                                             | No `turn` frame → today's behavior: Esc aborts, no quit overlay. An Esc with no frame for 2 s also sends the turnId-less cancel (§6.4): every try answers `404`, which reads as success with no notice, since the abort stopped the turn. Attach `404` → nothing to attach. #472 notice stands. |
 
 ## 8. Failure modes
 

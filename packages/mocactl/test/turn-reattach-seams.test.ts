@@ -245,7 +245,9 @@ describe('I2: Esc before the turn frame', () => {
     expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
   });
 
-  it("when every try finds no turn (an old or Knative harness), it reports it couldn't cancel", async () => {
+  // No turn holds the session: on Knative or an older harness the abort stopped it; on P6 the
+  // request was aborted before begin(). Nothing is left to cancel, so no "couldn't cancel".
+  it('when every try finds no turn (an old or Knative harness), it resolves true with no notice', async () => {
     const { session: s, harness, events } = faked([{ hang: true }], { pendingCancelMs: 10 });
     harness.cancelTurn = async (args) => {
       harness.cancels.push(args);
@@ -253,23 +255,66 @@ describe('I2: Esc before the turn frame', () => {
     };
     s.submit('go');
     await tick();
-    expect(await s.cancelRemote()).toBe(false);
+    expect(await s.cancelRemote()).toBe(true);
     await s.idle();
     expect(harness.cancels).toHaveLength(BLIND_CANCEL_TRIES);
-    expect(events).toContainEqual({
-      kind: 'notice',
-      text: "couldn't cancel — the turn keeps running",
-      tone: 'error',
-    });
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
   });
 
-  it('3 tries over about 3 s', () => {
+  // The cancel can land before begin() and find the session's previous, already-ended turn: the
+  // server answers 202 naming it. That is not this turn's cancel, so the tries go on.
+  it("a 202 naming the previous turn is not success: it retries until the new turn's", async () => {
+    const {
+      session: s,
+      harness,
+      events,
+    } = faked([{ frames: [turnF('t0'), doneFrame()], ids: ['t0:1-0', 't0:2-0'] }, { hang: true }], {
+      pendingCancelMs: 10,
+    });
+    const answers = ['t0', 't1'];
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      return { turnId: answers.shift() };
+    };
+    s.submit('first');
+    await s.idle();
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(2);
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
+  });
+
+  it('a 202 naming the previous turn on every try ends like finding no turn', async () => {
+    const {
+      session: s,
+      harness,
+      events,
+    } = faked([{ frames: [turnF('t0'), doneFrame()], ids: ['t0:1-0', 't0:2-0'] }, { hang: true }], {
+      pendingCancelMs: 10,
+    });
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      return { turnId: 't0' };
+    };
+    s.submit('first');
+    await s.idle();
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(BLIND_CANCEL_TRIES);
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
+  });
+
+  it('3 tries, 1.5 s apart (3 s between the first and the last)', () => {
     expect(BLIND_CANCEL_TRIES).toBe(3);
     expect((BLIND_CANCEL_TRIES - 1) * BLIND_CANCEL_RETRY_MS).toBe(3000);
   });
 
-  it('a cancel failure other than turn_not_found is not retried', async () => {
-    const { session: s, harness } = faked([{ hang: true }], { pendingCancelMs: 10 });
+  it("a cancel failure other than turn_not_found is not retried, and says it couldn't cancel", async () => {
+    const { session: s, harness, events } = faked([{ hang: true }], { pendingCancelMs: 10 });
     harness.cancelTurn = async (args) => {
       harness.cancels.push(args);
       throw new ApiError('harness', 0, 'network_error', 'down');
@@ -279,6 +324,11 @@ describe('I2: Esc before the turn frame', () => {
     expect(await s.cancelRemote()).toBe(false);
     await s.idle();
     expect(harness.cancels).toHaveLength(1);
+    expect(events).toContainEqual({
+      kind: 'notice',
+      text: "couldn't cancel — the turn keeps running",
+      tone: 'error',
+    });
   });
 
   it('the next queued prompt waits for the turnId-less cancel to settle, so it cannot hit it', async () => {

@@ -147,8 +147,10 @@ export function fakeHarness(
       if (!step) throw new ApiError('harness', 404, 'turn_not_found');
       yield* play(step, args);
     },
+    // As the server does: the 202 names the cancelled turn (the given one, if any).
     async cancelTurn(args: CancelTurnArgs) {
       cancels.push(args);
+      return args.turnId !== undefined ? { turnId: args.turnId } : {};
     },
     ...over,
   };

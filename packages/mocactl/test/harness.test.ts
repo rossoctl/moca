@@ -264,11 +264,23 @@ describe('detachable turns', () => {
       req = { url: u, body: JSON.parse(String(init.body)) };
       return Response.json({ turnId: 't1' }, { status: 202 });
     }) as typeof fetch);
-    await client.cancelTurn({ sessionId: 's1', turnId: 't1', token: 'tok' });
+    expect(await client.cancelTurn({ sessionId: 's1', turnId: 't1', token: 'tok' })).toEqual({
+      turnId: 't1',
+    });
     expect(req).toEqual({
       url: 'http://h/v1/turn/cancel',
       body: { sessionId: 's1', turnId: 't1' },
     });
+  });
+
+  it('cancelTurn resolves with no turnId when the 202 body names none', async () => {
+    for (const body of ['', 'not json', '{"turnId":7}']) {
+      const client = new HarnessClient(
+        'http://h',
+        (async () => new Response(body, { status: 202 })) as unknown as typeof fetch,
+      );
+      expect(await client.cancelTurn({ sessionId: 's1', token: 't' })).toEqual({});
+    }
   });
 
   it('cancelTurn throws the harness error otherwise', async () => {

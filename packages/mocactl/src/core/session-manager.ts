@@ -37,9 +37,10 @@ export const CANCEL_TIMEOUT_MS = 5000;
  */
 export const PENDING_CANCEL_MS = 2000;
 /**
- * That turnId-less cancel can land before the server's `begin()`, which answers turn_not_found:
- * it is retried this many times in all, this far apart (3 tries over about 3 s). On a harness
- * without the route every try answers 404 and the tries just run out.
+ * That turnId-less cancel can land before the server's `begin()`, which answers turn_not_found
+ * (or a 202 naming the previous, ended turn): it is tried this many times in all, this far apart.
+ * The spacing is 3 s from the first try to the last; each try may also take up to
+ * CANCEL_TIMEOUT_MS. On a harness without the route every try answers 404 and the tries run out.
  */
 export const BLIND_CANCEL_TRIES = 3;
 export const BLIND_CANCEL_RETRY_MS = 1500;
@@ -135,6 +136,8 @@ export class ActiveSession {
   };
   /** The running attach job is a 409's, following a turn this client did not start. */
   private conflict?: { resend: PromptJob };
+  /** The last turn any `turn` frame named: a turnId-less cancel's 202 for it cancelled nothing new. */
+  private lastTurnId?: string;
   /**
    * The turnId-less cancel after a pending Esc's deadline, until it settles. The queue waits for
    * it: a prompt sent meanwhile would start the very turn a late try could cancel.
@@ -265,28 +268,38 @@ export class ActiveSession {
 
   /**
    * Cancels whatever turn the session runs, before this client learned its turnId. True once the
-   * server accepted it (202). turn_not_found is retried: the cancel can land before `begin()`.
+   * server accepted it (202), or when every try found no turn; false (and a notice) on any other
+   * failure. turn_not_found is retried: the cancel can land before `begin()`. Each try is bounded
+   * by cancelTimeoutMs, so this can take up to about 18 s in the worst case (3 tries of up to 5 s,
+   * plus 3 s of spacing), and the queue waits that long.
    * Accepted risk: if this request never reached `begin()` and another device started a turn in
-   * these few seconds, that is the turn cancelled.
+   * that window, that is the turn cancelled.
    */
   private async cancelBySession(): Promise<boolean> {
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.cancelOnce(undefined);
-        return true;
+        const named = await this.cancelOnce(undefined);
+        // A 202 naming the session's previous, already-ended turn (the cancel landed before
+        // begin()) cancelled nothing of this turn: it reads as finding no turn.
+        if (named === undefined || named !== this.lastTurnId) return true;
       } catch (err) {
-        const notFound = err instanceof ApiError && err.code === 'turn_not_found';
-        if (!notFound || attempt >= BLIND_CANCEL_TRIES) {
+        if (!(err instanceof ApiError && err.code === 'turn_not_found')) {
           this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
           return false;
         }
       }
+      // No turn holds the session, on every try: on Knative or an older harness the abort stopped
+      // it, and on P6 the request was aborted before begin(). Nothing is left to cancel.
+      if (attempt >= BLIND_CANCEL_TRIES) return true;
       await this.deps.sleep(BLIND_CANCEL_RETRY_MS);
     }
   }
 
-  /** One server-side cancel, bounded by cancelTimeoutMs; throws when it was not accepted. */
-  private async cancelOnce(turnId: string | undefined): Promise<void> {
+  /**
+   * One server-side cancel, bounded by cancelTimeoutMs; throws when it was not accepted. Resolves
+   * with the turnId the 202 named, if any.
+   */
+  private async cancelOnce(turnId: string | undefined): Promise<string | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = new AbortController();
     const timeout = new Promise<never>((_, reject) => {
@@ -297,15 +310,16 @@ export class ActiveSession {
     });
     const call = async () => {
       await this.ensureToken();
-      await this.deps.harness.cancelTurn({
+      const r = await this.deps.harness.cancelTurn({
         sessionId: this.sessionId,
         ...(turnId !== undefined ? { turnId } : {}),
         token: this.token.token,
         signal: abort.signal,
       });
+      return r ? r.turnId : undefined;
     };
     try {
-      await Promise.race([call(), timeout]);
+      return await Promise.race([call(), timeout]);
     } finally {
       clearTimeout(timer);
     }
@@ -412,8 +426,10 @@ export class ActiveSession {
         deferred.resolve(true);
         throw new TurnCancelledError();
       }
-      if (frame.type === 'turn') this.live = { turnId: frame.turnId, lastEventId: ids.last };
-      else if (this.live && ids.last) this.live.lastEventId = ids.last;
+      if (frame.type === 'turn') {
+        this.live = { turnId: frame.turnId, lastEventId: ids.last };
+        this.lastTurnId = frame.turnId;
+      } else if (this.live && ids.last) this.live.lastEventId = ids.last;
       this.transcriptSafe(() =>
         this.deps.transcripts?.appendFrame(this.sessionId, frame, ids.last),
       );

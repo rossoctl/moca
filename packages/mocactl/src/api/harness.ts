@@ -1,7 +1,13 @@
 import { ApiError, TurnCancelledError, errorFromResponse, networkError } from './errors.js';
 import { isTerminal, type TurnFrame } from './frames.js';
 import { readSse, toFrame } from './sse-parser.js';
-import type { AttachArgs, CancelTurnArgs, HarnessApi, StreamTurnArgs } from './types.js';
+import type {
+  AttachArgs,
+  CancelTurnArgs,
+  CancelTurnResult,
+  HarnessApi,
+  StreamTurnArgs,
+} from './types.js';
 import { trimTrailingSlashes } from './url.js';
 
 /**
@@ -121,7 +127,12 @@ export class HarnessClient implements HarnessApi {
     yield* this.frames(res, signal, onEventId);
   }
 
-  async cancelTurn({ sessionId, turnId, token, signal }: CancelTurnArgs): Promise<void> {
+  async cancelTurn({
+    sessionId,
+    turnId,
+    token,
+    signal,
+  }: CancelTurnArgs): Promise<CancelTurnResult> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.base}/v1/turn/cancel`, {
@@ -134,7 +145,16 @@ export class HarnessClient implements HarnessApi {
       throw networkError('harness', err);
     }
     if (!res.ok) throw await errorFromResponse('harness', res);
-    await res.body?.cancel().catch(() => undefined);
+    // The 202 names the turn the server cancelled (or found already ended); a body without one is
+    // still an accepted cancel.
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    const named = (body as { turnId?: unknown } | null | undefined)?.turnId;
+    return typeof named === 'string' ? { turnId: named } : {};
   }
 
   /**

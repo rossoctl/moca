@@ -155,5 +155,13 @@ export interface HarnessApi {
   probeTrust(token: string, sessionId: string): Promise<'trusted' | 'untrusted'>;
   /** Replays the session's current turn after lastEventId, then follows it (spec §4.2). */
   attach(args: AttachArgs): AsyncGenerator<TurnFrame>;
-  cancelTurn(args: CancelTurnArgs): Promise<void>;
+  /**
+   * Cancels the session's turn (spec §4.3). Resolves on 202 with the turn the server named, which
+   * for a turnId-less cancel may be an earlier, already-ended turn. A fake may resolve void.
+   */
+  cancelTurn(args: CancelTurnArgs): Promise<CancelTurnResult | void>;
+}
+
+export interface CancelTurnResult {
+  turnId?: string;
 }

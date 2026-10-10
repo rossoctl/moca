@@ -4,6 +4,7 @@ import { HarnessClient } from './harness.js';
 import type {
   AttachArgs,
   CancelTurnArgs,
+  CancelTurnResult,
   ControlPlaneApi,
   HarnessApi,
   StreamTurnArgs,
@@ -112,7 +113,7 @@ export class DiscoveringHarness implements HarnessApi {
     yield* client.attach(args);
   }
 
-  async cancelTurn(args: CancelTurnArgs): Promise<void> {
+  async cancelTurn(args: CancelTurnArgs): Promise<CancelTurnResult> {
     return (await this.resolve()).cancelTurn(args);
   }
 }
