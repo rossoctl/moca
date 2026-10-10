@@ -16,6 +16,7 @@ import { RedisRefreshStore, type RefreshRedisLike } from './refresh-redis.js';
 import { startControlPlane } from './server.js';
 import type { CpConfig, CpDeps } from './handlers.js';
 import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.js';
+import { resolveVersion } from './version.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
 import { parseSandboxTiers } from './sandbox-tiers.js';
@@ -112,6 +113,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // incompressible max-size bundle (~10.7 MiB stored).
     bundleSubjectBytes: byteBudgetEnv(env, 'SH_BUNDLE_SUBJECT_BYTES', 16 * 1024 * 1024),
     bundleTotalBytes: byteBudgetEnv(env, 'SH_BUNDLE_TOTAL_BYTES', 64 * 1024 * 1024),
+    version: resolveVersion(env),
   };
   checkInferenceConfig(config);
   checkRefreshConfig(config);

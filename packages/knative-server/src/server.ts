@@ -30,9 +30,12 @@ import {
 } from './turn-auth.js';
 import { prepareServerProcess } from './server-process.js';
 import { adoptTurnSlot } from './turn-slot.js';
+import { resolveVersion } from './version.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
+// Resolved once at boot: MOCA_VERSION (the image build bakes in the git tag) else `dev`.
+const VERSION = resolveVersion(process.env);
 const SSE_HEADERS = {
   'Content-Type': 'text/event-stream',
   'Cache-Control': 'no-cache',
@@ -957,7 +960,10 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
   const url = req.url ?? '';
 
   if (req.method === 'GET' && url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
+    // The body stays the declared text/plain `ok` (probes and old clients match on it); the
+    // version rides the X-Moca-Version response header, which a client that knows no better
+    // simply ignores.
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'X-Moca-Version': VERSION }).end('ok');
     return;
   }
 

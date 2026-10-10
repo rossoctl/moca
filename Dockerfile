@@ -52,6 +52,12 @@ ENV NODE_ENV=production
 RUN mkdir -p /var/lib/moca/credentials && \
     chown 1000:1000 /var/lib/moca/credentials && \
     chmod 0700 /var/lib/moca/credentials
+# The git tag (or sha) this image was built from, advertised by the control plane's /v1/discovery
+# and the harness's /health so clients can show it. Build with --build-arg MOCA_VERSION=<tag>.
+# Declared last: an ARG's value keys the cache of every RUN below it, so declaring it earlier
+# would rebuild those layers on every version change.
+ARG MOCA_VERSION=dev
+ENV MOCA_VERSION=${MOCA_VERSION}
 EXPOSE 8080
 WORKDIR /app/packages/knative-server
 CMD ["node", "--import", "tsx", "src/server.ts"]

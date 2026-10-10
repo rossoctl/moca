@@ -51,6 +51,14 @@ paths:
       responses:
         '200':
           description: ok
+          headers:
+            X-Moca-Version:
+              description: |
+                The deployment's version (MOCA_VERSION, baked in at image build), so a client can
+                show it. Absent on a harness that predates advertising one; the body is unchanged
+                either way.
+              schema:
+                type: string
           content:
             text/plain:
               schema:

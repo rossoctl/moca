@@ -135,7 +135,7 @@ export function fakeHarness(
       attachQueue.push(step);
     },
     baseUrl: async () => 'http://h',
-    health: async () => undefined,
+    health: async () => ({}),
     probeTrust: async () => 'trusted',
     async *streamTurn(args: StreamTurnArgs) {
       turns.push(args);

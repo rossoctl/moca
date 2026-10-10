@@ -80,6 +80,55 @@ describe('DiscoveringHarness', () => {
     expect(seen).toEqual(['http://found/health', 'http://found/health']);
   });
 
+  it('forwards an abort signal to the underlying fetch', async () => {
+    const seenSignals: Array<AbortSignal | undefined> = [];
+    const capturing = (async (_url: string | URL, init: RequestInit = {}) => {
+      seenSignals.push(init.signal ?? undefined);
+      return new Response('ok', { status: 200 });
+    }) as typeof fetch;
+    const h = new DiscoveringHarness(async () => 'http://found', capturing);
+    const controller = new AbortController();
+    await h.health({ signal: controller.signal });
+    expect(seenSignals[0]).toBe(controller.signal);
+  });
+
+  it('gives an abandoned health probe its own abortable discovery, not the shared one', async () => {
+    // resolve() caches the discovery promise for every caller, so aborting it would kill a
+    // turn that is waiting on the same discovery. An uncached health with a signal instead
+    // runs an abortable one-off discovery.
+    const received: Array<AbortSignal | undefined> = [];
+    const h = new DiscoveringHarness((signal?) => {
+      received.push(signal);
+      return new Promise<never>((_, reject) =>
+        signal?.addEventListener('abort', () => reject(new Error('discovery aborted'))),
+      );
+    }, okFetch([]));
+    const caller = new AbortController();
+    const probe = h.health({ signal: caller.signal });
+    caller.abort();
+    await expect(probe).rejects.toThrow('discovery aborted');
+    expect(received[0]).toBe(caller.signal);
+  });
+
+  it('a successful one-off discovery warms the cache for later callers', async () => {
+    let discovered = 0;
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string | URL) => {
+      seen.push(String(url));
+      return new Response('ok', { status: 200 });
+    }) as typeof fetch;
+    const h = new DiscoveringHarness((signal?) => {
+      discovered++;
+      void signal;
+      return Promise.resolve('http://found');
+    }, fetchImpl);
+    const caller = new AbortController();
+    await h.health({ signal: caller.signal }); // the one-off path
+    await h.health(); // the cached path
+    expect(discovered).toBe(1);
+    expect(seen).toEqual(['http://found/health', 'http://found/health']);
+  });
+
   it('does not cache a failure, so fixing the deployment needs no restart', async () => {
     let fixed = false;
     const h = new DiscoveringHarness(async () => {

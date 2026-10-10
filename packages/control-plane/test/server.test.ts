@@ -65,7 +65,7 @@ describe('probes', () => {
   it('serves /v1/discovery unauthenticated, advertising no harness by default', async () => {
     const res = await request('GET', '/v1/discovery');
     expect(res.status).toBe(200);
-    expect(res.json()).toEqual({ harnessUrl: null, sandboxTiers: null });
+    expect(res.json()).toEqual({ harnessUrl: null, sandboxTiers: null, version: null });
   });
 });
 

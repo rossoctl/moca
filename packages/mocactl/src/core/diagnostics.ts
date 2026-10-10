@@ -73,7 +73,10 @@ export async function runDiagnostics(deps: DiagnosticsDeps): Promise<CheckResult
       fix: (err) => describeError(err),
     },
     {
-      run: () => deps.harness.health(),
+      // health() now also reports the harness's version; /doctor only cares that it answered.
+      run: async () => {
+        await deps.harness.health();
+      },
       fix: () =>
         `cannot reach the harness at ${harnessUrl} — ` +
         (deps.harnessOverridden

@@ -76,6 +76,8 @@ export interface CpConfig {
   bundleSubjectBytes: number;
   /** Stored config-bundle bytes the whole deployment may hold (`SH_BUNDLE_TOTAL_BYTES`). */
   bundleTotalBytes: number;
+  /** Advertised alongside harnessUrl; null when the deployment reports none (predates MOCA_VERSION). */
+  version?: string;
 }
 
 export interface CpDeps {
@@ -350,6 +352,7 @@ export const HANDLERS: Record<string, Handler> = {
     body: {
       harnessUrl: deps.config.publicHarnessUrl ?? null,
       sandboxTiers: deps.config.sandboxTiers,
+      version: deps.config.version ?? null,
     },
   }),
 

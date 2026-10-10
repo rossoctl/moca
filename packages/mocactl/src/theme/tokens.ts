@@ -14,6 +14,8 @@ export interface ThemeTokens {
   diffAdd?: string;
   diffRemove?: string;
   code?: string;
+  /** The startup banner's logo: pure TrueColor red in both palettes, by the banner's spec. */
+  logo?: string;
 }
 
 export type ThemeName = 'system' | 'dark';
@@ -40,6 +42,7 @@ export const SYSTEM_TOKENS: ThemeTokens = {
   diffAdd: 'green',
   diffRemove: 'red',
   code: 'yellow',
+  logo: '#ff0000',
 };
 
 export const DARK_TOKENS: ThemeTokens = {
@@ -55,6 +58,7 @@ export const DARK_TOKENS: ThemeTokens = {
   diffAdd: '#9ece6a',
   diffRemove: '#f7768e',
   code: '#e0af68',
+  logo: '#ff0000',
 };
 
 export function resolveTheme(

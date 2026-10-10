@@ -194,6 +194,7 @@ paths:
         client reaches it, set by the operator with SH_PUBLIC_HARNESS_URL. It is `null` when the
         deployment advertises none; a 404 means a control plane that predates this route.
         `sandboxTiers` (P6.3) is always present; a control plane that predates P6.3 omits it.
+        `version` is always present; a control plane that predates advertising one omits it.
       security: []
       responses:
         '200':
@@ -202,7 +203,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [harnessUrl, sandboxTiers]
+                required: [harnessUrl, sandboxTiers, version]
                 properties:
                   harnessUrl:
                     type: [string, 'null']
@@ -216,6 +217,12 @@ paths:
                     properties:
                       names: { type: array, items: { type: string } }
                       default: { type: string }
+                  version:
+                    type: [string, 'null']
+                    description: |
+                      the deployment's version (MOCA_VERSION, baked in at image build), so a client
+                      can show it; `dev` when nothing was baked in, and `null` permitted for
+                      compatibility with a control plane that reports none
   /v1/auth/device:
     post:
       operationId: startDeviceAuth

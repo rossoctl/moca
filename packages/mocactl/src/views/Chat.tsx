@@ -1,6 +1,8 @@
 import { Box, Static } from 'ink';
 import type { ReactNode } from 'react';
-import { splitStatic, type BlockState } from '../render/blocks.js';
+import type { BannerInfo } from '../core/banner.js';
+import { splitStatic, type Block, type BlockState } from '../render/blocks.js';
+import { Banner } from './Banner.js';
 import { BlockView } from './BlockView.js';
 import { InputBox } from './InputBox.js';
 import { StatusLine } from './StatusLine.js';
@@ -19,6 +21,8 @@ interface Props {
   onHelp: () => void;
   prefill?: { text: string; nonce: number };
   overlay?: ReactNode;
+  /** Collected at startup; printed as the FIRST <Static> item, so it scrolls away with history. */
+  banner?: BannerInfo;
 }
 
 // Settled blocks are printed once through <Static> and never re-rendered, so a long transcript
@@ -36,17 +40,26 @@ export function Chat({
   onHelp,
   prefill,
   overlay,
+  banner,
 }: Props) {
   const { settled, live } = splitStatic(blocks.blocks);
-  const view = (b: (typeof blocks.blocks)[number]) => (
-    <BlockView key={b.id} block={b} details={details} thinking={thinking} width={width} />
-  );
+  // Ink's <Static> prints append-only, so the banner rides in as the first item rather than
+  // around the region; it arrives after mount once the remote versions have been collected.
+  const items: Array<{ banner: BannerInfo } | Block> = banner ? [{ banner }, ...settled] : settled;
+  const view = (item: { banner: BannerInfo } | Block) =>
+    'banner' in item ? (
+      <Banner key="banner" info={item.banner} />
+    ) : (
+      <BlockView key={item.id} block={item} details={details} thinking={thinking} width={width} />
+    );
   return (
     <Box flexDirection="column">
-      <Static key={staticKey} items={settled}>
+      <Static key={staticKey} items={items}>
         {view}
       </Static>
-      {live.map(view)}
+      {live.map((b) => (
+        <BlockView key={b.id} block={b} details={details} thinking={thinking} width={width} />
+      ))}
       {overlay ? (
         <Box marginTop={1} flexDirection="column">
           {overlay}

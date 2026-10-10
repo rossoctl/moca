@@ -75,7 +75,8 @@ function wire(rt: Runtime): void {
   rt.harness = harnessUrl
     ? new HarnessClient(harnessUrl, rt.fetchImpl)
     : cp
-      ? new DiscoveringHarness(() => discoverHarnessUrl(cp), rt.fetchImpl)
+      ? // The signal lets an abandoned health probe abort the discovery behind it.
+        new DiscoveringHarness((signal) => discoverHarnessUrl(cp, { signal }), rt.fetchImpl)
       : undefined;
   wireTranscripts(rt);
 }
