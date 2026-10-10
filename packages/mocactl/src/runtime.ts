@@ -184,5 +184,6 @@ export function sessionManager(rt: Runtime): SessionManager {
     now: rt.now,
     sleep: rt.sleep,
     cancelPauseMs: rt.cancelPauseMs,
+    detachable: true,
   });
 }

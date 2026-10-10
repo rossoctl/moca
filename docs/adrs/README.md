@@ -50,6 +50,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0037](0037-p6-on-kubernetes-substrate.md)                | P6 on Kubernetes is a substrate, not the deprecated Knative path                                | Proposed    |
 | [0038](0038-mocactl-config-bundle-promotion.md)           | Promote config bundles through the control plane, not a direct Redis tunnel                     | Proposed    |
 | [0039](0039-rotating-refresh-tokens.md)                   | Long-lived client authentication via rotating refresh tokens, with 15-minute API tokens         | Proposed    |
+| [0040](0040-detachable-turns.md)                          | Detachable turns: a per-turn Redis Stream log, re-attach by `Last-Event-ID`, explicit cancel    | Proposed    |
 
 ## What an ADR is (and isn't)
 

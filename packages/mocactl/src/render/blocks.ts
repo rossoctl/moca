@@ -94,6 +94,8 @@ const eventReducer: FrameReducer = (s, frame) =>
 
 // Spec §7.2: one reducer per frame type; anything else falls to eventReducer.
 export const FRAME_REDUCERS: Record<string, FrameReducer> = {
+  turn: (s, f) =>
+    f.type === 'turn' && f.truncated ? addNotice(s, TRUNCATED_TURN_NOTICE, 'info') : s,
   text: (s, f) => (f.type === 'text' ? appendToAssistant(s, 'text', f.delta) : s),
   thinking: (s, f) => (f.type === 'thinking' ? appendToAssistant(s, 'thinking', f.delta) : s),
   tool_use: (s, f) =>
@@ -124,12 +126,19 @@ export const FRAME_REDUCERS: Record<string, FrameReducer> = {
       : s,
   error: (s, f) =>
     f.type === 'error'
-      ? push(finalizeOpen(s), {
-          kind: 'turn-end',
-          outcome: 'error',
-          message: f.errorMessage ?? f.stopReason,
-          usage: f.usage,
-        })
+      ? push(
+          finalizeOpen(s),
+          // The user's own cancel of a detachable turn arrives as an error frame; show it as the
+          // cancel it was, like Esc on a non-detachable turn.
+          f.abortReason === 'cancelled'
+            ? { kind: 'turn-end', outcome: 'cancelled', usage: f.usage }
+            : {
+                kind: 'turn-end',
+                outcome: 'error',
+                message: f.errorMessage ?? f.stopReason,
+                usage: f.usage,
+              },
+        )
       : s,
 };
 
@@ -193,34 +202,74 @@ export function endTurn(
 }
 
 /**
- * Why a resumed session can stop mid-reply: a client disconnect (quitting mocactl) aborts the turn
- * on the harness, and nothing replays it (turn SSE spec §3.6). Without this note the cut-off reply
- * reads as one still being written.
+ * Why a resumed session can stop mid-reply on a turn that cannot be re-attached: a turn that was
+ * not detachable (no `turn` frame recorded, e.g. a transcript written before detachable turns, or
+ * a harness without them) aborts on a client disconnect and nothing replays it (turn SSE spec
+ * §3.6). Without this note the cut-off reply reads as one still being written.
  */
 export const INTERRUPTED_TURN_NOTICE =
   'the last turn didn\'t finish (mocactl closed, or it was cancelled or failed) and isn\'t running — send a prompt such as "go on" to continue';
 
+export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer available';
+
+/**
+ * Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to.
+ * A `turn` entry opens one after its prompt, and also with no prompt before it: a 409's attach
+ * records another device's turn on its own.
+ */
+export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'open-detachable' {
+  let state: 'none' | 'finished' | 'open' | 'open-detachable' = 'none';
+  for (const e of t.entries) {
+    if (e.kind === 'prompt') state = 'open';
+    else if (e.kind === 'turn') state = 'open-detachable';
+    else if (isTerminal(e.frame)) state = 'finished';
+  }
+  return state;
+}
+
+/** Marks every tool block in [from, to) that has no result as interrupted. */
+function interruptTools(s: BlockState, from = 0, to = Infinity): BlockState {
+  const blocks = s.blocks.map((b, i) =>
+    i >= from && i < to && b.kind === 'tool' && !b.result
+      ? { ...b, result: { isError: true, preview: 'interrupted' } }
+      : b,
+  );
+  return { ...s, blocks };
+}
+
+/**
+ * Settles a turn left open for the resume's attach step (see fromTranscript) once that step ends
+ * without the turn's terminal: its reply is final and its unfinished tools were interrupted.
+ */
+export function settleOpenTurn(s: BlockState): BlockState {
+  return interruptTools(finalizeOpen(s));
+}
+
 export function fromTranscript(t: Transcript): BlockState {
   let s = EMPTY_BLOCKS;
-  let open = false; // the latest prompt has no terminal frame yet
+  let lastTurnFrom = 0; // where the last turn's blocks start: its prompt, or a prompt-less turn
+  let open = false; // a prompt or turn entry came after the last terminal
   for (const e of t.entries) {
     if (e.kind === 'prompt') {
       s = addUser(s, e.text);
+      lastTurnFrom = s.blocks.length - 1;
+      open = true;
+    } else if (e.kind === 'turn') {
+      // Another device's turn, recorded by a 409's attach with no prompt of its own.
+      if (!open) lastTurnFrom = s.blocks.length;
       open = true;
     } else {
       s = reduceFrame(s, e.frame);
       if (isTerminal(e.frame)) open = false;
     }
   }
-  s = finalizeOpen(s);
-  // Mark any tool block without a result as interrupted
-  const blocks = s.blocks.map((b) =>
-    b.kind === 'tool' && !b.result
-      ? { ...b, result: { isError: true, preview: 'interrupted' } }
-      : b,
-  );
-  s = { ...s, blocks };
-  return open ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
+  const state = lastTurnState(t);
+  // An open detachable turn may still be running: the resume's attach step replays the rest into
+  // it (a tool result, more of the reply), so it stays open; settleOpenTurn closes it if that step
+  // finds nothing. Earlier turns are settled as ever.
+  if (state === 'open-detachable') return interruptTools(s, 0, lastTurnFrom);
+  s = interruptTools(finalizeOpen(s));
+  return state === 'open' ? addNotice(s, INTERRUPTED_TURN_NOTICE, 'warning') : s;
 }
 
 export function isSettled(b: Block): boolean {

@@ -68,6 +68,10 @@ spec:
                 }
             - { name: SH_SANDBOX_AFFINITY_GRACE_SECONDS, value: '60' }
             - { name: SH_SANDBOX_AFFINITY_TTL_SECONDS, value: '86400' }
+            # Detachable turns (turn-reattach spec §5.6). Static, like the affinity timings.
+            - { name: SH_TURN_DETACH, value: '1' }
+            - { name: SH_TURN_DETACHED_MAX_S, value: '1800' }
+            - { name: SH_TURN_LOG_TTL_S, value: '86400' }
             - { name: SH_RELAY_ADDR, value: 'sandbox-relay-exec.moca.svc:9444' }
             - name: REDIS_URL
               valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }

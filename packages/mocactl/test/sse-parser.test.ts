@@ -49,6 +49,13 @@ describe('SseParser', () => {
     expect(p.push('event: text\ndata: x')).toEqual([]);
     expect(p.flush()).toEqual([{ event: 'text', data: 'x' }]);
   });
+
+  it('reads the id field', () => {
+    const p = new SseParser();
+    expect(p.push('id: t1:5-0\nevent: text\ndata: {"type":"text","delta":"x"}\n\n')).toEqual([
+      { event: 'text', data: '{"type":"text","delta":"x"}', id: 't1:5-0' },
+    ]);
+  });
 });
 
 describe('readSse', () => {
@@ -58,6 +65,26 @@ describe('readSse', () => {
     const events = [];
     for await (const e of readSse(streamOf([bytes.slice(0, at), bytes.slice(at)]))) events.push(e);
     expect(JSON.parse(events[0].data).delta).toBe('é');
+  });
+
+  // The SSE spec discards a block with no closing blank line at EOF. The harness writes `id:`
+  // before `data:`, so a body cut mid-event must not report that event's id: a re-attach would
+  // resume after it and never see the frame (#471 review).
+  it.each([
+    ['after the id line', 'id: t1:4-0\n'],
+    ['mid-data', 'id: t1:4-0\nevent: tool_result\ndata: {"type":"tool_res'],
+    ['after a complete data line', 'id: t1:4-0\nevent: text\ndata: {"type":"text","delta":"x"}\n'],
+  ])('a block cut %s at EOF yields no event and no id', async (_how, tail) => {
+    const head = 'id: t1:3-0\nevent: text\ndata: {"type":"text","delta":"a"}\n\n';
+    const events = [];
+    for await (const e of readSse(streamOf([head + tail]))) events.push(e);
+    expect(events.map((e) => e.id)).toEqual(['t1:3-0']);
+  });
+
+  it('a block closed by a lone-CR blank line at EOF is still dispatched', async () => {
+    const events = [];
+    for await (const e of readSse(streamOf(['id: t1:1-0\rdata: x\r\r']))) events.push(e);
+    expect(events).toEqual([{ event: 'message', data: 'x', id: 't1:1-0' }]);
   });
 });
 

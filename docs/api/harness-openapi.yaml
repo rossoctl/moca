@@ -27,8 +27,14 @@ info:
       * AN AUTHENTICATED CALLER MAY NOT NAME A TENANT. The session token alone scopes the work
         (MI1 R7); tenant remains available only to unauthenticated deployments, where it
         namespaces the session id. Enforced on the two routes that accept a tenant — /v1/runs
-        (body) and /runs/status (query); /v1/turn reads only prompt and sessionId, so a tenant
-        field there is inert, not refused.
+        (body) and /runs/status (query); /v1/turn reads only prompt, sessionId and detachable,
+        so a tenant field there is inert, not refused.
+
+    Detachable turns (#471, docs/specs/2026-10-09-turn-reattach-design.md) are a deployment
+    opt-in, SH_TURN_DETACH=1: a turn whose life belongs to the harness rather than the
+    connection, which a client re-attaches to (GET /v1/turn) and cancels (POST
+    /v1/turn/cancel). With it off, both of those routes answer 404 turn_not_found and POST
+    /v1/turn ignores `detachable`.
 
 security:
   - sessionToken: []
@@ -70,6 +76,35 @@ paths:
         `X-SH-Subject` is accepted only as a trusted-orchestrator convenience and REJECTED when
         it conflicts with the token's subject (spec §3.5) — a silent winner there is a
         cross-tenant bug waiting.
+
+        DETACHABLE TURNS. `detachable: true` is honoured only when all three hold: the
+        deployment runs with SH_TURN_DETACH=1, the request carries a session token the
+        harness accepts, and it asks for SSE (`Accept: text/event-stream`). Otherwise the field
+        is ignored and the turn behaves exactly as above. A detachable turn's stream differs in
+        three ways: its first event is a `turn` frame (FrameTurn — its presence is the
+        capability signal; there is no separate probe); every LOGGED frame carries an SSE
+        `id: <turnId>:<entryId>`, the cursor GET /v1/turn resumes from; and closing the
+        connection does NOT abort the turn. A frame is written to the turn's log before it is
+        sent, so an id a client holds always names a logged entry. If that log write fails,
+        the frame is still sent, but without an `id:` line, and a later attach may not replay
+        it. The same holds once the turn has lost its lease or its log already holds a
+        terminal: nothing is logged after the terminal. If an attach ended the turn with
+        `owner_lost` while its owner was cut off, that `owner_lost` frame (with its id) is
+        also the terminal the starting connection receives. A detached turn nobody watches is aborted
+        after SH_TURN_DETACHED_MAX_S (default 1800), and its log is retained for
+        SH_TURN_LOG_TTL_S (default 86400). A turn the harness ended itself carries the reason
+        on its terminal `error` frame (`abortReason`). The lazy flush is unchanged: the
+        session's one-live-turn lease is taken before the first frame, so a 409 or 503 is
+        still a real status code, and a failure before the first frame is the sync path's
+        status and JSON.
+
+        ONE LIVE TURN PER SESSION. With SH_TURN_DETACH=1, every /v1/turn — detachable or not —
+        checks for a running detachable turn on its session before its first frame, and is
+        refused 409 turn_in_progress while one runs. The check of a non-detachable turn is
+        bounded and fails open: a Redis that cannot answer in time does not block it (the
+        server logs each time it does).
+        Non-detachable turns take no lease, so concurrent non-detachable turns behave as
+        without the flag.
       security:
         - sessionToken: []
       requestBody:
@@ -93,7 +128,10 @@ paths:
                 filled with `: keepalive` comments (invisible to EventSource). The frame
                 vocabulary is TurnStreamFrame below — incremental text/thinking/tool frames,
                 then exactly one terminal `done` or `error` frame. Client disconnect aborts the
-                in-flight turn.
+                in-flight turn — except on a detachable turn, which opens with a `turn` frame,
+                puts `id: <turnId>:<entryId>` before the `event:` line of every frame it logged
+                (a frame whose log write failed is sent without one), and runs on when the
+                client leaves.
         '400':
           description: |
             prompt_required (no prompt in the body) · invalid_json · read_error (the body never
@@ -118,6 +156,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            turn_in_progress — SH_TURN_DETACH=1 and the session already runs a detachable turn
+            (one live turn per session). The body's `turnId` names the running turn, for
+            GET /v1/turn or POST /v1/turn/cancel; it is omitted for an unauthenticated caller,
+            which holds no token for the session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnConflict' }
         '410':
           description: config_bundle_not_found — the session's promoted bundle digest is gone
           content:
@@ -125,11 +172,199 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: |
-            Retryable, from either of two causes: no sandbox capacity right now (every candidate
+            Retryable, from one of three causes: no sandbox capacity right now (every candidate
             is at its cap, none is present yet, or the session's own sandbox is briefly absent —
-            sandbox_unavailable), or the control-plane credential exchange failed
+            sandbox_unavailable), the control-plane credential exchange failed
             (credential_unavailable — the control plane is unreachable or its answer was
-            unusable). The turn can succeed unmodified on a retry.
+            unusable), or a detachable turn could not take its lease because Redis did not
+            answer, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000) —
+            redis_unavailable. The turn can succeed unmodified on a retry.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: seconds to wait before retrying
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: internal_error — not retryable as-is
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      operationId: attachTurn
+      summary: Re-attach to a session's detachable turn — SSE replay from a cursor, then live
+      description: |
+        Resolves the session's current turn — the running detachable turn, or else the last one
+        whose log is still retained — and streams it as SSE, in the same framing as a detachable
+        POST /v1/turn: `id: <turnId>:<entryId>`, `event: <frame.type>`, `data: <frame JSON>`,
+        with `: keepalive` comments in idle gaps.
+
+        The stream opens with a `turn` frame (FrameTurn). If `Last-Event-ID` names this turn,
+        the replay is the entries after that cursor, and the `turn` frame's id is the cursor
+        itself, so a reconnect straight after it resumes in place. A cursor naming another
+        turn, or none, replays the turn from its first entry. A cursor older than the first
+        retained entry (the log was trimmed) sets `truncated: true`, and replay starts at the
+        first retained entry. After the replay the stream follows the live turn until its
+        terminal `done` or `error` frame, and then ends.
+
+        A finished turn replays to its terminal frame and ends at once. A cursor at or past a
+        finished turn's terminal gets only the `turn` frame, with `ended: true`, and the stream
+        ends: the client is already caught up and must not read the end as a drop. A turn whose
+        owning harness process stopped is ended by the attach itself, with an `error` frame
+        carrying `abortReason: owner_lost`. If following fails mid-stream, the response ends
+        without a terminal frame; reconnect with the last id received.
+
+        While connected, the attach counts as watching the turn, so a watched turn is never
+        aborted as unwatched. A token is REQUIRED here in every mode — 401 token_required
+        without one — and it must name the session; no credential is exchanged (the
+        GET /runs/status rule). With SH_TURN_DETACH off, every authorized attach answers 404
+        turn_not_found.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema: { type: string }
+          description: The session whose turn to attach to; must be the token's `sid`.
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: |
+            Optional cursor, `<turnId>:<entryId>` — the last SSE `id` the client received.
+            Absent, or naming another turn, means replay from the turn's start.
+      responses:
+        '200':
+          description: The turn's frames — the replay, then the live tail to its terminal.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              description: |
+                SSE of TurnStreamFrame, every frame with `id: <turnId>:<entryId>`. First a
+                `turn` frame; then the replay and live frames; then exactly one terminal `done`
+                or `error` frame — unless the `turn` frame says `ended: true`, in which case it
+                is the only frame.
+        '400':
+          description: sessionId_required · session_mismatch (the token names another session)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required (required on this route in every mode) · token_invalid · token_expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            turn_not_found — the session has no running or retained turn, or this deployment
+            does not run detachable turns (SH_TURN_DETACH off).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            Retryable: redis_unavailable — the turn registry could not be read before the stream
+            began, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000). Or
+            credential_unavailable — the token keyset became unusable under an already-serving
+            pod.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: seconds to wait before retrying
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: internal_error — not retryable as-is
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/turn/cancel:
+    post:
+      operationId: cancelTurn
+      summary: Cancel a session's running detachable turn
+      description: |
+        Asks the harness running the session's detachable turn to abort it. The turn ends
+        through its normal path: a terminal `error` frame with `abortReason: cancelled` reaches
+        the log and every attached watcher, so the cancelling client learns of the end by
+        watching the turn, not from this response. When no turn is running, the cancel is a
+        no-op that still answers 202, naming the session's LAST retained turn.
+
+        Pass `turnId` to make the cancel conditional, so a stale cancel cannot kill a newer
+        turn: if the running turn is another one, the answer is 409 turn_mismatch and nothing
+        is cancelled. The `turnId` is compared only against a RUNNING turn. When none is
+        running, the 202 names the last turn, which may not be the one the caller sent. A
+        client sending a conditional cancel should compare the two ids: a different id means
+        its own turn had already ended, and nothing was cancelled. The 202's `outcome` says
+        the same for any cancel: `requested` for a running turn, `ended` for a no-op.
+
+        A cancel without `turnId` is fenced by the time the harness received it: a turn that
+        began more than 2 s after that counts as not running, so the cancel is a no-op even when
+        it reaches Redis late (after its caller timed out and began another turn).
+
+        A token is REQUIRED here in every mode — 401 token_required without one — and it must
+        name the session. With SH_TURN_DETACH off, every authorized cancel answers 404
+        turn_not_found.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelTurnRequest' }
+      responses:
+        '202':
+          description: |
+            The cancel was requested of the running turn, and `turnId` names it. Or no turn is
+            running, and `turnId` names the session's last retained turn (a no-op). In the second
+            case the id need not equal the request's `turnId`. `outcome` tells the two apart:
+            `requested` for a running turn asked to stop, `ended` for a retained turn that had
+            already ended (nothing was cancelled). Older harnesses omit `outcome`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [turnId]
+                properties:
+                  turnId: { type: string }
+                  outcome:
+                    type: string
+                    enum: [requested, ended]
+        '400':
+          description: |
+            invalid_json (the body is not a JSON object) · sessionId_required · session_mismatch
+            (the token names another session)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required (required on this route in every mode) · token_invalid · token_expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            turn_not_found — the session has no running or retained turn, or this deployment
+            does not run detachable turns (SH_TURN_DETACH off).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            turn_mismatch — `turnId` was given and names a turn other than the running one;
+            the body's `turnId` names the running turn. Nothing was cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnConflict' }
+        '503':
+          description: |
+            Retryable: redis_unavailable — the turn registry failed, or did not answer within
+            SH_TURN_REGISTRY_TIMEOUT_MS (default 5000). Or
+            credential_unavailable — the token keyset became unusable under an already-serving
+            pod.
           headers:
             Retry-After:
               schema: { type: integer }
@@ -350,6 +585,37 @@ components:
             the session. An unauthenticated caller may also omit it: a fresh session is then
             created and its id minted. A supplied id must already exist — 404
             session_not_found otherwise.
+        detachable:
+          type: boolean
+          description: |
+            Ask for a detachable turn. Honoured only with SH_TURN_DETACH=1, a session token,
+            and `Accept: text/event-stream`; otherwise ignored, and the turn runs exactly as
+            without it. See POST /v1/turn.
+    CancelTurnRequest:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId:
+          type: string
+          description: The session whose running turn to cancel; must be the token's `sid`.
+        turnId:
+          type: string
+          description: |
+            Cancel only if this is the running turn — 409 turn_mismatch otherwise. Absent
+            cancels whichever turn is running.
+    TurnConflict:
+      type: object
+      required: [error]
+      description: A 409 on a detachable-turn route.
+      properties:
+        error:
+          type: string
+          enum: [turn_in_progress, turn_mismatch]
+        turnId:
+          type: string
+          description: |
+            The session's running turn. Always present on turn_mismatch; on turn_in_progress,
+            absent for an unauthenticated caller.
     TurnResult:
       type: object
       required: [sessionId, response, stopReason]
@@ -385,6 +651,7 @@ components:
     # union on `type`; old clients ignore unknown types, so this list only grows.
     TurnStreamFrame:
       oneOf:
+        - $ref: '#/components/schemas/FrameTurn'
         - $ref: '#/components/schemas/FrameText'
         - $ref: '#/components/schemas/FrameThinking'
         - $ref: '#/components/schemas/FrameToolUse'
@@ -392,6 +659,29 @@ components:
         - $ref: '#/components/schemas/FrameWorkspaceReset'
         - $ref: '#/components/schemas/FrameDone'
         - $ref: '#/components/schemas/FrameError'
+    FrameTurn:
+      type: object
+      required: [type, turnId, sessionId]
+      description: |
+        Detachable turns only: the first event of a detachable POST /v1/turn stream and of every
+        GET /v1/turn attach, naming the turn its frame ids belong to. Not terminal. A client
+        that never asks for a detachable turn never sees it.
+      properties:
+        type: { type: string, enum: [turn] }
+        turnId:
+          type: string
+          description: The turn's id (a UUID), the first half of every frame's SSE id.
+        sessionId: { type: string }
+        truncated:
+          type: boolean
+          description: |
+            Attach only: the client's cursor is older than the first retained log entry (the
+            log was trimmed); replay starts at the first retained entry, so frames were lost.
+        ended:
+          type: boolean
+          description: |
+            Attach only: the cursor is at or past this finished turn's terminal frame. Nothing
+            follows; the stream ends after this frame.
     FrameText:
       type: object
       required: [type, delta]
@@ -454,6 +744,15 @@ components:
         stopReason: { type: string }
         errorMessage: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
+        abortReason:
+          type: string
+          enum: [cancelled, unwatched, restarting, lease_lost, owner_lost]
+          description: |
+            Detachable turns only: present when the harness, not the turn, ended it —
+            cancelled (POST /v1/turn/cancel) · unwatched (no client attached for
+            SH_TURN_DETACHED_MAX_S) · restarting (the worker is draining) · lease_lost (the
+            owner could not renew the turn's lease) · owner_lost (the process running the turn
+            stopped; written by an attach). `errorMessage` then carries a human-readable form.
     # The POST /v1/runs body: one of three job shapes sharing a set of optional controls.
     # Discriminated by `kind` — absent (or 'converge') means the leaf shape.
     RunEnvelope:

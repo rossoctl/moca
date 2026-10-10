@@ -8,6 +8,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError, TurnCancelledError } from '../src/api/errors.js';
 import { App, CLEAR_SCREEN, initialOverlay } from '../src/app.js';
 import { loadAuth, loadConfig, saveAuth } from '../src/config.js';
+import { describeError } from '../src/core/messages.js';
 import type { Runtime } from '../src/runtime.js';
 import { json } from './helpers/fake-fetch.js';
 import { credential, doneFrame, fakeControlPlane, fakeHarness } from './helpers/fakes.js';
@@ -893,5 +894,270 @@ describe('App', () => {
     await until(() => all().includes('reply') && frame().includes('idle'));
     await send(stdin, '/export');
     await until(() => frame().includes('export failed: could not start editor'));
+  });
+});
+
+describe('leaving a running detachable turn', () => {
+  const turnF = { type: 'turn' as const, turnId: 't1', sessionId: 's-new' };
+  const running = () =>
+    fakeHarness([
+      {
+        frames: [turnF, { type: 'text', delta: 'working' }],
+        ids: ['t1:1-0', 't1:2-0'],
+        hang: true,
+      },
+    ]);
+  // Exiting unmounts Ink, which stops listening to stdin (as the first-run Esc test relies on).
+
+  it('ctrl+c asks; k keeps the turn running and exits', async () => {
+    const harness = running();
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('k');
+    await until(() => !inputReady(stdin));
+    expect(harness.cancels).toEqual([]);
+    expect(harness.turns[0]!.signal?.aborted).toBe(true); // stopped reading, nothing more
+  });
+
+  it('c cancels through the route, then exits', async () => {
+    const harness = running();
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('c');
+    await until(() => !inputReady(stdin));
+    expect(harness.cancels).toMatchObject([{ turnId: 't1' }]);
+  });
+
+  it('a failed cancel stays, and says so once', async () => {
+    const harness = fakeHarness(
+      [
+        {
+          frames: [turnF, { type: 'text', delta: 'working' }],
+          ids: ['t1:1-0', 't1:2-0'],
+          hang: true,
+        },
+      ],
+      {
+        cancelTurn: async () => {
+          throw new ApiError('harness', 503, 'redis_unavailable');
+        },
+      },
+    );
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('c');
+    await until(
+      () => frame().includes("couldn't cancel") && !frame().includes('a turn is running'),
+    );
+    expect(frame().split("couldn't cancel")).toHaveLength(2); // the chat notice, no extra toast
+    expect(inputReady(stdin)).toBe(true); // still running, still here
+    expect(harness.turns[0]!.signal?.aborted).toBe(false);
+  });
+
+  it('ctrl+c from Help asks the leave question, and k exits', async () => {
+    const harness = running();
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    await send(stdin, '/help');
+    await until(() => inputReady(stdin) && frame().includes('Help'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('k');
+    await until(() => !inputReady(stdin));
+    expect(harness.cancels).toEqual([]);
+  });
+
+  it('a create rejected after keep shows its error', async () => {
+    const err = new ApiError('control-plane', 500, 'internal_error');
+    let creates = 0;
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listCredentials: async () => [credential('anthropic')],
+        createSession: async () => {
+          if (++creates > 1) throw err;
+          return { sessionId: 's-new', token: 'st', expiresAt: 4_000_000_000 };
+        },
+      }),
+      harness: running(),
+    });
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    await send(stdin, '/new'); // one credential: New Session creates at once, and meets the question
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    expect(creates).toBe(1);
+    await tick(); // the question mounted just now: let its useInput subscribe (test/helpers/ink.ts)
+    stdin.write('k');
+    await until(() => frame().includes(describeError(err)));
+    expect(creates).toBe(2);
+    expect(frame().split(describeError(err))).toHaveLength(2); // reported once
+    expect(inputReady(stdin)).toBe(true);
+  });
+
+  /** A cancel route held open until the test releases it, answering ok or failing. */
+  function heldCancel() {
+    let release!: (ok: boolean) => void;
+    const answered = new Promise<boolean>((r) => (release = r));
+    const cancels: unknown[] = [];
+    const harness = fakeHarness(
+      [
+        {
+          frames: [turnF, { type: 'text', delta: 'working' }],
+          ids: ['t1:1-0', 't1:2-0'],
+          hang: true,
+        },
+      ],
+      {
+        cancelTurn: async (args) => {
+          cancels.push(args);
+          if (!(await answered)) throw new ApiError('harness', 503, 'redis_unavailable');
+        },
+      },
+    );
+    return { harness, cancels, release };
+  }
+
+  it('esc while a cancel is in flight stays, even when the cancel then succeeds', async () => {
+    const { harness, cancels, release } = heldCancel();
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('c');
+    await until(() => cancels.length === 1);
+    stdin.write(KEY.escape);
+    await until(() => inputReady(stdin) && !frame().includes('a turn is running'));
+    release(true);
+    await tick(100);
+    expect(inputReady(stdin)).toBe(true); // stayed: the leave action did not run
+    expect(frame()).toContain('type a message');
+  });
+
+  it('a late cancel failure does not close an overlay opened since', async () => {
+    const { harness, cancels, release } = heldCancel();
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    await tick(); // inputReady is Ink's stdin listener; the question's own useInput may lag a tick
+    stdin.write('c');
+    await until(() => cancels.length === 1);
+    stdin.write(KEY.escape);
+    await until(() => inputReady(stdin) && !frame().includes('a turn is running'));
+    await send(stdin, '/help');
+    await until(() => frame().includes('Help'));
+    release(false);
+    await until(() => all().includes("couldn't cancel"));
+    await tick(50);
+    expect(frame()).toContain('Help');
+  });
+
+  it('c after the turn already ended just leaves', async () => {
+    let finish!: () => void;
+    const finished = new Promise<void>((r) => (finish = r));
+    const harness = fakeHarness([], {
+      async *streamTurn(args) {
+        args.onEventId?.('t1:1-0');
+        yield turnF;
+        args.onEventId?.('t1:2-0');
+        yield { type: 'text', delta: 'working' };
+        await finished;
+        args.onEventId?.('t1:3-0');
+        yield doneFrame('s-new');
+      },
+    });
+    const { stdin, all, frame, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => inputReady(stdin) && frame().includes('a turn is running'));
+    finish();
+    await until(() => frame().includes('idle'));
+    stdin.write('c');
+    await until(() => !inputReady(stdin));
+    expect(harness.cancels).toEqual([]);
+  });
+
+  it('a non-detachable turn quits on ctrl+c without asking', async () => {
+    const harness = fakeHarness([{ frames: [{ type: 'text', delta: 'working' }], hang: true }]);
+    const { stdin, all, until, ready } = mount(testRuntime({ harness }));
+    await ready();
+    await send(stdin, 'long task');
+    await until(() => all().includes('working'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => !inputReady(stdin));
+    expect(all()).not.toContain('a turn is running');
+    expect(harness.turns[0]!.signal?.aborted).toBe(true);
+  });
+
+  it('ctrl+c in an overlay still quits', async () => {
+    const { stdin, frame, until, ready } = mount(testRuntime());
+    await ready();
+    await send(stdin, '/help');
+    await until(() => inputReady(stdin) && frame().includes('Help'));
+    stdin.write(KEY.ctrl('c'));
+    await until(() => !inputReady(stdin));
+  });
+
+  it('resume attaches with the transcript last id and shows the rest of the turn', async () => {
+    const rt = testRuntime({
+      cp: sessionList('remote-1'),
+      harness: fakeHarness([], {}, [
+        {
+          frames: [
+            { type: 'turn', turnId: 't1', sessionId: 'remote-1' },
+            { type: 'text', delta: 'the rest' },
+            doneFrame('remote-1'),
+          ],
+          ids: ['t1:1-0', 't1:3-0', 't1:4-0'],
+        },
+      ]),
+    });
+    rt.transcripts!.appendPrompt('remote-1', 'go');
+    rt.transcripts!.appendFrame(
+      'remote-1',
+      { type: 'turn', turnId: 't1', sessionId: 'remote-1' },
+      't1:1-0',
+    );
+    rt.transcripts!.appendFrame('remote-1', { type: 'text', delta: 'the start ' }, 't1:2-0');
+    rt.transcripts!.flush('remote-1');
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    stdin.write(KEY.ctrl('x'));
+    await tick();
+    stdin.write('l');
+    // With local history the list shows the transcript's title, not the id.
+    await until(() => inputReady(stdin) && frame().includes('local history'));
+    await tick();
+    stdin.write(KEY.enter);
+    await until(() => all().includes('the rest'));
+    const harness = rt.harness as unknown as { attaches: Array<{ lastEventId?: string }> };
+    expect(harness.attaches[0]!.lastEventId).toBe('t1:2-0');
+    expect(all()).not.toContain("isn't running"); // the attach found the turn: no #472 notice
   });
 });

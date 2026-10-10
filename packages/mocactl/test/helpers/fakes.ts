@@ -1,6 +1,8 @@
 import { ApiError, TurnCancelledError } from '../../src/api/errors.js';
 import type { DoneFrame, TurnFrame } from '../../src/api/frames.js';
 import type {
+  AttachArgs,
+  CancelTurnArgs,
   ControlPlaneApi,
   CredentialDescriptor,
   HarnessApi,
@@ -84,6 +86,8 @@ export type HarnessStep = {
   // Awaited before the first frame is yielded — lets a test insert a real gap (e.g. to bump a
   // fake clock) between turn-start and the first 'frame' event.
   wait?: () => Promise<void>;
+  // SSE ids, by frame index: onEventId is called with ids[i] just before frames[i] is yielded.
+  ids?: string[];
 };
 
 export const doneFrame = (sessionId = 's1'): DoneFrame => ({
@@ -95,27 +99,58 @@ export const doneFrame = (sessionId = 's1'): DoneFrame => ({
 export function fakeHarness(
   steps: HarnessStep[],
   over: Partial<HarnessApi> = {},
-): HarnessApi & { turns: StreamTurnArgs[] } {
+  attachSteps: HarnessStep[] = [],
+): HarnessApi & {
+  turns: StreamTurnArgs[];
+  attaches: AttachArgs[];
+  cancels: CancelTurnArgs[];
+  attachQueuePush(step: HarnessStep): void;
+} {
   const turns: StreamTurnArgs[] = [];
+  const attaches: AttachArgs[] = [];
+  const cancels: CancelTurnArgs[] = [];
   const queue = [...steps];
+  const attachQueue = [...attachSteps];
+  async function* play(step: HarnessStep, args: StreamTurnArgs | AttachArgs) {
+    if (step.wait) await step.wait();
+    for (const [i, f] of (step.frames ?? []).entries()) {
+      const id = step.ids?.[i];
+      if (id !== undefined) args.onEventId?.(id);
+      yield f;
+    }
+    if (step.hang) {
+      await new Promise<void>((resolve) => {
+        if (args.signal?.aborted) return resolve();
+        args.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      throw new TurnCancelledError();
+    }
+    if (step.error) throw step.error;
+  }
   return {
     turns,
+    attaches,
+    cancels,
+    attachQueuePush: (step: HarnessStep) => {
+      attachQueue.push(step);
+    },
     baseUrl: async () => 'http://h',
     health: async () => undefined,
     probeTrust: async () => 'trusted',
     async *streamTurn(args: StreamTurnArgs) {
       turns.push(args);
-      const step = queue.shift() ?? { frames: [doneFrame(args.sessionId)] };
-      if (step.wait) await step.wait();
-      for (const f of step.frames ?? []) yield f;
-      if (step.hang) {
-        await new Promise<void>((resolve) => {
-          if (args.signal?.aborted) return resolve();
-          args.signal?.addEventListener('abort', () => resolve(), { once: true });
-        });
-        throw new TurnCancelledError();
-      }
-      if (step.error) throw step.error;
+      yield* play(queue.shift() ?? { frames: [doneFrame(args.sessionId)] }, args);
+    },
+    async *attach(args: AttachArgs) {
+      attaches.push(args);
+      const step = attachQueue.shift();
+      if (!step) throw new ApiError('harness', 404, 'turn_not_found');
+      yield* play(step, args);
+    },
+    // As the server does: the 202 names the cancelled turn (the given one, if any).
+    async cancelTurn(args: CancelTurnArgs) {
+      cancels.push(args);
+      return args.turnId !== undefined ? { turnId: args.turnId } : {};
     },
     ...over,
   };

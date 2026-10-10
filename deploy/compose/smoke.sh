@@ -117,6 +117,9 @@ wait_for() {
 }
 metrics() { dc exec -T supervisor wget -qO- http://127.0.0.1:8081/metrics; }
 sandbox_attached() { [[ "$(dc exec -T redis redis-cli HEXISTS sh:sandbox:records sh-sandbox-0)" == 1 ]]; }
+# Extract ids from a file, handling incomplete final lines (e.g., from kill cutting mid-stream).
+# Portable across BSD and GNU tools. Only strips a newline-less final line; otherwise reads all ids.
+complete_ids() { if [[ -n "$(tail -c1 "$1")" ]]; then sed '$d' "$1"; else cat "$1"; fi | sed -n 's/^id: //p'; }
 
 claim 1 "the supervisor's worker pool is up, with SH_WORKERS=2 workers, all healthy"
 if wait_for 120 metrics; then
@@ -246,6 +249,84 @@ if wait_for 90 cp_ready && wait_for 120 metrics && wait_for 90 sandbox_attached;
 else
   ko "the stack did not come back after down && up"
 fi
+
+claim 8 "a detachable turn survives its client: re-attach replays what was missed, without repeats"
+# A fresh session; the first stream is started in the background, cut ~1 s after its first id,
+# then GET /v1/turn resumes from its last id, then a full replay verifies nothing was missed.
+detach_turn() {
+  local session sid first="$PROJ/detach-1.sse" second="$PROJ/detach-2.sse" third="$PROJ/detach-3.sse" pid last_id
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  [[ -n "$sid" ]] || { ko "POST /v1/sessions returned no session: ${session:0:300}"; return; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$(jq -r '.token // empty' <<<"$session" 2>/dev/null || true)" >"$TURN_HDR")
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Write the numbers 1 to 200, one per line, nothing else.", detachable: true}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$first" &
+  pid=$!
+  wait_for 60 grep -q '^id: ' "$first" || true
+  sleep 1
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  last_id="$(complete_ids "$first" | tail -1)"
+  [[ -n "$last_id" ]] || { ko "the detachable turn sent no ids: $(head -c 400 "$first")"; return; }
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H "Last-Event-ID: $last_id" \
+    "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$second" || true
+  # Reaching the end is either a done frame in the re-attach, or, when the model finished before
+  # the cut so the first stream already holds the terminal, a turn frame marked "ended":true.
+  if ! grep -q '^event: done' "$second" &&
+    ! { grep -q '"ended":true' "$second" && grep -q '^event: done' "$first"; }; then
+    ko "the re-attach did not reach done: $(tail -c 400 "$second")"
+    return
+  fi
+  # Extract complete ids from each stream (handle incomplete final lines from kill)
+  local first_ids second_ids repeats expected actual
+  first_ids="$(complete_ids "$first")"
+  second_ids="$(sed -n 's/^id: //p' "$second" | tail -n +2)"
+  # Check for repeats: no id from first + second (skip first line) should appear twice
+  repeats="$(printf '%s\n' "$first_ids" "$second_ids" | sed '/^$/d' | sort | uniq -d)"
+  if [[ -n "$repeats" ]]; then
+    ko "the re-attach repeated frames the first stream had"
+    return
+  fi
+  # Check for missed frames: full replay ids must equal first + second ids
+  curl -sN --max-time 60 -H @"$TURN_HDR" -H 'Accept: text/event-stream' \
+    "http://127.0.0.1:$SH_PORT/v1/turn?sessionId=$sid" >"$third" || true
+  local third_ids
+  third_ids="$(sed -n 's/^id: //p' "$third")"
+  # Blank lines dropped: after an "ended":true re-attach, second_ids is empty.
+  expected="$(printf '%s\n' "$first_ids" "$second_ids" | sed '/^$/d' | sort -u)"
+  actual="$(printf '%s\n' "$third_ids" | sed '/^$/d' | sort -u)"
+  if ! diff <(echo "$expected") <(echo "$actual") >/dev/null 2>&1; then
+    ko "the re-attach missed frames: expected $(echo "$expected" | grep -c . || true) ids, got $(echo "$actual" | grep -c . || true)"
+  else
+    ok "re-attached session $sid, replayed $(echo "$first_ids" | grep -c . || true) + $(echo "$second_ids" | grep -c . || true) frames without loss"
+  fi
+}
+detach_turn
+
+claim 9 "POST /v1/turn/cancel ends a running detachable turn with abortReason cancelled"
+cancel_turn() {
+  local session sid out="$PROJ/cancel.sse" post_body="$PROJ/cancel-post.json" pid status
+  session="$(curl -s -X POST -H @"$API_HDR" -H 'Content-Type: application/json' -d '{}' "$CP/v1/sessions" || true)"
+  sid="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
+  [[ -n "$sid" ]] || { ko "POST /v1/sessions returned no session"; return; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$(jq -r '.token // empty' <<<"$session" 2>/dev/null || true)" >"$TURN_HDR")
+  curl -sN --max-time 180 -H @"$TURN_HDR" -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s, prompt: "Write the numbers 1 to 500, one per line, nothing else.", detachable: true}')" \
+    "http://127.0.0.1:$SH_PORT/v1/turn" >"$out" &
+  pid=$!
+  wait_for 30 grep -q '^event: turn' "$out" || true
+  status="$(curl -s -o "$post_body" -w '%{http_code}' -X POST -H @"$TURN_HDR" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg s "$sid" '{sessionId: $s}')" "http://127.0.0.1:$SH_PORT/v1/turn/cancel" || true)"
+  wait "$pid" || true
+  if [[ "$status" != 202 ]]; then
+    ko "cancel answered $status: $(head -c 300 "$post_body")"
+  elif grep -q '"abortReason":"cancelled"' "$out"; then
+    ok "cancelled session $sid's turn"
+  else
+    ko "the stream did not end cancelled: $(tail -c 400 "$out")"
+  fi
+}
+cancel_turn
 
 printf '\n=== Results: %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

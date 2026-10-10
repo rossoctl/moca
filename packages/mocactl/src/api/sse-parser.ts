@@ -3,6 +3,7 @@ import { KNOWN_FRAME_TYPES, type TurnFrame } from './frames.js';
 export interface SseEvent {
   event: string;
   data: string;
+  id?: string;
 }
 
 export class SseParser {
@@ -34,11 +35,23 @@ export class SseParser {
     const ev = rest.trim() ? parseBlock(rest) : undefined;
     return ev ? [ev] : [];
   }
+
+  /**
+   * End of stream, per the SSE spec: a held-back CR still ends its line, so events it completes
+   * are dispatched, but a block with no closing blank line is discarded, id and all.
+   */
+  end(): SseEvent[] {
+    const out = this.pendingCr ? this.push('\n') : [];
+    this.buf = '';
+    this.pendingCr = false;
+    return out;
+  }
 }
 
 function parseBlock(block: string): SseEvent | undefined {
   let event = 'message';
   const data: string[] = [];
+  let id: string | undefined;
   for (const line of block.split('\n')) {
     if (line === '' || line.startsWith(':')) continue;
     const colon = line.indexOf(':');
@@ -47,8 +60,11 @@ function parseBlock(block: string): SseEvent | undefined {
     if (value.startsWith(' ')) value = value.slice(1);
     if (field === 'event') event = value;
     else if (field === 'data') data.push(value);
+    else if (field === 'id') id = value;
   }
-  return data.length === 0 ? undefined : { event, data: data.join('\n') };
+  return data.length === 0
+    ? undefined
+    : { event, data: data.join('\n'), ...(id !== undefined ? { id } : {}) };
 }
 
 export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {
@@ -58,7 +74,9 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
     yield* parser.push(decoder.decode(chunk, { stream: true }));
   }
   yield* parser.push(decoder.decode());
-  yield* parser.flush();
+  // Not flush(): a trailing block cut mid-event must not surface (its id would skip the frame on a
+  // re-attach); the stream reader reports the body as truncated instead.
+  yield* parser.end();
 }
 
 const KNOWN = new Set<string>(KNOWN_FRAME_TYPES);

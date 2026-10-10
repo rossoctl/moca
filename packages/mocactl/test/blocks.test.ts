@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import type { TurnFrame } from '../src/api/frames.js';
 import {
   EMPTY_BLOCKS,
+  TRUNCATED_TURN_NOTICE,
   addNotice,
   addUser,
   endTurn,
   fromTranscript,
+  lastTurnState,
   markSent,
   reduceFrame,
+  settleOpenTurn,
   splitStatic,
   type BlockState,
 } from '../src/render/blocks.js';
@@ -237,6 +240,195 @@ describe('fromTranscript', () => {
     }
   });
 
+  it('reports the last turn state', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    expect(lastTurnState(t([]))).toBe('none');
+    expect(
+      lastTurnState(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'frame', frame: done },
+        ]),
+      ),
+    ).toBe('finished');
+    expect(lastTurnState(t([{ kind: 'prompt', text: 'p' }]))).toBe('open');
+    expect(
+      lastTurnState(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'turn', turnId: 't1' },
+        ]),
+      ),
+    ).toBe('open-detachable');
+  });
+
+  // A 409's attach records another device's turn with no prompt of its own (#471 review).
+  it('a turn after a terminal, with no prompt, opens a new detachable turn', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    const finished = [
+      { kind: 'prompt', text: 'p' },
+      { kind: 'turn', turnId: 't1' },
+      { kind: 'frame', frame: done },
+    ];
+    expect(lastTurnState(t([...finished, { kind: 'turn', turnId: 't2' }]))).toBe('open-detachable');
+    expect(
+      lastTurnState(
+        t([...finished, { kind: 'turn', turnId: 't2' }, { kind: 'frame', frame: done }]),
+      ),
+    ).toBe('finished');
+    expect(lastTurnState(t([{ kind: 'turn', turnId: 't1' }]))).toBe('open-detachable');
+  });
+
+  it("renders a prompt-less turn, and leaves it open while earlier turns' tools settle", () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'mine' },
+        { kind: 'frame', frame: { type: 'tool_use', id: 'old', name: 'bash', args: {} } },
+        { kind: 'frame', frame: done },
+        { kind: 'turn', turnId: 't2' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: { type: 'tool_use', id: 'x1', name: 'bash', args: {} } },
+      ],
+      prompts: ['mine'],
+      usage,
+    } as any);
+    const tools = s.blocks.filter((b) => b.kind === 'tool') as any[];
+    expect(tools.map((b) => [b.toolId, b.result?.preview])).toEqual([
+      ['old', 'interrupted'],
+      ['x1', undefined],
+    ]);
+    expect(s.blocks.some((b) => b.kind === 'notice')).toBe(false);
+  });
+
+  it('a finished prompt-less turn renders without a prompt and without a notice', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: done },
+        { kind: 'prompt', text: 'mine' },
+        { kind: 'turn', turnId: 't2' },
+        { kind: 'frame', frame: { type: 'text', delta: 'ok' } },
+        { kind: 'frame', frame: done },
+      ],
+      prompts: ['mine'],
+      usage,
+    } as any);
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'user',
+      'assistant',
+      'turn-end',
+    ]);
+  });
+
+  it('leaves an open detachable turn to the attach step: no notice', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half' }, eventId: 't1:2-0' },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'assistant']);
+  });
+
+  // A resume after quitting mid-tool: the turn may still run, so the attach step settles it.
+  const midTool = (extra: any[] = []) => ({
+    sessionId: 's',
+    createdAt: 0,
+    entries: [
+      { kind: 'prompt', text: 'first' },
+      { kind: 'frame', frame: { type: 'tool_use', id: 'old', name: 'bash', args: {} } },
+      { kind: 'prompt', text: 'go' },
+      { kind: 'turn', turnId: 't1' },
+      ...extra,
+      { kind: 'frame', frame: { type: 'tool_use', id: 'x1', name: 'bash', args: {} } },
+    ],
+    prompts: ['first', 'go'],
+    usage,
+  });
+
+  it('leaves an open detachable turn open: its tool has no result yet, earlier turns settle', () => {
+    const s = fromTranscript(
+      midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any,
+    );
+    expect(s.blocks.map((b) => b.kind)).toEqual(['user', 'tool', 'user', 'assistant', 'tool']);
+    expect(s.blocks[1]).toMatchObject({ result: { preview: 'interrupted' } }); // the earlier turn
+    expect(s.blocks[4]).not.toHaveProperty('result');
+  });
+
+  it("leaves an open detachable turn's reply open, so the catch-up continues it", () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'hal' } },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks[1]).toMatchObject({ kind: 'assistant', final: false });
+    const after = apply(s, { type: 'text', delta: 'f' }, done);
+    expect(after.blocks.map((b) => b.kind)).toEqual(['user', 'assistant', 'turn-end']);
+    expect(after.blocks[1]).toMatchObject({ text: 'half', final: true });
+  });
+
+  it('a catch-up replaying the tool result and more text ends with one tool and one reply', () => {
+    const s = apply(
+      fromTranscript(midTool() as any),
+      { type: 'tool_result', id: 'x1', isError: false, preview: 'ok' },
+      { type: 'text', delta: 'all ' },
+      { type: 'text', delta: 'done' },
+      done,
+    );
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'user',
+      'tool',
+      'user',
+      'tool',
+      'assistant',
+      'turn-end',
+    ]);
+    expect(s.blocks[3]).toMatchObject({ result: { isError: false, preview: 'ok' } });
+    expect(s.blocks[4]).toMatchObject({ text: 'all done' });
+    expect(s.blocks.some((b) => b.kind === 'event')).toBe(false);
+  });
+
+  it('settleOpenTurn finalizes the reply and marks the open tools interrupted', () => {
+    const s = settleOpenTurn(
+      fromTranscript(midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any),
+    );
+    expect(s.blocks[3]).toMatchObject({ kind: 'assistant', final: true });
+    expect(s.blocks[4]).toMatchObject({ result: { isError: true, preview: 'interrupted' } });
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  it('old transcript keeps the #472 notice once', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'prompt', text: 'go' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half' } },
+      ],
+      prompts: ['go'],
+      usage,
+    });
+    expect(s.blocks.filter((b) => b.kind === 'notice')).toHaveLength(1);
+  });
+
   it('adds no notice to a transcript without turns', () => {
     const s = fromTranscript({ sessionId: 's', createdAt: 0, entries: [], prompts: [], usage });
     expect(s.blocks).toEqual([]);
@@ -252,5 +444,46 @@ describe('addNotice', () => {
     const assistants = blocks.filter((b) => b.kind === 'assistant');
     expect(assistants).toHaveLength(1);
     expect(assistants[0]).toMatchObject({ text: 'working', final: false });
+  });
+});
+
+describe('turn frames', () => {
+  it('a turn frame adds no block', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, { type: 'turn', turnId: 't1', sessionId: 's' });
+    expect(s.blocks).toEqual([]);
+  });
+
+  it('a truncated replay adds a notice', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'turn',
+      turnId: 't1',
+      sessionId: 's',
+      truncated: true,
+    });
+    expect(s.blocks).toMatchObject([{ kind: 'notice', text: TRUNCATED_TURN_NOTICE }]);
+  });
+
+  it('an error frame with abortReason cancelled ends the turn as cancelled', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'error',
+      sessionId: 's',
+      stopReason: 'aborted',
+      errorMessage: 'cancelled',
+      abortReason: 'cancelled',
+    });
+    expect(s.blocks).toMatchObject([{ kind: 'turn-end', outcome: 'cancelled' }]);
+  });
+
+  it('any other abort stays an error with its message', () => {
+    const s = reduceFrame(EMPTY_BLOCKS, {
+      type: 'error',
+      sessionId: 's',
+      stopReason: 'aborted',
+      errorMessage: 'harness restarting',
+      abortReason: 'restarting',
+    });
+    expect(s.blocks).toMatchObject([
+      { kind: 'turn-end', outcome: 'error', message: 'harness restarting' },
+    ]);
   });
 });

@@ -1,0 +1,313 @@
+import { randomUUID } from 'node:crypto';
+import { createClient } from 'redis';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  activeKey,
+  eventsKey,
+  lastKey,
+  parseEventId,
+  termKey,
+  type LoggedFrame,
+  TurnRegistry,
+  watchKey,
+} from '../src/turn-registry.js';
+
+const URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+const T = { leaseMs: 300, renewMs: 100, detachedMaxMs: 60_000, logTtlS: 60, maxLen: 1000 };
+const redis = createClient({ url: URL });
+await redis.connect();
+const regs: TurnRegistry[] = [];
+const reg = (timings: Partial<typeof T> = {}) => {
+  const r = new TurnRegistry({
+    url: URL,
+    ownerId: `a-${regs.length}`,
+    timings: { ...T, ...timings },
+  });
+  regs.push(r);
+  return r;
+};
+const sid = () => `s-${randomUUID()}`;
+const done = (sessionId: string) => ({ type: 'done' as const, sessionId, stopReason: 'stop' });
+async function collect(gen: AsyncGenerator<LoggedFrame>): Promise<LoggedFrame[]> {
+  const out: LoggedFrame[] = [];
+  for await (const f of gen) out.push(f);
+  return out;
+}
+const types = (fs: LoggedFrame[]) => fs.map((f) => f.frame.type);
+
+afterEach(async () => {
+  await Promise.all(regs.splice(0).map((r) => r.close()));
+});
+afterAll(async () => {
+  await redis.close();
+});
+
+describe('attach', () => {
+  it('replays a finished turn from the start, turn frame first', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'a' });
+    await turn.append({ type: 'text', delta: 'b' });
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(types(got)).toEqual(['turn', 'text', 'text', 'done']);
+    expect(got[0]!.frame).toEqual({ type: 'turn', turnId: turn.turnId, sessionId: s });
+    expect(got.every((f) => parseEventId(f.id)?.turnId === turn.turnId)).toBe(true);
+  });
+
+  it('resumes after a cursor of the same turn, without repeats', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const first = await turn.append({ type: 'text', delta: 'a' });
+    await turn.append({ type: 'text', delta: 'b' });
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, first));
+    expect(types(got)).toEqual(['turn', 'text', 'done']);
+    expect(got[1]!.frame).toEqual({ type: 'text', delta: 'b' });
+  });
+
+  it('foreign or malformed cursor replays from the start', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'a' });
+    await turn.end(done(s));
+    for (const cursor of ['garbage', 'older-turn:1-0', '']) {
+      expect(types(await collect(reg().attach(s, cursor)))).toEqual(['turn', 'text', 'done']);
+    }
+  });
+
+  it('follows a live turn to its terminal and refreshes the watch key', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const gen = reg().attach(s, undefined);
+    const got: LoggedFrame[] = [];
+    const reading = (async () => {
+      for await (const f of gen) got.push(f);
+    })();
+    await expect.poll(() => got.length).toBe(1); // the turn frame
+    await expect.poll(() => redis.exists(watchKey(s, turn.turnId))).toBe(1);
+    await turn.append({ type: 'text', delta: 'live' });
+    await turn.end(done(s));
+    await reading;
+    expect(types(got)).toEqual(['turn', 'text', 'done']);
+  });
+
+  it('marks a replay truncated when the cursor was trimmed away', async () => {
+    // A tiny maxLen: MAXLEN ~ trims whole stream nodes (100 entries by default), so 300 appends
+    // really drop the oldest ones, the cursor's entry among them.
+    const owner = reg({ maxLen: 10 });
+    const s = sid();
+    const turn = await owner.begin(s);
+    const cursor = await turn.append({ type: 'text', delta: 'first' });
+    for (let i = 0; i < 300; i++) await turn.append({ type: 'text', delta: String(i) });
+    await turn.end(done(s));
+    const key = eventsKey(s, turn.turnId);
+    const entryId = parseEventId(cursor!)!.entryId;
+    expect(await redis.xRange(key, entryId, entryId)).toEqual([]); // really trimmed
+    const retained = await redis.xLen(key);
+    expect(retained).toBeLessThan(302);
+    const got = await collect(reg().attach(s, cursor));
+    expect(got[0]!.frame).toMatchObject({ type: 'turn', truncated: true });
+    expect(got[0]!.id).toBe(cursor);
+    expect(got.at(-1)!.frame).toEqual(done(s));
+    expect(got).toHaveLength(retained + 1); // every retained entry, behind the synthesized turn frame
+    expect(got.slice(1, -1).every((f) => f.frame.type === 'text')).toBe(true);
+  });
+
+  it('writes one synthetic terminal when the owner is gone, under concurrent attaches', async () => {
+    const s = sid();
+    const turnId = randomUUID();
+    // A turn whose owner "crashed": a lapsing lease, a log with no terminal.
+    await redis.set(activeKey(s), JSON.stringify({ turnId }), { PX: 200 });
+    await redis.set(lastKey(s), turnId);
+    await redis.xAdd(eventsKey(s, turnId), '*', {
+      f: JSON.stringify({ type: 'turn', turnId, sessionId: s }),
+    });
+    await redis.xAdd(eventsKey(s, turnId), '*', {
+      f: JSON.stringify({ type: 'text', delta: 'half' }),
+    });
+    const [a, b] = await Promise.all([
+      collect(reg().attach(s, undefined)),
+      collect(reg().attach(s, undefined)),
+    ]);
+    for (const got of [a, b]) {
+      expect(got.at(-1)!.frame).toMatchObject({
+        type: 'error',
+        stopReason: 'aborted',
+        abortReason: 'owner_lost',
+        errorMessage: 'the harness process running this turn stopped',
+      });
+    }
+    const rows = (await redis.xRange(eventsKey(s, turnId), '-', '+')) ?? [];
+    expect(rows.filter((r) => JSON.parse(r.message.f).type === 'error')).toHaveLength(1);
+  });
+
+  it('throws TurnNotFoundError for a session with no retained turn', async () => {
+    await expect(collect(reg().attach(sid(), undefined))).rejects.toMatchObject({
+      name: 'TurnNotFoundError',
+    });
+  });
+
+  it('abort destroys the reader at once', async () => {
+    const owner = reg();
+    const s = sid();
+    await owner.begin(s);
+    // A 1 s block window, so "at once" and "when the block times out" are far apart.
+    const slow = new TurnRegistry({ url: URL, ownerId: 'slow', timings: { ...T, renewMs: 2000 } });
+    regs.push(slow);
+    const ac = new AbortController();
+    const gen = slow.attach(s, undefined, ac.signal);
+    await gen.next(); // the turn frame
+    const pending = gen.next();
+    await new Promise((r) => setTimeout(r, 100)); // the reader is now blocked in XREAD
+    const t0 = Date.now();
+    ac.abort();
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(Date.now() - t0).toBeLessThan(200);
+  });
+
+  it('close ends a following attach at once and quietly', async () => {
+    const owner = reg();
+    const s = sid();
+    await owner.begin(s);
+    const r = new TurnRegistry({ url: URL, ownerId: 'closer', timings: { ...T, renewMs: 2000 } });
+    regs.push(r);
+    const gen = r.attach(s, undefined);
+    await gen.next(); // the turn frame
+    const pending = gen.next();
+    await new Promise((res) => setTimeout(res, 100)); // blocked in XREAD
+    const t0 = Date.now();
+    await r.close();
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(Date.now() - t0).toBeLessThan(200); // at once, not when the 1 s block times out
+  });
+  it('a cursor at the terminal ends at once with only the turn frame', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'a' });
+    const { id } = await turn.end(done(s));
+    const t0 = Date.now();
+    const got = await collect(reg().attach(s, id!));
+    expect(types(got)).toEqual(['turn']);
+    // Marked ended: the client knows nothing more is coming, rather than reading a truncation.
+    expect(got[0]!.frame).toEqual({ type: 'turn', turnId: turn.turnId, sessionId: s, ended: true });
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it('a replay from the start does not mark the turn frame ended', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got[0]!.frame).not.toHaveProperty('ended');
+  });
+
+  it('a stalled owner ending after an attach wrote owner_lost adds no second terminal', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'half' });
+    // The owner's lease is gone from Redis (it stalled past the TTL) while it still runs.
+    await redis.del(activeKey(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ type: 'error', abortReason: 'owner_lost' });
+    const end = await turn.end(done(s));
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    const terminals = rows.filter((r) => ['done', 'error'].includes(JSON.parse(r.message.f).type));
+    expect(terminals).toHaveLength(1);
+    // end() reports the terminal actually logged, under its own id, not the caller's `done`.
+    expect(end.id).toBe(got.at(-1)!.id);
+    expect(end.frame).toEqual(got.at(-1)!.frame);
+  });
+
+  it('a stalled owner ending after owner_lost extends the marker as long as the log', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await redis.del(activeKey(s));
+    await collect(reg().attach(s, undefined)); // owner_lost at t0: marker and log until t0+ttl
+    await new Promise((r) => setTimeout(r, 1100));
+    await turn.end(done(s)); // t1: END refreshes the log's TTL to t1+ttl, so the marker's too
+    const term = await redis.pTTL(termKey(s, turn.turnId));
+    const log = await redis.pTTL(eventsKey(s, turn.turnId));
+    expect(log).toBeGreaterThan(0);
+    expect(term).toBeGreaterThanOrEqual(log);
+  });
+
+  it('after the first marker TTL would have passed, an attach writes no second owner_lost', async () => {
+    const short = { logTtlS: 2 };
+    const owner = reg(short);
+    const s = sid();
+    const turn = await owner.begin(s);
+    await redis.del(activeKey(s));
+    await collect(reg(short).attach(s, undefined)); // t0: owner_lost, marker until t0+2 s
+    await new Promise((r) => setTimeout(r, 1200));
+    await turn.end(done(s)); // t1 = t0+1.2 s: log (and now marker) until t1+2 s
+    await new Promise((r) => setTimeout(r, 1100)); // t0+2.3 s: past the marker's original TTL
+    const before = await redis.xLen(eventsKey(s, turn.turnId));
+    expect(before).toBeGreaterThan(0);
+    const got = await collect(reg(short).attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ abortReason: 'owner_lost' });
+    expect(await redis.xLen(eventsKey(s, turn.turnId))).toBe(before);
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(rows.filter((r) => JSON.parse(r.message.f).type === 'error')).toHaveLength(1);
+  });
+
+  it('an owner whose lease lapsed and was replaced by owner_lost cannot append after it', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    await turn.append({ type: 'text', delta: 'half' });
+    // The owner lost Redis past its lease; an attach seals the log with owner_lost.
+    await redis.del(activeKey(s));
+    const got = await collect(reg().attach(s, undefined));
+    expect(got.at(-1)!.frame).toMatchObject({ abortReason: 'owner_lost' });
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // Its queued writes land on reconnect: refused, with no lease and, below, even with one.
+      expect(await turn.append({ type: 'text', delta: 'queued' })).toBeUndefined();
+      await redis.set(activeKey(s), JSON.stringify({ turnId: turn.turnId }), { PX: 5000 });
+      expect(await turn.append({ type: 'text', delta: 'queued' })).toBeUndefined();
+    } finally {
+      quiet.mockRestore();
+    }
+    const rows = (await redis.xRange(eventsKey(s, turn.turnId), '-', '+')) ?? [];
+    expect(JSON.parse(rows.at(-1)!.message.f)).toMatchObject({ abortReason: 'owner_lost' });
+    await turn.end(done(s));
+  });
+
+  it('a cursor past the tail of a running turn still follows it', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const gen = reg().attach(s, `${turn.turnId}:99999999999999-0`);
+    const got: LoggedFrame[] = [];
+    const reading = (async () => {
+      for await (const f of gen) got.push(f);
+    })();
+    await expect.poll(() => got.length).toBe(1);
+    await turn.append({ type: 'text', delta: 'live' });
+    await turn.end(done(s));
+    await reading;
+    expect(types(got)).toEqual(['turn', 'text', 'done']);
+  });
+
+  it('the turn frame carries a same-turn cursor as its id', async () => {
+    const owner = reg();
+    const s = sid();
+    const turn = await owner.begin(s);
+    const first = await turn.append({ type: 'text', delta: 'a' });
+    await turn.append({ type: 'text', delta: 'b' });
+    await turn.end(done(s));
+    const got = await collect(reg().attach(s, first));
+    expect(got[0]!.id).toBe(first);
+    const trimmed = await collect(reg().attach(s, `${turn.turnId}:0-1`));
+    expect(trimmed[0]!.id).toBe(`${turn.turnId}:0-1`);
+  });
+});

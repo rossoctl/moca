@@ -21,7 +21,9 @@ export interface TranscriptOwner {
 }
 
 export type TranscriptEntry =
-  { kind: 'prompt'; text: string } | { kind: 'frame'; frame: TurnFrame };
+  | { kind: 'prompt'; text: string }
+  | { kind: 'turn'; turnId: string }
+  | { kind: 'frame'; frame: TurnFrame; eventId?: string };
 
 export interface UsageTotals extends Usage {
   turns: number;
@@ -35,12 +37,15 @@ export interface Transcript {
   entries: TranscriptEntry[];
   prompts: string[];
   usage: UsageTotals;
+  /** The SSE id of the last recorded frame (`<turnId>:<entryId>`): where a re-attach resumes. */
+  lastEventId?: string;
 }
 
 type Rec =
   | { kind: 'header'; v: 1; createdAt: number; subject: string; controlPlaneUrl: string }
   | { kind: 'prompt'; at: number; text: string }
-  | { kind: 'frame'; at: number; frame: TurnFrame }
+  | { kind: 'turn'; at: number; turnId: string; eventId?: string }
+  | { kind: 'frame'; at: number; frame: TurnFrame; eventId?: string }
   | { kind: 'title'; at: number; title: string; source: 'auto' | 'user' };
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
@@ -83,7 +88,12 @@ function endsTorn(path: string): boolean {
 }
 
 export class TranscriptStore {
-  private readonly pending = new Map<string, { type: 'text' | 'thinking'; delta: string }>();
+  private readonly pending = new Map<
+    string,
+    { type: 'text' | 'thinking'; delta: string; eventId?: string }
+  >();
+  /** Session → the last turnId recorded, so a re-attach's repeated turn frame is written once. */
+  private readonly turns = new Map<string, string>();
   private readonly titled = new Set<string>();
   private readonly ownershipCache = new Map<string, boolean>();
   private readonly tailChecked = new Set<string>();
@@ -151,7 +161,12 @@ export class TranscriptStore {
     const p = this.pending.get(id);
     if (!p) return;
     this.pending.delete(id);
-    this.write(id, { kind: 'frame', at: this.now(), frame: { type: p.type, delta: p.delta } });
+    this.write(id, {
+      kind: 'frame',
+      at: this.now(),
+      frame: { type: p.type, delta: p.delta },
+      ...(p.eventId ? { eventId: p.eventId } : {}),
+    });
   }
 
   appendPrompt(id: string, text: string): void {
@@ -167,21 +182,39 @@ export class TranscriptStore {
     this.write(id, { kind: 'prompt', at: this.now(), text });
   }
 
-  appendFrame(id: string, frame: TurnFrame): void {
+  appendFrame(id: string, frame: TurnFrame, eventId?: string): void {
     if (!this.ownsFile(id)) return;
     this.ensure(id);
+    if (frame.type === 'turn') {
+      // A re-attach repeats the turn frame; the transcript names each turn once.
+      if (this.turns.get(id) === frame.turnId) return;
+      this.flush(id);
+      this.turns.set(id, frame.turnId);
+      this.write(id, {
+        kind: 'turn',
+        at: this.now(),
+        turnId: frame.turnId,
+        ...(eventId ? { eventId } : {}),
+      });
+      return;
+    }
     if (frame.type === 'text' || frame.type === 'thinking') {
       const p = this.pending.get(id);
       if (p && p.type === frame.type) {
         p.delta += frame.delta;
+        if (eventId) p.eventId = eventId;
         return;
       }
       this.flush(id);
-      this.pending.set(id, { type: frame.type, delta: frame.delta });
+      this.pending.set(id, {
+        type: frame.type,
+        delta: frame.delta,
+        ...(eventId ? { eventId } : {}),
+      });
       return;
     }
     this.flush(id);
-    this.write(id, { kind: 'frame', at: this.now(), frame });
+    this.write(id, { kind: 'frame', at: this.now(), frame, ...(eventId ? { eventId } : {}) });
   }
 
   rename(id: string, title: string): void {
@@ -193,6 +226,7 @@ export class TranscriptStore {
 
   delete(id: string): void {
     this.pending.delete(id);
+    this.turns.delete(id);
     this.titled.delete(id);
     this.ownershipCache.delete(id);
     this.tailChecked.delete(id);
@@ -210,6 +244,7 @@ export class TranscriptStore {
       prompts: [],
       usage: zeroUsage(),
     };
+    let lastTurn: string | undefined;
     for (const line of readFileSync(path, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       let rec: Rec;
@@ -231,8 +266,18 @@ export class TranscriptStore {
           t.entries.push({ kind: 'prompt', text: rec.text });
           t.prompts.push(rec.text);
           break;
+        case 'turn':
+          t.entries.push({ kind: 'turn', turnId: rec.turnId });
+          if (rec.eventId) t.lastEventId = rec.eventId;
+          lastTurn = rec.turnId;
+          break;
         case 'frame':
-          t.entries.push({ kind: 'frame', frame: rec.frame });
+          t.entries.push({
+            kind: 'frame',
+            frame: rec.frame,
+            ...(rec.eventId ? { eventId: rec.eventId } : {}),
+          });
+          if (rec.eventId) t.lastEventId = rec.eventId;
           if (isTerminal(rec.frame)) {
             t.usage.turns += 1;
             const u = rec.frame.usage;
@@ -253,6 +298,8 @@ export class TranscriptStore {
     ) {
       return null;
     }
+    // Seed the per-process dedupe, so a resumed process re-attaching names the turn once too.
+    if (lastTurn) this.turns.set(id, lastTurn);
     return t;
   }
 }

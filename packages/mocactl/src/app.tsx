@@ -26,7 +26,13 @@ import {
 } from './core/session-manager.js';
 import { deriveTitle } from './core/transcripts.js';
 import { writeExport, type OsDeps } from './os.js';
-import { EMPTY_BLOCKS, addNotice, fromTranscript, type BlockState } from './render/blocks.js';
+import {
+  EMPTY_BLOCKS,
+  addNotice,
+  fromTranscript,
+  lastTurnState,
+  type BlockState,
+} from './render/blocks.js';
 import { transcriptToMarkdown } from './render/export.js';
 import {
   connectionOf,
@@ -78,7 +84,10 @@ export function initialOverlay(
 // Stops a session that is being switched away from, so its turn cannot keep running unseen.
 function retire(s: ActiveSession | undefined): void {
   s?.clearQueue();
-  s?.cancel();
+  // A detachable turn is left running (the user chose keep, or switched sessions); anything else is
+  // cancelled, as before.
+  if (s?.runningDetachable) s.detach();
+  else s?.cancel();
 }
 
 export function App({ rt, opts, env, os, write }: AppProps) {
@@ -110,6 +119,10 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   /** A message typed before any session existed; sent once New Session attaches one. */
   const pendingRef = useRef<string | undefined>(undefined);
   const sendOnAttach = useRef<string | undefined>(undefined);
+  /** A resumed session's catch-up, started once useSession listens to it (frames are not replayed). */
+  const catchUpOnAttach = useRef<
+    { session: ActiveSession; lastEventId?: string; expectOpen: boolean } | undefined
+  >(undefined);
   /** The prompt of the turn in flight, per session event, for replay after a re-login. */
   const runningPrompt = useRef<string | undefined>(undefined);
   const replayAfterLogin = useRef<{ session: ActiveSession; prompt: string } | undefined>(
@@ -146,6 +159,45 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   const close = () => {
     pendingRef.current = undefined;
     show(undefined);
+  };
+  /** What runs once the user answers the leave-turn overlay with keep or cancel. */
+  const pendingLeave = useRef<(() => void) | undefined>(undefined);
+  const leave = (then: () => void) => {
+    if (sessionRef.current?.runningDetachable) {
+      pendingLeave.current = then;
+      show({ name: 'leave-turn' });
+    } else then();
+  };
+  const leaveChoice = {
+    keep: () => {
+      const then = pendingLeave.current;
+      pendingLeave.current = undefined;
+      close();
+      then?.();
+    },
+    cancel: () => {
+      // The turn ended while the question was up: nothing is left to cancel, so just leave.
+      if (!sessionRef.current?.runningDetachable) return leaveChoice.keep();
+      const then = pendingLeave.current;
+      void (async () => {
+        const cancelled = await sessionRef.current?.cancelRemote();
+        // Stay, or a keep, answered while the cancel was in flight: the question is settled, and
+        // whatever is on screen now is not this overlay's to close.
+        if (pendingLeave.current !== then) return;
+        pendingLeave.current = undefined;
+        close();
+        // A failure stays; it is reported once, by the session's own notice in the chat.
+        if (cancelled) then?.();
+      })();
+    },
+    stay: () => {
+      pendingLeave.current = undefined;
+      close();
+    },
+  };
+  const quitApp = () => {
+    retire(sessionRef.current);
+    exit();
   };
   const persist = (patch: Partial<TuiConfig>) => {
     rt.config = { ...rt.config, ...patch };
@@ -249,6 +301,10 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     const off = s.on((e) => {
       if (e.kind === 'turn-start') runningPrompt.current = e.prompt;
     });
+    const catchUp = catchUpOnAttach.current;
+    catchUpOnAttach.current = undefined;
+    if (catchUp?.session === s)
+      s.attachExisting({ lastEventId: catchUp.lastEventId, expectOpen: catchUp.expectOpen });
     const prompt = sendOnAttach.current;
     sendOnAttach.current = undefined;
     if (prompt) view.submit(prompt);
@@ -279,29 +335,40 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     }
   };
 
-  const resume = async (id: string) => {
-    if (busy.current) return;
-    busy.current = true;
-    try {
-      const s = await sessionManager(rt).resume(id);
-      const t = rt.transcripts?.load(id);
-      const initial = t
-        ? fromTranscript(t)
-        : addNotice(
-            EMPTY_BLOCKS,
-            "history for this session isn't available on this device — the model still has its full context",
-            'info',
-          );
-      attach({ session: s, initial, initialUsage: t?.usage }, t?.title ?? id.slice(0, 8), [
-        ...(t?.prompts ?? []),
-      ]);
-      close();
-    } catch (err) {
-      if (!loginIfExpired(err, { name: 'sessions' })) notify(describeError(err), 'error');
-    } finally {
-      busy.current = false;
-    }
-  };
+  const resume = (id: string) =>
+    leave(() => {
+      void (async () => {
+        if (busy.current) return;
+        busy.current = true;
+        try {
+          const s = await sessionManager(rt).resume(id);
+          const t = rt.transcripts?.load(id);
+          const initial = t
+            ? fromTranscript(t)
+            : addNotice(
+                EMPTY_BLOCKS,
+                "history for this session isn't available on this device — the model still has its full context",
+                'info',
+              );
+          // Catch up on the session's last turn (turn-reattach spec §6.5): finished while away,
+          // still running, or nothing -- the attach step says which. It starts from the effect
+          // below, once useSession is subscribed: frames emitted before then would be lost.
+          catchUpOnAttach.current = {
+            session: s,
+            lastEventId: t?.lastEventId,
+            expectOpen: t ? lastTurnState(t) === 'open-detachable' : false,
+          };
+          attach({ session: s, initial, initialUsage: t?.usage }, t?.title ?? id.slice(0, 8), [
+            ...(t?.prompts ?? []),
+          ]);
+          close();
+        } catch (err) {
+          if (!loginIfExpired(err, { name: 'sessions' })) notify(describeError(err), 'error');
+        } finally {
+          busy.current = false;
+        }
+      })();
+    });
 
   const onLoggedIn = (a: CachedAuth, back?: Overlay) => {
     setAuth(rt, a);
@@ -426,10 +493,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
         notify(err instanceof PromoteError ? err.message : describeError(err), 'error');
       }
     },
-    quit: () => {
-      retire(sessionRef.current);
-      exit();
-    },
+    quit: () => leave(quitApp),
   };
 
   // Abandoned onboarding puts back whatever was last known to work, then exits if that is nothing.
@@ -446,6 +510,12 @@ export function App({ rt, opts, env, os, write }: AppProps) {
 
   useInput((input, key) => {
     lastInput.current = rt.now(); // any keystroke is activity, for the turn-complete bell
+    if (key.ctrl && input === 'c') {
+      // The leave-turn overlay answers Ctrl+C itself (keep); everywhere else it quits, asking first
+      // only when a detachable turn would be left behind.
+      if (overlay?.name !== 'leave-turn') leave(quitApp);
+      return;
+    }
     if (overlay) {
       if (key.escape && overlayInputless.current) {
         if (overlay.name === 'onboarding') cancelOnboarding();
@@ -498,8 +568,25 @@ export function App({ rt, opts, env, os, write }: AppProps) {
       onOnboardingCancel={cancelOnboarding}
       onLoggedIn={onLoggedIn}
       onCpError={(err) => loginIfExpired(err, overlay)}
-      onCreate={create}
-      onResume={(id) => void resume(id)}
+      onCreate={(req, values) =>
+        new Promise<void>((resolve, reject) => {
+          // Created at once, the overlay that asked is still mounted and shows a failure itself.
+          // After the leave-turn question it is gone, so the App reports the failure instead.
+          let asked = false;
+          leave(() => {
+            const created = create(req, values);
+            if (!asked) return void created.then(resolve, reject);
+            created.then(resolve, (err: unknown) => {
+              if (!loginIfExpired(err, { name: 'new-session' }))
+                notify(describeError(err), 'error');
+              resolve();
+            });
+          });
+          asked = true;
+          // Choosing stay leaves this unsettled; the overlay that awaited it is gone.
+        })
+      }
+      onResume={resume}
       onDeleted={(id) => {
         if (id === sessionRef.current?.sessionId) detach();
       }}
@@ -515,6 +602,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
             }
           : undefined
       }
+      leave={leaveChoice}
     />
   ) : null;
 

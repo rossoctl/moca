@@ -16,7 +16,10 @@ export function HelpOverlay({
   onClose: () => void;
 }) {
   const { tokens: t } = useTheme();
-  useInput(() => onClose());
+  // Any key closes Help, except Ctrl+C: that is the App's quit, which may ask first (leave-turn).
+  useInput((input, key) => {
+    if (!(key.ctrl && input === 'c')) onClose();
+  });
   const rows = registry.help(host);
   const width = Math.max(...rows.map((r) => r.title.length));
   return (

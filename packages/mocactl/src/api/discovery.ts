@@ -1,7 +1,14 @@
 import { ApiError, TurnCancelledError } from './errors.js';
 import type { TurnFrame } from './frames.js';
 import { HarnessClient } from './harness.js';
-import type { ControlPlaneApi, HarnessApi, StreamTurnArgs } from './types.js';
+import type {
+  AttachArgs,
+  CancelTurnArgs,
+  CancelTurnResult,
+  ControlPlaneApi,
+  HarnessApi,
+  StreamTurnArgs,
+} from './types.js';
 import { trimTrailingSlashes } from './url.js';
 
 /** The fix a user needs when the control plane cannot say where the harness is. */
@@ -98,5 +105,15 @@ export class DiscoveringHarness implements HarnessApi {
 
   async probeTrust(token: string, sessionId: string): Promise<'trusted' | 'untrusted'> {
     return (await this.resolve()).probeTrust(token, sessionId);
+  }
+
+  async *attach(args: AttachArgs): AsyncGenerator<TurnFrame> {
+    const client = await this.resolve();
+    if (args.signal?.aborted) throw new TurnCancelledError();
+    yield* client.attach(args);
+  }
+
+  async cancelTurn(args: CancelTurnArgs): Promise<CancelTurnResult> {
+    return (await this.resolve()).cancelTurn(args);
   }
 }

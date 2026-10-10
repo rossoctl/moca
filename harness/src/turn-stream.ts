@@ -2,12 +2,19 @@ import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type { LeafUsage } from './run-leaf.js';
 import type { TurnResult } from './run-turn.js';
 
+/** Why the registry aborted a detachable turn (turn-reattach spec §5); absent for any other end. */
+export type AbortReasonCode =
+  'cancelled' | 'unwatched' | 'restarting' | 'lease_lost' | 'owner_lost';
+
 /**
  * Neutral, transport-agnostic frames the turn core emits during a streamed turn. A discriminated
  * union on `type` — both the sink (server SSE) and any future consumer share this vocabulary.
  * Fidelity B: tool_use carries verbatim args; tool_result carries isError + a clipped preview.
  */
 export type TurnStreamFrame =
+  // Detachable turns only (turn-reattach spec §4.1): first frame, names the turn its ids belong to.
+  // `ended`: an attach whose cursor is at or past a finished turn's terminal; nothing follows it.
+  | { type: 'turn'; turnId: string; sessionId: string; truncated?: boolean; ended?: boolean }
   | { type: 'text'; delta: string } // assistant-text token
   | { type: 'thinking'; delta: string } // reasoning token (optional; may never fire — §3.5)
   | { type: 'tool_use'; id: string; name: string; args: unknown } // tool call started (args verbatim)
@@ -28,6 +35,7 @@ export type TurnStreamFrame =
       stopReason: string;
       errorMessage?: string;
       usage?: LeafUsage;
+      abortReason?: AbortReasonCode;
     };
 
 const DEFAULT_PREVIEW_BYTES = 2048;

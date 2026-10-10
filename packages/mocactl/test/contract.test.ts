@@ -190,7 +190,11 @@ describe('turn-stream contract (harness/src/turn-stream.ts)', () => {
   });
 
   it('parses the recorded fixture into the expected frame sequence', async () => {
-    const text = readFileSync(new URL('./fixtures/turn-stream.sse', import.meta.url), 'utf8');
+    // The harness ends every frame with a blank line; the end-of-file-fixer hook trims the file's
+    // last one, and readSse (per the SSE spec) drops an unterminated block, so restore it here.
+    const text =
+      readFileSync(new URL('./fixtures/turn-stream.sse', import.meta.url), 'utf8').trimEnd() +
+      '\n\n';
     const types = [];
     for await (const e of readSse(streamOf([text]))) types.push(toFrame(e).type);
     expect(types).toEqual(['thinking', 'text', 'text', 'tool_use', 'tool_result', 'text', 'done']);

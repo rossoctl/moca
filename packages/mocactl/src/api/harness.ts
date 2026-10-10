@@ -1,7 +1,13 @@
 import { ApiError, TurnCancelledError, errorFromResponse, networkError } from './errors.js';
 import { isTerminal, type TurnFrame } from './frames.js';
 import { readSse, toFrame } from './sse-parser.js';
-import type { HarnessApi, StreamTurnArgs } from './types.js';
+import type {
+  AttachArgs,
+  CancelTurnArgs,
+  CancelTurnResult,
+  HarnessApi,
+  StreamTurnArgs,
+} from './types.js';
 import { trimTrailingSlashes } from './url.js';
 
 /**
@@ -42,6 +48,8 @@ export class HarnessClient implements HarnessApi {
     prompt,
     token,
     signal,
+    detachable,
+    onEventId,
   }: StreamTurnArgs): AsyncGenerator<TurnFrame> {
     let res: Response;
     try {
@@ -52,7 +60,7 @@ export class HarnessClient implements HarnessApi {
           'content-type': 'application/json',
           authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ sessionId, prompt }),
+        body: JSON.stringify({ sessionId, prompt, ...(detachable ? { detachable: true } : {}) }),
         signal,
       });
     } catch (err) {
@@ -82,14 +90,98 @@ export class HarnessClient implements HarnessApi {
         : { type: 'done', sessionId: r.sessionId ?? sessionId, stopReason };
       return;
     }
+    yield* this.frames(res, signal, onEventId);
+  }
+
+  async *attach({
+    sessionId,
+    token,
+    lastEventId,
+    signal,
+    onEventId,
+  }: AttachArgs): AsyncGenerator<TurnFrame> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(
+        `${this.base}/v1/turn?sessionId=${encodeURIComponent(sessionId)}`,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'text/event-stream',
+            authorization: `Bearer ${token}`,
+            ...(lastEventId ? { 'last-event-id': lastEventId } : {}),
+          },
+          signal,
+        },
+      );
+    } catch (err) {
+      if (signal?.aborted) throw new TurnCancelledError();
+      throw networkError('harness', err);
+    }
+    // A harness without the route answers a bare 404, which means the same: nothing to attach to.
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ApiError('harness', 404, 'turn_not_found');
+    }
+    if (!res.ok) throw await errorFromResponse('harness', res);
+    yield* this.frames(res, signal, onEventId);
+  }
+
+  async cancelTurn({
+    sessionId,
+    turnId,
+    token,
+    signal,
+  }: CancelTurnArgs): Promise<CancelTurnResult> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.base}/v1/turn/cancel`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ sessionId, ...(turnId ? { turnId } : {}) }),
+        signal,
+      });
+    } catch (err) {
+      throw networkError('harness', err);
+    }
+    // A harness without the route answers a bare 404: no turn to cancel there, as in `attach`.
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ApiError('harness', 404, 'turn_not_found');
+    }
+    if (!res.ok) throw await errorFromResponse('harness', res);
+    // The 202 names the turn the server cancelled ('requested') or found already ended ('ended');
+    // an older server omits the outcome, and a body without a turnId is still an accepted cancel.
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = undefined;
+    }
+    const b = (body ?? {}) as { turnId?: unknown; outcome?: unknown };
+    return {
+      ...(typeof b.turnId === 'string' ? { turnId: b.turnId } : {}),
+      ...(b.outcome === 'requested' || b.outcome === 'ended' ? { outcome: b.outcome } : {}),
+    };
+  }
+
+  /**
+   * Reads SSE frames to the first terminal one, or to an ended `turn` frame (an attach already
+   * caught up on a finished turn); a stream that ends before either is truncated.
+   */
+  private async *frames(
+    res: Response,
+    signal: AbortSignal | undefined,
+    onEventId: ((id: string) => void) | undefined,
+  ): AsyncGenerator<TurnFrame> {
     if (!res.body)
       throw new ApiError('harness', 0, 'stream_truncated', 'the harness returned no stream');
-
     try {
       for await (const event of readSse(res.body)) {
         const frame = toFrame(event);
+        if (event.id !== undefined) onEventId?.(event.id);
         yield frame;
-        if (isTerminal(frame)) return;
+        if (isTerminal(frame) || (frame.type === 'turn' && frame.ended)) return;
       }
     } catch (err) {
       if (signal?.aborted) throw new TurnCancelledError();

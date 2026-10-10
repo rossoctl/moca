@@ -126,6 +126,25 @@ export interface StreamTurnArgs {
   prompt: string;
   token: string;
   signal?: AbortSignal;
+  /** Ask for a turn that outlives this connection (turn-reattach spec §4.1). */
+  detachable?: boolean;
+  /** Called with each frame's SSE id just before the frame is yielded. */
+  onEventId?: (id: string) => void;
+}
+
+export interface AttachArgs {
+  sessionId: string;
+  token: string;
+  lastEventId?: string;
+  signal?: AbortSignal;
+  onEventId?: (id: string) => void;
+}
+
+export interface CancelTurnArgs {
+  sessionId: string;
+  turnId?: string;
+  token: string;
+  signal?: AbortSignal;
 }
 
 export interface HarnessApi {
@@ -134,4 +153,17 @@ export interface HarnessApi {
   health(): Promise<void>;
   streamTurn(args: StreamTurnArgs): AsyncGenerator<TurnFrame>;
   probeTrust(token: string, sessionId: string): Promise<'trusted' | 'untrusted'>;
+  /** Replays the session's current turn after lastEventId, then follows it (spec §4.2). */
+  attach(args: AttachArgs): AsyncGenerator<TurnFrame>;
+  /**
+   * Cancels the session's turn (spec §4.3). Resolves on 202 with the turn the server named, which
+   * for a turnId-less cancel may be an earlier, already-ended turn. A fake may resolve void.
+   */
+  cancelTurn(args: CancelTurnArgs): Promise<CancelTurnResult | void>;
+}
+
+export interface CancelTurnResult {
+  turnId?: string;
+  /** 'requested': a running turn was asked to stop; 'ended': it had already ended. Older servers omit it. */
+  outcome?: 'requested' | 'ended';
 }

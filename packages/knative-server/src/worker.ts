@@ -2,7 +2,7 @@ import { createServer, type RequestListener, type Server } from 'node:http';
 import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { handler } from './server.js';
+import { abortDetachedTurns, handler } from './server.js';
 // Boot-time validation of the sandbox-discovery enum; see its use below.
 import { resolveDiscoverySource } from '@moca/harness/select-sandbox';
 // ...and of the sandbox tier settings (P6.3), likewise.
@@ -10,6 +10,7 @@ import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
 // Shared boot preparation (keyset validation, tenancy, ambient-credential scrub) -- this path has to
 // call it itself because it never goes through startServer. See its use below.
 import { prepareServerProcess } from './server-process.js';
+import { attachTurnSlot } from './turn-slot.js';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -103,25 +104,47 @@ export function statsIntervalMs(env: NodeJS.ProcessEnv, def = 1000): number {
   return Number.isInteger(n) && n > 0 ? n : def;
 }
 
+/**
+ * How long a draining worker lets detached turns run before it aborts them with "harness
+ * restarting" (turn-reattach spec §5.5). Under compose and k8s the supervisor is PID 1, so its exit
+ * SIGKILLs the workers and the IPC `disconnect` path never runs: the terminal frame has to be
+ * written before then. Must stay below the supervisor's SHUTDOWN_GRACE_MS (20 s,
+ * packages/supervisor/src/main.ts) so the abort, its terminal writes, and the in-flight count
+ * dropping (which lets `awaitIdle` exit early) all land inside the grace.
+ */
+export const DETACHED_DRAIN_MS = 15_000;
+
+/** Arms the drain deadline for detached turns; unref'd, so it never holds the process open. */
+export function armDetachedDrain(
+  abort: () => unknown,
+  ms = DETACHED_DRAIN_MS,
+): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(() => void abort(), ms);
+  timer.unref();
+  return timer;
+}
+
 export function createWorkerRuntime(opts: {
   send: (msg: WorkerToSupervisor) => void;
   requestHandler?: RequestListener;
 }): WorkerRuntime {
   const { send } = opts;
+  const counter = new TurnCounter((inFlight) => send({ type: 'load', inFlight }));
   // Never listen(). This server exists only to own an HTTP parser and the request/response
   // plumbing for sockets that arrive over IPC. Binding a port would make the worker
   // independently reachable and put two admission controllers in the system.
-  const server = createServer(opts.requestHandler ?? handler);
-  const counter = new TurnCounter((inFlight) => send({ type: 'load', inFlight }));
+  const baseHandler = opts.requestHandler ?? handler;
+  const wrappedHandler: RequestListener = (req, res) => {
+    if (isTurnRequest(req.method, req.url)) {
+      // 'close' covers both a finished response and a client abort, which is what "the turn is no
+      // longer occupying this process" means -- unless the route adopts the slot for a detachable
+      // turn, which then outlives its response (turn-reattach spec §5.5).
+      attachTurnSlot(res, counter.start());
+    }
+    baseHandler(req, res);
+  };
+  const server = createServer(wrappedHandler);
   let draining = false;
-
-  server.on('request', (req, res) => {
-    if (!isTurnRequest(req.method, req.url)) return;
-    const end = counter.start();
-    // 'close' covers both a finished response and a client abort, which is what "the turn
-    // is no longer occupying this process" actually means.
-    res.on('close', end);
-  });
 
   send({ type: 'ready', pid: process.pid });
 
@@ -306,6 +329,7 @@ if (isMainModule) {
     send,
     intervalMs: statsIntervalMs(process.env),
   });
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
   process.on('message', (msg: SupervisorToWorker, handle) => {
     if (msg.type === 'conn') {
       runtime.accept(handle as Socket, msg.head ? Buffer.from(msg.head, 'base64') : undefined);
@@ -316,9 +340,17 @@ if (isMainModule) {
       // longer taking.
       stopStats();
       runtime.drain();
+      // Detached turns that finish within DETACHED_DRAIN_MS finish normally; the rest get their
+      // terminal frame before the supervisor's grace runs out and SIGKILLs this process.
+      drainTimer ??= armDetachedDrain(() =>
+        abortDetachedTurns('restarting').catch(() => undefined),
+      );
     }
   });
-  // Supervisor crash ⇒ the IPC channel closes ⇒ we exit, so systemd restarts the whole set
-  // rather than leaving orphaned workers holding sockets nobody routes to (§6).
-  process.on('disconnect', () => process.exit(0));
+  // Supervisor crash or shutdown ⇒ the IPC channel closes ⇒ we exit, so systemd restarts the whole
+  // set rather than leaving orphaned workers holding sockets nobody routes to (§6). Detached turns
+  // get a terminal frame first (turn-reattach spec §5.5); abortDetachedTurns bounds its own wait.
+  process.on('disconnect', () => {
+    void abortDetachedTurns('restarting').finally(() => process.exit(0));
+  });
 }
