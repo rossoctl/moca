@@ -15,6 +15,7 @@ import {
   watchKey,
   withTimeout,
   BEGIN_LUA,
+  CANCEL_SKEW_MS,
 } from '../src/turn-registry.js';
 
 const URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -345,6 +346,52 @@ describe('cancel', () => {
     await turn.end(done(s));
     expect(await r.cancel(s, turn.turnId)).toEqual({ turnId: turn.turnId, outcome: 'ended' });
     await expect(r.cancel(sid())).rejects.toMatchObject({ name: 'TurnNotFoundError' });
+  });
+});
+
+describe('cancel fenced by its receipt time (§6.4)', () => {
+  const startedAt = async (s: string) =>
+    (JSON.parse((await redis.get(activeKey(s)))!) as { startedAt: number }).startedAt;
+
+  it('a turnId-less cancel received before the turn began (past the skew) cancels nothing', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    const issuedAt = (await startedAt(s)) - CANCEL_SKEW_MS - 1;
+    // Falls through to the no-lease branch: `last` already names the running turn.
+    expect(await r.cancel(s, undefined, { issuedAt })).toEqual({
+      turnId: turn.turnId,
+      outcome: 'ended',
+    });
+    expect(JSON.parse((await redis.get(activeKey(s)))!).cancelRequested).toBe(false);
+    await sleep(T.renewMs * 3);
+    expect(turn.signal.aborted).toBe(false);
+    await turn.end(done(s));
+  });
+
+  it('a turnId-less cancel received at or after the turn began still cancels it', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    expect(await r.cancel(s, undefined, { issuedAt: await startedAt(s) })).toEqual({
+      turnId: turn.turnId,
+      outcome: 'requested',
+    });
+    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('cancelled');
+    await turn.end(aborted(s));
+  });
+
+  it('a conditional cancel ignores issuedAt: its turnId fences it', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    const issuedAt = (await startedAt(s)) - CANCEL_SKEW_MS - 60_000;
+    expect(await r.cancel(s, turn.turnId, { issuedAt })).toEqual({
+      turnId: turn.turnId,
+      outcome: 'requested',
+    });
+    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('cancelled');
+    await turn.end(aborted(s));
   });
 });
 

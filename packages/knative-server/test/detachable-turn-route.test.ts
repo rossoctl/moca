@@ -442,6 +442,21 @@ describe('POST /v1/turn/cancel', () => {
     }
   });
 
+  it('passes the registry its receipt time, which fences a turnId-less cancel (§6.4)', async () => {
+    const spy = vi.spyOn(turnRegistry(), 'cancel');
+    const before = Date.now();
+    await postJson(
+      '/v1/turn/cancel',
+      { sessionId },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    expect(spy).toHaveBeenCalledWith(sessionId, undefined, { issuedAt: expect.any(Number) });
+    const issuedAt = (spy.mock.calls[0]![2] as { issuedAt: number }).issuedAt;
+    expect(issuedAt).toBeGreaterThanOrEqual(before);
+    expect(issuedAt).toBeLessThanOrEqual(Date.now());
+    spy.mockRestore();
+  });
+
   it('logs an unexpected failure before answering 503', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(turnRegistry(), 'cancel').mockRejectedValueOnce(new TypeError('boom'));

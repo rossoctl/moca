@@ -719,6 +719,8 @@ async function handleAttach(req: IncomingMessage, url: URL, res: ServerResponse)
 
 /** POST /v1/turn/cancel (turn-reattach spec §4.3). */
 async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Receipt time, before any await: it fences a turnId-less cancel that lands late (§6.4).
+  const issuedAt = Date.now();
   let body: unknown;
   try {
     body = JSON.parse(await readBody(req));
@@ -743,6 +745,7 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
       turnRegistry().cancel(
         sessionId,
         typeof parsed.turnId === 'string' ? parsed.turnId : undefined,
+        { issuedAt },
       ),
       registryTimeoutMs(),
     );

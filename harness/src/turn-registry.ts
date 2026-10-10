@@ -109,7 +109,10 @@ export class TurnRegistryUnavailableError extends Error {
  * Bound a registry call: node-redis has no command timeout, so against a blackholed Redis (socket
  * open, nothing answers) a call never settles. Past `ms` this rejects with
  * TurnRegistryUnavailableError; the call itself is not cancelled and may still land later, so use
- * it only where a late landing is harmless (a read, a cancel request). `begin` bounds itself.
+ * it only where a late landing is harmless: a read, or a cancel fenced against the next turn. A
+ * conditional cancel is fenced by its `turnId`; a turnId-less one by its receipt time (`issuedAt`,
+ * CANCEL_SKEW_MS), so landing after the caller saw 503 and began its next prompt cannot cancel that
+ * prompt's turn (turn-reattach spec §6.4). `begin` bounds itself.
  */
 export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -200,17 +203,31 @@ if v and cjson.decode(v).turnId == ARGV[1] then redis.call('DEL', KEYS[1]) end
 return {id, f}`;
 
 /**
- * KEYS[1]=active KEYS[2]=last ARGV=[turnId or '']. {'none'} | {'mismatch', running} |
- * {'ended', last} | {'requested', turnId}. Sets the lease flag the owner reads at renewal (§5.4).
+ * How far a running lease's `startedAt` may pass a turnId-less cancel's `issuedAt` and still be
+ * cancelled by it. `startedAt` is read on the owner's clock and `issuedAt` on the clock of the
+ * worker that received the cancel; the margin absorbs the skew between them (§6.4).
+ */
+export const CANCEL_SKEW_MS = 2000;
+
+/**
+ * KEYS[1]=active KEYS[2]=last ARGV=[turnId or '', issuedAt or '', skewMs]. {'none'} |
+ * {'mismatch', running} | {'ended', last} | {'requested', turnId}. Sets the lease flag the owner
+ * reads at renewal (§5.4). A turnId-less cancel with an `issuedAt` treats a lease that started more
+ * than skewMs after it as no running turn: it was received before that turn began, so landing late
+ * (from the offline queue, after its caller saw 503) it must not cancel it (§6.4).
  */
 export const CANCEL_LUA = `
 local v = redis.call('GET', KEYS[1])
-if not v then
+local d = v and cjson.decode(v)
+if d and ARGV[1] == '' and ARGV[2] ~= '' and tonumber(d.startedAt) and
+    tonumber(d.startedAt) > tonumber(ARGV[2]) + tonumber(ARGV[3]) then
+  d = nil
+end
+if not d then
   local last = redis.call('GET', KEYS[2])
   if not last then return {'none'} end
   return {'ended', last}
 end
-local d = cjson.decode(v)
 if ARGV[1] ~= '' and ARGV[1] ~= d.turnId then return {'mismatch', d.turnId} end
 d.cancelRequested = true
 redis.call('SET', KEYS[1], cjson.encode(d), 'KEEPTTL')
@@ -530,14 +547,23 @@ export class TurnRegistry {
     return v ? (JSON.parse(v) as { turnId: string }).turnId : null;
   }
 
+  /**
+   * `opts.issuedAt` is the receiving worker's clock when the cancel arrived: it fences a
+   * turnId-less cancel off any turn that began after it (CANCEL_SKEW_MS, §6.4).
+   */
   async cancel(
     sessionId: string,
     turnId?: string,
+    opts?: { issuedAt?: number },
   ): Promise<{ turnId: string; outcome: 'requested' | 'ended' }> {
     await this.open();
     const r = (await this.client.eval(CANCEL_LUA, {
       keys: [activeKey(sessionId), lastKey(sessionId)],
-      arguments: [turnId ?? ''],
+      arguments: [
+        turnId ?? '',
+        opts?.issuedAt === undefined ? '' : String(opts.issuedAt),
+        String(CANCEL_SKEW_MS),
+      ],
     })) as string[];
     if (r[0] === 'none') throw new TurnNotFoundError();
     if (r[0] === 'mismatch') throw new TurnMismatchError(r[1]!);

@@ -301,6 +301,10 @@ paths:
         its own turn had already ended, and nothing was cancelled. The 202's `outcome` says
         the same for any cancel: `requested` for a running turn, `ended` for a no-op.
 
+        A cancel without `turnId` is fenced by the time the harness received it: a turn that
+        began more than 2 s after that counts as not running, so the cancel is a no-op even when
+        it reaches Redis late (after its caller timed out and began another turn).
+
         A token is REQUIRED here in every mode — 401 token_required without one — and it must
         name the session. With SH_TURN_DETACH off, every authorized cancel answers 404
         turn_not_found.

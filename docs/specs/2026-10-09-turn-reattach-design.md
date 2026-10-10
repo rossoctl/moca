@@ -321,10 +321,18 @@ A turn that is not detachable (older harness, Knative) quits as today.
     That is success, with no notice.
   - Any other failure: the "couldn't cancel" notice.
 - Each try is bounded by the 5 s cancel timeout, so the cancel can take up to about 18 s in the worst
-  case. The queue holds the next prompt until it settles, so a late try cannot cancel that prompt's
-  turn. The leave overlay's `c` resolves the same way.
+  case. The queue holds the next prompt until it settles. The leave overlay's `c` resolves the same
+  way.
+- A try the client gave up on (a `503` past the bound) can still land later, from a worker's Redis
+  offline queue, after the next prompt has begun. The server fences it by its receipt time: the
+  worker reads its clock when the request arrives, and the cancel treats a running turn whose lease
+  `startedAt` is more than 2 s (`CANCEL_SKEW_MS`) past that time as no running turn. So a late try
+  cannot cancel that prompt's turn. A conditional cancel needs no such fence: its `turnId` is one.
 - Accepted risk: if the request never reached `begin()` and another device started a turn inside
   that window, the turnId-less cancel can cancel that turn.
+- Accepted risk: `startedAt` is the owner's clock and the receipt time the receiving worker's. If
+  the owner's clock runs more than 2 s behind, a late try can still cancel a turn that began just
+  after it was received; if it runs ahead, a timely try can miss a turn that began just before.
 
 ### 6.5 Resume, reattach, and dropped streams
 
