@@ -326,13 +326,23 @@ A turn that is not detachable (older harness, Knative) quits as today.
 - A try the client gave up on (a `503` past the bound) can still land later, from a worker's Redis
   offline queue, after the next prompt has begun. The server fences it by its receipt time: the
   worker reads its clock when the request arrives, and the cancel treats a running turn whose lease
-  `startedAt` is more than 2 s (`CANCEL_SKEW_MS`) past that time as no running turn. So a late try
-  cannot cancel that prompt's turn. A conditional cancel needs no such fence: its `turnId` is one.
+  `startedAt` is more than 2 s (`CANCEL_SKEW_MS`) past that time as no running turn. When the
+  cancel reaches the server well inside the 5 s bound -- the normal case, delivered in
+  milliseconds -- a late try cannot cancel that prompt's turn. A conditional cancel needs no such
+  fence: its `turnId` is one.
 - Accepted risk: if the request never reached `begin()` and another device started a turn inside
   that window, the turnId-less cancel can cancel that turn.
 - Accepted risk: `startedAt` is the owner's clock and the receipt time the receiving worker's. If
   the owner's clock runs more than 2 s behind, a late try can still cancel a turn that began just
   after it was received; if it runs ahead, a timely try can miss a turn that began just before.
+- Accepted risk: the client's 5 s timer starts before the token refresh and the send, so the fence
+  trips only if the request reaches the handler within about 3 s of it, less any skew. A slow token
+  refresh or slow delivery, together with a reconnecting worker's offline queue, can still let a
+  late try cancel the next prompt's turn.
+- Accepted risk: a fenced try answers `202` `outcome: "ended"` naming the newer, running turn, which
+  normally earns a retry with a fresh receipt time. On the third and last try there is none, so the
+  cancel reports success while that turn keeps running. This needs the prompt's request to reach the
+  server more than 2 s after that try's receipt, while Redis on the cancel's worker is slow.
 
 ### 6.5 Resume, reattach, and dropped streams
 

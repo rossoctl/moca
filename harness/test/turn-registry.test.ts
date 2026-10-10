@@ -381,6 +381,19 @@ describe('cancel fenced by its receipt time (§6.4)', () => {
     await turn.end(aborted(s));
   });
 
+  it('a turnId-less cancel at exactly the skew boundary still cancels (the check is strict)', async () => {
+    const r = reg();
+    const s = sid();
+    const turn = await r.begin(s);
+    const issuedAt = (await startedAt(s)) - CANCEL_SKEW_MS;
+    expect(await r.cancel(s, undefined, { issuedAt })).toEqual({
+      turnId: turn.turnId,
+      outcome: 'requested',
+    });
+    await expect.poll(() => turn.abortReason, { timeout: 1000 }).toBe('cancelled');
+    await turn.end(aborted(s));
+  });
+
   it('a conditional cancel ignores issuedAt: its turnId fences it', async () => {
     const r = reg();
     const s = sid();
