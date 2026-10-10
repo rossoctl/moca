@@ -53,4 +53,33 @@ describe('Chat', () => {
     );
     expect(lastFrame()).toContain('OVERLAY');
   });
+
+  it('prints the banner above the settled history, so it scrolls away with it', () => {
+    const { frames } = render(
+      withTheme(
+        <Chat
+          blocks={addUser(EMPTY_BLOCKS, 'hello')}
+          details={false}
+          thinking
+          width={80}
+          staticKey={0}
+          statusFields={[]}
+          inputActive
+          history={[]}
+          onSubmit={vi.fn()}
+          onHelp={vi.fn()}
+          banner={{
+            mocactlVersion: '0.5.2',
+            cpVersion: '0.5.1',
+            harnessVersion: '0.5.0',
+            cwd: '~/w',
+          }}
+        />,
+      ),
+    );
+    const f = frames.join('\n');
+    expect(f).toContain('control plane 0.5.1');
+    // The banner is the first thing <Static> prints, ahead of any settled block.
+    expect(f.indexOf('› hello')).toBeGreaterThan(f.indexOf('control plane 0.5.1'));
+  });
 });

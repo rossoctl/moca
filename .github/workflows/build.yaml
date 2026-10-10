@@ -76,7 +76,9 @@ jobs:
         with:
           images: ${{ matrix.image }}
           tags: |
-            type=sha,prefix=main-,enable={{is_default_branch}}
+            # priority 300: metadata-action's version output follows the highest-priority tag, and
+            # type=raw 'latest' (200) would otherwise outrank the sha tag (100) on main pushes.
+            type=sha,prefix=main-,enable={{is_default_branch}},priority=300
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
 
@@ -89,5 +91,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The version the harness/control plane advertise (MOCA_VERSION; the root Dockerfile is
+          # the only one that consumes it — the other matrix images ignore the unused build-arg).
+          build-args: MOCA_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

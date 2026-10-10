@@ -18,7 +18,7 @@ const openapi = parse(readFileSync(new URL('docs/api/openapi.yaml', root), 'utf8
 const USED: Array<{ method: string; path: string; reads?: string[]; sends?: string[] }> = [
   { method: 'get', path: '/healthz' },
   { method: 'get', path: '/readyz' },
-  { method: 'get', path: '/v1/discovery', reads: ['harnessUrl', 'sandboxTiers'] },
+  { method: 'get', path: '/v1/discovery', reads: ['harnessUrl', 'sandboxTiers', 'version'] },
   {
     method: 'post',
     path: '/v1/auth/device',

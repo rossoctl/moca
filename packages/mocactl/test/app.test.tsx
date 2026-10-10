@@ -6,6 +6,7 @@ import { render as inkRender } from 'ink';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError, TurnCancelledError } from '../src/api/errors.js';
+import type { ControlPlaneApi } from '../src/api/types.js';
 import { App, CLEAR_SCREEN, initialOverlay } from '../src/app.js';
 import { loadAuth, loadConfig, saveAuth } from '../src/config.js';
 import { describeError } from '../src/core/messages.js';
@@ -233,6 +234,20 @@ describe('App', () => {
     await ready();
     expect(frame()).toContain('Ada');
     expect(all()).not.toMatch(/\u001b\]|\u001b\[8m|\u0007|c2VjcmV0/);
+  });
+
+  it('aborts the banner version fetches on unmount', async () => {
+    // mocactl exits via process.exitCode, so a fetch the dead UI left running would hold the
+    // process alive with no one watching it.
+    const signals: Array<AbortSignal | undefined> = [];
+    const hang = ((opts?: { signal?: AbortSignal }) => {
+      signals.push(opts?.signal);
+      return new Promise<never>(() => {});
+    }) as ControlPlaneApi['discovery'];
+    const m = mount(testRuntime({ cp: fakeControlPlane({ discovery: hang }) }));
+    await m.until(() => signals.length === 1);
+    m.unmount();
+    expect(signals[0]?.aborted).toBe(true);
   });
 
   it('opens login when the cached login is missing', async () => {

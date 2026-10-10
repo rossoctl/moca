@@ -6,6 +6,7 @@ import type {
   CancelTurnArgs,
   CancelTurnResult,
   HarnessApi,
+  HealthReport,
   StreamTurnArgs,
 } from './types.js';
 import { trimTrailingSlashes } from './url.js';
@@ -33,14 +34,18 @@ export class HarnessClient implements HarnessApi {
     return this.base;
   }
 
-  async health(): Promise<void> {
+  async health(opts: { signal?: AbortSignal } = {}): Promise<HealthReport> {
     let res: Response;
     try {
-      res = await this.fetchImpl(`${this.base}/health`, { method: 'GET' });
+      res = await this.fetchImpl(`${this.base}/health`, { method: 'GET', signal: opts.signal });
     } catch (err) {
       throw networkError('harness', err);
     }
     if (!res.ok) throw await errorFromResponse('harness', res);
+    // The version rides the X-Moca-Version header; an old harness sends none, which is a harness
+    // with nothing to say about itself, not a health failure.
+    const version = res.headers.get('x-moca-version');
+    return version ? { version } : {};
   }
 
   async *streamTurn({

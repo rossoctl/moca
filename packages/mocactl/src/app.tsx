@@ -1,4 +1,5 @@
 import { Box, Text, useApp, useInput, useWindowSize } from 'ink';
+import { homedir } from 'node:os';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, classify } from './api/errors.js';
 import type { Usage } from './api/frames.js';
@@ -10,6 +11,7 @@ import { chordFor } from './commands/keys.js';
 import { CommandRegistry } from './commands/registry.js';
 import type { CachedAuth, TuiConfig } from './config.js';
 import { apiTokenValid, loginExpiryMinutes } from './core/auth.js';
+import { collectBannerInfo, type BannerInfo } from './core/banner.js';
 import { describeError } from './core/messages.js';
 import {
   describePromotion,
@@ -31,6 +33,7 @@ import {
   addNotice,
   fromTranscript,
   lastTurnState,
+  splitStatic,
   type BlockState,
 } from './render/blocks.js';
 import { transcriptToMarkdown } from './render/export.js';
@@ -107,6 +110,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   const [now, setNow] = useState(rt.now());
   const [overlayKey, setOverlayKey] = useState(0);
   const [pendingBundle, setPendingBundle] = useState<PromoteResult>();
+  const [banner, setBanner] = useState<BannerInfo>();
 
   // Overlays capture their callbacks at mount (Login resolves minutes later), so anything a
   // callback reads that can change meanwhile is read through a ref.
@@ -267,6 +271,26 @@ export function App({ rt, opts, env, os, write }: AppProps) {
     if (warnings.length > 0) notify(warnings.join(' · '), 'warning');
     else if (!overlay)
       notify('type a message to start a session · ctrl+x l to resume one · ? for help');
+  }, []);
+
+  // The banner's remote halves (control plane and harness versions) are collected in the
+  // background so the TUI paints immediately; the banner prints when they land or give up.
+  useEffect(() => {
+    // Aborted on unmount: mocactl exits via process.exitCode, so a fetch the dead UI left running
+    // would hold the process alive.
+    const controller = new AbortController();
+    void collectBannerInfo(
+      { cp: rt.cp, harness: rt.harness },
+      { cwd: process.cwd(), home: homedir(), signal: controller.signal },
+    ).then((info) => {
+      if (controller.signal.aborted) return;
+      setBanner(info);
+      // <Static> prints append-only: with history already printed, PREPENDING the banner would
+      // duplicate the last block instead of showing it — so clear and reprint with it on top.
+      const view = viewRef.current;
+      if (view && splitStatic(view.state.blocks).settled.length > 0) redraw();
+    });
+    return () => controller.abort();
   }, []);
 
   // A new snapshot means <Static> must re-print from scratch. This runs after useSession's own
@@ -642,6 +666,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
         onSubmit={submitText}
         onHelp={() => open({ name: 'help' })}
         prefill={prefill}
+        banner={banner}
         overlay={
           overlayNode || toastNode ? (
             <Box flexDirection="column">

@@ -43,7 +43,13 @@ export class ControlPlaneClient implements ControlPlaneApi {
   private async request(
     method: string,
     path: string,
-    opts: { body?: unknown; auth?: boolean; query?: Query; retried?: boolean } = {},
+    opts: {
+      body?: unknown;
+      auth?: boolean;
+      query?: Query;
+      retried?: boolean;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<Response> {
     const url = new URL(this.base + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -61,6 +67,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
         method,
         headers,
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        signal: opts.signal,
       });
     } catch (err) {
       throw networkError('control-plane', err);
@@ -87,7 +94,13 @@ export class ControlPlaneClient implements ControlPlaneApi {
   private async json<T>(
     method: string,
     path: string,
-    opts?: { body?: unknown; auth?: boolean; query?: Query; retried?: boolean },
+    opts?: {
+      body?: unknown;
+      auth?: boolean;
+      query?: Query;
+      retried?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<T> {
     return (await (await this.request(method, path, opts)).json()) as T;
   }
@@ -100,8 +113,8 @@ export class ControlPlaneClient implements ControlPlaneApi {
     await this.request('GET', '/readyz', { auth: false });
   }
 
-  discovery(): Promise<Discovery> {
-    return this.json('GET', '/v1/discovery', { auth: false });
+  discovery(opts: { signal?: AbortSignal } = {}): Promise<Discovery> {
+    return this.json('GET', '/v1/discovery', { auth: false, signal: opts.signal });
   }
 
   startDeviceAuth(): Promise<DeviceStart> {

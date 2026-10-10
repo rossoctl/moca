@@ -51,7 +51,12 @@ function request(
   method: string,
   path: string,
   body?: unknown,
-): Promise<{ status: number; body: string; contentType: string | undefined }> {
+): Promise<{
+  status: number;
+  body: string;
+  contentType: string | undefined;
+  headers: http.IncomingHttpHeaders;
+}> {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl);
     const req = http.request(url, { method }, (res) => {
@@ -62,6 +67,7 @@ function request(
           status: res.statusCode ?? 0,
           body: Buffer.concat(chunks).toString(),
           contentType: res.headers['content-type'],
+          headers: res.headers,
         }),
       );
     });
@@ -125,13 +131,14 @@ afterAll(async () => {
 });
 
 describe('GET /health', () => {
-  it('returns 200 ok', async () => {
+  it('answers text/plain ok, version in the X-Moca-Version header', async () => {
     const res = await request('GET', '/health');
     expect(res.status).toBe(200);
+    // The spec declares text/plain; probes only need the status, and old clients match on the
+    // body, so the version rides a response header instead of changing the body.
     expect(res.body).toBe('ok');
-    // The spec declares text/plain; the handler used to send no Content-Type at all, leaving the
-    // wire form to Node's defaults while the document promised a media type.
     expect(res.contentType).toBe('text/plain');
+    expect(res.headers['x-moca-version']).toBe('dev'); // nothing baked MOCA_VERSION in under test
   });
 });
 

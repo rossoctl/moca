@@ -2,7 +2,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileCredentialStore } from '../src/file-store.js';
@@ -139,6 +139,13 @@ describe('configFromEnv', () => {
       configFromEnv({ ...baseEnv, SH_PUBLIC_HARNESS_URL: 'https://harness.example.com/' })
         .publicHarnessUrl,
     ).toBe('https://harness.example.com');
+  });
+
+  it('versions the deployment from MOCA_VERSION, reporting dev when nothing was baked in', () => {
+    expect(configFromEnv({ ...baseEnv, MOCA_VERSION: 'v9.9.9-rc1' }).version).toBe('v9.9.9-rc1');
+    // No package.json fallback: a bundled release asset does not ship one, so unset means dev.
+    expect(configFromEnv(baseEnv).version).toBe('dev');
+    expect(configFromEnv({ ...baseEnv, MOCA_VERSION: '' }).version).toBe('dev');
   });
 
   it('trims SH_PUBLIC_HARNESS_URL in one pass, even on a long run of slashes', () => {

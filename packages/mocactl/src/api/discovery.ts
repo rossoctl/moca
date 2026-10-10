@@ -7,6 +7,7 @@ import type {
   CancelTurnResult,
   ControlPlaneApi,
   HarnessApi,
+  HealthReport,
   StreamTurnArgs,
 } from './types.js';
 import { trimTrailingSlashes } from './url.js';
@@ -19,10 +20,13 @@ const OVERRIDE = 'or pass --harness-url';
  * A 404 is a control plane that predates discovery; `null` is one whose operator set no
  * SH_PUBLIC_HARNESS_URL. Both fail with a code the UI shows verbatim, naming its own fix.
  */
-export async function discoverHarnessUrl(cp: ControlPlaneApi): Promise<string> {
+export async function discoverHarnessUrl(
+  cp: ControlPlaneApi,
+  opts: { signal?: AbortSignal } = {},
+): Promise<string> {
   let advertised: unknown;
   try {
-    advertised = (await cp.discovery()).harnessUrl;
+    advertised = (await cp.discovery(opts)).harnessUrl;
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       throw new ApiError(
@@ -73,7 +77,7 @@ export class DiscoveringHarness implements HarnessApi {
   private client?: Promise<HarnessClient>;
 
   constructor(
-    private readonly discover: () => Promise<string>,
+    private readonly discover: (signal?: AbortSignal) => Promise<string>,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
@@ -92,8 +96,18 @@ export class DiscoveringHarness implements HarnessApi {
     return (await this.resolve()).baseUrl();
   }
 
-  async health(): Promise<void> {
-    return (await this.resolve()).health();
+  async health(opts: { signal?: AbortSignal } = {}): Promise<HealthReport> {
+    // An abandoned probe (the banner's timeout or unmount) must abort its fetch — but the shared
+    // discovery in resolve() belongs to whoever awaits it, so aborting that would kill a turn
+    // racing the same discovery. An uncached health with a signal therefore resolves on its own:
+    // an abortable one-off discovery whose success warms the cache for everyone after it.
+    if (!this.client && opts.signal) {
+      const url = await this.discover(opts.signal);
+      const client = new HarnessClient(url, this.fetchImpl);
+      if (!this.client) this.client = Promise.resolve(client);
+      return client.health(opts);
+    }
+    return (await this.resolve()).health(opts);
   }
 
   async *streamTurn(args: StreamTurnArgs): AsyncGenerator<TurnFrame> {

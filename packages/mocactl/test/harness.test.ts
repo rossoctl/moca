@@ -198,6 +198,29 @@ describe('HarnessClient.health', () => {
     await new HarnessClient('http://h', fetch).health();
     expect(calls[0]).toMatchObject({ url: 'http://h/health', method: 'GET' });
   });
+
+  it('reads the harness version from the X-Moca-Version response header', async () => {
+    const res = new Response('ok', {
+      headers: { 'content-type': 'text/plain', 'x-moca-version': 'v0.5.2' },
+    });
+    const { fetch } = scriptedFetch(res);
+    expect(await new HarnessClient('http://h', fetch).health()).toEqual({ version: 'v0.5.2' });
+  });
+
+  it('passes an abort signal through to the fetch', async () => {
+    const { fetch, calls } = scriptedFetch(new Response('ok'));
+    const controller = new AbortController();
+    await new HarnessClient('http://h', fetch).health({ signal: controller.signal });
+    expect(calls[0].signal).toBe(controller.signal);
+  });
+
+  it.each([
+    ['an old harness that sent no header', new Response('ok')],
+    ['an empty header', new Response('ok', { headers: { 'x-moca-version': '' } })],
+  ])('reports no version for %s', async (_label, res) => {
+    const { fetch } = scriptedFetch(res);
+    expect(await new HarnessClient('http://h', fetch).health()).toEqual({});
+  });
 });
 
 describe('detachable turns', () => {

@@ -89,12 +89,14 @@ export interface Discovery {
   harnessUrl: string | null;
   /** P6.3. Optional so a pre-P6.3 control plane, which omits it, still parses. */
   sandboxTiers?: { names: string[]; default: string } | null;
+  /** The control plane's version; null/absent when it predates advertising one. */
+  version?: string | null;
 }
 
 export interface ControlPlaneApi {
   healthz(): Promise<void>;
   readyz(): Promise<void>;
-  discovery(): Promise<Discovery>;
+  discovery(opts?: { signal?: AbortSignal }): Promise<Discovery>;
   startDeviceAuth(): Promise<DeviceStart>;
   /** 'pending' until approved; 'expired' once the code lapsed unapproved (start a new one). */
   pollDeviceAuth(deviceCode: string): Promise<ApiLogin | 'pending' | 'expired'>;
@@ -147,10 +149,16 @@ export interface CancelTurnArgs {
   signal?: AbortSignal;
 }
 
+/** GET /health on the harness: what it can tell about itself. */
+export interface HealthReport {
+  /** From the X-Moca-Version header; absent for an old harness that sent none. */
+  version?: string;
+}
+
 export interface HarnessApi {
   /** The base URL turns go to; for a discovered harness this asks the control plane first. */
   baseUrl(): Promise<string>;
-  health(): Promise<void>;
+  health(opts?: { signal?: AbortSignal }): Promise<HealthReport>;
   streamTurn(args: StreamTurnArgs): AsyncGenerator<TurnFrame>;
   probeTrust(token: string, sessionId: string): Promise<'trusted' | 'untrusted'>;
   /** Replays the session's current turn after lastEventId, then follows it (spec §4.2). */

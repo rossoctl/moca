@@ -35,6 +35,13 @@ describe('ControlPlaneClient', () => {
     expect(calls[0].url).toBe('https://gw.example/cp/v1/me');
   });
 
+  it('passes an abort signal through to the fetch on discovery', async () => {
+    const { fetch, calls } = scriptedFetch(json({ harnessUrl: null }));
+    const controller = new AbortController();
+    await client(fetch).discovery({ signal: controller.signal });
+    expect(calls[0].signal).toBe(controller.signal);
+  });
+
   it('maps 428 on the device poll to "pending"', async () => {
     const { fetch, calls } = scriptedFetch(json({ error: 'authorization_pending' }, 428));
     expect(await client(fetch).pollDeviceAuth('d')).toBe('pending');
