@@ -283,6 +283,42 @@ describe('detachable turns', () => {
     }
   });
 
+  it("cancelTurn returns the 202's outcome when it is a known one", async () => {
+    const answers: [unknown, object][] = [
+      [
+        { turnId: 't0', outcome: 'ended' },
+        { turnId: 't0', outcome: 'ended' },
+      ],
+      [
+        { turnId: 't1', outcome: 'requested' },
+        { turnId: 't1', outcome: 'requested' },
+      ],
+      [{ turnId: 't1', outcome: 'other' }, { turnId: 't1' }],
+      [{ turnId: 't1', outcome: 3 }, { turnId: 't1' }],
+    ];
+    for (const [body, want] of answers) {
+      const client = new HarnessClient('http://h', (async () =>
+        Response.json(body, { status: 202 })) as typeof fetch);
+      expect(await client.cancelTurn({ sessionId: 's1', token: 't' })).toEqual(want);
+    }
+  });
+
+  it('cancelTurn reads a bare 404 (a harness without the route) as turn_not_found', async () => {
+    let drained = false;
+    const client = new HarnessClient('http://h', (async () => {
+      const body = new ReadableStream({
+        start: (c) => c.enqueue(new TextEncoder().encode('404 page not found')),
+        cancel: () => void (drained = true),
+      });
+      return new Response(body, { status: 404 });
+    }) as typeof fetch);
+    await expect(client.cancelTurn({ sessionId: 's1', token: 't' })).rejects.toMatchObject({
+      status: 404,
+      code: 'turn_not_found',
+    });
+    expect(drained).toBe(true);
+  });
+
   it('cancelTurn throws the harness error otherwise', async () => {
     const client = new HarnessClient('http://h', (async () =>
       Response.json({ error: 'turn_mismatch', turnId: 't2' }, { status: 409 })) as typeof fetch);

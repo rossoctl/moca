@@ -298,7 +298,8 @@ paths:
         is cancelled. The `turnId` is compared only against a RUNNING turn. When none is
         running, the 202 names the last turn, which may not be the one the caller sent. A
         client sending a conditional cancel should compare the two ids: a different id means
-        its own turn had already ended, and nothing was cancelled.
+        its own turn had already ended, and nothing was cancelled. The 202's `outcome` says
+        the same for any cancel: `requested` for a running turn, `ended` for a no-op.
 
         A token is REQUIRED here in every mode — 401 token_required without one — and it must
         name the session. With SH_TURN_DETACH off, every authorized cancel answers 404
@@ -315,7 +316,9 @@ paths:
           description: |
             The cancel was requested of the running turn, and `turnId` names it. Or no turn is
             running, and `turnId` names the session's last retained turn (a no-op). In the second
-            case the id need not equal the request's `turnId`.
+            case the id need not equal the request's `turnId`. `outcome` tells the two apart:
+            `requested` for a running turn asked to stop, `ended` for a retained turn that had
+            already ended (nothing was cancelled). Older harnesses omit `outcome`.
           content:
             application/json:
               schema:
@@ -323,6 +326,9 @@ paths:
                 required: [turnId]
                 properties:
                   turnId: { type: string }
+                  outcome:
+                    type: string
+                    enum: [requested, ended]
         '400':
           description: |
             invalid_json (the body is not a JSON object) · sessionId_required · session_mismatch

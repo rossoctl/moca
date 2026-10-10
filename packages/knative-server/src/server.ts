@@ -746,7 +746,9 @@ async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<
       ),
       registryTimeoutMs(),
     );
-    res.writeHead(202, JSON_HEADERS).end(JSON.stringify({ turnId: r.turnId }));
+    // `outcome` tells a turnId-less caller whether a running turn was cancelled ('requested') or
+    // the id names a turn that had already ended ('ended'): only the server knows which is current.
+    res.writeHead(202, JSON_HEADERS).end(JSON.stringify({ turnId: r.turnId, outcome: r.outcome }));
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
     if (name === 'TurnNotFoundError') return turnNotFound(res);

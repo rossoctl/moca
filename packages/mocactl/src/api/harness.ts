@@ -144,17 +144,25 @@ export class HarnessClient implements HarnessApi {
     } catch (err) {
       throw networkError('harness', err);
     }
+    // A harness without the route answers a bare 404: no turn to cancel there, as in `attach`.
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ApiError('harness', 404, 'turn_not_found');
+    }
     if (!res.ok) throw await errorFromResponse('harness', res);
-    // The 202 names the turn the server cancelled (or found already ended); a body without one is
-    // still an accepted cancel.
+    // The 202 names the turn the server cancelled ('requested') or found already ended ('ended');
+    // an older server omits the outcome, and a body without a turnId is still an accepted cancel.
     let body: unknown;
     try {
       body = await res.json();
     } catch {
       body = undefined;
     }
-    const named = (body as { turnId?: unknown } | null | undefined)?.turnId;
-    return typeof named === 'string' ? { turnId: named } : {};
+    const b = (body ?? {}) as { turnId?: unknown; outcome?: unknown };
+    return {
+      ...(typeof b.turnId === 'string' ? { turnId: b.turnId } : {}),
+      ...(b.outcome === 'requested' || b.outcome === 'ended' ? { outcome: b.outcome } : {}),
+    };
   }
 
   /**

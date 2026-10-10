@@ -261,6 +261,45 @@ describe('I2: Esc before the turn frame', () => {
     expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
   });
 
+  // An older harness has no cancel route and answers a bare 404, through the real client.
+  it('an older harness answering a bare 404 on every try: true, with no notice', async () => {
+    const { session: s, harness, events } = faked([{ hang: true }], { pendingCancelMs: 10 });
+    const old = new HarnessClient(
+      'http://h',
+      (async () => new Response('404 page not found', { status: 404 })) as unknown as typeof fetch,
+    );
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      return old.cancelTurn(args);
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(BLIND_CANCEL_TRIES);
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
+  });
+
+  // The server says when the turn it named had already ended: that is retried, whatever this
+  // client last saw (here it saw no turn at all, so the lastTurnId fallback would not catch it).
+  it("a 202 with outcome 'ended' is retried until one is 'requested'", async () => {
+    const { session: s, harness, events } = faked([{ hang: true }], { pendingCancelMs: 10 });
+    const answers = [
+      { turnId: 'tx', outcome: 'ended' as const },
+      { turnId: 't1', outcome: 'requested' as const },
+    ];
+    harness.cancelTurn = async (args) => {
+      harness.cancels.push(args);
+      return answers.shift();
+    };
+    s.submit('go');
+    await tick();
+    expect(await s.cancelRemote()).toBe(true);
+    await s.idle();
+    expect(harness.cancels).toHaveLength(2);
+    expect(events.filter((e) => e.kind === 'notice')).toEqual([]);
+  });
+
   // The cancel can land before begin() and find the session's previous, already-ended turn: the
   // server answers 202 naming it. That is not this turn's cancel, so the tries go on.
   it("a 202 naming the previous turn is not success: it retries until the new turn's", async () => {

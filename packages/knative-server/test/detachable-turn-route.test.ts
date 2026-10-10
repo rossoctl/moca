@@ -394,8 +394,24 @@ describe('POST /v1/turn/cancel', () => {
     await vi.waitFor(async () => expect(await redis.get(activeKey(sessionId))).not.toBeNull());
     const c = await postJson('/v1/turn/cancel', { sessionId }, auth);
     expect(c.status).toBe(202);
+    expect(c.json).toEqual({ turnId: expect.any(String), outcome: 'requested' });
     const res = await turn;
     expect(res.raw).toContain('"abortReason":"cancelled"');
+  });
+
+  it("with no turn running, the 202 names the last retained turn with outcome 'ended'", async () => {
+    vi.mocked(executeTurn).mockResolvedValueOnce({
+      sessionId,
+      response: 'x',
+      stopReason: 'stop',
+    } as any);
+    const auth = { Authorization: `Bearer ${mint(sessionId)}` };
+    const res = await sse({ sessionId, prompt: 'p', detachable: true }, auth);
+    const turnId = /"type":"turn"[^}]*"turnId":"([^"]+)"/.exec(res.raw)?.[1];
+    expect(turnId).toBeDefined();
+    const c = await postJson('/v1/turn/cancel', { sessionId }, auth);
+    expect(c.status).toBe(202);
+    expect(c.json).toEqual({ turnId, outcome: 'ended' });
   });
 
   it('409 turn_mismatch for another turn id, 404 with nothing to cancel', async () => {

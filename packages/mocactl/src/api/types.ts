@@ -164,4 +164,6 @@ export interface HarnessApi {
 
 export interface CancelTurnResult {
   turnId?: string;
+  /** 'requested': a running turn was asked to stop; 'ended': it had already ended. Older servers omit it. */
+  outcome?: 'requested' | 'ended';
 }

@@ -1,6 +1,7 @@
 import { ApiError, TOKEN_CODES, TurnCancelledError } from '../api/errors.js';
 import { isTerminal, type TurnFrame } from '../api/frames.js';
 import type {
+  CancelTurnResult,
   ControlPlaneApi,
   CreateSessionRequest,
   HarnessApi,
@@ -38,9 +39,10 @@ export const CANCEL_TIMEOUT_MS = 5000;
 export const PENDING_CANCEL_MS = 2000;
 /**
  * That turnId-less cancel can land before the server's `begin()`, which answers turn_not_found
- * (or a 202 naming the previous, ended turn): it is tried this many times in all, this far apart.
+ * (or a 202 for a turn that had already ended): it is tried this many times in all, this far apart.
  * The spacing is 3 s from the first try to the last; each try may also take up to
- * CANCEL_TIMEOUT_MS. On a harness without the route every try answers 404 and the tries run out.
+ * CANCEL_TIMEOUT_MS. On a harness without the route every try answers a bare 404 (read as
+ * turn_not_found) and the tries run out.
  */
 export const BLIND_CANCEL_TRIES = 3;
 export const BLIND_CANCEL_RETRY_MS = 1500;
@@ -136,7 +138,10 @@ export class ActiveSession {
   };
   /** The running attach job is a 409's, following a turn this client did not start. */
   private conflict?: { resend: PromptJob };
-  /** The last turn any `turn` frame named: a turnId-less cancel's 202 for it cancelled nothing new. */
+  /**
+   * The last turn any `turn` frame named. For a server that sends no `outcome`, a turnId-less
+   * cancel's 202 naming it cancelled nothing new.
+   */
   private lastTurnId?: string;
   /**
    * The turnId-less cancel after a pending Esc's deadline, until it settles. The queue waits for
@@ -278,10 +283,15 @@ export class ActiveSession {
   private async cancelBySession(): Promise<boolean> {
     for (let attempt = 1; ; attempt++) {
       try {
-        const named = await this.cancelOnce(undefined);
-        // A 202 naming the session's previous, already-ended turn (the cancel landed before
-        // begin()) cancelled nothing of this turn: it reads as finding no turn.
-        if (named === undefined || named !== this.lastTurnId) return true;
+        const r = await this.cancelOnce(undefined);
+        // A 202 for a turn that had already ended (the cancel landed before begin()) cancelled
+        // nothing of this turn: it reads as finding no turn. The server says so with `outcome`;
+        // an older one does not, and then a 202 naming the last turn this session saw is that.
+        const ended =
+          r.outcome !== undefined
+            ? r.outcome === 'ended'
+            : r.turnId !== undefined && r.turnId === this.lastTurnId;
+        if (!ended) return true;
       } catch (err) {
         if (!(err instanceof ApiError && err.code === 'turn_not_found')) {
           this.emit({ kind: 'notice', text: CANCEL_FAILED_NOTICE, tone: 'error' });
@@ -297,9 +307,9 @@ export class ActiveSession {
 
   /**
    * One server-side cancel, bounded by cancelTimeoutMs; throws when it was not accepted. Resolves
-   * with the turnId the 202 named, if any.
+   * with what the 202 named (the turn, and whether it was running or had ended), if anything.
    */
-  private async cancelOnce(turnId: string | undefined): Promise<string | undefined> {
+  private async cancelOnce(turnId: string | undefined): Promise<CancelTurnResult> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = new AbortController();
     const timeout = new Promise<never>((_, reject) => {
@@ -316,7 +326,7 @@ export class ActiveSession {
         token: this.token.token,
         signal: abort.signal,
       });
-      return r ? r.turnId : undefined;
+      return r ?? {};
     };
     try {
       return await Promise.race([call(), timeout]);

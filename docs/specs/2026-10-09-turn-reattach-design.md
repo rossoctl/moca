@@ -135,8 +135,8 @@ refreshes the turn's watch key (§5.3).
 Body: `{ sessionId, turnId? }`. Requires a session token with `turn:write` and `sid` equal to
 `sessionId`.
 
-- `202 {"turnId":"…"}`: the cancel was requested of the running turn, or the turn has already ended
-  (a no-op).
+- `202 {"turnId":"…","outcome":"requested"|"ended"}`: the cancel was requested of the running turn
+  (`requested`), or the turn `turnId` names had already ended (`ended`, a no-op).
 - `409 {"error":"turn_mismatch","turnId":"<running>"}`: `turnId` was given and names a different turn
   than the running one, so a stale cancel cannot kill a newer turn.
 - `404 {"error":"turn_not_found"}`: no running or retained turn.
@@ -269,7 +269,8 @@ wired into any deployment.
 - A `turn` frame marks the turn detachable: `ActiveSession` records its `turnId` and the last frame
   id. The block reducer ignores `turn` frames (no event block).
 - `HarnessClient` gains `attach({sessionId, token, lastEventId, signal})` and
-  `cancelTurn({sessionId, turnId?, token})`, which resolves with the `turnId` its `202` names.
+  `cancelTurn({sessionId, turnId?, token})`, which resolves with the `turnId` and `outcome` its `202`
+  names. A bare `404` (a harness without the route) reads as `turn_not_found`, as on attach.
   `readSse` surfaces the `id:` field.
 
 ### 6.2 Transcript
@@ -312,8 +313,9 @@ A turn that is not detachable (older harness, Knative) quits as today.
   - No frame by the deadline: abort the fetch, then `POST /v1/turn/cancel` without a `turnId`.
     Closing a detachable request detaches the turn rather than cancelling it, so the abort alone
     would leave it running.
-- The turnId-less cancel can land before `begin()`. `turn_not_found`, or a `202` that names the
-  session's previous (ended) turn, is retried: 3 tries, 1.5 s apart.
+- The turnId-less cancel can land before `begin()`. `turn_not_found`, or a `202` for a turn that had
+  already ended, is retried: 3 tries, 1.5 s apart. The `202`'s `outcome: "ended"` says so; from a
+  server that sends no `outcome`, a `202` naming the last turn this client saw reads the same.
   - A `202` for a new turn: cancelled.
   - Every try finds no turn: no turn holds the session (the abort stopped it, or it never began).
     That is success, with no notice.
