@@ -254,6 +254,22 @@ async function defaultFork(
   }
 }
 
+/**
+ * Fetch-level errors where the request is known to have reached the server. undici's
+ * `headersTimeout` and `bodyTimeout` only fire after the request is on the wire.
+ * `UND_ERR_SOCKET` is deliberately excluded: it also fires when the server resets before
+ * reading the request. Connect-phase codes (`ECONNREFUSED`, `ENOTFOUND`,
+ * `UND_ERR_CONNECT_TIMEOUT`, TLS errors) are not here either, so they stay terminal.
+ * Verified against Node 24 with a dispatcher probe (see PR #518 for the shapes).
+ */
+const AFTER_SEND_CAUSE_CODES: ReadonlySet<string> = new Set([
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+function isAfterSendError(causeCode: string | undefined): boolean {
+  return causeCode !== undefined && AFTER_SEND_CAUSE_CODES.has(causeCode);
+}
+
 export interface SpawnWorkerDeps {
   /** Overrides stdin reading; the real binary routes `process.stdin` through main.ts. */
   readStdin?: () => Promise<string>;
@@ -327,16 +343,17 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
         continue;
       }
       const message = err instanceof Error ? err.message : String(err);
-      // Server rejection (HTTP status) is terminal; client-side fetch error (no status) is not —
-      // the leaf is likely still running, and `subagents` reconciles via `/runs/status`.
-      const serverRejected = err instanceof ApiError && err.status > 0;
-      if (serverRejected) {
+      // Three cases: server replied (terminal), fetch died after send (reconcile — server may
+      // have the record), fetch died before send (terminal — request never left).
+      if (err instanceof ApiError && err.status > 0) {
         ledger.updateState(payload.sessionId, 'failed', { detail: message, now: rt.now() });
-      } else {
+      } else if (err instanceof ApiError && err.status === 0 && isAfterSendError(err.causeCode)) {
         ledger.updateState(payload.sessionId, 'running', {
           detail: `client disconnected (${message}); reconciling`,
           now: rt.now(),
         });
+      } else {
+        ledger.updateState(payload.sessionId, 'failed', { detail: message, now: rt.now() });
       }
       return 1;
     }

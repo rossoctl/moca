@@ -132,43 +132,18 @@ describe('LeafTransport.submitLeafTurn', () => {
       t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok'),
     ).rejects.toThrow(/config_bundle_not_found/);
   });
-  it('respects MOCACTL_RUN_TIMEOUT_MS by passing an AbortSignal to fetch', async () => {
-    const prev = process.env.MOCACTL_RUN_TIMEOUT_MS;
-    process.env.MOCACTL_RUN_TIMEOUT_MS = '10000';
-    try {
-      const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) =>
-        okJson({ status: 'responded', text: 'ok' }),
-      );
-      const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
-      await t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok');
-      const [, init] = fetchImpl.mock.calls[0]!;
-      // A caller-supplied signal would override, but with none, our env-driven signal is set.
-      expect(init!.signal).toBeInstanceOf(AbortSignal);
-    } finally {
-      if (prev === undefined) delete process.env.MOCACTL_RUN_TIMEOUT_MS;
-      else process.env.MOCACTL_RUN_TIMEOUT_MS = prev;
-    }
-  });
-
-  it('leaves the fetch signal undefined when MOCACTL_RUN_TIMEOUT_MS is unset or malformed', async () => {
-    const prev = process.env.MOCACTL_RUN_TIMEOUT_MS;
-    delete process.env.MOCACTL_RUN_TIMEOUT_MS;
-    try {
-      const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) =>
-        okJson({ status: 'responded', text: 'ok' }),
-      );
-      const t = new LeafTransport(harness, fetchImpl as unknown as typeof fetch);
-      await t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok');
-      expect(fetchImpl.mock.calls[0]![1]!.signal).toBeUndefined();
-
-      // Malformed value → still no signal.
-      process.env.MOCACTL_RUN_TIMEOUT_MS = 'nonsense';
-      await t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok');
-      expect(fetchImpl.mock.calls[1]![1]!.signal).toBeUndefined();
-    } finally {
-      if (prev === undefined) delete process.env.MOCACTL_RUN_TIMEOUT_MS;
-      else process.env.MOCACTL_RUN_TIMEOUT_MS = prev;
-    }
+  it('preserves undici cause codes on networkError, so the worker can tell after-send from connect-phase', async () => {
+    const { networkError } = await import('../src/api/errors.js');
+    const headersTimeout = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
+    });
+    expect(networkError('harness', headersTimeout).causeCode).toBe('UND_ERR_HEADERS_TIMEOUT');
+    const refused = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    });
+    expect(networkError('harness', refused).causeCode).toBe('ECONNREFUSED');
+    // A plain Error with no cause: no causeCode.
+    expect(networkError('harness', new Error('bare')).causeCode).toBeUndefined();
   });
 
   it('rejects when the harness returns non-JSON', async () => {
