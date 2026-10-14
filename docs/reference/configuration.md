@@ -239,14 +239,15 @@ the supported setup.
 
 ## mocactl
 
-| Variable               | Default                      | Notes                                                   |
-| ---------------------- | ---------------------------- | ------------------------------------------------------- |
-| `SH_CONTROL_PLANE_URL` | saved config                 | Precedence: flag, env, config                           |
-| `SH_HARNESS_URL`       | saved config, else discovery | Overrides the harness URL that discovery returns        |
-| `XDG_CONFIG_HOME`      | `~/.config`                  | `mocactl/config.json` and the login file (holds tokens) |
-| `XDG_STATE_HOME`       | `~/.local/state`             | Transcripts and exports                                 |
-| `VISUAL` / `EDITOR`    | `vi`                         | External editor                                         |
-| `NO_COLOR`             | off                          | Disables colour when non-empty                          |
+| Variable                 | Default                      | Notes                                                                                                    |
+| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `SH_CONTROL_PLANE_URL`   | saved config                 | Precedence: flag, env, config                                                                            |
+| `SH_HARNESS_URL`         | saved config, else discovery | Overrides the harness URL that discovery returns                                                         |
+| `MOCACTL_RUN_TIMEOUT_MS` | unset                        | Integer ms; client-side ceiling for `spawn`'s sync `POST /v1/runs`. Unset leaves undici's 5-min default. |
+| `XDG_CONFIG_HOME`        | `~/.config`                  | `mocactl/config.json` and the login file (holds tokens)                                                  |
+| `XDG_STATE_HOME`         | `~/.local/state`             | Transcripts and exports                                                                                  |
+| `VISUAL` / `EDITOR`      | `vi`                         | External editor                                                                                          |
+| `NO_COLOR`               | off                          | Disables colour when non-empty                                                                           |
 
 `MOCACTL_VERSION`, `MOCACTL_INSTALL_DIR` and `MOCACTL_BASE_URL` (the releases URL, https only) are read
 by the installer (`scripts/install-mocactl.sh`), not by `mocactl` itself.

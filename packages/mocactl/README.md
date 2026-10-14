@@ -115,7 +115,9 @@ can list them in isolation.
 `mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live
 child is `running`; past the grace with a dead child it is `unknown`. Without `--tag`, every
-spawn you own is listed, oldest first by dispatch time.
+spawn you own is listed, oldest first by dispatch time. A client-side fetch cutoff on the
+worker (undici's 5-min default) is reconciled on the next poll, not reported as failed; set
+`MOCACTL_RUN_TIMEOUT_MS` (ms) to override the ceiling.
 
 `mocactl get SESSIONID` fetches a terminal result and writes files to `--out DIR` (default: cwd):
 `<sid>.text` for a prompt response, `<sid>.patch` for a solve result (with a trailing newline
