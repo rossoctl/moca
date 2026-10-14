@@ -281,8 +281,10 @@ export interface SpawnWorkerDeps {
 
 /**
  * Detached-worker entry: read payload from stdin, POST /v1/runs, record outcome, exit.
- * Every exit path with a sessionId writes a terminal ledger line. The malformed-stdin branch
- * has no sessionId to anchor on; the parent's row stays authoritative there.
+ * Every exit path with a sessionId writes a ledger line — terminal for server replies and
+ * connect-phase failures, non-terminal `running` for after-send disconnects so `subagents`
+ * reconciles via `/runs/status`. The malformed-stdin branch has no sessionId to anchor on;
+ * the parent's row stays authoritative there.
  */
 export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): Promise<number> {
   const ledger = deps.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);

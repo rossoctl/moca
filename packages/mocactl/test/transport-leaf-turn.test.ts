@@ -132,18 +132,27 @@ describe('LeafTransport.submitLeafTurn', () => {
       t.submitLeafTurn({ sessionId: 's', kind: 'prompt', prompt: 'p' }, 'tok'),
     ).rejects.toThrow(/config_bundle_not_found/);
   });
-  it('preserves undici cause codes on networkError, so the worker can tell after-send from connect-phase', async () => {
+  it('preserves undici cause codes on networkError and folds them into the message', async () => {
     const { networkError } = await import('../src/api/errors.js');
+    // Real undici shape: top-level message is bare "fetch failed"; the code lives on .cause.
     const headersTimeout = Object.assign(new TypeError('fetch failed'), {
       cause: Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
     });
-    expect(networkError('harness', headersTimeout).causeCode).toBe('UND_ERR_HEADERS_TIMEOUT');
+    const e1 = networkError('harness', headersTimeout);
+    expect(e1.causeCode).toBe('UND_ERR_HEADERS_TIMEOUT');
+    expect(e1.message).toBe('fetch failed (UND_ERR_HEADERS_TIMEOUT)');
+
     const refused = Object.assign(new TypeError('fetch failed'), {
-      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      cause: Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' }),
     });
-    expect(networkError('harness', refused).causeCode).toBe('ECONNREFUSED');
-    // A plain Error with no cause: no causeCode.
-    expect(networkError('harness', new Error('bare')).causeCode).toBeUndefined();
+    const e2 = networkError('harness', refused);
+    expect(e2.causeCode).toBe('ECONNREFUSED');
+    expect(e2.message).toBe('fetch failed (ECONNREFUSED)');
+
+    // No cause: leave the message alone.
+    const e3 = networkError('harness', new Error('bare'));
+    expect(e3.causeCode).toBeUndefined();
+    expect(e3.message).toBe('bare');
   });
 
   it('rejects when the harness returns non-JSON', async () => {

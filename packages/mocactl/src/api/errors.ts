@@ -62,7 +62,10 @@ export function networkError(source: ErrorSource, err: unknown): ApiError {
     typeof (cause as { code: unknown }).code === 'string'
       ? (cause as { code: string }).code
       : undefined;
-  return new ApiError(source, 0, 'network_error', message, undefined, causeCode);
+  // undici's top-level message is just "fetch failed"; fold the cause code in so the
+  // operator can tell why.
+  const detail = causeCode ? `${message} (${causeCode})` : message;
+  return new ApiError(source, 0, 'network_error', detail, undefined, causeCode);
 }
 
 export const TOKEN_CODES: ReadonlySet<string> = new Set([
