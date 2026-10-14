@@ -316,21 +316,29 @@ export async function runSpawnWorker(rt: Runtime, deps: SpawnWorkerDeps = {}): P
       });
       return view.state === 'done' ? 0 : 1;
     } catch (err) {
-      // `errorFromResponse` folds `body.reason` into `code`, so 503 saturated arrives as
-      // ApiError(status: 503, code: 'saturated'); anything else is terminal.
+      // `errorFromResponse` folds body.reason into code, so saturated is ApiError(503, 'saturated').
       const saturated = err instanceof ApiError && err.status === 503 && err.code === 'saturated';
-      if (!saturated) {
-        ledger.updateState(payload.sessionId, 'failed', {
-          detail: err instanceof Error ? err.message : String(err),
+      if (saturated) {
+        if (attempt >= MAX_SATURATED_ATTEMPTS) break;
+        const remainingMs = MAX_RETRY_WALL_MS - (rt.now() - retryStart);
+        if (remainingMs <= 0) break;
+        const requestedMs = (err.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
+        await rt.sleep(Math.max(0, Math.min(requestedMs, remainingMs)));
+        continue;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      // Server rejection (HTTP status) is terminal; client-side fetch error (no status) is not —
+      // the leaf is likely still running, and `subagents` reconciles via `/runs/status`.
+      const serverRejected = err instanceof ApiError && err.status > 0;
+      if (serverRejected) {
+        ledger.updateState(payload.sessionId, 'failed', { detail: message, now: rt.now() });
+      } else {
+        ledger.updateState(payload.sessionId, 'running', {
+          detail: `client disconnected (${message}); reconciling`,
           now: rt.now(),
         });
-        return 1;
       }
-      if (attempt >= MAX_SATURATED_ATTEMPTS) break;
-      const remainingMs = MAX_RETRY_WALL_MS - (rt.now() - retryStart);
-      if (remainingMs <= 0) break;
-      const requestedMs = (err.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
-      await rt.sleep(Math.max(0, Math.min(requestedMs, remainingMs)));
+      return 1;
     }
   }
   ledger.updateState(payload.sessionId, 'failed', {

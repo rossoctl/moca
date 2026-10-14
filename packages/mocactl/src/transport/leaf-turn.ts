@@ -67,6 +67,14 @@ export interface LeafHarness {
   baseUrl(): Promise<string>;
 }
 
+/** `MOCACTL_RUN_TIMEOUT_MS` → signal for the sync POST /v1/runs; unset/malformed = no override. */
+function runTimeoutSignal(): AbortSignal | undefined {
+  const raw = process.env.MOCACTL_RUN_TIMEOUT_MS;
+  if (raw === undefined) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? AbortSignal.timeout(n) : undefined;
+}
+
 export class LeafTransport {
   constructor(
     private readonly harness: LeafHarness,
@@ -82,6 +90,9 @@ export class LeafTransport {
     const base = trimTrailingSlashes(await this.harness.baseUrl());
     let res: Response;
     try {
+      // Operators whose leaves exceed undici's default `headersTimeout` (5 min) set
+      // `MOCACTL_RUN_TIMEOUT_MS` to widen it; otherwise the worker's catch reconciles via
+      // `/runs/status`.
       res = await this.fetchImpl(`${base}/v1/runs`, {
         method: 'POST',
         headers: {
@@ -89,7 +100,7 @@ export class LeafTransport {
           authorization: `Bearer ${sessionToken}`,
         },
         body: JSON.stringify(envelope),
-        signal,
+        signal: signal ?? runTimeoutSignal(),
       });
     } catch (err) {
       throw networkError('harness', err);
