@@ -36,3 +36,12 @@ export {
   type SandboxExecServer,
 } from './gen/sandbox/v1/sandbox.js';
 export { SANDBOX_ENV_ALLOW, sandboxEnv } from './sandbox-env.js';
+export {
+  createPodBashOps,
+  createPodEditOps,
+  createPodFindOps,
+  createPodLsOps,
+  createPodReadOps,
+  createPodWriteOps,
+} from './operations.js';
+export { createPodGrepTool } from './grep-tool.js';

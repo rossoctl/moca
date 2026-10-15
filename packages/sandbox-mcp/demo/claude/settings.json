@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__sandbox__*"
+    ],
+    "deny": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Task",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Workflow"
+    ]
+  }
+}

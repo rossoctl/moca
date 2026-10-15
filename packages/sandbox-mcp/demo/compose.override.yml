@@ -1,0 +1,9 @@
+# SPIKE, local dev only: publish the relay's SandboxExec listener on host loopback so a
+# sandbox-mcp process on the host can dial it. Binding 0.0.0.0 also exposes it on moca-sandbox;
+# the sandbox does not hold MOCA_RELAY_EXEC_TOKEN, and this file is never used on the rig.
+services:
+  sandbox-relay:
+    environment:
+      MOCA_RELAY_EXEC_ADDR: 0.0.0.0:9444
+    ports:
+      - '127.0.0.1:9444:9444'

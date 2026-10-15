@@ -1,0 +1,27 @@
+{
+  "name": "@moca/sandbox-mcp",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SPIKE: Pi's seven tools served over MCP against a sandbox relay (docs/moca 2026-10-09 prototype plan)",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "node --import tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "link:../../pi-fork/packages/coding-agent",
+    "@grpc/grpc-js": "^1.14.5",
+    "@moca/k8s-sandbox": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

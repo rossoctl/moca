@@ -1,0 +1,37 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sandbox": {
+      "type": "remote",
+      "url": "http://localhost:8787/mcp",
+      "oauth": false,
+      "enabled": true
+    }
+  },
+  "tools": {
+    "bash": false,
+    "read": false,
+    "edit": false,
+    "write": false,
+    "patch": false,
+    "glob": false,
+    "grep": false,
+    "list": false,
+    "lsp": false,
+    "webfetch": false,
+    "websearch": false,
+    "task": false
+  },
+  "permission": {
+    "bash": "deny",
+    "read": "deny",
+    "edit": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "lsp": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "external_directory": "deny"
+  }
+}
