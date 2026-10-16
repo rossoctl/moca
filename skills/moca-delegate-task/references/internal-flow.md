@@ -18,11 +18,11 @@ creates sandboxes.
    (`POST /internal{ctx}/freeze`).
 5. **Session:** `mocactl spawn --workload <id> "…"` creates a session for the task on the control
    plane (`POST /v1/sessions`). Fan-out is one `spawn` per task, all on the same workload.
-6. **Run:** the spawned task sends `POST /runs` naming the workload. The supervisor picks a shared
-   sandbox, fetches the frozen revision once (`GET /internal{ctx}/revisions/{sha}/bundle`, then
-   cached), and copies it in with the task through the relay (`SandboxExec.Exec`).
+6. **Run:** the spawned task sends `POST /v1/runs` naming the workload. The supervisor picks a
+   shared sandbox, fetches the frozen revision once (`GET /internal{ctx}/revisions/{sha}/bundle`,
+   then cached), and copies it in with the task through the relay (`SandboxExec.Exec`).
 7. **Work:** the agent starts in the context: a read-only view, or with `--writable` its own copy
-   that is discarded when the run ends. The result comes back in the `/runs` response;
+   that is discarded when the run ends. The result comes back in the `/v1/runs` response;
    `mocactl subagents` and `mocactl get` show it.
 8. **Clean up:** `mocactl workloads delete <id>` calls `DELETE /workloads/{id}`, and MOCA deletes
    the Context (`DELETE /internal{ctx}`).

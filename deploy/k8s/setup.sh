@@ -5,7 +5,8 @@
 #                       [--build|--skip-build] [--tls-cert FILE --tls-key FILE]
 #                       [--relay-tls-cert FILE --relay-tls-key FILE] [--tls-secret NAME]
 #
-# Environment: SH_GITHUB_CLIENT_ID, SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
+# Environment: KIND_CLUSTER (kind only: the cluster name, default moca), SH_GITHUB_CLIENT_ID,
+# SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
 # SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
 # (default 120), SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; with SH_SANDBOX_COUNT>0 too, the stack is tiered
@@ -30,8 +31,11 @@ set -euo pipefail
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
-KIND_CLUSTER=moca
-KIND_CONTEXT=kind-moca
+# KIND_CLUSTER names the kind cluster (default moca). skills/moca-delegate-task/demo/setup.sh sources
+# this script (SH_SOURCE_ONLY=1) and sets KIND_CLUSTER and KIND_CONTEXT before calling main, so keep
+# both read at run time, not parse time.
+KIND_CLUSTER="${KIND_CLUSTER:-moca}"
+KIND_CONTEXT="kind-$KIND_CLUSTER"
 MIN_KIND_VERSION=0.24.0
 NS=moca
 SBX_NS=moca-sandbox

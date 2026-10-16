@@ -29,6 +29,7 @@ CS_IMAGE=dev.local/context-service:demo
 CONTEXT_SERVICE_REF="${CONTEXT_SERVICE_REF:-79518260ea626299048657030ed87acce448d2f5}"
 CONTEXT_SERVICE_GIT_URL=https://github.com/rossoctl/context-service.git
 STATE_DIR="${MOCA_DEMO_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/moca-kind-demo}"
+STATE_MARKER=.moca-kind-demo
 CP_URL=http://127.0.0.1:8090
 HARNESS_URL=http://127.0.0.1:8080
 CS_URL=http://127.0.0.1:8081
@@ -71,7 +72,11 @@ case "${1:-}" in
   [ "$#" -eq 1 ] || die 'usage: setup.sh --delete'
   need kind
   kind delete cluster --name "$CLUSTER"
-  rm -rf "$STATE_DIR"
+  # Only a directory this script made: a mis-set MOCA_DEMO_STATE must never be removed.
+  if [ -e "$STATE_DIR" ]; then
+    [ -f "$STATE_DIR/$STATE_MARKER" ] || die "refusing to delete $STATE_DIR: it has no $STATE_MARKER marker"
+    rm -rf "$STATE_DIR"
+  fi
   exit 0
   ;;
 --build | --skip-build) BUILD_ARG="$1" ;;
@@ -137,9 +142,12 @@ log "Context Service $CONTEXT_SERVICE_REF"
 if [ "$BUILD_ARG" != --skip-build ]; then
   docker build --load -t "$CS_IMAGE" "$cs_src"
   kind load docker-image "$CS_IMAGE" --name "$CLUSTER"
+elif ! docker exec "$CLUSTER-control-plane" crictl inspecti "$CS_IMAGE" >/dev/null 2>&1; then
+  die "--skip-build: $CS_IMAGE is not on the cluster yet; run setup.sh once without --skip-build"
 fi
 # The matching client, for ctx pack (#56 is needed on the client as well as the server).
 mkdir -p "$STATE_DIR/bin"
+: >"$STATE_DIR/$STATE_MARKER"
 if command -v go >/dev/null 2>&1; then
   (cd "$cs_src" && go build -o "$STATE_DIR/bin/contextctl" ./cmd/contextctl)
   log "built $STATE_DIR/bin/contextctl"
@@ -208,6 +216,8 @@ done
 # There is no refresh token: after DEMO_TOKEN_TTL seconds, re-run setup.sh. Never do this on a
 # real deployment; use `mocactl login`.
 export XDG_CONFIG_HOME="$STATE_DIR/config" XDG_STATE_HOME="$STATE_DIR/state"
+# mocactl prefers these over its config file; pin them so a real deployment's never wins.
+export SH_CONTROL_PLANE_URL="$CP_URL" SH_HARNESS_URL="$HARNESS_URL"
 api="$(kc -n "$MOCA_NS" exec deploy/moca-control-plane -c control-plane -- \
   node --import tsx --input-type=module -e \
   "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';

@@ -89,7 +89,7 @@
 
   <line class="line" x1="250" y1="380" x2="543" y2="380"/>
   <g class="step"><circle cx="272" cy="380" r="10"/><text x="272" y="380">6</text></g>
-  <text class="api" x="290" y="374">POST /runs</text>
+  <text class="api" x="290" y="374">POST /v1/runs</text>
   <text class="sub" x="290" y="395">mocactl spawn --workload; result in reply</text>
 
   <line class="line" x1="250" y1="420" x2="543" y2="420"/>

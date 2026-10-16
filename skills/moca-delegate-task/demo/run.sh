@@ -17,6 +17,9 @@ TIMEOUT="${DEMO_TIMEOUT:-300}"
 OUT="$STATE_DIR/results/$(date +%Y%m%dT%H%M%S)"
 # The demo-only login setup.sh wrote, and the contextctl it built.
 export XDG_CONFIG_HOME="$STATE_DIR/config" XDG_STATE_HOME="$STATE_DIR/state"
+# mocactl prefers these over its config file. Pin them to the demo so a real deployment's
+# exported URLs can never receive the demo token or the upload.
+export SH_CONTROL_PLANE_URL=http://127.0.0.1:8090 SH_HARNESS_URL=http://127.0.0.1:8080
 export PATH="$STATE_DIR/bin:$PATH"
 WORKLOAD=''
 

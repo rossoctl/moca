@@ -37,7 +37,10 @@ ln -s "$PWD/skills/moca-delegate-task" ~/.agents/skills/moca-delegate-task
 
 Copy the directory instead of linking it if you want a snapshot. In Claude Code, add the
 permissions in [`settings.example.json`](settings.example.json) so delegation does not depend on
-the auto-mode classifier.
+the auto-mode classifier. With those rules Claude Code does not ask before uploading a directory;
+the skill asks instead. To keep Claude Code's prompt for the upload, use
+[`settings.restricted.example.json`](settings.restricted.example.json). See "Claude Code
+permissions" in [`SKILL.md`](SKILL.md).
 
 ## Use
 

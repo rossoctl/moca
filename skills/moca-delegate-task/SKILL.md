@@ -47,16 +47,25 @@ forth with the user), secrets, or durable writes to your working tree.
 Run each command on its own and copy the ids it prints into the next one. Shell variables do not
 survive between an agent's tool calls, and a single command matches the permission rules below.
 
-1. Pack the directory. `.git` is skipped unless you add `--include-git`; symbolic links are refused.
+1. Make a temporary directory outside the working tree and keep the path it prints. The packed file
+   is a full copy of the directory, so it must not land in the repository, where it could be
+   committed or packed again.
 
    ```bash
-   contextctl ctx pack ./repo -o repo.context
+   mktemp -d
+   ```
+
+   Pack the directory into it. `.git` is skipped unless you add `--include-git`; symbolic links are
+   refused.
+
+   ```bash
+   contextctl ctx pack ./repo -o TMP_DIR/repo.context
    ```
 
 2. Create the workload. Keep the id it prints: there is no command that lists workloads.
 
    ```bash
-   mocactl workloads create --context repo.context
+   mocactl workloads create --context TMP_DIR/repo.context
    ```
 
    `--json` prints `{"workloadId","status","contextType","revision","files","bytes"}`.
@@ -86,10 +95,11 @@ survive between an agent's tool calls, and a single command matches the permissi
    mocactl get SESSION_ID --out results/
    ```
 
-6. Delete the workload, also after a failure or an interruption.
+6. Delete the workload and the local packed file, also after a failure or an interruption.
 
    ```bash
    mocactl workloads delete WORKLOAD_ID
+   rm -r TMP_DIR
    ```
 
 ## Writing prompts
@@ -119,17 +129,29 @@ survive between an agent's tool calls, and a single command matches the permissi
 
 ## Cleanup
 
-Always run `mocactl workloads delete ID` for every workload you created, and tell the user about
-any delete that failed so they can retry it.
+Always run `mocactl workloads delete ID` for every workload you created, and remove the temporary
+directory holding the packed file. Tell the user about any delete that failed so they can retry it.
 
 ## Claude Code permissions
 
 Delegation needs only these commands. Allowing them keeps the skill working when Claude Code's
 auto-mode classifier is unavailable
 ([#530](https://github.com/rossoctl/moca/issues/530), Claude Code's classifier vs MOCA's local and
-remote split); the remote commands run in MOCA sandboxes, not under Claude Code's classifier. Add
-them to `.claude/settings.json` or `~/.claude/settings.json`, as in
-[`settings.example.json`](settings.example.json):
+remote split); the remote commands run in MOCA sandboxes, not under Claude Code's classifier.
+
+**With these rules, Claude Code does not ask before uploading a directory.** `ctx pack` and
+`workloads create` are the two steps that send local files off the machine, and the skill's "get
+the user's go-ahead" step becomes the only check before them. That step is an instruction to the
+agent, not a control. Choose one of two sets and add it to `.claude/settings.json` or
+`~/.claude/settings.json`:
+
+- [`settings.example.json`](settings.example.json): every delegation command, including the upload.
+  Nothing prompts.
+- [`settings.restricted.example.json`](settings.restricted.example.json): only the commands that
+  run, watch and clean up tasks. Claude Code still asks before `ctx pack` and `workloads create`,
+  and those two steps then also need the classifier, or a person, to approve them.
+
+The full set:
 
 ```json
 {

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mocactl spawn *)",
+      "Bash(mocactl subagents *)",
+      "Bash(mocactl get *)",
+      "Bash(mocactl workloads get *)",
+      "Bash(mocactl workloads delete *)"
+    ]
+  }
+}
