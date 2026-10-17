@@ -527,4 +527,53 @@ describe('lifecycle races', () => {
     expect((await call('GET', '/workloads/race', alice)).body).toMatchObject({ status: 'deleted' });
     expect(await quotaOf(alice)).toBe(0);
   });
+
+  it('a GET in the delete window reports deleting, writes nothing, and cannot resurrect it', async () => {
+    await create(alice, 'observed');
+    const key = `sh:wl:${createHash('sha256').update(alice).digest('hex').slice(0, 32)}:observed`;
+    // The delete is held at Context Service, so the record is already `deleting` while it waits.
+    const release = cs.hold('delete');
+    const deleting = call('DELETE', '/workloads/observed', alice);
+    await vi.waitFor(() => expect(cs.calls.some((c) => c.method === 'DELETE')).toBe(true));
+    const raw = await redis.get(key);
+    expect(await call('GET', '/workloads/observed', alice)).toMatchObject({
+      status: 200,
+      body: { status: 'deleting' },
+    });
+    // A GET in the delete's window leaves the stored record byte-identical (#363's write-back race).
+    expect(await redis.get(key)).toBe(raw);
+    release();
+    expect(await deleting).toEqual({ status: 204, body: null });
+    expect((await call('GET', '/workloads/observed', alice)).body).toMatchObject({
+      status: 'deleted',
+    });
+    // A deleted workload cannot return to an active state.
+    expect(
+      await call('POST', '/workloads/observed/activate', alice, { revision: REVISION }),
+    ).toEqual({ status: 404, body: { error: 'workload_not_found' } });
+    expect(await call('POST', '/workloads/observed/uploads', alice)).toEqual({
+      status: 404,
+      body: { error: 'workload_not_found' },
+    });
+    expect(cs.contexts.size).toBe(0);
+    expect(await quotaOf(alice)).toBe(0);
+  });
+
+  it('two deletes racing converge on one deleted record and one quota release', async () => {
+    await create(alice, 'twice');
+    // The first delete is held at Context Service, the record already `deleting`.
+    const release = cs.hold('delete');
+    const first = call('DELETE', '/workloads/twice', alice);
+    await vi.waitFor(() => expect(cs.calls.some((c) => c.method === 'DELETE')).toBe(true));
+    // The second reads the `deleting` record and finishes the same delete.
+    const second = await call('DELETE', '/workloads/twice', alice);
+    release();
+    expect(second).toEqual({ status: 204, body: null });
+    expect(await first).toEqual({ status: 204, body: null });
+    expect((await call('GET', '/workloads/twice', alice)).body).toMatchObject({
+      status: 'deleted',
+    });
+    expect(cs.contexts.size).toBe(0);
+    expect(await quotaOf(alice)).toBe(0);
+  });
 });

@@ -68,6 +68,16 @@ same revision is a no-op.
 `DELETE` deletes the Context, then marks the workload `deleted` and frees its name and quota. If
 Context Service fails, the workload stays `deleting` and a repeated `DELETE` retries.
 
+A workload record moves through a fixed state machine — `creating` → `awaiting_upload` → `ready` →
+`deleting` → `deleted`, with no other transitions — and every record write is a compare-and-set on
+the record's `generation` and status. A `deleted` record cannot become active again: activation and
+upload grants refuse it, and it expires after `MOCA_WORKLOAD_DELETED_TTL_SECONDS` (a day by
+default), after which the name is reusable. A re-created name gets a new `generation` and a new
+Context, so a request from before the delete cannot act on the workload that now owns the name.
+`GET` is read-only: it reports the stored status, `deleting` and `deleted` included, and never
+writes the record, so a read can neither resurrect a deleted workload nor overwrite a concurrent
+lifecycle change.
+
 A request that loses a race with another lifecycle request, such as an activation racing a delete,
 answers `409 workload_state_changed` and changes nothing. Context Service failures answer
 `502 context_service_error`.
