@@ -381,9 +381,11 @@ Records live in the namespace's Redis, under `sbx:` keys. Subjects are hashed, a
 plane's ownership keys already are, so the keyspace names no logins:
 
 - `sbx:sandbox:<id>`: a hash with the record; it expires at the end of retention;
-- `sbx:live` (id → `expiresAt`) and `sbx:ended` (id → deletion time): sorted sets;
+- `sbx:live` (id → `expiresAt`): a sorted set of the sandboxes not deleted;
 - `sbx:owner:<subject hash>` and `sbx:all` (id → `createdAt`): sorted sets for listing;
-- `sbx:name:<subject hash>:<name>`: the id, set with `NX` and expiring at the sandbox's `expiresAt`.
+- `sbx:name:<subject hash>:<name>`: the id of the name's last holder. Whether that holder is still
+  live is read from `sbx:live` at the caller's clock; the key itself expires at `expiresAt` plus
+  retention, for cleanup only, so a Redis clock running ahead cannot free a live name.
 
 Quota checks and inserts run in one Lua script, so concurrent creates can't exceed a quota. Redis
 persistence follows the existing `base/redis.yaml`.
