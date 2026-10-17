@@ -23,6 +23,13 @@ const NOT_ENV_ON_K8S: Record<string, string> = {
   // Deliberately not set: the per-subject cap defaults to half of SH_TURNS_PER_WORKER (#360), so
   // a pinned literal here would drift the moment an operator changes S.
   SH_TURNS_PER_SUBJECT: 'derived (half of SH_TURNS_PER_WORKER), so the manifest does not pin it',
+  // SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers.
+  SH_SANDBOX_TOKEN_PUBLIC_KEYS:
+    'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
+  SH_SANDBOX_TOKEN_ISSUER:
+    'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
+  SH_SANDBOX_MAX_INFLIGHT:
+    'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
 };
 
 describe.skipIf(NO_KUBECTL)('deploy/k8s env parity with deploy/vm/env', () => {
@@ -46,6 +53,20 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s env parity with deploy/vm/env', () => {
       (v) => !(v in NOT_ENV_ON_K8S) && !envNames(c).includes(v),
     );
     expect(missing).toEqual([]);
+  });
+
+  it('the ocp-sbx relay sets the SBX0-only variables the base leaves out', () => {
+    const c = container(
+      find(render('overlays/ocp-sbx'), 'Deployment', 'sandbox-relay', 'moca-sbx'),
+      'sandbox-relay',
+    );
+    const sbx0Vars = [
+      'SH_SANDBOX_TOKEN_PUBLIC_KEYS',
+      'SH_SANDBOX_TOKEN_ISSUER',
+      'SH_SANDBOX_MAX_INFLIGHT',
+    ];
+    const names = envNames(c);
+    expect(sbx0Vars.every((v) => names.includes(v))).toBe(true);
   });
 
   it('the control plane and the supervisor read the sandbox tiers from one source (P6.3 spec §7)', () => {

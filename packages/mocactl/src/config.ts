@@ -43,6 +43,8 @@ export interface Preset {
 export interface TuiConfig {
   controlPlaneUrl?: string;
   harnessUrl?: string;
+  /** The sandbox service's control plane (SBX0), separate from MOCA's. */
+  sbxControlPlaneUrl?: string;
   theme: 'system' | 'dark';
   details: boolean;
   thinking: boolean;
@@ -75,6 +77,7 @@ const isPreset = (v: unknown): v is Preset =>
 const FIELD_CHECKS: Record<keyof TuiConfig, (v: unknown) => boolean> = {
   controlPlaneUrl: (v) => typeof v === 'string',
   harnessUrl: (v) => typeof v === 'string',
+  sbxControlPlaneUrl: (v) => typeof v === 'string',
   theme: (v) => v === 'system' || v === 'dark',
   details: (v) => typeof v === 'boolean',
   thinking: (v) => typeof v === 'boolean',

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { ControlPlaneClient } from '../src/api/control-plane.js';
+import { SandboxApiClient } from '../src/sbx/api.js';
 import { KNOWN_FRAME_TYPES } from '../src/api/frames.js';
 import { readSse, toFrame } from '../src/api/sse-parser.js';
 import { json, scriptedFetch } from './helpers/fake-fetch.js';
@@ -69,7 +70,31 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
   },
 ];
 
-// Codes the client branches on (api/errors.ts, core/session-manager.ts).
+// The same for `mocactl sbx`'s SandboxApiClient (SBX0 §5.1), beyond the calls it inherits.
+const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: string[] }> = [
+  { method: 'get', path: '/v1/discovery', reads: ['profile'] },
+  { method: 'get', path: '/v1/templates', reads: ['templates'] },
+  {
+    method: 'post',
+    path: '/v1/sandboxes',
+    reads: ['id', 'template', 'expiresAt'],
+    sends: ['template', 'name', 'labels'],
+  },
+  { method: 'get', path: '/v1/sandboxes', reads: ['sandboxes'] },
+  { method: 'get', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason', 'expiresAt'] },
+  { method: 'delete', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason'] },
+  {
+    method: 'post',
+    path: '/v1/sandboxes/{id}/token',
+    reads: ['token', 'expiresAt', 'execEndpoint', 'wrk', 'wsk', 'execCa'],
+  },
+];
+
+// The fields of each Sandbox and template `mocactl sbx ls` / `templates` print.
+const SBX_SANDBOX_READS = ['id', 'owner', 'name', 'template', 'state', 'reason', 'expiresAt'];
+const SBX_TEMPLATE_READS = ['id', 'description', 'tools'];
+
+// Codes the client branches on (api/errors.ts, core/session-manager.ts, sbx/commands.ts).
 const CODES_USED = [
   'token_required',
   'token_invalid',
@@ -89,6 +114,8 @@ const CODES_USED = [
   'forbidden',
   'model_unavailable',
   'model_catalog_unavailable',
+  'not_enrolled',
+  'sandbox_not_found',
 ];
 
 function responseSchema(op: any): any {
@@ -97,13 +124,16 @@ function responseSchema(op: any): any {
   return resolveSchema(schema);
 }
 
-// `$ref` to a component and `allOf` both appear in 2xx schemas; flatten them to one properties map.
+// `$ref` to a component, `allOf` and `oneOf`/`anyOf` all appear in 2xx schemas; flatten them to one
+// properties map. For `oneOf`/`anyOf` that is the union of every branch's properties: the check is
+// that each field the client reads exists somewhere in the response.
 function resolveSchema(s: any): any {
   if (!s) return s;
   if (s.$ref) return resolveSchema(openapi.components.schemas[s.$ref.split('/').pop()]);
-  if (s.allOf) {
+  const parts = s.allOf ?? s.oneOf ?? s.anyOf;
+  if (parts) {
     return {
-      properties: Object.assign({}, ...s.allOf.map((p: any) => resolveSchema(p)?.properties)),
+      properties: Object.assign({}, ...parts.map((p: any) => resolveSchema(p)?.properties)),
     };
   }
   return s;
@@ -201,6 +231,63 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
         ),
     );
     expect(invokedMethods).toEqual(publicMethods);
+  });
+});
+
+describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
+  it.each(SBX_USED)(
+    '$method $path exists with the fields mocactl sbx relies on',
+    ({ method, path, reads, sends }) => {
+      const op = openapi.paths[path]?.[method];
+      expect(op, `${method} ${path} missing from openapi.yaml`).toBeDefined();
+      const schema = responseSchema(op);
+      for (const f of reads ?? []) expect(Object.keys(schema?.properties ?? {})).toContain(f);
+      const req = op.requestBody?.content?.['application/json']?.schema;
+      for (const f of sends ?? []) expect(Object.keys(req?.properties ?? {})).toContain(f);
+    },
+  );
+
+  it('the Sandbox items and templates hold the fields ls and templates print', () => {
+    const sandbox = resolveSchema(openapi.components.schemas.Sandbox);
+    for (const f of SBX_SANDBOX_READS) expect(Object.keys(sandbox.properties)).toContain(f);
+    const list = responseSchema(openapi.paths['/v1/sandboxes'].get);
+    expect(resolveSchema(list.properties.sandboxes.items)).toEqual(sandbox);
+    const templates = responseSchema(openapi.paths['/v1/templates'].get);
+    for (const f of SBX_TEMPLATE_READS) {
+      expect(Object.keys(templates.properties.templates.items.properties)).toContain(f);
+    }
+  });
+
+  it('covers every call SandboxApiClient adds', async () => {
+    const reply = () => json({ templates: [], sandboxes: [] });
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 10 }, () => reply));
+    const c = new SandboxApiClient('http://cp', () => 't', fetch);
+    await c.sandboxDiscovery();
+    await c.listTemplates();
+    await c.createSandbox({ template: 'node22' });
+    await c.listSandboxes();
+    await c.getSandbox('ID');
+    await c.deleteSandbox('ID');
+    await c.mintSandboxToken('ID');
+    const seen = calls.map(
+      (k) => `${k.method.toLowerCase()} ${new URL(k.url).pathname.replace('/ID', '/{id}')}`,
+    );
+    expect(new Set(seen)).toEqual(new Set(SBX_USED.map((u) => `${u.method} ${u.path}`)));
+    // A new method on SandboxApiClient must be called above and listed in SBX_USED.
+    const own = Object.getOwnPropertyNames(SandboxApiClient.prototype).filter(
+      (m) => m !== 'constructor',
+    );
+    expect(new Set(own)).toEqual(
+      new Set([
+        'sandboxDiscovery',
+        'listTemplates',
+        'createSandbox',
+        'listSandboxes',
+        'getSandbox',
+        'deleteSandbox',
+        'mintSandboxToken',
+      ]),
+    );
   });
 });
 

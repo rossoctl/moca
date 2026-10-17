@@ -391,3 +391,26 @@ export class InMemoryCredentialStore implements CredentialStore {
     this.bySubject.get(subject)?.delete(name);
   }
 }
+
+/**
+ * The sandbox profile's credential store: there is none (SBX0 §4.1), and the routes that would use
+ * one are not mounted. Fail-closed rather than an empty store, so a wiring mistake surfaces as an
+ * error instead of a silent "no credentials".
+ */
+export class UnavailableCredentialStore implements CredentialStore {
+  private refuse(): never {
+    throw new CpError('internal_error', 'no credential store on the sandbox profile');
+  }
+  async put(): Promise<void> {
+    this.refuse();
+  }
+  async get(): Promise<StoredCredential | null> {
+    this.refuse();
+  }
+  async list(): Promise<CredentialDescriptor[]> {
+    this.refuse();
+  }
+  async delete(): Promise<void> {
+    this.refuse();
+  }
+}

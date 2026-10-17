@@ -293,6 +293,37 @@ export function refreshStoreContract(name: string, make: MakeStore): void {
       ]);
     });
 
+    it('revokes with the reason given (not_enrolled), so the superseded token is no reuse', async () => {
+      await setup();
+      const i = await login();
+      const r1 = await cur().store.rotate(i.refreshToken, T0);
+      if (!r1.ok) throw new Error('unreachable');
+      // The handler's de-enrolled path: the successor was never handed out, so it revokes by it.
+      expect(await cur().store.revoke(r1.refreshToken, T0, 'not_enrolled')).toBe(true);
+      expect(await cur().store.rotate(i.refreshToken, T0 + 120 * S)).toEqual({
+        ok: false,
+        reason: 'revoked',
+      });
+      const audit = await cur().audit();
+      expect(audit.filter((e) => e.decision === 'refresh_reuse_detected')).toEqual([]);
+      expect(audit.slice(2)).toEqual([
+        {
+          ts: String(T0),
+          subject: 'github:1',
+          decision: 'refresh_revoked',
+          family: i.family,
+          reason: 'not_enrolled',
+        },
+        {
+          ts: String(T0 + 120 * S),
+          subject: 'github:1',
+          decision: 'refresh_refused',
+          family: i.family,
+          reason: 'revoked',
+        },
+      ]);
+    });
+
     it('answers false, and audits nothing, when revoking a token nobody issued', async () => {
       await setup();
       expect(await cur().store.revoke('mrt_' + 'B'.repeat(43), T0)).toBe(false);

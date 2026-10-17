@@ -1,0 +1,6 @@
+interface:
+  display_name: 'Delegate a Task to MOCA'
+  short_description: 'Run bounded tasks on MOCA with a packed local directory as context'
+  default_prompt: 'Use $moca-delegate-task to run this bounded task remotely.'
+policy:
+  allow_implicit_invocation: false

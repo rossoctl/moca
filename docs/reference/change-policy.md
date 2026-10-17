@@ -22,8 +22,8 @@ notes. A **Legacy** surface does not change except for security and breakage fix
 
 - **HTTP routes.** The route table in `packages/knative-server/src/routes.ts` marks each route's `surface` as
   `client` or `internal`, and a contract test keeps the OpenAPI document and that table in step. Only `client` routes
-  are described in the OpenAPI files. The control-plane document (`docs/api/openapi.yaml`) says `version: 1.1.0` (per-session model
-  selection added to it); the harness document (`docs/api/harness-openapi.yaml`) says `version: 1.0.0`. The `/v1`
+  are described in the OpenAPI files. The control-plane document (`docs/api/openapi.yaml`) says `version: 1.2.0` (per-session model
+  selection, then the sandbox service's routes, added to it); the harness document (`docs/api/harness-openapi.yaml`) says `version: 1.0.0`. The `/v1`
   prefix is the only version marker on the wire.
 - **Aliases.** `/turn` and `/runs` are unprefixed aliases of `/v1/turn` and `/v1/runs` (internal, not marked
   deprecated). `/run-leaf` and `/run-leaf/status` are marked `deprecated` and log a warning once per process.
@@ -101,7 +101,7 @@ supported runtime also satisfies the first Stable criterion for the deployment p
 | 2   | Deprecation period                                                  | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                     |
 | 3   | The `/turn` and `/runs` aliases                                     | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507) |
 | 4   | `GET /runs/status`                                                  | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508) |
-| 5   | `version` in the OpenAPI files (control plane 1.1.0, harness 1.0.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | [#511](https://github.com/rossoctl/moca/issues/511) |
+| 5   | `version` in the OpenAPI files (control plane 1.2.0, harness 1.0.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | [#511](https://github.com/rossoctl/moca/issues/511) |
 | 6   | Stored-data compatibility                                           | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | [#509](https://github.com/rossoctl/moca/issues/509) |
 | 7   | Config bundle format                                                | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | [#510](https://github.com/rossoctl/moca/issues/510) |
 | 8   | Who approves a breaking change                                      | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                     |

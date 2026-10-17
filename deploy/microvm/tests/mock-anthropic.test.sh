@@ -86,5 +86,33 @@ check "K8S-SMOKE-MODEL is 200" "$code" "200"
 check "K8S-SMOKE-MODEL has no tool_use" "$(grep -c '"type":"tool_use"' "$TMP/body")" "0"
 check "K8S-SMOKE-MODEL text names the model" "$(grep -c 'model=mock-b' "$TMP/body")" "1"
 
+echo "== the moca-delegate-task Kind demo scripts (skills/moca-delegate-task/demo/run.sh)"
+# demo_turn MARKER N: the turn after N tool_results, each echoing RESULT-<i>.
+demo_turn() {
+  local msgs i
+  msgs='{"role":"user","content":"The repository is in your working directory. '"$1"'"}'
+  for ((i = 1; i <= $2; i++)); do
+    msgs="$msgs"',{"role":"assistant","content":[{"type":"tool_use","id":"t'"$i"'","name":"bash","input":{}}]}'
+    msgs="$msgs"',{"role":"user","content":[{"type":"tool_result","tool_use_id":"t'"$i"'","content":"RESULT-'"$i"'"}]}'
+  done
+  post '{"model":"mock-k8s","stream":true,"messages":['"$msgs"']}'
+}
+# shellcheck disable=SC2016 # the specs are literal commands, not to be expanded
+for spec in 'MOCA-DEMO-READ 0 echo "cwd=$(pwd)"; ls' 'MOCA-DEMO-READ 1 write=refused' 'MOCA-DEMO-READ 2 ./test.sh' \
+  'MOCA-DEMO-FIX 0 before-exit' 'MOCA-DEMO-FIX 1 after-exit' 'MOCA-DEMO-FIX 2 git diff --no-index'; do
+  m="${spec%% *}"; rest="${spec#* }"; n="${rest%% *}"; want="${rest#* }"
+  code="$(demo_turn "$m" "$n")"
+  check "$m step $n is 200" "$code" "200"
+  check "$m step $n is a bash tool_use" "$(grep -c '"name":"bash"' "$TMP/body")" "1"
+  # The command is JSON in JSON (partial_json): strip the escaping before matching it.
+  check "$m step $n runs '$want'" "$(sed 's/\\//g' "$TMP/body" | grep -cF -- "$want")" "1"
+done
+code="$(demo_turn MOCA-DEMO-READ 3)"
+check "MOCA-DEMO-READ ends with its done text and every result" \
+  "$(grep -c 'done-demo-read\\nRESULT-1\\nRESULT-2\\nRESULT-3' "$TMP/body")" "1"
+code="$(demo_turn MOCA-DEMO-FIX 3)"
+check "MOCA-DEMO-FIX ends with its done text and every result" \
+  "$(grep -c 'done-demo-fix\\nRESULT-1\\nRESULT-2\\nRESULT-3' "$TMP/body")" "1"
+
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

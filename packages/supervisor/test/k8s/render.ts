@@ -23,7 +23,12 @@ export type K8sObject = {
   [k: string]: any;
 };
 export type Target =
-  'base' | 'overlays/kind' | 'overlays/kind-ci' | 'overlays/ocp' | 'overlays/ocp-single';
+  | 'base'
+  | 'overlays/kind'
+  | 'overlays/kind-ci'
+  | 'overlays/ocp'
+  | 'overlays/ocp-single'
+  | 'overlays/ocp-sbx';
 
 export function haveKubectl(): boolean {
   try {

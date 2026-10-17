@@ -7,7 +7,12 @@ describe('GET /v1/discovery', () => {
     const d = makeDeps({ config: { publicHarnessUrl: 'https://harness.example.com' } });
     expect(await HANDLERS.getDiscovery!(ctx({}), d)).toEqual({
       status: 200,
-      body: { harnessUrl: 'https://harness.example.com', sandboxTiers: null, version: null },
+      body: {
+        harnessUrl: 'https://harness.example.com',
+        sandboxTiers: null,
+        version: null,
+        profile: 'harness',
+      },
     });
   });
 
@@ -16,7 +21,7 @@ describe('GET /v1/discovery', () => {
     // deployment that has it but was not given SH_PUBLIC_HARNESS_URL. They need different fixes.
     expect(await HANDLERS.getDiscovery!(ctx({}), makeDeps())).toEqual({
       status: 200,
-      body: { harnessUrl: null, sandboxTiers: null, version: null },
+      body: { harnessUrl: null, sandboxTiers: null, version: null, profile: 'harness' },
     });
   });
 
@@ -28,6 +33,7 @@ describe('GET /v1/discovery', () => {
       harnessUrl: null,
       sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
       version: null,
+      profile: 'harness',
     });
   });
 
@@ -41,6 +47,7 @@ describe('GET /v1/discovery', () => {
         harnessUrl: 'https://harness.example.com',
         sandboxTiers: null,
         version: '0.5.2',
+        profile: 'harness',
       },
     });
   });

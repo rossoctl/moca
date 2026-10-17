@@ -1,0 +1,27 @@
+# The sandbox control plane's API (SBX0 §2): edge TLS at the router, HTTP to the pod, as
+# overlays/ocp/routes.yaml's moca-control-plane Route. The host is a placeholder that
+# deploy/sbx/setup.sh's generated overlay replaces with SBX_API_HOST.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: { name: sbx-api, namespace: moca }
+spec:
+  host: sbx-api.apps.example.invalid
+  to: { kind: Service, name: moca-control-plane }
+  port: { targetPort: http }
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+# Additive: the router may reach the control plane's HTTP port, and nothing else does (the base
+# policy's supervisor ingress is reset in kustomization.yaml; SBX0 runs no supervisor).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-control-plane-from-router, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: moca-control-plane } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { 'policy-group.network.openshift.io/ingress': '' } }
+      ports:
+        - { protocol: TCP, port: 8080 }

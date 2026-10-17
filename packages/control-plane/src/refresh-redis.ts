@@ -10,6 +10,7 @@ import {
   type RefreshPolicy,
   type RefreshStore,
   type RefusalReason,
+  type RevokeReason,
   type RotateResult,
 } from './refresh-store.js';
 import { subjectHash } from './subject-document.js';
@@ -246,11 +247,7 @@ export class RedisRefreshStore implements RefreshStore {
     });
   }
 
-  private revokeFamily(
-    fid: string,
-    nowMs: number,
-    reason: 'logout' | 'logout_all',
-  ): Promise<number> {
+  private revokeFamily(fid: string, nowMs: number, reason: RevokeReason): Promise<number> {
     return this.redis
       .eval(REVOKE, {
         keys: [this.familyKey(fid), this.graceKey(fid), this.auditKey],
@@ -259,11 +256,15 @@ export class RedisRefreshStore implements RefreshStore {
       .then(Number);
   }
 
-  revoke(token: string, nowMs: number): Promise<boolean> {
+  revoke(
+    token: string,
+    nowMs: number,
+    reason: Exclude<RevokeReason, 'logout_all'> = 'logout',
+  ): Promise<boolean> {
     return this.guard(async () => {
       const fid = await this.redis.get(this.tokenKey(hashRefreshToken(token)));
       if (!fid) return false;
-      return (await this.revokeFamily(fid, nowMs, 'logout')) !== -1;
+      return (await this.revokeFamily(fid, nowMs, reason)) !== -1;
     });
   }
 

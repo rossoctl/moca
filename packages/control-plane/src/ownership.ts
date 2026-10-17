@@ -281,6 +281,8 @@ export class OwnershipIndex {
   async audit(entry: {
     subject: string;
     sessionId?: string;
+    /** The sandbox a decision is about (SBX0 §5). */
+    sandboxId?: string;
     credential?: string;
     configRef?: string;
     bytes?: number;
@@ -299,6 +301,7 @@ export class OwnershipIndex {
           subject: entry.subject,
           decision: entry.decision,
           ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+          ...(entry.sandboxId ? { sandboxId: entry.sandboxId } : {}),
           // The credential NAME, never its value (spec §7.2).
           ...(entry.credential ? { credential: entry.credential } : {}),
           ...(entry.configRef ? { configRef: entry.configRef } : {}),

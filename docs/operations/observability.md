@@ -64,7 +64,9 @@ The control plane appends to the Redis stream `sh:cp:audit` (trimmed to about 1,
 `family` (written by every refresh-token decision). Decisions: `credential_issued`, `operator_fallback_used`, `session_created`, `session_deleted`,
 `session_deleted_in_flight`, `credential_written`, `credential_deleted`, `config_bundle_uploaded`,
 `config_bundle_unchanged`, `config_bundle_refused`, `config_bundle_deleted`, and the refresh-token decisions
-`refresh_issued`, `refresh_rotated`, `refresh_refused`, `refresh_reuse_detected`, `refresh_revoked`. Anonymous
+`refresh_issued`, `refresh_rotated`, `refresh_refused`, `refresh_reuse_detected`, `refresh_revoked` (`reason`
+`logout`, `logout_all`, or `not_enrolled`: a sandbox-profile refresh by a subject no longer in `SH_ALLOWED_SUBJECTS`,
+whose family the control plane revokes so the client's last token is later refused as `revoked`, not as reuse). Anonymous
 refusals go to `sh:cp:audit:anon` (about 100,000). Read them with `redis-cli XREVRANGE sh:cp:audit + - COUNT 50`
 through `kubectl exec`; no HTTP endpoint for the audit stream is documented.
 

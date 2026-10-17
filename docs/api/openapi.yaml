@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -37,6 +37,13 @@ components:
       type: http
       scheme: bearer
       description: The shared `SH_EXCHANGE_TOKEN`, mounted into both tiers from one Secret.
+    janitorToken:
+      type: http
+      scheme: bearer
+      description: |
+        The sandbox host janitor's `SH_JANITOR_TOKEN` (SBX0 §8.3); admits GET /v1/janitor/sandboxes
+        only. No user or admin API token is accepted there, and with none configured every call is
+        refused.
   parameters:
     sessionId:
       name: id
@@ -50,6 +57,13 @@ components:
       schema:
         type: string
         pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'
+    sandboxId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^sbx-[0-9a-f]{26}$'
   schemas:
     Error:
       type: object
@@ -72,6 +86,12 @@ components:
             - forbidden
             - session_not_found
             - session_mismatch
+            - not_enrolled
+            - sandbox_not_found
+            - sandbox_terminated
+            - name_conflict
+            - quota_exceeded
+            - unknown_template
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -96,6 +116,9 @@ components:
             can carry a Redis connection string or a presented token, and this body reaches an
             arbitrary caller (errors.ts).
         sessionId: { type: string }
+        reason:
+          type: string
+          description: 'sandbox_terminated only: deleted | expired'
     Session:
       type: object
       required: [sessionId, owner, tenant, createdAt, state, turns]
@@ -171,16 +194,58 @@ components:
               maxTokens: { type: integer }
               reasoning: { type: boolean }
               vision: { type: boolean }
+    Sandbox:
+      type: object
+      description: A sandbox (SBX0 §5.1). Times are epoch seconds.
+      required:
+        [id, owner, name, template, state, reason, createdAt, expiresAt, terminatedAt, labels]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: '^sbx-[0-9a-f]{26}$'
+          description: '`sbx-` plus 26 random lowercase hex characters; also the workspace key'
+        owner: { type: string, description: 'github:<numeric id>' }
+        name:
+          type: [string, 'null']
+          pattern: '^[a-z0-9][a-z0-9-]{0,62}$'
+          description: unique among the owner's live sandboxes; null when unnamed
+        template: { type: string }
+        state: { type: string, enum: [ready, terminated] }
+        reason:
+          type: [string, 'null']
+          enum: [deleted, expired, null]
+          description: why it terminated; null while ready
+        createdAt: { type: integer, description: epoch seconds }
+        expiresAt:
+          type: integer
+          description: |
+            epoch seconds, fixed at create (no extension in SBX0). Expiry is computed: past it, the
+            sandbox reads as terminated / expired everywhere and refuses to mint (SBX0 §5.2).
+        terminatedAt:
+          type: [integer, 'null']
+          description: epoch seconds; the delete time or expiresAt; null while ready
+        labels:
+          type: object
+          maxProperties: 16
+          propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
+          additionalProperties: { type: string }
+          description: free-form string pairs (at most 16; each value at most 256 UTF-8 bytes)
   responses:
     Unauthorized:
-      description: no token, a bad token, or a failed exchange authentication
+      description: no token, a bad token, or a failed exchange or janitor authentication
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     NotFound:
       description: |
-        Unknown session, or a session owned by someone else -- deliberately indistinguishable.
-        404 rather than 403, because a 403 is an existence oracle (spec §8.1).
+        Unknown session (or sandbox), or one owned by someone else -- deliberately
+        indistinguishable. 404 rather than 403, because a 403 is an existence oracle (spec §8.1).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotEnrolled:
+      description: '`not_enrolled`: the caller is not in SH_ALLOWED_SUBJECTS (SBX0 §4.2)'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -223,6 +288,11 @@ paths:
         deployment advertises none; a 404 means a control plane that predates this route.
         `sandboxTiers` (P6.3) is always present; a control plane that predates P6.3 omits it.
         `version` is always present; a control plane that predates advertising one omits it.
+        `profile` names the control plane's route profile; on `sandbox`, `execEndpoint` and `execCa`
+        say where to send Exec and which CA to trust (SBX0 §4.1). A `sandbox` control plane answers
+        only `profile`, `execEndpoint` and, when the exec certificate is self-issued, `execCa`;
+        templates are at the fixed `/v1/templates`. A control plane that predates profiles omits
+        `profile`, and is a `harness` one.
       security: []
       responses:
         '200':
@@ -230,27 +300,44 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [harnessUrl, sandboxTiers, version]
-                properties:
-                  harnessUrl:
-                    type: [string, 'null']
-                    description: absolute http(s) URL, no trailing slash
-                  sandboxTiers:
-                    type: [object, 'null']
-                    description: |
-                      the tiers a session may ask for at creation (SH_SANDBOX_TIERS) and the
-                      default; null when none are declared
-                    required: [names, default]
+                oneOf:
+                  - type: object
+                    description: the harness profile (the default)
+                    required: [harnessUrl, sandboxTiers, version]
                     properties:
-                      names: { type: array, items: { type: string } }
-                      default: { type: string }
-                  version:
-                    type: [string, 'null']
-                    description: |
-                      the deployment's version (MOCA_VERSION, baked in at image build), so a client
-                      can show it; `dev` when nothing was baked in, and `null` permitted for
-                      compatibility with a control plane that reports none
+                      harnessUrl:
+                        type: [string, 'null']
+                        description: absolute http(s) URL, no trailing slash
+                      sandboxTiers:
+                        type: [object, 'null']
+                        description: |
+                          the tiers a session may ask for at creation (SH_SANDBOX_TIERS) and the
+                          default; null when none are declared
+                        required: [names, default]
+                        properties:
+                          names: { type: array, items: { type: string } }
+                          default: { type: string }
+                      version:
+                        type: [string, 'null']
+                        description: |
+                          the deployment's version (MOCA_VERSION, baked in at image build), so a client
+                          can show it; `dev` when nothing was baked in, and `null` permitted for
+                          compatibility with a control plane that reports none
+                      profile: { type: string, enum: [harness] }
+                  - type: object
+                    description: the sandbox profile (SBX0 §4.1)
+                    required: [profile, execEndpoint]
+                    additionalProperties: false
+                    properties:
+                      profile: { type: string, enum: [sandbox] }
+                      execEndpoint:
+                        type: string
+                        description: sandbox profile only -- host:port of the exec Route
+                      execCa:
+                        type: string
+                        description: |
+                          sandbox profile only -- PEM of a self-issued exec certificate; absent when
+                          the certificate chains to a public CA
   /v1/auth/device:
     post:
       operationId: startDeviceAuth
@@ -327,6 +414,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Sandbox profile only: `not_enrolled` -- the approving GitHub account is not in
+            SH_ALLOWED_SUBJECTS and is not an admin (SBX0 §4.2). No refresh family is issued. The
+            `message` names the caller's own subject (`github:<id>`) for an operator to enroll.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '410':
           description: device_code_expired — the code expired before it was approved; start a new one
           content:
@@ -369,6 +464,15 @@ paths:
                   refreshExpiresAt: { type: integer, description: epoch seconds }
         '400':
           description: invalid_request, or invalid_grant — the refresh token is unknown, revoked, expired or replayed; log in again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: |
+            Sandbox profile only: `not_enrolled` -- the login's subject was removed from
+            SH_ALLOWED_SUBJECTS since it logged in (SBX0 §4.2). The control plane revokes the login
+            (audited `refresh_revoked`, reason `not_enrolled`), so the refresh token presented is
+            refused from then on; the client should forget it. The `message` names the subject.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -875,6 +979,230 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates:
+    get:
+      operationId: listTemplates
+      summary: The templates a sandbox may be created from
+      description: |
+        Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane
+        answers 404 (SBX0 §4.1). Enrolled subjects and admins only (`403 not_enrolled`, §4.2).
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: the deployment's templates (SH_SANDBOX_TEMPLATES), without their worker ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templates]
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, description, tools]
+                      properties:
+                        id: { type: string }
+                        description: { type: string }
+                        tools: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/sandboxes:
+    description: |
+      Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers
+      404 (SBX0 §4.1).
+    post:
+      operationId: createSandbox
+      summary: Create a sandbox
+      description: |
+        Enrolled subjects and admins only. Does no I/O to the worker: the first Exec creates the
+        workspace, so a new sandbox always starts empty (SBX0 §5.1).
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template]
+              properties:
+                template: { type: string, description: a template id from GET /v1/templates }
+                name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
+                labels:
+                  type: object
+                  maxProperties: 16
+                  propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
+                  additionalProperties: { type: string }
+                  description: at most 16 pairs; each value at most 256 UTF-8 bytes
+      responses:
+        '201':
+          description: the new sandbox, ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sandbox' }
+        '400':
+          description: '`invalid_request`, or `unknown_template`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '409':
+          description: '`name_conflict`: the caller already has a live sandbox with that name'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`: per-user or deployment-wide live sandboxes (SBX0 §5.3)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      operationId: listSandboxes
+      summary: My sandboxes, newest first
+      description: |
+        The caller's own, terminated (but retained) ones included. `?all=1` lists everyone's and
+        requires the admin role.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema: { type: string, enum: [ready, terminated] }
+        - name: all
+          in: query
+          required: false
+          description: admins only
+          schema: { type: string, enum: ['1'] }
+      responses:
+        '200':
+          description: the sandboxes, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandboxes]
+                properties:
+                  sandboxes: { type: array, items: { $ref: '#/components/schemas/Sandbox' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: ?all= without the admin role'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}:
+    get:
+      operationId: getSandbox
+      summary: One sandbox
+      description: The caller's own; admins may read any. Another user's sandbox is a 404.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      responses:
+        '200':
+          description: the sandbox
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sandbox' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteSandbox
+      summary: Terminate a sandbox
+      description: |
+        Idempotent: deleting a terminated sandbox answers 200 with how it ended. The caller's own;
+        admins may delete any. The host janitor frees the workspace later (SBX0 §8.3).
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      responses:
+        '200':
+          description: terminated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, state, reason]
+                properties:
+                  id: { type: string }
+                  state: { type: string, enum: [terminated] }
+                  reason: { type: string, enum: [deleted, expired] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/sandboxes/{id}/token:
+    post:
+      operationId: mintSandboxToken
+      summary: Mint a sandbox token for Exec
+      description: |
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
+        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). No request body.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      responses:
+        '200':
+          description: a sandbox token, and where to send Exec with it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, expiresAt, execEndpoint, wrk, wsk, execCa]
+                properties:
+                  token: { type: string, description: 'JWT, typ moca-sandbox+jwt' }
+                  expiresAt: { type: integer, description: epoch seconds }
+                  execEndpoint: { type: string, description: host:port of the exec Route }
+                  wrk:
+                    type: string
+                    description: the worker sandbox_id serving the template (ExecRequest.sandbox_id)
+                  wsk: { type: string, description: the workspace key (Exec.workspace_key) }
+                  execCa:
+                    type: [string, 'null']
+                    description: the exec Route's CA (PEM) when self-issued, else null
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/janitor/sandboxes:
+    get:
+      operationId: janitorSandboxes
+      summary: The host janitor's read -- every live and retained terminated sandbox
+      description: |
+        Sandbox service control planes only. Authenticated by `SH_JANITOR_TOKEN` alone, never a
+        user's token, and refused with none configured (SBX0 §8.3). Carries only what the janitor
+        needs to find a workspace tree.
+      security: [{ janitorToken: [] }]
+      responses:
+        '200':
+          description: live and terminated sandboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [live, terminated]
+                properties:
+                  live:
+                    type: array
+                    items:
+                      type: object
+                      required: [wsk, wrk]
+                      properties:
+                        wsk: { type: string }
+                        wrk: { type: string }
+                  terminated:
+                    type: array
+                    items:
+                      type: object
+                      required: [wsk, wrk, terminatedAt]
+                      properties:
+                        wsk: { type: string }
+                        wrk: { type: string }
+                        terminatedAt: { type: integer, description: epoch seconds }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /internal/credentials:
     post:
       operationId: exchangeCredential

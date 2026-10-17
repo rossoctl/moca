@@ -1,32 +1,41 @@
 # The SBX0 front door (docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md §2, §8.1): the
 # sandbox relay and Redis in ONE namespace on a shared OpenShift cluster, reached from outside only
-# through two passthrough Routes -- attach (KVM hosts' workers dial in) and exec (clients). No
-# supervisor, no sandbox pods; the control plane arrives in increment 1b.
+# through two passthrough Routes -- attach (KVM hosts' workers dial in) and exec (clients) -- and
+# the control plane on the `sandbox` route profile (login and the sandbox resource), behind the edge
+# Route `sbx-api`. No supervisor, no sandbox pods.
 #
 # Built on ocp-single (no namespace creation, no SCC grants, restricted-v2 UIDs), plus:
 #   ../ocp/p4-relay   P6.2's attach Route and its ghostunnel sidecar, unchanged
 #   exec-tls/         the exec twin of p4-relay
-#   patch-relay.yaml  exec listener on loopback; 1a's optional static client tokens
-#   inline deletes    the workloads SBX0 does not run, and ocp-single's sandbox/supervisor peers
+#   patch-relay.yaml  exec listener on loopback; sandbox tokens (the keyset) as the only Exec
+#                     caller, the base's harness exec token removed
+#   patch-control-plane.yaml  the sandbox route profile, its settings, only the signing key mounted
+#   api-route.yaml    the control plane's edge Route and the router's NetworkPolicy to it
+#   inline deletes    the workloads SBX0 does not run, ocp-single's sandbox/supervisor peers, and
+#                     the base's in-cluster relay Services (sandbox-relay-attach, sandbox-relay-exec)
 #
 # Every patch names the BASE namespace (moca, moca-sandbox, moca-credentials): kustomize matches a
 # resource on its previous namespace too, which is how a patch here reaches an object ocp-single has
 # already renamed. A patch with no namespace would not match at all.
 #
 # deploy/sbx/setup.sh renders a generated overlay on top of this one with the real namespace, the
-# Route hosts and the image; the placeholders keep the checked-in overlay renderable for tests.
+# Route hosts, a settings hash on both pod templates and the image; the placeholders keep the
+# checked-in overlay renderable for tests.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: moca-sbx
 resources:
   - ../ocp-single
+  - api-route.yaml
 components:
   - ../ocp/p4-relay
   - exec-tls
 patches:
   - path: patch-relay.yaml
-  # Nothing in the namespace attaches or Execs from inside: the only ingress is the router, which
-  # the two components' NetworkPolicies admit. Egress to Redis (presence) stays.
+  - path: patch-control-plane.yaml
+  # Nothing in the namespace attaches, Execs or calls the control plane from inside: the only
+  # ingress is the router, which the components' and api-route.yaml's NetworkPolicies admit.
+  # Egress to Redis (presence, sandbox records) stays.
   - target:
       kind: NetworkPolicy
       name: sandbox-relay
@@ -34,6 +43,21 @@ patches:
       - op: replace
         path: /spec/ingress
         value: []
+  # The sandbox profile makes no Kubernetes API call (no credential store, no service account
+  # token), so its egress keeps Redis and 443 (GitHub's device flow) and drops the base's 6443 (the
+  # kube API after DNAT). The `test` op pins the index: the render fails if the base reorders it.
+  - target:
+      kind: NetworkPolicy
+      name: moca-control-plane
+    patch: |-
+      - op: replace
+        path: /spec/ingress
+        value: []
+      - op: test
+        path: /spec/egress/1/ports/1/port
+        value: 6443
+      - op: remove
+        path: /spec/egress/1/ports/1
   # The base's in-cluster relay Services: with the exec listener on loopback and the relay's
   # NetworkPolicy ingress emptied, neither is usable, so neither should look like a supported path.
   # The two ghostunnel Services (sandbox-relay-tls, sbx-relay-exec-tls) select the pods directly and
@@ -123,32 +147,3 @@ patches:
       metadata:
         name: moca-control-plane-credentials
         namespace: moca-credentials
-  # Increment 1a has no control plane; 1b deletes these four deletions and patches it instead.
-  - patch: |-
-      $patch: delete
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: moca-control-plane
-        namespace: moca
-  - patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: Service
-      metadata:
-        name: moca-control-plane
-        namespace: moca
-  - patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: ServiceAccount
-      metadata:
-        name: moca-control-plane
-        namespace: moca
-  - patch: |-
-      $patch: delete
-      apiVersion: networking.k8s.io/v1
-      kind: NetworkPolicy
-      metadata:
-        name: moca-control-plane
-        namespace: moca

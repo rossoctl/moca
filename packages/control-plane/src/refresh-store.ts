@@ -49,6 +49,14 @@ export interface Issued {
 
 export type RefusalReason = 'unknown' | 'revoked' | 'idle_expired' | 'abs_expired' | 'reuse';
 
+/**
+ * Why a family was revoked: the `reason` of its `refresh_revoked` audit entry. `logout` and
+ * `logout_all` are the user's; `not_enrolled` is the control plane's, when a refresh by a subject no
+ * longer enrolled (SBX0 §4.2) has already rotated -- revoking it there means the token the client
+ * still holds comes back as a plain `revoked` refusal, not as reuse (a false theft alarm).
+ */
+export type RevokeReason = 'logout' | 'logout_all' | 'not_enrolled';
+
 export type RotateResult =
   | {
       ok: true;
@@ -65,8 +73,15 @@ export type RotateResult =
 export interface RefreshStore {
   issue(input: IssueInput): Promise<Issued>;
   rotate(token: string, nowMs: number): Promise<RotateResult>;
-  /** True when the token names a family (revoked now or already); false for a token nobody issued. */
-  revoke(token: string, nowMs: number): Promise<boolean>;
+  /**
+   * True when the token names a family (revoked now or already); false for a token nobody issued.
+   * `reason` defaults to `logout`.
+   */
+  revoke(
+    token: string,
+    nowMs: number,
+    reason?: Exclude<RevokeReason, 'logout_all'>,
+  ): Promise<boolean>;
   /** How many of the subject's families this call revoked. */
   revokeAllFor(subject: string, nowMs: number): Promise<number>;
 }
@@ -200,7 +215,7 @@ export class MemoryRefreshStore implements RefreshStore {
     };
   }
 
-  private revokeFamily(fid: string, nowMs: number, reason: 'logout' | 'logout_all'): boolean {
+  private revokeFamily(fid: string, nowMs: number, reason: RevokeReason): boolean {
     const f = this.families.get(fid);
     if (!f || f.revokedAt !== undefined) return false;
     f.revokedAt = nowMs;
@@ -211,10 +226,14 @@ export class MemoryRefreshStore implements RefreshStore {
     return true;
   }
 
-  async revoke(token: string, nowMs: number): Promise<boolean> {
+  async revoke(
+    token: string,
+    nowMs: number,
+    reason: Exclude<RevokeReason, 'logout_all'> = 'logout',
+  ): Promise<boolean> {
     const fid = this.tokens.get(hashRefreshToken(token));
     if (!fid || !this.families.has(fid)) return false;
-    this.revokeFamily(fid, nowMs, 'logout');
+    this.revokeFamily(fid, nowMs, reason);
     return true;
   }
 

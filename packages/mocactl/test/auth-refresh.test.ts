@@ -108,6 +108,26 @@ describe('ensureAuth', () => {
     expect(loadAuth(paths, CP)).not.toHaveProperty('refreshToken');
   });
 
+  it('on not_enrolled, forgets the refresh pair and reports the refusal (its successor was revoked)', async () => {
+    const refusal = new ApiError(
+      'control-plane',
+      403,
+      'not_enrolled',
+      'this account (github:1) is no longer enrolled in the sandbox service',
+    );
+    const { deps, paths, calls } = setup({}, async (t) => {
+      calls.push(t);
+      throw refusal;
+    });
+    expect(await ensureAuth(deps)).toEqual({ kind: 'unreachable', error: refusal });
+    const left = loadAuth(paths, CP);
+    expect(left).not.toHaveProperty('refreshToken');
+    expect(left).not.toHaveProperty('refreshExpiresAt');
+    // Never presented again: the next command asks for a login without calling the control plane.
+    expect(await ensureAuth(deps)).toEqual({ kind: 'login_required' });
+    expect(calls).toEqual(['mrt_old']);
+  });
+
   it('when the control plane is unreachable, says so and keeps both tokens on disk', async () => {
     const { deps, paths } = setup({}, async () => {
       throw new ApiError('control-plane', 0, 'network_error', 'ECONNREFUSED');

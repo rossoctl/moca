@@ -37,11 +37,11 @@ export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1
 INSTALL="$SRC/deploy/sbx/install-host.sh"
 mkdir -p "$SBX_SRV/snapshots/default" "$SBX_SRV/snapshots/py312"
 
-bundle() { # bundle ID
+bundle() { # bundle ID [EXTRA_LINES]: a worker bundle as setup.sh writes it, plus EXTRA_LINES
   local d="$TMP/bundles/$1"
   mkdir -p "$d"
-  printf 'RELAY_ADDR=sbx-attach.apps.example.invalid:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' \
-    "$1" "$(printf '%064d' 7)" >"$d/worker.env"
+  printf 'RELAY_ADDR=sbx-attach.apps.example.invalid:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n%s' \
+    "$1" "$(printf '%064d' 7)" "${2-$'SH_WORKSPACE_IDLE=216h\nSH_WORKSPACE_IMAGE_MB=2048\n'}" >"$d/worker.env"
   printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' >"$d/relay-ca.crt"
   echo "$d"
 }
@@ -53,17 +53,35 @@ grep -q 'no snapshot' "$TMP/out" || fail 'missing-snapshot refusal does not say 
 b="$(bundle sbx_bad)"; sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=short/' "$b/worker.env"
 ! bash "$INSTALL" "$b" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a malformed token'
 ! grep -q 'short' "$TMP/out" || fail 'the refusal printed the token value'
-pass 'refuses a missing snapshot, a missing --snapshot and a malformed token (without printing it)'
+for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0'; do
+  : >"$MOCK_LOG"
+  # The bad line last: env_value takes the last one, so it overrides the valid idle before it.
+  ! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IDLE=216h\n'"$extra"$'\n')" --snapshot default >"$TMP/out" 2>&1 || fail "accepted $extra"
+  grep -q "${extra%%=*} in" "$TMP/out" || fail "the $extra refusal does not name the setting"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing $extra"
+done
+# A bundle with no SH_WORKSPACE_IDLE predates 1b's rule (idle = lifetime + 2 days): refused, not defaulted.
+: >"$MOCK_LOG"
+! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IMAGE_MB=2048\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a bundle with no SH_WORKSPACE_IDLE'
+grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/out" ||
+  fail 'the missing-idle refusal does not name SH_WORKSPACE_IDLE and setup.sh'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a bundle with no SH_WORKSPACE_IDLE'
+pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size'
 
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
-bash "$INSTALL" "$(bundle sbx_py312)" --snapshot py312 --budget-mb 8192 >"$TMP/out" 2>&1 || fail 'install sbx_py312'
+bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\n')" --snapshot py312 --budget-mb 8192 \
+  >"$TMP/out" 2>&1 || fail 'install sbx_py312'
 
 A="$SBX_ENV_DIR/workers/sbx_default.env" B="$SBX_ENV_DIR/workers/sbx_py312.env"
 for f in "$A" "$B"; do
   [[ "$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")" == 600 ]] || fail "$f is not 0600"
-  grep -qx 'SH_WORKSPACE_IDLE=216h' "$f" || fail "$f: SH_WORKSPACE_IDLE is not 216h"
   grep -qx 'RELAY_TLS=true' "$f" || fail "$f: RELAY_TLS"
 done
+grep -qx 'SH_WORKSPACE_IDLE=216h' "$A" || fail "$A: SH_WORKSPACE_IDLE is not the bundle's 216h"
+grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$A" || fail "$A: SH_WORKSPACE_IMAGE_MB is not the bundle's 2048"
+grep -qx 'SH_WORKSPACE_IDLE=240h' "$B" || fail "$B: SH_WORKSPACE_IDLE is not the bundle's 240h"
+grep -qx 'SH_WORKSPACE_IMAGE_MB=4096' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is not the bundle's 4096"
+[[ "$(grep -c '^SH_WORKSPACE_IDLE=' "$B")" == 1 ]] || fail "$B: SH_WORKSPACE_IDLE written twice"
 grep -qx 'SH_SNAPSHOT_IMAGE=py312' "$B" || fail 'snapshot not set'
 grep -qx 'SH_MAX_COMMITTED_MB=8192' "$B" || fail 'budget not set'
 for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
@@ -71,7 +89,13 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
   [[ -n "$va" && "$va" != "$vb" ]] || fail "$k is shared between workers ($va)"
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
-pass 'two workers: 0600 env files, own slice, jail and workspace root, 9-day idle'
+pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+
+# A bundle without SH_WORKSPACE_IMAGE_MB gets microvm-worker's default, 2048 MiB.
+bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'
+grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$SBX_ENV_DIR/workers/sbx_old.env" || fail 'SH_WORKSPACE_IMAGE_MB is not the 2048 default'
+bash "$INSTALL" --uninstall sbx_old >"$TMP/out" 2>&1 || fail 'uninstall sbx_old'
+pass 'a bundle without the image size gets the 2048 MiB default'
 
 [[ -f "$SBX_UNIT_DIR/sbx-worker@.service" && -f "$SBX_UNIT_DIR/sbx.slice" ]] || fail 'template unit or parent slice missing'
 [[ -f "$SBX_UNIT_DIR/sbx-sbx_py312.slice" ]] || fail 'per-worker slice missing'

@@ -1,8 +1,5 @@
 # The relay as SBX0 runs it (spec §2, §3.1): its exec listener on LOOPBACK, so the exec-tls sidecar
-# is the only way in, and -- in increment 1a only -- the prototype's static client tokens from an
-# optional Secret. A relay built from main ignores the variable; the team-only 1a image (built from
-# sbx/relay-1a: the prototype's client-token commits on the keepalive commit) reads it. Increment 1b
-# removes this env entry.
+# is the only way in, and per-sandbox tokens as its only SandboxExec caller.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,9 +13,13 @@ spec:
           env:
             - name: MOCA_RELAY_EXEC_ADDR
               value: '127.0.0.1:9444'
-            - name: MOCA_RELAY_CLIENT_TOKENS
-              valueFrom:
-                secretKeyRef:
-                  name: sbx-relay-clients
-                  key: MOCA_RELAY_CLIENT_TOKENS
-                  optional: true
+            # SBX0 §3: per-sandbox tokens only. The harness exec token the base wires is removed:
+            # nothing in this namespace is a harness, and the relay boots on the keyset alone.
+            - { name: MOCA_RELAY_EXEC_TOKEN, $patch: delete }
+            - name: SH_SANDBOX_TOKEN_PUBLIC_KEYS
+              valueFrom: { secretKeyRef: { name: sbx-token-keys, key: PUBLIC_KEYS } }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            # SBX0 §3.6: Execs one sandbox may have in flight at the relay.
+            - name: SH_SANDBOX_MAX_INFLIGHT
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_INFLIGHT } }

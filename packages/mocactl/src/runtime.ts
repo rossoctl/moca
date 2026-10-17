@@ -86,8 +86,14 @@ export function buildRuntime(
   env: NodeJS.ProcessEnv,
   home: string = homedir(),
   fetchImpl: typeof fetch = fetch,
+  /**
+   * Rewrites the resolved paths before anything is read. `mocactl sbx` keeps its login in its own
+   * file (and so its own refresh lock), so a sandbox-service login never replaces a MOCA one.
+   */
+  opts: { paths?: (p: Paths) => Paths } = {},
 ): Runtime {
-  const paths = resolvePaths(env, home);
+  const resolved = resolvePaths(env, home);
+  const paths = opts.paths ? opts.paths(resolved) : resolved;
   const loaded = loadConfig(paths);
   const endpoints = resolveEndpoints(flags, env, loaded.config);
   const rt: Runtime = {

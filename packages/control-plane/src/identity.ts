@@ -47,6 +47,9 @@ export type FetchLike = (
   init: { method: string; headers: Record<string, string>; body?: string },
 ) => Promise<{ status: number; text(): Promise<string> }>;
 
+/** The subject form the control plane mints (`github:<numeric id>`, see completeDeviceAuth). */
+export const GITHUB_SUBJECT_RE = /^github:[0-9]+$/;
+
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')
     .split(',')

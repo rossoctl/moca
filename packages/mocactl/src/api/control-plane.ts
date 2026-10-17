@@ -41,7 +41,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
     this.base = trimTrailingSlashes(baseUrl);
   }
 
-  private async request(
+  protected async request(
     method: string,
     path: string,
     opts: {
@@ -92,7 +92,7 @@ export class ControlPlaneClient implements ControlPlaneApi {
     return res;
   }
 
-  private async json<T>(
+  protected async json<T>(
     method: string,
     path: string,
     opts?: {

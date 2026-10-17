@@ -208,6 +208,9 @@ importers:
       '@grpc/grpc-js':
         specifier: ^1.14.6
         version: 1.14.6
+      '@moca/control-plane':
+        specifier: workspace:*
+        version: link:../control-plane
       '@moca/harness':
         specifier: workspace:*
         version: link:../../harness

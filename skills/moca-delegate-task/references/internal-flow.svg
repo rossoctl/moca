@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="580" viewBox="0 0 1400 580" role="img" aria-labelledby="title desc" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">MOCA context delegation workflow</title>
+  <desc id="desc">A local agent harness follows the moca-delegate-task skill. contextctl packs a folder into a .context file; mocactl creates a workload on the MOCA supervisor, uploads the file directly to Context Service, activates the frozen revision, and spawns one task per session. The supervisor fetches the frozen bundle from Context Service and sends it with each task through the relay to a shared sandbox, where the agent starts in its context. mocactl reads results and deletes the workload and its Context.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <style>
+    .box { stroke-width: 1.5; }
+    .title { font-size: 15px; font-weight: 600; fill: #111827; }
+    .sub { font-size: 12px; fill: #6b7280; }
+    .note { font-size: 12px; fill: #1f2937; }
+    .api { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; fill: #111827; }
+    .line { stroke: #374151; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .step circle { fill: #1f2937; }
+    .step text { font-size: 11.5px; font-weight: 700; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
+  </style>
+
+  <rect width="1400" height="580" rx="12" fill="#ffffff"/>
+
+  <!-- Local agent harness -->
+  <rect class="box" x="20" y="30" width="230" height="440" rx="10" fill="#eef4ff" stroke="#4a6fa5"/>
+  <text class="title" x="38" y="58">Local agent harness</text>
+  <text class="sub" x="38" y="78">follows the skill, runs the CLIs</text>
+  <rect class="box" x="40" y="100" width="190" height="150" rx="8" fill="#ffffff" stroke="#4a6fa5"/>
+  <text class="api" x="56" y="130" style="font-size: 14px; font-weight: 600;">contextctl · mocactl</text>
+  <g class="step"><circle cx="64" cy="176" r="10"/><text x="64" y="176">1</text></g>
+  <text class="api" x="82" y="172">contextctl ctx pack</text>
+  <text class="sub" x="82" y="190">folder → one .context file</text>
+  <text class="sub" x="56" y="228">fan-out: upload once, spawn N</text>
+
+  <!-- Moca P6 -->
+  <rect class="box" x="520" y="30" width="280" height="440" rx="10" fill="#fff4e5" stroke="#d08c2c"/>
+  <text class="title" x="538" y="58">MOCA</text>
+  <text class="sub" x="538" y="78">authenticates, routes, executes</text>
+  <rect class="box" x="545" y="95" width="230" height="75" rx="8" fill="#ffffff" stroke="#d08c2c"/>
+  <text class="title" x="660" y="126" text-anchor="middle">Control plane</text>
+  <text class="sub" x="660" y="147" text-anchor="middle">API login, task sessions</text>
+  <rect class="box" x="545" y="195" width="230" height="55" rx="8" fill="#ffffff" stroke="#d08c2c"/>
+  <text class="title" x="660" y="219" text-anchor="middle">Relay</text>
+  <text class="sub" x="660" y="238" text-anchor="middle">gRPC to sandbox workers</text>
+  <rect class="box" x="545" y="280" width="230" height="170" rx="8" fill="#ffffff" stroke="#d08c2c"/>
+  <text class="title" x="660" y="352" text-anchor="middle">Supervisor</text>
+  <text class="sub" x="660" y="373" text-anchor="middle">owns workloads, picks a</text>
+  <text class="sub" x="660" y="390" text-anchor="middle">shared sandbox per task</text>
+  <line class="line" x1="660" y1="280" x2="660" y2="252"/>
+
+  <!-- Static sandbox pool -->
+  <rect class="box" x="1130" y="30" width="250" height="220" rx="10" fill="#f3eefc" stroke="#7a5cc0"/>
+  <text class="title" x="1148" y="58">Shared sandboxes</text>
+  <text class="sub" x="1148" y="78">provisioned by the operator</text>
+  <rect class="box" x="1148" y="95" width="66" height="50" rx="7" fill="#ffffff" stroke="#7a5cc0"/>
+  <text class="note" x="1181" y="124" text-anchor="middle">Sandbox 1</text>
+  <rect class="box" x="1226" y="95" width="66" height="50" rx="7" fill="#ffffff" stroke="#7a5cc0"/>
+  <text class="note" x="1259" y="124" text-anchor="middle">Sandbox 2</text>
+  <rect class="box" x="1304" y="95" width="66" height="50" rx="7" fill="#ffffff" stroke="#7a5cc0"/>
+  <text class="note" x="1337" y="124" text-anchor="middle">Sandbox N</text>
+  <g class="step"><circle cx="1158" cy="186" r="10"/><text x="1158" y="186">7</text></g>
+  <text class="note" x="1176" y="190">agent starts in its context</text>
+  <text class="sub" x="1176" y="208">read-only, or a --writable copy</text>
+
+  <!-- Context Service -->
+  <rect class="box" x="1130" y="280" width="250" height="170" rx="10" fill="#eaf7ee" stroke="#3c8d5a"/>
+  <text class="title" x="1150" y="312">Context Service</text>
+  <text class="sub" x="1150" y="332">optional; never creates sandboxes</text>
+  <path class="box" d="M1165,365 v52 a90,11 0 0,0 180,0 v-52" fill="#eaf7ee" stroke="#3c8d5a"/>
+  <ellipse class="box" cx="1255" cy="365" rx="90" ry="11" fill="#eaf7ee" stroke="#3c8d5a"/>
+  <text class="title" x="1255" y="398" text-anchor="middle">Context PVC</text>
+  <text class="sub" x="1255" y="416" text-anchor="middle">frozen revisions</text>
+
+  <!-- Helper -> control plane -->
+  <line class="line" x1="250" y1="115" x2="543" y2="115"/>
+  <g class="step"><circle cx="272" cy="115" r="10"/><text x="272" y="115">5</text></g>
+  <text class="api" x="290" y="109">POST /v1/sessions</text>
+  <text class="sub" x="290" y="130">mocactl spawn: one session per task</text>
+
+
+  <!-- Helper -> supervisor -->
+  <line class="line" x1="250" y1="300" x2="543" y2="300"/>
+  <g class="step"><circle cx="272" cy="300" r="10"/><text x="272" y="300">2</text></g>
+  <text class="api" x="290" y="294">POST /workloads</text>
+  <text class="sub" x="290" y="315">mocactl workloads create</text>
+
+  <line class="line" x1="250" y1="340" x2="543" y2="340"/>
+  <g class="step"><circle cx="272" cy="340" r="10"/><text x="272" y="340">4</text></g>
+  <text class="api" x="290" y="334">POST /workloads/{id}/activate</text>
+  <text class="sub" x="290" y="355">…then freezes the uploaded revision</text>
+
+  <line class="line" x1="250" y1="380" x2="543" y2="380"/>
+  <g class="step"><circle cx="272" cy="380" r="10"/><text x="272" y="380">6</text></g>
+  <text class="api" x="290" y="374">POST /runs</text>
+  <text class="sub" x="290" y="395">mocactl spawn --workload; result in reply</text>
+
+  <line class="line" x1="250" y1="420" x2="543" y2="420"/>
+  <g class="step"><circle cx="272" cy="420" r="10"/><text x="272" y="420">8</text></g>
+  <text class="api" x="290" y="414">DELETE /workloads/{id}</text>
+  <text class="sub" x="290" y="435">mocactl workloads delete</text>
+
+  <!-- Relay -> sandbox pool -->
+  <line class="line" x1="775" y1="222" x2="1128" y2="222"/>
+  <g class="step"><circle cx="797" cy="222" r="10"/><text x="797" y="222">6</text></g>
+  <text class="api" x="815" y="216">SandboxExec.Exec</text>
+  <text class="sub" x="815" y="237">context once per revision, then the task</text>
+
+  <!-- Supervisor -> Context Service -->
+  <line class="line" x1="775" y1="300" x2="1128" y2="300"/>
+  <g class="step"><circle cx="797" cy="300" r="10"/><text x="797" y="300">2</text></g>
+  <text class="api" x="815" y="281">POST /internal/v1/contexts</text>
+  <text class="api" x="815" y="294">POST {ctx}/upload-capabilities</text>
+  <text class="sub" x="815" y="315">create Context + one-time grant</text>
+
+  <line class="line" x1="775" y1="340" x2="1128" y2="340"/>
+  <g class="step"><circle cx="797" cy="340" r="10"/><text x="797" y="340">4</text></g>
+  <text class="api" x="815" y="334">POST /internal{ctx}/freeze</text>
+  <text class="sub" x="815" y="355">pin the exact sha256 revision</text>
+
+  <line class="line" x1="775" y1="380" x2="1128" y2="380"/>
+  <g class="step"><circle cx="797" cy="380" r="10"/><text x="797" y="380">6</text></g>
+  <text class="api" x="815" y="374">GET /internal{ctx}/revisions/{sha}/bundle</text>
+  <text class="sub" x="815" y="395">frozen bundle, cached per revision</text>
+
+  <line class="line" x1="775" y1="420" x2="1128" y2="420"/>
+  <g class="step"><circle cx="797" cy="420" r="10"/><text x="797" y="420">8</text></g>
+  <text class="api" x="815" y="414">DELETE /internal{ctx}</text>
+  <text class="sub" x="815" y="435">delete Context</text>
+
+  <!-- Helper -> Context Service upload -->
+  <path class="line" d="M135,250 V510 H1255 V452"/>
+  <g class="step"><circle cx="300" cy="510" r="10"/><text x="300" y="510">3</text></g>
+  <text class="api" x="318" y="504">PUT /v1/uploads/{id}</text>
+  <text class="sub" x="318" y="525">.context file + one-time token, straight to Context Service</text>
+
+  <text class="api" x="20" y="562" style="fill: #6b7280;">{ctx} = /v1/namespaces/{ns}/contexts/{name}</text>
+</svg>

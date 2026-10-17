@@ -48,12 +48,18 @@ from what already runs:
   with a fixed absolute lifetime). It mints a short-lived Ed25519 **sandbox token**
   (`typ: moca-sandbox+jwt`, `aud: moca-sandbox`) naming exactly one worker (`wrk`) and one workspace
   key (`wsk`). The relay verifies it with public keys only and requires an exact match on both.
+  Because every sandbox of a template shares one worker, the relay also:
+  - namespaces each sandbox's `req_id`s before they reach the worker, so dedup and Abort never
+    cross sandboxes;
+  - cancels an Exec when its token expires;
+  - caps in-flight Execs per sandbox.
 - **Clients:** `mocactl sbx`, which pushes the working tree in, pulls a patch out, runs commands, and
   serves seven sandbox tools as a **local stdio MCP server**. There is no hosted MCP server or OAuth
   authorization server. The gRPC client, the tools (Pi's names and schemas, reimplemented without
   Pi) and the MCP server live in a new package, `@moca/sandbox-client`. It is the **second named
-  exception** to ADR-0036's no-`@moca/*`-dependency rule, after ADR-0038's `@moca/config-bundle`,
-  and is justified the same way: no Pi, no server internals, no substrate assumptions. The one-entry
+  exception** to ADR-0036's rule against `workspace:*` dependencies, after ADR-0038's `@moca/config-bundle`,
+  and is justified the same way, in ADR-0038's words: no Pi, no server internals, no substrate
+  assumptions. The one-entry
   allow-list in `mocactl`'s `layering.test.ts` becomes a two-entry list naming this ADR.
 - **No silent reset**, held by invariants rather than worker changes:
   - the control plane owns the lifetime;
@@ -76,8 +82,8 @@ egress, the next increment.
   means editing a Secret and restarting the relay. Used only in the first, team-only increment, from
   the prototype branch, and never merged.
 - **Embedding Pi's tools in `mocactl`** (depending on `pi-coding-agent` and `@moca/k8s-sandbox`).
-  One tool implementation, but it would break ADR-0036's stated core ("no pi") and bundle Pi's TUI
-  and AI packages into the client.
+  One tool implementation, but it would break the condition ADR-0038 sets for an exception ("no
+  Pi") and bundle Pi's TUI and AI packages into the client.
 - **A separate MCP binary** built on Pi. It keeps ADR-0036 absolute, but users install two things,
   and the binary needs its own release channel and login code.
 - **A hosted MCP server.** It would be a new internet-facing surface that holds user tokens, while
@@ -100,7 +106,10 @@ egress, the next increment.
   - The `uint64` `req_id` must stay below 2^53, a known wire wart.
   - If a standard data plane is adopted later, this cohort's clients must migrate.
 - **Negative / accepted cost:** delete takes effect only when the last minted token expires (≤ 15
-  minutes). The worker does not re-verify tokens, so it trusts the relay.
+  minutes, plus 30 s of clock leeway), and an Exec still running then is cancelled. The worker does
+  not re-verify tokens, so it trusts the relay.
+- **Negative / accepted cost:** the longest single command is one token lifetime (15 minutes by
+  default). A longer lifetime allows longer commands, at the cost of a slower delete.
 - **Negative / accepted cost:** one shared KVM host. Losing it ends every sandbox on it. The laptop
   keeps the original tree.
 - **Negative / accepted cost:** the control plane's codebase now serves two products, selected by a

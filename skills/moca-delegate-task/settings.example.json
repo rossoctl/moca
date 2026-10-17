@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(contextctl ctx pack *)",
+      "Bash(mocactl workloads *)",
+      "Bash(mocactl spawn *)",
+      "Bash(mocactl subagents *)",
+      "Bash(mocactl get *)"
+    ]
+  }
+}

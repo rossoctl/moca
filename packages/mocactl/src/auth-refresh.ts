@@ -107,6 +107,15 @@ export async function ensureAuth(
         }
         return { kind: 'login_required' };
       }
+      if (err instanceof ApiError && err.code === 'not_enrolled') {
+        // SBX0 §4.2: the control plane rotated, then revoked the family. Forget the pair so it is
+        // never presented again, but report the refusal itself: the user needs the operator, not a login.
+        try {
+          saveAuth(deps.paths, withoutRefresh(current));
+        } catch {
+          // Could not forget it: presented again, it is refused as revoked. Harmless.
+        }
+      }
       return { kind: 'unreachable', error: err };
     }
     try {

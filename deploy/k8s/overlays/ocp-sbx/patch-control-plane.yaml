@@ -1,0 +1,54 @@
+# The control plane as SBX0 runs it (spec §4.1): the `sandbox` route profile, which needs no
+# credential store, KEK, exchange token or inference settings -- so those settings are removed and
+# only the signing key is mounted. Its own settings come from sbx-settings (deploy/sbx/setup.sh).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      # No credential store means no Kubernetes API calls: no service account token either.
+      automountServiceAccountToken: false
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_ROUTE_PROFILE, value: sandbox }
+            - { name: SH_CREDENTIAL_STORE, $patch: delete }
+            - { name: SH_CREDENTIAL_NAMESPACE, $patch: delete }
+            - { name: SH_SANDBOX_NAMESPACE, $patch: delete }
+            - { name: SH_SANDBOX_TIERS, $patch: delete }
+            - { name: SH_SANDBOX_DEFAULT_TIER, $patch: delete }
+            - { name: SH_PUBLIC_HARNESS_URL, $patch: delete }
+            - { name: SH_ALLOW_OPERATOR_FALLBACK, $patch: delete }
+            - name: SH_ALLOWED_SUBJECTS
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_ALLOWED_SUBJECTS } }
+            - name: SH_SANDBOX_TEMPLATES
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TEMPLATES } }
+            - name: SH_SANDBOX_EXEC_ENDPOINT
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_ENDPOINT } }
+            - name: SH_SANDBOX_EXEC_CA
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_CA, optional: true } }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            - name: SH_SANDBOX_LIFETIME_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_LIFETIME_SECONDS } }
+            - name: SH_SANDBOX_TOKEN_TTL_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_TTL_SECONDS } }
+            - name: SH_SANDBOX_RETENTION_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_RETENTION_SECONDS } }
+            - name: SH_SANDBOX_MAX_PER_SUBJECT
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_PER_SUBJECT } }
+            - name: SH_SANDBOX_MAX_TOTAL
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_TOTAL } }
+      volumes:
+        - name: credentials
+          secret:
+            secretName: moca-mu1
+            items:
+              - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+            defaultMode: 256 # 0400

@@ -1,5 +1,5 @@
 export { CP_ERROR_CODES, CpError, statusFor, writeError, type CpErrorCode } from './errors.js';
-export { ROUTES, matchRoute, type RouteSpec } from './routes.js';
+export { ROUTES, matchRoute, type RouteProfile, type RouteSpec } from './routes.js';
 export {
   TOKEN_AUDIENCE,
   DEFAULT_ISSUER,
@@ -8,14 +8,27 @@ export {
   parseKeyset,
   publicKeyFromBase64,
   publicKeyToBase64,
+  verifyJws,
   verifyToken,
   type MintInput,
   type TokenClaims,
 } from './token.js';
+export {
+  DEFAULT_SANDBOX_ISSUER,
+  SANDBOX_CLOCK_LEEWAY_S,
+  SANDBOX_SCOPE_EXEC,
+  SANDBOX_TOKEN_AUDIENCE,
+  SANDBOX_TOKEN_TYP,
+  mintSandboxToken,
+  verifySandboxToken,
+  type SandboxMintInput,
+  type SandboxTokenClaims,
+} from './sandbox-token.js';
 export { KEK_BYTES, credentialAad, keksFromBase64, open, seal, type Opened } from './envelope.js';
 export {
   CREDENTIAL_NAME_RE,
   InMemoryCredentialStore,
+  UnavailableCredentialStore,
   inferenceAuthHeader,
   kindSpec,
   parseCredentialBody,
@@ -89,8 +102,37 @@ export {
   type RequestCtx,
 } from './handlers.js';
 export { projectResources, resolveSandbox, type SandboxView } from './resources.js';
+// The store's SandboxView is aliased: resources.ts's SandboxView (a session's sandbox tier) owns the name.
+export {
+  MemorySandboxStore,
+  isLive,
+  viewOf,
+  type CreateOutcome,
+  type DeleteOutcome,
+  type SandboxLimits,
+  type SandboxRecord,
+  type SandboxState,
+  type SandboxStore,
+  type SandboxView as SandboxStoreView,
+  type TerminationReason,
+} from './sandbox-store.js';
+export {
+  DEFAULT_SANDBOX_PREFIX,
+  RedisSandboxStore,
+  type SandboxRedisLike,
+} from './sandbox-redis.js';
+export {
+  isEnrolled,
+  parseTemplates,
+  routeProfileFromEnv,
+  sandboxConfigFromEnv,
+  type SandboxConfig,
+  type SandboxTemplate,
+} from './sandbox-config.js';
+export { LABEL_KEY_RE, SANDBOX_HANDLERS, SANDBOX_ID_RE } from './sandbox-handlers.js';
 export {
   checkExchangeAuth,
+  checkStaticBearer,
   exchangeCredential,
   placeholderFor,
   refuseMisdirectedSecret,

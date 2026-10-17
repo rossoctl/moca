@@ -22,7 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_SRV:=/srv/sbx}"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
-WORKSPACE_IDLE=216h # 9 days > the 7-day sandbox lifetime (spec §5.4); setup checks it again in 1b
+# A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
+# spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
+# the image size defaults to microvm-worker's own.
+DEFAULT_IMAGE_MB=2048
 DEFAULT_BUDGET_MB=8192
 
 log() { printf '==> %s\n' "$*"; }
@@ -58,7 +61,7 @@ install_units() {
 }
 
 install_worker() {
-  local env="$BUNDLE/worker.env" id addr tok ca=''
+  local env="$BUNDLE/worker.env" id addr tok idle image_mb ca=''
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
   id="$(env_value SANDBOX_ID "$env")"
   valid_id "$id" || die "SANDBOX_ID in $env is not a valid worker id"
@@ -67,6 +70,13 @@ install_worker() {
   [[ "$(env_value RELAY_TLS "$env")" == true ]] || die "RELAY_TLS in $env must be true"
   tok="$(env_value SANDBOX_TOKEN "$env")"
   [[ "$tok" =~ ^[0-9a-f]{64}$ ]] || die "SANDBOX_TOKEN in $env is not 64 hex characters: copy the bundle again"
+  idle="$(env_value SH_WORKSPACE_IDLE "$env")"
+  [[ -n "$idle" ]] ||
+    die "$env has no SH_WORKSPACE_IDLE (a bundle from before increment 1b): re-run deploy/sbx/setup.sh and copy the new bundle"
+  [[ "$idle" =~ ^[1-9][0-9]*h$ ]] || die "SH_WORKSPACE_IDLE in $env must be whole hours, e.g. 216h"
+  image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
+  image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"
+  [[ "$image_mb" =~ ^[1-9][0-9]*$ ]] || die "SH_WORKSPACE_IMAGE_MB in $env must be a whole number of MiB"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
@@ -88,7 +98,7 @@ install_worker() {
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$SBX_SRV/jail/$id"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
-      printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\n' "$BUDGET_MB" "$WORKSPACE_IDLE"
+      printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
     } >"$SBX_ENV_DIR/workers/$id.env"
   )
   chmod 0600 "$SBX_ENV_DIR/workers/$id.env"

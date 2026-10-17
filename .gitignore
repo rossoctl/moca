@@ -44,3 +44,6 @@ __pycache__/
 # deploy/k8s/setup.sh's per-run overlay and (OCP) self-signed CA
 deploy/k8s/.generated/
 deploy/sbx/.generated/
+
+# Generated Python stubs for the sandbox/v1 examples (docs/api/sandbox-v1-direct-client.md)
+docs/api/examples/sandbox/

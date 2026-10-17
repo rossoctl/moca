@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTES } from '../src/routes.js';
 import { HANDLERS } from '../src/handlers.js';
-import { makeDeps, ctx, alice, bob, codeOf, seedCredential } from './helpers/deps.js';
+import { makeDeps, ctx, admin, alice, bob, codeOf, seedCredential } from './helpers/deps.js';
 import type { CpError } from '../src/errors.js';
 
 describe('§9.3 test 2 — route-table enumeration', () => {
@@ -94,5 +94,53 @@ describe('cross-tenant negatives (spec §9.3)', () => {
       ),
     ).toBe('session_not_found');
     expect(await d.index.get('b-1')).not.toBeNull();
+  });
+});
+
+describe('sandbox-scoped routes (SBX0 §5.1)', () => {
+  const sbx = () => makeDeps({ config: { routeProfile: 'sandbox' }, newId: () => 'a'.repeat(26) });
+
+  it("makes EVERY sandbox-scoped route hide another user's sandbox with sandbox_not_found", async () => {
+    const scoped = ROUTES.filter((r) => r.sandboxScoped);
+    expect(scoped.length).toBe(3);
+    for (const route of scoped) {
+      const d = sbx();
+      const created = await HANDLERS.createSandbox!(
+        ctx({ principal: alice, body: { template: 'default' } }),
+        d,
+      );
+      const { id } = created.body as { id: string };
+      const code = await codeOf(() =>
+        HANDLERS[route.operationId]!(ctx({ principal: bob, params: { id } }), d),
+      );
+      expect(code, `${route.method} ${route.path}`).toBe('sandbox_not_found');
+    }
+  });
+
+  it('makes every sandbox-scoped route reject a missing principal', async () => {
+    for (const route of ROUTES.filter((r) => r.sandboxScoped)) {
+      const code = await codeOf(() =>
+        HANDLERS[route.operationId]!(ctx({ params: { id: 'sbx-x' } }), sbx()),
+      );
+      expect(code, `${route.method} ${route.path}`).toBe('token_required');
+    }
+  });
+
+  it('declares every /v1/sandboxes/{id} route sandbox-scoped, and only those', () => {
+    const idRoutes = ROUTES.filter((r) => r.path.startsWith('/v1/sandboxes/{id}'));
+    expect(idRoutes.every((r) => r.sandboxScoped)).toBe(true);
+    const scoped = ROUTES.filter((r) => r.sandboxScoped);
+    expect(scoped.every((r) => r.path.startsWith('/v1/sandboxes/{id}'))).toBe(true);
+  });
+
+  it('refuses the janitor route without the janitor bearer', async () => {
+    const janitor = ROUTES.filter((r) => r.auth === 'janitor');
+    expect(janitor.length).toBe(1);
+    for (const route of janitor) {
+      // Not even an admin's principal stands in for the janitor's mark.
+      for (const c of [ctx(), ctx({ principal: admin })]) {
+        expect(await codeOf(() => HANDLERS[route.operationId]!(c, sbx()))).toBe('unauthorized');
+      }
+    }
   });
 });

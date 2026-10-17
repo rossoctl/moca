@@ -49,6 +49,26 @@ const SCRIPTS = {
   // deploy/k8s/smoke.sh, per-session models: no tool step, and the reply names the model the
   // request carried, so the smoke can see a PATCHed model reach the gateway.
   'K8S-SMOKE-MODEL': { steps: [], done: (model) => `model=${model}` },
+  // skills/moca-delegate-task/demo/run.sh: a read-only and a writable run on a workload whose
+  // context is demo/example_repo. READ shows the run starts in the context, that the context is
+  // read-only, and that its ./test.sh runs; FIX edits the writable copy until ./test.sh passes, then
+  // diffs it against the sandbox's cached revision, which must still have the bug.
+  'MOCA-DEMO-READ': {
+    steps: [
+      'echo "cwd=$(pwd)"; ls',
+      "stat -c '%a %n' test.sh src/greet.py; if (echo '# edit' >> src/greet.py) 2>/dev/null; then echo write=allowed; else echo write=refused; fi",
+      './test.sh; echo "test-exit=$?"',
+    ],
+    done: 'done-demo-read',
+  },
+  'MOCA-DEMO-FIX': {
+    steps: [
+      'echo "cwd=$(pwd)"; ./test.sh; echo "before-exit=$?"',
+      `python3 -c "import pathlib; p = pathlib.Path('src/greet.py'); p.write_text(p.read_text().replace('f\\"Hello {name}\\"', 'f\\"Hello, {name}!\\"'))"; ./test.sh; echo "after-exit=$?"`,
+      'for f in /workspace/.moca-context/cache/*/workspace/src/greet.py; do echo "cached=$f"; sha256sum "$f"; git diff --no-index -- "$f" src/greet.py; done; true',
+    ],
+    done: 'done-demo-fix',
+  },
 };
 
 const isToolResult = (m) =>

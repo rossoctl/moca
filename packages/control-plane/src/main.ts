@@ -5,7 +5,11 @@ import type { KeyObject } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import type { BundleBudgetRedisLike } from './bundle-budget.js';
 import { keksFromBase64 } from './envelope.js';
-import type { CredentialStore, InferenceAuthHeader } from './credential-store.js';
+import {
+  UnavailableCredentialStore,
+  type CredentialStore,
+  type InferenceAuthHeader,
+} from './credential-store.js';
 import { directModeMismatch } from './exchange.js';
 import { FileCredentialStore } from './file-store.js';
 import { adminSubjectsFromEnv, GithubOAuthProvider } from './identity.js';
@@ -20,6 +24,8 @@ import { resolveVersion } from './version.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
 import { parseSandboxTiers } from './sandbox-tiers.js';
+import { routeProfileFromEnv, sandboxConfigFromEnv } from './sandbox-config.js';
+import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -104,13 +110,20 @@ export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
  */
 // prettier-ignore
-export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN'] as const;
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN'] as const;
 
-export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
-  required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
-  required(env, 'SH_GITHUB_CLIENT_ID');
-  keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
-  const config: CpConfig = {
+/** The API, session and refresh token lifetimes, shared by both route profiles. */
+function tokenTtlsFromEnv(
+  env: NodeJS.ProcessEnv,
+): Pick<
+  CpConfig,
+  | 'apiTokenTtlSeconds'
+  | 'sessionTokenTtlSeconds'
+  | 'refreshIdleTtlSeconds'
+  | 'refreshMaxTtlSeconds'
+  | 'refreshReuseGraceSeconds'
+> {
+  return {
     // 15 minutes: API tokens stay stateless, so their lifetime IS the revocation latency (B14 §2).
     apiTokenTtlSeconds: intEnv(env, 'SH_API_TOKEN_TTL_SECONDS', 900),
     // A session outlives a 5-minute token; POST /v1/sessions/{id}/token re-mints (spec §4.2).
@@ -118,6 +131,16 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     refreshIdleTtlSeconds: intEnv(env, 'SH_REFRESH_IDLE_TTL_SECONDS', 30 * 86_400),
     refreshMaxTtlSeconds: intEnv(env, 'SH_REFRESH_MAX_TTL_SECONDS', 90 * 86_400),
     refreshReuseGraceSeconds: intEnv(env, 'SH_REFRESH_REUSE_GRACE_SECONDS', 30),
+  };
+}
+
+export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
+  required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
+  required(env, 'SH_GITHUB_CLIENT_ID');
+  if (routeProfileFromEnv(env) === 'sandbox') return sandboxProfileConfig(env);
+  keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
+  const config: CpConfig = {
+    ...tokenTtlsFromEnv(env),
     exchangeToken: required(env, 'SH_EXCHANGE_TOKEN'),
     defaultInferenceEndpoint: env.SH_DEFAULT_INFERENCE_ENDPOINT || undefined,
     modelCatalogHosts: catalogHostsEnv(env),
@@ -137,6 +160,27 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     version: resolveVersion(env),
   };
   checkInferenceConfig(config);
+  checkRefreshConfig(config);
+  return config;
+}
+
+/**
+ * SBX0 §4.1: the sandbox profile needs no credential store, KEK, exchange token or inference
+ * settings, so none is required; the harness-only fields take inert values that no mounted route reads.
+ */
+function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
+  const config: CpConfig = {
+    routeProfile: 'sandbox',
+    sandbox: sandboxConfigFromEnv(env),
+    ...tokenTtlsFromEnv(env),
+    allowOperatorFallback: false,
+    injectorConfigured: false,
+    sandboxNamespace: 'default',
+    sandboxTiers: null,
+    bundleSubjectBytes: 0,
+    bundleTotalBytes: 0,
+    version: resolveVersion(env),
+  };
   checkRefreshConfig(config);
   return config;
 }
@@ -303,6 +347,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
+  const sandboxProfile = config.routeProfile === 'sandbox';
   // Without a listener an 'error' event is an uncaught exception and the process exits. The message
   // only: node-redis socket errors name host:port, never userinfo, and the error object itself is not
   // logged in case some future one carries the URL (the test checks the password never appears).
@@ -332,7 +377,10 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       maxTtlS: config.refreshMaxTtlSeconds,
       graceS: config.refreshReuseGraceSeconds,
     }),
-    credentials: credentialStoreFromEnv(env),
+    credentials: sandboxProfile ? new UnavailableCredentialStore() : credentialStoreFromEnv(env),
+    ...(sandboxProfile
+      ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
+      : {}),
     identity: new GithubOAuthProvider({
       clientId: env.SH_GITHUB_CLIENT_ID!,
       adminSubjects: adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { CpError, writeError } from './errors.js';
-import { checkExchangeAuth } from './exchange.js';
+import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
 import { HANDLERS, type CpDeps, type RequestCtx } from './handlers.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
 import { verifyToken } from './token.js';
@@ -60,6 +60,13 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     ctx.exchangeAuthorized = true;
     return;
   }
+  if (route.auth === 'janitor') {
+    // The host janitor's SH_JANITOR_TOKEN, and nothing else: a user's or an admin's API token is
+    // refused here, and with none configured every call is (SBX0 §8.3).
+    checkStaticBearer(presented, deps.config.sandbox?.janitorToken, 'janitor');
+    ctx.janitorAuthorized = true;
+    return;
+  }
   if (!presented) throw new CpError('token_required', 'this route requires a token');
   // requiredScope 'api' is what stops a session token rewriting credentials or creating a second
   // session, and stops the shared exchange bearer standing in for a user identity (plan gap #7).
@@ -72,7 +79,11 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
 export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     const route = async () => {
-      const matched = matchRoute(req.method ?? '', req.url ?? '');
+      const matched = matchRoute(
+        req.method ?? '',
+        req.url ?? '',
+        deps.config.routeProfile ?? 'harness',
+      );
       if (!matched) {
         res.writeHead(404, JSON_HEADERS).end(JSON.stringify({ error: 'not_found' }));
         return;

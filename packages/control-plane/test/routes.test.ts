@@ -30,6 +30,14 @@ describe('the route table', () => {
         'GET /healthz',
         'GET /readyz',
         'GET /v1/discovery',
+        // SBX0 §5.1: the sandbox profile's own.
+        'GET /v1/templates',
+        'POST /v1/sandboxes',
+        'GET /v1/sandboxes',
+        'GET /v1/sandboxes/{id}',
+        'DELETE /v1/sandboxes/{id}',
+        'POST /v1/sandboxes/{id}/token',
+        'GET /v1/janitor/sandboxes',
       ].sort(),
     );
   });
@@ -55,27 +63,37 @@ describe('the route table', () => {
     expect(auth('POST', '/internal/credentials')).toBe('exchange');
     // A client reads it before it has logged in; it carries no per-subject data.
     expect(auth('GET', '/v1/discovery')).toBe('none');
+    // The host janitor's read takes its own bearer and never a user's token (SBX0 §8.3).
+    expect(auth('GET', '/v1/janitor/sandboxes')).toBe('janitor');
+    expect(ROUTES.filter((r) => r.auth === 'janitor').map((r) => r.operationId)).toEqual([
+      'janitorSandboxes',
+    ]);
   });
 
   it('requires an api-scoped token on every other /v1 route', () => {
     // A session token must not be able to rewrite credentials or create a second session, so
     // nothing under /v1 accepts scope `turn:write` (plan gap #7).
-    // The one named exception is discovery: public config, read before login, and GET-only.
-    const PUBLIC = new Set(['GET /v1/discovery']);
+    // The named exceptions: discovery (public config, read before login, GET-only), and the host
+    // janitor's read, which takes the janitor's bearer instead (SBX0 §8.3).
+    const EXEMPT = new Map([
+      ['GET /v1/discovery', 'none'],
+      ['GET /v1/janitor/sandboxes', 'janitor'],
+    ]);
     const wrong = ROUTES.filter(
       (r) =>
         r.path.startsWith('/v1/') &&
         !r.path.startsWith('/v1/auth/') &&
-        !PUBLIC.has(`${r.method} ${r.path}`) &&
-        r.auth !== 'api',
+        r.auth !== (EXEMPT.get(`${r.method} ${r.path}`) ?? 'api'),
     );
     expect(wrong.map((r) => r.path)).toEqual([]);
   });
 
-  it('gates ?owner= on an admin role, on the list route only', () => {
+  it('gates ?owner= and ?all= on an admin role, on the two list routes only', () => {
     const list = ROUTES.find((r) => r.method === 'GET' && r.path === '/v1/sessions')!;
     expect(list.adminOnlyQuery).toBe('owner');
-    expect(ROUTES.filter((r) => r.adminOnlyQuery).length).toBe(1);
+    const sandboxes = ROUTES.find((r) => r.operationId === 'listSandboxes')!;
+    expect(sandboxes.adminOnlyQuery).toBe('all');
+    expect(ROUTES.filter((r) => r.adminOnlyQuery).length).toBe(2);
   });
 });
 
@@ -132,6 +150,7 @@ describe('bodyLimitFor', () => {
         path: '/x',
         auth: 'api',
         sessionScoped: false,
+        profiles: ['harness'],
         operationId: 'x',
         maxBodyBytes: 1234,
       }),

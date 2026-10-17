@@ -17,6 +17,7 @@ import {
   type Io,
 } from './headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
+import { sbxMain } from './sbx/cli.js';
 import { cmdGet, cmdSpawn, cmdSubagents, runSpawnWorker } from './subagent.js';
 import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from './workloads.js';
 import { VERSION } from './version.js';
@@ -34,6 +35,7 @@ export const USAGE = `usage:
   mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
                                                  (--dry-run: build and report, upload nothing)
   mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
+  mocactl sbx …                                  the sandbox service: login, create, ls, rm, token, env (mocactl sbx --help)
   mocactl sessions [--json]                      list your sessions
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)
@@ -91,6 +93,9 @@ export async function main(
     readStdin?: () => Promise<string>;
   } = {},
 ): Promise<number> {
+  // `mocactl sbx` (SBX0) is its own command group with its own flags and its own control plane, so
+  // it is dispatched before the global flag table rather than widening it.
+  if (argv[0] === 'sbx') return sbxMain(argv.slice(1), env, io, { signal: deps.signal });
   let parsed;
   try {
     parsed = parseArgs({

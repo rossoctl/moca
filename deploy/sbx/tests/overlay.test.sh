@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Renders deploy/k8s/overlays/ocp-sbx with the real `kubectl kustomize` (no cluster needed) and
-# asserts what SBX0 1a needs: the relay and Redis only, both TLS Routes, the exec listener bound to
-# loopback, one namespace, and the relay reachable from the router alone. Spec SBX0 §2, §8.1.
+# asserts what SBX0 needs: the relay, Redis and the control plane on the sandbox profile, the two
+# passthrough Routes and the API's edge Route, the exec listener bound to loopback, the relay on
+# sandbox tokens alone, one namespace, and the relay and the control plane reachable from the router
+# alone. Spec SBX0 §2, §3.1, §4.1, §8.1.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # Fails, never skips: a skip would read as a pass for the overlay's security checks, and CI's
@@ -30,21 +32,24 @@ hasnt() { [[ -z "$(obj "${1%%/*}" "${1#*/}")" ]] || fail "unexpected $1"; }
 
 for o in Deployment/sandbox-relay StatefulSet/redis Route/moca-relay Route/sbx-exec \
   Service/sandbox-relay-tls Service/sbx-relay-exec-tls NetworkPolicy/sbx-relay-exec-from-router \
-  NetworkPolicy/sandbox-relay-from-router; do
+  NetworkPolicy/sandbox-relay-from-router Deployment/moca-control-plane Service/moca-control-plane \
+  ServiceAccount/moca-control-plane NetworkPolicy/moca-control-plane Route/sbx-api \
+  NetworkPolicy/moca-control-plane-from-router; do
   has "$o"
 done
-pass 'renders the relay, Redis, both Routes and their Services'
+pass 'renders the relay, Redis, the control plane, the three Routes and their Services'
 
-for o in Deployment/moca-supervisor StatefulSet/moca-sandbox Deployment/moca-control-plane \
+for o in Deployment/moca-supervisor StatefulSet/moca-sandbox \
   Role/moca-control-plane-credentials RoleBinding/moca-control-plane-credentials; do
   hasnt "$o"
 done
-pass 'renders no supervisor, sandbox pods, control plane (1b) or credentials Role'
+pass 'renders no supervisor, sandbox pods or credentials Role'
 
-for n in moca-supervisor moca-sandbox moca-control-plane; do
+# The control plane's Service, ServiceAccount and NetworkPolicy are expected (asserted above).
+for n in moca-supervisor moca-sandbox; do
   for k in Service ServiceAccount NetworkPolicy; do hasnt "$k/$n"; done
 done
-pass 'renders no supervisor, sandbox or control-plane Service, ServiceAccount or NetworkPolicy'
+pass 'renders no supervisor or sandbox Service, ServiceAccount or NetworkPolicy'
 
 hasnt Service/sandbox-relay-attach
 hasnt Service/sandbox-relay-exec
@@ -97,12 +102,71 @@ sidecar() { obj Deployment sandbox-relay | jq -r --arg c "$1" '.spec.template.sp
   fail 'the exec sidecar does not mount sbx-exec-tls'
 pass 'two ghostunnel sidecars: attach -> :9443, exec -> :9444'
 
-[[ "$(obj Deployment sandbox-relay | jq -r '.spec.template.spec.containers[] | select(.name == "sandbox-relay") | .env[] | select(.name == "MOCA_RELAY_CLIENT_TOKENS") | .valueFrom.secretKeyRef.optional')" == true ]] ||
-  fail 'MOCA_RELAY_CLIENT_TOKENS is not an optional Secret reference'
-pass 'static client tokens come from an optional Secret (1a only)'
+relay_ref() { obj Deployment sandbox-relay | jq -c --arg e "$1" '.spec.template.spec.containers[] | select(.name == "sandbox-relay") | .env[]? | select(.name == $e) | .valueFrom'; }
+[[ -z "$(q '[.. | objects | select(.name? == "MOCA_RELAY_CLIENT_TOKENS")] | .[]' -c)" ]] || fail 'the 1a static client tokens are still wired'
+[[ -z "$(relay_ref MOCA_RELAY_EXEC_TOKEN)$(relay_env sandbox-relay MOCA_RELAY_EXEC_TOKEN)" ]] || fail 'the relay still reads a harness exec token'
+[[ "$(relay_ref SH_SANDBOX_TOKEN_PUBLIC_KEYS)" == '{"secretKeyRef":{"key":"PUBLIC_KEYS","name":"sbx-token-keys"}}' ]] ||
+  fail "the relay does not read the sandbox public keys from sbx-token-keys/PUBLIC_KEYS: $(relay_ref SH_SANDBOX_TOKEN_PUBLIC_KEYS)"
+[[ "$(relay_ref SH_SANDBOX_TOKEN_ISSUER)" == '{"configMapKeyRef":{"key":"SH_SANDBOX_TOKEN_ISSUER","name":"sbx-settings"}}' ]] ||
+  fail 'the relay does not read the sandbox token issuer (it refuses to boot without one)'
+[[ "$(relay_ref SH_SANDBOX_MAX_INFLIGHT)" == '{"configMapKeyRef":{"key":"SH_SANDBOX_MAX_INFLIGHT","name":"sbx-settings"}}' ]] ||
+  fail 'the relay does not read the in-flight cap from sbx-settings'
+pass 'the relay takes sandbox tokens and nothing else (no exec token, no static client tokens)'
+
+CP="$(obj Deployment moca-control-plane)"
+[[ -n "$CP" ]] || fail 'could not isolate the control-plane Deployment'
+cp_env() { jq -c --arg e "$1" '.spec.template.spec.containers[] | select(.name == "control-plane") | .env[]? | select(.name == $e)' <<<"$CP"; }
+[[ "$(cp_env SH_ROUTE_PROFILE | jq -r .value)" == sandbox ]] || fail 'control plane not on the sandbox profile'
+for k in SH_CREDENTIAL_STORE SH_CREDENTIAL_NAMESPACE SH_SANDBOX_NAMESPACE SH_SANDBOX_TIERS \
+  SH_SANDBOX_DEFAULT_TIER SH_PUBLIC_HARNESS_URL SH_ALLOW_OPERATOR_FALLBACK SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN; do
+  ! grep -q "$k" <<<"$CP" || fail "the control plane still configures $k"
+done
+for k in SH_ALLOWED_SUBJECTS SH_SANDBOX_TEMPLATES SH_SANDBOX_EXEC_ENDPOINT SH_SANDBOX_EXEC_CA \
+  SH_SANDBOX_TOKEN_ISSUER SH_SANDBOX_LIFETIME_SECONDS SH_SANDBOX_TOKEN_TTL_SECONDS SH_SANDBOX_RETENTION_SECONDS \
+  SH_SANDBOX_MAX_PER_SUBJECT SH_SANDBOX_MAX_TOTAL; do
+  [[ "$(cp_env "$k" | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)"')" == "sbx-settings/$k" ]] ||
+    fail "the control plane does not read $k from sbx-settings"
+done
+[[ "$(cp_env SH_SANDBOX_EXEC_CA | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
+  fail 'SH_SANDBOX_EXEC_CA must be optional (absent when the exec certificate is issued)'
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY"]}]' ]] ||
+  fail "the control plane mounts more than its signing key: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
+[[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
+pass 'the control plane runs the sandbox profile with only its signing key mounted'
+
+# The control plane's own policy admits nothing (the base's supervisor ingress is reset).
+[[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] ||
+  fail "NetworkPolicy/moca-control-plane admits ingress: $(obj NetworkPolicy moca-control-plane | jq -c .spec.ingress)"
+[[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.policyTypes | index("Ingress") != null')" == true ]] ||
+  fail 'NetworkPolicy/moca-control-plane does not govern Ingress (an empty ingress would then deny nothing)'
+# Every policy that governs the control-plane pods' ingress, as for the relay: taken together, the
+# router namespace on 8080 and nothing else, from moca-control-plane-from-router alone.
+CP_INGRESS='[.[] | select(.kind == "NetworkPolicy")
+  | select((.spec.policyTypes // ["Ingress"]) | index("Ingress"))
+  | select(.spec.podSelector == {}
+      or .spec.podSelector.matchLabels.app == "moca-control-plane"
+      or ([.spec.podSelector.matchExpressions[]? | select(.key == "app" and .operator == "In" and (.values | index("moca-control-plane")))] | length > 0))
+  | {name: .metadata.name, rule: (.spec.ingress // [])[]}]'
+[[ "$(q "$CP_INGRESS"' | map({name, from: .rule.from, ports: .rule.ports})' -c)" == "[{\"name\":\"moca-control-plane-from-router\",\"from\":$ROUTER,\"ports\":[{\"port\":8080,\"protocol\":\"TCP\"}]}]" ]] ||
+  fail "ingress to the control plane is not the router on 8080 alone: $(q "$CP_INGRESS" -c)"
+pass 'the only ingress to the control plane is the router namespace, on 8080'
+
+# The sandbox profile calls no Kubernetes API (no credential store, no service account token), so its
+# egress is Redis and 443 (GitHub's device flow) only: the base's 6443 (kube API after DNAT) is dropped.
+cp_ports="$(obj NetworkPolicy moca-control-plane | jq -r '[.spec.egress[].ports[]?.port] | sort | map(tostring) | join(" ")')"
+[[ " $cp_ports " == *' 443 '* ]] || fail 'the control plane lost its 443 egress (GitHub device flow)'
+[[ " $cp_ports " == *' 6379 '* ]] || fail 'the control plane lost its Redis egress'
+[[ " $cp_ports " != *' 6443 '* ]] || fail 'the sandbox control plane still has 6443 (Kubernetes API) egress'
+pass 'the control plane has no Kubernetes API egress (6443)'
+
+[[ "$(obj Route sbx-api | jq -r .spec.tls.termination)" == edge ]] || fail 'the API Route is not edge-terminated'
+[[ "$(obj Route sbx-api | jq -r .spec.to.name)" == moca-control-plane ]] || fail 'the API Route does not target the control plane'
+[[ "$(q '[.[] | select(.kind == "Route" and .spec.tls.termination == "edge") | .metadata.name] | join(" ")')" == sbx-api ]] ||
+  fail 'want one edge Route (the API)'
+pass 'the API Route is edge-terminated, to the control plane'
 
 for r in moca-relay sbx-exec; do
   [[ "$(obj Route "$r" | jq -r .spec.tls.termination)" == passthrough ]] ||
     fail "Route/$r must be passthrough (gRPC must not cross the router TLS termination)"
 done
-pass 'both Routes are passthrough'
+pass 'the attach and exec Routes are passthrough'

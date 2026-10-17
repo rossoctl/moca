@@ -1,30 +1,106 @@
-# SBX0 front door (increment 1a)
+# SBX0 sandbox service
 
-The sandbox relay and Redis in one namespace of a shared OpenShift cluster, reached through two
-passthrough Routes: **attach** (KVM hosts' workers dial in) and **exec** (clients). Design:
+The sandbox control plane, the sandbox relay and Redis in one namespace of a shared OpenShift
+cluster. Three Routes reach them: **api** (edge TLS, the control plane: login and the sandbox
+resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (passthrough, clients'
+`Exec` calls). Design:
 [`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
 
 ## 1. Cluster side
 
-Needs `kubectl` logged in with edit rights in an **existing** namespace, `jq` and `openssl`. The
-namespace must be **dedicated to SBX0**: the overlay's default-deny and relay NetworkPolicies would cut
-off anything else running in it. Keep the inputs in a file outside the repo:
+Needs `kubectl` logged in with edit rights in an **existing** namespace, `jq`, and an `openssl` that
+makes Ed25519 keys (OpenSSL 1.1.1 or later; on macOS, `brew install openssl@3`). The namespace must
+be **dedicated to SBX0**: the overlay's default-deny and relay NetworkPolicies would cut off anything
+else running in it. Keep the inputs in a file outside the repo:
 
     SBX_NAMESPACE=<namespace>
+    SBX_API_HOST=<api route host>
     SBX_ATTACH_HOST=<attach route host>
-    SBX_EXEC_HOST=<exec route host>
-    SBX_IMAGE=<relay image ref>
-    SBX_WORKERS="sbx_default"            # one worker id per template
-    SBX_CLIENTS="<name> <name>"          # increment 1a only: static client tokens, no '-' in a name
+    SBX_EXEC_HOST=<exec route host>         # three distinct hosts
+    SBX_IMAGE=<image ref>
+    SBX_WORKERS="sbx_default sbx_py312"     # one worker id per template
+    SBX_TEMPLATES_FILE=<templates.json>     # below
+    SBX_GITHUB_CLIENT_ID=<client id>        # this deployment's own GitHub OAuth app (device flow)
+    SBX_ALLOWED_SUBJECTS=github:<id>,github:<id>   # who may log in: numeric GitHub user ids
+    SBX_ADMIN_SUBJECTS=github:<id>          # optional
+    SBX_WORKSPACE_FS_GIB=<n>                # the KVM host's workspace filesystem size, in GiB
 
     deploy/sbx/setup.sh --env-file <file>
 
-A client name may not contain `-`: its token admits workspace keys under `sbx-exec-<name>-`, which
-would otherwise also prefix the keys of another client (`bob` and `bob-x`).
+A subject is `github:` plus the numeric GitHub user id, not the login. Look one up with
+`gh api users/<login> --jq .id`. A user who is not enrolled is told their own subject by
+`mocactl sbx login`, so they can send it to you.
 
-Re-run it after any change; tokens and certificates are kept. A change to `SBX_CLIENTS` or
-`SBX_WORKERS` that changes the client tokens rolls the relay, since it reads them only at boot. Without
-`SBX_*_TLS_CERT/KEY` the Routes use self-signed certificates, shipped in every bundle.
+Optional inputs:
+
+| Variable                               | Default | Rule                                                                        |
+| -------------------------------------- | ------- | --------------------------------------------------------------------------- |
+| `SBX_LIFETIME_DAYS`                    | 7       | 1-30; each worker's idle reclaim is set to this plus two days (below)       |
+| `SBX_TOKEN_TTL_MINUTES`                | 15      | 5-60: a sandbox token's lifetime, the longest command, and the delete delay |
+| `SBX_RETENTION_DAYS`                   | 14      | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`       |
+| `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40   | live sandboxes per user, and in all                                         |
+| `SBX_MAX_INFLIGHT`                     | 2       | 1-8: `Exec` calls one sandbox may have in flight at the relay               |
+| `SBX_WORKSPACE_IMAGE_MB`               | 2048    | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)    |
+| `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none    | the Route's certificate; otherwise the router's (api) or a self-signed one  |
+
+The templates file lists one template per worker in `SBX_WORKERS`. A template id is lower-case
+letters, digits and dashes, and unique; `tools` is what `mocactl sbx` shows:
+
+```json
+[
+  {
+    "id": "default",
+    "worker": "sbx_default",
+    "description": "bash, git, Python 3",
+    "tools": ["bash", "git", "python3"]
+  },
+  { "id": "py312", "worker": "sbx_py312", "description": "Python 3.12", "tools": ["python3.12"] }
+]
+```
+
+The run refuses, before applying anything, when `SBX_MAX_TOTAL` × `SBX_WORKSPACE_IMAGE_MB` exceeds
+80 % of `SBX_WORKSPACE_FS_GIB`: the quota is the disk control.
+
+Re-run it after any change; tokens, the signing key and certificates are kept. A change to any
+setting rolls the control plane and the relay, which read their settings only at boot.
+
+**Changing `SBX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane takes
+the new lifetime at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it was
+installed with until `install-host.sh` is re-run on its host. After a raise, that idle can be shorter
+than a live sandbox's lifetime, and the worker would reclaim its workspace. So the run refuses a
+lifetime that changes the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is set. To
+raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the new value;
+otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names them.
+The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between runs
+(it is gitignored), or the run cannot see the idle the hosts were given.
+
+**Delete and de-enrollment are not immediate.** A sandbox token already issued keeps working until
+it expires, plus the relay's 30 s clock leeway: up to `SBX_TOKEN_TTL_MINUTES` plus 30 s after a
+`mocactl sbx rm`, or after a subject is removed from `SBX_ALLOWED_SUBJECTS`. An `Exec` still running
+when that token expires is cancelled. Raising `SBX_TOKEN_TTL_MINUTES` allows longer commands at the
+cost of a slower delete.
+
+Without
+`SBX_{ATTACH,EXEC}_TLS_CERT/KEY` those Routes use self-signed certificates: the attach one ships in
+every worker bundle, and the control plane hands the exec one to clients.
+
+**Upgrading from 1a:** unset `SBX_CLIENTS` (the run refuses it), and move `SBX_IMAGE` off the
+team-only 1a image (built from `sbx/relay-1a`): its relay requires the harness exec token, and its
+control plane has no sandbox profile. The run deletes the static client tokens and their bundles,
+and removes the relay's harness exec token once the new relay is up. Run it with `SBX_ACK_HOSTS=1`,
+because every 1a host must be reinstalled anyway, then re-run `install-host.sh` with the new worker
+bundles, which now carry the workspace idle time and image size; it refuses a 1a bundle. **1a
+workspaces are not migrated:** a 1b sandbox has a workspace key of its own, which no 1a workspace
+matches, so tell 1a users to pull their work out before the upgrade.
+
+**The API Route's certificate:** without `SBX_API_TLS_CERT/KEY` the API Route uses the router's
+default certificate. If that certificate is not publicly trusted (a self-signed or internal-CA
+wildcard), `mocactl sbx login` fails its TLS check: users then need `NODE_EXTRA_CA_CERTS=<ca.pem>`
+in their environment.
+
+**No janitor yet:** 1b has none (increment 1c adds it). A deleted or expired sandbox's workspace stays
+on the host's disk until the worker's own idle sweep (`SH_WORKSPACE_IDLE`, the lifetime plus two
+days) reclaims it, so size `SBX_WORKSPACE_FS_GIB` with that in mind.
 
 ## 2. KVM host side
 
@@ -45,24 +121,11 @@ a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace 
 `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
 it.
 
-## 3. Clients (increment 1a)
+## 3. Users
 
-Each `deploy/sbx/.generated/clients/<name>/` holds `client.env` and, with a self-signed certificate,
-`exec-ca.crt`. Hand it to its owner and delete the copy. The owner loads it from inside the bundle
-directory, making the CA path absolute so it holds from anywhere:
+Users log in with GitHub and create sandboxes from a template:
 
-    cd <bundle directory>
-    set -a; . ./client.env; set +a
-    [ -f exec-ca.crt ] && export SBX_CA_FILE="$PWD/exec-ca.crt"
+    mocactl sbx login --control-plane-url https://<api host>
+    mocactl sbx create --template <id>
 
-In 1a a client token reaches the **first** worker in `SBX_WORKERS` only: that is the one its bundle
-names (`SBX_SANDBOX_ID`), and setup.sh mints and keeps no token for any other worker. So changing
-which worker is first in `SBX_WORKERS` re-issues every client token, and every client bundle already
-handed out must be replaced. Increment 1b's per-sandbox tokens replace these.
-
-These static client tokens work only with the team-only 1a relay image. Build it from
-`sbx/relay-1a`: the prototype's client-token commits rebased onto this change's relay keepalive
-commit (spec §3.1, §11), never merged. A relay built from `main` ignores the tokens, and an image
-built from the prototype branch alone has no keepalive, so the 1a exit check (a command silent for
-5 minutes, spec §10.6 step 3) passes only with the rebuilt image. Increment 1b replaces the tokens
-with `mocactl sbx login`.
+To call the gRPC API directly, see [the direct-client guide](../../docs/api/sandbox-v1-direct-client.md).
