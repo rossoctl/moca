@@ -1,0 +1,11 @@
+# The relay's EXEC path from outside the cluster (SBX0 §2): the twin of ../../ocp/p4-relay, which
+# serves the ATTACH path. A second ghostunnel sidecar ends TLS and hands each connection to the exec
+# listener on loopback, which nothing else can reach (patch-relay.yaml binds it to 127.0.0.1).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - service.yaml
+  - route.yaml
+  - network-policy.yaml
+patches:
+  - path: patch-relay-exec-tls.yaml

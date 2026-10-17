@@ -1,0 +1,154 @@
+# The SBX0 front door (docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md §2, §8.1): the
+# sandbox relay and Redis in ONE namespace on a shared OpenShift cluster, reached from outside only
+# through two passthrough Routes -- attach (KVM hosts' workers dial in) and exec (clients). No
+# supervisor, no sandbox pods; the control plane arrives in increment 1b.
+#
+# Built on ocp-single (no namespace creation, no SCC grants, restricted-v2 UIDs), plus:
+#   ../ocp/p4-relay   P6.2's attach Route and its ghostunnel sidecar, unchanged
+#   exec-tls/         the exec twin of p4-relay
+#   patch-relay.yaml  exec listener on loopback; 1a's optional static client tokens
+#   inline deletes    the workloads SBX0 does not run, and ocp-single's sandbox/supervisor peers
+#
+# Every patch names the BASE namespace (moca, moca-sandbox, moca-credentials): kustomize matches a
+# resource on its previous namespace too, which is how a patch here reaches an object ocp-single has
+# already renamed. A patch with no namespace would not match at all.
+#
+# deploy/sbx/setup.sh renders a generated overlay on top of this one with the real namespace, the
+# Route hosts and the image; the placeholders keep the checked-in overlay renderable for tests.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: moca-sbx
+resources:
+  - ../ocp-single
+components:
+  - ../ocp/p4-relay
+  - exec-tls
+patches:
+  - path: patch-relay.yaml
+  # Nothing in the namespace attaches or Execs from inside: the only ingress is the router, which
+  # the two components' NetworkPolicies admit. Egress to Redis (presence) stays.
+  - target:
+      kind: NetworkPolicy
+      name: sandbox-relay
+    patch: |-
+      - op: replace
+        path: /spec/ingress
+        value: []
+  # The base's in-cluster relay Services: with the exec listener on loopback and the relay's
+  # NetworkPolicy ingress emptied, neither is usable, so neither should look like a supported path.
+  # The two ghostunnel Services (sandbox-relay-tls, sbx-relay-exec-tls) select the pods directly and
+  # the Routes target those, so nothing else needs these.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-attach
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: sandbox-relay-exec
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: moca-supervisor
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: moca-supervisor
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: moca-supervisor
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: moca-supervisor
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: moca-sandbox
+        namespace: moca-sandbox
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: moca-sandbox
+        namespace: moca-sandbox
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: moca-sandbox
+        namespace: moca-sandbox
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: moca-sandbox
+        namespace: moca-sandbox
+  # The credentials Role exists for the harness's credential store; SBX0 has none (spec §4.1).
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: moca-control-plane-credentials
+        namespace: moca-credentials
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: moca-control-plane-credentials
+        namespace: moca-credentials
+  # Increment 1a has no control plane; 1b deletes these four deletions and patches it instead.
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: moca-control-plane
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: moca-control-plane
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: moca-control-plane
+        namespace: moca
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: moca-control-plane
+        namespace: moca

@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-relay
+  namespace: moca
+spec:
+  template:
+    spec:
+      containers:
+        # Byte-for-byte TCP, as ../../ocp/p4-relay's `tls` sidecar, but onto the EXEC listener.
+        - name: tls-exec
+          image: 'docker.io/ghostunnel/ghostunnel:v1.11.3@sha256:2599b8a04bae16d70a4209495618dea61b46a00a9a05fcf74da282688ad3517f'
+          args:
+            - server
+            - --listen
+            - 0.0.0.0:8445
+            - --target
+            - 127.0.0.1:9444
+            - --cert
+            - /tls/tls.crt
+            - --key
+            - /tls/tls.key
+            - --disable-authentication
+            # grpc clients refuse a TLS handshake whose server selects no ALPN protocol.
+            - --alpn
+            - h2
+          ports:
+            - name: https-exec
+              containerPort: 8445
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            tcpSocket:
+              port: https-exec
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: exec-tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: exec-tls
+          secret:
+            secretName: sbx-exec-tls
+            defaultMode: 288

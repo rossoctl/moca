@@ -4,6 +4,7 @@ import {
   Server,
   ServerCredentials,
   status,
+  type ChannelOptions,
   type Metadata,
   type ServerDuplexStream,
   type ServerWritableStream,
@@ -133,14 +134,35 @@ function unauthenticated(): Error & { code: number; details: string } {
   return err;
 }
 
-function newServer(): Server {
-  // Raise the ingress limit above gRPC's 4 MiB default. This is the hop that rejects an
-  // oversized write today: the harness's ExecRequest carries base64 stdin at 4/3 of the
-  // file, so a file the read path can return (DEFAULT_OUTPUT_CAP, 8 MiB) needs ~10.7 MiB
-  // here. MAX_EXEC_MESSAGE_BYTES is shared with the Go worker's session.MaxRecvMsgBytes
-  // and pinned equal to it — a relay that accepts more than the worker would forward a
-  // payload the worker refuses on its Attach stream, killing every exec on it (#173 item 2).
-  return new Server({ 'grpc.max_receive_message_length': MAX_EXEC_MESSAGE_BYTES });
+/**
+ * Server-side keepalive (SBX0 §3.4). Some load balancers in front of a cluster router close a TCP
+ * connection after a short idle period -- one was measured at 50 s -- so an Exec whose command prints
+ * nothing would die mid-command. The relay pings every connection instead. These are the two
+ * keepalive options grpc-js 1.14's server reads; it does not police client ping rates, so a client's
+ * own pings are never refused.
+ */
+export interface Keepalive {
+  timeMs: number;
+  timeoutMs: number;
+}
+export const RELAY_KEEPALIVE = { timeMs: 20_000, timeoutMs: 10_000 } as const;
+
+export function relayServerOptions(keepalive: Keepalive = RELAY_KEEPALIVE): ChannelOptions {
+  return {
+    // Raise the ingress limit above gRPC's 4 MiB default. This is the hop that rejects an
+    // oversized write today: the harness's ExecRequest carries base64 stdin at 4/3 of the
+    // file, so a file the read path can return (DEFAULT_OUTPUT_CAP, 8 MiB) needs ~10.7 MiB
+    // here. MAX_EXEC_MESSAGE_BYTES is shared with the Go worker's session.MaxRecvMsgBytes
+    // and pinned equal to it — a relay that accepts more than the worker would forward a
+    // payload the worker refuses on its Attach stream, killing every exec on it (#173 item 2).
+    'grpc.max_receive_message_length': MAX_EXEC_MESSAGE_BYTES,
+    'grpc.keepalive_time_ms': keepalive.timeMs,
+    'grpc.keepalive_timeout_ms': keepalive.timeoutMs,
+  };
+}
+
+function newServer(keepalive?: Keepalive): Server {
+  return new Server(relayServerOptions(keepalive));
 }
 
 function addWorkerService(server: Server, relay: ReturnType<typeof createRelay>): void {
@@ -258,9 +280,12 @@ function addExecService(
  * every sandbox can reach SandboxExec, and only a secret exec token keeps it out. With the base
  * manifest's public dev token there is no isolation between sandboxes at all.
  */
-export function buildServer(deps: RelayServerDeps): { server: Server; relay: Relay } {
+export function buildServer(
+  deps: RelayServerDeps,
+  keepalive?: Keepalive,
+): { server: Server; relay: Relay } {
   const relay = createRelay(deps);
-  const server = newServer();
+  const server = newServer(keepalive);
   addWorkerService(server, relay);
   addExecService(server, relay, deps.validateExecToken);
   return { server, relay };
@@ -273,14 +298,17 @@ export function buildServer(deps: RelayServerDeps): { server: Server; relay: Rel
  * exec token is again the only control. Same relay instance, so an Exec routes to a worker attached
  * on the other listener.
  */
-export function buildServers(deps: RelayServerDeps): {
+export function buildServers(
+  deps: RelayServerDeps,
+  keepalive?: Keepalive,
+): {
   attachServer: Server;
   execServer: Server;
   relay: Relay;
 } {
   const relay = createRelay(deps);
-  const attachServer = newServer();
-  const execServer = newServer();
+  const attachServer = newServer(keepalive);
+  const execServer = newServer(keepalive);
   addWorkerService(attachServer, relay);
   addExecService(execServer, relay, deps.validateExecToken);
   return { attachServer, execServer, relay };
@@ -376,7 +404,13 @@ async function stopGracefully(servers: Server[], relay: Relay, close?: () => Pro
 }
 
 export async function startRelay(
-  opts: { port?: number; execAddr?: string; deps?: RelayServerDeps; env?: NodeJS.ProcessEnv } = {},
+  opts: {
+    port?: number;
+    execAddr?: string;
+    deps?: RelayServerDeps;
+    env?: NodeJS.ProcessEnv;
+    keepalive?: Keepalive;
+  } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
   const env = opts.env ?? process.env;
   // The store startRelay built itself, and so closes on shutdown; injected deps belong to the caller.
@@ -399,11 +433,11 @@ export async function startRelay(
   const attachAddr = `0.0.0.0:${opts.port ?? Number(env.SH_RELAY_PORT ?? 8443)}`;
   const execAddr = opts.execAddr ?? env.MOCA_RELAY_EXEC_ADDR;
   if (!execAddr) {
-    const { server, relay } = buildServer(deps);
+    const { server, relay } = buildServer(deps, opts.keepalive);
     const port = await bind(server, attachAddr);
     return { port, shutdown: () => stopGracefully([server], relay, close) };
   }
-  const { attachServer, execServer, relay } = buildServers(deps);
+  const { attachServer, execServer, relay } = buildServers(deps, opts.keepalive);
   const port = await bind(attachServer, attachAddr);
   const execPort = await bind(execServer, execAddr);
   return {

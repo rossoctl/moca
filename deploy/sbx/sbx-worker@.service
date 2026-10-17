@@ -1,0 +1,36 @@
+# deploy/sbx/sbx-worker@.service -- one SBX0 template worker (microvm-worker) per instance; %i is
+# its worker id. Installed by deploy/sbx/install-host.sh, which writes /etc/sbx/workers/%i.env from
+# the bundle deploy/sbx/setup.sh wrote. Mirrors deploy/microvm/microvm-worker.service (read it for
+# why each limit and path is set) with three differences: its own slice, its own paths, no
+# AssertMemory (the budget is per worker, set in the env file).
+[Unit]
+Description=SBX0 sandbox worker %i (microvm-worker)
+After=network-online.target
+Wants=network-online.target
+# As deploy/microvm/microvm-worker.service: fail loudly without KVM, and stop restarting a broken worker after 5 tries in 5 minutes.
+AssertPathExists=/dev/kvm
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Slice=sbx-%i.slice
+ExecStart=/usr/local/bin/microvm-worker
+EnvironmentFile=/etc/sbx/workers/%i.env
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5s
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+Environment=SH_JAILER_BIN=/usr/local/bin/jailer
+Environment=SH_FIRECRACKER_BIN=/usr/local/bin/firecracker
+Environment=SH_VMM=firecracker
+Environment=SH_STANDBY_DEPTH=2
+Environment=SH_GUEST_RAM_MB=256
+Environment=SH_MAX_RUNS=64
+Environment=SH_MEMORY_RESERVE_MB=1024
+
+[Install]
+WantedBy=multi-user.target

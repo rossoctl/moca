@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sbx-relay-exec-tls
+  namespace: moca
+spec:
+  selector:
+    app: sandbox-relay
+  ports:
+    - name: https-exec
+      port: 8445
+      targetPort: https-exec

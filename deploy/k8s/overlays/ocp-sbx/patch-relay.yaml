@@ -1,0 +1,24 @@
+# The relay as SBX0 runs it (spec §2, §3.1): its exec listener on LOOPBACK, so the exec-tls sidecar
+# is the only way in, and -- in increment 1a only -- the prototype's static client tokens from an
+# optional Secret. A relay built from main ignores the variable; the team-only 1a image (built from
+# sbx/relay-1a: the prototype's client-token commits on the keepalive commit) reads it. Increment 1b
+# removes this env entry.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-relay
+  namespace: moca
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-relay
+          env:
+            - name: MOCA_RELAY_EXEC_ADDR
+              value: '127.0.0.1:9444'
+            - name: MOCA_RELAY_CLIENT_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: sbx-relay-clients
+                  key: MOCA_RELAY_CLIENT_TOKENS
+                  optional: true

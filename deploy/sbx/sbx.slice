@@ -1,0 +1,11 @@
+# deploy/sbx/sbx.slice -- parent of every SBX0 template worker's slice (sbx-<worker>.slice).
+# Each worker gets its OWN child slice because microvm-worker sweeps its parent cgroup for orphans at
+# startup (remote-worker/internal/vmpool/cgroup.go): sharing one would let a restarting worker kill
+# every other worker's VMs (SBX0 spec §8.2). Swap is off for the same reason as microvm-vms.slice.
+[Unit]
+Description=SBX0 sandbox workers (parent slice)
+
+[Slice]
+MemorySwapMax=0
+MemoryMax=infinity
+TasksMax=infinity
