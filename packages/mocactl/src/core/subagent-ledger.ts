@@ -33,6 +33,8 @@ export interface LedgerEnvelope {
 export interface LedgerRecord {
   sessionId: string;
   tag?: string;
+  /** A caller label for this one dispatch (`spawn --label`); mocactl-local, never sent to the server. */
+  label?: string;
   bundle?: string;
   /** The workload the run was sent to (`spawn --workload`). */
   workloadId?: string;

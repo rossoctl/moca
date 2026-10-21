@@ -40,6 +40,11 @@ decisions behind them.
   harness builds the agent's prompt itself. `--kind prompt` sends `env.prompt`.
 - The 64 KiB prompt cap keeps a `record` ledger line within one atomic `write(2)` on a
   local filesystem (§2.5).
+- `--label STRING` names one dispatch within a `--tag` group (e.g. `diagnose` / `fix`
+  inside a parent agent's leaves). mocactl-local — never sent to the server — stored on
+  the ledger record and surfaced on `mocactl subagents --json` as `label`. Alphabet is
+  `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`: stricter than `--tag` so a downstream `jq` filter
+  by label value doesn't need shell-quote defensiveness.
 
 ### 2.2 `mocactl subagents` — join ledger with `/runs/status`
 

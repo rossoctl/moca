@@ -99,7 +99,7 @@ mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of
 
 ```bash
 mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
-  [--repo URL --ref REF] [--tag T] [--json]  # fork a detached subagent; prints its sessionId
+  [--repo URL --ref REF] [--tag T] [--label L] [--json]  # fork a detached subagent; prints its sessionId
 mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
 mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it on a workload's context
@@ -117,7 +117,10 @@ to `$XDG_STATE_HOME/mocactl/subagents.jsonl`, then forks a detached worker that 
 sessionId is printed on stdout immediately so a script can capture it. `--kind solve` requires
 both `--repo URL` and `--ref REF`; `--kind prompt` refuses them. The optional `--tag T` groups
 related spawns (e.g. a parent agent's own subagents under one tag) so `mocactl subagents --tag T`
-can list them in isolation.
+can list them in isolation. The optional `--label L` names one dispatch within a tag group
+(`diagnose`, `fix`, `fix2`): mocactl-local, surfaced on `mocactl subagents --json` as `label`
+on rows that have one. Alphabet is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (stricter than `--tag`
+so `jq`-side filtering doesn't need quoting).
 
 `mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live

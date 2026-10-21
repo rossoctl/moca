@@ -33,6 +33,13 @@ const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_PROMPT_BYTES = 64 * 1024;
 /** Harness-side session-id alphabet (mirrors `leafSessionId` in run-leaf.ts). */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/;
+/**
+ * `--label` alphabet: starts alphanumeric, up to 64 characters of `[A-Za-z0-9._-]`.
+ * Stricter than `--tag` (which is free-form) because `label` is a per-dispatch
+ * disambiguator surfaced on `--json` output where downstream `jq` filters pick it
+ * up by key value, so shell meta or whitespace would make callers quote defensively.
+ */
+const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 interface SpawnedSession {
   sessionId: string;
@@ -74,6 +81,8 @@ export interface SpawnOptions {
   repoUrl?: string;
   ref?: string;
   tag?: string;
+  /** A caller label for this one dispatch, surfaced on `subagents --json` as `label`. */
+  label?: string;
   /** A ready workload whose context the run sees; prompt runs only (the harness refuses others). */
   workloadId?: string;
   /** Give the run its own writable copy of the workload's context (`--writable`). */
@@ -106,6 +115,10 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   }
   if (opts.configRef && !BUNDLE_DIGEST.test(opts.configRef)) {
     io.err('a bundle digest is sha256:<64 lowercase hex>, as `mocactl promote` prints it');
+    return 2;
+  }
+  if (opts.label !== undefined && !LABEL_RE.test(opts.label)) {
+    io.err('--label must start with [A-Za-z0-9] and be up to 64 characters of [A-Za-z0-9._-]');
     return 2;
   }
   if (opts.kind === 'solve') {
@@ -176,6 +189,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   const record: LedgerRecord = {
     sessionId: session.sessionId,
     ...(opts.tag ? { tag: opts.tag } : {}),
+    ...(opts.label ? { label: opts.label } : {}),
     envelope: envelopeForLedger(opts),
     ...(opts.configRef ? { bundle: opts.configRef } : {}),
     ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
@@ -494,6 +508,8 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
         subagents: views.map(({ record, view }) => ({
           sessionId: record.sessionId,
           tag: record.tag ?? null,
+          // Only on `spawn --label` rows, so the shape of every other row is unchanged.
+          ...(record.label ? { label: record.label } : {}),
           kind: record.envelope.kind,
           state: view.state,
           detail: view.detail ?? null,
@@ -507,10 +523,11 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
     );
     return 0;
   }
-  const header = ['SESSION', 'TAG', 'KIND', 'STATE', 'BUNDLE'];
+  const header = ['SESSION', 'TAG', 'LABEL', 'KIND', 'STATE', 'BUNDLE'];
   const rows = views.map(({ record, view }) => [
     sanitizeRemote(record.sessionId),
     sanitizeRemote(record.tag ?? '-'),
+    sanitizeRemote(record.label ?? '-'),
     sanitizeRemote(record.envelope.kind),
     view.state + (view.detail ? ` (${sanitizeRemote(view.detail)})` : ''),
     sanitizeRemote(record.bundle ?? '-'),

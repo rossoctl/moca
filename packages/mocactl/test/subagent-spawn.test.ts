@@ -129,6 +129,34 @@ describe('cmdSpawn — flag validation refuses before any session is created', (
     expect(r).toBe(2);
     expect(cp.createSession).not.toHaveBeenCalled();
   });
+
+  it('refuses a label outside [A-Za-z0-9][A-Za-z0-9._-]{0,63} (empty, spaces, leading dot, >64 chars)', async () => {
+    const { rt, cp } = makeRt();
+    const long = 'a' + 'b'.repeat(64); // 65 chars
+    for (const bad of ['', 'has spaces!', '.hidden', long]) {
+      const { io, err } = makeIo();
+      const r = await cmdSpawn(
+        rt,
+        io,
+        baseOpts({ label: bad, forkFn: () => 1, ledger: withLedger(rt) }),
+      );
+      expect(r).toBe(2);
+      expect(err.join('\n')).toContain('[A-Za-z0-9._-]');
+    }
+    expect(cp.createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('cmdSpawn — --label', () => {
+  it('persists label on the ledger row (absent-when-omitted is covered in subagent-list.test)', async () => {
+    const { rt } = makeRt();
+    await cmdSpawn(
+      rt,
+      makeIo().io,
+      baseOpts({ label: 'diagnose', forkFn: () => 4242, ledger: withLedger(rt) }),
+    );
+    expect(openLedger(ledgerPath).readAll()[0]!.label).toBe('diagnose');
+  });
 });
 
 /* --- happy path --- */

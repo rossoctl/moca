@@ -509,6 +509,21 @@ describe('workloads and spawn --workload', () => {
     expect(o.errs.join('\n')).toContain('--writable only applies to `mocactl spawn`');
   });
 
+  it('spawn routes --label through to cmdSpawn; --label is refused elsewhere', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    const argv = ['spawn', 'p', '--kind', 'prompt', '--label', 'diagnose'];
+    expect(await main(argv, {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ label: 'diagnose' });
+    const o = io();
+    expect(
+      await main(['subagents', '--label', 'diagnose'], {}, o, { buildRuntime: fakeBuild }),
+    ).toBe(2);
+    expect(o.errs.join('\n')).toContain('--label only applies to `mocactl spawn`');
+  });
+
   it('spawn --writable without --workload exits 2 before spawning', async () => {
     const mod = await import('../src/subagent.js');
     const spy = vi.spyOn(mod, 'cmdSpawn');

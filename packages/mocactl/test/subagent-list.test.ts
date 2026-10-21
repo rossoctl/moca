@@ -242,3 +242,17 @@ describe('cmdSubagents — workload', () => {
     ]);
   });
 });
+
+describe('cmdSubagents — label', () => {
+  it('surfaces label on rows that have one, omits it on rows that do not', async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile, rt.now);
+    ledger.append(seedRecord({ sessionId: 'l', label: 'diagnose', lastKnownState: 'done' }));
+    ledger.append(seedRecord({ sessionId: 'n', submittedAt: 2, lastKnownState: 'done' }));
+    const { io, out } = makeIo();
+    await cmdSubagents(rt, io, base({ json: true, ledger, transport: {} as LeafTransport }));
+    const [labelled, unlabelled] = JSON.parse(out[0]!.trim()).subagents;
+    expect(labelled).toMatchObject({ sessionId: 'l', label: 'diagnose' });
+    expect(unlabelled).not.toHaveProperty('label');
+  });
+});

@@ -43,7 +43,10 @@ export const USAGE = `usage:
       [--endpoint URL] [--json]                  the secret is read from stdin
   mocactl credentials delete NAME [--json]
   mocactl spawn "prompt" [--config DIGEST] --kind prompt|solve
-      [--repo URL --ref REF] [--tag T] [--json]   fork a detached subagent (solve needs --repo/--ref)
+      [--repo URL --ref REF] [--tag T] [--label L] [--json]
+                                                 fork a detached subagent (solve needs --repo/--ref;
+                                                 --label names one dispatch within a --tag group,
+                                                 surfaced on 'mocactl subagents --json' as label)
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
@@ -130,6 +133,7 @@ export async function main(
         repo: { type: 'string' },
         ref: { type: 'string' },
         tag: { type: 'string' },
+        label: { type: 'string' },
         out: { type: 'string' },
         workload: { type: 'string' },
         writable: { type: 'boolean' },
@@ -186,6 +190,10 @@ export async function main(
   }
   if (values.tag !== undefined && command !== 'spawn' && command !== 'subagents') {
     io.err(`--tag only applies to \`mocactl spawn\` and \`mocactl subagents\`\n${USAGE}`);
+    return 2;
+  }
+  if (values.label !== undefined && command !== 'spawn') {
+    io.err(`--label only applies to \`mocactl spawn\`\n${USAGE}`);
     return 2;
   }
   if (values.out !== undefined && command !== 'get') {
@@ -338,6 +346,7 @@ export async function main(
         repoUrl: values.repo,
         ref: values.ref,
         tag: values.tag,
+        label: values.label,
         workloadId: values.workload,
         writable: values.writable === true,
         json,
