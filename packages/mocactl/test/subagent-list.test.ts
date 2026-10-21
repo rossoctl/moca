@@ -159,6 +159,7 @@ describe('cmdSubagents — joined view', () => {
     const stdout = out.join('');
     const lines = stdout.split('\n').filter(Boolean);
     expect(lines[0]).toContain('SESSION');
+    expect(lines[0]).toContain('LABEL');
     expect(lines[0]).toContain('STATE');
     // At least one data row.
     expect(lines[1]).toContain('s1');

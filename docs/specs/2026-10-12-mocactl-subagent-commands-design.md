@@ -42,9 +42,10 @@ decisions behind them.
   local filesystem (§2.5).
 - `--label STRING` names one dispatch within a `--tag` group (e.g. `diagnose` / `fix`
   inside a parent agent's leaves). mocactl-local — never sent to the server — stored on
-  the ledger record and surfaced on `mocactl subagents --json` as `label`. Alphabet is
-  `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`: stricter than `--tag` so a downstream `jq` filter
-  by label value doesn't need shell-quote defensiveness.
+  the ledger record and surfaced on `mocactl subagents` as a `LABEL` column and on
+  `--json` as `label` (on rows that have one). Alphabet is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`:
+  stricter than `--tag` so a downstream `jq` filter by label value doesn't need
+  shell-quote defensiveness.
 
 ### 2.2 `mocactl subagents` — join ledger with `/runs/status`
 

@@ -20,9 +20,8 @@ exits 2. Some flags are always rejected (exit 2) outside their command: `--consu
 `--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
 outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
 `subagents`; `--label` outside `spawn`; `--out` outside `get`; `--workload` outside `spawn`;
-`--context` and `--name` outside
-`workloads create`; and `--all` outside `logout`. Other flags a command does not use
-are not rejected and may be ignored.
+`--context` and `--name` outside `workloads create`; and `--all` outside `logout`. Other flags a
+command does not use are not rejected and may be ignored.
 
 ## Endpoints
 
@@ -128,7 +127,7 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   `responded`/`done`/`solved`; `queued`/`paused`/`failed` exit 1.
 - `--json`:
   - `spawn` → `{"type":"session","sessionId","pid"}`.
-  - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them).
+  - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them). The non-`--json` table columns are `SESSION TAG LABEL KIND STATE BUNDLE` (`-` on unlabeled rows).
   - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`.
 
 ### `workloads`

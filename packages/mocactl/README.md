@@ -118,9 +118,10 @@ sessionId is printed on stdout immediately so a script can capture it. `--kind s
 both `--repo URL` and `--ref REF`; `--kind prompt` refuses them. The optional `--tag T` groups
 related spawns (e.g. a parent agent's own subagents under one tag) so `mocactl subagents --tag T`
 can list them in isolation. The optional `--label L` names one dispatch within a tag group
-(`diagnose`, `fix`, `fix2`): mocactl-local, surfaced on `mocactl subagents --json` as `label`
-on rows that have one. Alphabet is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (stricter than `--tag`
-so `jq`-side filtering doesn't need quoting).
+(`diagnose`, `fix`, `fix2`): mocactl-local, surfaced on `mocactl subagents` as a `LABEL`
+column (`-` on unlabeled rows) and on `--json` as `label` on rows that have one. Alphabet
+is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (stricter than `--tag` so `jq`-side filtering doesn't
+need quoting).
 
 `mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live
