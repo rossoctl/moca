@@ -1,12 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mktemp -d)",
+      "Bash(rm -rf .moca-delegate)",
+      "Bash(mkdir .moca-delegate)",
       "Bash(contextctl ctx pack *)",
       "Bash(mocactl workloads *)",
       "Bash(mocactl spawn *)",
       "Bash(mocactl subagents *)",
-      "Bash(mocactl get *)"
+      "Bash(mocactl get *)",
+      "Bash(rm -r .moca-delegate)"
     ]
   }
 }
