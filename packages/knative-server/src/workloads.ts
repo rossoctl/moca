@@ -410,13 +410,10 @@ async function rollbackCreate(store: WorkloadStore, reserved: WorkloadRecord): P
     // Retry only while Context Service is unreachable (no HTTP response). A reply that already
     // says "gone" or any 4xx/5xx with a status is terminal — it tells us the server saw us and
     // decided. The retry absorbs transient blips (pod restart, momentary network loss).
-    await retryWhileUnreachable(
-      () => deleteContext(reserved.contextName, reserved.owner),
-      {
-        attempts: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS', 3),
-        backoffMs: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS', 500),
-      },
-    ).catch((err: unknown) => {
+    await retryWhileUnreachable(() => deleteContext(reserved.contextName, reserved.owner), {
+      attempts: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS', 3),
+      backoffMs: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS', 500),
+    }).catch((err: unknown) => {
       cleaned = false;
       // The Context name is derived and does not reveal the owner; log it so an operator can
       // delete the Context if no record is left for a retry to act on.
