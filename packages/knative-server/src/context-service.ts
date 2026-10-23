@@ -41,20 +41,31 @@ export interface ContextStorage {
  * refuses. Local misconfiguration and Redis failures are plain errors.
  */
 export class ContextServiceError extends Error {
+  /**
+   * Whether the call never got an HTTP response at all (network error, timeout, connection
+   * refused). Set only in `request()`'s fetch-catch; semantic failures on an answered reply
+   * (`'Context Service returned an invalid …'`, bundle validation, etc.) leave it `false`, so a
+   * future `retryWhileUnreachable` caller cannot accidentally retry a reply the server already
+   * decided on.
+   */
+  readonly unreachable: boolean;
+
   constructor(
     message: string,
     /** The HTTP status Context Service answered, when it answered. */
     readonly status?: number,
     /** Context Service's `error` code, when it sent one. */
     readonly code?: string,
+    options: { unreachable?: boolean } = {},
   ) {
     super(message);
     this.name = 'ContextServiceError';
+    this.unreachable = options.unreachable ?? false;
   }
 
   /** True when the Context Service call never got a response (vs got an error response). */
   isUnreachable(): boolean {
-    return this.status === undefined;
+    return this.unreachable;
   }
 }
 
@@ -152,7 +163,12 @@ async function request(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(timeout),
   }).catch((err: unknown) => {
-    throw new ContextServiceError(`Context Service is unreachable: ${String(err)}`);
+    throw new ContextServiceError(
+      `Context Service is unreachable: ${String(err)}`,
+      undefined,
+      undefined,
+      { unreachable: true },
+    );
   });
   if (response.ok || acceptedStatuses.includes(response.status)) return response;
   const failure = (await response.json().catch(() => ({}))) as { error?: unknown };

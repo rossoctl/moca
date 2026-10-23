@@ -509,6 +509,9 @@ describe('quota', () => {
     expect((await call('GET', '/workloads/blip', alice)).body).toMatchObject({ status: 'deleted' });
     expect(await quotaOf(alice)).toBe(0);
     expect(cs.ownedBy(alice)).toHaveLength(0);
+    // Pin the budget: exactly 3 rollback-delete attempts (ATTEMPTS=3). An off-by-one in the loop
+    // or a regression to "attempts + 1" would fail here.
+    expect(cs.calls.filter((c) => c.method === 'DELETE').length).toBe(3);
   });
 
   // A sustained Context Service outage must not paper over the failure. The record stays
@@ -526,6 +529,8 @@ describe('quota', () => {
       status: 'deleting',
     });
     expect(await quotaOf(alice)).toBe(1);
+    // Pin the budget: exactly 3 rollback-delete attempts, no more.
+    expect(cs.calls.filter((c) => c.method === 'DELETE').length).toBe(3);
     // Context Service recovers (unreachable counter still positive but we clear it); owner's
     // DELETE finishes the pending cleanup and frees the quota.
     cs.unreachable.delete('delete');
