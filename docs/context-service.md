@@ -264,6 +264,8 @@ Context's owner.
 | `MOCA_CONTEXT_MAX_STORAGE_GIB`           | Largest `workspace.size`, default `10`                                  |
 | `MOCA_CONTEXT_STORAGE_CLASSES`           | Comma-separated StorageClasses a caller may name; empty allows none     |
 | `MOCA_WORKLOAD_DELETED_TTL_SECONDS`      | How long `GET` still reports a deleted workload, default `86400`        |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS`   | Retries of the create-rollback's Context Service cleanup while it is unreachable, default `3` |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS` | Backoff between those retries, default `500`                            |
 | `MOCA_CONTEXT_BUNDLE_MAX_BYTES`          | Largest bundle a run downloads, default `268435456` (256 MiB)           |
 | `MOCA_CONTEXT_BUNDLE_MAX_EXPANDED_BYTES` | Most a bundle may inflate to, default `1342177280` (1.25 GiB)           |
 | `MOCA_CONTEXT_BUNDLE_MAX_ENTRIES`        | Most entries a bundle may hold, default `10000`                         |

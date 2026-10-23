@@ -140,6 +140,8 @@ Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` i
 | `MOCA_CONTEXT_MAX_STORAGE_GIB`                              | `10`                       |                                                  |
 | `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER`                      | `5`                        |                                                  |
 | `MOCA_WORKLOAD_DELETED_TTL_SECONDS`                         | `86400`                    | TTL of the deleted-workload record               |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS`                      | `3`                        | Create-rollback cleanup retries while Context Service is unreachable |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS`                    | `500`                      | Backoff between those retries                    |
 | `MOCA_CONTEXT_STORAGE_CLASSES`                              | empty (any class rejected) |                                                  |
 
 These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_TOKEN` or URL returns
