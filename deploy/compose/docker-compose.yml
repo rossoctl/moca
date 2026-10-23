@@ -17,10 +17,17 @@ name: serverless-harness
 services:
   # docker.io/redis:7-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished: this Redis
   # has no auth and holds sh:sandbox:records, so whoever can write to it chooses the executor for
-  # every turn. Only moca-brain reaches it -- no sandbox shares a network with it (MI1 §5 R8). No
-  # volume, same as the VM path: a trial starts from an empty Redis.
+  # every turn. Only moca-brain reaches it -- no sandbox shares a network with it (MI1 §5 R8).
+  #
+  # Named volume + AOF, same as the VM path (#410) and the Kubernetes one: `docker compose down`
+  # removes containers but keeps named volumes, so sessions, the ownership index and the lease store
+  # come back with the stack instead of being silently forgotten. `docker compose down -v` is still
+  # the way to start clean.
   redis:
     image: docker.io/redis:7-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes:
+      - moca-redis:/data
     networks: [moca-brain]
     restart: unless-stopped
 
@@ -197,6 +204,8 @@ volumes:
   # The control plane's credential store. Envelope-encrypted under SH_CREDENTIAL_KEK, so a copy of
   # the volume without .env yields ciphertext.
   moca-credentials: {}
+  # Redis's AOF and RDB: sessions, the ownership index and the lease store (#410).
+  moca-redis: {}
 
 networks:
   # The brain side: supervisor + workers, Redis, the relay's SandboxExec listener and the control

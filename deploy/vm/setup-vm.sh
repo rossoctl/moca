@@ -38,6 +38,13 @@
 #   MOCA_SANDBOX_BRIDGE    Name of that network's bridge interface (default moca-sandbox0, at most
 #                          15 characters). The firewall matches sandbox traffic by the bridge it
 #                          arrives on, so it covers every address family, IPv6 link-local included.
+#   MOCA_REDIS_VOLUME      Named podman volume holding Redis's data (default moca-redis). Sessions,
+#                          ownership and leases live here, so this survives both a re-run of this
+#                          script and a reboot (#410).
+#   SH_REDIS_ADOPT_VOLUME  Set to 1 ONCE, on a host installed before #410, to migrate the sessions
+#                          from that install's anonymous /data volume into MOCA_REDIS_VOLUME. Off by
+#                          default: the installer warns about the old volume rather than rewriting
+#                          live data unasked. See deploy/vm/README.md, "Redis persistence".
 #
 # Control-plane settings (optional; written into control-plane.env only where it has none yet --
 # an existing value is kept, with a warning if these disagree). sudo drops the environment, so pass
@@ -57,6 +64,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCA_SANDBOX_SUBNET="${MOCA_SANDBOX_SUBNET:-10.89.40.0/24}"
 MOCA_SANDBOX_GATEWAY="${MOCA_SANDBOX_GATEWAY:-10.89.40.1}"
 MOCA_SANDBOX_BRIDGE="${MOCA_SANDBOX_BRIDGE:-moca-sandbox0}"
+MOCA_REDIS_VOLUME="${MOCA_REDIS_VOLUME:-moca-redis}"
 cred_dir() { printf '%s' "${SH_CRED_DIR:-$SH_ENV_DIR/credentials}"; }
 # The MU1 secrets as systemd credentials: NAME (what LoadCredential= and credentialValue call it) and
 # the file under $SH_CRED_DIR that holds it. The units hardcode the default path; setup-vm.test.sh
@@ -204,6 +212,118 @@ install_env() {
   install_env_file control-plane "set SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL before starting (or pass both to this script: sudo env SH_GITHUB_CLIENT_ID=... SH_PUBLIC_HARNESS_URL=... $0)"
 }
 
+# The two answers from redis_container_diff that are not a list of differing fields. Sentinels
+# rather than bare strings because start_redis and adopt_redis_volume both branch on them, and a
+# typo in one copy of a literal would silently take the other path.
+REDIS_MATCHES="matches"
+REDIS_ABSENT="no container"
+
+# redis_container_diff prints REDIS_MATCHES when the running sh-redis is already what this script
+# would start, REDIS_ABSENT when there is none, else a human-readable list of what differs -- which
+# start_redis logs, so an operator sees WHY their container was recreated rather than just losing
+# it. Four fields, because those are the four this function's caller sets; a container differing in
+# any of them is not the one we would have started.
+#
+# `podman container inspect` on a missing container exits non-zero and prints to stderr: under
+# `set -euo pipefail` that would abort the whole script on a first install, so the call is guarded
+# and its stderr dropped. Image is compared by the configured NAME, not the resolved digest: this
+# script pins a floating `:7-alpine` tag, so comparing digests would replace Redis -- and on a
+# pre-#410 container, LOSE ITS DATA -- every time upstream rebuilt the tag.
+redis_container_diff() {
+  local image port volume appendonly out=()
+  podman container inspect sh-redis >/dev/null 2>&1 || { printf '%s' "$REDIS_ABSENT"; return 0; }
+  image="$(podman container inspect sh-redis --format '{{.ImageName}}' 2>/dev/null)"
+  port="$(podman container inspect sh-redis \
+    --format '{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}{{.HostIp}}:{{.HostPort}}->{{$p}} {{end}}{{end}}' 2>/dev/null)"
+  volume="$(podman container inspect sh-redis \
+    --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)"
+  appendonly="$(podman container inspect sh-redis --format '{{.Config.CreateCommand}}' 2>/dev/null)"
+  [[ "$image" == *redis:7-alpine* ]] || out+=("image is '$image', expected docker.io/redis:7-alpine")
+  [[ "$port" == *127.0.0.1:6379* ]] || out+=("published port is '$port', expected 127.0.0.1:6379")
+  if [[ "$volume" != "$MOCA_REDIS_VOLUME" ]]; then
+    # The anonymous-volume case (this image's own VOLUME /data) is the pre-#410 container every
+    # existing host is running, and adopt_redis_volume keys off this text. It is NOT detectable from
+    # the mount: podman reports an anonymous volume's .Name as a 64-hex id, indistinguishable from a
+    # name an operator chose (verified live, podman 6.1.1). The volume's own .Anonymous flag is the
+    # only reliable signal, so ask for it -- defaulting to false, since treating an unknown volume
+    # as anonymous would run a data migration over something nobody asked us to touch.
+    local anon="false"
+    [[ -z "$volume" ]] ||
+      anon="$(podman volume inspect "$volume" --format '{{.Anonymous}}' 2>/dev/null || echo false)"
+    if [[ "$anon" == true || -z "$volume" ]]; then
+      out+=("/data volume is ANONYMOUS (${volume:-unnamed}), expected $MOCA_REDIS_VOLUME")
+    else
+      out+=("/data volume is '$volume', expected $MOCA_REDIS_VOLUME")
+    fi
+  fi
+  [[ "$appendonly" == *appendonly* ]] || out+=("it runs without --appendonly yes")
+  ((${#out[@]})) || { printf '%s' "$REDIS_MATCHES"; return 0; }
+  local IFS='; '
+  printf '%s' "${out[*]}"
+}
+
+# The one-time migration off the anonymous volume (#410). Every host installed before this change
+# is running a container whose /data is an anonymous volume holding that host's real sessions;
+# starting the named volume beside it leaves them reachable but unused.
+#
+# OPT-IN, by SH_REDIS_ADOPT_VOLUME=1. The default warns and continues: adopting means this
+# installer reading and rewriting live operator data, and picking WHICH volume is the right one on
+# a host with eleven orphans. That is the operator's call, and the warning is what tells them the
+# data is still there to make it. Same shape as ensure_exec_listener's one-time migration: act only
+# on the exact state we recognize, and never guess.
+#
+# THE ORDER BELOW IS LOAD-BEARING, and it is not the order the issue proposed. Verified against
+# redis:7-alpine (podman 6.1.1): with `--appendonly yes`, Redis loads the AOF and IGNORES an
+# existing dump.rdb -- so "copy dump.rdb in, then start" yields an EMPTY Redis, silently. The
+# conversion must therefore happen with appendonly OFF (so the RDB is loaded), then CONFIG SET
+# appendonly yes writes the AOF from what was loaded. After that, start_redis's own
+# `--appendonly yes` reads it correctly.
+adopt_redis_volume() {
+  local diff="$1"
+  # Only the state this function knows how to migrate: a container on an anonymous /data volume.
+  # Anything else already has a volume somebody named, and copying over it is not ours to do.
+  [[ "$diff" == *"volume is ANONYMOUS"* ]] || return 0
+  if [[ "${SH_REDIS_ADOPT_VOLUME:-}" != 1 ]]; then
+    echo "WARNING: the running sh-redis keeps its sessions on an ANONYMOUS podman volume (every" \
+      "host installed before #410 does). This run starts Redis on the named volume" \
+      "'$MOCA_REDIS_VOLUME' instead, so those sessions become unreachable -- they are NOT" \
+      "deleted, and podman keeps the old volume until you remove it. To migrate them into the" \
+      "named volume, re-run with: sudo env SH_REDIS_ADOPT_VOLUME=1 $0" >&2
+    return 0
+  fi
+  log "adopting the existing anonymous Redis volume into '$MOCA_REDIS_VOLUME' (SH_REDIS_ADOPT_VOLUME=1)"
+  # SAVE first, synchronously: the dump.rdb on disk is otherwise as old as the last save point, so
+  # copying without this silently drops the most recent sessions -- the ones most likely to matter.
+  podman exec sh-redis redis-cli SAVE
+  podman stop sh-redis
+  podman volume create --ignore "$MOCA_REDIS_VOLUME"
+  # Both volumes into one throwaway container. `--volumes-from` carries the anonymous volume at
+  # its own /data, so the copy needs no volume id -- which is what makes this safe on a host with
+  # several orphans: it is always THIS container's data, never a guess at which orphan is current.
+  podman run --rm --volumes-from sh-redis -v "$MOCA_REDIS_VOLUME:/adopt" \
+    --entrypoint sh docker.io/redis:7-alpine -c 'cp -p /data/dump.rdb /adopt/dump.rdb'
+  # Conversion, appendonly OFF so the RDB is what gets loaded (see the comment above). Started
+  # detached and shut down explicitly rather than left to --rm: SHUTDOWN NOSAVE after the rewrite
+  # is what guarantees the AOF is complete on disk before start_redis opens the same volume.
+  podman run -d --rm --name sh-redis-adopt -v "$MOCA_REDIS_VOLUME:/data" \
+    docker.io/redis:7-alpine redis-server --appendonly no
+  local i
+  for ((i = 0; i < 30; i++)); do
+    podman exec sh-redis-adopt redis-cli PING >/dev/null 2>&1 && break
+    sleep 1
+  done
+  podman exec sh-redis-adopt redis-cli CONFIG SET appendonly yes
+  # The rewrite is a background job; shutting down before it finishes leaves a partial AOF that
+  # Redis then loads INSTEAD of the RDB -- the same silent-empty failure, one step later.
+  for ((i = 0; i < 60; i++)); do
+    [[ "$(podman exec sh-redis-adopt redis-cli INFO persistence 2>/dev/null |
+      sed -n 's/^aof_rewrite_in_progress:\([0-9]*\).*/\1/p')" == 0 ]] && break
+    sleep 1
+  done
+  podman exec sh-redis-adopt redis-cli SHUTDOWN NOSAVE || true # NOSAVE closes the connection
+  log "adopted: the sessions in the anonymous volume are now in '$MOCA_REDIS_VOLUME'"
+}
+
 start_redis() {
   log "starting Redis container"
   # LOOPBACK ONLY, and this is the execution path rather than a data-at-rest concern.
@@ -225,14 +345,39 @@ start_redis() {
   # 127.0.0.1 *because* it is unauthenticated). It simply had not been applied to the listener that
   # exposes session state, the ownership index, the lease store and sh:sandbox:records.
   #
-  # NO VOLUME, deliberately for this round: session state, the ownership index and the lease store
-  # are lost on every reboot and on every `podman rm` of this container. That is acceptable only
-  # because this deployment exists to run E8 rungs, where each run starts from an empty Redis
-  # anyway. It is stated here (and in README.md's "What round one does not claim") rather than left
-  # for an operator to discover after a reboot: --restart=always below brings the container back,
-  # not the data that was in it.
+  # PERSISTED, on a NAMED volume, with AOF on (#410). Both halves are needed and neither is
+  # sufficient:
+  #
+  #   - The named volume survives `podman rm`. This image declares `VOLUME /data`, so the old
+  #     no-`-v` form did not lose data outright -- every --replace just moved it to a FRESH
+  #     anonymous volume and orphaned the last one (the rig accumulated 11). Sessions were
+  #     unreachable, which to the user is the same thing.
+  #   - `--appendonly yes` makes a write durable when it happens. Without it Redis snapshots on
+  #     the `save` points only, so a reboot drops up to the last window's writes even with the
+  #     volume kept.
+  #
+  # Redis holds the control plane's session and ownership index, the harness's own session state
+  # (@moca/session-backend), the lease store and sh:sandbox:records -- only the last is
+  # self-healing (workers re-register on reconnect). This matches the Kubernetes path, which
+  # already persists: a PVC in deploy/k8s/base/redis.yaml plus `appendonly yes` in
+  # deploy/k8s/setup.sh's redis.conf.
+  #
+  # NOT `--replace` unconditionally. That recreated the container on EVERY run, which is what made
+  # a re-run destructive -- and a re-run is how an operator applies a changed control-plane.env, so
+  # the installer's own documented procedure forgot every session (#410, seen twice during the P6.3
+  # acceptance in #425). redis_container_diff below replaces it only when something it cares about
+  # actually differs, which is the same contract install_env_file keeps for an operator's env file.
+  local diff
+  diff="$(redis_container_diff)"
+  if [[ "$diff" == "$REDIS_MATCHES" ]]; then
+    log "keeping the running sh-redis (same image, port, volume and appendonly setting)"
+    return 0
+  fi
+  adopt_redis_volume "$diff"
+  [[ "$diff" == "$REDIS_ABSENT" ]] || log "replacing sh-redis: $diff"
   podman run -d --name sh-redis --replace --restart=always \
-    -p 127.0.0.1:6379:6379 docker.io/redis:7-alpine
+    -p 127.0.0.1:6379:6379 -v "$MOCA_REDIS_VOLUME:/data" \
+    docker.io/redis:7-alpine redis-server --appendonly yes
 }
 
 # Podman's --restart=always covers a container that exits, but explicitly NOT a host reboot:

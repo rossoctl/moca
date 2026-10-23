@@ -54,6 +54,40 @@ if [[ "$1" == "network" && "$2" == "inspect" ]]; then
     printf '%s\n' "${MOCK_PODMAN_INSPECT:-10.89.40.0/24 10.89.40.1}"
   fi
 fi
+# `container inspect`, for redis_container_diff (#410). It answers one field per call, chosen by
+# the Go template the caller passed, and EXITS NON-ZERO when MOCK_REDIS_EXISTS is unset -- which
+# is podman's own behaviour for a missing container and the default state of every test below, so
+# a case that sets none of these sees a first install.
+#
+# MOCK_REDIS_VOLUME is read with `-`, not `:-`, so a test can set it to the empty string (podman
+# prints nothing for a container with no /data mount at all) without `:-` silently restoring the
+# named-volume default.
+if [[ "$1" == "container" && "$2" == "inspect" ]]; then
+  [[ -n "${MOCK_REDIS_EXISTS-}" ]] || exit 1
+  case "$*" in
+  # The defaults are what a REAL podman prints for the container start_redis creates, verbatim from
+  # a live probe (podman 6.1.1): .ImageName normalizes `docker.io/redis:7-alpine` to
+  # `docker.io/library/redis:7-alpine`, and the Ports template leaves a trailing space. Both are
+  # why redis_container_diff compares with globs rather than equality, so both belong here.
+  *.ImageName*) printf '%s\n' "${MOCK_REDIS_IMAGE-docker.io/library/redis:7-alpine}" ;;
+  *NetworkSettings.Ports*) printf '%s\n' "${MOCK_REDIS_PORT-127.0.0.1:6379->6379/tcp }" ;;
+  *.Mounts*) printf '%s\n' "${MOCK_REDIS_VOLUME-moca-redis}" ;;
+  *.Config.CreateCommand*) printf '%s\n' "${MOCK_REDIS_CMD-[podman run -d --name sh-redis --replace --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine redis-server --appendonly yes]}" ;;
+  esac
+fi
+# `volume inspect --format {{.Anonymous}}`, the ONLY reliable way to tell the pre-#410 anonymous
+# /data volume from a named one. podman reports BOTH as a .Name on the mount, and an anonymous
+# volume's name is a 64-hex id that no pattern distinguishes from a name an operator chose --
+# verified live on podman 6.1.1, which is why redis_container_diff asks the volume itself.
+if [[ "$1" == "volume" && "$2" == "inspect" ]]; then
+  printf '%s\n' "${MOCK_REDIS_VOLUME_ANON-false}"
+fi
+# redis-cli over `podman exec`, for the adoption path. Only INFO persistence needs real stdout:
+# adopt_redis_volume waits on aof_rewrite_in_progress, and a mock that printed nothing would spin
+# there for the full 60-second cap on every run of this suite.
+if [[ "$1" == "exec" && "$*" == *"INFO persistence"* ]]; then
+  printf 'aof_rewrite_in_progress:%s\n' "${MOCK_REDIS_AOF_REWRITE-0}"
+fi
 MOCK
 chmod +x "$TMP/bin/podman"
 
@@ -1098,16 +1132,122 @@ pass "a missing podman-restart.service warns about the reboot gap instead of abo
 # Restore the plain mock for the rest of the file (main() below asserts on systemctl argv).
 write_systemctl_mock
 
-# --- Redis's missing volume is stated, not left to be discovered on a reboot -------------------
-# start_redis runs with no -v, so sessions, the ownership index and the lease store are lost on
-# every reboot and every `podman rm`. That is a deliberate round-one choice (E8 rungs start from an
-# empty Redis), but --restart=always above brings the CONTAINER back and not the data in it, which
-# is exactly the kind of gap an operator should read rather than find.
-grep -qi 'no volume' "$SCRIPT" ||
-  fail "start_redis must state that Redis runs with no volume (state is lost on reboot)"
-grep -qi 'does not survive a reboot' "$VM_DIR/README.md" ||
-  fail "README.md must state that Redis state does not survive a reboot"
-pass "Redis's lack of a volume is documented in both the script and the README"
+# --- Redis persists, and a re-run is not destructive (#410) -----------------------------------
+# Redis holds the control plane's session and ownership index, the harness's own session state and
+# the lease store. It used to run with no -v and an unconditional --replace, so every reboot and
+# every re-run of this script forgot all of it -- and a re-run is the documented way to apply a
+# changed control-plane.env, which made the installer's own procedure the thing that lost sessions.
+# --restart=always above brings the CONTAINER back; only a volume brings the data in it.
+: >"$MOCK_LOG"
+start_redis
+grep -qE "podman run .*-v $MOCA_REDIS_VOLUME:/data" "$MOCK_LOG" ||
+  fail "start_redis must mount the named volume $MOCA_REDIS_VOLUME at /data: $(cat "$MOCK_LOG")"
+# BOTH halves, and the volume alone is not enough: without AOF, Redis snapshots only on its `save`
+# points, so a reboot still drops the last window's writes out of a volume that was kept.
+grep -qE 'podman run .*redis-server --appendonly yes' "$MOCK_LOG" ||
+  fail "start_redis must run redis-server --appendonly yes: $(cat "$MOCK_LOG")"
+pass "Redis runs on a named volume with AOF on, so sessions survive a re-run and a reboot"
+
+# Every case below drives start_redis against a SIMULATED existing container. The MOCK_REDIS_*
+# values have to be exported (the podman mock is a separate process that reads them from its own
+# environment), and must not leak into the next case or into main() at the end of this file -- so
+# each runs in a subshell. Output is captured because the warning and the "replacing, because X"
+# line are themselves assertions; $MOCK_LOG is a file, so the subshell's podman calls still land in
+# it.
+redis_run() (
+  export MOCK_REDIS_EXISTS=1
+  while [[ "${1:-}" == *=* ]]; do
+    export "${1?}"
+    shift
+  done
+  : >"$MOCK_LOG"
+  start_redis 2>&1
+)
+
+# The issue's own acceptance item: a second run over a container that already matches touches
+# nothing. An unconditional --replace is what made a re-run destructive in the first place.
+redis_run >/dev/null
+if grep -qE 'podman (run|rm|stop) ' "$MOCK_LOG"; then
+  fail "a re-run must not recreate or remove a matching sh-redis: $(cat "$MOCK_LOG")"
+fi
+pass "a re-run leaves an already-matching sh-redis alone"
+
+# ...but it is not inert. Each of the four fields independently, because a diff that only ever
+# checked the image would let a container with no volume -- the pre-#410 shape, the one actually
+# running on every existing host -- read as a match and never be fixed. The log must also say WHICH
+# field differed: without that an operator sees their Redis recreated with no way to tell why.
+#
+# The volume gets two rows: a DIFFERENT named volume (an operator's own choice, reported by name)
+# and no /data mount at all. The second is the degenerate anonymous case -- podman prints nothing
+# for the mount -- and must still read as anonymous rather than as the empty-string name.
+while IFS='|' read -r mock expected; do
+  out="$(redis_run "$mock")"
+  grep -q 'podman run .*sh-redis' "$MOCK_LOG" ||
+    fail "a sh-redis differing in '$expected' must be replaced: $(cat "$MOCK_LOG")"
+  [[ "$out" == *"$expected"* ]] ||
+    fail "the replacement must report '$expected' as the difference: $out"
+done <<'CASES'
+MOCK_REDIS_IMAGE=docker.io/redis:6-alpine|image is 'docker.io/redis:6-alpine'
+MOCK_REDIS_PORT=0.0.0.0:6379->6379/tcp|published port is
+MOCK_REDIS_VOLUME=redis-data|/data volume is 'redis-data'
+MOCK_REDIS_VOLUME=|/data volume is ANONYMOUS
+MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine]|without --appendonly yes
+CASES
+pass "a difference in image, port, volume or appendonly each replaces sh-redis, saying which"
+
+# --- the pre-#410 anonymous volume: warned about, never moved unasked (#410) -------------------
+# redis:7-alpine declares VOLUME /data, so the old no-`-v` form did not destroy data outright --
+# each --replace moved it to a fresh anonymous volume and orphaned the last (the P6.3 rig
+# accumulated 11). The sessions are therefore still recoverable, which is why the default path
+# warns loudly instead of quietly starting a fresh named volume beside them.
+#
+# The mock state below is the shape a real pre-#410 host is actually in, and it is the reason
+# redis_container_diff has to ask `volume inspect`: podman gives the anonymous volume a 64-hex NAME
+# and reports it on the mount like any other, so the id alone is indistinguishable from a name an
+# operator chose. Only the volume's own .Anonymous flag separates the two.
+ANON_VOL=f3c1b0a9e7d5c3b1a9f7e5d3c1b0a9f7e5d3c1b0a9f7e5d3c1b0a9f7e5d3c1b0
+out="$(redis_run "MOCK_REDIS_VOLUME=$ANON_VOL" MOCK_REDIS_VOLUME_ANON=true)"
+[[ "$out" == *SH_REDIS_ADOPT_VOLUME=1* ]] ||
+  fail "the anonymous-volume warning must name the flag that migrates it: $out"
+[[ "$out" == *"NOT"* ]] ||
+  fail "the warning must say the old sessions are not deleted, so an operator knows they can still" \
+    "be migrated: $out"
+# `volume inspect` is excluded: the diff itself reads .Anonymous, which is a read of METADATA, not
+# of the sessions. `volume create`/`volume rm`, `podman exec` (SAVE) and `stop` are the calls that
+# would move or disturb the data, and none of them may happen without the flag.
+if grep -qE 'podman (exec|volume (create|rm)|stop) ' "$MOCK_LOG"; then
+  fail "without the flag, nothing may touch the old volume's data: $(cat "$MOCK_LOG")"
+fi
+pass "an anonymous Redis volume warns, naming the adopt flag, and is left untouched"
+
+# With the flag: the ORDER is the claim. The recovery recipe on #410 ("copy dump.rdb in, start
+# Redis") yields an EMPTY Redis once AOF is on, because redis:7-alpine loads the AOF and ignores an
+# existing dump.rdb -- verified live under podman 6.1.1. So SAVE must precede the copy (or the file
+# is as old as the last save point), the conversion must run with appendonly OFF (or the RDB is
+# never read), and only then may CONFIG SET appendonly yes write the AOF.
+#
+# This pins the shape and the order against the mocks; it cannot and does not re-verify Redis's own
+# loading behaviour, which the live probe established.
+redis_run "MOCK_REDIS_VOLUME=$ANON_VOL" MOCK_REDIS_VOLUME_ANON=true SH_REDIS_ADOPT_VOLUME=1 >/dev/null
+adopt_order="$(sed -nE 's/.*(redis-cli SAVE|stop sh-redis|cp -p \/data\/dump\.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes).*/\1/p' "$MOCK_LOG" | tr '\n' '|')"
+[[ "$adopt_order" == "redis-cli SAVE|stop sh-redis|cp -p /data/dump.rdb|--appendonly no|CONFIG SET appendonly yes|--appendonly yes|" ]] ||
+  fail "adoption ran out of order (SAVE, stop, copy, appendonly-off conversion, CONFIG SET, then" \
+    "the final run): got '$adopt_order' from $(cat "$MOCK_LOG")"
+pass "SH_REDIS_ADOPT_VOLUME=1 migrates the old volume in the order the live probe proved"
+
+# Only the state it recognizes. A container differing in some OTHER field already has a named
+# volume, so running the migration over it would copy that volume's own dump.rdb onto itself.
+redis_run MOCK_REDIS_IMAGE=docker.io/redis:6-alpine SH_REDIS_ADOPT_VOLUME=1 >/dev/null
+if grep -q 'cp -p /data/dump.rdb' "$MOCK_LOG"; then
+  fail "adoption must run only for an anonymous volume, not for any difference: $(cat "$MOCK_LOG")"
+fi
+pass "the adoption path ignores a container that already has a named volume"
+
+grep -qi 'named volume' "$SCRIPT" ||
+  fail "start_redis must state that Redis data lives on a named volume"
+grep -qi 'appendonly' "$VM_DIR/README.md" ||
+  fail "README.md must document Redis persistence (the named volume and AOF)"
+pass "Redis persistence is documented in both the script and the README"
 
 # --- admin listener (Task 11): loopback only -------------------------------------------------
 # Unauthenticated, and it echoes configuration. Bound to 0.0.0.0 on a cloud VM it is a

@@ -281,6 +281,19 @@ grep -qE 'SH_(SESSION_TOKEN_PRIVATE_KEY|CREDENTIAL_KEK|EXCHANGE_TOKEN|GITHUB_CLI
   fail "a control-plane secret is :?-required; that breaks every stack without the profile"
 pass "the control plane's secrets never block a stack that runs without it"
 
+# Redis: a named volume and AOF, matching the VM path (#410). Without the volume, `docker compose
+# down` -- which the restart claim in smoke.sh runs, and which an operator runs to change .env --
+# silently forgets every session, the ownership index and the lease store. Without AOF, Redis
+# snapshots only on its `save` points, so the volume comes back short of the last window's writes.
+jq -e '.services.redis.volumes | any(.type == "volume" and .source == "moca-redis" and .target == "/data")' \
+  "$OUT" >/dev/null ||
+  fail "redis must mount the moca-redis named volume at /data, or sessions die with the container:" \
+    "$(jq -c .services.redis.volumes "$OUT")"
+jq -e '.services.redis.command | index("--appendonly") as $i | $i != null and .[$i + 1] == "yes"' \
+  "$OUT" >/dev/null ||
+  fail "redis must run with --appendonly yes: $(jq -c .services.redis.command "$OUT")"
+pass "redis keeps sessions on the moca-redis named volume with AOF on"
+
 # Credentials: the file store, on a NAMED volume at the path the image creates for uid 1000.
 [[ "$(cp_env control-plane SH_CREDENTIAL_STORE)" == file ]] ||
   fail "the compose control plane must use SH_CREDENTIAL_STORE=file (there is no Kubernetes here)"

@@ -1,7 +1,7 @@
 # Single-VM deployment (P6 process-manager runtime)
 
 > **Preview.** The single-VM deployment is implemented but not yet declared Stable; interfaces and limits may
-> change. Known gaps (no Redis persistence by default, no upgrade or backup guide): [Maturity and lifecycle](../../docs/reference/maturity-and-lifecycle.md).
+> change. Known gaps (no upgrade or backup guide): [Maturity and lifecycle](../../docs/reference/maturity-and-lifecycle.md).
 
 Round one's target for the VM process-manager runtime (spec §4.3, §4.4, step 4): a single
 Linux VM running the supervisor, the relay and the MU1 control plane under systemd, with Redis and
@@ -134,7 +134,9 @@ Across those two runs, the script does the following, in this order:
    `systemd/sh-control-plane.service` into `/etc/systemd/system`, reloads the daemon, and enables
    `podman-restart.service` so the containers below come back after a reboot (see "Reboots" below).
 6. Starts a Redis container on podman's **default** network (published on `127.0.0.1:6379`), which
-   `isolate=strict` below keeps unreachable from sandboxes.
+   `isolate=strict` below keeps unreachable from sandboxes. Its data is on a named volume with AOF
+   on, and an already-matching container is left running rather than recreated (see "Redis
+   persistence" below).
 7. Creates a dedicated `moca-sandbox` podman network (fixed subnet `10.89.40.0/24`, gateway
    `10.89.40.1`, `isolate=strict` so it exchanges no traffic with any other podman network) and
    installs an nftables table that confines it, then starts `SH_SANDBOX_COUNT` (default 2) sandbox
@@ -161,8 +163,9 @@ default start limit (5 starts in 10 seconds) leaves it `failed` about ten second
 `SH_GITHUB_CLIENT_ID` and `SH_PUBLIC_HARNESS_URL` and re-run `setup-vm.sh`, which restarts it. (With
 the client id set but no `SH_PUBLIC_HARNESS_URL` it does boot, advertising no harness.) To opt out, `sudo systemctl disable sh-control-plane.service`; a re-run of
 `setup-vm.sh` enables it again. A re-run
-also recreates Redis and the sandbox containers (`podman run --replace`), so Redis state is lost
-(see "Reboots" below).
+also recreates the sandbox containers (`podman run --replace`). It does **not** recreate Redis
+unless something about it actually differs from what the script would start, and its data is on a
+named volume either way, so a re-run keeps every session (see "Redis persistence" below).
 
 `SH_TURNS_PER_WORKER` ships empty on purpose (see below), and `readConfig` throws on blank, so
 the supervisor unit is _expected_ to fail if it starts before the operator sets it. With
@@ -196,8 +199,8 @@ sudo systemctl start sh-supervisor.service
 (`SH_CONTROL_PLANE_HOST`, `SH_CONTROL_PLANE_PORT` in `control-plane.env`). Credentials use the
 **file** store (`SH_CREDENTIAL_STORE=file`) in `/var/lib/moca-control-plane` (`SH_CREDENTIAL_DIR`,
 the unit's `StateDirectory`, mode `0700`), envelope-encrypted under the KEK. Sessions live in the
-same loopback Redis container as the supervisor's, so a reboot's lost Redis state (see "Reboots"
-below) loses sessions, not credentials. Vault (`SH_CREDENTIAL_STORE=vault`) is the multi-host
+same loopback Redis container as the supervisor's, on the named volume described under "Redis
+persistence" below, so they survive a re-run and a reboot alongside the credentials. Vault (`SH_CREDENTIAL_STORE=vault`) is the multi-host
 option and is not wired by `setup-vm.sh`: a follow-up (#362 item 1).
 
 ### The GitHub OAuth app
@@ -640,11 +643,63 @@ failing (it is one package's unit name, not a hard requirement of the bring-up) 
 still completes. On such a host, re-run `setup-vm.sh` after a reboot before expecting turns to
 work.
 
-**Redis state does not survive a reboot either way.** The Redis container runs with no volume, so
-sessions, the ownership index and the lease store are lost on reboot and on any `podman rm` of it.
-That is a deliberate round-one choice, not an oversight: this deployment exists to run E8 rungs,
-and each run starts from an empty Redis anyway. `--restart=always` and `podman-restart.service`
-bring the container back, not the data that was in it.
+## Redis persistence
+
+Redis holds the control plane's session and ownership index, the harness's own session state, the
+lease store and `sh:sandbox:records` — of which only the last is self-healing (workers re-register
+when they reconnect to the relay). `setup-vm.sh` therefore starts it on a **named volume**
+(`moca-redis`, override with `MOCA_REDIS_VOLUME`) with **AOF on** (`redis-server --appendonly yes`),
+the same shape the Kubernetes path already uses — a PVC in `deploy/k8s/base/redis.yaml` plus
+`appendonly yes` in the `redis.conf` that `deploy/k8s/setup.sh` writes.
+
+Both halves are needed. The named volume survives `podman rm`; AOF makes each write durable when it
+happens, where snapshots alone would drop up to the last `save` window on a reboot.
+
+A re-run of `setup-vm.sh` also no longer recreates the container. It inspects the running `sh-redis`
+first and leaves it alone when its image, published port, `/data` volume and `--appendonly` setting
+all match what the script would start, logging which field differed when it does replace it. This
+matters because re-running the installer is how you apply a changed `control-plane.env`
+(`--restart=always` and `podman-restart.service` bring the container back after a reboot, not the
+data that was in it).
+
+### Hosts installed before this change
+
+Earlier versions started Redis with no `-v`. `docker.io/redis:7-alpine` declares `VOLUME /data`, so
+each run's `podman run --replace` moved the data to a **fresh anonymous volume** and orphaned the
+previous one: those sessions were unreachable but never deleted, and a long-lived rig can hold a
+stack of them (`podman volume ls`).
+
+On such a host the first re-run warns that it is leaving that volume behind and starts the named one
+empty. To migrate the sessions in it instead, re-run once with:
+
+```bash
+sudo env SH_REDIS_ADOPT_VOLUME=1 ./deploy/vm/setup-vm.sh
+```
+
+That runs `redis-cli SAVE` on the live container, copies its `dump.rdb` into `moca-redis`, converts
+it to an AOF, and starts Redis on the result. It acts only on a container whose `/data` is anonymous;
+it will not touch a named volume.
+
+> **Do not just copy a `dump.rdb` into the volume and start Redis.** With `--appendonly yes`,
+> Redis 7 loads the AOF and **ignores** an existing `dump.rdb` — verified against
+> `redis:7-alpine` under podman 6.1.1 — so that yields a silently **empty** Redis. The conversion
+> has to run with appendonly **off** first, so the RDB is what gets loaded, and only then
+> `CONFIG SET appendonly yes`. `SH_REDIS_ADOPT_VOLUME=1` does this in the right order. The same
+> trap applies to recovering an orphaned volume by hand:
+>
+> ```bash
+> # Inspect candidates first: the newest Mountpoint/dump.rdb mtime is usually the one you want.
+> podman volume ls
+> podman run --rm -v <old-volume>:/data docker.io/redis:7-alpine ls -l /data
+> # Load the RDB with appendonly OFF, then convert.
+> podman run -d --rm --name redis-recover -v <old-volume>:/data \
+>   docker.io/redis:7-alpine redis-server --appendonly no
+> podman exec redis-recover redis-cli DBSIZE          # non-zero, or you have the wrong volume
+> podman exec redis-recover redis-cli CONFIG SET appendonly yes
+> podman exec redis-recover redis-cli SHUTDOWN NOSAVE # closes the connection; expected
+> ```
+>
+> Then point `MOCA_REDIS_VOLUME` at that volume and re-run `setup-vm.sh`.
 
 ## Where the env file lives
 

@@ -240,8 +240,11 @@ else
 fi
 
 claim 7 "a stored credential survives docker compose down && up, and still DECRYPTS for a turn"
-# Redis has no volume, so every session is gone after the restart; the credential, on its own
-# volume, is not. The api token still verifies: the signing key lives in .env.
+# `dc down` keeps named volumes (only `down -v` removes them), so both the credential store and
+# Redis -- and so the sessions in it -- come back with the stack (#410). This claim is about the
+# CREDENTIAL either way: `authed_turn after` opens a fresh session, so it passes or fails on whether
+# the stored credential still decrypts, not on session survival. The api token still verifies too:
+# the signing key lives in .env.
 dc down >/dev/null 2>&1
 dc up -d >/dev/null 2>&1
 if wait_for 90 cp_ready && wait_for 120 metrics && wait_for 90 sandbox_attached; then

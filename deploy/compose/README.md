@@ -245,9 +245,11 @@ The first three run in CI through `make test-deploy`.
 
 ## What the trial does not claim
 
-- **No persistence, except credentials.** Redis has no volume, the same as the VM path.
-  `docker compose down` (or removing the container) loses sessions, the ownership index and the
-  lease store. Only the control plane's credentials, on their own volume, survive.
+- **Persistence, but no backup or upgrade story.** Redis keeps sessions, the ownership index and the
+  lease store on the `moca-redis` named volume with AOF on, the same as the VM path (#410), so
+  `docker compose down && up` keeps them — as do the control plane's credentials, on their own
+  volume. `docker compose down -v` removes both and starts clean. Nothing here backs either volume
+  up, migrates one across a Redis image change, or bounds its growth.
 - **No offline login.** Logging in goes through GitHub's device flow, so it needs internet access
   and an OAuth app. A loopback-only development identity provider is a possible follow-up; it is
   security-sensitive enough to need its own ADR.
