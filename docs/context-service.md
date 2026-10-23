@@ -252,28 +252,28 @@ Context's owner.
 
 ## Settings
 
-| Variable                                 | Meaning                                                                 |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
-| `MOCA_CONTEXT_WORKLOADS_ENABLED`         | `1` turns the routes on, together with `CONTEXT_SERVICE_URL`            |
-| `CONTEXT_SERVICE_URL`                    | Internal base URL of Context Service                                    |
-| `CONTEXT_SERVICE_TOKEN`                  | Bearer Context Service accepts for its trusted routes                   |
-| `CONTEXT_SERVICE_PUBLIC_URL`             | Base URL clients upload to; HTTPS, or HTTP on loopback only             |
-| `CONTEXT_SERVICE_NAMESPACE`              | Context namespace; defaults to `POD_NAMESPACE`, then `default`          |
-| `CONTEXT_SERVICE_TIMEOUT_MS`             | Per-request timeout, default `5000`                                     |
-| `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER`   | Live workloads per user, default `5`                                    |
-| `MOCA_CONTEXT_MAX_STORAGE_GIB`           | Largest `workspace.size`, default `10`                                  |
-| `MOCA_CONTEXT_STORAGE_CLASSES`           | Comma-separated StorageClasses a caller may name; empty allows none     |
-| `MOCA_WORKLOAD_DELETED_TTL_SECONDS`      | How long `GET` still reports a deleted workload, default `86400`        |
+| Variable                                 | Meaning                                                                                       |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `MOCA_CONTEXT_WORKLOADS_ENABLED`         | `1` turns the routes on, together with `CONTEXT_SERVICE_URL`                                  |
+| `CONTEXT_SERVICE_URL`                    | Internal base URL of Context Service                                                          |
+| `CONTEXT_SERVICE_TOKEN`                  | Bearer Context Service accepts for its trusted routes                                         |
+| `CONTEXT_SERVICE_PUBLIC_URL`             | Base URL clients upload to; HTTPS, or HTTP on loopback only                                   |
+| `CONTEXT_SERVICE_NAMESPACE`              | Context namespace; defaults to `POD_NAMESPACE`, then `default`                                |
+| `CONTEXT_SERVICE_TIMEOUT_MS`             | Per-request timeout, default `5000`                                                           |
+| `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER`   | Live workloads per user, default `5`                                                          |
+| `MOCA_CONTEXT_MAX_STORAGE_GIB`           | Largest `workspace.size`, default `10`                                                        |
+| `MOCA_CONTEXT_STORAGE_CLASSES`           | Comma-separated StorageClasses a caller may name; empty allows none                           |
+| `MOCA_WORKLOAD_DELETED_TTL_SECONDS`      | How long `GET` still reports a deleted workload, default `86400`                              |
 | `MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS`   | Retries of the create-rollback's Context Service cleanup while it is unreachable, default `3` |
-| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS` | Backoff between those retries, default `500`                            |
-| `MOCA_CONTEXT_BUNDLE_MAX_BYTES`          | Largest bundle a run downloads, default `268435456` (256 MiB)           |
-| `MOCA_CONTEXT_BUNDLE_MAX_EXPANDED_BYTES` | Most a bundle may inflate to, default `1342177280` (1.25 GiB)           |
-| `MOCA_CONTEXT_BUNDLE_MAX_ENTRIES`        | Most entries a bundle may hold, default `10000`                         |
-| `MOCA_CONTEXT_BUNDLE_CACHE_BYTES`        | Moca's in-memory bundle cache, default `67108864` (64 MiB)              |
-| `MOCA_CONTEXT_DOWNLOAD_BUDGET_BYTES`     | Bytes all downloads in flight may buffer, default `536870912` (512 MiB) |
-| `MOCA_CONTEXT_EXPORT_TIMEOUT_MS`         | Timeout for one bundle download, default `300000`                       |
-| `MOCA_CONTEXT_CACHE_SECRET`              | Secret for the sandbox cache names; random per process if unset         |
-| `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES`    | Minutes an unused revision stays on a sandbox, default `0`              |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS` | Backoff between those retries, default `500`                                                  |
+| `MOCA_CONTEXT_BUNDLE_MAX_BYTES`          | Largest bundle a run downloads, default `268435456` (256 MiB)                                 |
+| `MOCA_CONTEXT_BUNDLE_MAX_EXPANDED_BYTES` | Most a bundle may inflate to, default `1342177280` (1.25 GiB)                                 |
+| `MOCA_CONTEXT_BUNDLE_MAX_ENTRIES`        | Most entries a bundle may hold, default `10000`                                               |
+| `MOCA_CONTEXT_BUNDLE_CACHE_BYTES`        | Moca's in-memory bundle cache, default `67108864` (64 MiB)                                    |
+| `MOCA_CONTEXT_DOWNLOAD_BUDGET_BYTES`     | Bytes all downloads in flight may buffer, default `536870912` (512 MiB)                       |
+| `MOCA_CONTEXT_EXPORT_TIMEOUT_MS`         | Timeout for one bundle download, default `300000`                                             |
+| `MOCA_CONTEXT_CACHE_SECRET`              | Secret for the sandbox cache names; random per process if unset                               |
+| `MOCA_CONTEXT_SANDBOX_RETAIN_MINUTES`    | Minutes an unused revision stays on a sandbox, default `0`                                    |
 
 A missing token or an unsafe public URL answers `500 workloads_misconfigured`.
 

@@ -129,20 +129,20 @@ these variables; see [the migration guide](../migrating-from-knative.md#configur
 Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` is set; otherwise
 `/workloads` returns 501. See [`docs/context-service.md`](../context-service.md).
 
-| Variable                                                    | Default                    | Notes                                            |
-| ----------------------------------------------------------- | -------------------------- | ------------------------------------------------ |
-| `MOCA_CONTEXT_WORKLOADS_ENABLED`                            | off                        | Feature switch                                   |
-| `CONTEXT_SERVICE_URL`                                       | none                       |                                                  |
-| `CONTEXT_SERVICE_PUBLIC_URL`                                | none                       | Required for workloads; HTTPS except on loopback |
-| `CONTEXT_SERVICE_TOKEN`                                     | none                       | **Secret.** Required for workloads               |
-| `CONTEXT_SERVICE_NAMESPACE` (falls back to `POD_NAMESPACE`) | `default`                  |                                                  |
-| `CONTEXT_SERVICE_TIMEOUT_MS`                                | `5000`                     |                                                  |
-| `MOCA_CONTEXT_MAX_STORAGE_GIB`                              | `10`                       |                                                  |
-| `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER`                      | `5`                        |                                                  |
-| `MOCA_WORKLOAD_DELETED_TTL_SECONDS`                         | `86400`                    | TTL of the deleted-workload record               |
+| Variable                                                    | Default                    | Notes                                                                |
+| ----------------------------------------------------------- | -------------------------- | -------------------------------------------------------------------- |
+| `MOCA_CONTEXT_WORKLOADS_ENABLED`                            | off                        | Feature switch                                                       |
+| `CONTEXT_SERVICE_URL`                                       | none                       |                                                                      |
+| `CONTEXT_SERVICE_PUBLIC_URL`                                | none                       | Required for workloads; HTTPS except on loopback                     |
+| `CONTEXT_SERVICE_TOKEN`                                     | none                       | **Secret.** Required for workloads                                   |
+| `CONTEXT_SERVICE_NAMESPACE` (falls back to `POD_NAMESPACE`) | `default`                  |                                                                      |
+| `CONTEXT_SERVICE_TIMEOUT_MS`                                | `5000`                     |                                                                      |
+| `MOCA_CONTEXT_MAX_STORAGE_GIB`                              | `10`                       |                                                                      |
+| `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER`                      | `5`                        |                                                                      |
+| `MOCA_WORKLOAD_DELETED_TTL_SECONDS`                         | `86400`                    | TTL of the deleted-workload record                                   |
 | `MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS`                      | `3`                        | Create-rollback cleanup retries while Context Service is unreachable |
-| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS`                    | `500`                      | Backoff between those retries                    |
-| `MOCA_CONTEXT_STORAGE_CLASSES`                              | empty (any class rejected) |                                                  |
+| `MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS`                    | `500`                      | Backoff between those retries                                        |
+| `MOCA_CONTEXT_STORAGE_CLASSES`                              | empty (any class rejected) |                                                                      |
 
 These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_TOKEN` or URL returns
 500 `workloads_misconfigured`.
