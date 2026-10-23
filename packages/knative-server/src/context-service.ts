@@ -51,6 +51,39 @@ export class ContextServiceError extends Error {
     super(message);
     this.name = 'ContextServiceError';
   }
+
+  /** True when the Context Service call never got a response (vs got an error response). */
+  isUnreachable(): boolean {
+    return this.status === undefined;
+  }
+}
+
+const retrySleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Retry `fn` on `ContextServiceError` that marks Context Service as unreachable (no HTTP response
+ * ever arrived). An error response from Context Service, even 5xx with a code, is not retried: it
+ * means the server is reachable and the problem is semantic. Caller-visible errors (bad input,
+ * local misconfiguration) are not retried either.
+ */
+export async function retryWhileUnreachable<T>(
+  fn: () => Promise<T>,
+  { attempts, backoffMs }: { attempts: number; backoffMs: number },
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof ContextServiceError) || !err.isUnreachable() || i === attempts - 1) {
+        throw err;
+      }
+      await retrySleep(backoffMs);
+    }
+  }
+  // Loop always returns or throws; this is unreachable but keeps TypeScript happy.
+  throw lastErr;
 }
 
 export function contextServiceConfigured(): boolean {

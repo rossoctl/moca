@@ -40,6 +40,11 @@ class FakeContextService {
   private holds = new Map<string, { when: 'before' | 'after'; released: Promise<void> }>();
   /** One-shot: the next request to this operation fails with this status. */
   failures = new Map<string, number>();
+  /**
+   * The next N requests to this operation drop the socket before responding, so the harness sees
+   * them as unreachable (fetch rejection, no HTTP status). The counter decrements per hit.
+   */
+  unreachable = new Map<string, number>();
   server = http.createServer((req, res) => void this.handle(req, res));
 
   hold(operation: string, when: 'before' | 'after' = 'before'): () => void {
@@ -91,6 +96,13 @@ class FakeContextService {
       if (value === undefined) res.writeHead(status).end();
       else res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     };
+    const remaining = this.unreachable.get(operation) ?? 0;
+    if (remaining > 0) {
+      if (remaining === 1) this.unreachable.delete(operation);
+      else this.unreachable.set(operation, remaining - 1);
+      req.socket.destroy();
+      return;
+    }
     const failure = this.failures.get(operation);
     if (failure) {
       this.failures.delete(operation);
@@ -479,6 +491,46 @@ describe('quota', () => {
     expect((await call('DELETE', '/workloads/demo', alice)).status).toBe(204);
     expect(await quotaOf(alice)).toBe(0);
     expect(cs.contexts.size).toBe(0);
+  });
+
+  // A transient Context Service unreachability during the rollback's deleteContext would
+  // otherwise leave the record in `deleting` with its quota slot held, invisibly to the owner.
+  // The retry inside rollbackCreate absorbs the blip and lets the record reach `deleted`.
+  it('absorbs a transient Context Service blip during rollback and frees the quota', async () => {
+    vi.stubEnv('MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS', '3');
+    vi.stubEnv('MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS', '10');
+    cs.failures.set('grant', 500); // force the create to fail → rollback runs
+    cs.unreachable.set('delete', 2); // first two rollback-delete attempts are unreachable
+    expect(await create(alice, 'blip')).toEqual({
+      status: 502,
+      body: { error: 'context_service_error' },
+    });
+    // The third rollback-delete got through: record is deleted, quota released.
+    expect((await call('GET', '/workloads/blip', alice)).body).toMatchObject({ status: 'deleted' });
+    expect(await quotaOf(alice)).toBe(0);
+    expect(cs.ownedBy(alice)).toHaveLength(0);
+  });
+
+  // A sustained Context Service outage must not paper over the failure. The record stays
+  // `deleting` so the owner-driven DELETE still finishes the cleanup once Context Service is back.
+  it('leaves the record deleting when the Context Service stays unreachable past the retry budget', async () => {
+    vi.stubEnv('MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS', '3');
+    vi.stubEnv('MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS', '10');
+    cs.failures.set('grant', 500);
+    cs.unreachable.set('delete', 10); // more unreachables than retries: outage outlasts the budget
+    expect(await create(alice, 'stuck')).toEqual({
+      status: 502,
+      body: { error: 'context_service_error' },
+    });
+    expect((await call('GET', '/workloads/stuck', alice)).body).toMatchObject({
+      status: 'deleting',
+    });
+    expect(await quotaOf(alice)).toBe(1);
+    // Context Service recovers (unreachable counter still positive but we clear it); owner's
+    // DELETE finishes the pending cleanup and frees the quota.
+    cs.unreachable.delete('delete');
+    expect((await call('DELETE', '/workloads/stuck', alice)).status).toBe(204);
+    expect(await quotaOf(alice)).toBe(0);
   });
 });
 

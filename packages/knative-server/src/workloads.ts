@@ -16,6 +16,7 @@ import {
   deleteContext,
   evictContextBundles,
   freezeContext,
+  retryWhileUnreachable,
   type ContextStorage,
 } from './context-service.js';
 import { recordsKey } from '@moca/harness/pool-records';
@@ -406,12 +407,21 @@ async function createWorkload(
 async function rollbackCreate(store: WorkloadStore, reserved: WorkloadRecord): Promise<void> {
   try {
     let cleaned = true;
-    await deleteContext(reserved.contextName, reserved.owner).catch((err: unknown) => {
+    // Retry only while Context Service is unreachable (no HTTP response). A reply that already
+    // says "gone" or any 4xx/5xx with a status is terminal — it tells us the server saw us and
+    // decided. The retry absorbs transient blips (pod restart, momentary network loss).
+    await retryWhileUnreachable(
+      () => deleteContext(reserved.contextName, reserved.owner),
+      {
+        attempts: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_ATTEMPTS', 3),
+        backoffMs: positiveIntEnv('MOCA_CONTEXT_ROLLBACK_RETRY_BACKOFF_MS', 500),
+      },
+    ).catch((err: unknown) => {
       cleaned = false;
       // The Context name is derived and does not reveal the owner; log it so an operator can
       // delete the Context if no record is left for a retry to act on.
       console.error(
-        `workload create rollback could not delete Context ${reserved.contextName}:`,
+        `workload create rollback could not delete Context ${reserved.contextName} after retries:`,
         err,
       );
     });
