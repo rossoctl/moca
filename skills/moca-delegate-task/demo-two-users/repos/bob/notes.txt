@@ -1,0 +1,2 @@
+Bob's project notes.
+SECRET-BOB-c41e: only Bob's tasks may ever read this line.

@@ -1,0 +1,17 @@
+# Kind cluster for the two-user demo (setup.sh creates it as moca-two-users). Its host ports differ
+# from the phase 1 demo's (../demo/kind.yaml), so both can run at once. They bind to 127.0.0.1 only,
+# and setup.sh turns the Services into these NodePorts:
+#   127.0.0.1:8180 -> NodePort 30080 -> moca-supervisor (harness)
+#   127.0.0.1:8190 -> NodePort 30082 -> moca-control-plane
+#   127.0.0.1:8181 -> NodePort 30081 -> context-service (uploads)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  # Pinned so the host-access NetworkPolicy can exclude pod traffic.
+  podSubnet: 10.244.0.0/16
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 8180, listenAddress: 127.0.0.1, protocol: TCP }
+      - { containerPort: 30081, hostPort: 8181, listenAddress: 127.0.0.1, protocol: TCP }
+      - { containerPort: 30082, hostPort: 8190, listenAddress: 127.0.0.1, protocol: TCP }

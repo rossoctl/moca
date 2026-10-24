@@ -1,0 +1,2 @@
+Alice's project notes.
+SECRET-ALICE-7f3a: only Alice's tasks may ever read this line.

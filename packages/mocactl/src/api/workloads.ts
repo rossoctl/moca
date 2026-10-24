@@ -30,16 +30,28 @@ export interface UploadGrant {
   maxBytes: number;
 }
 
+/** `workspace.mount` (phase 2): how a workload's own sandboxes mount its context. */
+export const WORKLOAD_MOUNTS = ['read-only', 'writable'] as const;
+export type WorkloadMount = (typeof WORKLOAD_MOUNTS)[number];
+
 export interface Workload {
   workloadId: string;
   status: string;
   contextType?: string;
-  workspace?: { size?: string; storageClass?: string };
+  workspace?: { size?: string; storageClass?: string; mount?: string };
   revision?: string;
+  /** Phase 2: the workload's own sandboxes; `ready` of `count` are attached. */
+  sandboxes?: { count: number; tier?: string; ready?: number };
+  /** Why the last provisioning attempt failed (a `provisioning` workload only). */
+  error?: string;
 }
 
 export interface CreateWorkloadRequest {
   name?: string;
+  /** Phase 2 (docs/context-service.md, "Own sandboxes"): sandboxes of the workload's own. */
+  sandboxes?: { count: number };
+  /** Needs `sandboxes`: mount the context from the workload's own PVC instead of copying it. */
+  workspace?: { mount: WorkloadMount };
 }
 
 export interface UploadResult {
@@ -230,6 +242,10 @@ function asWorkload(body: unknown): Workload {
     ...(typeof b.contextType === 'string' ? { contextType: b.contextType } : {}),
     ...(b.workspace && typeof b.workspace === 'object' ? { workspace: b.workspace } : {}),
     ...(typeof b.revision === 'string' ? { revision: b.revision } : {}),
+    ...(b.sandboxes && typeof b.sandboxes === 'object' && typeof b.sandboxes.count === 'number'
+      ? { sandboxes: b.sandboxes }
+      : {}),
+    ...(typeof b.error === 'string' ? { error: b.error } : {}),
   };
 }
 

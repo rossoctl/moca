@@ -15,6 +15,7 @@ import {
   type UploadGrant,
   type UploadResult,
   type Workload,
+  type WorkloadMount,
 } from './api/workloads.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
@@ -23,6 +24,9 @@ import { ensureRuntimeAuth, type Runtime } from './runtime.js';
 
 /** A grant this close to its expiry is replaced before the upload starts. */
 const GRANT_EXPIRY_MARGIN_MS = 10_000;
+/** How long `create --sandboxes` waits for the workload's sandboxes to attach, and how often it looks. */
+const READY_TIMEOUT_MS = 300_000;
+const READY_POLL_MS = 2_000;
 
 export interface WorkloadOptions {
   json: boolean;
@@ -89,6 +93,12 @@ export interface CreateOptions extends WorkloadOptions {
   /** The context file to upload, as `contextctl ctx pack` writes it. */
   contextPath: string;
   name?: string;
+  /** `--sandboxes N`: the workload gets N sandboxes of its own (phase 2). */
+  sandboxes?: number;
+  /** `--mount MODE`: with `sandboxes`, mount the context from the workload's own PVC. */
+  mount?: WorkloadMount;
+  /** Test seam: how long to wait for a `provisioning` workload to become ready. */
+  readyTimeoutMs?: number;
 }
 
 /**
@@ -96,7 +106,9 @@ export interface CreateOptions extends WorkloadOptions {
  * returned. A grant that has expired, or that the upload rejects with 401, is replaced once via
  * POST .../uploads. On any failure after the workload exists, it is deleted again (best effort) so
  * it does not hold a slot of the per-user quota. Without `--name` the name is generated here, not by
- * the harness, so the id is known even when the reply to the POST never arrives.
+ * the harness, so the id is known even when the reply to the POST never arrives. With `sandboxes`,
+ * activate answers `provisioning` while the workload's own sandboxes start; `create` polls
+ * `GET /workloads/{id}` until it is `ready`, and treats a recorded `error` or a timeout as a failure.
  */
 export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions): Promise<number> {
   if (opts.name !== undefined && !validWorkloadId(opts.name)) {
@@ -124,6 +136,12 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
     io.err(`--context ${opts.contextPath} is empty`);
     return 2;
   }
+  if (opts.mount !== undefined && opts.sandboxes === undefined) {
+    io.err(
+      '--mount needs --sandboxes N: only a workload with its own sandboxes mounts its context',
+    );
+    return 2;
+  }
   if (!ready(rt, io)) return 2;
   const client = opts.client ?? clientFor(rt);
   const { signal } = opts;
@@ -136,7 +154,14 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
     );
   let created: Workload & { upload: UploadGrant };
   try {
-    created = await client.create({ name }, signal);
+    created = await client.create(
+      {
+        name,
+        ...(opts.sandboxes !== undefined ? { sandboxes: { count: opts.sandboxes } } : {}),
+        ...(opts.mount !== undefined ? { workspace: { mount: opts.mount } } : {}),
+      },
+      signal,
+    );
   } catch (err) {
     if (aborted(signal)) {
       mayExist();
@@ -153,7 +178,7 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
     io.err(message);
     if (aborted(signal)) {
       io.err(
-        `workload ${sanitizeRemote(id)} was left awaiting upload: \`mocactl workloads delete ${sanitizeRemote(id)}\``,
+        `workload ${sanitizeRemote(id)} was left ${uploaded ? 'activating' : 'awaiting upload'}: \`mocactl workloads delete ${sanitizeRemote(id)}\``,
       );
       return 130;
     }
@@ -208,6 +233,40 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
   } catch (err) {
     return fail(describeWorkloadError(err, id));
   }
+  if (active.status === 'provisioning') {
+    io.err(`workload ${sanitizeRemote(id)} is provisioning its sandboxes`);
+    const deadline = rt.now() + (opts.readyTimeoutMs ?? READY_TIMEOUT_MS);
+    let reactivated = false;
+    try {
+      while (active.status === 'provisioning') {
+        // The harness lost the held bundle (a provisioner restart, or a seed hold that lapsed while
+        // a claim sat Pending): the documented remedy is to repeat the activate, once.
+        if (active.error === 'seed_bundle_missing' && !reactivated) {
+          reactivated = true;
+          io.err(`workload ${sanitizeRemote(id)} lost its seed bundle; activating again`);
+          active = await client.activate(id, uploaded.revision, signal);
+          continue;
+        }
+        if (active.error) {
+          return await fail(
+            `workload ${sanitizeRemote(id)} failed to provision: ${sanitizeRemote(active.error)}`,
+          );
+        }
+        if (rt.now() >= deadline) {
+          const s = active.sandboxes;
+          return await fail(
+            `workload ${sanitizeRemote(id)} is still provisioning` +
+              (s ? ` (${s.ready ?? 0} of ${s.count} sandboxes attached)` : ''),
+          );
+        }
+        await rt.sleep(READY_POLL_MS, signal);
+        if (aborted(signal)) return await fail('interrupted while the sandboxes start');
+        active = await client.get(id, signal);
+      }
+    } catch (err) {
+      return fail(describeWorkloadError(err, id));
+    }
+  }
   io.err(
     `workload ${sanitizeRemote(id)} is ${sanitizeRemote(active.status)} (revision ${uploaded.revision.slice(0, 12)}` +
       (uploaded.files !== undefined ? `, ${uploaded.files} files` : '') +
@@ -222,6 +281,8 @@ export async function cmdWorkloadCreate(rt: Runtime, io: Io, opts: CreateOptions
         revision: uploaded.revision,
         files: uploaded.files ?? null,
         bytes: uploaded.bytes ?? null,
+        ...(active.sandboxes ? { sandboxes: active.sandboxes } : {}),
+        ...(active.workspace?.mount ? { mount: active.workspace.mount } : {}),
       }) + '\n',
     );
   } else {
@@ -260,18 +321,22 @@ export async function cmdWorkloadGet(rt: Runtime, io: Io, opts: IdOptions): Prom
     contextType: w.contextType ?? null,
     workspace: w.workspace ?? null,
     revision: w.revision ?? null,
+    sandboxes: w.sandboxes ?? null,
+    ...(w.error ? { error: w.error } : {}),
   };
   if (opts.json) {
     io.out(JSON.stringify(view) + '\n');
     return 0;
   }
   const rows = [
-    ['WORKLOAD', 'STATUS', 'TYPE', 'SIZE', 'REVISION'],
+    ['WORKLOAD', 'STATUS', 'TYPE', 'SIZE', 'SANDBOXES', 'MOUNT', 'REVISION'],
     [
       view.workloadId,
       view.status,
       view.contextType ?? '-',
       view.workspace?.size ?? '-',
+      view.sandboxes ? `${view.sandboxes.ready ?? 0}/${view.sandboxes.count}` : '-',
+      view.workspace?.mount ?? '-',
       view.revision ?? '-',
     ].map(sanitizeRemote),
   ];

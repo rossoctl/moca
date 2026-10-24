@@ -108,6 +108,180 @@ describe('workloads create', () => {
     expect(o.stdout.trimEnd().split('\n')).toHaveLength(1);
   });
 
+  it('sends --sandboxes and --mount, then waits for the provisioning workload to be ready', async () => {
+    const own = { count: 2, tier: 'container' };
+    const mounted = { size: '1Gi', mount: 'writable' };
+    const { fetch, calls } = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV, files: 1, bytes: 13 }, 201),
+      json(
+        workload('provisioning', {
+          revision: REV,
+          workspace: mounted,
+          sandboxes: { ...own, ready: 0 },
+        }),
+        202,
+      ),
+      json(
+        workload('provisioning', {
+          revision: REV,
+          workspace: mounted,
+          sandboxes: { ...own, ready: 1 },
+        }),
+      ),
+      json(
+        workload('ready', { revision: REV, workspace: mounted, sandboxes: { ...own, ready: 2 } }),
+      ),
+    );
+    const o = io();
+    const code = await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), o, {
+      contextPath: contextFile(),
+      name: 'demo',
+      sandboxes: 2,
+      mount: 'writable',
+      json: true,
+    });
+    expect(code).toBe(0);
+    expect(calls[0]!.body).toEqual({
+      name: 'demo',
+      sandboxes: { count: 2 },
+      workspace: { mount: 'writable' },
+    });
+    expect(calls.slice(3).map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET http://h/workloads/demo',
+      'GET http://h/workloads/demo',
+    ]);
+    expect(JSON.parse(o.stdout)).toMatchObject({
+      workloadId: 'demo',
+      status: 'ready',
+      sandboxes: { count: 2, ready: 2 },
+      mount: 'writable',
+    });
+    expect(o.stderr.join('\n')).toContain('provisioning its sandboxes');
+  });
+
+  it('sends only sandboxes without --mount, and nothing new without --sandboxes', async () => {
+    const { fetch, calls } = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('ready', { revision: REV, sandboxes: { count: 1, ready: 1 } })),
+    );
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), io(), {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(0);
+    expect(calls[0]!.body).toEqual({ name: 'demo', sandboxes: { count: 1 } });
+  });
+
+  it('refuses --mount without --sandboxes before any request', async () => {
+    const { fetch, calls } = scriptedFetch();
+    const o = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: fetch }), o, {
+        contextPath: contextFile(),
+        mount: 'read-only',
+        json: false,
+      }),
+    ).toBe(2);
+    expect(o.stderr.join('\n')).toContain('--mount needs --sandboxes N');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('deletes a workload whose provisioning records an error, or never finishes', async () => {
+    const own = { count: 1, tier: 'container', ready: 0 };
+    const failed = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('provisioning', { revision: REV, sandboxes: own, error: 'workload_refused' })),
+      new Response(null, { status: 204 }),
+    );
+    const o = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: failed.fetch }), o, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(1);
+    expect(o.stderr.join('\n')).toContain('failed to provision: workload_refused');
+    expect(failed.calls.at(-1)!.method).toBe('DELETE');
+
+    const slow = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      new Response(null, { status: 204 }),
+    );
+    const t = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: slow.fetch }), t, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        readyTimeoutMs: 0,
+        json: false,
+      }),
+    ).toBe(1);
+    expect(t.stderr.join('\n')).toContain('still provisioning (0 of 1 sandboxes attached)');
+    expect(slow.calls.at(-1)!.method).toBe('DELETE');
+  });
+
+  it('activates once more when the seed bundle was lost, then deletes if it is lost again', async () => {
+    const own = { count: 1, tier: 'container', ready: 0 };
+    const lost = { revision: REV, sandboxes: own, error: 'seed_bundle_missing' };
+    const recovered = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('provisioning', lost)),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('ready', { revision: REV, sandboxes: { ...own, ready: 1 } })),
+    );
+    const o = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: recovered.fetch }), o, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(0);
+    expect(recovered.calls.slice(2).map((c) => `${c.method} ${c.url}`)).toEqual([
+      'POST http://h/workloads/demo/activate',
+      'GET http://h/workloads/demo',
+      'POST http://h/workloads/demo/activate',
+      'GET http://h/workloads/demo',
+    ]);
+    expect(recovered.calls[4]!.body).toEqual({ revision: REV });
+    expect(o.stderr.join('\n')).toContain('lost its seed bundle; activating again');
+
+    const twice = scriptedFetch(
+      json({ ...workload('awaiting_upload'), upload: grant() }, 201),
+      json({ revision: REV }, 201),
+      json(workload('provisioning', { revision: REV, sandboxes: own }), 202),
+      json(workload('provisioning', lost)),
+      json(workload('provisioning', lost), 202),
+      new Response(null, { status: 204 }),
+    );
+    const t = io();
+    expect(
+      await cmdWorkloadCreate(testRuntime({ fetchImpl: twice.fetch }), t, {
+        contextPath: contextFile(),
+        name: 'demo',
+        sandboxes: 1,
+        json: false,
+      }),
+    ).toBe(1);
+    expect(t.stderr.join('\n')).toContain('failed to provision: seed_bundle_missing');
+    expect(twice.calls.at(-1)!.method).toBe('DELETE');
+  });
+
   it('replaces an already-expired grant before uploading', async () => {
     const { fetch, calls } = scriptedFetch(
       json({ ...workload('awaiting_upload'), upload: grant({ expiresAt: PAST }) }, 201),
@@ -437,7 +611,41 @@ describe('workloads get', () => {
       contextType: 'workspace',
       workspace: { size: '1Gi' },
       revision: REV,
+      sandboxes: null,
     });
+  });
+
+  it("shows a phase 2 workload's sandboxes and mount", async () => {
+    const { fetch } = scriptedFetch(
+      json(
+        workload('provisioning', {
+          revision: REV,
+          workspace: { size: '1Gi', mount: 'read-only' },
+          sandboxes: { count: 2, tier: 'container', ready: 1 },
+          error: 'seed_bundle_missing',
+        }),
+      ),
+      json(
+        workload('ready', {
+          revision: REV,
+          workspace: { size: '1Gi', mount: 'read-only' },
+          sandboxes: { count: 2, tier: 'container', ready: 2 },
+        }),
+      ),
+    );
+    const rt = testRuntime({ fetchImpl: fetch });
+    const o = io();
+    expect(await cmdWorkloadGet(rt, o, { id: 'demo', json: true })).toBe(0);
+    expect(JSON.parse(o.stdout)).toMatchObject({
+      sandboxes: { count: 2, tier: 'container', ready: 1 },
+      workspace: { mount: 'read-only' },
+      error: 'seed_bundle_missing',
+    });
+    const table = io();
+    expect(await cmdWorkloadGet(rt, table, { id: 'demo', json: false })).toBe(0);
+    expect(table.stdout.trimEnd().split('\n')[1]).toMatch(
+      /^demo\s+ready\s+workspace\s+1Gi\s+2\/2\s+read-only\s+c{64}$/,
+    );
   });
 
   it('prints a table, with nulls for what an unactivated workload lacks in JSON', async () => {
@@ -449,8 +657,8 @@ describe('workloads get', () => {
     const table = io();
     expect(await cmdWorkloadGet(rt, table, { id: 'demo', json: false })).toBe(0);
     const lines = table.stdout.trimEnd().split('\n');
-    expect(lines[0]).toMatch(/^WORKLOAD\s+STATUS\s+TYPE\s+SIZE\s+REVISION$/);
-    expect(lines[1]).toMatch(/^demo\s+awaiting_upload\s+workspace\s+1Gi\s+-$/);
+    expect(lines[0]).toMatch(/^WORKLOAD\s+STATUS\s+TYPE\s+SIZE\s+SANDBOXES\s+MOUNT\s+REVISION$/);
+    expect(lines[1]).toMatch(/^demo\s+awaiting_upload\s+workspace\s+1Gi\s+-\s+-\s+-$/);
     const bare = io();
     expect(await cmdWorkloadGet(rt, bare, { id: 'demo', json: true })).toBe(0);
     expect(JSON.parse(bare.stdout)).toEqual({
@@ -459,6 +667,7 @@ describe('workloads get', () => {
       contextType: null,
       workspace: null,
       revision: null,
+      sandboxes: null,
     });
   });
 

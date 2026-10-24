@@ -564,6 +564,31 @@ describe('workloads and spawn --workload', () => {
     expect(await run(['workloads', 'delete', 'demo'])).toBe(0);
     expect(del.mock.calls[0][2]).toMatchObject({ id: 'demo', json: false });
 
+    expect(
+      await run([
+        'workloads',
+        'create',
+        '--context',
+        'ctx.context',
+        '--sandboxes',
+        '2',
+        '--mount',
+        'writable',
+      ]),
+    ).toBe(0);
+    expect(create.mock.calls[1][2]).toMatchObject({ sandboxes: 2, mount: 'writable' });
+    for (const bad of [
+      ['--sandboxes', '0'],
+      ['--sandboxes', 'x'],
+      ['--sandboxes', '1.5'],
+      ['--sandboxes', '1', '--mount', 'rw'],
+    ]) {
+      const o = io();
+      expect(await run(['workloads', 'create', '--context', 'c', ...bad], o)).toBe(2);
+      expect(o.errs.join('\n')).toMatch(/--(sandboxes|mount) must be/);
+    }
+    expect(await run(['workloads', 'get', 'demo', '--sandboxes', '1'])).toBe(2);
+    expect(await run(['spawn', 'p', '--mount', 'writable'])).toBe(2);
     const noContext = io();
     expect(await run(['workloads', 'create'], noContext)).toBe(2);
     expect(noContext.errs.join('\n')).toContain('needs --context FILE');
@@ -575,7 +600,7 @@ describe('workloads and spawn --workload', () => {
     expect(await run(['workloads', 'delete', 'a', 'b'])).toBe(2);
     expect(await run(['workloads', 'get', 'demo', '--context', 'x'])).toBe(2);
     expect(await run(['sessions', '--name', 'x'])).toBe(2);
-    expect(create).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(2);
     expect(get).toHaveBeenCalledTimes(1);
     expect(del).toHaveBeenCalledTimes(1);
     expect(USAGE).toContain('mocactl workloads create --context FILE');

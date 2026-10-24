@@ -107,6 +107,7 @@ mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it 
 
 ```bash
 mocactl workloads create --context FILE [--name NAME] [--json]  # upload a context; prints its id
+mocactl workloads create --context FILE --sandboxes N [--mount read-only|writable]  # with sandboxes of its own
 mocactl workloads get ID [--json]           # status, context type, size and frozen revision
 mocactl workloads delete ID [--json]        # delete the workload and its context
 ```
@@ -206,6 +207,20 @@ request, so if the reply is lost (Ctrl-C, a dropped connection) it can still nam
 delete. The harness has no route that lists workloads, so there is no `mocactl workloads` listing:
 keep the id `create` prints.
 
+`--sandboxes N` gives the workload N sandboxes of its own instead of the operator's shared pool
+(phase 2, [#476](https://github.com/rossoctl/moca/issues/476); "Own sandboxes" in
+[`docs/context-service.md`](../../docs/context-service.md)). `--mount read-only` or
+`--mount writable`, which needs `--sandboxes`, also gives it a volume of its own holding the
+context, mounted into those sandboxes, so runs use it with no per-run copy; with `writable`, what
+one run writes the next sees. The deployment must run `moca-provisioner`, or the harness refuses
+`sandboxes` (`400 workload_field_not_allowed`). Activation answers `provisioning` while the
+sandboxes start: `create` then polls `GET /workloads/ID` every 2 seconds, for up to 5 minutes,
+until the workload is `ready`. On `seed_bundle_missing` (the provisioner lost the bundle, for
+example after a restart) it activates once more. Any other `error` the harness records, the same
+error twice, or the timeout is a failure (it deletes the workload, as for any other failure).
+`--sandboxes` is a whole number of at
+least 1 (the harness caps it, 2 by default); either flag outside `workloads create` exits `2`.
+
 `spawn --workload ID` adds `workloadId` to the run and records it in the ledger row
 (`mocactl subagents --json` shows it as `workload`). Only prompt runs can use a workload, so
 `--workload` needs `--kind prompt`. Before it creates the session, `spawn` checks the workload
@@ -237,8 +252,8 @@ their own shapes. These shapes are stable: fields may be added, but none is rena
 | `spawn`              | `{"type":"session","sessionId","pid"}`                                                             |
 | `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`    |
 | `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                 |
-| `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes"}`                                 |
-| `workloads get`      | `{"workloadId","status","contextType","workspace","revision"}`, `null` for what is not set         |
+| `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes","sandboxes"?,"mount"?}`           |
+| `workloads get`      | `{"workloadId","status","contextType","workspace","revision","sandboxes","error"?}`, `null` unset  |
 | `workloads delete`   | `{"workloadId","status":"deleted"}`                                                                |
 
 `createdAt` and `lastTurnAt` are epoch milliseconds as the control plane sends them (`lastTurnAt`

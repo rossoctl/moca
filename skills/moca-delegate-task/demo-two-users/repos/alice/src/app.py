@@ -1,0 +1,2 @@
+def owner():
+    return "alice"

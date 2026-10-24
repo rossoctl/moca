@@ -114,5 +114,22 @@ code="$(demo_turn MOCA-DEMO-FIX 3)"
 check "MOCA-DEMO-FIX ends with its done text and every result" \
   "$(grep -c 'done-demo-fix\\nRESULT-1\\nRESULT-2\\nRESULT-3' "$TMP/body")" "1"
 
+echo "== the two-user Kind demo scripts (skills/moca-delegate-task/demo-two-users/run.sh)"
+# shellcheck disable=SC2016 # the specs are literal commands, not to be expanded
+for spec in 'MOCA-DEMO2-WHO 0 where=$HOSTNAME' 'MOCA-DEMO2-WRITE 0 written-by=$HOSTNAME' \
+  'MOCA-DEMO2-READBACK 0 note=$(cat run-note.txt' 'MOCA-DEMO2-PEEK 0 write=refused' 'MOCA-DEMO2-PEEK 1 SECRET-'; do
+  m="${spec%% *}"; rest="${spec#* }"; n="${rest%% *}"; want="${rest#* }"
+  code="$(demo_turn "$m" "$n")"
+  check "$m step $n is 200" "$code" "200"
+  check "$m step $n is a bash tool_use" "$(grep -c '"name":"bash"' "$TMP/body")" "1"
+  check "$m step $n runs '$want'" "$(sed 's/\\//g' "$TMP/body" | grep -cF -- "$want")" "1"
+done
+for spec in 'MOCA-DEMO2-WHO 1 done-demo2-who' 'MOCA-DEMO2-WRITE 1 done-demo2-write' \
+  'MOCA-DEMO2-READBACK 1 done-demo2-readback' 'MOCA-DEMO2-PEEK 2 done-demo2-peek'; do
+  m="${spec%% *}"; rest="${spec#* }"; n="${rest%% *}"; want="${rest#* }"
+  code="$(demo_turn "$m" "$n")"
+  check "$m ends with $want and every result" "$(grep -c "$want\\\\nRESULT-1" "$TMP/body")" "1"
+done
+
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

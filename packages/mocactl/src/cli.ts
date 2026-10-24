@@ -19,6 +19,7 @@ import {
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { sbxMain } from './sbx/cli.js';
 import { cmdGet, cmdSpawn, cmdSubagents, runSpawnWorker } from './subagent.js';
+import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
 import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from './workloads.js';
 import { VERSION } from './version.js';
 
@@ -53,8 +54,11 @@ export const USAGE = `usage:
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
   mocactl workloads create --context FILE [--name NAME] [--json]
+      [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (contextctl ctx pack) to a
-                                                 new workload; prints its id
+                                                 new workload; prints its id (--sandboxes: N
+                                                 sandboxes of its own; --mount: its context on
+                                                 their own volume, no per-run copy)
   mocactl workloads get ID [--json]
   mocactl workloads delete ID [--json]           delete a workload and its context
 flags for every command: --control-plane-url URL
@@ -139,6 +143,8 @@ export async function main(
         writable: { type: 'boolean' },
         context: { type: 'string' },
         name: { type: 'string' },
+        sandboxes: { type: 'string' },
+        mount: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'V' },
       },
@@ -213,10 +219,11 @@ export async function main(
     return 2;
   }
   const workloadsCreate = command === 'workloads' && rest[0] === 'create';
-  if ((values.context !== undefined || values.name !== undefined) && !workloadsCreate) {
-    io.err(
-      `--${values.context !== undefined ? 'context' : 'name'} only applies to \`mocactl workloads create\`\n${USAGE}`,
-    );
+  const createOnly = (['context', 'name', 'sandboxes', 'mount'] as const).find(
+    (f) => values[f] !== undefined,
+  );
+  if (createOnly && !workloadsCreate) {
+    io.err(`--${createOnly} only applies to \`mocactl workloads create\`\n${USAGE}`);
     return 2;
   }
   // B14: refresh an expired API token once, up front, so every command's login check -- and the
@@ -374,9 +381,26 @@ export async function main(
           io.err(`workloads create needs --context FILE\n${USAGE}`);
           return 2;
         }
+        let sandboxes: number | undefined;
+        if (values.sandboxes !== undefined) {
+          sandboxes = /^[1-9][0-9]{0,3}$/.test(values.sandboxes)
+            ? Number(values.sandboxes)
+            : undefined;
+          if (sandboxes === undefined) {
+            io.err(`--sandboxes must be a whole number of at least 1\n${USAGE}`);
+            return 2;
+          }
+        }
+        const mount = values.mount;
+        if (mount !== undefined && !(WORKLOAD_MOUNTS as readonly string[]).includes(mount)) {
+          io.err(`--mount must be read-only or writable\n${USAGE}`);
+          return 2;
+        }
         return cmdWorkloadCreate(rt, io, {
           contextPath: values.context,
           name: values.name,
+          ...(sandboxes !== undefined ? { sandboxes } : {}),
+          ...(mount !== undefined ? { mount: mount as WorkloadMount } : {}),
           json,
           signal,
         });

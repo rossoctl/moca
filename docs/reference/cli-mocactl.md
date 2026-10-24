@@ -20,7 +20,7 @@ exits 2. Some flags are always rejected (exit 2) outside their command: `--consu
 `--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
 outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
 `subagents`; `--label` outside `spawn`; `--out` outside `get`; `--workload` outside `spawn`;
-`--context` and `--name` outside `workloads create`; and `--all` outside `logout`. Other flags a
+`--context`, `--name`, `--sandboxes` and `--mount` outside `workloads create`; and `--all` outside `logout`. Other flags a
 command does not use are not rejected and may be ignored.
 
 ## Endpoints
@@ -74,7 +74,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl spawn "prompt" [--config DIGEST] --kind prompt\|solve [--repo URL --ref REF] [--tag T] [--label L] [--json]`             | Creates a session, writes a ledger record, forks a detached worker that holds a `POST /v1/runs`. Prints the sessionId on stdout. `--label` names one dispatch within a `--tag` group (`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`), surfaced on `mocactl subagents --json` as `label` |
 | `mocactl subagents [--tag T] [--json]`                                                                                            | Lists spawned subagents from the ledger joined with `GET /runs/status`                                                                                                                                                                                                      |
 | `mocactl get SESSIONID [--out DIR] [--json]`                                                                                      | Fetches a terminal result from `GET /runs/status` and writes `<sid>.text` / `<sid>.verdict.json` / `<sid>.patch`                                                                                                                                                            |
-| `mocactl workloads create --context FILE [--name NAME] [--json]`                                                                  | `POST /workloads`, uploads `FILE` to the returned grant, then `POST /workloads/{id}/activate`. Prints the workload id                                                                                                                                                       |
+| `mocactl workloads create --context FILE [--name NAME] [--sandboxes N [--mount read-only\|writable]] [--json]`                    | `POST /workloads` (with `sandboxes: {count: N}` and `workspace: {mount}` when given), uploads `FILE` to the returned grant, then `POST /workloads/{id}/activate`, and with `--sandboxes` waits until the workload is `ready`. Prints the workload id                        |
 | `mocactl workloads get ID [--json]`                                                                                               | Reads a workload (`GET /workloads/{id}`)                                                                                                                                                                                                                                    |
 | `mocactl workloads delete ID [--json]`                                                                                            | Deletes a workload and its context (`DELETE /workloads/{id}`)                                                                                                                                                                                                               |
 
@@ -136,13 +136,22 @@ See "Delegate with context" in [`packages/mocactl/README.md`](../../packages/moc
 [`docs/context-service.md`](../context-service.md). The routes are on the harness and take the API
 token. There is no list command: the harness has no list route.
 
-- `create` exit 2: no `--context`, a missing, empty or non-regular file, or an invalid `--name`; all
-  before any request. Exit 1 for a refusal, including a file larger than the grant's `maxBytes` or an
-  upload URL that is neither HTTPS nor loopback HTTP; a workload created before the failure is deleted.
+- `create` exit 2: no `--context`, a missing, empty or non-regular file, an invalid `--name`, a
+  `--sandboxes` that is not a whole number of at least 1, a `--mount` other than `read-only` or
+  `writable`, or `--mount` without `--sandboxes`; all before any request.
+- `create` exit 1 for a refusal, including a file larger than the grant's `maxBytes` or an upload
+  URL that is neither HTTPS nor loopback HTTP; a workload created before the failure is deleted.
+- `create --sandboxes`: activation answers `provisioning` while the workload's own sandboxes start;
+  `create` polls `GET /workloads/{id}` every 2 s for up to 5 minutes. On `seed_bundle_missing` (the
+  provisioner lost the bundle) it activates once more. Any other recorded `error`, the same error
+  again, or the timeout exits 1 and deletes the workload.
 - `get`/`delete` exit 2 for an invalid id, exit 1 for `404 workload_not_found` or another refusal.
 - `--json`:
-  - `create` → `{"workloadId","status","contextType","revision","files","bytes"}`.
-  - `get` → `{"workloadId","status","contextType","workspace","revision"}` (`null` when unset).
+  - `create` → `{"workloadId","status","contextType","revision","files","bytes"}`, plus
+    `"sandboxes":{"count","tier","ready"}` and `"mount"` for a workload with sandboxes of its own.
+  - `get` → `{"workloadId","status","contextType","workspace","revision","sandboxes"}` (`null` when
+    unset; `workspace.mount` on a mounted workload), plus `"error"` while provisioning has failed.
+    The table adds `SANDBOXES` (`ready/count`) and `MOUNT` columns.
   - `delete` → `{"workloadId","status":"deleted"}`.
 
 ### `promote` exit codes

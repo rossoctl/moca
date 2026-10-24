@@ -69,6 +69,35 @@ const SCRIPTS = {
     ],
     done: 'done-demo-fix',
   },
+  // skills/moca-delegate-task/demo-two-users/run.sh: Alice's and Bob's runs, each on its own
+  // workload's sandboxes. Every step prints where it ran ($HOSTNAME is the pod, which is the
+  // sandbox's SANDBOX_ID) and the run's working directory. WRITE leaves a note in Alice's writable
+  // tree; READBACK, two at once, so least-loaded selection spreads them over her two sandboxes, reads
+  // it back. PEEK tries to write the context and searches every place a run can reach for the
+  // other user's SECRET- line: run.sh checks that only the caller's own one turns up.
+  'MOCA-DEMO2-WHO': {
+    steps: ['echo "where=$HOSTNAME"; echo "cwd=$(pwd)"; cat notes.txt 2>&1; true'],
+    done: 'done-demo2-who',
+  },
+  'MOCA-DEMO2-WRITE': {
+    steps: [
+      'echo "where=$HOSTNAME"; echo "cwd=$(pwd)"; echo "written-by=$HOSTNAME" > run-note.txt; echo "write-exit=$?"',
+    ],
+    done: 'done-demo2-write',
+  },
+  'MOCA-DEMO2-READBACK': {
+    steps: [
+      'sleep 2; echo "where=$HOSTNAME"; echo "cwd=$(pwd)"; echo "note=$(cat run-note.txt 2>&1)"',
+    ],
+    done: 'done-demo2-readback',
+  },
+  'MOCA-DEMO2-PEEK': {
+    steps: [
+      'echo "where=$HOSTNAME"; echo "cwd=$(pwd)"; cat notes.txt 2>&1; if (echo probe >> notes.txt) 2>/dev/null; then echo write=allowed; else echo write=refused; fi',
+      'grep -rIs "SECRET-" /workspace /home /tmp /run /mnt /var/tmp 2>/dev/null | sed "s/^/found=/"; echo "searched=done"',
+    ],
+    done: 'done-demo2-peek',
+  },
 };
 
 const isToolResult = (m) =>
