@@ -637,6 +637,12 @@ export async function selectPoolSandbox(
      * `moca.dev/owner=<ownerScope>`, a second check on the same signed binding (spec §3.3).
      */
     ownerScope?: string;
+    /**
+     * True when the leaf will run with its cwd pointed at a workload-context mount. Suppresses
+     * the per-session workspace_key, which would otherwise ask the worker to create an unused
+     * `<WorkspaceRoot>/<sessionId>` dir that lives for 30 min until the idle sweep.
+     */
+    forWorkloadContext?: boolean;
   },
   deps: SelectDeps = {},
 ): Promise<SelectedSandbox | null> {
@@ -662,6 +668,7 @@ async function select(
   const selector = env.KAGENTI_SANDBOX_POOL_SELECTOR;
   const workload = opts.workload || undefined;
   const ownerScope = opts.ownerScope || undefined;
+  const forWorkloadContext = opts.forWorkloadContext === true;
   // Without the owner a workload run could not apply the owner half of the filter; refuse rather
   // than fall back to matching on the workload alone.
   if (workload && !ownerScope) {
@@ -767,7 +774,13 @@ async function select(
             // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
             // open turn 2 of a session in an empty workspace and give it its own standby VM pool
             // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
-            { workspaceKey: sessionId, ...(workload ? { workload } : {}) },
+            // A workload-context run drops the key: its cwd is the workload mount, so a per-session
+            // subdir on the worker would sit empty until the idle sweep. Workload-context runs are
+            // container-tier only, so the microVM "refuse empty workspace_key" rule does not apply.
+            {
+              workspaceKey: forWorkloadContext ? '' : sessionId,
+              ...(workload ? { workload } : {}),
+            },
           )
         : undefined;
       return {

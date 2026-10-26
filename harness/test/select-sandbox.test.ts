@@ -264,6 +264,39 @@ describe('selectPoolSandbox remote dispatch', () => {
     expect(lease.acquiredHolders).toEqual(['sess-1:11111111-2222-3333-4444-555555555555']);
   });
 
+  // When the leaf writes inside the workload mount (a copy or a persistent workload mount),
+  // the caller sets forWorkloadContext. Selection suppresses the per-session workspace_key so
+  // the worker does not create an unused <WorkspaceRoot>/<sessionId> dir that lives until the
+  // idle sweep.
+  it('sends an empty workspace key when forWorkloadContext is set', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    let seen: { id: string; opts?: { workspaceKey?: string } } | undefined;
+    const fakeTransport = {
+      exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+      close: async () => {},
+      fastTier: 'per-call-exec' as const,
+    };
+    const sel = await selectPoolSandbox(
+      env(),
+      '/head',
+      'sess-wl-1',
+      { ...opts, forWorkloadContext: true },
+      {
+        listPods: async () => [],
+        lease,
+        affinity: noAffinity,
+        records: fakeRecords([grpcRec]),
+        makeExecClient: () => fakeExecClient,
+        makeTransport: (id, _client, transportOpts) => {
+          seen = { id, opts: transportOpts };
+          return fakeTransport;
+        },
+      },
+    );
+    expect(sel?.transport).toBeDefined();
+    expect(seen?.opts?.workspaceKey).toBe('');
+  });
+
   // #408: a container worker that honours workspace_key runs each session in <root>/<session id>.
   // Every sandbox path is absolute under podCwd, so podCwd itself must move -- a worker-side
   // directory alone would leave every session writing to the shared /workspace.
