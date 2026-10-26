@@ -182,6 +182,36 @@ describe('frozen context on a prompt leaf', () => {
     expect(selectPoolSandboxMock.mock.calls[0]![3]).not.toHaveProperty('ownerScope');
   });
 
+  it('sets agentWritesInContext iff the context is a copy or a writable mount', async () => {
+    const WL = `w-${'a'.repeat(32)}`;
+    const OWN = 'b'.repeat(32);
+    const { lease } = relayLease();
+    const overlayContext = vi.fn(async () => '/workspace/.moca-context/runs/run-1');
+    type Mod = { writable?: boolean; mount?: 'read-only' | 'writable' };
+    const cases: { label: string; patch: Mod; expected: boolean }[] = [
+      { label: 'overlay read-only', patch: {}, expected: false },
+      { label: 'overlay copy', patch: { writable: true }, expected: true },
+      { label: 'mounted read-only, no writable', patch: { mount: 'read-only' }, expected: false },
+      {
+        label: 'mounted read-only, writable copy',
+        patch: { mount: 'read-only', writable: true },
+        expected: true,
+      },
+      { label: 'mounted persistent', patch: { mount: 'writable' }, expected: true },
+    ];
+    for (const { label, patch, expected } of cases) {
+      selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+      const e = env(vi.fn());
+      e.internalContext!.workload = WL;
+      e.internalContext!.ownerScope = OWN;
+      Object.assign(e.internalContext as Record<string, unknown>, patch);
+      await runLeaf(e, undefined, { executeTurn: okTurn(), overlayContext });
+      expect(selectPoolSandboxMock.mock.calls[0]![3], label).toMatchObject({
+        agentWritesInContext: expected,
+      });
+    }
+  });
+
   it('reports no attached workload sandbox as its own reason, never as a terminal error', async () => {
     const { WorkloadSandboxUnavailableError } = await import('../src/select-sandbox.js');
     const WL = `w-${'a'.repeat(32)}`;
