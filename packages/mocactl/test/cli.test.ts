@@ -544,9 +544,9 @@ describe('spawn / subagents / get', () => {
 
   it('--prompt-file is refused outside spawn', async () => {
     const o = io();
-    expect(
-      await main(['run', '--prompt-file', '/tmp/x'], {}, o, { buildRuntime: fakeBuild }),
-    ).toBe(2);
+    expect(await main(['run', '--prompt-file', '/tmp/x'], {}, o, { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
     expect(o.errs.join('\n')).toContain('--prompt-file only applies to `mocactl spawn`');
   });
 });
