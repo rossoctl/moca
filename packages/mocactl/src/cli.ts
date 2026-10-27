@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
@@ -48,6 +49,8 @@ export const USAGE = `usage:
                                                  fork a detached subagent (solve needs --repo/--ref;
                                                  --label names one dispatch within a --tag group,
                                                  surfaced on 'mocactl subagents --json' as label)
+  mocactl spawn --prompt-file FILE [...]         read the prompt from FILE (UTF-8, trimmed); use when
+                                                 the prompt would otherwise be awkward on argv
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
@@ -145,6 +148,7 @@ export async function main(
         name: { type: 'string' },
         sandboxes: { type: 'string' },
         mount: { type: 'string' },
+        'prompt-file': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'V' },
       },
@@ -212,6 +216,10 @@ export async function main(
   }
   if (values.writable !== undefined && command !== 'spawn') {
     io.err(`--writable only applies to \`mocactl spawn\`\n${USAGE}`);
+    return 2;
+  }
+  if (values['prompt-file'] !== undefined && command !== 'spawn') {
+    io.err(`--prompt-file only applies to \`mocactl spawn\`\n${USAGE}`);
     return 2;
   }
   if (values.writable && values.workload === undefined) {
@@ -332,10 +340,29 @@ export async function main(
       });
     }
     case 'spawn': {
-      const prompt = rest.join(' ').trim();
-      if (!prompt) {
-        io.err(`spawn needs a prompt\n${USAGE}`);
-        return 2;
+      const promptFile = values['prompt-file'];
+      let prompt: string;
+      if (promptFile !== undefined) {
+        if (rest.length > 0) {
+          io.err(`--prompt-file and an inline prompt cannot be used together\n${USAGE}`);
+          return 2;
+        }
+        try {
+          prompt = readFileSync(promptFile, 'utf8').trim();
+        } catch (err) {
+          io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
+          return 2;
+        }
+        if (!prompt) {
+          io.err(`spawn needs a prompt (${promptFile} is empty)\n${USAGE}`);
+          return 2;
+        }
+      } else {
+        prompt = rest.join(' ').trim();
+        if (!prompt) {
+          io.err(`spawn needs a prompt\n${USAGE}`);
+          return 2;
+        }
       }
       const kind = values.kind;
       if (kind !== 'prompt' && kind !== 'solve') {

@@ -467,6 +467,88 @@ describe('spawn / subagents / get', () => {
     expect(USAGE).toContain('mocactl subagents');
     expect(USAGE).toContain('mocactl get');
   });
+
+  it('spawn --prompt-file reads the prompt from the file (UTF-8, trimmed)', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const path = join(dir, 'prompt.txt');
+    // Trailing newline + leading whitespace must be trimmed; the body is a multi-line
+    // string with '#' and '$(…)' — exactly the shape that an inline argv would be refused for.
+    writeFileSync(path, '\n# diagnosis\nthe failure is in $(cat broken)\n');
+    expect(
+      await main(['spawn', '--prompt-file', path, '--kind', 'prompt'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(stub).toHaveBeenCalledTimes(1);
+    expect(stub.mock.calls[0][2]).toMatchObject({
+      prompt: '# diagnosis\nthe failure is in $(cat broken)',
+      kind: 'prompt',
+    });
+  });
+
+  it('spawn --prompt-file with an inline prompt is refused (mutex, exit 2)', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const path = join(dir, 'prompt.txt');
+    writeFileSync(path, 'from file');
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', path, 'and', 'inline', '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    expect(o.errs.join('\n')).toContain('cannot be used together');
+  });
+
+  it('spawn --prompt-file on a missing file exits 2 with a clear read error', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const path = join(tmpdir(), 'mocactl-prompt-file-does-not-exist-' + Date.now());
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', path, '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    expect(o.errs.join('\n')).toContain('--prompt-file: cannot read');
+    expect(o.errs.join('\n')).toContain(path);
+  });
+
+  it('spawn --prompt-file on an empty file exits 2 and names the file', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const path = join(dir, 'empty.txt');
+    writeFileSync(path, '   \n\n\t\n');
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', path, '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    const errs = o.errs.join('\n');
+    expect(errs).toContain('spawn needs a prompt');
+    expect(errs).toContain(path);
+  });
+
+  it('--prompt-file is refused outside spawn', async () => {
+    const o = io();
+    expect(
+      await main(['run', '--prompt-file', '/tmp/x'], {}, o, { buildRuntime: fakeBuild }),
+    ).toBe(2);
+    expect(o.errs.join('\n')).toContain('--prompt-file only applies to `mocactl spawn`');
+  });
 });
 
 /* ---------------- workloads ---------------- */

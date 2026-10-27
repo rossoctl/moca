@@ -100,6 +100,7 @@ mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of
 ```bash
 mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
   [--repo URL --ref REF] [--tag T] [--label L] [--json]  # fork a detached subagent; prints its sessionId
+mocactl spawn --prompt-file FILE [--kind prompt|solve] [...]  # read the prompt from FILE instead of argv
 mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
 mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it on a workload's context
@@ -123,6 +124,13 @@ can list them in isolation. The optional `--label L` names one dispatch within a
 column (`-` on unlabeled rows) and on `--json` as `label` on rows that have one. Alphabet
 is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (stricter than `--tag` so `jq`-side filtering doesn't
 need quoting).
+
+`mocactl spawn --prompt-file FILE` reads the prompt from FILE (UTF-8, leading and trailing
+whitespace trimmed) instead of from positional argv. Mutually exclusive with an inline prompt.
+Use it when the prompt contains characters a parent shell or coding agent would otherwise refuse
+to put on argv — multi-line content, `#`, `$(...)`, heredocs — most commonly when chaining
+subagents and inlining a prior leaf's final message. A missing file, an unreadable file, or an
+empty file exits `2` with the specific reason.
 
 `mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live
