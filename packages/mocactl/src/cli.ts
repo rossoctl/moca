@@ -363,9 +363,7 @@ export async function main(
             return 2;
           }
           if (st.size > MAX_PROMPT_BYTES) {
-            io.err(
-              `--prompt-file: ${promptFile} is ${st.size} bytes; max is ${MAX_PROMPT_BYTES}`,
-            );
+            io.err(`--prompt-file: ${promptFile} is ${st.size} bytes; max is ${MAX_PROMPT_BYTES}`);
             return 2;
           }
           prompt = readFileSync(fd, 'utf8').trim();
