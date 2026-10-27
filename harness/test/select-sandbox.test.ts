@@ -232,6 +232,9 @@ describe('selectPoolSandbox remote dispatch', () => {
     // per-turn holder while all of them must share the session's workspace. Keying the workspace by
     // the holder instead gave turn 2 an empty `WorkspaceRoot/<key>` and its own standby VM pool
     // (spec §3.4, §4.3, §4.4) — cross-turn continuity lost, standbys multiplied per turn.
+    //
+    // The record advertises WORKSPACE_SUBDIR_CAPABILITY so the key-drop gate's record half is
+    // satisfied; the key must still stay set because this is a non-workload-context session.
     const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
     let seen: { id: string; opts?: { workspaceKey?: string } } | undefined;
     const fakeTransport = {
@@ -248,7 +251,7 @@ describe('selectPoolSandbox remote dispatch', () => {
         listPods: async () => [],
         lease,
         affinity: noAffinity,
-        records: fakeRecords([grpcRec]),
+        records: fakeRecords([{ ...grpcRec, capabilities: [WORKSPACE_SUBDIR_CAPABILITY] }]),
         makeExecClient: () => fakeExecClient,
         makeTransport: (id, _client, transportOpts) => {
           seen = { id, opts: transportOpts };
