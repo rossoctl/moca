@@ -18,7 +18,7 @@
   "dependencies": {
     "@moca/config-bundle": "workspace:*",
     "@moca/sandbox-client": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "chalk": "^5.4.0",
     "clipboardy": "^5.3.2",
     "ink": "^8.0.0",
