@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -557,7 +558,7 @@ describe('spawn / subagents / get', () => {
     expect(o.errs.join('\n')).toContain('is not a regular file');
   });
 
-  it('spawn --prompt-file refuses a symlink (O_NOFOLLOW; closes the stat → read TOCTOU window)', async () => {
+  it('spawn --prompt-file refuses a symlink with a deliberate message (not raw ELOOP)', async () => {
     const mod = await import('../src/subagent.js');
     const spy = vi.spyOn(mod, 'cmdSpawn');
     onTestFinished(() => spy.mockRestore());
@@ -573,7 +574,50 @@ describe('spawn / subagents / get', () => {
       }),
     ).toBe(2);
     expect(spy).not.toHaveBeenCalled();
-    expect(o.errs.join('\n')).toContain('--prompt-file: cannot read');
+    const errs = o.errs.join('\n');
+    expect(errs).toContain('is a symlink');
+    expect(errs).not.toContain('ELOOP');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'spawn --prompt-file refuses a FIFO without blocking on open',
+    async () => {
+      const mod = await import('../src/subagent.js');
+      const spy = vi.spyOn(mod, 'cmdSpawn');
+      onTestFinished(() => spy.mockRestore());
+      const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+      const path = join(dir, 'fifo');
+      execFileSync('mkfifo', [path]);
+      const o = io();
+      // Without O_NONBLOCK, open(2) would park waiting for a writer and this test would hang.
+      expect(
+        await main(['spawn', '--prompt-file', path, '--kind', 'prompt'], {}, o, {
+          buildRuntime: fakeBuild,
+        }),
+      ).toBe(2);
+      expect(spy).not.toHaveBeenCalled();
+      expect(o.errs.join('\n')).toContain('is not a regular file');
+    },
+  );
+
+  it('spawn --prompt-file refuses an oversized file via fstat before reading it', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const path = join(dir, 'big.txt');
+    // One byte over the 64 KiB cap; the fstat short-circuit must fire regardless of content shape.
+    writeFileSync(path, 'x'.repeat(64 * 1024 + 1));
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', path, '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    const errs = o.errs.join('\n');
+    expect(errs).toContain('bytes; max is');
+    expect(errs).toContain(path);
   });
 
   it('spawn --prompt-file composes with --kind solve + --repo/--ref', async () => {

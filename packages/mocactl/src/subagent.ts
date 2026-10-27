@@ -30,7 +30,7 @@ import {
 
 const BUNDLE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 /** Keeps a ledger append within one atomic `O_APPEND write(2)` on a local filesystem. */
-const MAX_PROMPT_BYTES = 64 * 1024;
+export const MAX_PROMPT_BYTES = 64 * 1024;
 /** Harness-side session-id alphabet (mirrors `leafSessionId` in run-leaf.ts). */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/;
 /**

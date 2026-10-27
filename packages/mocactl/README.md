@@ -126,9 +126,10 @@ is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (stricter than `--tag` so `jq`-side filteri
 need quoting).
 
 `mocactl spawn --prompt-file FILE` reads the prompt from FILE (UTF-8, trimmed; must be a regular
-file) instead of positional argv. Mutually exclusive with an inline prompt. Use it when the
-prompt would carry characters a parent shell or coding agent refuses on argv (multi-line, `#`,
-`$(...)`, heredocs) — typically when chaining subagents. Same 64 KiB cap as inline prompts.
+file, no symlinks) instead of positional argv. Mutually exclusive with an inline prompt. Use it
+when the prompt would carry characters a parent shell or coding agent refuses on argv
+(multi-line, `#`, `$(...)`, heredocs) — typically when chaining subagents. Same 64 KiB cap as
+inline prompts.
 
 `mocactl subagents` reads the ledger and joins it with `/runs/status`, resolving the server's
 `queued` ambiguity with child-pid liveness and a 60-second grace: a `queued` row with a live

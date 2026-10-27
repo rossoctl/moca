@@ -19,7 +19,7 @@ import {
 } from './headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { sbxMain } from './sbx/cli.js';
-import { cmdGet, cmdSpawn, cmdSubagents, runSpawnWorker } from './subagent.js';
+import { cmdGet, cmdSpawn, cmdSubagents, MAX_PROMPT_BYTES, runSpawnWorker } from './subagent.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
 import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from './workloads.js';
 import { VERSION } from './version.js';
@@ -347,18 +347,35 @@ export async function main(
           io.err(`--prompt-file and an inline prompt cannot be used together\n${USAGE}`);
           return 2;
         }
-        // Open once, stat and read the same fd. Refuses symlinks via O_NOFOLLOW so a swapped
+        // Open once, stat and read the same fd. O_NOFOLLOW refuses symlinks so a swapped
         // path cannot redirect the read elsewhere between stat and read (CodeQL CWE-367).
+        // O_NONBLOCK keeps open() from parking on a FIFO with no writer; the isFile() check
+        // then refuses it like any other non-regular file.
         let fd: number | undefined;
         try {
-          fd = openSync(promptFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-          if (!fstatSync(fd).isFile()) {
+          fd = openSync(
+            promptFile,
+            fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+          );
+          const st = fstatSync(fd);
+          if (!st.isFile()) {
             io.err(`--prompt-file: ${promptFile} is not a regular file`);
+            return 2;
+          }
+          if (st.size > MAX_PROMPT_BYTES) {
+            io.err(
+              `--prompt-file: ${promptFile} is ${st.size} bytes; max is ${MAX_PROMPT_BYTES}`,
+            );
             return 2;
           }
           prompt = readFileSync(fd, 'utf8').trim();
         } catch (err) {
-          io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ELOOP') {
+            io.err(`--prompt-file: ${promptFile} is a symlink; pass the target path`);
+          } else {
+            io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
+          }
           return 2;
         } finally {
           // readFileSync(fd) leaves the fd open; close it on every exit path.
