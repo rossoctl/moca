@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -555,6 +555,25 @@ describe('spawn / subagents / get', () => {
     ).toBe(2);
     expect(spy).not.toHaveBeenCalled();
     expect(o.errs.join('\n')).toContain('is not a regular file');
+  });
+
+  it('spawn --prompt-file refuses a symlink (O_NOFOLLOW; closes the stat → read TOCTOU window)', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const real = join(dir, 'real.txt');
+    const link = join(dir, 'link.txt');
+    writeFileSync(real, 'hi');
+    symlinkSync(real, link);
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', link, '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    expect(o.errs.join('\n')).toContain('--prompt-file: cannot read');
   });
 
   it('spawn --prompt-file composes with --kind solve + --repo/--ref', async () => {

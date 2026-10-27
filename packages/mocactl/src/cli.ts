@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
@@ -347,15 +347,22 @@ export async function main(
           io.err(`--prompt-file and an inline prompt cannot be used together\n${USAGE}`);
           return 2;
         }
+        // Open once, stat and read the same fd. Refuses symlinks via O_NOFOLLOW so a swapped
+        // path cannot redirect the read elsewhere between stat and read (CodeQL CWE-367).
+        let fd: number | undefined;
         try {
-          if (!statSync(promptFile).isFile()) {
+          fd = openSync(promptFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          if (!fstatSync(fd).isFile()) {
             io.err(`--prompt-file: ${promptFile} is not a regular file`);
             return 2;
           }
-          prompt = readFileSync(promptFile, 'utf8').trim();
+          prompt = readFileSync(fd, 'utf8').trim();
         } catch (err) {
           io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
           return 2;
+        } finally {
+          // readFileSync(fd) leaves the fd open; close it on every exit path.
+          if (fd !== undefined) closeSync(fd);
         }
         if (!prompt) {
           io.err(`--prompt-file: ${promptFile} has no prompt content (empty or whitespace-only)`);
