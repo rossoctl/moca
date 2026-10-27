@@ -538,8 +538,47 @@ describe('spawn / subagents / get', () => {
     ).toBe(2);
     expect(spy).not.toHaveBeenCalled();
     const errs = o.errs.join('\n');
-    expect(errs).toContain('spawn needs a prompt');
+    expect(errs).toContain('has no prompt content');
     expect(errs).toContain(path);
+  });
+
+  it('spawn --prompt-file on a directory exits 2 (not a regular file)', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn');
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const o = io();
+    expect(
+      await main(['spawn', '--prompt-file', dir, '--kind', 'prompt'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(spy).not.toHaveBeenCalled();
+    expect(o.errs.join('\n')).toContain('is not a regular file');
+  });
+
+  it('spawn --prompt-file composes with --kind solve + --repo/--ref', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-prompt-file-'));
+    const path = join(dir, 'prompt.txt');
+    writeFileSync(path, 'solve this');
+    expect(
+      await main(
+        ['spawn', '--prompt-file', path, '--kind', 'solve', '--repo', 'https://x', '--ref', 'main'],
+        {},
+        io(),
+        { buildRuntime: fakeBuild },
+      ),
+    ).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({
+      prompt: 'solve this',
+      kind: 'solve',
+      repoUrl: 'https://x',
+      ref: 'main',
+    });
   });
 
   it('--prompt-file is refused outside spawn', async () => {

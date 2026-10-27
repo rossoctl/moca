@@ -108,9 +108,7 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     return 2;
   }
   if (Buffer.byteLength(opts.prompt, 'utf8') > MAX_PROMPT_BYTES) {
-    io.err(
-      `prompt is too large (max ${MAX_PROMPT_BYTES} bytes); pipe large inputs into a file the agent can read instead`,
-    );
+    io.err(`prompt is too large (max ${MAX_PROMPT_BYTES} bytes); shorten it or split the task`);
     return 2;
   }
   if (opts.configRef && !BUNDLE_DIGEST.test(opts.configRef)) {

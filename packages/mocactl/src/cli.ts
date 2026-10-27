@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
@@ -348,13 +348,17 @@ export async function main(
           return 2;
         }
         try {
+          if (!statSync(promptFile).isFile()) {
+            io.err(`--prompt-file: ${promptFile} is not a regular file`);
+            return 2;
+          }
           prompt = readFileSync(promptFile, 'utf8').trim();
         } catch (err) {
           io.err(`--prompt-file: cannot read ${promptFile}: ${(err as Error).message}`);
           return 2;
         }
         if (!prompt) {
-          io.err(`spawn needs a prompt (${promptFile} is empty)\n${USAGE}`);
+          io.err(`--prompt-file: ${promptFile} has no prompt content (empty or whitespace-only)`);
           return 2;
         }
       } else {
