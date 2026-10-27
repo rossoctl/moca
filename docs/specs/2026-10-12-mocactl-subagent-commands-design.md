@@ -40,6 +40,14 @@ decisions behind them.
   harness builds the agent's prompt itself. `--kind prompt` sends `env.prompt`.
 - The 64 KiB prompt cap keeps a `record` ledger line within one atomic `write(2)` on a
   local filesystem (§2.5).
+- `--prompt-file FILE` reads the prompt from a regular file (UTF-8, trimmed) instead of
+  positional argv — mutually exclusive with an inline prompt, subject to the same 64 KiB
+  cap. The envelope and ledger shape are unchanged. Motivation is operator-side: parent
+  coding agents (Claude Code's Bash tool, in particular) run a static safety check that
+  refuses argv containing `#`, `$(…)`, heredocs, or multi-line quoted content independent
+  of the user's permission allow-list, so chained-subagent flows that inline a prior
+  leaf's final message as the next prompt otherwise chain-break at the parent-agent layer
+  ([#637](https://github.com/rossoctl/moca/issues/637)).
 - `--label STRING` names one dispatch within a `--tag` group (e.g. `diagnose` / `fix`
   inside a parent agent's leaves). mocactl-local — never sent to the server — stored on
   the ledger record and surfaced on `mocactl subagents` as a `LABEL` column and on
