@@ -281,6 +281,10 @@ path, the query or the secret.
 | `SH_WORKSPACE_ROOT`              | built-in default   | Absolute path                                                                                                                                                                                                                                                                                                             |
 | `SH_WORKSPACE_IDLE`              | built-in default   | Go duration; idle time after which a session workspace is deleted                                                                                                                                                                                                                                                         |
 
+`SH_EXEC_TIMING=1` (off unless exactly `1`) writes one `exec-timing` line per Exec to the worker's log:
+`req`, `workspace_key`, `start_ms`, `dur_ms` (receipt to end), the command process's CPU (`user_ms`, `sys_ms`),
+`exit` and `err`. It is cheap enough to leave on for a measured run, unlike `SH_DIAG_PHASES` (#576).
+
 Commands run in a sandbox do not inherit the worker's own settings. The exact names `SANDBOX_TOKEN`,
 `RELAY_ADDR`, `RELAY_TLS`, `RELAY_CA_FILE`, `SANDBOX_ID`, `SANDBOX_IMAGE`, `SANDBOX_TRUST` and
 `WORKER_MAX_CONCURRENT`, and anything prefixed `SANDBOX_TOKEN_`, `SH_` or `MOCA_`, are stripped. Other
@@ -310,6 +314,11 @@ It reads the same `RELAY_*` and `SANDBOX_*` variables (defaults `SANDBOX_ID=sbx-
 | `SH_JAILER_BIN`, `SH_FIRECRACKER_BIN`, `SH_CHROOT_BASE` | PATH, `/srv/jail` | Binary and jail locations                                                                                                                                                                                                                                                 |
 | `SH_WORKSPACE_IMAGE_MB`                                 | `2048`            | Positive integer                                                                                                                                                                                                                                                          |
 | `SH_SNAPSHOT_IMAGE`                                     | `default`         |                                                                                                                                                                                                                                                                           |
+
+`SH_EXEC_TIMING=1` (off unless exactly `1`) writes the container worker's `exec-timing` line per Exec, with the
+same fields, plus the phases `ExecPhased` computes (`acquire_us`, `resume_us`, `mount_us`, `run_us`, `destroy_us`,
+`cold`) and the VM's CPU from its pooled cgroup's `cpu.stat`, read after the acquire and before the destroy.
+`user_ms=-1 sys_ms=-1` means not measured, never no CPU. Scheduling, admission and teardown are unchanged (#576).
 
 `SH_VIRTIOFSD_UID` and `SH_VIRTIOFSD_GID` (default `65534`) are read only in the Cloud Hypervisor arm, so
 they do nothing with the default `SH_VMM=firecracker`.
