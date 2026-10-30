@@ -600,13 +600,15 @@ export async function cmdSessions(rt: Runtime, io: Io, opts: ManageOptions): Pro
     return failed(io, err);
   }
   // Titles are local (renamed in the TUI, or the first prompt); the control plane keeps none.
-  // No turn count: the control plane reports one, but nothing writes it yet, so it is always 0.
+  // `turns` is the server's own count of completed turns, left out when #406 added this command
+  // because nothing wrote it then and it read 0 on every deployment (#420 gave it a writer).
   const rows = sessions.map((s) => ({
     sessionId: s.sessionId,
     title: rt.transcripts?.load(s.sessionId)?.title ?? null,
     state: s.state,
     createdAt: s.createdAt,
     lastTurnAt: s.lastTurnAt,
+    turns: s.turns,
   }));
   if (opts.json) {
     io.out(JSON.stringify({ sessions: rows }) + '\n');
@@ -616,11 +618,14 @@ export async function cmdSessions(rt: Runtime, io: Io, opts: ManageOptions): Pro
     io.err('no sessions');
     return 0;
   }
-  const head = ['ID', 'STATE', 'CREATED (UTC)', 'LAST TURN (UTC)', 'TITLE'];
+  const head = ['ID', 'STATE', 'TURNS', 'CREATED (UTC)', 'LAST TURN (UTC)', 'TITLE'];
   const body = rows.map((r) =>
     [
       r.sessionId,
       r.state,
+      // Stringified here rather than left to `table`, so it passes through the same sanitizeRemote
+      // as every other cell: this is a remote value, and `turns: number` is only what the type says.
+      String(r.turns),
       utc(r.createdAt),
       r.lastTurnAt === null ? '-' : utc(r.lastTurnAt),
       r.title ?? '',

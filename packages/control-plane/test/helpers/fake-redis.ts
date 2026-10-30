@@ -17,6 +17,15 @@ export function fakeRedis() {
       hashes.set(key, { ...(hashes.get(key) ?? {}), ...values });
       return 1;
     },
+    async hIncrBy(key, field, by) {
+      // The field name is recorded too: `turns` must move by HINCRBY and never by the merging hSet,
+      // and an op log that said only `hIncrBy <key>` could not tell those apart.
+      ops.push(`hIncrBy ${key} ${field}`);
+      const h = hashes.get(key) ?? {};
+      const next = (Number(h[field]) || 0) + by;
+      hashes.set(key, { ...h, [field]: String(next) });
+      return next;
+    },
     async hGetAll(key) {
       return { ...(hashes.get(key) ?? {}) };
     },

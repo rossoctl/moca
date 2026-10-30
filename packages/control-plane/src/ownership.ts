@@ -13,6 +13,8 @@ import { sanitizeLimits, type ModelLimits } from './models.js';
  */
 export interface CpRedisLike {
   hSet(key: string, values: Record<string, string>): Promise<unknown>;
+  /** Atomic +N on one hash field, for the runtime hash's counters (see RUNTIME_COUNTERS). */
+  hIncrBy(key: string, field: string, by: number): Promise<number>;
   hGetAll(key: string): Promise<Record<string, string>>;
   zAdd(key: string, member: { score: number; value: string }): Promise<unknown>;
   zRem(key: string, member: string): Promise<unknown>;
@@ -112,6 +114,18 @@ const RUNTIME_FIELDS = [
   'workspaceResetAt',
   'workspaceResetFrom',
 ] as const;
+
+/**
+ * Readable, but NOT writable through `putRuntime` -- the one asymmetry in the runtime hash.
+ *
+ * `turns` is a counter, so it is the only runtime field whose new value depends on its old one. Two
+ * things follow. It cannot ride the merging `hSet`: the server does not serialize concurrent turns
+ * of one session (ADR-0036), so a read-modify-write would have both turns read N and both write
+ * N+1. And it must not be settable to an arbitrary value by the tier that self-reports this hash
+ * (spec §7.4), which a `fields.turns` passed to `putRuntime` would be. `bumpTurns` -- a server-side
+ * HINCRBY of exactly +1 -- is the only writer; everything else is dropped on write.
+ */
+const RUNTIME_COUNTERS: readonly string[] = ['turns'];
 
 /** A stored limits field, read tolerantly: '' or a corrupted value is "no limits", never a throw. */
 function readLimits(raw: string | undefined): ModelLimits | undefined {
@@ -264,10 +278,22 @@ export class OwnershipIndex {
   async putRuntime(sid: string, fields: Record<string, string>): Promise<void> {
     const allowed: Record<string, string> = {};
     for (const f of RUNTIME_FIELDS) {
+      // A counter is readable but never settable here -- see RUNTIME_COUNTERS. Dropped on write,
+      // like a field off the allow-list, rather than stored and then ignored.
+      if (RUNTIME_COUNTERS.includes(f)) continue;
       if (fields[f] !== undefined) allowed[f] = fields[f]!;
     }
     if (Object.keys(allowed).length === 0) return;
     await this.guard(() => this.redis.hSet(runtimeKey(sid), allowed));
+  }
+
+  /**
+   * Count one completed turn (#420). HINCRBY, not a read-modify-write through `putRuntime`: the
+   * server does not serialize concurrent turns of one session, so reading the old value here would
+   * undercount. See RUNTIME_COUNTERS for why this is the only writer of `turns`.
+   */
+  async bumpTurns(sid: string): Promise<void> {
+    await this.guard(() => this.redis.hIncrBy(runtimeKey(sid), 'turns', 1));
   }
 
   async getRuntime(sid: string): Promise<Record<string, string>> {

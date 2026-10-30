@@ -838,6 +838,68 @@ describe('makeRuntimeReporter', () => {
       expect(hSet).toHaveBeenCalled();
     });
   });
+
+  describe('counts completed turns (#420)', () => {
+    // `turns` was on the control plane's runtime allow-list and read by both the session summary
+    // and the resources view, but NOTHING ever wrote it, so every deployment reported 0 turns.
+    const client = () => {
+      const hSet = vi.fn(async () => undefined);
+      const hIncrBy = vi.fn(async () => 1);
+      vi.mocked(createClient).mockImplementation(
+        () =>
+          ({
+            on: vi.fn(),
+            connect: vi.fn(async () => undefined),
+            hSet,
+            hIncrBy,
+            destroy: vi.fn(),
+          }) as unknown as ReturnType<typeof createClient>,
+      );
+      return { hSet, hIncrBy };
+    };
+
+    it('increments once per turn end, with HINCRBY rather than a racy read-modify-write', async () => {
+      const { hIncrBy } = client();
+      await makeRuntimeReporter('redis://127.0.0.1:6379')('sid-1', {
+        turnEndedAt: '1757000000000',
+        lastTurnAt: '1757000000000',
+      });
+      expect(hIncrBy).toHaveBeenCalledTimes(1);
+      expect(hIncrBy).toHaveBeenCalledWith('sh:cp:session:sid-1:runtime', 'turns', 1);
+    });
+
+    it('does not count a turn that has only started, so an in-flight turn is not already counted', async () => {
+      const { hIncrBy, hSet } = client();
+      await makeRuntimeReporter('redis://127.0.0.1:6379')('sid-1', {
+        turnStartedAt: '1757000000000',
+      });
+      expect(hSet).toHaveBeenCalledTimes(1);
+      expect(hIncrBy).not.toHaveBeenCalled();
+    });
+
+    it('still reports the end timestamps, so the counter does not displace the fields it rides with', async () => {
+      const { hSet, hIncrBy } = client();
+      await makeRuntimeReporter('redis://127.0.0.1:6379')('sid-1', {
+        turnEndedAt: '1757000000000',
+        lastTurnAt: '1757000000000',
+        sandboxId: 'c-0',
+      });
+      expect(hSet).toHaveBeenCalledTimes(1);
+      expect(hSet.mock.calls[0]).toMatchObject([
+        'sh:cp:session:sid-1:runtime',
+        { turnEndedAt: '1757000000000', lastTurnAt: '1757000000000', sandboxId: 'c-0' },
+      ]);
+      expect(hIncrBy).toHaveBeenCalledTimes(1);
+    });
+
+    it('never fails the turn when the increment fails: display-only data', async () => {
+      const { hIncrBy } = client();
+      hIncrBy.mockRejectedValue(new Error('connection lost'));
+      await expect(
+        makeRuntimeReporter('redis://127.0.0.1:6379')('sid-1', { turnEndedAt: '1757000000000' }),
+      ).resolves.toBeUndefined();
+    });
+  });
 });
 
 describe('configRef from the exchange', () => {
