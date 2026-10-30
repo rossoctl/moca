@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
@@ -168,15 +169,31 @@ type Runner interface {
 // shell. Every command the harness sends is self-contained (`cd 'cwd' && …`), and
 // decisively, `base64 -d > f` only terminates on stdin EOF — which a shared
 // long-lived shell cannot deliver per-exec (spec §4 D1).
-type BashRunner struct{}
+type BashRunner struct {
+	// Timing, when set, logs one `exec-timing` line per Exec: its wall time from just before
+	// the child starts until Wait returns (so output still being delivered to a slow sink is
+	// not counted), and the child's user and system CPU time, which on unix include every
+	// descendant bash waited for. Keyed by req and workspace_key (the session id) so a
+	// benchmark can join the line to its tool call. Off by default; cmd/worker sets it from
+	// SH_EXEC_TIMING=1.
+	Timing bool
+}
 
-func (BashRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
+func (b BashRunner) Run(ctx context.Context, s Spec, sink Sink) (code int32, err error) {
 	// Refuse before spawning anything on a platform that cannot isolate the child
 	// in its own process group: abort and timeout would then leave grandchildren
 	// running, which is not a degraded mode worth offering (#173 item 8). Always
 	// nil on unix.
 	if err := platformSupported(); err != nil {
 		return -1, err
+	}
+	var (
+		start, end time.Time
+		ps         *os.ProcessState
+	)
+	if b.Timing {
+		start = time.Now()
+		defer func() { logExecTiming(s, start, end, ps, code, err) }()
 	}
 	// One lock serializes every call to the caller's Sink: the two pump
 	// goroutines below (and the non-streaming emission at exit) must not race
@@ -286,6 +303,7 @@ func (BashRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
 	// StdoutPipe's contract: Wait closes the pipes, so all reads must finish first.
 	wg.Wait()
 	waitErr := cmd.Wait()
+	end, ps = time.Now(), cmd.ProcessState
 
 	if sinkErr != nil {
 		return -1, sinkErr
@@ -325,6 +343,27 @@ func (BashRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
 		return int32(exitErr.ExitCode()), nil
 	}
 	return -1, fmt.Errorf("wait: %w", waitErr)
+}
+
+// logExecTiming writes BashRunner's per-Exec timing line (see BashRunner.Timing). A run that
+// never reached Wait (a start or pipe error) has no end or ProcessState: it is logged with
+// its time to the error and zero CPU, so a missing line never hides a failed Exec.
+func logExecTiming(s Spec, start, end time.Time, ps *os.ProcessState, code int32, err error) {
+	if end.IsZero() {
+		end = time.Now()
+	}
+	var userMs, sysMs float64
+	if ps != nil {
+		userMs = float64(ps.UserTime().Microseconds()) / 1000
+		sysMs = float64(ps.SystemTime().Microseconds()) / 1000
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	log.Printf("exec-timing req=%d workspace_key=%q start_ms=%d dur_ms=%.1f user_ms=%.1f sys_ms=%.1f exit=%d err=%q",
+		s.ReqID, s.WorkspaceKey, start.UnixMilli(), float64(end.Sub(start).Microseconds())/1000,
+		userMs, sysMs, code, errText)
 }
 
 // emitBuffered sends buf's contents as one or more ChunkSize-capped Chunks.

@@ -151,6 +151,7 @@ type fakeVM struct {
 	resumed   bool
 	runs      int
 	destroyed bool
+	cpuReads  int // CgroupCPU's step counter (exec_timing_test.go)
 }
 
 func (v *fakeVM) Key() string { return v.key }

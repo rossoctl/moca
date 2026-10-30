@@ -762,7 +762,10 @@ func main() {
 		Capabilities:  man.Capabilities,
 		MaxConcurrent: maxConcurrent,
 		Labels:        labels,
-	}, vmpool.Runner{Pool: pool})
+	}, vmpool.Runner{Pool: pool,
+		// SH_EXEC_TIMING=1: one exec-timing line per Exec, the container worker's format plus the
+		// VM phases and CPU, for benchmarks comparing the tiers. Off unless exactly 1.
+		Timing: get("SH_EXEC_TIMING") == "1"})
 
 	// slots is in the banner because this tier's default is 16 while the shipped unit sets
 	// no WORKER_MAX_CONCURRENT: without it an upgrade moves 4 -> 16 dispatch slots with

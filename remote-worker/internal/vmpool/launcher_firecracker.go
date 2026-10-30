@@ -965,6 +965,16 @@ func (v *firecrackerVM) stashResumePhases(vmResume, vsockDial, mount time.Durati
 
 func (v *firecrackerVM) Key() string { return v.key }
 
+// CgroupCPU implements cpuReporter (diag.go): the cumulative CPU of the pooled cgroup this VM
+// was placed in. Cumulative across the cgroup's tenants (#258 reuses it), which is why ExecPhased
+// takes a difference. Not measured when there is no pooled cgroup.
+func (v *firecrackerVM) CgroupCPU() (user, sys time.Duration, ok bool) {
+	if v.cgroups == nil || v.cgroupRel == "" {
+		return 0, 0, false
+	}
+	return readCgroupCPU(v.cgroups.abs(v.cgroupRel))
+}
+
 // ID is the per-VM id that names the jail and the cgroup (read by vmID for the exec audit line).
 func (v *firecrackerVM) ID() string { return v.id }
 

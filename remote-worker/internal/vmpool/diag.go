@@ -1,8 +1,12 @@
 package vmpool
 
 import (
+	"bufio"
 	"log"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -73,4 +77,65 @@ func logPhases(ph *Phases) {
 // attempt, not a VM.
 type resumePhaser interface {
 	ResumePhases() (vmResume, vsockDial, mount time.Duration)
+}
+
+// cpuReporter is the seam a VM implements to report its cgroup's cumulative CPU, read by
+// ExecPhased at acquire and before destroy (Phases.CPUUser/CPUSys). Optional, like resumePhaser:
+// a VM without a known cgroup (no ParentCgroup, a fake, CHV's scope) simply does not measure.
+type cpuReporter interface {
+	CgroupCPU() (user, sys time.Duration, ok bool)
+}
+
+// readCgroupCPU reads user_usec and system_usec from <dir>/cpu.stat (cgroup v2).
+func readCgroupCPU(dir string) (user, sys time.Duration, ok bool) {
+	f, err := os.Open(filepath.Join(dir, "cpu.stat"))
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	var gotU, gotS bool
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		k, v, found := strings.Cut(sc.Text(), " ")
+		if !found {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			continue
+		}
+		switch k {
+		case "user_usec":
+			user, gotU = time.Duration(n)*time.Microsecond, true
+		case "system_usec":
+			sys, gotS = time.Duration(n)*time.Microsecond, true
+		}
+	}
+	return user, sys, gotU && gotS
+}
+
+// timingLog is nil unless the Runner was built with Timing (cmd/microvm-worker sets it from
+// SH_EXEC_TIMING=1); a variable so tests capture the lines.
+var timingLog = log.Printf
+
+// logExecTiming emits the `exec-timing` line, the SAME format the container sandbox worker
+// writes (internal/exec/runner.go logExecTiming, webchang 096a6df2), so a benchmark parses both
+// tiers with one reader and compares them field by field. user_ms/sys_ms are the VM's CPU over
+// the Exec (Phases.CPUUser/CPUSys) when measured, else -1. The microVM fields follow `err=`,
+// so a reader of the container format still matches: tier, the phases, cold, and the VM.
+func logExecTiming(reqID uint64, key string, start time.Time, dur time.Duration, ph *Phases, code int32, err error) {
+	userMs, sysMs := -1.0, -1.0
+	if ph.CPUMeasured {
+		userMs = float64(ph.CPUUser.Microseconds()) / 1000
+		sysMs = float64(ph.CPUSys.Microseconds()) / 1000
+	}
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	timingLog("exec-timing req=%d workspace_key=%q start_ms=%d dur_ms=%.1f user_ms=%.1f sys_ms=%.1f exit=%d err=%q "+
+		"tier=%q acquire_us=%d resume_us=%d mount_us=%d run_us=%d destroy_us=%d cold=%q vm=%s",
+		reqID, key, start.UnixMilli(), float64(dur.Microseconds())/1000, userMs, sysMs, code, errText,
+		"microvm", ph.Acquire.Microseconds(), ph.Resume.Microseconds(), ph.Mount.Microseconds(),
+		ph.Run.Microseconds(), ph.Destroy.Microseconds(), string(ph.Cold), ph.VMID)
 }

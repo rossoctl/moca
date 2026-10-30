@@ -6,8 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	osexec "os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +89,84 @@ func TestExitZero(t *testing.T) {
 	}, &r)
 	if err != nil || code != 0 {
 		t.Fatalf("got code=%d err=%v, want 0/nil", code, err)
+	}
+}
+
+// captureLog redirects the standard logger for one test and returns what it wrote.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+	return &buf
+}
+
+var timingLine = regexp.MustCompile(`^exec-timing req=(\d+) workspace_key="([^"]*)" start_ms=(\d+) ` +
+	`dur_ms=([\d.]+) user_ms=([\d.]+) sys_ms=([\d.]+) exit=(-?\d+) err="([^"]*)"$`)
+
+// With Timing on, each Exec logs exactly one line keyed by req and workspace_key, with its
+// exit code and error, so a benchmark can join it to the tool call that caused it.
+func TestTimingLogsOneLinePerExec(t *testing.T) {
+	buf := captureLog(t)
+	var r recorder
+	code, err := wexec.BashRunner{Timing: true}.Run(context.Background(), wexec.Spec{
+		ReqID: 42, WorkspaceKey: "sess-1", Command: "exit 3", Streaming: true,
+	}, &r)
+	if err != nil || code != 3 {
+		t.Fatalf("got code=%d err=%v, want 3/nil", code, err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one log line, got %d: %q", len(lines), buf.String())
+	}
+	m := timingLine.FindStringSubmatch(lines[0])
+	if m == nil {
+		t.Fatalf("line does not match the exec-timing format: %q", lines[0])
+	}
+	if m[1] != "42" || m[2] != "sess-1" || m[7] != "3" || m[8] != "" {
+		t.Errorf("req/key/exit/err = %s/%s/%s/%q, want 42/sess-1/3/\"\"", m[1], m[2], m[7], m[8])
+	}
+}
+
+// The CPU fields count the child's own work: a busy loop shows user time, which a sleep
+// would not. Wall time covers the whole child.
+func TestTimingCountsChildCPU(t *testing.T) {
+	buf := captureLog(t)
+	var r recorder
+	if _, err := (wexec.BashRunner{Timing: true}).Run(context.Background(), wexec.Spec{
+		ReqID: 7, Command: "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done", Streaming: true,
+	}, &r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	m := timingLine.FindStringSubmatch(strings.TrimSpace(buf.String()))
+	if m == nil {
+		t.Fatalf("no exec-timing line: %q", buf.String())
+	}
+	dur, _ := strconv.ParseFloat(m[4], 64)
+	user, _ := strconv.ParseFloat(m[5], 64)
+	sys, _ := strconv.ParseFloat(m[6], 64)
+	if user <= 0 {
+		t.Errorf("user_ms = %v, want > 0 for a busy loop", user)
+	}
+	if user+sys > dur*1.5+50 { // one thread: CPU cannot much exceed wall time
+		t.Errorf("user+sys %.1f ms implausibly above wall %.1f ms", user+sys, dur)
+	}
+}
+
+// Off by default: a BashRunner without Timing logs nothing, so no deployment changes its
+// log volume unless it asks to.
+func TestTimingOffByDefault(t *testing.T) {
+	buf := captureLog(t)
+	var r recorder
+	if _, err := (wexec.BashRunner{}).Run(context.Background(), wexec.Spec{
+		ReqID: 1, Command: "true", Streaming: true,
+	}, &r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("want no log output with Timing off, got %q", buf.String())
 	}
 }
 
