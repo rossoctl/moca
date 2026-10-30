@@ -190,7 +190,7 @@ CREATED_A='' CREATED_B='' PIDS='' CRED_NAMES='' BRANCH=''
 PASSES=0 FAILS=0 SKIPS=0
 
 cleanup() {
-  local rc=$? id u
+  local rc=$? id u ids
   set +e
   # shellcheck disable=SC2086 # a list of pids
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null
@@ -200,8 +200,11 @@ cleanup() {
   # that an add whose answer was lost is still cleaned up (the server stored it), but that also
   # records names no add ever stored -- a refused add, a connection that never opened. Deleting
   # those reported a cleanup failure for a credential that never existed and masked the real error.
+  # A listing that itself fails (stored_creds' exit 1) is not read as "nothing is stored": every
+  # recorded name is still tried, and the run says it could not list.
   if [[ -n "$CRED_NAMES" ]]; then
-    for id in $(stored_creds); do left_cred "$id" || rc=1; done
+    ids="$(stored_creds)" || echo "# cleanup: could not list user A's credentials; trying every recorded name (${CRED_NAMES# })"
+    for id in $ids; do left_cred "$id" || rc=1; done
   fi
   for id in $CREATED_A; do left a "$id" || rc=1; done
   for id in $CREATED_B; do left b "$id" || rc=1; done
@@ -229,18 +232,24 @@ left() { # left a|b ID: delete a sandbox this run created and a step did not
     return 1
   fi
 }
-stored_creds() { # the recorded names user A's `credentials list` still shows (see the cleanup)
-  local listed
+stored_creds() { # the recorded names user A's `credentials list` still shows (see the cleanup);
+  # exit 1 -- after printing every recorded name -- when the listing itself failed
+  local listed n
   listed="$(as a credentials --json 2>>"$LOGS/cleanup.log" </dev/null | "$PY" -c '
 import json, sys
 try:
     doc = json.load(sys.stdin)
-except ValueError:  # not JSON (an unmounted route, a transport error): say nothing is listed
-    sys.exit(0)
+except ValueError:  # not JSON (an unmounted route, a proxy error page): we could not list
+    sys.exit(1)
 for c in doc.get("credentials") or []:
     if c.get("name"):
-        print(c["name"])' 2>>"$LOGS/cleanup.log")" || listed=''
-  local n
+        print(c["name"])' 2>>"$LOGS/cleanup.log")" || {
+    # The listing failed (a refused connection, an expired session), which is not "nothing is
+    # stored": read every recorded name back to the caller, so it still tries the deletes. A
+    # spurious "could not delete" is the safe side next to a stored PAT quietly left behind.
+    for n in $CRED_NAMES; do printf '%s\n' "$n"; done
+    return 1
+  }
   for n in $CRED_NAMES; do
     printf '%s\n' "$listed" | grep -qxF "$n" && printf '%s\n' "$n"
   done
@@ -271,7 +280,9 @@ drop_branch() {
   local code ref
   code="$(pat_curl -X DELETE -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$CRED_REPO/git/refs/heads/$BRANCH" 2>>"$LOGS/cleanup.log")" || code=''
   if [[ "$code" != 204 ]]; then
-    ref="$(api_code "https://api.github.com/repos/$CRED_REPO/git/refs/heads/$BRANCH")"
+    # The singular `git/ref/...` is the exact-match get: the plural `git/refs/...` can answer 200
+    # with refs that merely start with the name.
+    ref="$(api_code "https://api.github.com/repos/$CRED_REPO/git/ref/heads/$BRANCH")"
     # The ref reads as absent: trust that only if the repository itself is still reachable, since a
     # revoked PAT answers 404 for both.
     if [[ "$ref" == 404 && "$(api_code "https://api.github.com/repos/$CRED_REPO")" == 200 ]]; then

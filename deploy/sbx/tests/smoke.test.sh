@@ -109,7 +109,10 @@ credentials)
     [[ "${MOCK_CRED_STALE:-}" != 1 ]] || : >"$MOCK_DIR/cred-stale-${args[1]}" ;;
   # `credentials [list] [--json]`: the names this user owns, in cmdCredentials' JSON shape. The
   # cleanup reads this to tell a credential that is not there from a delete that failed.
+  # MOCK_CRED_LIST_FAIL=1: the listing itself fails (a refused connection, an expired session, a
+  # proxy error page), which the cleanup must not read as "nothing is stored".
   list | --json | '')
+    [[ "${MOCK_CRED_LIST_FAIL:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; }
     sep='' out='{"credentials":['
     for f in "$MOCK_DIR"/cred-*.owner; do
       [[ -e "$f" ]] || continue
@@ -280,9 +283,10 @@ if [[ -n "$kstdin" ]]; then # the smoke host, as the PAT's owner: the whole conf
     exit 0
   fi
   case "$url" in
-  # The confirming probes: the repo is still reachable with the PAT, and the ref is really absent.
-  # MOCK_REPO_GONE=1 is the revoked-PAT / inaccessible-repo case a bare 404 cannot be told from.
-  */git/refs/heads/*)
+  # The confirming probes: the repo is still reachable with the PAT, and the ref is really absent
+  # (the singular git/ref path: the smoke's exact-match get). MOCK_REPO_GONE=1 is the revoked-PAT /
+  # inaccessible-repo case a bare 404 cannot be told from.
+  */git/ref/heads/*)
     [[ "${MOCK_REPO_GONE:-}" != 1 ]] || { printf '%s' 404; exit 0; }
     grep -qx "${url##*/heads/}" "$MOCK_DIR/remote-branches" 2>/dev/null && printf '%s' 200 || printf '%s' 404
     exit 0 ;;
@@ -802,6 +806,33 @@ grep -q '^# cleanup: deleted credential smoke-' "$TMP/out" ||
 [[ "$(live_creds)" == 0 ]] || fail "a credential was left after an add whose answer was lost: $(live_creds)"
 nopat
 pass 'an add whose answer was lost is still cleaned up: the trap deletes what `credentials list` shows'
+
+# The listing the trap reads can itself fail (a refused connection, an expired session, a proxy's
+# error page). It must not be read as "nothing is stored": with the add's answer lost the
+# credential is on the service, and a failed listing used to leave it there with no message and
+# rc 0 -- the leak-reported-as-cleaned-up case this whole section is about.
+reset_state
+rc=0
+credrun MOCK_CRED_ADD_LOST=1 MOCK_CRED_LIST_FAIL=1 >"$TMP/out" 2>&1 || rc=$?
+[[ "$rc" == 1 ]] || fail "a lost add with a failed listing: exit $rc, not 1"
+grep -q '^# cleanup: could not list user A' "$TMP/out" || fail 'a failed listing was not reported'
+grep -q '^# cleanup: deleted credential smoke-' "$TMP/out" ||
+  fail 'a failed listing made the trap skip a credential that was stored'
+[[ "$(live_creds)" == 0 ]] || fail 'a failed listing left a stored credential behind'
+nopat
+pass 'a failed `credentials list` does not read as empty: the stored credential is still deleted, and the run says it could not list'
+
+# The safe side of that fallback: with the listing broken the trap cannot tell a name no add ever
+# stored, so it still tries the delete and reports the failure it could not rule out -- reached
+# only when listing failed, not (see above) for every failed add.
+reset_state
+rc=0
+credrun MOCK_FAIL=add MOCK_CRED_LIST_FAIL=1 >"$TMP/out" 2>&1 || rc=$?
+[[ "$rc" == 1 ]] || fail "a failed add with a failed listing: exit $rc, not 1"
+grep -q '^# cleanup: could not delete credential smoke-' "$TMP/out" ||
+  fail 'with the listing broken the trap silently skipped a name it could not rule out'
+nopat
+pass 'a name the trap cannot rule out (listing broken) is still tried, and its delete failure reported'
 
 # 3. The credential names were fixed (smoke-gh, smoke-gh-mcp) while the sandboxes were already
 # namespaced per run, so two concurrent runs shared one credential and each deleted the other's.
