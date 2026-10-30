@@ -198,7 +198,7 @@ env and reference it from `SH_MODEL_HEADERS` via `${VAR}` (the default Bearer is
 | Knative Serving + Kourier | Direct YAML apply from upstream releases                                        |
 | KEDA                      | Direct YAML apply (async leaf ScaledJob support)                                |
 | Knative config            | Autoscaler tuning (20s stable-window), PVC feature flags, security-context flag |
-| Redis                     | Lightweight in-repo Deployment (`redis:7-alpine`)                               |
+| Redis                     | Lightweight in-repo Deployment (`valkey/valkey:9-alpine`)                       |
 | Sandbox                   | Pre-baked image (`sandbox.yaml`, `USER 65532`)                                  |
 | `leaf-work` PVC           | `ReadWriteOnce`, default StorageClass                                           |
 | Harness                   | Knative Service (`service.yaml`)                                                |

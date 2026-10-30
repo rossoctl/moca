@@ -5,11 +5,12 @@
 
 ## How Redis is deployed
 
-A single-replica StatefulSet running `redis:7-alpine` (pinned by digest) on a `ReadWriteOnce` volume of **1Gi**
+A single-replica StatefulSet running `valkey/valkey:9-alpine` (pinned by digest; the RESP-compatible
+BSD-3 fork of Redis — the resources keep `redis` names) on a `ReadWriteOnce` volume of **1Gi**
 using the cluster's default StorageClass. `setup.sh` warns if there is no default class; without one `redis-0`
 stays Pending. The generated configuration is exactly `requirepass`, `appendonly yes` and `dir /data`.
 
-- **No `appendfsync`, `save`, `maxmemory` or eviction policy is set**, so Redis 7 defaults apply. With AOF that
+- **No `appendfsync`, `save`, `maxmemory` or eviction policy is set**, so Valkey 9 defaults apply. With AOF that
   usually means about one second of writes can be lost on a hard crash (a Redis default, not a repository
   guarantee). Nothing evicts.
 - The container limit is **256Mi of memory**, which the data set can outgrow before it fills the 1Gi volume; an OOM

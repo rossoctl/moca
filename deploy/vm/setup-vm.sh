@@ -252,7 +252,7 @@ redis_container_diff() {
   volume="$(podman container inspect sh-redis \
     --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)"
   appendonly="$(podman container inspect sh-redis --format '{{.Config.CreateCommand}}' 2>/dev/null)"
-  [[ "$image" == *redis:7-alpine* ]] || out+=("image is '$image', expected docker.io/redis:7-alpine")
+  [[ "$image" == *valkey/valkey:9-alpine* ]] || out+=("image is '$image', expected docker.io/valkey/valkey:9-alpine")
   [[ "$port" == *127.0.0.1:6379* ]] || out+=("published port is '$port', expected 127.0.0.1:6379")
   if [[ "$volume" != "$MOCA_REDIS_VOLUME" ]]; then
     # The anonymous-volume case (this image's own VOLUME /data) is the pre-#410 container every
@@ -302,11 +302,12 @@ redis_container_diff() {
 #   SH_REDIS_ADOPT_VOLUME=0   explicit opt-out: start fresh, leaving the old volume orphaned.
 #
 # THE ORDER BELOW IS LOAD-BEARING, and it is not the order the issue proposed. Verified against
-# redis:7-alpine (podman 6.1.1): with `--appendonly yes`, Redis loads the AOF and IGNORES an
-# existing dump.rdb -- so "copy dump.rdb in, then start" yields an EMPTY Redis, silently. The
-# conversion must therefore happen with appendonly OFF (so the RDB is loaded), then CONFIG SET
-# appendonly yes writes the AOF from what was loaded. After that, start_redis's own
-# `--appendonly yes` reads it correctly.
+# redis:7-alpine (podman 6.1.1), unchanged under valkey/valkey:9-alpine (Valkey ships compat
+# redis-server / redis-cli symlinks): with `--appendonly yes`, the server loads the AOF and
+# IGNORES an existing dump.rdb -- so "copy dump.rdb in, then start" yields an EMPTY store,
+# silently. The conversion must therefore happen with appendonly OFF (so the RDB is loaded),
+# then CONFIG SET appendonly yes writes the AOF from what was loaded. After that, start_redis's
+# own `--appendonly yes` reads it correctly.
 adopt_redis_volume() {
   local diff="$1"
   # Only the state this function knows how to migrate: a container on an anonymous /data volume.
@@ -375,7 +376,7 @@ adopt_redis_volume() {
 redis_adopt_target_nonempty() {
   podman volume exists "$MOCA_REDIS_VOLUME" 2>/dev/null || return 1
   [[ -n "$(podman run --rm -v "$MOCA_REDIS_VOLUME:/data" --entrypoint sh \
-    docker.io/redis:7-alpine -c 'ls -A /data' 2>/dev/null)" ]]
+    docker.io/valkey/valkey:9-alpine -c 'ls -A /data' 2>/dev/null)" ]]
 }
 
 # The migration itself. Every step checks its own exit status (see the caller: errexit does not
@@ -394,12 +395,12 @@ redis_adopt_migrate() {
   # its own /data, so the copy needs no volume id -- which is what makes this safe on a host with
   # several orphans: it is always THIS container's data, never a guess at which orphan is current.
   podman run --rm --volumes-from sh-redis -v "$MOCA_REDIS_VOLUME:/adopt" \
-    --entrypoint sh docker.io/redis:7-alpine -c 'cp -p /data/dump.rdb /adopt/dump.rdb' || return 1
+    --entrypoint sh docker.io/valkey/valkey:9-alpine -c 'cp -p /data/dump.rdb /adopt/dump.rdb' || return 1
   # Conversion, appendonly OFF so the RDB is what gets loaded (see the comment above). Started
   # detached and shut down explicitly rather than left to --rm: SHUTDOWN NOSAVE after the rewrite
   # is what guarantees the AOF is complete on disk before start_redis opens the same volume.
   podman run -d --rm --name sh-redis-adopt -v "$MOCA_REDIS_VOLUME:/data" \
-    docker.io/redis:7-alpine redis-server --appendonly no >/dev/null || return 1
+    docker.io/valkey/valkey:9-alpine redis-server --appendonly no >/dev/null || return 1
   for ((i = 0; i < SH_REDIS_ADOPT_PING_TRIES; i++)); do
     podman exec sh-redis-adopt redis-cli PING >/dev/null 2>&1 && break
     sleep 1
@@ -499,7 +500,7 @@ start_redis() {
   [[ "$diff" == "$REDIS_ABSENT" ]] || log "replacing sh-redis: $diff"
   podman run -d --name sh-redis --replace --restart=always \
     -p 127.0.0.1:6379:6379 -v "$MOCA_REDIS_VOLUME:/data" \
-    docker.io/redis:7-alpine redis-server --appendonly yes
+    docker.io/valkey/valkey:9-alpine redis-server --appendonly yes
 }
 
 # Podman's --restart=always covers a container that exits, but explicitly NOT a host reboot:

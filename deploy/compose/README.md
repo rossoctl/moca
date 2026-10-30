@@ -71,7 +71,7 @@ cd ~/.serverless-harness && docker compose down        # stop it (Redis state go
 | `supervisor`    | `packages/supervisor` and its `SH_WORKERS` forked turn workers                 | `moca-brain`                  | `127.0.0.1:8080` only   |
 | `sandbox-relay` | `packages/sandbox-relay`: sandboxes attach here and it mirrors them into Redis | `moca-brain` + `moca-sandbox` | no                      |
 | `sandbox`       | one `remote-worker` (`SANDBOX_ID=sh-sandbox-0`) dialing the relay              | `moca-sandbox`                | no                      |
-| `redis`         | `docker.io/redis:7-alpine`, the image `setup-vm.sh` pins                       | `moca-brain`                  | no                      |
+| `redis`         | `docker.io/valkey/valkey:9-alpine`, the image `setup-vm.sh` pins               | `moca-brain`                  | no                      |
 | `control-plane` | `packages/control-plane` (MU1), only under the `control-plane` profile         | `moca-brain`                  | `127.0.0.1:8090` only   |
 
 **The supervisor and its whole worker pool are one container.** The supervisor starts its
@@ -257,7 +257,8 @@ The first three run in CI through `make test-deploy`.
   lease store on the `moca-redis` named volume with AOF on, the same as the VM path (#410), so
   `docker compose down && up` keeps them — as do the control plane's credentials, on their own
   volume. `docker compose down -v` removes both and starts clean. Nothing here backs either volume
-  up, migrates one across a Redis image change, or bounds its growth.
+  up, migrates one across a Redis image change, or bounds its growth. (The Valkey swap keeps
+  existing volumes readable — Valkey 9 loads Redis 7.x AOF/RDB — but nothing here verifies that.)
 - **No offline login.** Logging in goes through GitHub's device flow, so it needs internet access
   and an OAuth app. A loopback-only development identity provider is a possible follow-up; it is
   security-sensitive enough to need its own ADR.

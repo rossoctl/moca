@@ -700,10 +700,10 @@ data that was in it).
 
 ### Hosts installed before this change
 
-Earlier versions started Redis with no `-v`. `docker.io/redis:7-alpine` declares `VOLUME /data`, so
-each run's `podman run --replace` moved the data to a **fresh anonymous volume** and orphaned the
-previous one: those sessions were unreachable but never deleted, and a long-lived rig can hold a
-stack of them (`podman volume ls`).
+Earlier versions started Redis with no `-v`. `docker.io/redis:7-alpine` (what the VM stack ran
+before the Valkey swap) declares `VOLUME /data`, so each run's `podman run --replace` moved the
+data to a **fresh anonymous volume** and orphaned the previous one: those sessions were unreachable
+but never deleted, and a long-lived rig can hold a stack of them (`podman volume ls`).
 
 On such a host the next run **stops** and makes you choose. It will not decide the fate of those
 sessions for you, and it will not carry on and quietly strand them: nothing changes, and `sh-redis`

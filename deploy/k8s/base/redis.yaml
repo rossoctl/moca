@@ -1,8 +1,10 @@
-# Redis holds sh:sandbox:records -- whoever can write it chooses the executor for every turn -- so
+# Valkey holds sh:sandbox:records -- whoever can write it chooses the executor for every turn -- so
 # it has a password (spec §3.4) and only these callers (NetworkPolicy below): the supervisor, the
 # relay and the control plane, plus moca-provisioner when workload sandboxes are on
 # (workload-sandboxes/kustomization.yaml adds it; it holds the same read-write password). AOF on a
-# PVC, so sessions and presence survive a pod restart (the VM's #410 pain).
+# PVC, so sessions and presence survive a pod restart (the VM's #410 pain). The image ships
+# redis-server / redis-cli symlinks (uid 999 / gid 1000, same as redis), so the StatefulSet and
+# the probes stay unchanged across the image swap.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -43,14 +45,14 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 999 # the image's redis user (uid 999, gid 1000)
+        runAsUser: 999 # the image's valkey user (uid 999, gid 1000)
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: redis
-          image: docker.io/redis:7-alpine # the tag deploy/vm/setup-vm.sh pins; base/kustomization.yaml adds the digest
+          image: docker.io/valkey/valkey:9-alpine # the tag deploy/vm/setup-vm.sh pins; base/kustomization.yaml adds the digest
           # The password is in redis.conf (requirepass), mounted from the Secret, never in argv:
           # --requirepass would put it in /proc/<pid>/cmdline and in `ps` on the node.
           command:

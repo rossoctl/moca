@@ -24,13 +24,13 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: namespaces, defaults, Redis', () =
     }
   });
 
-  it('pins Redis to a digest, at the same tag deploy/vm/setup-vm.sh runs', () => {
+  it('pins Valkey to a digest, at the same tag deploy/vm/setup-vm.sh runs', () => {
     const image: string = container(find(objs(), 'StatefulSet', 'redis', 'moca'), 'redis').image;
-    const m = /^docker\.io\/redis:([^@]+)@sha256:[0-9a-f]{64}$/.exec(image);
+    const m = /^docker\.io\/valkey\/valkey:([^@]+)@sha256:[0-9a-f]{64}$/.exec(image);
     expect(m, `redis image ${image} is not tag@digest-pinned`).not.toBeNull();
     // The VM path is the version's source of truth; a tag bump there must move this pin too.
     const vm = readFileSync(resolve(REPO_ROOT, 'deploy/vm/setup-vm.sh'), 'utf8');
-    expect(vm).toContain(`docker.io/redis:${m![1]}`);
+    expect(vm).toContain(`docker.io/valkey/valkey:${m![1]}`);
   });
 
   it('runs Redis as a one-replica StatefulSet with a PVC and its config from the Secret', () => {

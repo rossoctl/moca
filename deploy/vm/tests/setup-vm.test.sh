@@ -88,13 +88,13 @@ if [[ "$1" == "container" && "$2" == "inspect" ]]; then
   [[ -n "${MOCK_REDIS_EXISTS-}" ]] || exit 1
   case "$*" in
   # The defaults are what a REAL podman prints for the container start_redis creates, verbatim from
-  # a live probe (podman 6.1.1): .ImageName normalizes `docker.io/redis:7-alpine` to
-  # `docker.io/library/redis:7-alpine`, and the Ports template leaves a trailing space. Both are
+  # a live probe (podman 6.1.1): .ImageName returns the registry-qualified name
+  # `docker.io/valkey/valkey:9-alpine`, and the Ports template leaves a trailing space. Both are
   # why redis_container_diff compares with globs rather than equality, so both belong here.
-  *.ImageName*) printf '%s\n' "${MOCK_REDIS_IMAGE-docker.io/library/redis:7-alpine}" ;;
+  *.ImageName*) printf '%s\n' "${MOCK_REDIS_IMAGE-docker.io/valkey/valkey:9-alpine}" ;;
   *NetworkSettings.Ports*) printf '%s\n' "${MOCK_REDIS_PORT-127.0.0.1:6379->6379/tcp }" ;;
   *.Mounts*) printf '%s\n' "${MOCK_REDIS_VOLUME-moca-redis}" ;;
-  *.Config.CreateCommand*) printf '%s\n' "${MOCK_REDIS_CMD-[podman run -d --name sh-redis --replace --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine redis-server --appendonly yes]}" ;;
+  *.Config.CreateCommand*) printf '%s\n' "${MOCK_REDIS_CMD-[podman run -d --name sh-redis --replace --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/valkey/valkey:9-alpine redis-server --appendonly yes]}" ;;
   esac
 fi
 # `volume inspect --format {{.Anonymous}}`, the ONLY reliable way to tell the pre-#410 anonymous
@@ -1300,13 +1300,13 @@ done <<'CASES'
 MOCK_REDIS_IMAGE=docker.io/redis:6-alpine|image is 'docker.io/redis:6-alpine'
 MOCK_REDIS_PORT=0.0.0.0:6379->6379/tcp|published port is
 MOCK_REDIS_VOLUME=redis-data|/data volume is 'redis-data'
-MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine]|without --appendonly yes
-MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/redis:7-alpine redis-server --appendonly no]|without --appendonly yes
+MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/valkey/valkey:9-alpine]|without --appendonly yes
+MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/valkey/valkey:9-alpine redis-server --appendonly no]|without --appendonly yes
 CASES
 pass "a difference in image, port, volume or appendonly each replaces sh-redis, saying which"
 
 # --- the pre-#410 anonymous volume: the installer STOPS and makes the operator choose (#410) ----
-# redis:7-alpine declares VOLUME /data, so the old no-`-v` form did not destroy data outright --
+# redis:7-alpine (the pre-swap image) declared VOLUME /data, so the old no-`-v` form did not destroy data outright --
 # each --replace moved it to a fresh anonymous volume and orphaned the last (the P6.3 rig
 # accumulated 11). The sessions are therefore still recoverable, which is the whole reason this
 # state gets a decision rather than a default.
@@ -1396,7 +1396,7 @@ fi
 pass "adoption refuses a non-empty target instead of overwriting the sessions already in it"
 
 # With the flag: the ORDER is the claim. The recovery recipe on #410 ("copy dump.rdb in, start
-# Redis") yields an EMPTY Redis once AOF is on, because redis:7-alpine loads the AOF and ignores an
+# Redis") yields an EMPTY store once AOF is on, because the server loads the AOF and ignores an
 # existing dump.rdb -- verified live under podman 6.1.1. So SAVE must precede the copy (or the file
 # is as old as the last save point), the conversion must run with appendonly OFF (or the RDB is
 # never read), and only then may CONFIG SET appendonly yes write the AOF.

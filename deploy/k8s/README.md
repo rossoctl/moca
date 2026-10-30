@@ -414,7 +414,7 @@ You need:
 - optionally, a certificate and key valid for the supervisor Route's host,
   `moca-moca.<apps domain>`.
 
-The cluster pulls ghostunnel and `redis:7-alpine` from Docker Hub, so it needs access to
+The cluster pulls ghostunnel and `valkey/valkey:9-alpine` from Docker Hub, so it needs access to
 `docker.io`.
 
 ### 9.1 Bring it up
@@ -689,7 +689,7 @@ pin it). On OpenShift, drop `--context kind-moca`.
 
 - **A proxy in your shell.** `kind create` copies `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` into the
   node's containerd. A proxy on `127.0.0.1` then points at the node itself, and in-cluster pulls
-  (`redis:7-alpine`) fail with `proxyconnect tcp: dial tcp 127.0.0.1:...`. Create the cluster
+  (`valkey/valkey:9-alpine`) fail with `proxyconnect tcp: dial tcp 127.0.0.1:...`. Create the cluster
   without them, then run `setup.sh` as usual (it reuses an existing `moca` cluster):
 
   ```bash

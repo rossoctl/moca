@@ -15,16 +15,17 @@
 name: serverless-harness
 
 services:
-  # docker.io/redis:7-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished: this Redis
-  # has no auth and holds sh:sandbox:records, so whoever can write to it chooses the executor for
-  # every turn. Only moca-brain reaches it -- no sandbox shares a network with it (MI1 §5 R8).
+  # docker.io/valkey/valkey:9-alpine, as deploy/vm/setup-vm.sh's start_redis pins. Unpublished:
+  # this Valkey has no auth and holds sh:sandbox:records, so whoever can write to it chooses the
+  # executor for every turn. Only moca-brain reaches it -- no sandbox shares a network with it
+  # (MI1 §5 R8). The image ships a `redis-server` symlink, so the command stays unchanged.
   #
   # Named volume + AOF, same as the VM path (#410) and the Kubernetes one: `docker compose down`
   # removes containers but keeps named volumes, so sessions, the ownership index and the lease store
   # come back with the stack instead of being silently forgotten. `docker compose down -v` is still
   # the way to start clean.
   redis:
-    image: docker.io/redis:7-alpine
+    image: docker.io/valkey/valkey:9-alpine
     command: [redis-server, --appendonly, 'yes']
     volumes:
       - moca-redis:/data
