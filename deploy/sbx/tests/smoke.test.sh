@@ -94,16 +94,30 @@ done
 case "$cmd" in
 credentials)
   # credentials add NAME --preset P (the PAT on stdin, never logged) / credentials delete NAME
-  case "${args[0]}" in
+  case "${args[0]:-}" in # bare `credentials` passes none, so the index must tolerate an empty list
   # .read keeps the bytes exactly as they arrived on stdin, and the delete below leaves it behind,
   # so a test can still see what the add was given after the run has revoked the credential.
   add) cat >"$MOCK_DIR/cred-${args[1]}"; cp "$MOCK_DIR/cred-${args[1]}" "$MOCK_DIR/cred-${args[1]}.read"
-    echo "$user" >"$MOCK_DIR/cred-${args[1]}.owner" ;;
+    echo "$user" >"$MOCK_DIR/cred-${args[1]}.owner"
+    # MOCK_CRED_ADD_LOST=1: the server stored it, but the answer never arrives. The name the smoke
+    # recorded before the call is the only trace, which is why cred_add records first.
+    [[ "${MOCK_CRED_ADD_LOST:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; } ;;
   delete)
     [[ -f "$MOCK_DIR/cred-${args[1]}" ]] || { echo 'sbx: no such credential' >&2; exit 1; }
     rm -f "$MOCK_DIR/cred-${args[1]}"
     # MOCK_CRED_STALE=1: the proxy keeps serving the credential after its delete (a broken revocation).
     [[ "${MOCK_CRED_STALE:-}" != 1 ]] || : >"$MOCK_DIR/cred-stale-${args[1]}" ;;
+  # `credentials [list] [--json]`: the names this user owns, in cmdCredentials' JSON shape. The
+  # cleanup reads this to tell a credential that is not there from a delete that failed.
+  list | --json | '')
+    sep='' out='{"credentials":['
+    for f in "$MOCK_DIR"/cred-*.owner; do
+      [[ -e "$f" ]] || continue
+      nm="$(basename "$f")" nm="${nm#cred-}" nm="${nm%.owner}"
+      [[ -f "$MOCK_DIR/cred-$nm" && "$(cat "$f")" == "$user" ]] || continue
+      out+="$sep{\"name\":\"$nm\",\"kind\":\"bearer\",\"consumer\":\"header\",\"hosts\":[\"api.github.com\"],\"endpoint\":null}"; sep=,
+    done
+    echo "$out]}" ;;
   *) echo "mock mocactl: unexpected: credentials ${args[*]}" >&2; exit 99 ;;
   esac ;;
 --help) echo 'usage (the sandbox service, SBX0):'; echo '  mocactl sbx login ...' ;;
@@ -234,16 +248,48 @@ while (($#)); do
 done
 # A credential is its owner's: the sandbox's owner is the sb file's first word.
 sbowner="$(cut -d' ' -f1 "$MOCK_DIR/sb/$(basename "$PWD")" 2>/dev/null)"
-have() { [[ ( -f "$MOCK_DIR/cred-$1" && "$(cat "$MOCK_DIR/cred-$1.owner")" == "$sbowner" ) || ( "${MOCK_CRED_STALE:-}" == 1 && -f "$MOCK_DIR/cred-stale-$1" ) ]]; }
+# The names carry the run id, so the fakes match on the suffix the preset owns ('gh', 'gh-mcp')
+# rather than on a fixed name.
+have() {
+  local f
+  for f in "$MOCK_DIR"/cred-*-"$1"; do
+    [[ -f "$f" && "$(cat "$f.owner" 2>/dev/null)" == "$sbowner" ]] && return 0
+  done
+  for f in "$MOCK_DIR"/cred-stale-*-"$1"; do
+    [[ "${MOCK_CRED_STALE:-}" == 1 && -f "$f" ]] && return 0
+  done
+  return 1
+}
 if [[ -n "$kstdin" ]]; then # the smoke host, as the PAT's owner: the whole config line, no newline in the PAT
   [[ "$kstdin" == 'user = "x-access-token:ghp_SECRETPATVALUE0123456789"' ]] || { echo '{"message":"Bad credentials"}'; exit 0; }
   if [[ "$method" == DELETE ]]; then
+    # MOCK_BRANCH_DELETE_CODE: the ambiguous answers GitHub really sends for a ref delete. Both 422
+    # and 404 can mean "Reference does not exist" *or* something else (the default branch, spam, a
+    # repo the PAT can no longer reach), so the smoke must confirm rather than believe them.
+    if [[ -n "${MOCK_BRANCH_DELETE_CODE:-}" ]]; then
+      # MOCK_BRANCH_GONE=1: the ref really is absent (deleted by hand, or by a concurrent run), so
+      # the ambiguous code was honest. Without it the ref is still there and the code was a lie.
+      [[ "${MOCK_BRANCH_GONE:-}" != 1 ]] ||
+        { grep -vx "${url##*/heads/}" "$MOCK_DIR/remote-branches" >"$MOCK_DIR/rb.new" 2>/dev/null; mv -f "$MOCK_DIR/rb.new" "$MOCK_DIR/remote-branches"; }
+      printf '%s' "$MOCK_BRANCH_DELETE_CODE"; exit 0
+    fi
     if grep -qx "${url##*/heads/}" "$MOCK_DIR/remote-branches" 2>/dev/null; then
       grep -vx "${url##*/heads/}" "$MOCK_DIR/remote-branches" >"$MOCK_DIR/rb.new"; mv "$MOCK_DIR/rb.new" "$MOCK_DIR/remote-branches"
       printf '%s' 204
     else printf '%s' 404; fi
     exit 0
   fi
+  case "$url" in
+  # The confirming probes: the repo is still reachable with the PAT, and the ref is really absent.
+  # MOCK_REPO_GONE=1 is the revoked-PAT / inaccessible-repo case a bare 404 cannot be told from.
+  */git/refs/heads/*)
+    [[ "${MOCK_REPO_GONE:-}" != 1 ]] || { printf '%s' 404; exit 0; }
+    grep -qx "${url##*/heads/}" "$MOCK_DIR/remote-branches" 2>/dev/null && printf '%s' 200 || printf '%s' 404
+    exit 0 ;;
+  */repos/*)
+    [[ "${MOCK_REPO_GONE:-}" != 1 ]] || { printf '%s' 404; exit 0; }
+    printf '%s' 200; exit 0 ;;
+  esac
   echo '{"login":"octo"}'; exit 0
 fi
 if [[ "$PWD" != "$MOCK_SRV"/* ]]; then # the smoke host with the placeholder
@@ -251,14 +297,17 @@ if [[ "$PWD" != "$MOCK_SRV"/* ]]; then # the smoke host with the placeholder
   exit 0
 fi
 case "$url" in
-https://api.githubcopilot.com/*) have smoke-gh-mcp && echo '{"result":{"serverInfo":{"name":"github-mcp-server"}}}' || echo '{"error":"unauthorized"}' ;;
-*) have smoke-gh && printf '%s' 200 || printf '%s' 401 ;;
+https://api.githubcopilot.com/*) have gh-mcp && echo '{"result":{"serverInfo":{"name":"github-mcp-server"}}}' || echo '{"error":"unauthorized"}' ;;
+*) have gh && printf '%s' 200 || printf '%s' 401 ;;
 esac
 MOCK
 cat >"$TMP/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 printf 'gh %s\n' "$*" >>"$MOCK_LOG"
-[[ -f "$MOCK_DIR/cred-smoke-gh" || ( "${MOCK_CRED_STALE:-}" == 1 && -f "$MOCK_DIR/cred-stale-smoke-gh" ) ]] || { echo 'HTTP 401' >&2; exit 1; }
+# The credential name carries the run id, so match the preset's suffix, not a fixed name.
+gh_cred() { local f; for f in "$MOCK_DIR"/cred-*-gh "$MOCK_DIR"/cred-stale-*-gh; do
+  [[ -f "$f" ]] && { [[ "$f" != *stale* || "${MOCK_CRED_STALE:-}" == 1 ]] && return 0; }; done; return 1; }
+gh_cred || { echo 'HTTP 401' >&2; exit 1; }
 if [[ "${MOCK_GH_WRONG:-}" == 1 ]]; then echo mallory; else echo octo; fi
 MOCK
 # git: only the github.com clone, the empty commit and pushes to origin are played; all else is real git.
@@ -269,10 +318,14 @@ case " $* " in
 *' commit '*--allow-empty*) printf 'git %s\n' "$*" >>"$MOCK_LOG"; exit 0 ;;
 *' push '*' origin '*)
   printf 'git %s\n' "$*" >>"$MOCK_LOG"
-  [[ -f "$MOCK_DIR/cred-smoke-gh" ]] || { echo 'fatal: Authentication failed' >&2; exit 128; }
+  ls "$MOCK_DIR"/cred-*-gh >/dev/null 2>&1 || { echo 'fatal: Authentication failed' >&2; exit 128; }
   for last; do :; done
   case " $* " in
-  *' --delete '*) grep -vx "$last" "$MOCK_DIR/remote-branches" >"$MOCK_DIR/rb.new"; mv "$MOCK_DIR/rb.new" "$MOCK_DIR/remote-branches" ;;
+  # MOCK_SBX_DELBRANCH_FAIL=1: the in-sandbox branch delete fails, leaving the branch to the EXIT
+  # trap's drop_branch. That is the only path on which drop_branch runs: on a clean step 7 the
+  # sandbox deletes its own branch and clears BRANCH, so the trap has nothing to do.
+  *' --delete '*) [[ "${MOCK_SBX_DELBRANCH_FAIL:-}" != 1 ]] || { echo 'fatal: unable to access' >&2; exit 128; }
+    grep -vx "$last" "$MOCK_DIR/remote-branches" >"$MOCK_DIR/rb.new"; mv "$MOCK_DIR/rb.new" "$MOCK_DIR/remote-branches" ;;
   *) echo "${last#HEAD:refs/heads/}" >>"$MOCK_DIR/remote-branches" ;;
   esac
   exit 0 ;;
@@ -568,6 +621,18 @@ nopat_sees_kept_logs() {
   nopat
 }
 credrun() { smoke SBX_SMOKE_STEPS=7 -u SBX_SMOKE_HOME_B SBX_SMOKE_GITHUB_TOKEN_FILE="$TMP/pat" SBX_SMOKE_GITHUB_REPO=octo/repo "$@"; }
+# The credentials still stored: a cred-NAME file without its .read/.owner side files.
+# cred-stale-* is the proxy's copy of a revoked credential, not a stored one, so it does not count.
+live_creds() {
+  local f n=0
+  for f in "$MOCK_DIR"/cred-*; do
+    [[ -f "$f" ]] || continue
+    f="$(basename "$f")"
+    case "$f" in cred-stale-* | *.*) continue ;; esac
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
 
 # Without its inputs: a SKIP, and nothing else is needed (no home B).
 reset_state
@@ -592,14 +657,14 @@ has 'ok 7 - egress credentials: the PAT works from the sandbox without being in 
 has '# 1 ok, 0 not ok, 6 skipped'
 all_cleaned
 [[ "$(created)" == 1 ]] || fail "step 7 created $(created) sandboxes, not 1"
-grep -qx 'mocactl user=a url=https://api.sbx.example xdg= sbx credentials add smoke-gh --preset github' "$MOCK_LOG" || fail 'no credentials add with the github preset as A'
-grep -qx 'mocactl user=a url=https://api.sbx.example xdg= sbx credentials delete smoke-gh' "$MOCK_LOG" || fail 'no credentials delete as A'
+grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials add smoke-[0-9]+-[0-9]+-gh --preset github$' "$MOCK_LOG" || fail 'no credentials add with the github preset as A'
+grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials delete smoke-[0-9]+-[0-9]+-gh$' "$MOCK_LOG" || fail 'no credentials delete as A'
 ! grep -q 'user=b' "$MOCK_LOG" || fail 'user B was used'
 grep -q 'git clone -q https://github.com/octo/repo ' "$MOCK_LOG" || fail 'no clone'
 grep -q 'git push -q origin HEAD:refs/heads/sbx-smoke-' "$MOCK_LOG" || fail 'no push of the branch'
 grep -qx 'gh api user --jq .login' "$MOCK_LOG" || fail 'no gh api user'
 [[ ! -s "$MOCK_DIR/remote-branches" ]] || fail "the remote branch was left: $(cat "$MOCK_DIR/remote-branches")"
-[[ ! -e "$MOCK_DIR/cred-smoke-gh" ]] || fail 'the credential was left'
+[[ "$(live_creds)" == 0 ]] || fail 'the credential was left'
 # The wait: TTL 60 + 5 s on the fake clock, between the delete and the check.
 grep -q 'waiting 65 s' "$TMP/out" || fail 'no 65 s wait'
 # The add is handed the token file on stdin, byte for byte, and the PAT reaches it no other way.
@@ -608,9 +673,10 @@ grep -q 'waiting 65 s' "$TMP/out" || fail 'no 65 s wait'
 # so this reads what the fake kept of that stdin. The `|| true` this replaces compared the
 # already-deleted file against '' and discarded the result either way, so it held nothing at all:
 # the smoke could have sent an empty stdin, or the PAT on argv, and it would still have passed.
-[[ -f "$MOCK_DIR/cred-smoke-gh.read" ]] || fail 'the credential add never read the PAT from stdin'
-cmp -s "$MOCK_DIR/cred-smoke-gh.read" "$TMP/pat" ||
-  fail "the add's stdin is not the token file: $(cmp "$MOCK_DIR/cred-smoke-gh.read" "$TMP/pat" 2>&1 |
+read_file="$(echo "$MOCK_DIR"/cred-*-gh.read)"
+[[ -f "$read_file" ]] || fail 'the credential add never read the PAT from stdin'
+cmp -s "$read_file" "$TMP/pat" ||
+  fail "the add's stdin is not the token file: $(cmp "$read_file" "$TMP/pat" 2>&1 |
     sed 's/^cmp: //')"
 nopat
 pass 'step 7: store on stdin, clone/commit/push, the owner, the branch deleted, the placeholder 401, revoked; PAT in no log or output'
@@ -618,8 +684,8 @@ pass 'step 7: store on stdin, clone/commit/push, the owner, the branch deleted, 
 # The stored value is the PAT without its newline (checked while the credential exists: the fake sandbox runs gh).
 reset_state
 credrun SBX_SMOKE_GITHUB_MCP=1 >"$TMP/out" 2>&1 || fail "step 7 with github-mcp exited $?"
-grep -qx 'mocactl user=a url=https://api.sbx.example xdg= sbx credentials add smoke-gh-mcp --preset github-mcp' "$MOCK_LOG" || fail 'no github-mcp add'
-grep -qx 'mocactl user=a url=https://api.sbx.example xdg= sbx credentials delete smoke-gh-mcp' "$MOCK_LOG" || fail 'no github-mcp delete'
+grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials add smoke-[0-9]+-[0-9]+-gh-mcp --preset github-mcp$' "$MOCK_LOG" || fail 'no github-mcp add'
+grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials delete smoke-[0-9]+-[0-9]+-gh-mcp$' "$MOCK_LOG" || fail 'no github-mcp delete'
 grep -q 'api.githubcopilot.com/mcp/' "$MOCK_LOG" || fail 'no MCP initialize'
 ! grep 'api.githubcopilot.com' "$MOCK_LOG" | grep -qi authorization || fail 'the MCP request carried an Authorization header'
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes'
@@ -653,16 +719,98 @@ credfail() { # credfail WHY ENV...
   [[ "$rc" == 1 ]] || fail "$why: exit $rc, not 1"
   grep -q "^not ok 7 - .*: .*$why" "$TMP/out" || fail "no 'not ok 7 - ...: ...$why'"
   all_cleaned
-  [[ ! -e "$MOCK_DIR/cred-smoke-gh" && ! -e "$MOCK_DIR/cred-smoke-gh-mcp" ]] || fail "$why: a credential was left"
+  [[ "$(live_creds)" == 0 ]] || fail "$why: a credential was left"
   [[ ! -s "$MOCK_DIR/remote-branches" ]] || fail "$why: the remote branch was left"
   nopat
 }
 credfail 'is not the PAT.s owner' MOCK_GH_WRONG=1
-grep -q '^# cleanup: deleted credential smoke-gh (user A)$' "$TMP/out" || fail 'the trap did not delete the credential'
+grep -q '^# cleanup: deleted credential smoke-' "$TMP/out" || fail 'the trap did not delete the credential'
 grep -q '^# cleanup: deleted remote branch sbx-smoke-' "$TMP/out" || fail 'the trap did not delete the branch'
 # A failed run is the case that keeps its logs, so it is the one that can prove nopat reads them.
 nopat_sees_kept_logs
 credfail 'got .200., not 401\|got .200. from api.github.com/user' MOCK_PLACEHOLDER_OK=1
 credfail 'after the delete and 65 s the sandbox got' MOCK_CRED_STALE=1
-credfail 'sbx credentials add smoke-gh --preset github' MOCK_FAIL=add
+credfail 'sbx credentials add .* --preset github' MOCK_FAIL=add
 pass 'a wrong owner, a placeholder that works, a revocation that does not take, a failed add: each `not ok 7`, and the trap deletes the credential, the branch and the sandbox'
+
+# --- #653: three step-7 cleanup gaps -------------------------------------------------------------
+# These pin the cases the old cleanup could not tell apart: an ambiguous branch-delete code, a
+# credential name the trap recorded but no add ever stored, and the fixed names two runs shared.
+
+# 1. drop_branch believed the ambiguous codes. GitHub answers "Reference does not exist" with *both*
+# 422 and 404 (cli/cli#11187), and 422 is also its default-branch/spam answer, so neither code on
+# its own means the branch is gone: a revoked PAT leaves the branch and used to report success.
+for code in 404 422; do
+  reset_state
+  credrun MOCK_SBX_DELBRANCH_FAIL=1 MOCK_BRANCH_DELETE_CODE="$code" >"$TMP/out" 2>&1 || true
+  grep -q 'could not delete the remote branch sbx-smoke-' "$TMP/out" ||
+    fail "a $code with the branch still there was reported as a deleted branch"
+  ! grep -q '^# cleanup: deleted remote branch' "$TMP/out" ||
+    fail "a $code with the branch still there printed a delete it did not do"
+  [[ -s "$MOCK_DIR/remote-branches" ]] || fail "the test did not leave a branch behind to find"
+  nopat
+done
+pass 'a 404 or 422 on the branch delete is confirmed, not believed: the branch is still there, so the trap says to delete it by hand'
+
+# The same ambiguous codes, with the ref really gone: confirmed absent, so a success and no nagging.
+for code in 404 422; do
+  reset_state
+  credrun MOCK_SBX_DELBRANCH_FAIL=1 MOCK_BRANCH_DELETE_CODE="$code" MOCK_BRANCH_GONE=1 >"$TMP/out" 2>&1 || true
+  grep -q '^# cleanup: deleted remote branch sbx-smoke-' "$TMP/out" ||
+    fail "a $code whose ref is confirmed absent was not accepted as deleted"
+  ! grep -q 'could not delete the remote branch' "$TMP/out" ||
+    fail "a $code with the branch really gone was reported as a leak"
+  [[ ! -s "$MOCK_DIR/remote-branches" ]] || fail "the branch was left after a $code"
+  nopat
+done
+pass 'a 404 or 422 whose ref is confirmed absent counts as deleted: an already-gone branch is not reported as a leak'
+
+# A 404 because the PAT can no longer reach the repository is not "the branch is gone": the probe
+# must separate the two, or a revoked PAT silently reports every leaked branch as cleaned up.
+reset_state
+credrun MOCK_SBX_DELBRANCH_FAIL=1 MOCK_BRANCH_DELETE_CODE=404 MOCK_BRANCH_GONE=1 MOCK_REPO_GONE=1 >"$TMP/out" 2>&1 || true
+grep -q 'could not delete the remote branch sbx-smoke-' "$TMP/out" ||
+  fail 'a 404 from an unreachable repository was reported as a deleted branch'
+! grep -q '^# cleanup: deleted remote branch' "$TMP/out" ||
+  fail 'a 404 from an unreachable repository printed a delete it could not have done'
+nopat
+pass 'a 404 from a repository the PAT cannot reach is not read as a deleted branch'
+
+# 2. A failed add left a recorded name the trap then tried to delete, so a run whose add failed
+# printed a cleanup failure for a credential that was never stored, and exited on that instead of
+# on the add. The record must stay (an add whose answer is lost really did store it) and the trap
+# must delete only what `credentials list` shows.
+reset_state
+rc=0
+credrun MOCK_FAIL=add >"$TMP/out" 2>&1 || rc=$?
+[[ "$rc" == 1 ]] || fail "a failed add: exit $rc, not 1"
+! grep -q 'could not delete credential' "$TMP/out" ||
+  fail 'a failed add left the trap reporting a delete failure for a credential that was never stored'
+grep -q "^not ok 7 - .*sbx credentials add .* --preset github" "$TMP/out" ||
+  fail 'the failed add is not what the run reported'
+nopat
+pass 'a failed add is not followed by a spurious delete failure for a credential that was never stored'
+
+# The record-first contract still holds: an add whose answer is lost did store the credential, and
+# the trap must still find it in `credentials list` and delete it.
+reset_state
+rc=0
+credrun MOCK_CRED_ADD_LOST=1 >"$TMP/out" 2>&1 || rc=$?
+[[ "$rc" == 1 ]] || fail "an add whose answer was lost: exit $rc, not 1"
+grep -q '^# cleanup: deleted credential smoke-' "$TMP/out" ||
+  fail 'the trap did not delete the credential of an add whose answer was lost'
+[[ "$(live_creds)" == 0 ]] || fail "a credential was left after an add whose answer was lost: $(live_creds)"
+nopat
+pass 'an add whose answer was lost is still cleaned up: the trap deletes what `credentials list` shows'
+
+# 3. The credential names were fixed (smoke-gh, smoke-gh-mcp) while the sandboxes were already
+# namespaced per run, so two concurrent runs shared one credential and each deleted the other's.
+reset_state
+credrun SBX_SMOKE_GITHUB_MCP=1 >"$TMP/out" 2>&1 || fail "step 7 exited $?"
+grep -q "sbx credentials add smoke-[0-9]*-[0-9]*-gh --preset github\$" "$MOCK_LOG" ||
+  fail "the credential name is not namespaced per run: $(sed -n 's/.*credentials add \([^ ]*\) .*/\1/p' "$MOCK_LOG" | sort -u | tr '\n' ' ')"
+grep -q "sbx credentials add smoke-[0-9]*-[0-9]*-gh-mcp --preset github-mcp\$" "$MOCK_LOG" ||
+  fail 'the github-mcp credential name is not namespaced per run'
+! grep -q 'credentials add smoke-gh ' "$MOCK_LOG" || fail 'the run still used the shared fixed name smoke-gh'
+nopat
+pass 'the credentials are named per run, so concurrent runs cannot share or revoke one another'

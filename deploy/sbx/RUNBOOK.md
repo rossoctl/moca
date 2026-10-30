@@ -527,8 +527,9 @@ SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMO
 ```
 
 `SBX_SMOKE_HOME_B` stays required for steps 1 to 6. Step 7 prints the PAT nowhere and passes it to
-`mocactl` on stdin only; its trap deletes the credentials (`smoke-gh`, `smoke-gh-mcp`), the remote
-branch `sbx-smoke-<ts>` and the sandboxes, even on failure.
+`mocactl` on stdin only; its trap deletes the credentials (`smoke-<ts>-<pid>-gh` and `-gh-mcp`, named
+per run so two runs as the same user cannot revoke one another), the remote branch
+`sbx-smoke-<ts>` and the sandboxes, even on failure.
 
 What each step does:
 
@@ -560,7 +561,7 @@ What each step does:
    `SBX_SMOKE_JANITOR_AGE`), after waiting until the deletion is that old. The installed timer
    and its settings are not changed. After the run, the directory must be gone.
 7. Needs the two GitHub variables, else it is a SKIP. User A stores the PAT
-   (`credentials add smoke-gh --preset github`, on stdin from the file). In A's sandbox it clones the
+   (`credentials add <run>-gh --preset github`, on stdin from the file). In A's sandbox it clones the
    repository, commits, pushes `sbx-smoke-<ts>` and deletes it, and checks that `gh api user` (or
    `curl`, without `gh`) names the PAT's owner. The placeholder sent from this machine must get a 401.
    User A deletes the credential, the step waits `SBX_SMOKE_CRED_TTL` + 5 s, and the sandbox must get
