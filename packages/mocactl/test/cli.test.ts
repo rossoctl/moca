@@ -80,6 +80,42 @@ describe('main', () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
+  // #419. The flag only reaches cmdRun as a boolean, so this is where the wiring is checked;
+  // what it PRINTS is headless.test.ts's.
+  it('passes run --show-tools through, and defaults it to false', async () => {
+    const run = vi.fn(async (..._args: unknown[]) => 0);
+    const headless = await import('../src/headless.js');
+    const spy = vi.spyOn(headless, 'cmdRun').mockImplementation(run);
+    onTestFinished(() => spy.mockRestore());
+    expect(await main(['run', 'hi', '--show-tools'], {}, io(), { buildRuntime: fakeBuild })).toBe(
+      0,
+    );
+    expect(run.mock.calls[0][2]).toMatchObject({ showTools: true });
+    // Absent must be false, not undefined: `opts.showTools && ...` would pass either way, but a
+    // caller that forwards the option object (the TUI, a future wrapper) should see a boolean.
+    expect(await main(['run', 'hi'], {}, io(), { buildRuntime: fakeBuild })).toBe(0);
+    expect(run.mock.calls[1][2]).toMatchObject({ showTools: false });
+  });
+
+  // Refused rather than ignored: --json already carries every tool frame, and a script whose flag
+  // is silently dropped learns nothing.
+  it('rejects --show-tools together with --json, running no turn', async () => {
+    const run = vi.fn(async (..._args: unknown[]) => 0);
+    const headless = await import('../src/headless.js');
+    const spy = vi.spyOn(headless, 'cmdRun').mockImplementation(run);
+    onTestFinished(() => spy.mockRestore());
+    const o = io();
+    expect(
+      await main(['run', 'hi', '--show-tools', '--json'], {}, o, { buildRuntime: fakeBuild }),
+    ).toBe(2);
+    expect(o.errs.join('\n')).toContain('--show-tools is redundant with --json');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('documents --show-tools in the usage, so --help stays the one source of truth', () => {
+    expect(USAGE).toContain('--show-tools');
+  });
+
   it('passes flags to the runtime builder', async () => {
     const build = vi.fn(fakeBuild);
     await main(

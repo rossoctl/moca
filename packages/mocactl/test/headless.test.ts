@@ -18,6 +18,7 @@ import {
 import type { Runtime } from '../src/runtime.js';
 import { ApiError } from '../src/api/errors.js';
 import type { ControlPlaneApi } from '../src/api/types.js';
+import { toolSummary } from '../src/render/tools.js';
 import { testRuntime } from './helpers/runtime.js';
 import { credential, doneFrame, fakeControlPlane, fakeHarness } from './helpers/fakes.js';
 
@@ -253,6 +254,141 @@ describe('cmdRun', () => {
     expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false })).toBe(0);
     expect(o.stdout).not.toMatch(/[\u0007\u001b]/);
     expect(o.stdout).toMatch(/^a.*b\n$/); // a split sequence leaves printable residue only
+  });
+
+  // #419: the demo needed `--json | jq -j '...'` to show an audience the commands the agent ran.
+  describe('--show-tools', () => {
+    // One bash call that fails, one that works, text on both sides. The frame order is the
+    // server's: a tool_use, then its tool_result, interleaved with the text deltas.
+    const toolTurn = () =>
+      fakeHarness([
+        {
+          frames: [
+            { type: 'text', delta: 'let me look' },
+            { type: 'tool_use', id: 't1', name: 'bash', args: { command: 'ls /nope' } },
+            { type: 'tool_result', id: 't1', isError: true, preview: 'No such file' },
+            { type: 'tool_use', id: 't2', name: 'bash', args: { command: 'ls /tmp' } },
+            { type: 'tool_result', id: 't2', isError: false, preview: 'a\nb\nc' },
+            { type: 'text', delta: 'found it' },
+            doneFrame('s-new'),
+          ],
+        },
+      ]);
+
+    it('prints each tool call and flags the failed one, in frame order with the text', async () => {
+      const o = io();
+      const rt = runtime({ harness: toolTurn() });
+      expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false, showTools: true })).toBe(
+        0,
+      );
+      expect(o.stdout).toBe(
+        'let me look\n$ ls /nope\n  (that command failed)\n\n$ ls /tmp\nfound it\n',
+      );
+    });
+
+    it('prints no tool calls without the flag, so plain `run` is unchanged', async () => {
+      const o = io();
+      const rt = runtime({ harness: toolTurn() });
+      expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false })).toBe(0);
+      expect(o.stdout).toBe('let me lookfound it\n');
+    });
+
+    // Not the preview: a successful command's output is the agent's business, and the preview is
+    // remote multi-line text that would bury the answer the demo is there to show.
+    it('says nothing about a tool call that SUCCEEDED beyond the command itself', async () => {
+      const o = io();
+      const rt = runtime({ harness: toolTurn() });
+      await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false, showTools: true });
+      expect(o.stdout).toContain('$ ls /tmp');
+      expect(o.stdout).not.toContain('No such file');
+      expect(o.stdout).not.toContain('a\nb\nc');
+      // The failure marker belongs to t1 only -- one failed result, one marker.
+      expect(o.stdout.match(/that command failed/g)).toHaveLength(1);
+    });
+
+    // The flag's whole output is server-originated, so it goes through the same sanitizeRemote as
+    // the text path (#419). A tool NAME is remote too, not just its arguments.
+    it('strips escape sequences from the tool name and its arguments', async () => {
+      const o = io();
+      const rt = runtime({
+        harness: fakeHarness([
+          {
+            frames: [
+              {
+                type: 'tool_use',
+                id: 't1',
+                name: 'ba\u001b]52;c;aGk=\u0007sh',
+                args: { command: 'echo \u001b[31mred\u001b[0m' },
+              },
+              doneFrame('s-new'),
+            ],
+          },
+        ]),
+      });
+      await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false, showTools: true });
+      expect(o.stdout).not.toMatch(/[\u0007\u001b]/);
+      expect(o.stdout).toContain('red');
+    });
+
+    // sanitizeRemote keeps \n (the text path needs it), so a multi-line argument would otherwise
+    // spread one tool call over several lines and read as several calls.
+    it('keeps a tool call on one line even when an argument spans lines', async () => {
+      const o = io();
+      const rt = runtime({
+        harness: fakeHarness([
+          {
+            frames: [
+              { type: 'tool_use', id: 't1', name: 'grep', args: { pattern: 'a\nb', path: 'src' } },
+              doneFrame('s-new'),
+            ],
+          },
+        ]),
+      });
+      await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false, showTools: true });
+      // The fencing newlines around the call are the only ones it adds.
+      expect(o.stdout.split('\n').filter((l) => l.includes('grep'))).toHaveLength(1);
+      expect(o.stdout).toContain('grep a b in src');
+    });
+
+    // Uses the TUI's own formatter, so `--show-tools` and the transcript export never disagree
+    // about what a given tool call looked like.
+    it('formats a non-bash tool the way the TUI does (toolSummary)', async () => {
+      const o = io();
+      const rt = runtime({
+        harness: fakeHarness([
+          {
+            frames: [
+              { type: 'tool_use', id: 't1', name: 'read', args: { path: 'src/a.ts', offset: 10 } },
+              doneFrame('s-new'),
+            ],
+          },
+        ]),
+      });
+      await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false, showTools: true });
+      expect(o.stdout).toContain(toolSummary('read', { path: 'src/a.ts', offset: 10 }));
+    });
+
+    // --json is a machine contract: one JSON document per line and nothing else. A stray
+    // "$ ls /tmp" would break every reader, so the plain-text path must stay off under --json.
+    it('adds no plain-text lines under --json, whose every line stays parseable', async () => {
+      const o = io();
+      const rt = runtime({ harness: toolTurn() });
+      await cmdRun(rt, o, { prompt: 'hi', options: {}, json: true, showTools: true });
+      const types = o.stdout
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l).type);
+      expect(types).toEqual([
+        'session',
+        'text',
+        'tool_use',
+        'tool_result',
+        'tool_use',
+        'tool_result',
+        'text',
+        'done',
+      ]);
+    });
   });
 
   it('exits 1 with a readable message when the turn fails', async () => {

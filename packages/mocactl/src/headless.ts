@@ -26,6 +26,7 @@ import {
 } from './core/session-options.js';
 import { sameControlPlane, storedLoginUrl } from './config.js';
 import { workspaceResetText } from './render/blocks.js';
+import { toolSummary } from './render/tools.js';
 import { openableUrl, type OsDeps } from './os.js';
 import { ensureRuntimeAuth, sessionManager, setAuth, type Runtime } from './runtime.js';
 
@@ -313,7 +314,16 @@ export interface RunOptions {
   json: boolean;
   signal?: AbortSignal;
   configRef?: string;
+  /** Interleave the turn's tool calls with its text (#419). Redundant under `json`, which has them. */
+  showTools?: boolean;
 }
+
+/**
+ * One tool call is one line, so a newline inside a remote argument (a path, a pattern) cannot break
+ * the layout up. Control characters are already gone -- this runs on sanitizeRemote's output, which
+ * keeps `\n` deliberately for the text path.
+ */
+const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, ' ').trimEnd();
 
 /**
  * False (with the reason on stderr) unless there is a control plane and a valid login for it. The
@@ -490,6 +500,16 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
       // The sandbox id and tier are server-originated, so they are sanitized like the text above.
       else if (e.frame.type === 'workspace_reset')
         io.err(sanitizeRemote(workspaceResetText(e.frame)));
+      // --show-tools (#419). Both go to STDOUT, interleaved with the text rather than beside it on
+      // stderr: the point of the flag is to show, in order, what the agent did before it answered.
+      // Fenced in newlines of their own, because the text they sit between arrives as deltas that
+      // may end mid-line. `toolSummary` is the TUI's own formatter, so the two agree per tool.
+      else if (opts.showTools && e.frame.type === 'tool_use')
+        io.out(`\n${oneLine(sanitizeRemote(toolSummary(e.frame.name, e.frame.args)))}\n`);
+      // Only a FAILED result is reported, and without its preview: a successful command's output is
+      // the agent's business, and a preview is remote multi-line text that would bury the answer.
+      else if (opts.showTools && e.frame.type === 'tool_result' && e.frame.isError)
+        io.out('  (that command failed)\n');
     } else if (e.kind === 'retrying') {
       io.err(`the harness has no capacity — retrying in ${e.seconds}s`);
     } else if (e.kind === 'turn-end') {

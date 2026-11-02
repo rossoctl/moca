@@ -369,16 +369,13 @@ Reply with one short paragraph saying what you found, then end with exactly thes
 COMMIT=<the first 12 characters of the commit hash>
 NODE_VERSION=<the version, for example v1.2.3>
 NODE_DATE=<its date, YYYY-MM-DD>"
-mocactl run "$P" --json | jq -j '
-  if .type == "tool_use" then "\n$ \(.args.command // .args)\n"
-  elif .type == "tool_result" and .isError then "  (that command failed)\n"
-  elif .type == "text" then .delta
-  elif .type == "error" then "\nerror: \(.errorMessage // .stopReason)\n"
-  else empty end'
+mocactl run "$P" --show-tools
 ```
 
-`--json` streams the turn's frames, so the room sees each command as the agent runs it. Plain
-`mocactl run` prints only the answer. On the run:
+`--show-tools` prints each command between the turn's text, so the room sees them as the agent
+runs them; plain `mocactl run` prints only the answer. (Before #419 this act piped `--json`
+through a `jq -j` filter to the same effect. No `jq` is needed now; a turn that fails still
+reports on stderr, as every `mocactl run` does.) On the run:
 
 ```
 session 7ce498ad-6776-40f2-b0c0-2b3166e3f49c
@@ -737,7 +734,7 @@ to 9 come from the 2026-10-01 run.
 | 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                                                                                                                       | Fixed (#463): `/etc/gitconfig` in the image.                                                                                                                                   |
 | 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.                                                                                                     | #417: show a short session id; count turns from the server. #406 adds `sessions`.                                                                                              |
 | 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                                                                                                        | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects.                                                                                             |
-| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                                                                                                       | #419: a `mocactl run --show-tools` would replace the filter.                                                                                                                   |
+| 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                                                                                                       | Fixed (#419): `mocactl run --show-tools`; 2a uses it and the `jq` filter is gone.                                                                                              |
 | 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).                                                                                                  | #404: `mocactl --profile`.                                                                                                                                                     |
 | 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                                                                                                            | #407: `v0.5.1` until S5, then `multi`.                                                                                                                                         |
 
