@@ -48,7 +48,9 @@ const FILES = [
   '.mcp.json',
   '.claude/settings.json',
   'opencode.json',
+  // Bob gets both filenames: which one it reads depends on its version (#676).
   '.bob/settings.json',
+  '.bob/mcp.json',
   'CLAUDE.md',
   'AGENTS.md',
 ];
@@ -133,10 +135,33 @@ describe('agent configuration (SBX0 §6.3)', () => {
   it("doctor reports Bob's missing server, and nothing once up has run", () => {
     const d = dir();
     expect(checkAgentConfig(d)).toContain(
-      'IBM Bob: .bob/settings.json has no sandbox MCP server (mocactl sbx mcp)',
+      'IBM Bob: neither .bob/settings.json nor .bob/mcp.json has a sandbox MCP server ' +
+        '(mocactl sbx mcp)',
     );
     writeAgentConfig(d);
     expect(checkAgentConfig(d)).toEqual([]);
+  });
+
+  // #676: `up` wrote only .bob/settings.json, which Bob 2.0.9 ignores -- it reads .bob/mcp.json --
+  // so `up` reported Bob configured while `bob mcp list` said "No MCP servers configured". Both
+  // names are written now, and either one alone satisfies doctor: the one that counts is whichever
+  // the installed Bob reads, and a developer who configured Bob by hand (`bob mcp add`) has only
+  // that one.
+  it('writes both of Bob’s filenames, and doctor accepts either alone', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    for (const f of ['.bob/settings.json', '.bob/mcp.json']) {
+      expect(json(d, f), f).toEqual({
+        mcpServers: { sandbox: { command: 'mocactl', args: ['sbx', 'mcp'] } },
+      });
+    }
+    // Each file on its own is enough; neither is, alone, required.
+    for (const drop of ['.bob/settings.json', '.bob/mcp.json']) {
+      const one = dir();
+      writeAgentConfig(one);
+      rmSync(join(one, drop));
+      expect(checkAgentConfig(one), `without ${drop}`).toEqual([]);
+    }
   });
 
   it('holds the spec §6.3 lists verbatim', () => {
