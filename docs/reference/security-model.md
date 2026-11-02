@@ -208,8 +208,8 @@ the root `Dockerfile` only. Scorecard runs weekly. Images are pushed to `ghcr.io
 attested**. The harness image has no `USER` line (the manifests impose non-root), uses floating base tags and includes
 `kubectl` for the deprecated Knative path. Redis and the OpenShift TLS sidecar are pinned by digest; the harness and
 remote-worker images are `:latest` unless you pass `--image` (harness) and `--sandbox-image` (remote worker; the
-VM uses `SANDBOX_IMAGE`). Redis is digest-pinned only in the Kubernetes manifests; the VM and Compose use
-`redis:7-alpine` by tag.
+VM uses `SANDBOX_IMAGE`). Valkey is digest-pinned only in the Kubernetes manifests; the VM and Compose use
+`valkey/valkey:9-alpine` by tag.
 
 ## Known gaps in `SECURITY.md`
 

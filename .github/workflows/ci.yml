@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     services:
       redis:
-        image: redis:7
+        image: valkey/valkey:9
         ports:
           - 6379:6379
         options: >-

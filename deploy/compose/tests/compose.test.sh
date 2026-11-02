@@ -229,8 +229,8 @@ published_cp="$(jq -r '.services | to_entries[] | select(.value.ports) | .key' "
 jq -e '.services["control-plane"].ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].target == 8080
   and .[0].published == "8090"' "$OUT_CP" >/dev/null ||
   fail "the control plane must publish exactly 127.0.0.1:8090->8080: $(jq -c '.services["control-plane"].ports' "$OUT_CP")"
-[[ "$(jq -r '.services.redis.image' "$OUT")" == docker.io/redis:7-alpine ]] ||
-  fail "redis image must match deploy/vm/setup-vm.sh's start_redis (docker.io/redis:7-alpine)"
+[[ "$(jq -r '.services.redis.image' "$OUT")" == docker.io/valkey/valkey:9-alpine ]] ||
+  fail "redis image must match deploy/vm/setup-vm.sh's start_redis (docker.io/valkey/valkey:9-alpine)"
 pass "only the supervisor's 8080 (and the control plane's 8090) are published, on loopback; redis is the VM path's image"
 
 # --- 7. the sandbox shares no network with Redis, the supervisor or anything else (MI1 R8) ---------
