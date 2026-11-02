@@ -33,7 +33,8 @@
 #   SH_ENV_DIR, SH_INSTALL_DIR        As setup-vm.sh (default /etc/serverless-harness, /opt/serverless-harness).
 #   SH_CRED_DIR                       TEST-ONLY, as setup-vm.sh (default $SH_ENV_DIR/credentials).
 #   RESEARCH_DELETE_WAIT              Seconds between tries at deleting the session (default 2).
-#   KEEP=1                            Leave the credential, session, fetched files and evidence in place.
+#   KEEP=1                            Leave the credential, session, fetched files, the minted subject's
+#                                     record in the credential store, and the evidence in place.
 set -uo pipefail
 
 if [[ "${VM_RESEARCH_SMOKE:-}" != 1 ]]; then
@@ -104,6 +105,40 @@ js() {
 hdr() { (umask 077 && printf 'Authorization: Bearer %s\n' "$2" >"$OUT/$1.hdr"); }
 sandboxes() { podman ps --format '{{.Names}}' --filter 'name=^sh-sandbox-' --filter status=running; }
 
+# Remove this run's minted subject from the file credential store (#418). Deleting the credential
+# cannot do it: the store's `delete` writes the subject's document back without that credential and
+# never unlinks, so an empty record survives -- one per run, forever. Nothing but this subject is
+# ever touched: the name is the sha256[:16] of THIS run's subject, which no other subject can hash
+# to, and the file must parse as a document holding no credentials.
+# A control-plane route that deleted an empty subject would let this (and P4-ON-P6.md's smoke) stop
+# reaching into the store; until then both do it by hand.
+drop_record() {
+  local dir hash f
+  dir="$( (grep -oE '^SH_CREDENTIAL_DIR=.*' "$SH_ENV_DIR/control-plane.env" 2>/dev/null || true) | tail -1 | cut -d= -f2-)"
+  # Only the file store keeps records here; vault (or no store line at all) has nothing to remove.
+  [[ -n "$dir" && -d "$dir" ]] || return 0
+  # The store's own name for the subject (packages/control-plane/src/subject-document.ts).
+  hash="$(SMOKE_SUB="$SUBJECT" node -e '
+    const { createHash } = require("node:crypto");
+    process.stdout.write(createHash("sha256").update(process.env.SMOKE_SUB).digest("hex").slice(0, 16));
+  ' 2>/dev/null)" || return 0
+  # No format check on $hash: node either printed this subject's 16 hex characters or the run
+  # returned above, and an empty one makes `$dir/.json`, which the next line does not find.
+  f="$dir/$hash.json"
+  [[ -f "$f" ]] || return 0
+  # Refuse to remove a record that still holds a credential: this subject is this run's alone, so
+  # that would mean the delete above did not land, and silently dropping it would destroy the only
+  # evidence. Say so instead.
+  if ! node -e '
+    const doc = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    process.exit(Object.keys(doc.credentials ?? {}).length === 0 ? 0 : 1);
+  ' "$f" 2>/dev/null; then
+    echo "warning: $f still holds a credential for $SUBJECT; it stays (delete it by hand)" >&2
+    return 0
+  fi
+  rm -f "$f" || echo "warning: could not remove $SUBJECT's record $f; delete it by hand" >&2
+}
+
 cleanup() {
   local c
   if [[ "${KEEP:-}" == 1 ]]; then
@@ -125,6 +160,7 @@ cleanup() {
     fi
     [[ -z "$STORED" ]] || curl -sS -o /dev/null -X DELETE -H @"$OUT/api.hdr" "$CP/v1/credentials/$CRED_NAME" || true
   fi
+  drop_record
   if [[ -n "$TURNED" ]]; then
     for c in $(sandboxes); do podman exec "$c" rm -rf "$WORKDIR" >/dev/null 2>&1 || true; done
   fi
