@@ -359,11 +359,84 @@ describe('workload lifecycle', () => {
     expect(await call('DELETE', '/workloads/demo', alice)).toEqual({ status: 204, body: null });
     expect(cs.contexts.size).toBe(0);
     expect((await call('GET', '/workloads/demo', alice)).body).toMatchObject({ status: 'deleted' });
+    // Repeating the delete names the record it found rather than claiming the name is unknown
+    // (#602). Still 404: there is no live workload to delete.
     expect(await call('DELETE', '/workloads/demo', alice)).toEqual({
       status: 404,
-      body: { error: 'workload_not_found' },
+      body: { error: 'workload_already_deleted' },
     });
     expect(await quotaOf(alice)).toBe(0);
+  });
+
+  // #602: `delete` on a deleted workload and `delete` on a name that was never used answered the
+  // same 404 workload_not_found, so an operator could not tell "already handled" from "wrong id".
+  describe('a repeated delete (#602)', () => {
+    it('is distinguishable from a name that never existed', async () => {
+      await create(alice, 'twice');
+      expect((await call('DELETE', '/workloads/twice', alice)).status).toBe(204);
+      expect(await call('DELETE', '/workloads/twice', alice)).toEqual({
+        status: 404,
+        body: { error: 'workload_already_deleted' },
+      });
+      expect(await call('DELETE', '/workloads/never', alice)).toEqual({
+        status: 404,
+        body: { error: 'workload_not_found' },
+      });
+    });
+
+    // The privacy property of docs/context-service.md ("Names are per user") is the reason the new
+    // code cannot be reported for someone else's record: only the owner's keyspace is ever read, so
+    // bob learns nothing about alice's workload -- not even that the name is taken.
+    it("says nothing about another user's deleted workload", async () => {
+      await create(alice, 'mine');
+      expect((await call('DELETE', '/workloads/mine', alice)).status).toBe(204);
+      expect(await call('DELETE', '/workloads/mine', bob)).toEqual({
+        status: 404,
+        body: { error: 'workload_not_found' },
+      });
+    });
+
+    // Once the deleted record expires its name is free again, so the honest answer is that nothing
+    // is known about it. This is the boundary of how long the kinder error can be given at all.
+    it('reverts to workload_not_found once the deleted record has expired', async () => {
+      vi.stubEnv('MOCA_WORKLOAD_DELETED_TTL_SECONDS', '120');
+      await create(alice, 'expiring');
+      const key = `sh:wl:${createHash('sha256').update(alice).digest('hex').slice(0, 32)}:expiring`;
+      expect((await call('DELETE', '/workloads/expiring', alice)).status).toBe(204);
+      expect((await call('DELETE', '/workloads/expiring', alice)).body).toEqual({
+        error: 'workload_already_deleted',
+      });
+      await redis.del(key);
+      expect(await call('DELETE', '/workloads/expiring', alice)).toEqual({
+        status: 404,
+        body: { error: 'workload_not_found' },
+      });
+    });
+
+    // A `deleting` record is an unfinished delete, not a finished one: it must still be retried
+    // (docs/context-service.md), so it must not take the new code.
+    it('still retries a delete left `deleting` by a Context Service failure', async () => {
+      await create(alice, 'stuck');
+      cs.failures.set('delete', 500);
+      expect((await call('DELETE', '/workloads/stuck', alice)).status).toBe(502);
+      expect((await call('GET', '/workloads/stuck', alice)).body).toMatchObject({
+        status: 'deleting',
+      });
+      cs.failures.delete('delete');
+      expect((await call('DELETE', '/workloads/stuck', alice)).status).toBe(204);
+    });
+
+    // The record is read and reported; nothing is torn down a second time and no quota is returned
+    // twice, which a delete that fell through to the teardown path would do.
+    it('changes nothing: no Context Service call, no second quota release', async () => {
+      await create(alice, 'quiet');
+      expect((await call('DELETE', '/workloads/quiet', alice)).status).toBe(204);
+      expect(await quotaOf(alice)).toBe(0);
+      const before = cs.calls.length;
+      expect((await call('DELETE', '/workloads/quiet', alice)).status).toBe(404);
+      expect(cs.calls.length).toBe(before);
+      expect(await quotaOf(alice)).toBe(0);
+    });
   });
 
   it('expires a deleted record, and only a deleted one', async () => {

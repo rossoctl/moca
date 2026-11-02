@@ -164,13 +164,19 @@ token. There is no list command: the harness has no list route.
   provisioner lost the bundle) it activates once more. Any other recorded `error`, the same error
   again, or the timeout exits 1 and deletes the workload.
 - `get`/`delete` exit 2 for an invalid id, exit 1 for `404 workload_not_found` or another refusal.
+- `delete` on a workload that is already deleted exits 0: the workload is gone, which is what was
+  asked for, so a cleanup script can delete every id it knows without telling "already done" from a
+  real failure ([#602](https://github.com/rossoctl/moca/issues/602)). Only `404
+workload_already_deleted` is treated this way — `workload_not_found` still exits 1, because there
+  the id may simply be wrong.
 - `--json`:
   - `create` → `{"workloadId","status","contextType","revision","files","bytes"}`, plus
     `"sandboxes":{"count","tier","ready"}` and `"mount"` for a workload with sandboxes of its own.
   - `get` → `{"workloadId","status","contextType","workspace","revision","sandboxes"}` (`null` when
     unset; `workspace.mount` on a mounted workload), plus `"error"` while provisioning has failed.
     The table adds `SANDBOXES` (`ready/count`) and `MOUNT` columns.
-  - `delete` → `{"workloadId","status":"deleted"}`.
+  - `delete` → `{"workloadId","status":"deleted"}`, plus `"alreadyDeleted":true` when the workload
+    was deleted before this call (absent otherwise, so the document reads the same either way).
 
 ### `promote` exit codes
 

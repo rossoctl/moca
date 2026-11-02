@@ -65,6 +65,12 @@ export function describeWorkloadError(err: unknown, id?: string): string {
         return "the harness's workload settings are incomplete — ask its operator";
       case 'workload_not_found':
         return id ? `no workload '${sanitizeRemote(id)}' (or it is not yours)` : 'no such workload';
+      // `delete` treats this as success and never reaches here (#602); any other request that
+      // names a deleted workload is a real refusal, and this says which of the two 404s it got.
+      case 'workload_already_deleted':
+        return id
+          ? `workload '${sanitizeRemote(id)}' was already deleted`
+          : 'that workload was already deleted';
       case 'workload_quota_exceeded':
         return 'you have as many workloads as you may — delete one with `mocactl workloads delete ID`';
       case 'workload_name_taken':
@@ -353,14 +359,36 @@ export async function cmdWorkloadDelete(rt: Runtime, io: Io, opts: IdOptions): P
   if (!checkId(io, opts.id)) return 2;
   if (!ready(rt, io)) return 2;
   const client = opts.client ?? clientFor(rt);
+  let already = false;
   try {
     await client.delete(opts.id, opts.signal);
   } catch (err) {
     if (aborted(opts.signal)) return 130;
-    io.err(describeWorkloadError(err, opts.id));
-    return 1;
+    // The workload is gone and the caller wanted it gone, so the intent is satisfied: exit 0, as
+    // `kubectl delete` does, which lets a cleanup script delete every id it knows without having
+    // to tell "already done" from a real failure (#602). Only this code; `workload_not_found` is
+    // still an error, because there the id may simply be wrong.
+    if (!(err instanceof ApiError && err.code === 'workload_already_deleted')) {
+      io.err(describeWorkloadError(err, opts.id));
+      return 1;
+    }
+    already = true;
   }
-  io.err(`deleted workload ${sanitizeRemote(opts.id)}`);
-  if (opts.json) io.out(JSON.stringify({ workloadId: opts.id, status: 'deleted' }) + '\n');
+  io.err(
+    already
+      ? `workload ${sanitizeRemote(opts.id)} was already deleted`
+      : `deleted workload ${sanitizeRemote(opts.id)}`,
+  );
+  // The same document either way, so a reader needs no special case; `alreadyDeleted` is there for
+  // one that wants to tell them apart, and absent (not false) when the delete did the work.
+  if (opts.json) {
+    io.out(
+      JSON.stringify({
+        workloadId: opts.id,
+        status: 'deleted',
+        ...(already ? { alreadyDeleted: true } : {}),
+      }) + '\n',
+    );
+  }
   return 0;
 }
