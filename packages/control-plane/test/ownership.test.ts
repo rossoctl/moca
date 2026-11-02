@@ -281,6 +281,51 @@ describe('runtime hash', () => {
   });
 });
 
+describe('bumpTurns', () => {
+  it('counts a completed turn, so the session summary stops reporting 0 (#420)', async () => {
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    await index.bumpTurns('sid-1');
+    await index.bumpTurns('sid-1');
+    expect((await index.getRuntime('sid-1')).turns).toBe('2');
+  });
+
+  it('increments server-side, so concurrent turns of one session cannot lose a count', async () => {
+    // The server does not serialize concurrent turns of one session (ADR-0036), so a
+    // read-modify-write through putRuntime would have both turns read N and both write N+1.
+    // HINCRBY is the whole point: assert on the command, since a fake that merely ends at the
+    // right number would also pass for a racy implementation run sequentially.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    await Promise.all([index.bumpTurns('sid-1'), index.bumpTurns('sid-1')]);
+    expect((await index.getRuntime('sid-1')).turns).toBe('2');
+    expect(f.ops).toEqual([
+      `hIncrBy ${runtimeKey('sid-1')} turns`,
+      `hIncrBy ${runtimeKey('sid-1')} turns`,
+    ]);
+    // Never through the merging hSet path.
+    expect(f.ops.some((o) => o.startsWith('hSet'))).toBe(false);
+  });
+
+  it('is the only way turns is written, so a compromised harness cannot set it to any value', async () => {
+    // `turns` is on RUNTIME_FIELDS so getRuntime returns it, but the harness self-reports the
+    // runtime hash (spec §7.4). Were it writable through putRuntime, a compromised brain tier could
+    // claim any count. Only the +1 here may move it.
+    const f = fakeRedis();
+    const index = new OwnershipIndex(f.redis);
+    await index.bumpTurns('sid-1');
+    await index.putRuntime('sid-1', { harnessPod: 'h-1', turns: '9999' });
+    expect(f.hashes.get(runtimeKey('sid-1'))).not.toHaveProperty('turns', '9999');
+    expect((await index.getRuntime('sid-1')).turns).toBe('1');
+  });
+
+  it('turns a Redis transport failure into redis_unavailable, like every other index write', async () => {
+    const down = () => Promise.reject(new Error('connect ECONNREFUSED'));
+    const index = new OwnershipIndex({ ...fakeRedis().redis, hIncrBy: down } as never);
+    await expect(index.bumpTurns('sid-1')).rejects.toMatchObject({ code: 'redis_unavailable' });
+  });
+});
+
 describe('audit', () => {
   it('caps the audit stream with an approximate MAXLEN on every write', async () => {
     const f = fakeRedis();

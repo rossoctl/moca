@@ -44,7 +44,10 @@ describe('cmdSessions', () => {
     const listSessions = vi.fn(async (opts?: { cursor?: number }) =>
       opts?.cursor === undefined
         ? { sessions: [summary('s-1')], nextCursor: 7 }
-        : { sessions: [summary('s-2', { lastTurnAt: null, state: 'deleting' })], nextCursor: null },
+        : {
+            sessions: [summary('s-2', { lastTurnAt: null, state: 'deleting', turns: 0 })],
+            nextCursor: null,
+          },
     );
     const rt = testRuntime({ cp: fakeControlPlane({ listSessions }) });
     rt.transcripts!.rename('s-1', 'fix \u001b]52;c;aGk=\u0007the build');
@@ -52,11 +55,12 @@ describe('cmdSessions', () => {
     expect(await cmdSessions(rt, o, { json: false })).toBe(0);
     expect(listSessions.mock.calls.map((c) => c[0]?.cursor)).toEqual([undefined, 7]);
     const lines = o.stdout.trimEnd().split('\n');
-    expect(lines[0]).toMatch(/^ID\s+STATE\s+CREATED \(UTC\)\s+LAST TURN \(UTC\)\s+TITLE$/);
+    expect(lines[0]).toMatch(/^ID\s+STATE\s+TURNS\s+CREATED \(UTC\)\s+LAST TURN \(UTC\)\s+TITLE$/);
     expect(lines[1]).toMatch(
-      /^s-1\s+active\s+2026-09-30 09:15\s+2026-09-30 09:20\s+fix the build$/,
+      /^s-1\s+active\s+2\s+2026-09-30 09:15\s+2026-09-30 09:20\s+fix the build$/,
     );
-    expect(lines[2]).toMatch(/^s-2\s+deleting\s+2026-09-30 09:15\s+-$/);
+    // A session that has run no turn reads 0, not a blank: the count is always known (#420).
+    expect(lines[2]).toMatch(/^s-2\s+deleting\s+0\s+2026-09-30 09:15\s+-$/);
   });
 
   it('prints the documented --json shape', async () => {
@@ -79,6 +83,7 @@ describe('cmdSessions', () => {
           state: 'active',
           createdAt: Date.UTC(2026, 8, 30, 9, 15),
           lastTurnAt: Date.UTC(2026, 8, 30, 9, 20),
+          turns: 2,
         },
         {
           sessionId: 's-2',
@@ -86,10 +91,30 @@ describe('cmdSessions', () => {
           state: 'active',
           createdAt: Date.UTC(2026, 8, 30, 9, 15),
           lastTurnAt: Date.UTC(2026, 8, 30, 9, 20),
+          turns: 2,
         },
       ],
     });
     expect(o.stdout.endsWith('\n')).toBe(true);
+  });
+
+  it("reports the SERVER's turn count, not the local transcript's (#420)", async () => {
+    // The field was left out of this command when #406 added it, because nothing wrote it and it
+    // read 0 everywhere; #420 gave it a writer. It must come from the summary: the local transcript
+    // store is the one thing that is NOT authoritative here -- a headless run writes no transcript,
+    // and a session resumed on another machine has none at all, yet both have run turns.
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listSessions: async () => ({ sessions: [summary('s-1', { turns: 7 })], nextCursor: null }),
+      }),
+    });
+    expect(rt.transcripts!.load('s-1')).toBeNull();
+    const o = io();
+    expect(await cmdSessions(rt, o, { json: true })).toBe(0);
+    expect((JSON.parse(o.stdout) as { sessions: { turns: number }[] }).sessions[0]!.turns).toBe(7);
+    const t = io();
+    expect(await cmdSessions(rt, t, { json: false })).toBe(0);
+    expect(t.stdout.trimEnd().split('\n')[1]).toMatch(/^s-1\s+active\s+7\s/);
   });
 
   it('keeps stdout empty with no sessions, and prints an empty list with --json', async () => {

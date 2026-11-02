@@ -463,6 +463,11 @@ export function makeRuntimeReporter(
       }
       await ready;
       await index?.putRuntime(sessionId, fields);
+      // A completed turn is exactly the report that stamps turnEndedAt, so the count rides that
+      // rather than a flag of its own: no call site can report an end and forget to count it, and
+      // the counter cannot drift from the timestamp beside it (#420). Separate from the putRuntime
+      // above because it is an HINCRBY -- `turns` is never settable through the merging hSet.
+      if (fields.turnEndedAt !== undefined) await index?.bumpTurns(sessionId);
     } catch {
       // A transient failure (e.g. a Redis restart mid-rollout) must not permanently disable this
       // reporter for the rest of the process's life: clear the memoised state so the NEXT call

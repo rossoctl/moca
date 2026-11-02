@@ -455,6 +455,22 @@ describe('GET and DELETE /v1/sessions/{id}, POST .../token', () => {
     });
   });
 
+  it("grows the summary's turn count as turns complete, rather than reporting 0 forever (#420)", async () => {
+    // `turns` was read here and allow-listed for the runtime hash, but no writer existed, so every
+    // real deployment reported 0. This is the end-to-end shape the issue asks for: what the data
+    // plane's reporter calls on turn end must be what this summary shows.
+    const summary = async () =>
+      (
+        (await HANDLERS.getSession!(ctx({ principal: alice, params: { id: 'sid-fixed' } }), d))
+          .body as { turns: number }
+      ).turns;
+    expect(await summary()).toBe(0);
+    await d.index.bumpTurns('sid-fixed');
+    expect(await summary()).toBe(1);
+    await d.index.bumpTurns('sid-fixed');
+    expect(await summary()).toBe(2);
+  });
+
   it('re-mints a session token, because a session outlives a 5-minute token', async () => {
     const res = await HANDLERS.mintSessionToken!(
       ctx({ principal: alice, params: { id: 'sid-fixed' } }),
