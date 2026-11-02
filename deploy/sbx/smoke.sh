@@ -69,7 +69,7 @@
 #      janitor run (`sudo ... sbx-janitor.sh`, janitor.env sourced, its own wait kept) frees it once
 #      its deletion is that old (see SBX_SMOKE_JANITOR_AGE).
 #   7. egress credentials (SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO): user A stores the
-#      PAT (`credentials add smoke-gh --preset github`, on stdin from the file, never argv); in A's
+#      PAT (`credentials add <run>-gh --preset github`, on stdin from the file, never argv); in A's
 #      sandbox git clone, commit, push of a branch and `gh api user` (else curl) see the PAT's owner;
 #      the remote branch is deleted; the placeholder sent from this machine is a 401; after A deletes
 #      the credential and TTL + 5 s the sandbox gets a 401. Opt-in: github-mcp (no Authorization
@@ -77,7 +77,9 @@
 #      The trap deletes the remote branch, the credentials and the sandboxes. The PAT is never printed.
 #
 # What it creates: temp directories (sample repositories, a mocactl install, token files) and
-# credentials (smoke-gh, smoke-gh-mcp), a remote branch sbx-smoke-<ts> and sandboxes it records as it creates them. Each step deletes its own; an EXIT trap deletes whatever
+# credentials (smoke-<ts>-<pid>-gh and -gh-mcp, named per run so two runs as the same user cannot
+# revoke one another), a remote branch sbx-smoke-<ts> and sandboxes it records as it creates
+# them. Each step deletes its own; an EXIT trap deletes whatever
 # is left, on success, failure or interrupt. It deletes nothing it did not create, and never prints a
 # token: tokens go to 0600 files in its temp directory, removed at exit. Logs are kept (path printed)
 # when something failed.
@@ -179,17 +181,31 @@ WORK="$(mktemp -d)"
 LOGS="$(mktemp -d)"
 chmod 700 "$WORK" "$LOGS"
 RUN="smoke-$(date +%s)-$$"
+# Step 7's credential names carry $RUN, as its sandboxes and its branch do: the names are a shared
+# namespace per user, so two runs of this smoke as the same user (a retry over a still-running one,
+# two CI jobs) would otherwise store one `smoke-gh` and each delete the other's mid-check. Both fit
+# the 40-character credential name limit (mocactl's CREDENTIAL_NAME).
+CRED_GH="$RUN-gh" CRED_MCP="$RUN-gh-mcp"
 CREATED_A='' CREATED_B='' PIDS='' CRED_NAMES='' BRANCH=''
 PASSES=0 FAILS=0 SKIPS=0
 
 cleanup() {
-  local rc=$? id u
+  local rc=$? id u ids
   set +e
   # shellcheck disable=SC2086 # a list of pids
   [[ -z "$PIDS" ]] || kill $PIDS 2>/dev/null
   # Step 7's leftovers first: the branch needs the PAT (read from its file), not a sandbox.
   if [[ -n "$BRANCH" ]]; then drop_branch || rc=1; fi
-  for id in $CRED_NAMES; do left_cred "$id" || rc=1; done
+  # Only the recorded names the service still holds: `cred_add` records a name *before* the add, so
+  # that an add whose answer was lost is still cleaned up (the server stored it), but that also
+  # records names no add ever stored -- a refused add, a connection that never opened. Deleting
+  # those reported a cleanup failure for a credential that never existed and masked the real error.
+  # A listing that itself fails (stored_creds' exit 1) is not read as "nothing is stored": every
+  # recorded name is still tried, and the run says it could not list.
+  if [[ -n "$CRED_NAMES" ]]; then
+    ids="$(stored_creds)" || echo "# cleanup: could not list user A's credentials; trying every recorded name (${CRED_NAMES# })"
+    for id in $ids; do left_cred "$id" || rc=1; done
+  fi
   for id in $CREATED_A; do left a "$id" || rc=1; done
   for id in $CREATED_B; do left b "$id" || rc=1; done
   # A create the server carried out but whose id never reached us (an interrupt, a lost answer):
@@ -216,6 +232,29 @@ left() { # left a|b ID: delete a sandbox this run created and a step did not
     return 1
   fi
 }
+stored_creds() { # the recorded names user A's `credentials list` still shows (see the cleanup);
+  # exit 1 -- after printing every recorded name -- when the listing itself failed
+  local listed n
+  listed="$(as a credentials --json 2>>"$LOGS/cleanup.log" </dev/null | "$PY" -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:  # not JSON (an unmounted route, a proxy error page): we could not list
+    sys.exit(1)
+for c in doc.get("credentials") or []:
+    if c.get("name"):
+        print(c["name"])' 2>>"$LOGS/cleanup.log")" || {
+    # The listing failed (a refused connection, an expired session), which is not "nothing is
+    # stored": read every recorded name back to the caller, so it still tries the deletes. A
+    # spurious "could not delete" is the safe side next to a stored PAT quietly left behind.
+    for n in $CRED_NAMES; do printf '%s\n' "$n"; done
+    return 1
+  }
+  for n in $CRED_NAMES; do
+    printf '%s\n' "$listed" | grep -qxF "$n" && printf '%s\n' "$n"
+  done
+  return 0
+}
 left_cred() { # left_cred NAME: delete a credential this run stored and a step did not
   if as a credentials delete "$1" >>"$LOGS/cleanup.log" 2>&1 </dev/null; then
     echo "# cleanup: deleted credential $1 (user A)"
@@ -228,11 +267,30 @@ left_cred() { # left_cred NAME: delete a credential this run stored and a step d
 # in argv, not in the environment, never echoed. One trailing newline is dropped.
 pat() { local t; t="$(cat "$CRED_FILE"; printf x)" && t="${t%x}" && printf '%s' "${t%$'\n'}"; }
 pat_curl() { printf 'user = "x-access-token:%s"\n' "$(pat)" | curl -sS -K - "$@"; }
-drop_branch() { # delete the remote branch from this machine; a branch that is not there is fine
-  local code
+api_code() { # api_code URL: the status of a GET with the PAT, '' if curl itself failed
+  pat_curl -o /dev/null -w '%{http_code}' "$1" 2>>"$LOGS/cleanup.log" || printf ''
+}
+# Delete the remote branch from this machine. A branch that is really gone is fine, but GitHub's
+# "gone" answers are ambiguous: it sends "Reference does not exist" as *both* 422 and 404
+# (cli/cli#11187), 422 is also its answer for the default branch and for a spammed endpoint, and a
+# 404 is what a PAT that can no longer reach the repository gets for every ref. Believing them
+# reported a leaked branch as cleaned up -- the one case this cleanup exists to catch -- so anything
+# but a 204 is confirmed: the repository still answers with this PAT, and the ref is really absent.
+drop_branch() {
+  local code ref
   code="$(pat_curl -X DELETE -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$CRED_REPO/git/refs/heads/$BRANCH" 2>>"$LOGS/cleanup.log")" || code=''
+  if [[ "$code" != 204 ]]; then
+    # The singular `git/ref/...` is the exact-match get: the plural `git/refs/...` can answer 200
+    # with refs that merely start with the name.
+    ref="$(api_code "https://api.github.com/repos/$CRED_REPO/git/ref/heads/$BRANCH")"
+    # The ref reads as absent: trust that only if the repository itself is still reachable, since a
+    # revoked PAT answers 404 for both.
+    if [[ "$ref" == 404 && "$(api_code "https://api.github.com/repos/$CRED_REPO")" == 200 ]]; then
+      code=204
+    fi
+  fi
   case "$code" in
-  204 | 404 | 422) echo "# cleanup: deleted remote branch $BRANCH"; BRANCH='' ;;
+  204) echo "# cleanup: deleted remote branch $BRANCH"; BRANCH='' ;;
   *) echo "# cleanup: could not delete the remote branch $BRANCH of $CRED_REPO (HTTP ${code:-none}): delete it by hand"; return 1 ;;
   esac
 }
@@ -700,7 +758,7 @@ step7() {
   local owner id d="smoke-$RUN" code
   owner="$(pat_curl https://api.github.com/user 2>"$LOGS/owner.err" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["login"])' 2>>"$LOGS/owner.err")" || owner=''
   [[ "$owner" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || fail "api.github.com/user did not accept the PAT in SBX_SMOKE_GITHUB_TOKEN_FILE: $(lastline "$LOGS/owner.err")" || return 1
-  cred_add smoke-gh github || return 1
+  cred_add "$CRED_GH" github || return 1
   create a credentials || return 1
   id="$SBX"
   # Clone, commit, push a branch: the credential rides git over HTTPS; the sandbox holds none.
@@ -730,19 +788,19 @@ step7() {
     echo '# step 7: second-user check skipped (no second user)'
   fi
   # Revocation: after the delete and the egress cache TTL, the sandbox is a 401.
-  cred_del smoke-gh || return 1
+  cred_del "$CRED_GH" || return 1
   echo "# step 7: waiting $((CRED_TTL + 5)) s for the egress credential cache..."
   job sleep $((CRED_TTL + 5))
   sbx_sh cred-revoked "$id" "$SANDBOX_CODE"
   [[ "$RC" == 0 && "$(lastline "$LOGS/cred-revoked.out")" == 401 ]] ||
     fail "after the delete and $((CRED_TTL + 5)) s the sandbox got '$(lastline "$LOGS/cred-revoked.out")' from api.github.com/user, not 401" || return 1
   if [[ "${SBX_SMOKE_GITHUB_MCP:-}" == 1 ]]; then
-    cred_add smoke-gh-mcp github-mcp || return 1
+    cred_add "$CRED_MCP" github-mcp || return 1
     # No Authorization header from the client: the host sets it.
     sbx_sh cred-mcp "$id" "curl --http1.1 -sS -X POST https://api.githubcopilot.com/mcp/ -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"sbx-smoke\",\"version\":\"0\"}}}'"
     grep -q serverInfo "$LOGS/cred-mcp.out" ||
       fail "the github-mcp initialize without an Authorization header returned no serverInfo (exit $RC): $(lastline "$LOGS/cred-mcp.out")" || return 1
-    cred_del smoke-gh-mcp || return 1
+    cred_del "$CRED_MCP" || return 1
   fi
   release a "$id"
 }
