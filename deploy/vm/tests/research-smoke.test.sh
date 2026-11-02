@@ -19,9 +19,16 @@ fi; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export STATE="$TMP/state" MOCK_LOG="$TMP/mock.log" ARGV_LOG="$TMP/argv.log"
-mkdir -p "$TMP/bin" "$STATE" "$TMP/etc/credentials" "$TMP/tmp"
+# The file credential store the control plane writes, as the unit's StateDirectory (SH_CREDENTIAL_DIR
+# in control-plane.env). The smoke reaches into it to drop its own minted subject's record.
+export STORE="$TMP/var/moca-control-plane"
+mkdir -p "$TMP/bin" "$STATE" "$TMP/etc/credentials" "$TMP/tmp" "$STORE"
 
-echo 'SH_CONTROL_PLANE_PORT=18090' >"$TMP/etc/control-plane.env"
+{
+  echo 'SH_CONTROL_PLANE_PORT=18090'
+  echo 'SH_CREDENTIAL_STORE=file'
+  echo "SH_CREDENTIAL_DIR=$STORE"
+} >"$TMP/etc/control-plane.env"
 RAW_KEY='sk-ant-api03-fabricated-for-the-test' # notsecret
 GW_KEY='gw-fabricated-token'                   # notsecret
 (umask 077 && printf '%s\n' "$RAW_KEY" >"$TMP/raw.key" && printf '%s\n' "$GW_KEY" >"$TMP/gw.key")
@@ -56,11 +63,27 @@ reply() { printf '%s' "$2" >"$out"; [[ -n "$wfmt" ]] && printf '%s' "$1"; exit 0
 # The api token must be the real control plane's: three segments, and its payload names the subject.
 api_ok() { node -e 'const [, p] = process.argv[1].split("."); const c = JSON.parse(Buffer.from(p, "base64url"));
   process.exit(c.sub && c.sub.startsWith("research-smoke:") && c.scope.includes("api") ? 0 : 1)' "$auth" 2>/dev/null; }
+# The record the file store keeps for the presented token's subject: `<subjectHash>.json`, the
+# sha256[:16] of the subject (packages/control-plane/src/subject-document.ts).
+record() { node -e 'const { createHash } = require("node:crypto");
+  const [, p] = process.argv[1].split("."); const c = JSON.parse(Buffer.from(p, "base64url"));
+  process.stdout.write(createHash("sha256").update(c.sub).digest("hex").slice(0, 16))' "$auth" 2>/dev/null; }
 case "$method $path" in
 "GET /readyz") reply "${MOCK_READYZ:-200}" '{}' ;;
 "PUT /v1/credentials/research-smoke")
   api_ok || reply 401 '{"error":"token_invalid"}'
-  printf '%s' "$body" >"$STATE/put-body.json"; touch "$STATE/stored"; reply 201 '{}' ;;
+  printf '%s' "$body" >"$STATE/put-body.json"; touch "$STATE/stored"
+  # As the file store does: the subject's document, holding this credential.
+  printf '{"v":1,"credentials":{"research-smoke":{}}}' >"$STORE/$(record).json"
+  reply 201 '{}' ;;
+"DELETE /v1/credentials/research-smoke")
+  # The real file store's `delete` writes the document back WITHOUT the credential; it never
+  # unlinks. So an empty record survives the credential's delete -- the leak this smoke must clear.
+  # MOCK_CRED_DELETE_NOOP=1: answers 204 but leaves the credential in the document, as a delete
+  # whose answer was lost does. The record then still holds a credential and must not be removed.
+  f="$STORE/$(record).json"
+  if [[ -e "$f" && "${MOCK_CRED_DELETE_NOOP:-}" != 1 ]]; then printf '{"v":1,"credentials":{}}' >"$f"; fi
+  reply 204 '' ;;
 "POST /v1/sessions")
   api_ok || reply 401 '{"error":"token_invalid"}'
   reply 201 '{"sessionId":"sess-1","token":"tok-sess-1"}' ;;
@@ -141,11 +164,18 @@ MOCK
 chmod +x "$TMP/bin/"*
 export RESEARCH_DELETE_WAIT=0 PATH="$TMP/bin:$PATH" HEAD_SHA SH_ENV_DIR="$TMP/etc" SH_INSTALL_DIR="$REPO" TMPDIR="$TMP/tmp"
 
-# run <name> [VAR=value ...]: one smoke run in a fresh mock state; <name>.log and <name>.rc.
+# run <name> [PLANT=file] [VAR=value ...]: one smoke run in a fresh mock state; <name>.log and
+# <name>.rc. PLANT (consumed here, not passed on) is a credential-store record for ANOTHER subject,
+# written after the reset: the run must leave it alone. It is EMPTY, like the records this smoke
+# removes, so a cleanup that removed any empty record rather than its own subject's takes it too.
 run() {
   local name="$1"
   shift
-  rm -rf "$STATE" "$TMP"/tmp/research-smoke.* && mkdir -p "$STATE"
+  rm -rf "$STATE" "$TMP"/tmp/research-smoke.* "$STORE" && mkdir -p "$STATE" "$STORE"
+  if [[ "${1:-}" == PLANT=* ]]; then
+    printf '{"v":1,"credentials":{}}' >"${1#PLANT=}"
+    shift
+  fi
   : >"$MOCK_LOG"
   : >"$ARGV_LOG"
   env VM_RESEARCH_SMOKE=1 "$@" bash "$SCRIPT" >"$TMP/$name.log" 2>&1
@@ -154,6 +184,11 @@ run() {
 rc() { cat "$TMP/$1.rc"; }
 logged() { grep -qE "$1" "$MOCK_LOG" && echo yes || echo no; }
 said() { grep -qF -- "$2" "$TMP/$1.log" && echo yes || echo no; }
+# The records left in the file store: one per subject the run minted. A passing run must leave none.
+records() { find "$STORE" -maxdepth 1 -name '*.json' | wc -l | tr -d ' '; }
+# Whether the run warned at all: a record it could not remove is the only warning these cases
+# allow, so matching the word "record" would also catch the pool's own "every pool record" line.
+warned() { grep -q '^warning:' "$TMP/$1.log" && echo yes || echo no; }
 
 echo "== shellcheck"
 if command -v shellcheck >/dev/null; then
@@ -244,6 +279,10 @@ check "the session was deleted afterwards" "$(logged '^DELETE /v1/sessions/sess-
 check "the fetched files were removed from the sandboxes" "$(logged "rm -rf $(cat "$STATE/workdir")")" "yes"
 check "a passing run leaves no work directory (tokens included)" "$(find "$TMP/tmp" -maxdepth 1 -name 'research-smoke.*' | wc -l | tr -d ' ')" "0"
 check "reports the audit decision" "$(said pass 'audit: credential_issued')" "yes"
+# #418: deleting the credential leaves the subject's (now empty) record in the file store, one per
+# run. The credential delete cannot clear it -- the store's `delete` rewrites the document without
+# the credential and never unlinks -- so the smoke removes the record itself, after that delete.
+check "a passing run leaves no subject record in the credential store (#418)" "$(records)" "0"
 
 echo "== a gateway token with RESEARCH_ENDPOINT: stored as bearer"
 run gw RESEARCH_CREDENTIAL_FILE="$TMP/gw.key" RESEARCH_ENDPOINT=https://gateway.example
@@ -293,6 +332,50 @@ check "but not its token files" "$(find "$TMP/tmp" -name '*.hdr' -o -name sessio
 run errframe RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SCENARIO=error-frame
 check "an error frame: fails" "$(rc errframe)" "1"
 check "an error frame: shows its message" "$(said errframe '401 invalid x-api-key')" "yes"
+
+# --- The subject record in the file credential store (#418). One per run until this cleared it.
+echo "== the minted subject's record in the credential store (#418)"
+# A failing run cleans up as a passing one does: the record is the leak either way.
+run wrong2 RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_SCENARIO=wrong-commit
+check "a failing run leaves no record either" "$(records)" "0"
+# The operator fallback stores no credential, so no record is written; removing nothing must not
+# warn, and must not touch another subject's file (planted AFTER the reset `run` does).
+run fb2 PLANT="$STORE/00112233445566aa.json" RESEARCH_USE_OPERATOR_FALLBACK=1
+check "the fallback leaves another subject's record alone" "$(records)" "1"
+check "and warns about nothing" "$(warned fb2)" "no"
+rm -f "$STORE/00112233445566aa.json"
+# The same plant next to a run that DOES store a credential: exactly one record goes, this run's
+# own. A cleanup keyed on "any empty record" rather than on this subject's hash would take both.
+run plant PLANT="$STORE/00112233445566aa.json" RESEARCH_CREDENTIAL_FILE="$TMP/raw.key"
+check "another subject's record survives a storing run" "$(records)" "1"
+check "and it is that subject's, not this run's" \
+  "$(find "$STORE" -maxdepth 1 -name '00112233445566aa.json' | wc -l | tr -d ' ')" "1"
+check "removing its own record warns about nothing" "$(warned plant)" "no"
+rm -f "$STORE/00112233445566aa.json"
+# KEEP=1 leaves the record with everything else it leaves, so the run can be inspected afterwards.
+run keep RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" KEEP=1
+check "KEEP=1: exit 0" "$(rc keep)" "0"
+check "KEEP=1 keeps the record" "$(records)" "1"
+check "KEEP=1 deletes no credential" "$(logged '^DELETE /v1/credentials')" "no"
+# Kept because KEEP=1 returns before any cleanup -- not because the guard refused a record that
+# still holds the credential it never deleted. Without this, removing the record ahead of the KEEP
+# guard would still pass the check above, on that spurious warning.
+check "KEEP=1 warns about nothing" "$(warned keep)" "no"
+# A store that is not the file one (vault, or no SH_CREDENTIAL_DIR line) has no record to remove:
+# the run must still pass and say nothing.
+cp "$TMP/etc/control-plane.env" "$TMP/etc/cp.env.bak"
+echo 'SH_CONTROL_PLANE_PORT=18090' >"$TMP/etc/control-plane.env"
+run novault RESEARCH_CREDENTIAL_FILE="$TMP/raw.key"
+check "no SH_CREDENTIAL_DIR: exit 0" "$(rc novault)" "0"
+check "no SH_CREDENTIAL_DIR: warns about nothing" "$(warned novault)" "no"
+mv "$TMP/etc/cp.env.bak" "$TMP/etc/control-plane.env"
+# The guard: a record that still holds a credential means the delete above did not land. Removing it
+# would destroy the only evidence, so it stays and the run says so. MOCK_CRED_DELETE_NOOP=1 makes
+# the mock answer 204 while leaving the document as it was, which is what a lost delete looks like.
+run stuck RESEARCH_CREDENTIAL_FILE="$TMP/raw.key" MOCK_CRED_DELETE_NOOP=1
+check "a record that still holds a credential: exit 0" "$(rc stuck)" "0"
+check "it is kept, not removed" "$(records)" "1"
+check "and the run says so" "$(said stuck 'still holds a credential')" "yes"
 
 echo
 if [[ "$fails" -eq 0 ]]; then echo "all research-smoke.sh tests passed"; else echo "FAIL: $fails check(s)"; fi

@@ -628,8 +628,12 @@ sudo VM_RESEARCH_SMOKE=1 RESEARCH_CREDENTIAL_FILE=/root/gw-token \
 sudo VM_RESEARCH_SMOKE=1 RESEARCH_USE_OPERATOR_FALLBACK=1 ./deploy/vm/research-smoke.sh
 ```
 
-It deletes its credential, session and fetched files afterwards (`KEEP=1` leaves them). A failed run
-keeps its SSE transcript in the directory it names.
+It deletes its credential, session and fetched files afterwards (`KEEP=1` leaves them), and removes
+its minted subject's record from the file credential store. That last step is its own: deleting a
+credential rewrites the subject's document without it and never unlinks, so the empty record would
+otherwise stay — one per run ([#418](https://github.com/rossoctl/moca/issues/418)). A record that
+still holds a credential is kept and reported, not removed. A failed run keeps its SSE transcript in
+the directory it names.
 
 ## Reboots
 
