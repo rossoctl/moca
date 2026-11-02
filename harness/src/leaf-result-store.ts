@@ -128,7 +128,7 @@ export class RedisResultStore implements RedisLike {
     await this.open();
     return this.client.del(key);
   }
-  /** Atomic read-and-remove (Redis 6.2+; every deployment pins redis:7). The run-lease reaper
+  /** Atomic read-and-remove (Redis 6.2+; every deployment pins Valkey 9). The run-lease reaper
    * claims orphaned markers with it, so concurrent sweepers cannot double-finalize one run. */
   async getdel(key: string): Promise<string | null> {
     await this.open();

@@ -241,7 +241,7 @@ REDIS_ABSENT="no container"
 # `podman container inspect` on a missing container exits non-zero and prints to stderr: under
 # `set -euo pipefail` that would abort the whole script on a first install, so the call is guarded
 # and its stderr dropped. Image is compared by the configured NAME, not the resolved digest: this
-# script pins a floating `:7-alpine` tag, so comparing digests would replace Redis -- and on a
+# script pins a floating `:9-alpine` tag, so comparing digests would replace Redis -- and on a
 # pre-#410 container, LOSE ITS DATA -- every time upstream rebuilt the tag.
 redis_container_diff() {
   local image port volume appendonly out=()

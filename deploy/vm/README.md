@@ -730,8 +730,8 @@ by-hand recipe below is the route; `=1` will no longer do it for you, and that i
 `moca-redis` holds real sessions by then, and adopting over them would trade one loss for another.
 
 > **Do not just copy a `dump.rdb` into the volume and start Redis.** With `--appendonly yes`,
-> Redis 7 loads the AOF and **ignores** an existing `dump.rdb` — verified against
-> `redis:7-alpine` under podman 6.1.1 — so that yields a silently **empty** Redis. The conversion
+> Valkey loads the AOF and **ignores** an existing `dump.rdb` — verified against `redis:7-alpine`
+> (podman 6.1.1) and `valkey/valkey:9-alpine` — so that yields a silently **empty** Redis. The conversion
 > has to run with appendonly **off** first, so the RDB is what gets loaded, and only then
 > `CONFIG SET appendonly yes`. `SH_REDIS_ADOPT_VOLUME=1` does this in the right order. The same
 > trap applies to recovering an orphaned volume by hand:
@@ -739,16 +739,18 @@ by-hand recipe below is the route; `=1` will no longer do it for you, and that i
 > ```bash
 > # Inspect candidates first: the newest Mountpoint/dump.rdb mtime is usually the one you want.
 > podman volume ls
-> podman run --rm -v <old-volume>:/data docker.io/redis:7-alpine ls -l /data
+> podman run --rm -v <old-volume>:/data docker.io/valkey/valkey:9-alpine ls -l /data
 > # Load the RDB with appendonly OFF, then convert.
 > podman run -d --rm --name redis-recover -v <old-volume>:/data \
->   docker.io/redis:7-alpine redis-server --appendonly no
+>   docker.io/valkey/valkey:9-alpine redis-server --appendonly no
 > podman exec redis-recover redis-cli DBSIZE          # non-zero, or you have the wrong volume
 > podman exec redis-recover redis-cli CONFIG SET appendonly yes
 > podman exec redis-recover redis-cli SHUTDOWN NOSAVE # closes the connection; expected
 > ```
 >
 > Then point `MOCA_REDIS_VOLUME` at that volume and re-run `setup-vm.sh`.
+
+The Valkey swap is one-way: once Valkey rewrites the AOF or RDB, the data needs Valkey to load.
 
 ## Where the env file lives
 

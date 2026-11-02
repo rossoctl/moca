@@ -1298,6 +1298,7 @@ while IFS='|' read -r mock expected; do
     fail "the replacement must report '$expected' as the difference: $out"
 done <<'CASES'
 MOCK_REDIS_IMAGE=docker.io/redis:6-alpine|image is 'docker.io/redis:6-alpine'
+MOCK_REDIS_IMAGE=docker.io/library/redis:7-alpine|image is 'docker.io/library/redis:7-alpine'
 MOCK_REDIS_PORT=0.0.0.0:6379->6379/tcp|published port is
 MOCK_REDIS_VOLUME=redis-data|/data volume is 'redis-data'
 MOCK_REDIS_CMD=[podman run -d --name sh-redis --restart=always -p 127.0.0.1:6379:6379 -v moca-redis:/data docker.io/valkey/valkey:9-alpine]|without --appendonly yes
