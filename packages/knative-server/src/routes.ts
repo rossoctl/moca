@@ -140,6 +140,14 @@ export const ROUTES: RouteSpec[] = [
     summary: 'Create a workload and its Context; returns a one-time upload grant',
   },
   {
+    method: 'GET',
+    path: '/workloads',
+    operationId: 'listWorkloads',
+    auth: 'subject',
+    surface: 'internal',
+    summary: "List the caller's own live workloads, newest first (paged by ?limit and ?cursor)",
+  },
+  {
     method: 'POST',
     path: '/workloads/{id}/uploads',
     operationId: 'createWorkloadUpload',

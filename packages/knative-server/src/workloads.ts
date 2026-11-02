@@ -96,6 +96,12 @@ interface WorkloadRecord {
   status: WorkloadStatus;
   contextType: string;
   workspace: ContextStorage;
+  /**
+   * Unix milliseconds at reservation, and the owner index's score (#552). Optional only because a
+   * record written before this field existed has none; `publicView` omits `createdAt` for those
+   * rather than inventing one, and they are absent from the index for the same reason.
+   */
+  createdAt?: number;
   revision?: string;
   sandboxes?: WorkloadSandboxes;
   /** Why the last provisioning attempt failed; cleared when one succeeds. */
@@ -128,6 +134,17 @@ export function workloadsEnabled(): boolean {
 const recordScope = ownerScopeFor;
 const recordKey = workloadRecordKey;
 const quotaKey = (owner: string) => `sh:wl-quota:${recordScope(owner)}`;
+/**
+ * The owner's index of live workload names, scored by creation time (#552). A listing reads this
+ * rather than scanning the keyspace, which the isolation spec §13 forbids for a caller-facing path
+ * (rossoctl/moca#361): a scan is O(keyspace), blocks the data-plane Redis, and has no owner concept.
+ * Scoped per owner like the record key, so one owner's listing can never reach another's workload.
+ *
+ * It is written only by the two scripts that own the quota counter, in the same atomic step, so
+ * membership here and a consumed quota unit are the same fact. That is what makes the listing able
+ * to name the workload holding a slot the owner cannot otherwise find (rossoctl/moca#601).
+ */
+const indexKey = (owner: string) => `sh:wl-index:${recordScope(owner)}`;
 let cacheSecret: string | Buffer | undefined;
 
 /**
@@ -153,17 +170,26 @@ function positiveIntEnv(name: string, fallback: number): number {
 }
 
 // Claim the name and one unit of the owner's quota. Any record that is not `deleted` keeps both.
+// The index entry is added here and removed only on the transition to `deleted`, so it is held for
+// exactly as long as the quota unit is (#552). ZADD, not SADD: the score is the creation time, which
+// is what lets a listing page by it.
 const RESERVE = `
 local current = redis.call('GET', KEYS[1])
 if current and cjson.decode(current).status ~= 'deleted' then return 'duplicate' end
 if tonumber(redis.call('GET', KEYS[2]) or '0') >= tonumber(ARGV[2]) then return 'quota' end
 redis.call('SET', KEYS[1], ARGV[1])
 redis.call('INCR', KEYS[2])
+redis.call('ZADD', KEYS[3], tonumber(ARGV[3]), ARGV[4])
 return 'ok'`;
 
 // Compare-and-set on (generation, status). Only the request whose transition to `deleted` lands
 // releases the quota unit, so it is released exactly once. A deleted record expires after
 // ARGV[5] seconds; until then GET reports it as deleted.
+//
+// The index entry is dropped in that same branch, beside the DECR: a `deleted` record holds no quota
+// unit, so it must not be listed as live even while GET still reports it (#552). Every other status
+// keeps its entry, `deleting` included -- that one still holds its unit, and a delete stuck there is
+// exactly what an owner needs the listing to show (#601).
 const TRANSITION = `
 local current = redis.call('GET', KEYS[1])
 if not current then return 0 end
@@ -172,6 +198,7 @@ if decoded.generation ~= ARGV[1] or decoded.status ~= ARGV[2] then return 0 end
 if ARGV[4] == '1' then
   redis.call('SET', KEYS[1], ARGV[3], 'EX', tonumber(ARGV[5]))
   if tonumber(redis.call('GET', KEYS[2]) or '0') > 0 then redis.call('DECR', KEYS[2]) end
+  redis.call('ZREM', KEYS[3], ARGV[6])
 else
   redis.call('SET', KEYS[1], ARGV[3])
 end
@@ -183,17 +210,49 @@ async function transition(
   to: WorkloadRecord,
 ): Promise<boolean> {
   const changed = await store.eval(TRANSITION, {
-    keys: [recordKey(from.owner, from.name), quotaKey(from.owner)],
+    keys: [recordKey(from.owner, from.name), quotaKey(from.owner), indexKey(from.owner)],
     arguments: [
       from.generation,
       from.status,
       JSON.stringify(to),
       to.status === 'deleted' ? '1' : '0',
       String(positiveIntEnv('MOCA_WORKLOAD_DELETED_TTL_SECONDS', 24 * 60 * 60)),
+      from.name,
     ],
   });
   return Number(changed) === 1;
 }
+
+/**
+ * One page of the owner's index, newest first, with each name's record read in the same step (#552).
+ * One script rather than a ZRANGE and then N GETs, so a listing cannot interleave with a delete and
+ * report a name whose record it then fails to read.
+ *
+ * A member whose record is gone is skipped rather than returned as a hole. That window is real: the
+ * record key carries the deleted-record TTL while the index entry does not, so a process that dies
+ * between the SET and the ZREM leaves a member behind. The listing only reads -- it never writes --
+ * so such a member stays until the owner's next delete of that name clears it.
+ *
+ * The cursor is the score of the last member CONSIDERED, not of the last record found. Taking it
+ * from the last surviving record would leave the skipped members between them above the next page's
+ * exclusive bound, so every page would re-visit them forever; a page of nothing but skipped members
+ * would also report no cursor and truncate the walk while more pages existed. The same trap, and the
+ * same fix, as `listByOwner` in @moca/control-plane (ownership.ts).
+ */
+const LIST = `
+local names = redis.call('ZRANGE', KEYS[1], ARGV[1], '-inf',
+  'BYSCORE', 'REV', 'LIMIT', 0, tonumber(ARGV[2]))
+local found = {}
+for _, name in ipairs(names) do
+  -- The record key is built here from a prefix the caller derived from the same owner, so a name in
+  -- this index can only ever name a record in the same owner's scope. Both keys are declared, but
+  -- they are in different hash slots regardless, as RESERVE's already are: not cluster-safe, which
+  -- every deployment's single Valkey makes moot.
+  local raw = redis.call('GET', KEYS[2] .. name)
+  if raw then found[#found + 1] = raw end
+end
+local tail = names[#names]
+return { found, #names, tail and redis.call('ZSCORE', KEYS[1], tail) or false }`;
 
 async function findWorkload(
   store: WorkloadStore,
@@ -211,6 +270,9 @@ function publicView(record: WorkloadRecord, ready?: number) {
     workloadId: record.name,
     status: record.status,
     contextType: record.contextType,
+    // Omitted, not zeroed, on a record written before the field existed: a listing should show
+    // "unknown" rather than claim the workload was created at the epoch.
+    ...(record.createdAt ? { createdAt: new Date(record.createdAt).toISOString() } : {}),
     // A mounted workload's size and class are its own PVC's.
     workspace: mount
       ? {
@@ -456,11 +518,13 @@ async function createWorkload(
   const sandboxes = spec && claim ? { ...spec, mount: mount as WorkloadMount, claim } : spec;
 
   const generation = randomUUID();
+  const createdAt = Date.now();
   const reserved: WorkloadRecord = {
     name,
     owner,
     generation,
     contextName: contextNameFor(owner, name, generation),
+    createdAt,
     status: 'creating',
     contextType,
     workspace: storage,
@@ -468,10 +532,12 @@ async function createWorkload(
   };
   const reservation = String(
     await store.eval(RESERVE, {
-      keys: [recordKey(owner, name), quotaKey(owner)],
+      keys: [recordKey(owner, name), quotaKey(owner), indexKey(owner)],
       arguments: [
         JSON.stringify(reserved),
         String(positiveIntEnv('MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER', 5)),
+        String(createdAt),
+        name,
       ],
     }),
   );
@@ -785,10 +851,10 @@ export async function resolveWorkloadRun(
   };
 }
 
-type Route = 'create' | 'get' | 'delete' | 'uploads' | 'activate';
+type Route = 'create' | 'list' | 'get' | 'delete' | 'uploads' | 'activate';
 
 function routeFor(method: string | undefined, id?: string, action?: string): Route | null {
-  if (!id) return method === 'POST' ? 'create' : null;
+  if (!id) return method === 'POST' ? 'create' : method === 'GET' ? 'list' : null;
   if (action) return method === 'POST' ? (action as Route) : null;
   if (method === 'GET') return 'get';
   if (method === 'DELETE') return 'delete';
@@ -837,6 +903,16 @@ export async function handleWorkloads(
   }
   const store = deps.store();
   if (route === 'create') return createWorkload(body, owner, store, res);
+  // `path` has the query stripped, so the listing's paging reads it from the request, as the
+  // run-status and attach routes do.
+  if (route === 'list') {
+    return listWorkloads(
+      owner,
+      store,
+      new URL(req.url ?? '', 'http://localhost').searchParams,
+      res,
+    );
+  }
 
   let name: string;
   try {
@@ -899,4 +975,50 @@ async function getWorkload(
   } catch (err) {
     sendFailure(res, 'get', err);
   }
+}
+
+/** A listing's page size: the default, and the most a caller may ask for. */
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 200;
+
+/** `limit` and `cursor` as the query gives them; anything unusable falls back rather than erroring. */
+function pageOf(query: URLSearchParams): { limit: number; cursor?: number } {
+  const limit = Number.parseInt(query.get('limit') ?? '', 10);
+  const cursor = Number.parseInt(query.get('cursor') ?? '', 10);
+  return {
+    limit:
+      Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE,
+    ...(Number.isSafeInteger(cursor) && cursor >= 0 ? { cursor } : {}),
+  };
+}
+
+/**
+ * The caller's own live workloads, newest first (#552). Read-only: unlike `GET /workloads/{name}` it
+ * never settles a `provisioning` record, because a listing of N should not make N provisioner calls
+ * and a `ready` count that lags by one `get` is the lesser cost. So a row's `sandboxes.ready` is
+ * what the record last recorded; `get` is the way to settle one.
+ *
+ * Only the owner's own index is read, so this cannot enumerate another user's workloads -- the
+ * per-user property of this document's "Names are per user". A `deleted` record is absent even while
+ * `GET` still reports it, because it no longer holds a quota unit.
+ */
+async function listWorkloads(
+  owner: string,
+  store: WorkloadStore,
+  query: URLSearchParams,
+  res: ServerResponse,
+): Promise<void> {
+  const { limit, cursor } = pageOf(query);
+  // `(score` is Redis's EXCLUSIVE bound: the cursor is the last score already returned, so an
+  // inclusive one would repeat that row forever on a one-per-page walk.
+  const max = cursor === undefined ? '+inf' : `(${cursor}`;
+  const raw = (await store.eval(LIST, {
+    keys: [indexKey(owner), `${recordKey(owner, '')}`],
+    arguments: [max, String(limit)],
+  })) as [string[], number, string | null];
+  const [records, considered, tail] = raw;
+  const workloads = records.map((row) => publicView(JSON.parse(row) as WorkloadRecord));
+  // Only a full page can have more behind it, so the last page costs no cursor at all.
+  const nextCursor = Number(considered) === limit && tail ? Number(tail) : null;
+  send(res, 200, { workloads, ...(nextCursor === null ? {} : { nextCursor }) });
 }

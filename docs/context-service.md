@@ -24,13 +24,15 @@ Context Service:
    it.
 4. **Run:** a synchronous `POST /runs` with a `workloadId` runs the prompt on a shared sandbox with
    the workload's frozen revision available read-only, or as a writable copy for that run.
-5. **Delete:** `DELETE /workloads/{id}` deletes the Context, then the workload.
+5. **Delete:** `DELETE /workloads/{id}` deletes the Context, then the workload. `GET /workloads`
+   lists the caller's own live workloads at any point, so one can be found without its id.
 
 `mocactl` is the client for this flow
 ([#495](https://github.com/rossoctl/moca/issues/495), one CLI for delegating subagent tasks;
 [#517](https://github.com/rossoctl/moca/issues/517), seed sandbox files before a leaf runs):
 `mocactl workloads create --context FILE` does steps 1 to 3, `mocactl spawn --kind prompt --workload ID`
-step 4, and `mocactl workloads delete ID` step 5. It does not build the context file:
+step 4, and `mocactl workloads delete ID` step 5; `mocactl workloads list` shows what you own.
+It does not build the context file:
 `contextctl ctx pack <dir> -o FILE` does, which packs the directory's files under the bundle's
 `workspace/` directory. `pack` needs a Context Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles), on the server as well as
 the client. See "Delegate with context" in
@@ -50,6 +52,7 @@ token is `401 token_invalid`.
 | `POST /workloads`                                | `201` workload plus `upload` grant | `400`, `409 workload_name_taken`, `429 workload_quota_exceeded` |
 | `POST /workloads/{name}/uploads`                 | `201` a fresh grant                | `404`, `409 workload_not_awaiting_upload`                       |
 | `POST /workloads/{name}/activate` `{"revision"}` | `200` workload, status `ready`     | `400 revision_invalid`, `404`, `409`                            |
+| `GET /workloads`                                 | `200` the caller's own workloads   | —                                                               |
 | `GET /workloads/{name}`                          | `200` workload                     | `404`                                                           |
 | `DELETE /workloads/{name}`                       | `204`                              | `404 workload_already_deleted`, `404`, `409`                    |
 
@@ -78,6 +81,24 @@ unknown again and the answer reverts to `workload_not_found`. Another user's wor
 at all, so it stays `workload_not_found` (see "Names are per user" below); a `deleting` record is an
 unfinished delete, not a finished one, so it retries as before. `mocactl workloads delete` treats
 `workload_already_deleted` as success (exit 0), the way `kubectl delete` does.
+
+`GET /workloads` lists the caller's own live workloads, newest first, as
+`{"workloads": [...], "nextCursor"?: number}` — the same workload view as `GET /workloads/{name}`,
+plus `createdAt`. It exists so a workload can be found without already holding its name
+([#552](https://github.com/rossoctl/moca/issues/552)): a client that crashes between the create and
+whatever persists the returned name otherwise leaves a workload that holds a quota unit and cannot
+be named to delete it, which matters most when Moca generated the name
+([#601](https://github.com/rossoctl/moca/issues/601)). `?limit` (50 by default, 200 at most) and
+`?cursor` page it; an unusable value falls back rather than erroring, and `nextCursor` is absent on
+the last page. The listing is read-only in a stronger sense than `GET /workloads/{name}`: it never
+settles a `provisioning` record, so listing N workloads makes no provisioner calls and a row's
+`sandboxes.ready` is what the record last stored — `GET /workloads/{name}` is what settles one.
+
+A `deleting` workload is listed, because it still holds its quota unit and is exactly what the
+owner needs to see to retry the delete. A `deleted` one is not, even though `GET /workloads/{name}`
+still reports it for its TTL, because it holds no unit. Membership of the listing and consumption
+of a quota unit are written by the same compare-and-set, so the two cannot drift: anything counted
+against the quota can be found.
 
 A workload record moves through a fixed state machine — `creating` → `awaiting_upload` → `ready` →
 `deleting` → `deleted`, with no other transitions — and every record write is a compare-and-set on
@@ -344,6 +365,10 @@ Each user has their own names: two users can each own `demo`. Another user's wor
 indistinguishable from a missing one (`404 workload_not_found`, never `409`). This is the first half
 of [rossoctl/moca#358](https://github.com/rossoctl/moca/issues/358) (per-user PVC authorization).
 
+`GET /workloads` keeps that property: it reads the caller's own owner-scoped index, so it cannot
+show, or even count, another user's workloads. There is no route that lists anyone else's and no
+administrative listing.
+
 The Context's name in Context Service is derived from the owner, the workload name and that
 reservation, so it is unique per user and per re-creation and does not reveal the owner. Moca never
 returns it, nor the Context's identity. Context Service records the user (`user:<subject>`) as the
@@ -423,4 +448,19 @@ no StatefulSet left (`kubectl -n moca-sandbox get statefulset <wl>` answers `Not
 kubectl -n moca-sandbox get secret \
   -l app=moca-workload-sandbox,app.kubernetes.io/managed-by=moca-provisioner -L moca.dev/workload
 kubectl -n moca-sandbox delete secret <wl>-attach
+```
+
+A workload created before [#552](https://github.com/rossoctl/moca/issues/552) (`GET /workloads`) is
+not in its owner's index, so `GET /workloads` and `mocactl workloads list` do not show it, and it
+has no `createdAt`. It is otherwise unaffected: `GET /workloads/{name}` still reads it and `DELETE`
+still deletes it and frees its quota unit. There is no backfill, because the index is keyed by the
+owner's hash and the records cannot be enumerated per owner — which is the same no-keyspace-scan
+rule the listing itself obeys. These workloads age out: each holds its quota unit until it is
+deleted, and once deleted the quota is released and the name is reusable. To reach them, delete by
+name, or let `MOCA_WORKLOAD_DELETED_TTL_SECONDS` expire the records of ones already deleted. An
+operator with Redis access can list the pre-#552 records directly:
+
+```bash
+# Administrative only: a keyspace scan, which no caller-facing route is allowed to do.
+redis-cli --scan --pattern 'sh:wl:*'
 ```

@@ -794,15 +794,17 @@ describe('workloads and spawn --workload', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('routes workloads create, get and delete; --context and --name only on create', async () => {
+  it('routes workloads create, list, get and delete; --context and --name only on create', async () => {
     const mod = await import('../src/workloads.js');
     const create = vi.fn(async (..._a: unknown[]) => 0);
     const get = vi.fn(async (..._a: unknown[]) => 0);
     const del = vi.fn(async (..._a: unknown[]) => 0);
+    const list = vi.fn(async (..._a: unknown[]) => 0);
     const spies = [
       vi.spyOn(mod, 'cmdWorkloadCreate').mockImplementation(create),
       vi.spyOn(mod, 'cmdWorkloadGet').mockImplementation(get),
       vi.spyOn(mod, 'cmdWorkloadDelete').mockImplementation(del),
+      vi.spyOn(mod, 'cmdWorkloadList').mockImplementation(list),
     ];
     onTestFinished(() => spies.forEach((s) => s.mockRestore()));
     const run = (argv: string[], o = io()) => main(argv, {}, o, { buildRuntime: fakeBuild });
@@ -819,6 +821,9 @@ describe('workloads and spawn --workload', () => {
     expect(get.mock.calls[0][2]).toMatchObject({ id: 'demo', json: true });
     expect(await run(['workloads', 'delete', 'demo'])).toBe(0);
     expect(del.mock.calls[0][2]).toMatchObject({ id: 'demo', json: false });
+    // `list` takes no id, so it never reaches the id-required branch the others share (#552).
+    expect(await run(['workloads', 'list', '--json'])).toBe(0);
+    expect(list.mock.calls[0][2]).toMatchObject({ json: true });
 
     expect(
       await run([
@@ -848,10 +853,11 @@ describe('workloads and spawn --workload', () => {
     const noContext = io();
     expect(await run(['workloads', 'create'], noContext)).toBe(2);
     expect(noContext.errs.join('\n')).toContain('needs --context FILE');
-    const noList = io();
-    expect(await run(['workloads'], noList)).toBe(2);
-    expect(noList.errs.join('\n')).toContain('there is no list');
-    expect(await run(['workloads', 'list'])).toBe(2);
+    const noSub = io();
+    expect(await run(['workloads'], noSub)).toBe(2);
+    expect(noSub.errs.join('\n')).toContain('needs create, list, get or delete');
+    // An id on the listing is a mistake, not a filter.
+    expect(await run(['workloads', 'list', 'demo'])).toBe(2);
     expect(await run(['workloads', 'get'])).toBe(2);
     expect(await run(['workloads', 'delete', 'a', 'b'])).toBe(2);
     expect(await run(['workloads', 'get', 'demo', '--context', 'x'])).toBe(2);
@@ -859,7 +865,9 @@ describe('workloads and spawn --workload', () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(get).toHaveBeenCalledTimes(1);
     expect(del).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
     expect(USAGE).toContain('mocactl workloads create --context FILE');
+    expect(USAGE).toContain('mocactl workloads list');
     expect(USAGE).toContain('--workload ID');
   });
 });

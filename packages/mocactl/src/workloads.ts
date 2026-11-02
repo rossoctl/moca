@@ -1,7 +1,7 @@
 /**
- * `mocactl workloads create | get | delete`: a workload carries a context (built elsewhere, e.g.
- * with `contextctl ctx pack`) that `mocactl spawn --workload` runs prompts on. The harness has no
- * route that lists workloads, so there is no list command.
+ * `mocactl workloads create | list | get | delete`: a workload carries a context (built elsewhere,
+ * e.g. with `contextctl ctx pack`) that `mocactl spawn --workload` runs prompts on. `list` shows
+ * only the caller's own, from the harness's owner-scoped index (#552).
  */
 import { randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
@@ -21,6 +21,7 @@ import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { ready, type Io } from './headless.js';
 import { ensureRuntimeAuth, type Runtime } from './runtime.js';
+import { formatRelative } from './views/format.js';
 
 /** A grant this close to its expiry is replaced before the upload starts. */
 const GRANT_EXPIRY_MARGIN_MS = 10_000;
@@ -353,6 +354,89 @@ export async function cmdWorkloadGet(rt: Runtime, io: Io, opts: IdOptions): Prom
       .join('\n') + '\n',
   );
   return 0;
+}
+
+/**
+ * `mocactl workloads list`: every live workload the caller owns, newest first (#552).
+ *
+ * This exists so a workload can be found without already holding its id. A client that crashes
+ * between `create` and whatever persists the returned id otherwise leaves a workload that counts
+ * against the quota and cannot be named to delete it (#601) — the harness generates the id when
+ * the caller does not supply one, so it is genuinely unrecoverable without a listing.
+ *
+ * Only the caller's own workloads: the route reads the caller's owner-scoped index, so this cannot
+ * show (or even count) anyone else's, which is the privacy property #358 settled.
+ *
+ * `sandboxes` ready counts can lag here. The listing is read-only and does not settle a
+ * `provisioning` workload, so that N rows cost no provisioner calls; `workloads get` settles one.
+ */
+export async function cmdWorkloadList(rt: Runtime, io: Io, opts: WorkloadOptions): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  const client = opts.client ?? clientFor(rt);
+  let workloads: Workload[];
+  try {
+    workloads = await client.list(opts.signal);
+  } catch (err) {
+    if (aborted(opts.signal)) return 130;
+    io.err(describeWorkloadError(err));
+    return 1;
+  }
+  if (opts.json) {
+    io.out(
+      JSON.stringify({
+        workloads: workloads.map((w) => ({
+          workloadId: w.workloadId,
+          status: w.status,
+          contextType: w.contextType ?? null,
+          workspace: w.workspace ?? null,
+          createdAt: w.createdAt ?? null,
+          revision: w.revision ?? null,
+          sandboxes: w.sandboxes ?? null,
+          ...(w.error ? { error: w.error } : {}),
+        })),
+      }) + '\n',
+    );
+    return 0;
+  }
+  // A plain-text empty listing says so on stderr and prints no table, so `| wc -l` on a piped
+  // listing counts workloads rather than a header. --json still emits its empty array.
+  if (workloads.length === 0) {
+    io.err('no workloads');
+    return 0;
+  }
+  const rows = [
+    ['WORKLOAD', 'STATUS', 'TYPE', 'SIZE', 'SANDBOXES', 'CREATED', 'REVISION'],
+    ...workloads.map((w) =>
+      [
+        w.workloadId,
+        w.status,
+        w.contextType ?? '-',
+        w.workspace?.size ?? '-',
+        w.sandboxes ? `${w.sandboxes.ready ?? 0}/${w.sandboxes.count}` : '-',
+        age(w.createdAt, rt.now()),
+        w.revision ? w.revision.slice(0, 12) : '-',
+      ].map(sanitizeRemote),
+    ),
+  ];
+  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+  io.out(
+    rows
+      .map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join('  '))
+      .join('\n') + '\n',
+  );
+  return 0;
+}
+
+/**
+ * The CREATED cell, relative like the Sessions view's rows. `-` covers both a workload created
+ * before the harness recorded the field and a value it cannot parse, because in either case the
+ * honest answer is that the age is unknown rather than the epoch.
+ */
+function age(createdAt: string | undefined, nowMs: number): string {
+  if (!createdAt) return '-';
+  const ms = Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return '-';
+  return formatRelative(ms, nowMs);
 }
 
 export async function cmdWorkloadDelete(rt: Runtime, io: Io, opts: IdOptions): Promise<number> {

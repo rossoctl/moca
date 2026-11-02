@@ -110,6 +110,7 @@ mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it 
 ```bash
 mocactl workloads create --context FILE [--name NAME] [--json]  # upload a context; prints its id
 mocactl workloads create --context FILE --sandboxes N [--mount read-only|writable]  # with sandboxes of its own
+mocactl workloads list [--json]             # your own live workloads, newest first
 mocactl workloads get ID [--json]           # status, context type, size and frozen revision
 mocactl workloads delete ID [--json]        # delete the workload and its context (idempotent)
 ```
@@ -222,8 +223,29 @@ anything fails after the workload exists, `create` deletes it again, so it does 
 your quota (5 live workloads by default), and exits `1`. `--name` is a lowercase Kubernetes name of
 at most 50 characters; without one `create` generates one (`wl-` and 8 hex) before it sends the
 request, so if the reply is lost (Ctrl-C, a dropped connection) it can still name the workload to
-delete. The harness has no route that lists workloads, so there is no `mocactl workloads` listing:
-keep the id `create` prints.
+delete.
+
+`workloads list` shows what you own, newest first, when you no longer have the id `create` printed
+(`GET /workloads`, [#552](https://github.com/rossoctl/moca/issues/552)). It is the way out of a
+workload holding a quota unit under a name nothing recorded:
+
+```bash
+mocactl workloads list
+# WORKLOAD      STATUS           TYPE       SIZE  SANDBOXES  CREATED  REVISION
+# wl-3f9c1a04   ready            workspace  1Gi   -          4m ago   8c1d0e4a2b77
+# demo          awaiting_upload  workspace  1Gi   -          2h ago   -
+mocactl workloads delete wl-3f9c1a04
+```
+
+Your own workloads only: there is no route that lists another user's, and none that lists everyone's.
+A `deleting` workload is listed, because it still holds its quota unit and a repeated `delete` is
+how to clear it; a `deleted` one is not, though `workloads get` still reads it for a day. The
+listing never settles a `provisioning` workload, so `SANDBOXES` can lag — `workloads get ID` is
+what settles one. `CREATED` is `-` for a workload created before the harness recorded the field;
+those are also absent from the listing (see "Upgrading" in
+[`docs/context-service.md`](../../docs/context-service.md)). With no workloads at all, it says
+`no workloads` on stderr and prints no table, so `mocactl workloads list | wc -l` counts workloads;
+`--json` prints `{"workloads": []}`.
 
 `--sandboxes N` gives the workload N sandboxes of its own instead of the operator's shared pool
 (phase 2, [#476](https://github.com/rossoctl/moca/issues/476); "Own sandboxes" in
@@ -260,19 +282,20 @@ empty list. Without `--json` a listing is an aligned table with a header row, ma
 Times are UTC. With `--json` stdout is one JSON document and one line; `run` and `doctor` keep
 their own shapes. These shapes are stable: fields may be added, but none is renamed or removed.
 
-| Command              | `--json` on stdout                                                                                 |
-| -------------------- | -------------------------------------------------------------------------------------------------- |
-| `sessions`           | `{"sessions":[{"sessionId","title","state","createdAt","lastTurnAt"}]}`                            |
-| `sessions delete`    | `{"sessionId","status"}`, `status` being `deleted`, or `accepted` while the control plane finishes |
-| `credentials`        | `{"credentials":[{"name","kind","consumer","hosts","endpoint"}]}`                                  |
-| `credentials add`    | `{"name","status":"stored"}`                                                                       |
-| `credentials delete` | `{"name","status":"deleted"}`                                                                      |
-| `spawn`              | `{"type":"session","sessionId","pid"}`                                                             |
-| `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`    |
-| `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                 |
-| `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes","sandboxes"?,"mount"?}`           |
-| `workloads get`      | `{"workloadId","status","contextType","workspace","revision","sandboxes","error"?}`, `null` unset  |
-| `workloads delete`   | `{"workloadId","status":"deleted","alreadyDeleted"?}`                                              |
+| Command              | `--json` on stdout                                                                                                                                  |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessions`           | `{"sessions":[{"sessionId","title","state","createdAt","lastTurnAt"}]}`                                                                             |
+| `sessions delete`    | `{"sessionId","status"}`, `status` being `deleted`, or `accepted` while the control plane finishes                                                  |
+| `credentials`        | `{"credentials":[{"name","kind","consumer","hosts","endpoint"}]}`                                                                                   |
+| `credentials add`    | `{"name","status":"stored"}`                                                                                                                        |
+| `credentials delete` | `{"name","status":"deleted"}`                                                                                                                       |
+| `spawn`              | `{"type":"session","sessionId","pid"}`                                                                                                              |
+| `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`                                                     |
+| `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                                                                  |
+| `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes","sandboxes"?,"mount"?}`                                                            |
+| `workloads list`     | `{"workloads":[{"workloadId","status","contextType","workspace","createdAt","revision","sandboxes","error"?}]}`, `null` unset, `createdAt` ISO 8601 |
+| `workloads get`      | `{"workloadId","status","contextType","workspace","revision","sandboxes","error"?}`, `null` unset                                                   |
+| `workloads delete`   | `{"workloadId","status":"deleted","alreadyDeleted"?}`                                                                                               |
 
 `createdAt` and `lastTurnAt` are epoch milliseconds as the control plane sends them (`lastTurnAt`
 is `null` before the first turn); `endpoint` is `null` when the deployment default applies.

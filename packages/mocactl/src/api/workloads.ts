@@ -15,6 +15,12 @@ export const CONTEXT_MEDIA_TYPE = 'application/vnd.rossoctl.context';
 export const WORKLOAD_ID = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/;
 export const MAX_WORKLOAD_ID_LENGTH = 50;
 const REVISION = /^[a-f0-9]{64}$/;
+/**
+ * How many pages `list` will follow before giving up (#552). The per-owner quota is 5 by default
+ * and the route's page is 50, so one page is the normal case and this is only a guard against a
+ * cursor that never advances.
+ */
+const MAX_LIST_PAGES = 20;
 
 export function validWorkloadId(id: string): boolean {
   return id.length <= MAX_WORKLOAD_ID_LENGTH && WORKLOAD_ID.test(id);
@@ -39,6 +45,8 @@ export interface Workload {
   status: string;
   contextType?: string;
   workspace?: { size?: string; storageClass?: string; mount?: string };
+  /** ISO 8601. Absent on a workload created before the harness recorded it. */
+  createdAt?: string;
   revision?: string;
   /** Phase 2: the workload's own sandboxes; `ready` of `count` are attached. */
   sandboxes?: { count: number; tier?: string; ready?: number };
@@ -132,6 +140,31 @@ export class WorkloadsClient {
     return asWorkload(
       await this.request('GET', `/workloads/${encodeURIComponent(id)}`, undefined, signal),
     );
+  }
+
+  /**
+   * GET /workloads: every live workload of the caller's, newest first (#552). The route pages, and
+   * this follows the cursor to the end, because the quota is small (5 by default) and a user asking
+   * "what do I own?" wants the answer and not a page of it.
+   *
+   * MAX_LIST_PAGES bounds that walk. A server that returned the same cursor forever would otherwise
+   * hang the command; this stops and returns what it has, which is a listing that is short rather
+   * than one that never arrives.
+   */
+  async list(signal?: AbortSignal): Promise<Workload[]> {
+    const workloads: Workload[] = [];
+    let cursor: number | undefined;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const query = cursor === undefined ? '' : `?cursor=${cursor}`;
+      const body = await this.request('GET', `/workloads${query}`, undefined, signal);
+      const rows = (body as { workloads?: unknown } | null)?.workloads;
+      if (!Array.isArray(rows)) throw invalid('workload list');
+      workloads.push(...rows.map(asWorkload));
+      const next = (body as { nextCursor?: unknown }).nextCursor;
+      if (typeof next !== 'number') return workloads;
+      cursor = next;
+    }
+    return workloads;
   }
 
   /** DELETE /workloads/{id}: 204. */
@@ -241,6 +274,7 @@ function asWorkload(body: unknown): Workload {
     status: b.status,
     ...(typeof b.contextType === 'string' ? { contextType: b.contextType } : {}),
     ...(b.workspace && typeof b.workspace === 'object' ? { workspace: b.workspace } : {}),
+    ...(typeof b.createdAt === 'string' ? { createdAt: b.createdAt } : {}),
     ...(typeof b.revision === 'string' ? { revision: b.revision } : {}),
     ...(b.sandboxes && typeof b.sandboxes === 'object' && typeof b.sandboxes.count === 'number'
       ? { sandboxes: b.sandboxes }

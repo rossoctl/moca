@@ -23,7 +23,12 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { sbxMain } from './sbx/cli.js';
 import { cmdGet, cmdSpawn, cmdSubagents, MAX_PROMPT_BYTES, runSpawnWorker } from './subagent.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
-import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from './workloads.js';
+import {
+  cmdWorkloadCreate,
+  cmdWorkloadDelete,
+  cmdWorkloadGet,
+  cmdWorkloadList,
+} from './workloads.js';
 import { VERSION } from './version.js';
 
 export const USAGE = `usage:
@@ -69,6 +74,7 @@ export const USAGE = `usage:
                                                  new workload; prints its id (--sandboxes: N
                                                  sandboxes of its own; --mount: its context on
                                                  their own volume, no per-run copy)
+  mocactl workloads list [--json]                your own live workloads, newest first
   mocactl workloads get ID [--json]
   mocactl workloads delete ID [--json]           delete a workload and its context
 flags for every command: --control-plane-url URL
@@ -466,9 +472,13 @@ export async function main(
     case 'workloads': {
       const [sub, id, ...extra] = rest;
       if (sub === undefined) {
-        // The harness has no route that lists workloads.
-        io.err(`mocactl workloads needs create, get or delete (there is no list)\n${USAGE}`);
+        io.err(`mocactl workloads needs create, list, get or delete\n${USAGE}`);
         return 2;
+      }
+      if (sub === 'list') {
+        // Takes no id: the point of the listing is to find one (#552).
+        if (id !== undefined) return usage(io);
+        return cmdWorkloadList(rt, io, { json, signal });
       }
       if (sub === 'create') {
         if (id !== undefined) return usage(io);
