@@ -709,4 +709,74 @@ describe('workloads delete', () => {
     expect(await cmdWorkloadDelete(rt, raced, { id: 'demo', json: false })).toBe(1);
     expect(raced.stderr.join('\n')).toContain('409 workload_state_changed');
   });
+
+  // #602: deleting an already-deleted workload satisfies the operator's intent, so it succeeds
+  // (as `kubectl delete` does) instead of failing indistinguishably from a mistyped id.
+  describe('an already-deleted workload (#602)', () => {
+    const alreadyDeleted = () => json({ error: 'workload_already_deleted' }, 404);
+
+    it('exits 0 and says it was already deleted', async () => {
+      const { fetch } = scriptedFetch(alreadyDeleted());
+      const o = io();
+      expect(
+        await cmdWorkloadDelete(testRuntime({ fetchImpl: fetch }), o, { id: 'demo', json: false }),
+      ).toBe(0);
+      expect(o.stderr.join('\n')).toContain('workload demo was already deleted');
+      // Not the "or it is not yours" sentence: that one is for a name nothing is known about.
+      expect(o.stderr.join('\n')).not.toContain('not yours');
+    });
+
+    // So `workloads delete ID --json | jq` reads the same either way and a cleanup script needs no
+    // special case; `alreadyDeleted` tells the two apart for anyone who does care.
+    it('prints the same --json shape as a delete that did the work, plus alreadyDeleted', async () => {
+      const { fetch } = scriptedFetch(alreadyDeleted());
+      const o = io();
+      expect(
+        await cmdWorkloadDelete(testRuntime({ fetchImpl: fetch }), o, { id: 'demo', json: true }),
+      ).toBe(0);
+      expect(JSON.parse(o.stdout)).toEqual({
+        workloadId: 'demo',
+        status: 'deleted',
+        alreadyDeleted: true,
+      });
+    });
+
+    it('omits alreadyDeleted when the delete did the work', async () => {
+      const { fetch } = scriptedFetch(new Response(null, { status: 204 }));
+      const o = io();
+      expect(
+        await cmdWorkloadDelete(testRuntime({ fetchImpl: fetch }), o, { id: 'demo', json: true }),
+      ).toBe(0);
+      expect(JSON.parse(o.stdout)).not.toHaveProperty('alreadyDeleted');
+    });
+
+    // Only this one code is idempotent. A 404 for a name the harness knows nothing about stays an
+    // error -- that is the mistyped-id case the issue wants kept distinct, and it prints no JSON.
+    it('still exits 1 for workload_not_found, printing no JSON', async () => {
+      const { fetch } = scriptedFetch(json({ error: 'workload_not_found' }, 404));
+      const o = io();
+      expect(
+        await cmdWorkloadDelete(testRuntime({ fetchImpl: fetch }), o, { id: 'demo', json: true }),
+      ).toBe(1);
+      expect(o.stdout).toBe('');
+    });
+
+    // An id that could carry an escape sequence never reaches the new message: `checkId` rejects
+    // anything outside WORKLOAD_ID first, before a request is even made. That is the guarantee
+    // worth pinning -- asserting on the sanitized message instead passes even unsanitized, because
+    // no such id can get that far (it let a no-sanitize mutant survive).
+    it('rejects a crafted id before any request, so the message never sees one', async () => {
+      const { fetch, calls } = scriptedFetch(alreadyDeleted());
+      const o = io();
+      expect(
+        await cmdWorkloadDelete(testRuntime({ fetchImpl: fetch }), o, {
+          id: 'wl-\u001b[31m00',
+          json: true,
+        }),
+      ).toBe(2);
+      expect(calls).toHaveLength(0);
+      expect(o.stdout).toBe('');
+      expect(o.stderr.join('\n')).not.toMatch(/\u001b/);
+    });
+  });
 });

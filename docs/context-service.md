@@ -51,7 +51,7 @@ token is `401 token_invalid`.
 | `POST /workloads/{name}/uploads`                 | `201` a fresh grant                | `404`, `409 workload_not_awaiting_upload`                       |
 | `POST /workloads/{name}/activate` `{"revision"}` | `200` workload, status `ready`     | `400 revision_invalid`, `404`, `409`                            |
 | `GET /workloads/{name}`                          | `200` workload                     | `404`                                                           |
-| `DELETE /workloads/{name}`                       | `204`                              | `404`, `409`                                                    |
+| `DELETE /workloads/{name}`                       | `204`                              | `404 workload_already_deleted`, `404`, `409`                    |
 
 `POST /workloads` takes `name` (a lowercase Kubernetes name of at most 50 characters; generated if
 omitted), `contextType` (`workspace`, the default, `state`, `memory`, `knowledge` or `artifacts`)
@@ -67,6 +67,17 @@ same revision is a no-op.
 
 `DELETE` deletes the Context, then marks the workload `deleted` and frees its name and quota. If
 Context Service fails, the workload stays `deleting` and a repeated `DELETE` retries.
+
+Deleting an already-`deleted` workload answers `404 workload_already_deleted` rather than
+`404 workload_not_found`, so a repeated delete is distinguishable from one that names a workload
+nothing is known about ([#602](https://github.com/rossoctl/moca/issues/602)). It changes nothing: no
+Context Service call is made and no quota unit is freed a second time. The caller's own record is
+what says so, which `GET` already reports as `deleted` for `MOCA_WORKLOAD_DELETED_TTL_SECONDS`, so
+the code reveals nothing `GET` does not — and once that record expires, the name is genuinely
+unknown again and the answer reverts to `workload_not_found`. Another user's workload is never read
+at all, so it stays `workload_not_found` (see "Names are per user" below); a `deleting` record is an
+unfinished delete, not a finished one, so it retries as before. `mocactl workloads delete` treats
+`workload_already_deleted` as success (exit 0), the way `kubectl delete` does.
 
 A workload record moves through a fixed state machine — `creating` → `awaiting_upload` → `ready` →
 `deleting` → `deleted`, with no other transitions — and every record write is a compare-and-set on

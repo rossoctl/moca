@@ -703,8 +703,14 @@ async function deleteWorkload(
   userToken: string,
   res: ServerResponse,
 ): Promise<void> {
-  if (!record || record.status === 'deleted')
-    return send(res, 404, { error: 'workload_not_found' });
+  if (!record) return send(res, 404, { error: 'workload_not_found' });
+  // A record the caller owns, already deleted: say so rather than answering as for a name nothing
+  // is known about, so a repeated delete reads as "already handled" and not "wrong id" (#602).
+  // This is the owner's own record, which `GET` already reports as `deleted` for a day
+  // (MOCA_WORKLOAD_DELETED_TTL_SECONDS), so it reveals nothing GET does not. Another user's
+  // workload is not read at all and stays `workload_not_found` -- the per-user privacy property of
+  // docs/context-service.md ("Names are per user"). Still 404: there is no live workload to delete.
+  if (record.status === 'deleted') return send(res, 404, { error: 'workload_already_deleted' });
   try {
     // A `deleting` record is a delete (or a create rollback) that failed midway: retry it.
     const deleting: WorkloadRecord = { ...record, status: 'deleting' };
