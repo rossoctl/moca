@@ -278,18 +278,30 @@ bob mcp list                     # expect: sandbox: mocactl sbx mcp | enabled | 
 
 # 4. run it, from the repository root, NAMING the sandbox tools (see below).
 #    Check `mocactl sbx templates` carries your language before asking for a build or test run.
-bob run "Using the sandbox bash and edit tools, add a doc comment to each exported function in <a package>"
+bob chat
+#    then, in the session, something whose result you can check:
+#    "Using the sandbox bash and write tools, add a CHANGES.md at the top of /workspace
+#     listing the five files changed most recently, newest first."
 
 # 5. bring the work back
 mocactl sbx pull --apply
 ```
 
+Prefer `bob chat` for the first run: `bob run` is headless, so a task Bob wants to ask about ends
+with the question unanswered and nothing written. Give it work whose output you can verify — a file
+that was not there before is the clearest signal the round trip worked. Asking it to "fix what
+fails" or to tidy something already tidy can legitimately produce no change, and `pull` then says
+`nothing to pull`, which looks like a broken round trip but is not one.
+
 **Name the sandbox tools in the prompt.** This is the one thing to get right, and it is not
 optional politeness: with the server connected and working, Bob will still reach for its own local
 tools for an ordinary request, and run on your laptop instead of in the sandbox. Saying
-"using the sandbox bash tool", or naming `edit`/`read`, routes it correctly. Saying "do not use any
-local tool" does **not**: that instruction is ignored. See the warning below for why `up` cannot
+"using the sandbox bash tool", or naming another of them, routes it correctly. Saying "do not use
+any local tool" does **not**: that instruction is ignored. See the warning below for why `up` cannot
 enforce this.
+
+The server's tools are `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and `sandbox_info`.
+Name the one the job needs — `write` creates a file, `edit` only changes one that already exists.
 
 If step 3 shows no `sandbox` server, run `mocactl sbx up` again — it merges the entry into Bob's
 config. If Bob cannot start the server, check that `mocactl` is on the `PATH` Bob inherits, since
