@@ -80,6 +80,7 @@ mocactl doctor [--json]                     # seven checks, one fix per failure;
 mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] [--json]
 mocactl promote DIR [--dry-run] [--json]    # upload DIR's .claude/skills and .claude/commands
 mocactl run "prompt" --config DIGEST        # start the new session with that config bundle
+mocactl run "prompt" --show-tools           # print each tool call between the turn's text
 mocactl bundles delete DIGEST [--json]      # delete a bundle you promoted; frees your budget
 ```
 
@@ -146,6 +147,11 @@ verdict. A session that has not finished yet exits `1` with a hint; a `failed` b
 with the status, reason, and detail on stderr.
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
+
+By default it prints the assistant's text only. `--show-tools` adds each tool call the turn makes,
+on its own line between the text, formatted as the TUI formats it (`$ ls /tmp`, `read src/a.ts`),
+and marks a tool call that failed; a successful call's output is not printed. It is refused with
+`--json`, which already streams the `tool_use` and `tool_result` frames themselves.
 
 `mocactl promote` prints what it built and the preflight report (warnings on stderr) BEFORE
 uploading, then the bundle digest to pass to `run --config`. `--dry-run` builds and prints without

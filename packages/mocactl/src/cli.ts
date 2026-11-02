@@ -39,6 +39,8 @@ export const USAGE = `usage:
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
+  mocactl run "prompt" --show-tools              print each tool call the turn makes, between its
+                                                 text (not with --json, which streams the frames)
   mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
                                                  (--dry-run: build and report, upload nothing)
   mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
@@ -137,6 +139,7 @@ export async function main(
         new: { type: 'boolean' },
         option: { type: 'string', multiple: true },
         json: { type: 'boolean' },
+        'show-tools': { type: 'boolean' },
         kind: { type: 'string' },
         consumer: { type: 'string' },
         host: { type: 'string', multiple: true },
@@ -309,6 +312,15 @@ export async function main(
         io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${USAGE}`);
         return 2;
       }
+      // Refused rather than ignored: --json already emits every tool_use and tool_result frame, so
+      // --show-tools asks for nothing it does not have, and silently dropping a flag in a script is
+      // worse than saying so (#419).
+      if (values['show-tools'] === true && json) {
+        io.err(
+          `--show-tools is redundant with --json, which already streams tool frames\n${USAGE}`,
+        );
+        return 2;
+      }
       let options: Record<string, string>;
       try {
         options = parseOptionFlags(values.option ?? []);
@@ -323,6 +335,7 @@ export async function main(
         json,
         signal: deps.signal,
         configRef: values.config,
+        showTools: values['show-tools'] === true,
       });
     }
     case 'promote': {
