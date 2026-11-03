@@ -2,6 +2,7 @@ import { ApiError, TOKEN_CODES, errorFromResponse, networkError } from './errors
 import { trimTrailingSlashes } from './url.js';
 import type {
   ApiLogin,
+  ConfigBundleSummary,
   ControlPlaneApi,
   CreateSessionRequest,
   CreatedSession,
@@ -178,6 +179,10 @@ export class ControlPlaneClient implements ControlPlaneApi {
     tar: string;
   }): Promise<{ digest: string; uploaded: boolean }> {
     return this.json('POST', '/v1/config-bundles', { body: req });
+  }
+
+  listConfigBundles(): Promise<{ bundles: ConfigBundleSummary[] }> {
+    return this.json('GET', '/v1/config-bundles');
   }
 
   async deleteConfigBundle(digest: string): Promise<void> {

@@ -174,7 +174,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Sessions       | `POST` and `GET /v1/sessions`, `GET`, `PATCH` and `DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/resources`, `POST /v1/sessions/{id}/token`     |
 | Models         | `GET /v1/models?credential=` (the models a credential's endpoint lists), `GET /v1/sessions/{id}/models` (the models the session's credential lists) |
 | Credentials    | `GET /v1/credentials`, `PUT` and `DELETE /v1/credentials/{name}`                                                                                    |
-| Config bundles | `POST /v1/config-bundles`, `DELETE /v1/config-bundles/{digest}`                                                                                     |
+| Config bundles | `POST` and `GET /v1/config-bundles` (your own, newest first), `DELETE /v1/config-bundles/{digest}`                                                  |
 | Internal       | `POST /internal/credentials`: data plane only, authenticated with `SH_EXCHANGE_TOKEN`                                                               |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`

@@ -150,6 +150,13 @@ export function fakeBundleRedis(): BundleRedisLike &
         .sort((a, b) => a[1] - b[1])
         .map(([v]) => v);
     },
+    async zRangeWithScores(key, min, max, opts) {
+      if (opts?.BY !== 'SCORE') throw new Error('this fake only serves BY SCORE');
+      return [...z(key)]
+        .filter(([, score]) => inRange(score, min, max))
+        .sort((a, b) => a[1] - b[1])
+        .map(([value, score]) => ({ value, score }));
+    },
     async zRem(key, member) {
       z(key).delete(member);
       return 1;

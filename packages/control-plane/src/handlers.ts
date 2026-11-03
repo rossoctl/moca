@@ -11,6 +11,7 @@ import {
   admitBundle,
   bundleOwnerHash,
   dropBundleEntry,
+  listBundlesByOwner,
   MIN_BUNDLE_CHARGE_BYTES,
   recordBundle,
   refreshBundle,
@@ -962,6 +963,27 @@ export const HANDLERS: Record<string, Handler> = {
         });
       }
       throw err;
+    }
+  },
+
+  /**
+   * The caller's own live bundles, newest first (rossoctl/moca#559). Without it a digest lost between
+   * `promote` returning and whatever wrote it down was an orphan holding budget for its whole TTL,
+   * findable only by an admin's keyspace scan.
+   *
+   * No `withBundleLock`: this writes nothing, and a listing that races a concurrent upload may simply
+   * miss or include that one digest. Taking the lock would queue every listing behind every upload.
+   */
+  listConfigBundles: async (ctx, deps) => {
+    const p = requirePrincipal(ctx);
+    try {
+      return {
+        status: 200,
+        body: { bundles: await listBundlesByOwner(deps.bundles, p.sub, deps.now()) },
+      };
+    } catch (err) {
+      console.error(`[control-plane] listConfigBundles: ${(err as Error)?.message ?? String(err)}`);
+      throw new CpError('redis_unavailable', 'redis is not answering');
     }
   },
 

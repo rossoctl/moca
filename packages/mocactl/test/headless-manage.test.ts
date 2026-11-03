@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/errors.js';
-import type { PutCredentialRequest, SessionSummary } from '../src/api/types.js';
+import type {
+  ConfigBundleSummary,
+  PutCredentialRequest,
+  SessionSummary,
+} from '../src/api/types.js';
 import {
   cmdBundleDelete,
+  cmdBundleList,
   cmdCredentialAdd,
   cmdCredentialDelete,
   cmdCredentials,
@@ -470,6 +475,135 @@ describe('cmdCredentialDelete', () => {
     expect(deleteCredential).not.toHaveBeenCalled();
     expect(o.stdout).toBe('');
     expect(o.stderr).toContain('no credential named anthropc');
+  });
+});
+
+describe('cmdBundleList', () => {
+  const digestA = 'sha256:' + 'a'.repeat(64);
+  const digestB = 'sha256:' + 'b'.repeat(64);
+
+  function bundle(digest: string, over: Partial<ConfigBundleSummary> = {}): ConfigBundleSummary {
+    return {
+      digest,
+      bytes: 4096,
+      promotedAt: Date.UTC(2026, 8, 30, 9, 15),
+      expiresAt: Date.UTC(2026, 9, 30, 9, 15),
+      ...over,
+    };
+  }
+
+  it('prints a table in the order the server sent, with the full digest', async () => {
+    const listConfigBundles = vi.fn(async () => ({
+      bundles: [bundle(digestA, { bytes: 12_345 }), bundle(digestB)],
+    }));
+    const rt = testRuntime({ cp: fakeControlPlane({ listConfigBundles }) });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: false })).toBe(0);
+    const lines = o.stdout.trimEnd().split('\n');
+    expect(lines[0]).toMatch(/^DIGEST\s+BYTES\s+PROMOTED \(UTC\)\s+EXPIRES \(UTC\)$/);
+    // Full digest, not truncated: `bundles delete` takes exactly this string (#559).
+    expect(lines[1]).toMatch(
+      new RegExp(`^${digestA}\\s+12345\\s+2026-09-30 09:15\\s+2026-10-30 09:15$`),
+    );
+    expect(lines[2]).toContain(digestB);
+  });
+
+  it('prints - for a bundle stored before the server recorded a promotion time', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listConfigBundles: async () => ({ bundles: [bundle(digestA, { promotedAt: null })] }),
+      }),
+    });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: false })).toBe(0);
+    expect(o.stdout.trimEnd().split('\n')[1]).toMatch(
+      new RegExp(`^${digestA}\\s+4096\\s+-\\s+2026-10-30 09:15$`),
+    );
+  });
+
+  it('prints the documented --json shape', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listConfigBundles: async () => ({ bundles: [bundle(digestA, { promotedAt: null })] }),
+      }),
+    });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: true })).toBe(0);
+    expect(JSON.parse(o.stdout)).toEqual({
+      bundles: [
+        {
+          digest: digestA,
+          bytes: 4096,
+          promotedAt: null,
+          expiresAt: Date.UTC(2026, 9, 30, 9, 15),
+        },
+      ],
+    });
+  });
+
+  it('writes an empty listing to stderr only, so a piped count reads 0', async () => {
+    const rt = testRuntime({ cp: fakeControlPlane({}) });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: false })).toBe(0);
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('')).toContain('no config bundles');
+  });
+
+  it('prints an empty array for --json with no bundles, not a message', async () => {
+    const rt = testRuntime({ cp: fakeControlPlane({}) });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: true })).toBe(0);
+    expect(JSON.parse(o.stdout)).toEqual({ bundles: [] });
+    expect(o.stderr).toEqual([]);
+  });
+
+  it('strips control characters a hostile digest could carry', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listConfigBundles: async () => ({
+          bundles: [bundle('sha256:\u001b]52;c;aGk=\u0007' + 'c'.repeat(64))],
+        }),
+      }),
+    });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: false })).toBe(0);
+    // The escape never reaches the terminal; the rest of the digest still does.
+    expect(o.stdout).not.toContain('\u001b');
+    expect(o.stdout).toContain('c'.repeat(64));
+  });
+
+  it('exits 1 when the control plane refuses the listing', async () => {
+    const rt = testRuntime({
+      cp: fakeControlPlane({
+        listConfigBundles: async () => {
+          throw new ApiError('control-plane', 503, 'redis_unavailable', 'redis is not answering');
+        },
+      }),
+    });
+    const o = io();
+    expect(await cmdBundleList(rt, o, { json: false })).toBe(1);
+    expect(o.stdout).toBe('');
+    // The CLI says what the user can do about it, not what broke inside the control plane.
+    expect(o.stderr.join('')).toContain('control plane is unavailable');
+  });
+
+  it('exits 2 when not logged in, without calling the control plane', async () => {
+    const listConfigBundles = vi.fn(async () => ({ bundles: [] }));
+    const o = io();
+    expect(await cmdBundleList(testRuntime(loggedOut), o, { json: false })).toBe(2);
+    expect(listConfigBundles).not.toHaveBeenCalled();
+  });
+
+  it('exits 130 when interrupted while waiting on the control plane', async () => {
+    const ac = new AbortController();
+    const rt = testRuntime({
+      cp: fakeControlPlane({ listConfigBundles: () => new Promise(() => {}) }),
+    });
+    const o = io();
+    const pending = cmdBundleList(rt, o, { json: false, signal: ac.signal });
+    ac.abort();
+    expect(await pending).toBe(130);
+    expect(o.stdout).toBe('');
   });
 });
 

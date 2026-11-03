@@ -1008,6 +1008,45 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/config-bundles:
+    get:
+      operationId: listConfigBundles
+      summary: My config bundles, newest first
+      description: |
+        Read from the caller's own budget index, so it needs no keyspace scan and shows no other
+        subject's bundles. Unpaged: the per-subject byte budget bounds how many a caller can hold.
+
+        `bytes` is what the bundle is CHARGED — its stored (gzip) size, floored at 4096 — not the
+        size of the tar that was uploaded. `promotedAt` is null for a bundle recorded before the
+        server stored one, and a bundle stored without a budget entry (ADR-0030 `/promote`, which
+        writes Redis directly) does not appear at all.
+
+        A charge can outlive its stored bundle, since expired charges are reaped lazily on the next
+        upload. Such an entry is still listed: it holds budget, and `DELETE` accepts it.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: every live bundle charged to the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundles]
+                properties:
+                  bundles:
+                    type: array
+                    items:
+                      type: object
+                      required: [digest, bytes, promotedAt, expiresAt]
+                      properties:
+                        digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                        bytes:
+                          type: integer
+                          description: the charged bytes, not the uploaded tar's size
+                        promotedAt:
+                          type: [integer, 'null']
+                          description: epoch ms the bundle was first stored; null for a legacy entry
+                        expiresAt: { type: integer, description: epoch ms the charge ages out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       operationId: putConfigBundle
       summary: Upload a client-built config bundle (ADR-0038)

@@ -277,15 +277,31 @@ describe('main', () => {
     expect(USAGE).toContain('mocactl promote DIR [--dry-run] [--json]');
   });
 
-  it('bundles delete needs exactly one digest, and bundles has no other subcommand', async () => {
+  it('bundles delete needs exactly one digest, and bundles has no third subcommand', async () => {
     expect(await main(['bundles', 'delete'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
     expect(await main(['bundles', 'delete', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(
       2,
     );
     const o = io();
-    expect(await main(['bundles', 'list'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
-    expect(o.errs.join('')).toContain('unknown bundles command "list"');
+    expect(await main(['bundles', 'promote'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('')).toContain('unknown bundles command "promote"');
     expect(USAGE).toContain('mocactl bundles delete DIGEST [--json]');
+  });
+
+  it('routes bundles list to the listing, and refuses a digest with it (#559)', async () => {
+    const listConfigBundles = vi.fn(async () => ({ bundles: [] }));
+    const build = () => testRuntime({ cp: fakeControlPlane({ listConfigBundles }) });
+    const o = io();
+    expect(await main(['bundles', 'list'], {}, o, { buildRuntime: build })).toBe(0);
+    expect(listConfigBundles).toHaveBeenCalledOnce();
+    expect(o.errs.join('')).toContain('no config bundles');
+    // The listing is how you FIND a digest, so taking one would be nonsense.
+    const d = io();
+    expect(
+      await main(['bundles', 'list', 'sha256:' + 'a'.repeat(64)], {}, d, { buildRuntime: build }),
+    ).toBe(2);
+    expect(listConfigBundles).toHaveBeenCalledOnce();
+    expect(USAGE).toContain('mocactl bundles list [--json]');
   });
 
   it('promote needs exactly one directory', async () => {

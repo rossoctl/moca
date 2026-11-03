@@ -81,6 +81,7 @@ mocactl run "prompt" [--session ID | --new] [--option inferenceCredential=NAME] 
 mocactl promote DIR [--dry-run] [--json]    # upload DIR's .claude/skills and .claude/commands
 mocactl run "prompt" --config DIGEST        # start the new session with that config bundle
 mocactl run "prompt" --show-tools           # print each tool call between the turn's text
+mocactl bundles list [--json]               # your own live bundles, newest first; prints the full digest
 mocactl bundles delete DIGEST [--json]      # delete a bundle you promoted; frees your budget
 ```
 
@@ -170,6 +171,12 @@ bundle is fixed when it is created, so
 `--config` cannot be combined with `--session`.
 
 Stored bundles count against a per-account and a deployment-wide byte budget (`429` when full).
+`mocactl bundles list` prints the bundles you own — digest, the bytes each is charged, when it was
+promoted and when it expires — newest first, so a digest you lost after `promote` is still
+recoverable instead of holding your budget until it expires. It prints the digest in full because
+that is what `delete` takes. `BYTES` is the charge, not the size of your directory: a small bundle
+is still charged a 4 KiB minimum. A bundle promoted by the harness's own `promote` tool writes
+Redis directly, keeps no budget entry, and so does not appear.
 `mocactl bundles delete DIGEST` deletes a bundle you promoted and frees its share; an admin may
 delete anyone's. Sessions created on it then fail their next turn as for an expired bundle.
 `mocactl promote DIR --dry-run` prints a directory's digest without uploading. Rollout order: upgrade the harness before the
