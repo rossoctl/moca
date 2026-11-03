@@ -1136,7 +1136,15 @@ export function writeAgentConfig(
   }
 
   const writes: { t: Target; body: string }[] = [];
+  // Once per real file, as the Markdown loop above: Bob's two filenames hold the same entry, so a
+  // developer keeping them in step with a link (`ln -s settings.json .bob/mcp.json`) leaves two
+  // Docs over one file. Both merge the same key into the same bytes and so agree, but considering
+  // it twice would name it twice in what `up` prints and write it a second time for nothing.
+  // Seen, not "already in writes": the first of the pair may be skipped as unchanged below.
+  const seenDocs = new Set<string>();
   for (const d of [mcp, settings, oc, bob, bobMcp]) {
+    if (seenDocs.has(d.abs)) continue;
+    seenDocs.add(d.abs);
     const body = finalText(d);
     if (d.exists && body === d.original) continue;
     if (!d.exists && !recs.some((r) => r.file === d.rel)) continue;
