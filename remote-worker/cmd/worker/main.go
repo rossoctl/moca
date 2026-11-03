@@ -90,9 +90,11 @@ func capabilities() []string {
 // a fallback, since a misread idle can delete a waiting session's work.
 func workspaceRunner(get func(string) string) (*wexec.WorkspaceRunner, error) {
 	w := &wexec.WorkspaceRunner{
-		Root:  wexec.DefaultWorkspaceRoot,
-		Idle:  wexec.DefaultWorkspaceIdle,
-		Inner: wexec.BashRunner{},
+		Root: wexec.DefaultWorkspaceRoot,
+		Idle: wexec.DefaultWorkspaceIdle,
+		// SH_EXEC_TIMING=1: one `exec-timing` log line per Exec (wall time, CPU), for
+		// benchmarks that break a turn's time down by tool call. Off unless set to exactly 1.
+		Inner: wexec.BashRunner{Timing: get("SH_EXEC_TIMING") == "1"},
 	}
 	if v := get("SH_WORKSPACE_ROOT"); v != "" {
 		if !filepath.IsAbs(v) {

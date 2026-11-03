@@ -235,6 +235,14 @@ type Phases struct {
 	VMResume  time.Duration // PATCH /vm {state: Resumed} -- Firecracker un-pauses the vcpus
 	VsockDial time.Duration // host-initiated vsock dial + "CONNECT <port>" handshake
 	Mount     time.Duration // guest round trip running the /workspace mount
+
+	// The VM's CPU over this Exec: its cgroup's cpu.stat read once the VM is acquired and once
+	// just before it is destroyed, so a pooled cgroup's earlier tenants are subtracted out. Set
+	// only by a VM implementing cpuReporter (diag.go); CPUMeasured false means "not measured",
+	// never "used no CPU". It covers resume through run: the standby's restore happened before
+	// the acquire and is not this Exec's.
+	CPUUser, CPUSys time.Duration
+	CPUMeasured     bool
 }
 
 // ExecPhased is Exec with instrumentation. Exec delegates to it with a throwaway
@@ -294,10 +302,20 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	if ph != nil {
 		ph.VMID = vmID(vm)
 	}
+	cpu, cpuOK := vm.(cpuReporter)
+	var u0, s0 time.Duration
+	if ph != nil && cpuOK {
+		u0, s0, cpuOK = cpu.CgroupCPU()
+	}
 	// One identical teardown for abort, timeout and success (spec §4.1). Named rather
 	// than written inline as a defer because the gate below has one path that must run
 	// it before any defer of its own is registered.
 	destroy := func() {
+		if ph != nil && cpuOK {
+			if u1, s1, ok := cpu.CgroupCPU(); ok {
+				ph.CPUUser, ph.CPUSys, ph.CPUMeasured = u1-u0, s1-s0, true
+			}
+		}
 		t0 := p.clk.Now()
 		p.destroy(key, vm)
 		if ph != nil {

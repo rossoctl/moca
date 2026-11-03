@@ -132,6 +132,25 @@ func TestWorkspaceRunnerConfig(t *testing.T) {
 	}
 }
 
+// SH_EXEC_TIMING turns the per-Exec timing line on only for exactly "1", like the
+// microVM worker's SH_DIAG_PHASES: a benchmark knob, never on by accident.
+func TestWorkspaceRunnerExecTiming(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "0": false, "true": false, "1": true} {
+		w, err := workspaceRunner(func(k string) string {
+			if k == "SH_EXEC_TIMING" {
+				return v
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("SH_EXEC_TIMING=%q: %v", v, err)
+		}
+		if got := w.Inner.(wexec.BashRunner).Timing; got != want {
+			t.Errorf("SH_EXEC_TIMING=%q: Timing=%v, want %v", v, got, want)
+		}
+	}
+}
+
 func TestSweepIntervalIsBounded(t *testing.T) {
 	for idle, want := range map[time.Duration]time.Duration{
 		30 * time.Minute: time.Minute,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
@@ -15,7 +16,13 @@ import (
 // destroy" needs no new SandboxTransport and owes no new entry in the shared
 // conformance battery. Everything session owns — Hello, heartbeats, the dispatch
 // pool, req_id dedup, frame emission, the Abort wiring — is reused untouched.
-type Runner struct{ Pool Pool }
+type Runner struct {
+	Pool Pool
+	// Timing logs one `exec-timing` line per Exec (diag.go logExecTiming): the container
+	// worker's per-Exec line, plus the VM phases and the VM's CPU. cmd/microvm-worker sets it
+	// from SH_EXEC_TIMING=1; off by default.
+	Timing bool
+}
 
 // execLog is the per-Exec audit line: which workspace (the session id) and which VM. Always on --
 // it is the evidence that a session's commands ran in microVMs (#369) -- and deliberately without
@@ -27,6 +34,7 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 	// nothing extra and makes the relayed path report the same decomposition vmpoolctl
 	// already gets. Without it the worker's hot path was unmeasurable (see diag.go).
 	var ph Phases
+	start := time.Now()
 	res, err := r.Pool.ExecPhased(ctx, s.WorkspaceKey, Exec{
 		ReqID:     s.ReqID,
 		Command:   s.Command,
@@ -35,6 +43,9 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		Streaming: s.Streaming,
 	}, &sinkAdapter{sink: sink}, &ph)
 	logPhases(&ph)
+	if r.Timing {
+		logExecTiming(s.ReqID, s.WorkspaceKey, start, time.Since(start), &ph, res.ExitCode, err)
+	}
 	execLog("vmpool: exec req=%d workspace_key=%q vm=%s cold=%q exit=%d err=%v",
 		s.ReqID, s.WorkspaceKey, ph.VMID, string(ph.Cold), res.ExitCode, err)
 
