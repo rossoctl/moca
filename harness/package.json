@@ -29,7 +29,7 @@
     "promote": "tsx src/promote-cli.ts"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.6",
+    "@grpc/grpc-js": "^1.14.7",
     "@moca/config-bundle": "workspace:*",
     "@moca/session-backend": "workspace:*",
     "@moca/k8s-sandbox": "workspace:*",

@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.16.0",
-    "@grpc/grpc-js": "^1.14.6",
+    "@grpc/grpc-js": "^1.14.7",
     "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "devDependencies": {
