@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { describe, expect, it, onTestFinished } from 'vitest';
 import { uploadUrlProblem } from '../src/api/workloads.js';
 import type { Io } from '../src/headless.js';
-import { cmdWorkloadCreate, cmdWorkloadDelete, cmdWorkloadGet } from '../src/workloads.js';
+import {
+  cmdWorkloadCreate,
+  cmdWorkloadDelete,
+  cmdWorkloadGet,
+  cmdWorkloadList,
+} from '../src/workloads.js';
 import { json, scriptedFetch } from './helpers/fake-fetch.js';
 import { fakeHarness } from './helpers/fakes.js';
 import { testRuntime } from './helpers/runtime.js';
@@ -680,6 +685,135 @@ describe('workloads get', () => {
     expect(o.stdout).toBe('');
     expect(await cmdWorkloadGet(rt, io(), { id: '../etc', json: false })).toBe(2);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('workloads list', () => {
+  // testRuntime's clock is 1e12 ms, so these are a fixed age in its CREATED column.
+  const NOW = 1e12;
+  const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+  it('prints the caller’s workloads newest first, with a relative CREATED column', async () => {
+    const { fetch, calls } = scriptedFetch(
+      json({
+        workloads: [
+          workload('ready', {
+            workloadId: 'newer',
+            revision: REV,
+            createdAt: at(120_000),
+            sandboxes: { count: 2, tier: 'container', ready: 1 },
+          }),
+          workload('awaiting_upload', { workloadId: 'older', createdAt: at(7_200_000) }),
+        ],
+      }),
+    );
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: false })).toBe(0);
+    expect(calls[0]!.method + ' ' + calls[0]!.url).toBe('GET http://h/workloads');
+    expect(calls[0]!.headers.authorization).toBe('Bearer a');
+    const lines = o.stdout.trimEnd().split('\n');
+    expect(lines[0]).toMatch(/^WORKLOAD\s+STATUS\s+TYPE\s+SIZE\s+SANDBOXES\s+CREATED\s+REVISION$/);
+    // The order the harness sent, and a 12-character revision so the row stays readable.
+    expect(lines[1]).toMatch(/^newer\s+ready\s+workspace\s+1Gi\s+1\/2\s+2m ago\s+c{12}$/);
+    expect(lines[2]).toMatch(/^older\s+awaiting_upload\s+workspace\s+1Gi\s+-\s+2h ago\s+-$/);
+    expect(lines).toHaveLength(3);
+  });
+
+  it('prints one JSON document with --json, with nulls for what a workload lacks', async () => {
+    const { fetch } = scriptedFetch(
+      json({ workloads: [{ workloadId: 'bare', status: 'awaiting_upload' }] }),
+    );
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: true })).toBe(0);
+    expect(JSON.parse(o.stdout)).toEqual({
+      workloads: [
+        {
+          workloadId: 'bare',
+          status: 'awaiting_upload',
+          contextType: null,
+          workspace: null,
+          createdAt: null,
+          revision: null,
+          sandboxes: null,
+        },
+      ],
+    });
+  });
+
+  it('says so on stderr for an empty listing, and prints no table', async () => {
+    const { fetch } = scriptedFetch(json({ workloads: [] }));
+    const rt = testRuntime({ fetchImpl: fetch });
+    const o = io();
+    expect(await cmdWorkloadList(rt, o, { json: false })).toBe(0);
+    // No header: a piped listing counts workloads, not a header line.
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('\n')).toContain('no workloads');
+  });
+
+  it('prints an empty array with --json for an empty listing', async () => {
+    const { fetch } = scriptedFetch(json({ workloads: [] }));
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: true })).toBe(0);
+    expect(JSON.parse(o.stdout)).toEqual({ workloads: [] });
+  });
+
+  it('follows the cursor so the listing is every workload, not the first page', async () => {
+    const { fetch, calls } = scriptedFetch(
+      json({
+        workloads: [workload('ready', { workloadId: 'c', createdAt: at(0) })],
+        nextCursor: 300,
+      }),
+      json({
+        workloads: [workload('ready', { workloadId: 'b', createdAt: at(0) })],
+        nextCursor: 200,
+      }),
+      json({ workloads: [workload('ready', { workloadId: 'a', createdAt: at(0) })] }),
+    );
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: true })).toBe(0);
+    expect(calls.map((c) => c.url)).toEqual([
+      'http://h/workloads',
+      'http://h/workloads?cursor=300',
+      'http://h/workloads?cursor=200',
+    ]);
+    expect(
+      (JSON.parse(o.stdout) as { workloads: { workloadId: string }[] }).workloads.map(
+        (w) => w.workloadId,
+      ),
+    ).toEqual(['c', 'b', 'a']);
+  });
+
+  it('shows CREATED as - when the harness recorded no createdAt, or an unparseable one', async () => {
+    const { fetch } = scriptedFetch(
+      json({
+        workloads: [
+          { workloadId: 'legacy', status: 'ready' },
+          { workloadId: 'odd', status: 'ready', createdAt: 'not-a-date' },
+        ],
+      }),
+    );
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: false })).toBe(0);
+    const lines = o.stdout.trimEnd().split('\n');
+    // Unknown, not the epoch: neither row claims to be from 1970.
+    expect(lines[1]).toMatch(/^legacy\s+ready\s+-\s+-\s+-\s+-\s+-$/);
+    expect(lines[2]).toMatch(/^odd\s+ready\s+-\s+-\s+-\s+-\s+-$/);
+  });
+
+  it('exits 1 and prints nothing on a failed listing', async () => {
+    const { fetch } = scriptedFetch(json({ error: 'workloads_unavailable' }, 501));
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: true })).toBe(1);
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('\n')).toContain('workloads are not enabled on this harness');
+  });
+
+  it('exits 1 on a reply whose workloads are not a list', async () => {
+    const { fetch } = scriptedFetch(json({ workloads: 'nope' }));
+    const o = io();
+    expect(await cmdWorkloadList(testRuntime({ fetchImpl: fetch }), o, { json: true })).toBe(1);
+    expect(o.stdout).toBe('');
+    expect(o.stderr.join('\n')).toContain('invalid workload list');
   });
 });
 

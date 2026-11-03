@@ -82,6 +82,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl subagents [--tag T] [--json]`                                                                                            | Lists spawned subagents from the ledger joined with `GET /runs/status`                                                                                                                                                                                                                                                                                                                                                   |
 | `mocactl get SESSIONID [--out DIR] [--json]`                                                                                      | Fetches a terminal result from `GET /runs/status` and writes `<sid>.text` / `<sid>.verdict.json` / `<sid>.patch`                                                                                                                                                                                                                                                                                                         |
 | `mocactl workloads create --context FILE [--name NAME] [--sandboxes N [--mount read-only\|writable]] [--json]`                    | `POST /workloads` (with `sandboxes: {count: N}` and `workspace: {mount}` when given), uploads `FILE` to the returned grant, then `POST /workloads/{id}/activate`, and with `--sandboxes` waits until the workload is `ready`. Prints the workload id                                                                                                                                                                     |
+| `mocactl workloads list [--json]`                                                                                                 | Lists your own live workloads, newest first (`GET /workloads`, following its cursor to the end). See [`workloads list`](#workloads-list)                                                                                                                                                                                                                                                                                 |
 | `mocactl workloads get ID [--json]`                                                                                               | Reads a workload (`GET /workloads/{id}`)                                                                                                                                                                                                                                                                                                                                                                                 |
 | `mocactl workloads delete ID [--json]`                                                                                            | Deletes a workload and its context (`DELETE /workloads/{id}`)                                                                                                                                                                                                                                                                                                                                                            |
 
@@ -97,6 +98,25 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 - Text mode streams the reply to stdout, and reports a `workspace_reset` to stderr.
 - `--json` emits NDJSON: a first line `{"type":"session","sessionId":...}`, then one raw
   [turn frame](http-api.md#streaming-frames) per line.
+
+### `workloads list`
+
+Your own live workloads, newest first; nobody else's, and there is no route that lists another
+user's ([#552](https://github.com/rossoctl/moca/issues/552)). Takes no id: finding one without
+already holding its id is the point, so `workloads list ID` exits 2.
+
+- A table of `WORKLOAD STATUS TYPE SIZE SANDBOXES CREATED REVISION`. `CREATED` is relative
+  (`4m ago`), `REVISION` is the first 12 characters, and `-` means unset — `CREATED` is `-` for a
+  workload created before the harness recorded the field, which is also absent from the listing
+  (see "Upgrading" in [`../context-service.md`](../context-service.md)).
+- `--json` prints one document, `{"workloads": [...]}`, with `null` for what a workload lacks and
+  `createdAt` in ISO 8601.
+- With no workloads it says `no workloads` on stderr and prints no table, so
+  `mocactl workloads list | wc -l` counts workloads; `--json` prints `{"workloads": []}`.
+- A `deleting` workload is listed, because it still holds a quota unit; a `deleted` one is not,
+  though `workloads get` still reads it for a day.
+- `SANDBOXES` can lag: the listing never settles a `provisioning` workload (so listing N makes no
+  provisioner calls). `workloads get ID` settles one.
 
 ### `credentials add`
 

@@ -175,12 +175,12 @@ class FakeContextService {
 }
 
 const redis = createClient({ url: REDIS_URL });
+const scopeOf = (owner: string) => createHash('sha256').update(owner).digest('hex').slice(0, 32);
 const quotaOf = async (owner: string) =>
-  Number(
-    (await redis.get(
-      `sh:wl-quota:${createHash('sha256').update(owner).digest('hex').slice(0, 32)}`,
-    )) ?? '0',
-  );
+  Number((await redis.get(`sh:wl-quota:${scopeOf(owner)}`)) ?? '0');
+/** The owner's index of live names (#552), oldest first; the listing route reads it newest first. */
+const indexOf = (owner: string) => redis.zRange(`sh:wl-index:${scopeOf(owner)}`, 0, -1);
+const recordKeyOf = (owner: string, name: string) => `sh:wl:${scopeOf(owner)}:${name}`;
 
 let cs: FakeContextService;
 let server: ReturnType<typeof startServer>;
@@ -293,6 +293,7 @@ describe('workload lifecycle', () => {
       status: 'awaiting_upload',
       contextType: 'workspace',
       workspace: { size: '2Gi', storageClass: 'fast' },
+      createdAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
       upload: {
         uploadUrl: expect.stringMatching(
           /^https:\/\/cs\.example\/context\/v1\/uploads\/[0-9a-f]+$/,
@@ -340,6 +341,7 @@ describe('workload lifecycle', () => {
         status: 'ready',
         contextType: 'workspace',
         workspace: { size: '2Gi', storageClass: 'fast' },
+        createdAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
         revision: REVISION,
       },
     });
@@ -538,6 +540,141 @@ describe('names are scoped per owner', () => {
     }
     expect(cs.contexts.size).toBe(1);
     expect(cs.calls.filter((c) => c.subject === `user:${bob}`)).toEqual([]);
+  });
+});
+
+describe('listing a caller’s own workloads (#552)', () => {
+  const list = (owner: string, query = '') =>
+    call('GET', `/workloads${query}`, owner) as Promise<{
+      status: number;
+      body: {
+        workloads: { workloadId: string; status: string; createdAt?: string }[];
+        nextCursor?: number;
+      };
+    }>;
+  const idsOf = async (owner: string, query = '') =>
+    (await list(owner, query)).body.workloads.map((w) => w.workloadId);
+
+  it('lists the caller’s own workloads, newest first, with the fields a user needs', async () => {
+    await create(alice, 'older', { workspace: { size: '2Gi', storageClass: 'fast' } });
+    cs.upload(alice);
+    await call('POST', '/workloads/older/activate', alice, { revision: REVISION });
+    await create(alice, 'newer');
+
+    const listed = await list(alice);
+    expect(listed.status).toBe(200);
+    expect(listed.body.workloads).toEqual([
+      {
+        workloadId: 'newer',
+        status: 'awaiting_upload',
+        contextType: 'workspace',
+        workspace: { size: '1Gi' },
+        createdAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      },
+      {
+        workloadId: 'older',
+        status: 'ready',
+        contextType: 'workspace',
+        workspace: { size: '2Gi', storageClass: 'fast' },
+        createdAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+        revision: REVISION,
+      },
+    ]);
+    // A single page: no cursor to follow, so a client does not page forever.
+    expect(listed.body).not.toHaveProperty('nextCursor');
+    // The Context's own name and identity stay server-side here as they do on create.
+    const [[contextName, context]] = cs.ownedBy(alice);
+    expect(JSON.stringify(listed.body)).not.toContain(contextName!);
+    expect(JSON.stringify(listed.body)).not.toContain(context!.contextId);
+  });
+
+  it('answers an empty list for a caller who owns nothing, and reads no one else’s', async () => {
+    await create(alice, 'mine');
+    expect(await list(bob)).toEqual({ status: 200, body: { workloads: [] } });
+    // The privacy property of "Names are per user": bob cannot even count alice's workloads.
+    expect(JSON.stringify((await list(bob)).body)).not.toContain('mine');
+  });
+
+  it('finds the workload whose generated id the caller never kept (#601)', async () => {
+    // What a client crashing between create and persisting the id leaves behind: a workload
+    // holding a quota unit under a name nobody recorded.
+    const created = await call('POST', '/workloads', alice, {});
+    expect(created.status).toBe(201);
+    const generated = (created.body as { workloadId: string }).workloadId;
+    expect(generated).toMatch(/^wl-[0-9a-f]{8}$/);
+    expect(await quotaOf(alice)).toBe(1);
+
+    expect(await idsOf(alice)).toEqual([generated]);
+    expect((await call('DELETE', `/workloads/${generated}`, alice)).status).toBe(204);
+    expect(await quotaOf(alice)).toBe(0);
+  });
+
+  it('lists a deleting workload, and drops it once deleted', async () => {
+    await create(alice, 'stuck');
+    // A delete Context Service will not complete: the record stays `deleting` and keeps its unit,
+    // which is exactly the state a listing has to show for the owner to retry it.
+    cs.failures.set('delete', 500);
+    expect((await call('DELETE', '/workloads/stuck', alice)).status).toBe(502);
+    expect((await call('GET', '/workloads/stuck', alice)).body).toMatchObject({
+      status: 'deleting',
+    });
+    expect(await quotaOf(alice)).toBe(1);
+    expect(await idsOf(alice)).toEqual(['stuck']);
+
+    cs.failures.delete('delete');
+    expect((await call('DELETE', '/workloads/stuck', alice)).status).toBe(204);
+    // Still readable by name for its TTL, but it holds no quota unit, so it is not in the listing.
+    expect((await call('GET', '/workloads/stuck', alice)).body).toMatchObject({
+      status: 'deleted',
+    });
+    expect(await idsOf(alice)).toEqual([]);
+    expect(await indexOf(alice)).toEqual([]);
+  });
+
+  it('pages newest-first with ?limit and ?cursor, and caps the page size', async () => {
+    for (const name of ['a', 'b', 'c']) await create(alice, name);
+    const first = await list(alice, '?limit=2');
+    expect(first.body.workloads.map((w) => w.workloadId)).toEqual(['c', 'b']);
+    expect(typeof first.body.nextCursor).toBe('number');
+    const second = await list(alice, `?limit=2&cursor=${first.body.nextCursor}`);
+    expect(second.body.workloads.map((w) => w.workloadId)).toEqual(['a']);
+    expect(second.body).not.toHaveProperty('nextCursor');
+    // An unusable limit falls back, and an oversized one is capped, rather than erroring.
+    expect(await idsOf(alice, '?limit=nonsense')).toEqual(['c', 'b', 'a']);
+    expect(await idsOf(alice, '?limit=99999')).toEqual(['c', 'b', 'a']);
+    expect(await idsOf(alice, '?cursor=nonsense')).toEqual(['c', 'b', 'a']);
+  });
+
+  it('keeps walking past a page of records that expired under the index', async () => {
+    // The record and its index entry are separate keys, so a record can vanish (a TTL, a manual
+    // delete) while its name is still indexed. The walk must count the names it considered, not
+    // the records it found, or the cursor stalls and the rest of the listing is lost.
+    for (const name of ['a', 'b', 'c']) await create(alice, name);
+    await redis.del([recordKeyOf(alice, 'c'), recordKeyOf(alice, 'b')]);
+    const first = await list(alice, '?limit=2');
+    expect(first.body.workloads).toEqual([]);
+    expect(typeof first.body.nextCursor).toBe('number');
+    expect(await idsOf(alice, `?limit=2&cursor=${first.body.nextCursor}`)).toEqual(['a']);
+  });
+
+  it('omits createdAt for a record written before the harness recorded it', async () => {
+    await create(alice, 'legacy');
+    const key = recordKeyOf(alice, 'legacy');
+    const record = JSON.parse((await redis.get(key))!) as Record<string, unknown>;
+    delete record.createdAt;
+    await redis.set(key, JSON.stringify(record));
+    const [row] = (await list(alice)).body.workloads;
+    // Omitted rather than zeroed: the age is unknown, not the epoch.
+    expect(row).not.toHaveProperty('createdAt');
+    expect(row).toMatchObject({ workloadId: 'legacy', status: 'awaiting_upload' });
+  });
+
+  it('refuses an anonymous listing, and takes the API token like the other workload routes', async () => {
+    vi.stubEnv('SH_REQUIRE_AUTH', 'false');
+    expect(await call('GET', '/workloads')).toMatchObject({
+      status: 401,
+      body: { error: 'token_required' },
+    });
   });
 });
 
