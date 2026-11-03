@@ -37,6 +37,23 @@ describe('checkSiblingPaths', () => {
     expect(f[0]!.message).toContain('references/missing.md');
   });
 
+  it('says the reference will not be in the bundle, not that it is misplaced (#628)', () => {
+    // The shape the reporter hit: a repo-root `scripts/` beside skills that ship `scripts/*.py`.
+    // `scripts/build.sh` DOES exist in their repo, so "not in its directory" read as a layout
+    // mistake; the true statement is that only the skill's own directory travels, so the
+    // reference will not resolve when the skill runs remotely.
+    const s = skill('detect-missing-figures', 'run `scripts/build.sh` first', [
+      'scripts/detect_figures.py',
+    ]);
+    const f = checkSiblingPaths([s]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.code).toBe('missing_sibling');
+    expect(f[0]!.message).toContain('scripts/build.sh');
+    expect(f[0]!.message).toContain('is not included in the bundle');
+    // The part that answers "but the file is right there": why it is absent.
+    expect(f[0]!.message).toContain("only files under the skill's own directory travel");
+  });
+
   it('treats every ancestor directory as owned, not just the leaf parent', () => {
     // A skill shipping only a nested file still owns the ancestor directory.
     const nested = skill('x', 'see `references/missing.md`', ['references/deep/x.md']);
