@@ -164,6 +164,28 @@ describe('agent configuration (SBX0 §6.3)', () => {
     }
   });
 
+  // #677 review: checking .bob/mcp.json is new, and it is the file `bob mcp add` writes -- which
+  // the guide recommends as the manual fallback. So a repository where the developer ran that by
+  // hand must still get through `up`, not stop with a ConfigConflict. Verified against Bob 2.0.9
+  // in a fresh repository: `bob mcp add sandbox -- mocactl sbx mcp` writes exactly the two keys
+  // below, with no `disabled`/`timeout`/`trust`/`alwaysAllow` field that `isBobServer` would
+  // reject. This pins that shape, so a Bob that starts adding keys fails here rather than in a
+  // developer's repository.
+  it('accepts the entry `bob mcp add` writes by hand, in either file (#677 review)', () => {
+    const byHand = { mcpServers: { sandbox: { command: 'mocactl', args: ['sbx', 'mcp'] } } };
+    for (const f of ['.bob/mcp.json', '.bob/settings.json']) {
+      const d = dir();
+      mkdirSync(join(d, '.bob'), { recursive: true });
+      writeFileSync(join(d, f), JSON.stringify(byHand, null, 2) + '\n');
+      expect(() => writeAgentConfig(d), f).not.toThrow();
+      expect(checkAgentConfig(d), f).toEqual([]);
+      // The developer's file is left as it was; the other one is created alongside it.
+      expect(json(d, f), f).toEqual(byHand);
+      const other = f === '.bob/mcp.json' ? '.bob/settings.json' : '.bob/mcp.json';
+      expect(json(d, other), other).toEqual(byHand);
+    }
+  });
+
   it('holds the spec §6.3 lists verbatim', () => {
     expect(CLAUDE_DENY).toEqual([
       'Bash',
