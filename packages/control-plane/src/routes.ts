@@ -276,6 +276,14 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'putConfigBundle',
   },
   {
+    method: 'GET',
+    path: '/v1/config-bundles',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'listConfigBundles',
+  },
+  {
     method: 'DELETE',
     path: '/v1/config-bundles/{digest}',
     auth: 'api',

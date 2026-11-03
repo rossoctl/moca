@@ -65,6 +65,7 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
     reads: ['digest', 'uploaded'],
     sends: ['digest', 'tar'],
   },
+  { method: 'get', path: '/v1/config-bundles', reads: ['bundles'] },
   { method: 'delete', path: '/v1/config-bundles/{digest}' },
   { method: 'get', path: '/v1/models', reads: ['credential', 'models'] },
   { method: 'get', path: '/v1/sessions/{id}/models', reads: ['credential', 'models'] },
@@ -208,6 +209,7 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
     });
     await cProxy.deleteCredential('NAME');
     await cProxy.putConfigBundle({ digest: 'sha256:x', tar: '' });
+    await cProxy.listConfigBundles();
     await cProxy.deleteConfigBundle('DIGEST');
     await cProxy.listModels('cred');
     await cProxy.listSessionModels('ID');

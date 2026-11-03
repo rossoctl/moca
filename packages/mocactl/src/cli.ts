@@ -5,6 +5,7 @@ import type { CredentialConsumer } from './api/types.js';
 import {
   cmdAuthToken,
   cmdBundleDelete,
+  cmdBundleList,
   cmdCredentialAdd,
   cmdCredentialDelete,
   cmdCredentials,
@@ -43,6 +44,7 @@ export const USAGE = `usage:
                                                  text (not with --json, which streams the frames)
   mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
                                                  (--dry-run: build and report, upload nothing)
+  mocactl bundles list [--json]                  your own stored bundles, newest first
   mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
   mocactl sbx …                                  the sandbox service: login, create, ls, rm, token, env (mocactl sbx --help)
   mocactl sessions [--json]                      list your sessions
@@ -344,6 +346,11 @@ export async function main(
     }
     case 'bundles': {
       const [sub, digest, ...extra] = rest;
+      if (sub === 'list') {
+        // Takes no digest: the point of the listing is to find one (rossoctl/moca#559).
+        if (digest !== undefined) return usage(io);
+        return cmdBundleList(rt, io, { json, signal });
+      }
       if (sub !== 'delete') return sub === undefined ? usage(io) : unknown(io, 'bundles', sub);
       if (digest === undefined || extra.length > 0) return usage(io);
       return cmdBundleDelete(rt, io, { digest, json, signal });

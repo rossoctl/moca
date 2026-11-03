@@ -72,6 +72,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl doctor [--json]`                                                                                                         | Seven ordered checks that stop at the first failure (below). Exit 1 if any fails                                                                                                                                                                                                                                                                                                                                         |
 | `mocactl run "prompt" [--session ID \| --new] [--option k=v ...] [--config DIGEST] [--json]`                                      | Runs a turn. Continues `--session`, or starts a new session (`--new`, the default)                                                                                                                                                                                                                                                                                                                                       |
 | `mocactl promote DIR [--dry-run] [--json]`                                                                                        | Builds a config bundle from `DIR/.claude` and uploads it (`POST /v1/config-bundles`). See [Promoting](../guides/promote-claude-workflow.md)                                                                                                                                                                                                                                                                              |
+| `mocactl bundles list [--json]`                                                                                                   | Lists the bundles you own, newest first (`GET /v1/config-bundles`). See below                                                                                                                                                                                                                                                                                                                                            |
 | `mocactl bundles delete DIGEST [--json]`                                                                                          | Deletes a bundle you promoted (`DELETE /v1/config-bundles/{digest}`). `DIGEST` must be `sha256:` plus 64 hex characters                                                                                                                                                                                                                                                                                                  |
 | `mocactl sessions [--json]`                                                                                                       | Lists every session you own (all pages of `GET /v1/sessions`)                                                                                                                                                                                                                                                                                                                                                            |
 | `mocactl sessions delete ID [--json]`                                                                                             | Deletes a session and its local transcript. `status` is `deleted`, or `accepted` when a turn was in flight                                                                                                                                                                                                                                                                                                               |
@@ -171,6 +172,32 @@ token. There is no list command: the harness has no list route.
     unset; `workspace.mount` on a mounted workload), plus `"error"` while provisioning has failed.
     The table adds `SANDBOXES` (`ready/count`) and `MOUNT` columns.
   - `delete` → `{"workloadId","status":"deleted"}`.
+
+### `bundles list`
+
+Answers "which config bundles do I own?", so a digest lost between `promote` returning and whatever
+stored it is recoverable instead of holding your byte budget until it expires.
+
+- Only your own bundles. Another subject's is indistinguishable from one that does not exist, and an
+  admin sees their own listing like anyone else — this is not an audit command.
+- Takes no `DIGEST` (exit 2 if given): finding one is the point.
+- Newest first, by when it was promoted. A bundle from before the control plane recorded that time
+  prints `-` and sorts last.
+- Columns `DIGEST BYTES PROMOTED (UTC) EXPIRES (UTC)`. The digest is printed in full because
+  `bundles delete` takes exactly that string.
+- `BYTES` is what the bundle is **charged**, not the size of your directory: the compressed upload,
+  or a 4 KiB minimum if it is smaller.
+- `EXPIRES` moves: each session that uses a bundle extends its 30-day life. `PROMOTED` does not.
+- With no bundles, stdout stays empty — the message goes to stderr — so `| wc -l` answers 0.
+  `--json` prints `{"bundles":[]}`.
+- One unpaged response. No cursor: the index is ordered by expiry, which a concurrent use can move,
+  so a cursor could skip or repeat a bundle. Your 16 MiB subject budget bounds the count.
+- A bundle promoted by the harness's own `promote` tool writes storage directly and keeps no budget
+  entry, so it does not appear here (the same population only an admin can delete).
+- A charge whose stored bytes were already reaped is still listed: that charge is exactly what you
+  need `bundles delete` for.
+- `--json` → `{"bundles":[{"digest","bytes","promotedAt","expiresAt"}]}`, epoch milliseconds,
+  `promotedAt` `null` when unrecorded. Exit 1 if the control plane refuses, 2 if not logged in.
 
 ### `promote` exit codes
 

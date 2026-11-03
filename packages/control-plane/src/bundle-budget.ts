@@ -14,6 +14,13 @@ export interface BundleBudgetRedisLike {
     max: number | string,
     opts: { BY: 'SCORE' },
   ): Promise<string[]>;
+  /** The same range, with each member's score: a listing needs the expiry the score already holds. */
+  zRangeWithScores(
+    key: string,
+    min: number | string,
+    max: number | string,
+    opts: { BY: 'SCORE' },
+  ): Promise<{ value: string; score: number }[]>;
   zRemRangeByScore(key: string, min: number | string, max: number | string): Promise<unknown>;
   zRem(key: string, member: string): Promise<unknown>;
   hSet(key: string, values: Record<string, string>): Promise<unknown>;
@@ -26,7 +33,13 @@ export interface BundleBudgetRedisLike {
 
 /**
  * Layout. Each zset member is a digest scored by its expiry (epoch ms), so an entry ages out with
- * the bundle's own TTL; `meta` holds `<storedBytes>:<subjectHash of the first uploader>`.
+ * the bundle's own TTL; `meta` holds
+ * `<storedBytes>:<subjectHash of the first uploader>[:<promotedAt epoch ms>]`.
+ *
+ * `promotedAt` is the third field because the score cannot answer "when did I promote this?": a
+ * refresh or a session's touch pushes the score to now+TTL, so `score - TTL` reads as last-used.
+ * Only `recordBundle` writes it, so a touch cannot move it. Entries written before it existed parse
+ * with `promotedAt: null` (rossoctl/moca#559).
  */
 export const BUNDLES_ALL_KEY = 'sh:cp:bundles:all';
 export const BUNDLES_META_KEY = 'sh:cp:bundles:meta';
@@ -46,11 +59,23 @@ export interface BundleBudgetLimits {
 
 const expiryMs = (nowMs: number): number => nowMs + DEFAULT_BUNDLE_TTL_SECONDS * 1000;
 
-function parseMeta(raw: string | null): { bytes: number; owner: string } | null {
+function parseMeta(
+  raw: string | null,
+): { bytes: number; owner: string; promotedAt: number | null } | null {
   if (raw === null) return null;
   const i = raw.indexOf(':');
   const bytes = Number(raw.slice(0, i));
-  return i > 0 && Number.isFinite(bytes) ? { bytes, owner: raw.slice(i + 1) } : null;
+  if (i <= 0 || !Number.isFinite(bytes)) return null;
+  // The owner hash is fixed-width hex and carries no ':', so the rest splits unambiguously.
+  const rest = raw.slice(i + 1);
+  const j = rest.indexOf(':');
+  if (j < 0) return { bytes, owner: rest, promotedAt: null };
+  const promotedAt = Number(rest.slice(j + 1));
+  return {
+    bytes,
+    owner: rest.slice(0, j),
+    promotedAt: Number.isSafeInteger(promotedAt) && promotedAt > 0 ? promotedAt : null,
+  };
 }
 
 /** The subjectHash a digest is charged to, or null when it has no budget entry. */
@@ -128,10 +153,70 @@ export async function recordBundle(
 ): Promise<void> {
   const hash = subjectHash(subject);
   const score = expiryMs(nowMs);
-  await redis.hSet(BUNDLES_META_KEY, { [digest]: `${bytes}:${hash}` });
+  await redis.hSet(BUNDLES_META_KEY, { [digest]: `${bytes}:${hash}:${nowMs}` });
   await redis.zAdd(BUNDLES_ALL_KEY, { score, value: digest });
   await redis.zAdd(ownerZsetFor(hash), { score, value: digest });
   await redis.expire(ownerZsetFor(hash), DEFAULT_BUNDLE_TTL_SECONDS);
+}
+
+/** One of the caller's live charges, as `listBundlesByOwner` reports it. */
+export interface OwnedBundle {
+  digest: string;
+  /** The charged bytes: the stored (gzip+base64) length, floored at MIN_BUNDLE_CHARGE_BYTES. */
+  bytes: number;
+  /** null for an entry recorded before the meta carried a promotedAt. */
+  promotedAt: number | null;
+  expiresAt: number;
+}
+
+/**
+ * Every live bundle charged to `subject`, newest first (rossoctl/moca#559).
+ *
+ * Reads the subject's own zset, so there is no keyspace scan: a store keyed by digest has no owner
+ * concept, and `KEYS config:bundle:*` is an all-tenant read the isolation spec S13 forbids on a
+ * caller-facing path (rossoctl/moca#361) -- it was the cluster-admin workaround #559 was filed about.
+ *
+ * Unpaged on purpose. This zset is scored by EXPIRY, which a touch moves, so a score cursor could
+ * skip or repeat a digest mid-walk; the sessions index pages safely only because its score is an
+ * immutable promotedAt. N is bounded instead: the subject byte budget over MIN_BUNDLE_CHARGE_BYTES
+ * caps a caller's live entries, and this costs two round trips whatever N is.
+ *
+ * Reports the BUDGET's view, not the keyspace's: an entry is not EXISTS-checked, because a charge
+ * whose key has already gone still holds bytes until the next admit reaps it, and that charge is
+ * exactly what the caller needs the digest of in order to delete it.
+ */
+export async function listBundlesByOwner(
+  redis: BundleBudgetRedisLike,
+  subject: string,
+  nowMs: number,
+): Promise<OwnedBundle[]> {
+  const ownKey = bundleOwnerKey(subject);
+  // `(nowMs` is Redis's exclusive bound, as admitBundle uses when it sums the live charges. WITHSCORES
+  // because the score IS the expiry: fetching it per digest afterwards would be N round trips.
+  const live = await redis.zRangeWithScores(ownKey, `(${nowMs}`, '+inf', { BY: 'SCORE' });
+  if (live.length === 0) return [];
+  const metas = await redis.hmGet(
+    BUNDLES_META_KEY,
+    live.map((m) => m.value),
+  );
+  const owner = subjectHash(subject);
+  const bundles: OwnedBundle[] = [];
+  live.forEach(({ value: digest, score }, i) => {
+    const meta = parseMeta(metas[i] ?? null);
+    // A member whose meta is gone is skipped rather than reported with a zero size: dropBundleEntry
+    // removes the meta field, so this window is real and reads as "already deleted". A member whose
+    // meta names another subject is a crossed write that must not widen into a cross-tenant read.
+    if (meta && meta.owner === owner) {
+      bundles.push({ digest, bytes: meta.bytes, promotedAt: meta.promotedAt, expiresAt: score });
+    }
+  });
+  // Newest first. A legacy entry has no promotedAt to sort on and goes last, in digest order so the
+  // listing is stable rather than dependent on the zset's expiry ordering.
+  return bundles.sort(
+    (a, b) =>
+      (b.promotedAt ?? -1) - (a.promotedAt ?? -1) ||
+      (a.promotedAt === null && b.promotedAt === null ? a.digest.localeCompare(b.digest) : 0),
+  );
 }
 
 /** Push a stored digest's budget expiry out with its TTL. A digest with no entry is left alone. */

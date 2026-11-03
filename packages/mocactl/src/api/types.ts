@@ -156,8 +156,20 @@ export interface ControlPlaneApi {
     digest: string;
     tar: string;
   }): Promise<{ digest: string; uploaded: boolean }>;
+  /** The caller's own live bundles, newest first. Unpaged: the byte budget bounds how many. */
+  listConfigBundles(): Promise<{ bundles: ConfigBundleSummary[] }>;
   /** Only the subject the digest is charged to, or an admin, may delete it. */
   deleteConfigBundle(digest: string): Promise<void>;
+}
+
+/** One of the caller's stored config bundles (rossoctl/moca#559). */
+export interface ConfigBundleSummary {
+  digest: string;
+  /** What the bundle is CHARGED, not the size of the tar that was uploaded. */
+  bytes: number;
+  /** null for a bundle stored before the server recorded one. */
+  promotedAt: number | null;
+  expiresAt: number;
 }
 
 export interface StreamTurnArgs {

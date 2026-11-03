@@ -398,6 +398,139 @@ describe('POST /v1/config-bundles byte budget', () => {
   });
 });
 
+describe('GET /v1/config-bundles (#559)', () => {
+  const put = (d: ReturnType<typeof makeDeps>, principal: typeof alice, body: { digest: string }) =>
+    HANDLERS.putConfigBundle!(ctx({ principal, body }), d);
+  const list = async (d: ReturnType<typeof makeDeps>, principal: typeof alice) =>
+    (await HANDLERS.listConfigBundles!(ctx({ principal }), d)).body as {
+      bundles: { digest: string; bytes: number; promotedAt: number | null; expiresAt: number }[];
+    };
+
+  it('reports the caller’s own bundles newest first, with charge, promotion and expiry', async () => {
+    const a = bundle('a');
+    const b = bundle('b');
+    let now = NOW_MS;
+    const d = makeDeps({ now: () => now });
+    await put(d, alice, a);
+    now += 60_000;
+    await put(d, alice, b);
+    expect(await list(d, alice)).toEqual({
+      bundles: [
+        {
+          digest: b.digest,
+          bytes: MIN_BUNDLE_CHARGE_BYTES,
+          promotedAt: NOW_MS + 60_000,
+          expiresAt: NOW_MS + 60_000 + DEFAULT_BUNDLE_TTL_SECONDS * 1000,
+        },
+        {
+          digest: a.digest,
+          bytes: MIN_BUNDLE_CHARGE_BYTES,
+          promotedAt: NOW_MS,
+          expiresAt: NOW_MS + DEFAULT_BUNDLE_TTL_SECONDS * 1000,
+        },
+      ],
+    });
+  });
+
+  it('shows a caller none of another subject’s, and an empty listing reads like having none', async () => {
+    const a = bundle('a');
+    const d = makeDeps();
+    await put(d, alice, a);
+    // #358: bob cannot tell alice's bundle from one that was never uploaded. Both are `[]`.
+    expect(await list(d, bob)).toEqual({ bundles: [] });
+    expect(await list(d, admin)).toEqual({ bundles: [] });
+  });
+
+  it('finds the orphan whose digest was lost after promote (#559)', async () => {
+    const orphan = bundle('orphan');
+    const d = makeDeps();
+    // What `mocactl promote` does, with the caller then crashing before writing the digest down.
+    await put(d, alice, orphan);
+    const recovered = (await list(d, alice)).bundles.map((b) => b.digest);
+    expect(recovered).toEqual([orphan.digest]);
+    // And the recovered digest is enough to free the budget it was holding.
+    await HANDLERS.deleteConfigBundle!(
+      ctx({ principal: alice, params: { digest: recovered[0]! } }),
+      d,
+    );
+    expect(await list(d, alice)).toEqual({ bundles: [] });
+  });
+
+  it('leaves out an entry whose charge has aged past its expiry score', async () => {
+    const a = bundle('a');
+    let now = NOW_MS;
+    const d = makeDeps({ now: () => now });
+    await put(d, alice, a);
+    now += DEFAULT_BUNDLE_TTL_SECONDS * 1000 + 1;
+    expect(await list(d, alice)).toEqual({ bundles: [] });
+  });
+
+  it('still lists a charge whose stored bundle is already gone, because it holds budget', async () => {
+    const a = bundle('a');
+    const d = makeDeps();
+    await put(d, alice, a);
+    // Expired or evicted key, entry not yet reaped: this is the charge the caller must delete.
+    (d.bundles as unknown as FakeBundles).store.delete(bundleKey(a.digest));
+    expect((await list(d, alice)).bundles.map((b) => b.digest)).toEqual([a.digest]);
+  });
+
+  it('keeps promotedAt across a touch that moves the expiry', async () => {
+    const a = bundle('a');
+    let now = NOW_MS;
+    const d = makeDeps({ now: () => now });
+    await put(d, alice, a);
+    now += 86_400_000;
+    // A session turn using the bundle. This pushes the SCORE, which is why promotedAt is its own
+    // field: deriving it as `score - TTL` would report this bundle as promoted a day late.
+    await touchBundle(d.bundles, a.digest, now);
+    const [row] = (await list(d, alice)).bundles;
+    expect(row).toMatchObject({
+      promotedAt: NOW_MS,
+      expiresAt: now + DEFAULT_BUNDLE_TTL_SECONDS * 1000,
+    });
+  });
+
+  it('reports a pre-#559 entry, whose meta carries no promotion time, as null', async () => {
+    const a = bundle('a');
+    const d = makeDeps();
+    await put(d, alice, a);
+    const fake = d.bundles as unknown as FakeBundles;
+    const legacy = fake.hashes
+      .get(BUNDLES_META_KEY)!
+      .get(a.digest)!
+      .split(':')
+      .slice(0, 2)
+      .join(':');
+    fake.hashes.get(BUNDLES_META_KEY)!.set(a.digest, legacy);
+    expect((await list(d, alice)).bundles).toEqual([
+      {
+        digest: a.digest,
+        bytes: MIN_BUNDLE_CHARGE_BYTES,
+        promotedAt: null,
+        expiresAt: NOW_MS + DEFAULT_BUNDLE_TTL_SECONDS * 1000,
+      },
+    ]);
+  });
+
+  it('drops a member of my index whose meta names another subject', async () => {
+    const a = bundle('a');
+    const d = makeDeps();
+    await put(d, alice, a);
+    const fake = d.bundles as unknown as FakeBundles;
+    // A crossed write: alice's index still lists the digest, but the charge is bob's. The listing
+    // must agree with the budget, not with the index, or it becomes a read across subjects (#358).
+    const meta = fake.hashes.get(BUNDLES_META_KEY)!.get(a.digest)!.split(':');
+    const bobHash = bundleOwnerKey(bob.sub).slice('sh:cp:bundles:owner:'.length);
+    fake.hashes.get(BUNDLES_META_KEY)!.set(a.digest, [meta[0], bobHash, meta[2]].join(':'));
+    expect(await list(d, alice)).toEqual({ bundles: [] });
+  });
+
+  it('refuses an anonymous caller', async () => {
+    const d = makeDeps();
+    expect(await codeOf(() => HANDLERS.listConfigBundles!(ctx({}), d))).toBe('token_required');
+  });
+});
+
 describe('DELETE /v1/config-bundles/{digest}', () => {
   const put = (d: ReturnType<typeof makeDeps>, principal: typeof alice, body: { digest: string }) =>
     HANDLERS.putConfigBundle!(ctx({ principal, body }), d);

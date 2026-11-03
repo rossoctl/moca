@@ -1,5 +1,10 @@
 import { ApiError } from './api/errors.js';
-import type { CredentialConsumer, DeviceStart, SessionSummary } from './api/types.js';
+import type {
+  ConfigBundleSummary,
+  CredentialConsumer,
+  DeviceStart,
+  SessionSummary,
+} from './api/types.js';
 import {
   LoginCancelledError,
   LoginExpiredError,
@@ -390,6 +395,44 @@ export async function cmdPromote(
     io.err(describeError(err));
     return 1;
   }
+}
+
+/**
+ * `mocactl bundles list`: the caller's own stored config bundles (rossoctl/moca#559).
+ *
+ * The digest is printed in full, not abbreviated, because the only thing to do with a listed bundle
+ * is `mocactl bundles delete <digest>` -- an elided digest would have to be retyped from the server.
+ */
+export async function cmdBundleList(rt: Runtime, io: Io, opts: ManageOptions): Promise<number> {
+  if (!ready(rt, io)) return 2;
+  let bundles: ConfigBundleSummary[];
+  try {
+    bundles = (await cancellable(rt.cp.listConfigBundles(), opts.signal)).bundles;
+  } catch (err) {
+    return failed(io, err);
+  }
+  if (opts.json) {
+    io.out(JSON.stringify({ bundles }) + '\n');
+    return 0;
+  }
+  if (bundles.length === 0) {
+    // On stderr with no header, so `mocactl bundles list | wc -l` answers 0 for an empty listing.
+    io.err('no config bundles');
+    return 0;
+  }
+  const head = ['DIGEST', 'BYTES', 'PROMOTED (UTC)', 'EXPIRES (UTC)'];
+  const body = bundles.map((b) =>
+    [
+      b.digest,
+      // Stringified here so it passes through the same sanitizeRemote as every other cell: these are
+      // remote values, and `bytes: number` is only what the type says.
+      String(b.bytes),
+      b.promotedAt === null ? '-' : utc(b.promotedAt),
+      utc(b.expiresAt),
+    ].map(sanitizeRemote),
+  );
+  io.out(table([head, ...body]) + '\n');
+  return 0;
 }
 
 export async function cmdBundleDelete(
