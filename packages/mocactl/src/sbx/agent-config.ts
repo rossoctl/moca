@@ -137,19 +137,34 @@ export const OPENCODE_SERVER = Object.freeze({
 });
 export const CLAUDE_ALLOW = 'mcp__sandbox__*';
 /**
- * IBM Bob's server, in its project-scoped settings. The shape is `.mcp.json`'s, but kept apart from
- * CLAUDE_SERVER so the two can diverge and a conflict can name Bob.
+ * IBM Bob's server, in its repository-scoped config. The shape is `.mcp.json`'s, but kept apart
+ * from CLAUDE_SERVER so the two can diverge and a conflict can name Bob.
  *
- * Bob reads `.bob/settings.json` from the repository (`bob mcp add` defaults to `-s project`), so
- * unlike Codex it needs no launcher: `up` merges into it like the other two. What it has no
- * equivalent of is Claude Code's `permissions.deny` — `--allowed-tools` only waives confirmation,
- * so Bob's local tools stay available and nothing here can take them away (#593's lesson, applied).
+ * Bob reads its MCP servers from the repository, so unlike Codex it needs no launcher: `up` merges
+ * into its config like the other two. What it has no equivalent of is Claude Code's
+ * `permissions.deny` — `--allowed-tools` only waives confirmation, so Bob's local tools stay
+ * available and nothing here can take them away (#593's lesson, applied).
  */
 export const BOB_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
 
 const MCP_JSON = '.mcp.json';
 const SETTINGS = '.claude/settings.json';
+/**
+ * Bob's two config filenames, both written (#676).
+ *
+ * Which one Bob reads depends on its version, and the names moved under us: Bob 2.0.9
+ * (`bob mcp add`, default scope `workspace`) writes `.bob/mcp.json` and ignores
+ * `.bob/settings.json` entirely, while earlier Bob read `.bob/settings.json` at what its help then
+ * called `project` scope. `up` cannot tell which is installed — it runs before Bob is necessarily
+ * on `PATH`, and parsing `bob --version` would make agent config depend on the agent.
+ *
+ * So write both. Each is a two-key file naming the same server, the cost of the redundant one is a
+ * few bytes, and `doctor` passes when either carries the server. Writing only `settings.json` meant
+ * `up` reported Bob configured while Bob saw no server at all: the symptom in #676, where
+ * `bob mcp list` said "No MCP servers configured" against a file whose contents were correct.
+ */
 const BOB_SETTINGS = '.bob/settings.json';
+const BOB_MCP = '.bob/mcp.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
 const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
@@ -860,7 +875,7 @@ function loadManifest(root: string): { m?: Manifest; bad?: string } {
 }
 
 /** The JSON and Markdown files `sbx up` writes, and the directory it may create. */
-const JSON_FILES = [MCP_JSON, SETTINGS, 'opencode.json', 'opencode.jsonc', BOB_SETTINGS];
+const JSON_FILES = [MCP_JSON, SETTINGS, 'opencode.json', 'opencode.jsonc', BOB_SETTINGS, BOB_MCP];
 const MD_FILES = ['CLAUDE.md', 'AGENTS.md'];
 const DIRS = [dirname(SETTINGS), dirname(BOB_SETTINGS)];
 
@@ -987,6 +1002,7 @@ export function writeAgentConfig(
   const settings = loadDoc(root, SETTINGS, false);
   const oc = loadDoc(root, opencodeFile(root), true);
   const bob = loadDoc(root, BOB_SETTINGS, false);
+  const bobMcp = loadDoc(root, BOB_MCP, false);
   const local = readLocalSettings(root);
 
   needObjects(mcp, ['mcpServers']);
@@ -999,6 +1015,16 @@ export function writeAgentConfig(
   const bobHave = at(bob.data, ['mcpServers', SERVER]);
   if (bobHave !== undefined && !isBobServer(bobHave)) {
     throw new ConfigConflict(bob.rel, `mcpServers.${SERVER}`, 'is there and names another server');
+  }
+
+  needObjects(bobMcp, ['mcpServers']);
+  const bobMcpHave = at(bobMcp.data, ['mcpServers', SERVER]);
+  if (bobMcpHave !== undefined && !isBobServer(bobMcpHave)) {
+    throw new ConfigConflict(
+      bobMcp.rel,
+      `mcpServers.${SERVER}`,
+      'is there and names another server',
+    );
   }
 
   needObjects(settings, ['permissions']);
@@ -1067,6 +1093,7 @@ export function writeAgentConfig(
   // Then merge, in memory.
   if (have === undefined) setKey(mcp, ['mcpServers', SERVER], { ...CLAUDE_SERVER }, recs);
   if (bobHave === undefined) setKey(bob, ['mcpServers', SERVER], { ...BOB_SERVER }, recs);
+  if (bobMcpHave === undefined) setKey(bobMcp, ['mcpServers', SERVER], { ...BOB_SERVER }, recs);
   addItems(
     settings,
     ['permissions', 'allow'],
@@ -1109,7 +1136,7 @@ export function writeAgentConfig(
   }
 
   const writes: { t: Target; body: string }[] = [];
-  for (const d of [mcp, settings, oc, bob]) {
+  for (const d of [mcp, settings, oc, bob, bobMcp]) {
     const body = finalText(d);
     if (d.exists && body === d.original) continue;
     if (!d.exists && !recs.some((r) => r.file === d.rel)) continue;
@@ -1122,7 +1149,7 @@ export function writeAgentConfig(
     if (!p.t.exists) created.push(p.t.rel);
   }
   // The nested files' directories, so `sbx rm` can remove one it created.
-  for (const d of [settings, bob]) {
+  for (const d of [settings, bob, bobMcp]) {
     if (d.exists || !writes.some((w) => w.t.rel === d.rel)) continue;
     const dir = dirname(d.rel);
     if (!existsSync(join(root, dir))) dirs.push(dir);
@@ -1208,7 +1235,7 @@ export function takeBackAgentConfig(root: string): TakeBack {
   // A record names a file after following links (target()), so a linked opencode.json is recorded
   // as its target's path. Only OpenCode's is JSONC; the rest are strict JSON: decide by resolving.
   const strict = new Set<string>();
-  for (const f of [MCP_JSON, SETTINGS, BOB_SETTINGS]) {
+  for (const f of [MCP_JSON, SETTINGS, BOB_SETTINGS, BOB_MCP]) {
     try {
       strict.add(target(root, f, RM_HINT).rel);
     } catch {
@@ -1344,6 +1371,7 @@ export function checkAgentConfig(root: string): string[] {
   const settings = load(SETTINGS, false);
   const oc = load(ocFile, true);
   const bob = load(BOB_SETTINGS, false);
+  const bobMcp = load(BOB_MCP, false);
   const local = readLocalSettings(root);
 
   if (!isClaudeServer(at(mcp, ['mcpServers', SERVER]))) {
@@ -1406,8 +1434,17 @@ export function checkAgentConfig(root: string): string[] {
     problems.push(`OpenCode: ${ocFile} re-enables local built-in tools: ${back.join(', ')}`);
   }
   // Bob only: it has no deny list to check, so there is no local-tools line for it.
-  if (!isBobServer(at(bob, ['mcpServers', SERVER]))) {
-    problems.push(`IBM Bob: ${BOB_SETTINGS} has no ${SERVER} MCP server (mocactl sbx mcp)`);
+  //
+  // Either filename satisfies this: which one Bob reads depends on its version (see BOB_SETTINGS),
+  // and the one that matters is the one the installed Bob looks at. Requiring both would fail a
+  // repository that is working fine.
+  if (
+    !isBobServer(at(bob, ['mcpServers', SERVER])) &&
+    !isBobServer(at(bobMcp, ['mcpServers', SERVER]))
+  ) {
+    problems.push(
+      `IBM Bob: neither ${BOB_SETTINGS} nor ${BOB_MCP} has a ${SERVER} MCP server (mocactl sbx mcp)`,
+    );
   }
   const seen = new Set<string>();
   for (const f of ['CLAUDE.md', 'AGENTS.md']) {

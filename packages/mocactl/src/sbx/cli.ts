@@ -84,9 +84,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  sandbox's MCP tools, with their local tools denied
                                                  (Bob's cannot be: it has no deny list) (merged
                                                  into .mcp.json, .claude/settings.json,
-                                                 opencode.json, .bob/settings.json, CLAUDE.md,
-                                                 AGENTS.md; a value there that conflicts stops up
-                                                 before anything is done)
+                                                 opencode.json, .bob/settings.json, .bob/mcp.json,
+                                                 CLAUDE.md, AGENTS.md; a value there that conflicts
+                                                 stops up before anything is done)
                                                  (a reused sandbox with changes not yet pulled is
                                                  left unpushed, with a warning, and up exits 0)
                                                  (--cortex: Cortex v0.9.3+ blocks the local tools

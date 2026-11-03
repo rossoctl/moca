@@ -49,3 +49,19 @@ deploy/sbx/.generated/
 
 # Generated Python stubs for the sandbox/v1 examples (docs/api/sandbox-v1-direct-client.md)
 docs/api/examples/sandbox/
+
+# Per-developer agent wiring written by `mocactl sbx up`: it points at one developer's
+# sandbox, is re-merged by the next `up`, and differs per working tree (each gets its own
+# sandbox). This repo ignores them for every clone; `up` itself only excludes .sbx/, and
+# only via .git/info/exclude (see docs/sbx/user-guide.md). .claude/settings.json and
+# CLAUDE.md are tracked and stay so -- `up` merges into them inside a marked block.
+#
+# Anchored to the root, which is the only place `up` writes them: unanchored, these would
+# also ignore a future packages/<pkg>/AGENTS.md or a fixture under any subdirectory, and
+# `git add` would need -f with no visible reason.
+/.bob/
+/.mcp.json
+/opencode.json
+/opencode.jsonc
+/AGENTS.md
+/.sbx/

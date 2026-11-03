@@ -48,7 +48,9 @@ const FILES = [
   '.mcp.json',
   '.claude/settings.json',
   'opencode.json',
+  // Bob gets both filenames: which one it reads depends on its version (#676).
   '.bob/settings.json',
+  '.bob/mcp.json',
   'CLAUDE.md',
   'AGENTS.md',
 ];
@@ -133,10 +135,55 @@ describe('agent configuration (SBX0 §6.3)', () => {
   it("doctor reports Bob's missing server, and nothing once up has run", () => {
     const d = dir();
     expect(checkAgentConfig(d)).toContain(
-      'IBM Bob: .bob/settings.json has no sandbox MCP server (mocactl sbx mcp)',
+      'IBM Bob: neither .bob/settings.json nor .bob/mcp.json has a sandbox MCP server ' +
+        '(mocactl sbx mcp)',
     );
     writeAgentConfig(d);
     expect(checkAgentConfig(d)).toEqual([]);
+  });
+
+  // #676: `up` wrote only .bob/settings.json, which Bob 2.0.9 ignores -- it reads .bob/mcp.json --
+  // so `up` reported Bob configured while `bob mcp list` said "No MCP servers configured". Both
+  // names are written now, and either one alone satisfies doctor: the one that counts is whichever
+  // the installed Bob reads, and a developer who configured Bob by hand (`bob mcp add`) has only
+  // that one.
+  it('writes both of Bob’s filenames, and doctor accepts either alone', () => {
+    const d = dir();
+    writeAgentConfig(d);
+    for (const f of ['.bob/settings.json', '.bob/mcp.json']) {
+      expect(json(d, f), f).toEqual({
+        mcpServers: { sandbox: { command: 'mocactl', args: ['sbx', 'mcp'] } },
+      });
+    }
+    // Each file on its own is enough; neither is, alone, required.
+    for (const drop of ['.bob/settings.json', '.bob/mcp.json']) {
+      const one = dir();
+      writeAgentConfig(one);
+      rmSync(join(one, drop));
+      expect(checkAgentConfig(one), `without ${drop}`).toEqual([]);
+    }
+  });
+
+  // #677 review: checking .bob/mcp.json is new, and it is the file `bob mcp add` writes -- which
+  // the guide recommends as the manual fallback. So a repository where the developer ran that by
+  // hand must still get through `up`, not stop with a ConfigConflict. Verified against Bob 2.0.9
+  // in a fresh repository: `bob mcp add sandbox -- mocactl sbx mcp` writes exactly the two keys
+  // below, with no `disabled`/`timeout`/`trust`/`alwaysAllow` field that `isBobServer` would
+  // reject. This pins that shape, so a Bob that starts adding keys fails here rather than in a
+  // developer's repository.
+  it('accepts the entry `bob mcp add` writes by hand, in either file (#677 review)', () => {
+    const byHand = { mcpServers: { sandbox: { command: 'mocactl', args: ['sbx', 'mcp'] } } };
+    for (const f of ['.bob/mcp.json', '.bob/settings.json']) {
+      const d = dir();
+      mkdirSync(join(d, '.bob'), { recursive: true });
+      writeFileSync(join(d, f), JSON.stringify(byHand, null, 2) + '\n');
+      expect(() => writeAgentConfig(d), f).not.toThrow();
+      expect(checkAgentConfig(d), f).toEqual([]);
+      // The developer's file is left as it was; the other one is created alongside it.
+      expect(json(d, f), f).toEqual(byHand);
+      const other = f === '.bob/mcp.json' ? '.bob/settings.json' : '.bob/mcp.json';
+      expect(json(d, other), other).toEqual(byHand);
+    }
   });
 
   it('holds the spec §6.3 lists verbatim', () => {
