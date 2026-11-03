@@ -26,8 +26,17 @@ function ancestorPrefixes(p: string): string[] {
 }
 
 /**
- * A skill referencing one of its OWN files that the bundle omits would fail remotely as a
- * confusing read miss. Two deliberate restrictions, both measured against a real `~/.claude`:
+ * A skill referencing a path the bundle does not ship would fail remotely as a confusing read
+ * miss. The bundle carries each skill's own directory and nothing else, so a reference that
+ * resolves perfectly well on the author's machine can still be absent when the skill runs.
+ *
+ * That is usually what this fires on, and the message says so (#628): a repository with a
+ * top-level `scripts/` beside skills that ship `scripts/*.py` warns on `scripts/build.sh`, because
+ * the skill owns `scripts/` by the rule below while the file itself lives at the repo root and
+ * never travels. It is a true finding -- the remote read really would miss -- so the wording has to
+ * name non-inclusion rather than imply the author misplaced the file.
+ *
+ * Two deliberate restrictions, both measured against a real `~/.claude`:
  *
  * 1. **Only references the skill plausibly owns are flagged** — the reference must contain a `/`
  *    AND its directory prefix must be a directory the skill actually ships files in. Without this
@@ -68,7 +77,9 @@ export function checkSiblingPaths(skills: ResolvedSkill[]): PreflightFinding[] {
       findings.push({
         severity: 'warn',
         code: 'missing_sibling',
-        message: `skill '${skill.name}' references '${ref}', which is not in its directory`,
+        message:
+          `skill '${skill.name}' references '${ref}', which is not included in the bundle` +
+          " — only files under the skill's own directory travel",
         path: skill.dir,
       });
     }
