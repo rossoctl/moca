@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -184,6 +185,34 @@ describe('agent configuration (SBX0 §6.3)', () => {
       const other = f === '.bob/mcp.json' ? '.bob/settings.json' : '.bob/mcp.json';
       expect(json(d, other), other).toEqual(byHand);
     }
+  });
+
+  // #677 review: Bob's two filenames carry the same entry, so keeping them in step with a link is
+  // a natural thing to do -- and it leaves writeAgentConfig with two Docs over one file. The
+  // Markdown loop has always guarded this for CLAUDE.md -> AGENTS.md; the JSON loop had no reason
+  // to until Bob got a second filename. Without the guard the name appears twice in what `up`
+  // prints and the file is written twice.
+  it('writes through a .bob/mcp.json that links to .bob/settings.json, once', () => {
+    const d = dir();
+    mkdirSync(join(d, '.bob'), { recursive: true });
+    writeFileSync(join(d, '.bob/settings.json'), '{}\n');
+    symlinkSync('settings.json', join(d, '.bob/mcp.json'));
+
+    const bobNames = writeAgentConfig(d).changed.filter((f) => f.startsWith('.bob/'));
+    expect(bobNames).toEqual(['.bob/settings.json']);
+    // The link is kept, and both names still read the one merged entry.
+    expect(lstatSync(join(d, '.bob/mcp.json')).isSymbolicLink()).toBe(true);
+    for (const f of ['.bob/settings.json', '.bob/mcp.json']) {
+      expect(json(d, f).mcpServers.sandbox, f).toEqual({
+        command: 'mocactl',
+        args: ['sbx', 'mcp'],
+      });
+    }
+    expect(checkAgentConfig(d)).toEqual([]);
+    // And the take-back leaves the developer's file and its link as they were.
+    removeAgentConfig(d);
+    expect(json(d, '.bob/settings.json')).toEqual({});
+    expect(lstatSync(join(d, '.bob/mcp.json')).isSymbolicLink()).toBe(true);
   });
 
   it('holds the spec §6.3 lists verbatim', () => {
