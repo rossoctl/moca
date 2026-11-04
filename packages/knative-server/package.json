@@ -14,7 +14,7 @@
     "@moca/control-plane": "workspace:*",
     "@moca/harness": "workspace:*",
     "@moca/work-queue": "workspace:*",
-    "redis": "^6.3.0"
+    "redis": "^6.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

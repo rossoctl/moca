@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@moca/control-plane": "workspace:*",
-    "redis": "^6.3.0"
+    "redis": "^6.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
