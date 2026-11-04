@@ -21,8 +21,8 @@ importers:
         specifier: link:../pi-fork/packages/coding-agent
         version: link:../pi-fork/packages/coding-agent
       '@grpc/grpc-js':
-        specifier: ^1.14.6
-        version: 1.14.6
+        specifier: ^1.14.7
+        version: 1.14.7
       '@moca/config-bundle':
         specifier: workspace:*
         version: link:../packages/config-bundle
@@ -110,8 +110,8 @@ importers:
         specifier: link:../../pi-fork/packages/coding-agent
         version: link:../../pi-fork/packages/coding-agent
       '@grpc/grpc-js':
-        specifier: ^1.14.6
-        version: 1.14.6
+        specifier: ^1.14.7
+        version: 1.14.7
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -240,8 +240,8 @@ importers:
         specifier: ^2.16.0
         version: 2.16.0
       '@grpc/grpc-js':
-        specifier: ^1.14.6
-        version: 1.14.6
+        specifier: ^1.14.7
+        version: 1.14.7
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
@@ -262,8 +262,8 @@ importers:
   packages/sandbox-relay:
     dependencies:
       '@grpc/grpc-js':
-        specifier: ^1.14.6
-        version: 1.14.6
+        specifier: ^1.14.7
+        version: 1.14.7
       '@moca/control-plane':
         specifier: workspace:*
         version: link:../control-plane
@@ -650,8 +650,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@grpc/grpc-js@1.14.6':
-    resolution: {integrity: sha512-SgC/B3/VZ8lTyOZ4Cwk6f1skWhmkNAaVfiX90qd5u1rRXGKk1//8FTUEN9GvOUq7rfWIqAYkA3CoyumYVpOS6g==}
+  '@grpc/grpc-js@1.14.7':
+    resolution: {integrity: sha512-W4W/fcBMGRVtG6dW2c7cw2mnpS3hvbBd+oQXjh2iYFTZDk1JJmcNqkM5KSaPubQpamlUUurrlb7G1s9NJeERmQ==}
     engines: {node: '>=12.10.0'}
 
   '@grpc/proto-loader@0.8.1':
@@ -2130,7 +2130,7 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@grpc/grpc-js@1.14.6':
+  '@grpc/grpc-js@1.14.7':
     dependencies:
       '@grpc/proto-loader': 0.8.1
       '@js-sdsl/ordered-map': 4.4.2
