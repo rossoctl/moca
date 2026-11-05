@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/knative/verify-sandbox-inventory.sh <image-ref>
+# scripts/verify-sandbox-inventory.sh <image-ref>
 #
 # Verify a checked-in inventory against the image it describes: every declared binary must
 # actually resolve inside the image. Requires docker (or podman, via CONTAINER_RUNTIME) and
@@ -9,12 +9,12 @@
 # binary -- with 347 declared binaries and a ~0.2s container-start cost, one-per-binary would
 # take well over a minute per run for no benefit: the check itself (`command -v`) is instant.
 #
-# The shape test (tests/sandbox-inventory.test.sh) cannot catch drift, because drift is a
+# The shape test (harness/test/promote.test.ts) cannot catch drift, because drift is a
 # disagreement with reality rather than with the schema.
 set -euo pipefail
 
 IMAGE="${1:?usage: verify-sandbox-inventory.sh <image-ref>}"
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sandbox-inventory"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../harness/sandbox-inventory" && pwd)"
 FILE="$DIR/$(printf '%s' "$IMAGE" | tr ':/' '__').json"
 
 [ -f "$FILE" ] || { echo "no inventory for $IMAGE (expected $FILE)"; exit 1; }

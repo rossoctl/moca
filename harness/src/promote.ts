@@ -26,7 +26,9 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
     entry: '',
     mode: 'unattended',
     // Matches deploy/knative/setup-k8s.sh:30 so the checked-in inventory (Task 14) resolves.
-    sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
+    // The container-tier sandbox image the P6 deployments run; must match the shipped
+    // inventory in harness/sandbox-inventory/ or the binary check degrades to warnings.
+    sandboxImage: 'ghcr.io/rossoctl/moca-remote-worker:latest',
     deny: [],
     excludePrompts: [],
     dryRun: false,
@@ -120,7 +122,7 @@ export function projectMemoryDir(cwd: string, home: string): string {
 }
 
 /** Relative location of the checked-in sandbox inventories, from a repo or package root. */
-export const INVENTORY_SUBDIR = join('deploy', 'knative', 'sandbox-inventory');
+export const INVENTORY_SUBDIR = 'sandbox-inventory';
 
 /** The inventory filename for an image ref: `:` and `/` become `_`. Mirrors readInventory's key. */
 export function inventoryFileName(image: string): string {
@@ -139,6 +141,9 @@ export function inventoryFileName(image: string): string {
  * 29 findings, from one directory deeper it produced none.
  *
  * `cwd` is kept as a LOWER-precedence fallback so a caller can still override with a local file.
+ * The shipped files live under the harness package's own `sandbox-inventory/` (moved there from
+ * `deploy/knative/sandbox-inventory/` when the Knative path was removed, ADR-0041) so the walk
+ * from the module finds them wherever the harness is installed.
  */
 export function inventoryCandidates(image: string, cwd: string, moduleDir: string): string[] {
   const file = inventoryFileName(image);

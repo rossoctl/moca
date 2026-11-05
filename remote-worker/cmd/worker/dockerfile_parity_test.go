@@ -18,7 +18,7 @@ import (
 // This is that guard, and it is static on purpose: it relates the Go list to the image recipes without
 // a daemon, a network or a build, so it runs in the `go test -race ./...` step that already exists.
 // What it CANNOT do is prove a package still resolves in a future UBI 9 minor; only building the image
-// does that. deploy/knative/verify-sandbox-inventory.sh is the in-image counterpart for the OCP
+// does that. scripts/verify-sandbox-inventory.sh is the in-image counterpart for the OCP
 // sandbox image, and is the pattern to follow if these images ever get published to GHCR.
 //
 // Everything here matches against INSTRUCTIONS, never against the raw file. The first version of this
