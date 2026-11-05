@@ -580,6 +580,45 @@ describe('fromTranscript', () => {
     expect(s.blocks[3]).toMatchObject({ kind: 'user', text: 'MINE' });
   });
 
+  // The happy path the whole change exists for: the resume prefills the prompt, the user presses
+  // Enter, and the turn it finally runs must land BELOW the warning about it, not above. The
+  // notice and the unsent copy are bottom-pinned only while nothing has answered them -- once the
+  // prompt is sent they are ordinary history, or every later block would be spliced in front of
+  // blocks <Static> has already printed.
+  it('puts the prompt sent from a prefill below the unsent warning, not above it', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: done },
+        { kind: 'unsent', text: 'MINE' },
+        { kind: 'prompt', text: 'MINE' },
+        { kind: 'frame', frame: { type: 'text', delta: 'at last' } },
+        { kind: 'frame', frame: done },
+      ],
+      prompts: ['MINE'],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'notice',
+      'user', // the unsent copy
+      'user', // the same text, now actually sent
+      'assistant',
+      'turn-end',
+    ]);
+    // Both are retired: history now, so nothing later is spliced in front of them.
+    expect(s.blocks[2]).toMatchObject({ text: UNSENT_PROMPT_NOTICE, pinned: false });
+    expect(s.blocks[3]).toMatchObject({ text: 'MINE', unsent: false });
+    expect(s.blocks[4]).toMatchObject({ text: 'MINE', queued: false });
+    expect(s.blocks[5]).toMatchObject({ text: 'at last' });
+    // And all of it is settled, so <Static> prints the whole run exactly once.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
   // The record says a prompt never ran; it says nothing about the last turn, so the attach step's
   // expectOpen (app.tsx) must read exactly as it did before the record existed.
   it('an unsent prompt does not change the last turn state', () => {

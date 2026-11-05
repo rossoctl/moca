@@ -163,7 +163,29 @@ export function reduceFrame(s: BlockState, frame: TurnFrame): BlockState {
 }
 
 export function addUser(s: BlockState, text: string, queued = false): BlockState {
-  return push(queued ? s : finalizeOpen(s), { kind: 'user', text, queued });
+  // Sending anything is what retires an unsent record: it was pinned to the bottom only while it
+  // was still the one thing owed to the user. Unpinning first is what keeps this prompt -- the
+  // prefill the resume offered, usually this very text -- and everything it leads to BELOW the
+  // warning about it, instead of spliced in front of blocks <Static> has already printed (#479).
+  const base = unpinBottom(s);
+  return push(queued ? base : finalizeOpen(base), { kind: 'user', text, queued });
+}
+
+/**
+ * Turns the bottom-pinned run into ordinary history: the `unsent` prompts and the notices heading
+ * them stop claiming the bottom, so later blocks append after them in the order they happened.
+ * Queued prompts keep their flag — they are still waiting, and it is what marks them on screen.
+ */
+function unpinBottom(s: BlockState): BlockState {
+  const from = tailStart(s.blocks);
+  if (from === s.blocks.length) return s;
+  const blocks = s.blocks.map((b, i) => {
+    if (i < from) return b;
+    if (b.kind === 'user' && b.unsent) return { ...b, unsent: false };
+    if (b.kind === 'notice' && b.pinned) return { ...b, pinned: false };
+    return b;
+  });
+  return { ...s, blocks };
 }
 
 /**

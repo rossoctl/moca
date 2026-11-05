@@ -1429,17 +1429,25 @@ describe('leaving a running detachable turn', () => {
   // queue, which leaving drops. Quitting must write it down, and the next resume must hand it back
   // -- warned about on the way out, offered back on the way in, and never sent behind the user.
   it('a prompt held back by another device survives a quit and comes back on the resume', async () => {
-    const harness = fakeHarness([{ error: new ApiError('harness', 409, 'turn_in_progress') }], {}, [
-      // The conflict attach: the other device's turn, still going when this one leaves.
-      {
-        frames: [
-          { type: 'turn', turnId: 't9', sessionId: 's-new' },
-          { type: 'text', delta: 'their work' },
-        ],
-        ids: ['t9:1-0', 't9:2-0'],
-        hang: true,
-      },
-    ]);
+    const harness = fakeHarness(
+      [
+        { error: new ApiError('harness', 409, 'turn_in_progress') },
+        // The same prompt, finally sent by hand from the resume's prefill.
+        { frames: [{ type: 'text', delta: 'at last' }, doneFrame('s-new')] },
+      ],
+      {},
+      [
+        // The conflict attach: the other device's turn, still going when this one leaves.
+        {
+          frames: [
+            { type: 'turn', turnId: 't9', sessionId: 's-new' },
+            { type: 'text', delta: 'their work' },
+          ],
+          ids: ['t9:1-0', 't9:2-0'],
+          hang: true,
+        },
+      ],
+    );
     const rt = testRuntime({ cp: sessionList('s-new'), harness });
     const first = mount(rt);
     await first.ready();
@@ -1469,5 +1477,14 @@ describe('leaving a running detachable turn', () => {
     await until(() => !frame().includes('ctrl+p for commands'));
     expect(frame()).toContain('my own question');
     expect(harness.turns).toHaveLength(1);
+
+    // Sending it at last. The warning is about this prompt, so the prompt and its reply must read
+    // BELOW it -- not spliced in front of lines <Static> has already printed (#479 review).
+    stdin.write(KEY.enter);
+    await until(() => frame().includes('at last'));
+    expect(harness.turns).toHaveLength(2);
+    expect(harness.turns[1].prompt).toBe('my own question');
+    const out = frame();
+    expect(out.indexOf('was not sent')).toBeLessThan(out.lastIndexOf('at last'));
   });
 });
