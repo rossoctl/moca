@@ -1,6 +1,6 @@
 # Glossary
 
-Canonical definitions for the terms MOCA uses. `session` and `turn` are the two identity terms the
+Canonical definitions for the terms moca uses. `session` and `turn` are the two identity terms the
 harness actually uses (see
 [#279](https://github.com/rossoctl/moca/issues/279) for the decision that produced
 them); the rest name the parts of the runtime and its contracts. P6 and P4 are milestone IDs: P6 is

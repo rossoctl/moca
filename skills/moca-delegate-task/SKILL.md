@@ -1,11 +1,11 @@
 ---
 name: moca-delegate-task
-description: Delegate bounded tasks to MOCA with a packed local directory as context, fan them out, and bring the results back.
+description: Delegate bounded tasks to moca with a packed local directory as context, fan them out, and bring the results back.
 ---
 
-# Delegate tasks to MOCA
+# Delegate tasks to moca
 
-Pack a local directory, upload it once as a MOCA workload, run one or many prompt tasks on it with
+Pack a local directory, upload it once as a moca workload, run one or many prompt tasks on it with
 `mocactl spawn`, collect the answers with `mocactl get`, then delete the workload.
 
 ## When to use it
@@ -15,14 +15,14 @@ Use it for:
 - **Offloading a bounded task:** a clear deliverable you can check, such as a review, an analysis
   or a fix with its diff.
 - **Fan-out:** many independent tasks on the same context, such as one per file, module or report.
-- **Remote resources:** work that needs MOCA's sandboxes rather than this machine.
+- **Remote resources:** work that needs moca's sandboxes rather than this machine.
 
 Keep the work local when it needs interactive local state (a running app, your shell, a back and
 forth with the user), secrets, or durable writes to your working tree.
 
 ## Prerequisites
 
-- `mocactl login` against the user's MOCA control plane (a cached login). Check with
+- `mocactl login` against the user's moca control plane (a cached login). Check with
   `mocactl doctor`.
 - Exactly one inference credential (`mocactl credentials`), unless the operator provides one:
   `spawn` does not name a credential, so with several the session is refused as ambiguous.
@@ -30,7 +30,7 @@ forth with the user), secrets, or durable writes to your working tree.
   [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace
   bundles) on the server as well as the client. `contextctl` v0.3.0 or later also skips `.claude`
   and the files your `.gitignore` excludes (see step 1).
-- MOCA with [#534](https://github.com/rossoctl/moca/pull/534) (workload runs start in their
+- moca with [#534](https://github.com/rossoctl/moca/pull/534) (workload runs start in their
   context).
 - The operator has turned workloads on. Otherwise `workloads create` fails with
   `501 workloads_unavailable`.
@@ -85,7 +85,7 @@ calls, and a single command matches the permission rules below.
      fan-out, use `read-only`.
    - `spawn` returns at once, so for a sequence wait until each task is `done` (step 4) before
      spawning the next. Never run several writing tasks at once on a `--mount writable` workload:
-     they share one tree and MOCA adds no locking.
+     they share one tree and moca adds no locking.
    - It needs the operator to have turned per-workload sandboxes on. Otherwise `create` fails with
      `400 workload_field_not_allowed`; run without `--sandboxes`.
 
@@ -164,8 +164,8 @@ they can retry it.
 
 Delegation needs only these commands, plus the cleanup `rm -r .moca-delegate`. Allowing them keeps
 the skill working when Claude Code's auto-mode classifier is unavailable
-([#530](https://github.com/rossoctl/moca/issues/530), Claude Code's classifier vs MOCA's local and
-remote split); the remote commands run in MOCA sandboxes, not under Claude Code's classifier.
+([#530](https://github.com/rossoctl/moca/issues/530), Claude Code's classifier vs moca's local and
+remote split); the remote commands run in moca sandboxes, not under Claude Code's classifier.
 
 **With these rules, Claude Code does not ask before uploading a directory.** `ctx pack` and
 `workloads create` are the two steps that send local files off the machine, and the skill's "get
@@ -204,4 +204,4 @@ The full set:
 - [`mocactl` command reference](../../docs/reference/cli-mocactl.md)
 - [Context Service and workloads](../../docs/context-service.md), including [Runs](../../docs/context-service.md#runs)
 - [Context workflows](../../docs/concepts/context-workflows.md)
-- [How delegation works inside MOCA](references/internal-flow.md)
+- [How delegation works inside moca](references/internal-flow.md)

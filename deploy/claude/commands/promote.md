@@ -1,5 +1,5 @@
 ---
-description: Promote this project's Claude Code workflow into MOCA
+description: Promote this project's Claude Code workflow into moca
 argument-hint: <entry-prompt> [--dry-run] [--deny <skill>] [--sandbox-image <ref>]
 allowed-tools: Bash(pnpm --dir:*), Bash(kubectl port-forward:*), Bash(kubectl exec:*), Bash(test:*), Bash(ls:*), Bash(lsof:*), Bash(pwd), Bash(printenv:*), Bash(echo:*), Bash(git init:*)
 ---
@@ -145,6 +145,6 @@ Finally, note what promotion does **not** carry: MCP servers and subagents are o
 promoted memory travels read-only, so a remote run consumes what it was taught locally and returns
 discoveries in the leaf result instead of writing back.
 
-This command is for a developer with `kubectl` access to the cluster. A user who reaches MOCA only
+This command is for a developer with `kubectl` access to the cluster. A user who reaches moca only
 through its control plane promotes with `mocactl promote <dir>` (or `/promote <dir>` inside
 `mocactl`) instead: same bundle, uploaded over `/v1` with no cluster credentials (ADR-0038).

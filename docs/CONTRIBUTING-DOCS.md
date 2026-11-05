@@ -1,4 +1,4 @@
-# Writing and maintaining MOCA docs
+# Writing and maintaining moca docs
 
 Conventions for anything under `docs/`, the READMEs and `deploy/*/README*.md`. They exist so the
 docs survive the move from the Knative/KEDA deployment to P6/P4 without another restructure. The
@@ -53,7 +53,7 @@ Do not state a support commitment the ADRs do not state.
 ## Terminology
 
 Use [the glossary](glossary.md) terms as defined: `session` (durable, owned, resumable), `turn`
-(one exchange), and not `run`. The product is **MOCA**; packages are `@moca/*`. Legacy names
+(one exchange), and not `run`. The product is **moca**; packages are `@moca/*`. Legacy names
 (`serverless-harness`, `SH_*`, `KAGENTI_*`, `@sh/*`) appear only where a variable or path still has
 that name, never in new prose. "P6" and "P4" are milestone IDs (process manager and microVM
 sandboxes); introduce them with that gloss on first use in a page.

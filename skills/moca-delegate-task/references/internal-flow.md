@@ -1,7 +1,7 @@
 # How context delegation works
 
 Your local agent follows the `moca-delegate-task` skill and runs two CLIs: `contextctl` packs a
-folder into a `.context` file, and `mocactl` sends it to MOCA and runs tasks on it. MOCA runs each
+folder into a `.context` file, and `mocactl` sends it to moca and runs tasks on it. Moca runs each
 task on one of the operator's shared sandboxes, or, for a workload created with `--sandboxes`, on
 sandboxes of its own ([#476](https://github.com/rossoctl/moca/issues/476), per-workload sandboxes
 and storage). Context Service stores the context; it never creates sandboxes.
@@ -10,12 +10,12 @@ and storage). Context Service stores the context; it never creates sandboxes.
 
 1. **Pack:** `contextctl ctx pack <dir> -o repo.context` turns the folder into one `.context` file.
 2. **Create:** `mocactl workloads create --context repo.context` calls `POST /workloads` with your
-   `mocactl` login. MOCA creates the workload's Context in Context Service
+   `mocactl` login. Moca creates the workload's Context in Context Service
    (`POST /internal/v1/contexts`) and gets a one-time upload grant
    (`POST {ctx}/upload-capabilities`).
 3. **Upload:** the same command sends the file straight to Context Service with that grant
-   (`PUT /v1/uploads/{id}`). MOCA never handles the bytes.
-4. **Activate:** it then calls `POST /workloads/{id}/activate`, and MOCA freezes that exact revision
+   (`PUT /v1/uploads/{id}`). Moca never handles the bytes.
+4. **Activate:** it then calls `POST /workloads/{id}/activate`, and moca freezes that exact revision
    (`POST /internal{ctx}/freeze`).
 5. **Session:** `mocactl spawn --workload <id> "…"` creates a session for the task on the control
    plane (`POST /v1/sessions`). Fan-out is one `spawn` per task, all on the same workload.
@@ -25,7 +25,7 @@ and storage). Context Service stores the context; it never creates sandboxes.
 7. **Work:** the agent starts in the context: a read-only view, or with `--writable` its own copy
    that is discarded when the run ends. The result comes back in the `/v1/runs` response;
    `mocactl subagents` and `mocactl get` show it.
-8. **Clean up:** `mocactl workloads delete <id>` calls `DELETE /workloads/{id}`, and MOCA deletes
+8. **Clean up:** `mocactl workloads delete <id>` calls `DELETE /workloads/{id}`, and moca deletes
    the Context (`DELETE /internal{ctx}`).
 
 `{ctx}` is `/v1/namespaces/{ns}/contexts/{name}`. For the server-side details (limits, caching,

@@ -160,7 +160,7 @@ Workloads with sandboxes of their own (phase 2, [`docs/context-service.md`](../c
 
 ## moca-provisioner (`packages/provisioner`)
 
-The only MOCA component with Kubernetes permissions in the sandbox namespace
+The only moca component with Kubernetes permissions in the sandbox namespace
 ([ADR-0043](../adrs/0043-workload-sandboxes-provisioner.md)). Secrets are files under
 `CREDENTIALS_DIRECTORY`, or env vars of the same name.
 

@@ -2,7 +2,7 @@
 
 > **Preview.** Describes the P6 runtime on `main` as of 2026-10-12.
 
-An orchestrator can hand work to MOCA in three patterns. Which of them work depends on the deployment.
+An orchestrator can hand work to moca in three patterns. Which of them work depends on the deployment.
 
 | Archetype            | Pattern                                                           | On P6 today                                                     |
 | -------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |

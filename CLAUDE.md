@@ -1,4 +1,4 @@
-# MOCA
+# moca
 
 ## Overview
 
@@ -22,7 +22,7 @@ moca/
 │   ├── control-plane/    # Multi-user control plane, credential issuance (@moca/control-plane)
 │   ├── config-bundle/    # Promoted config bundle loading (@moca/config-bundle)
 │   ├── ibac-stub/        # IBAC stub (@moca/ibac-stub)
-│   └── mocactl/          # MOCA terminal client for the control plane (@moca/mocactl)
+│   └── mocactl/          # moca terminal client for the control plane (@moca/mocactl)
 ├── remote-worker/        # Go module: container + microVM sandbox workers, vmpoolctl
 ├── deploy/
 │   ├── k8s/              # P6 on Kubernetes/OpenShift (first-class, ADR-0037)

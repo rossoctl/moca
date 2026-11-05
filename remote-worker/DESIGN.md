@@ -84,7 +84,7 @@ then ride _back down_ the worker-initiated stream through the same tunnel.
 ```
 
 Prereqs: harness + relay already deployed in ykt1 `default` (they are — see the
-project CLAUDE.md "MOCA" section). Then:
+project CLAUDE.md "moca" section). Then:
 
 ```bash
 export KUBECONFIG=.kube/config-ykt1

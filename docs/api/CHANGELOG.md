@@ -6,7 +6,7 @@ changes, the major only with a `/v2` ([change policy](../reference/change-policy
 ## 1.2.0
 
 The sandbox service's routes ([SBX0 spec](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md) §5.1),
-served only by a control plane on the `sandbox` route profile (`SH_ROUTE_PROFILE=sandbox`); a MOCA
+served only by a control plane on the `sandbox` route profile (`SH_ROUTE_PROFILE=sandbox`); a moca
 control plane answers 404 for all of them.
 
 - New GET /v1/templates; POST and GET /v1/sandboxes; GET and DELETE /v1/sandboxes/{id}; and

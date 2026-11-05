@@ -4,7 +4,7 @@
 > declared Stable; interfaces and limits may change. Known limits: [Limits](#7-limits).
 
 This guide takes you from nothing installed to an agent's work applied in your own repository. You
-need no MOCA background. The design is
+need no moca background. The design is
 [the SBX0 spec](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md). Operators should read
 [the runbook](../../deploy/sbx/RUNBOOK.md) instead.
 
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-
 
 It installs `mocactl` into `~/.local/bin`, and prints a line to add to your shell's rc file if that
 directory is not on your `PATH`. Re-running it upgrades to the latest release. Its closing hint
-about `SH_CONTROL_PLANE_URL` is for MOCA's own server: ignore it here. Check that `sbx` is there:
+about `SH_CONTROL_PLANE_URL` is for moca's own server: ignore it here. Check that `sbx` is there:
 
 ```bash
 mocactl --version     # v0.7.0 or later
@@ -583,7 +583,7 @@ example). It is not a secret and is useless anywhere else: sent straight to GitH
 ### GitHub
 
 Create a **fine-grained personal access token** limited to the repositories your sandboxes need,
-with only the permissions you want the agent to have. MOCA does not narrow it further: the token's
+with only the permissions you want the agent to have. Moca does not narrow it further: the token's
 scope is your limit. Then store it, reading it from stdin so it stays out of your shell history:
 
 ```bash
@@ -766,7 +766,7 @@ Other messages:
   `-c sandbox_mode="read-only"` if you want its own confinement too.
 
 **Logging out.** `mocactl sbx logout` ends this login and deletes `sbx-auth.json` (in
-`~/.config/mocactl/`). It is kept apart from `mocactl login`'s MOCA login: you can have both, and
+`~/.config/mocactl/`). It is kept apart from `mocactl login`'s moca login: you can have both, and
 logging out of one leaves the other.
 
 ## 10. Data handling

@@ -1,6 +1,6 @@
-# MOCA documentation
+# moca documentation
 
-MOCA runs stateful AI coding-agent sessions as a backend service: sessions are durable and
+Moca runs stateful AI coding-agent sessions as a backend service: sessions are durable and
 resumable, the agent's reasoning (the _brain_) is isolated from the sandboxes that execute its
 tools (the _hands_), many users share one deployment, and sandboxes are disposable. The README has
 the pitch; this page is the map.
@@ -23,8 +23,8 @@ the path, not about the project as a whole.
 
 | I want to...                        | Go to                                                                                                                                                                                     |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pick an install path and run MOCA   | [Get started](get-started/index.md)                                                                                                                                                       |
-| Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
+| Pick an install path and run moca   | [Get started](get-started/index.md)                                                                                                                                                       |
+| Run moca for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
 | Understand the security model       | [Security model](reference/security-model.md); [hardening checklist](operations/hardening.md)                                                                                             |
 | Run a deployment for several users  | [Manage multi-user sessions](guides/manage-multi-user-sessions.md)                                                                                                                        |
 | Attach a sandbox on another host    | [Attach a remote sandbox](guides/remote-sandbox.md)                                                                                                                                       |
@@ -33,7 +33,7 @@ the path, not about the project as a whole.
 | Promote a Claude Code workflow      | [Promote a workflow](guides/promote-claude-workflow.md)                                                                                                                                   |
 | Operate P6 on Kubernetes            | [Operations](operations/index.md)                                                                                                                                                         |
 | Understand how it works             | [Concepts](concepts/index.md)                                                                                                                                                             |
-| See the terms MOCA uses             | [Glossary](glossary.md)                                                                                                                                                                   |
+| See the terms moca uses             | [Glossary](glossary.md)                                                                                                                                                                   |
 | Know what changes need notice       | [Change policy](reference/change-policy.md)                                                                                                                                               |
 | Know what Stable requires           | [Maturity and lifecycle](reference/maturity-and-lifecycle.md)                                                                                                                             |
 | Look up an environment variable     | [Configuration reference](reference/configuration.md)                                                                                                                                     |
@@ -42,7 +42,7 @@ the path, not about the project as a whole.
 | Dispatch a leaf, use the human gate | [Leaf envelope and result](reference/leaf-and-envelope.md)                                                                                                                                |
 | Watch a guided walkthrough          | [Demos](demos/README.md)                                                                                                                                                                  |
 | Understand why a decision was made  | [ADRs](adrs/README.md) and the [spec registry](specs/README.md)                                                                                                                           |
-| Work on MOCA itself                 | [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`CONTRIBUTING-DOCS.md`](CONTRIBUTING-DOCS.md)                                                                                                   |
+| Work on moca itself                 | [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`CONTRIBUTING-DOCS.md`](CONTRIBUTING-DOCS.md)                                                                                                   |
 
 ## What is in `docs/`
 
