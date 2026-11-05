@@ -202,7 +202,8 @@ The pipeline archetypes describe how an orchestrator dispatches leaves:
 B is served by the P6 runtime today. Archetypes A (async fan-out) and C (scheduled dispatch) ran
 only on the earlier scale-to-zero deployment, removed in November 2026
 ([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and have **no P6 equivalent
-yet**; async fan-out is tracked in [#686](https://github.com/rossoctl/moca/issues/686).
+yet**; async fan-out is tracked in [#686](https://github.com/rossoctl/moca/issues/686) and
+scheduled dispatch in [#536](https://github.com/rossoctl/moca/issues/536).
 
 ---
 
