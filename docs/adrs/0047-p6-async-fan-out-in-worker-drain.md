@@ -60,6 +60,16 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
 - **On drain, abandon without acking.** The loop stops claiming, the in-flight leaf is left pending
   for `XAUTOCLAIM` to reclaim, and the slot is released so `awaitIdle` exits early. Delivery is
   at-least-once and the idempotency key makes redelivery safe.
+- **Status is read from the turn record on a new route; `GET /runs/status` is untouched.**
+  `GET /v1/sessions/{id}/turns/{turnId}` answers from the record, so queued, never-submitted (`404`)
+  and reaped-as-`lost` are distinguishable. The existing route infers status from the *result store*
+  — no record answers `{status:'queued'}` — which conflates all three, and extending it would change
+  a live route's responses on top of the admission change below. Two routes, one source of truth
+  each.
+- **Cancellation covers `queued` turns only.** `DELETE` on the turn flips a queued record to
+  `cancelled` and the drain loop skips it at claim; a `running` leaf runs to completion and the call
+  answers `409`. Interrupting a running leaf needs a cancel signal addressed to one specific worker,
+  which does not exist for async — interactive cancel (ADR-0040) rides the turn's own connection.
 - **Revive `packages/work-queue` from `38aa2146`** behind its existing `WorkQueue` interface, with
   the KEDA-era parity audit (#689) recorded below rather than assumed.
 - **Delivery in three milestones.** M1 is a working drain on `deploy/vm`/compose, gated to
@@ -103,6 +113,13 @@ absence of evidence.
   Rejected.
 - **Reserve headroom for interactive turns.** A second number to tune, and the two-budget shape
   again. Not added before a measurement asks for it.
+- **Extend `GET /runs/status` to serve async callers too.** One route for both, and it would fix the
+  queued/never-submitted conflation for existing synchronous callers as well. Rejected because it
+  changes a live route's responses, and this decision already imposes one behaviour change on the
+  synchronous path (the admission fix below); two is a migration rather than a cost.
+- **Full cancellation, including running leaves.** Rejected for this design as new
+  control-plane-to-specific-worker machinery; the per-turn caps already bound how long a leaf runs,
+  so it is a latency improvement, not a containment property. Recorded as owed.
 - **Abort the in-flight leaf on drain, as `armDetachedDrain` does for a detached interactive turn.**
   An interactive turn aborts because a client is waiting on a stream; nobody waits on an async leaf,
   so redelivery is strictly better. A 1800 s leaf cannot finish in a 20 s grace window regardless.
@@ -138,13 +155,22 @@ absence of evidence.
   silently.
 - Negative / accepted cost: at-least-once delivery means a leaf can run twice. Effectively-once rests
   on the idempotency key and on `runLeaf`'s existing retry contract, not on the queue.
+- Negative / accepted cost: **nothing watches the queue as a side effect any more.** KEDA's scaler
+  read `pendingEntriesCount` because it acted on it; slot-driven admission removes the actor and with
+  it the observation. Depth, oldest-entry age, claims, reclaims, dead-letters and claims-denied-when-
+  full must therefore be reported deliberately, on the supervisor's existing admin `GET /metrics`
+  JSON body. They ride the advisory `stats` IPC row, which stays advisory: telemetry only, never an
+  input to admission or routing.
+- Negative / accepted cost: a queued turn can be withdrawn but a running one cannot, so a caller who
+  submits a long leaf by mistake waits for its cap to expire.
 - Follow-up owed: `turn_exp` is specified in MI1 §6.1 but **implemented nowhere in TypeScript** —
   expiry today is always `exp = iat + ttlSeconds`. #388 is larger than it reads, and this is where the
-  M1/M2 split comes from. Also owed: result retention beyond 24 h and richer artifacts; per-class
-  concurrency caps; `/v1/batches` (#537) once a working fan-out exists to measure against; the
-  documentation updates in #690 (ADR-0041's "Still owed" note, the Archetype A row, the
-  `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1 §6.5/§10 still say "owned
-  `/v1/runs`" against #279's resolution.
+  M1/M2 split comes from. Also owed: cancelling a running leaf; result retention beyond 24 h and
+  richer artifacts; per-class concurrency caps, for which `async_claim_denied_full` against
+  interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working
+  fan-out exists to measure against; the documentation updates in #690 (ADR-0041's "Still owed" note,
+  the Archetype A row, the `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1
+  §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
 
 ---
 

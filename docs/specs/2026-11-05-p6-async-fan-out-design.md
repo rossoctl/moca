@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.0 — November 5, 2026
+Version: 1.1 — November 5, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -10,10 +10,11 @@ Supersedes in substance: [`2026-06-27-async-leaf-completion-design.md`](2026-06-
 
 Scope: how a caller submits many leaf turns without waiting, how a P6 worker drains them under the
 same admission budget as interactive turns, how a leaf gets its credential at dequeue without a
-bearer token in the queue, and how results are collected. Covers all three P6 deployments
-(`deploy/k8s`, `deploy/vm`, `deploy/compose`).
+bearer token in the queue, how status and results are read back, what can be cancelled, what is
+measured, and what proves it. Covers all three P6 deployments (`deploy/k8s`, `deploy/vm`,
+`deploy/compose`).
 
-> **What this is not.** Not the cron on-ramp (Archetype C, #536), though §9 states what that design
+> **What this is not.** Not the cron on-ramp (Archetype C, #536), though §11 states what that design
 > inherits from this one. Not batch execution (`/v1/batches`, #537), which is decided once a working
 > fan-out exists to measure. Synchronous `POST /v1/runs` and interactive `POST /v1/turn` keep their
 > current contracts, with one deliberate exception recorded in §5.3.
@@ -69,7 +70,7 @@ and it is the foundation this design builds on rather than replaces.
 
 **Non-goals.** Scale-to-zero. ADR-0041 accepted its loss as the headline cost of the P6 cutover:
 capacity scales by adding process-manager pods or sizing them up, and idle capacity costs memory
-continuously. Nothing here tries to recover it, and §8 records what else from the KEDA path is
+continuously. Nothing here tries to recover it, and §10 records what else from the KEDA path is
 deliberately dropped.
 
 ---
@@ -97,7 +98,7 @@ safety property in §6 is enforced twice and can diverge once.
 
 The cost is real and is accepted: a deterministic controller must now hold a credential, which on the
 old unauthenticated data-plane path it never did. This is the same "who does a job with no
-interactive user run as" question #536 faces for cron, and §9 keeps the two answers aligned.
+interactive user run as" question #536 faces for cron, and §11 keeps the two answers aligned.
 
 ---
 
@@ -115,7 +116,7 @@ Authenticated, owner-scoped, async on the **turn** rather than at session creati
 mix interactive and async turns, and binding `async` to the session would forbid that for no gain.
 
 There is no `run` noun and no second `/v1/runs`, per #279's resolution. MU1 §4.2 and MI1 §6.5/§10
-still say "owned `/v1/runs`"; this design amends that wording (§10).
+still say "owned `/v1/runs`"; this design amends that wording (§12).
 
 `202` rather than `200`: the work is accepted, not done. The response carries the `turnId` the caller
 polls, and nothing else — no result, no partial state.
@@ -156,6 +157,53 @@ Two consequences of that default, stated because each could be read the other wa
   interactive behaviour, where a session already running a turn answers `409 turn_in_progress`. A
   caller that genuinely wants two queued turns on one session passes distinct `idempotencyKey`s and
   takes responsibility for the ordering, which the queue does not promise.
+
+### 4.4 Reading status and collecting results
+
+```
+GET /v1/sessions/{sessionId}/turns/{turnId}
+  → 200 { turnId, state, attempts, result?: { status, patch? | text? | gate? | reason? } }
+  → 404 unknown turn
+```
+
+Authenticated and owner-scoped, like §4.1. The turn record is the **single source of truth for
+state**; `result` is the artifact from `leaf-result-store`, present once the leaf has written one.
+Goal 4 is satisfied by N of these — one per leaf — which is also the measurement #537 needs before
+`/v1/batches` can be judged worth building.
+
+**`GET /runs/status` is deliberately left exactly as it is.** It already exists
+(`server.ts:1237-1240`) and infers status *from the result store*: no record answers
+`{status:'queued'}` (`:1163`). That inference cannot be reused here, for two reasons:
+
+- It conflates three different situations — queued, never submitted, and reaped-as-`lost` all look
+  like "no record yet" — and an async caller polling for minutes needs them distinguished. The new
+  route answers from the record, so `404` means never submitted and `lost` is its own state.
+- Extending it to consult the turn record would make a **live** route's responses change, on top of
+  the admission change §5.3 already flags. One behaviour change on the sync path is a cost worth
+  stating; two is a migration.
+
+So the two routes coexist with one source of truth each: `/runs/status` serves synchronous callers
+from the result store as it always has, and the route above serves async callers from the record.
+
+### 4.5 Cancellation: queued only
+
+```
+DELETE /v1/sessions/{sessionId}/turns/{turnId}  → 202 | 409
+```
+
+A `queued` record flips to `cancelled`, and the drain loop skips it at claim — it checks
+`state === 'queued'` when minting (§5.4), so a cancelled entry is acked and dropped without running.
+
+**A `running` leaf is not interrupted.** It finishes and writes its result; the `DELETE` answers
+`409` naming the state. This is a deliberate scope line, not an oversight:
+
+- Interrupting a running leaf needs a cancel signal addressed to the one worker holding it.
+  Interactive cancel (ADR-0040) rides the turn's own connection, and async has no connection — so
+  this is new control-plane-to-specific-worker machinery, not a reuse.
+- The per-turn caps of §4.3 already bound how long a leaf can run, so "cancel a running leaf" is a
+  latency improvement over waiting for the cap, not a containment property §6.4 depends on.
+
+Cancelling a running leaf is recorded as owed in §12.
 
 ---
 
@@ -201,7 +249,7 @@ have it.
 | ---------------- | ------------------------------------------------------------------ |
 | `turnId`         | opaque; the only thing in the queue                                |
 | `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)           |
-| `tenant`         | gates M1 (§7)                                                      |
+| `tenant`         | gates M1 (§9)                                                      |
 | `sessionId`      | the session the turn belongs to                                    |
 | `cfg`            | bundle digest, as on the session                                    |
 | `credentialName` | a **name**, resolved server-side at dequeue — never the credential |
@@ -216,9 +264,10 @@ queued → running → paused | responded | done | solved | failed | cancelled |
 ```
 
 `paused`, `responded`, `done`, `solved` and `failed` mirror `LeafResult`'s existing discriminants, so
-a result maps to a state without translation. `cancelled` is a caller's withdrawal. `lost` is the
-terminal the reaper writes when attempts are exhausted (§6.2) — distinct from `failed`, because
-"we never found out" is operationally different from "it ran and failed."
+a result maps to a state without translation. `cancelled` is a caller's withdrawal of a turn that was
+still `queued` (§4.5); it is never reached from `running`. `lost` is the terminal the reaper writes
+when attempts are exhausted (§6.2) — distinct from `failed`, because "we never found out" is
+operationally different from "it ran and failed."
 
 Stored like `SessionRecord`: Redis hash plus per-owner zset, via `OwnershipIndex`. Owner scoping is a
 flat subject string on the record, following the existing convention rather than inventing a scope
@@ -266,7 +315,7 @@ first served. The alternative, reserving k slots for interactive turns, is a sec
 and reintroduces the two-budget shape §5.2 rejected; it is not added before there is a measurement
 asking for it. The consequence is stated rather than hidden: a full queue can occupy every slot, so
 an interactive `/turn` arriving then is refused with `429` exactly as it would be behind other
-interactive turns. §10 records per-class caps as the knob to reach for if that proves wrong.
+interactive turns. §12 records per-class caps as the knob to reach for if that proves wrong.
 
 Pull-when-ready, rather than claim-then-queue-internally: an entry claimed but not started is an
 entry no other worker can take, and it is also the window in which a crash costs a reclaim cycle.
@@ -303,7 +352,7 @@ MI1 §6.1 specifies `turn_exp` as "an absolute cap: turn start + `MOCA_TURN_MAX_
 `exp = min(now + MOCA_GRANT_TTL_S, turn_exp)`, and `MOCA_TURN_MAX_S` defaulting to 1800 — but no
 TypeScript in the repo implements it. Expiry today is always `exp = iat + ttlSeconds`, clamped only
 for sandbox tokens by the resource's own `expiresAt`. #388 is therefore larger than it reads, and this
-is where the M1/M2 split in §7 comes from.
+is where the M1/M2 split in §9 comes from.
 
 For an async leaf, "turn start" is **dequeue**, not enqueue. A leaf that waits an hour in the queue
 must still get its full `MOCA_TURN_MAX_S`, and a grant minted at enqueue would already be expired.
@@ -317,7 +366,7 @@ consumer calls `prepareServerProcess(process.env)` at boot for the tenancy, keys
 credential-scrub invariants (MI1 §5 R2), exactly as the HTTP path does — the removed drainer had the
 same line, with the same comment: "a queued run is a server turn too."
 
-Retention beyond 24 h and richer artifacts are out of scope here; §10 lists them as owed.
+Retention beyond 24 h and richer artifacts are out of scope here; §12 lists them as owed.
 
 The caller polls the turn record for state, and the result store for the artifact. Whether N-way
 collection needs `/v1/batches` is #537, decided once this is measurable.
@@ -340,7 +389,7 @@ A claimed entry stays in the consumer group's PEL. `XAUTOCLAIM` reclaims entries
 after their owner dies; past `maxAttempts`, an entry dead-letters to a `lost` turn record plus a
 failed result, so a caller polling always reaches a terminal state rather than waiting forever.
 
-The restored queue brings this machinery with it (§8).
+The restored queue brings this machinery with it (§10).
 
 ### 6.3 Shutdown: the one place async differs sharply from interactive
 
@@ -381,16 +430,90 @@ abandoned entry reclaimed per §6.3.
 
 ---
 
-## 7. Delivery in three milestones
+## 7. Observability
+
+Dropping queue-depth-driven capacity (§10) means **nothing watches the queue as a side effect any
+more.** KEDA's scaler read `pendingEntriesCount` to decide how many Jobs to spawn, so depth was
+visible because something acted on it. Slot-driven admission removes the actor, and with it the
+observation — so the metrics have to be asked for explicitly rather than inherited.
+
+The existing surface sets the shape: `GET /metrics` on the supervisor's **admin** port returns a JSON
+body (not Prometheus text) whose `counters` object is snake_case — `restarts`, `handoff_retries`,
+`over_admission`, `spurious_refusals`, `head_truncations` (`supervisor/src/admin.ts`). New async
+counters join that object and follow it.
+
+| Metric                   | Kind  | Why it earns its place                                                     |
+| ------------------------ | ----- | -------------------------------------------------------------------------- |
+| `async_queue_depth`      | gauge | The one KEDA gave for free. Sustained growth means arrival outruns drain    |
+| `async_oldest_age_ms`    | gauge | Depth alone cannot distinguish a deep fast queue from a stalled shallow one |
+| `async_claims`           | count | Drain throughput; with depth, the arrival-vs-drain ratio                    |
+| `async_reclaims`         | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
+| `async_dead_letters`     | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
+| `async_claim_denied_full`| count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
+
+The last one is the design's own stated risk made visible: §5.3 reserves no headroom, so a full queue
+can occupy every slot. If `async_claim_denied_full` and interactive `429`s rise together, that is the
+measurement which would justify the per-class caps §12 holds in reserve.
+
+**The reporting path already exists and is the constraint.** The drain loop runs in the worker, which
+reaches the admin port only through the advisory `stats` IPC row — and that row is deliberately
+"never routed on, never merged into the supervisor's `WorkerView`" (`worker.ts:15-31`). Async
+counters ride it on the same terms: telemetry only, never an input to admission or routing. Queue
+depth and oldest-entry age are properties of Redis rather than of any one worker, so whichever
+component reports them must do so once per deployment, not once per worker.
+
+---
+
+## 8. Test strategy
+
+What proves each part, named here because the implementation plan is written from this document and
+the repo's TDD discipline requires the failing test first. `vitest` throughout, following the
+existing suites.
+
+**Unit, no Redis.** The drain loop's slot arithmetic against a fake `WorkQueue` and a real
+`TurnCounter`: claims while `inFlight < cap`, stops at the cap, releases on every exit path
+including a throw. `start()`'s end function is idempotent, so the test that matters is that a leaf
+failing *and* the loop's own cleanup running cannot double-decrement — the bias the counter's own
+comment warns about. The restored `work-queue` arrives with 319 lines of its own tests (§10).
+
+**Integration, with Redis** — as `session-backend` and the workload suites already require:
+
+- N submitted, cap below N, all N results collected, and the counter never observed above the cap.
+- Crash mid-leaf: kill a worker holding a claimed entry, assert `XAUTOCLAIM` reclaims it, it runs to
+  completion elsewhere, and the idempotency key makes the redelivery effectively once.
+- Drain: `drain` stops claiming, the in-flight entry is abandoned **unacked** and still pending, the
+  slot is released, and `awaitIdle` exits early rather than burning the full 20 s (§6.3).
+- Dead-letter: an entry failing past `maxAttempts` reaches `lost` **and** a failed result, so a
+  polling caller always terminates.
+- Cancel: a `queued` turn flips to `cancelled` and is never claimed; a `running` one answers `409`.
+
+**The admission change needs its own characterization test (§5.3).** All three synchronous aliases —
+`/runs`, `/run-leaf`, `/v1/runs` — must each be shown to occupy a slot. A test that covers only
+`/runs` would pass while two doors stay open, which is the defect restated. The existing
+`supervisor/test/real-worker.integration.test.ts` forks the real worker and drives the IPC rows, and
+is the natural home for the end-to-end half.
+
+**Live smoke, env-gated.** The queued-leaf smoke test on `deploy/k8s` (#688) follows the existing
+`M3_LIVE_SMOKE` convention; the removed `leaf-async-smoke.sh` at `38aa2146` is the starting point.
+
+**Explicitly not covered by tests:** `turn_exp`, until M2 builds it — there is nothing to test, and a
+test asserting today's `exp = iat + ttlSeconds` would lock in the behaviour MI1 §6.1 says is wrong.
+
+---
+
+## 9. Delivery in three milestones
 
 The design is whole; the delivery is staged, because §5.4 showed `turn_exp` and the turn record are
 new construction and nothing can be demonstrated until something drains.
 
-**M1 — a working drain, single tenancy.** Restore the queue (§8). Drain loop in the worker, sharing
-`TurnCounter`. `/runs` brought into the counter. Results through the existing store. Submission
-resolves the credential from the turn record at dequeue under **`MOCA_TENANCY=single` only**; async
-under `multi` is refused by name, as #386 item 5's interim allows. Acceptance: N leaves submitted,
-drained at a cap below N, all results collected, and #389's crash and drain acceptance holding.
+**M1 — a working drain, single tenancy.** Restore the queue (§10). Drain loop in the worker, sharing
+`TurnCounter`. All three synchronous aliases brought into the counter (§5.3). Submission, the status
+read (§4.4) and queued-only cancel (§4.5). Results through the existing store. Credentials resolved
+from the turn record at dequeue under **`MOCA_TENANCY=single` only**; async under `multi` is refused
+by name, as #386 item 5's interim allows. The §7 counters land with the loop that increments them —
+a drain whose depth and reclaims are invisible cannot be operated, and they are what M1's acceptance
+is read from. Acceptance: N leaves submitted, drained at a cap below N, all results collected, and
+#389's crash and drain acceptance holding, per §8.
 
 **M2 — multi-tenant.** `turn_exp` implemented (MI1 §6.1). Full grant-at-dequeue with both audiences
 (#388). The tenancy gate lifts. Control-plane turn record and submission API complete (#387).
@@ -404,7 +527,7 @@ shape ADR-0041 used for its own deprecation window.
 
 ---
 
-## 8. The queue: revive, with the parity audit on the record
+## 10. The queue: revive, with the parity audit on the record
 
 **Decision: restore `packages/work-queue` from `38aa2146` behind its existing `WorkQueue` interface.**
 
@@ -425,8 +548,8 @@ the verdict on each item:
 | Exit-0-when-idle drain semantics     | **Replaced** by the `drain` signal (§6.3)                          |
 | `XAUTOCLAIM` reaper (#17)            | **Kept.** §6.2 depends on it                                      |
 | Dead-letter past `maxAttempts`       | **Kept**, mapped to the `lost` state (§5.1)                        |
-| `LEAF_RESULT_TTL_SECONDS` (86400)    | **Kept** as-is; longer retention is owed (§10)                     |
-| Per-class concurrency caps           | **Not carried.** Archetypes §2 wants them; §10 records the gap     |
+| `LEAF_RESULT_TTL_SECONDS` (86400)    | **Kept** as-is; longer retention is owed (§12)                     |
+| Per-class concurrency caps           | **Not carried.** Archetypes §2 wants them; §12 records the gap     |
 
 Housekeeping: delete the dead `LeafEnvelope.async?: boolean` field, whose comment still claims "the
 HTTP layer enqueues instead of running inline." Nothing reads it, and leaving it invites a future
@@ -434,7 +557,7 @@ reader to believe the field is load-bearing.
 
 ---
 
-## 9. What Archetype C inherits
+## 11. What Archetype C inherits
 
 #536 (cron) should build on this consumer rather than a second one. It needs a trigger and an
 identity to run as; this design supplies the identity answer (§3: a service-account credential and
@@ -443,17 +566,22 @@ it adds is the schedule. Its design should cite this document for both.
 
 ---
 
-## 10. Owed, and explicitly not here
+## 12. Owed, and explicitly not here
 
+- **Cancelling a `running` leaf** (§4.5). Needs a cancel signal addressed to the one worker holding
+  it — new control-plane-to-worker machinery, since interactive cancel (ADR-0040) rides the turn's own
+  connection and async has none. The §4.3 caps bound how long a leaf runs meanwhile, so this is a
+  latency improvement rather than a missing containment property.
 - Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.
-- Per-class concurrency caps (archetypes §2) — §8 drops them for now; a global slot cap is what M1
-  delivers.
+- Per-class concurrency caps (archetypes §2) — §10 drops them for now; a global slot cap is what M1
+  delivers. §7's `async_claim_denied_full` against interactive `429`s is the measurement that would
+  justify adding them.
 - `/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
   `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
 - Wording amendments: MU1 §4.2 and MI1 §6.5/§10 still say "owned `/v1/runs`" (§4.1).
 
-## 11. References
+## 13. References
 
 - Issues: #686 (epic), #386 (this spec), #387, #388, #389, #687, #688, #689, #690, #537, #536, #378,
   #490, #691, #279, #361, #17
