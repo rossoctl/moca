@@ -13,7 +13,6 @@ import {
   type LeafResult,
 } from '@moca/harness/run-leaf';
 import { defaultAuditLog } from '@moca/harness/audit-log';
-import { RedisWorkQueue } from '@moca/work-queue';
 import {
   RedisResultStore,
   toResultRecord,
@@ -30,7 +29,6 @@ import {
   type TurnAuth,
   type TurnAuthDeps,
 } from './turn-auth.js';
-import { warnKnativeDeprecation } from './deprecation.js';
 import { prepareServerProcess } from './server-process.js';
 import { adoptTurnSlot, attachTurnSlot } from './turn-slot.js';
 import { SubjectCounter, turnsPerSubjectCap } from './subject-quota.js';
@@ -425,8 +423,8 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
  * (`SandboxPoolSaturatedError`) or there is no candidate yet (`SandboxPoolEmptyError` — pods
  * rolling, an HPA scaling from zero, presence records not re-mirrored after a restart), the turn can
  * succeed on a retry, and a 500 tells the caller it never can. `/runs` already treats saturation this
- * way (it bounded-waits then 503s) and `classifyOutcome` keeps BOTH retryable for the async queue, so
- * returning 500 here would make one signal mean two different things depending on the route.
+ * way (it bounded-waits then 503s) and `classifyOutcome` keeps both retryable, so returning 500
+ * here would make one signal mean two different things depending on the route.
  *
  * The two are deliberately not distinguished: from the caller's side "no capacity right now, retry"
  * is one fact, and splitting it would only invite a client to treat one as fatal.
@@ -963,12 +961,6 @@ function rejectInvalidConfigRef(body: any, res: ServerResponse): boolean {
   return true;
 }
 
-let queue: RedisWorkQueue | undefined;
-function getQueue(): RedisWorkQueue {
-  if (!queue) queue = new RedisWorkQueue(process.env.REDIS_URL);
-  return queue;
-}
-
 let resultStore: RedisResultStore | undefined;
 function getResultStore(): RedisResultStore {
   if (!resultStore) resultStore = new RedisResultStore(process.env.REDIS_URL);
@@ -1048,20 +1040,6 @@ async function resolveRunWorkload(
       ...(sandboxes ?? {}),
     },
   };
-}
-
-async function handleEnqueueLeafParsed(body: any, res: ServerResponse): Promise<void> {
-  if (!isRunEnvelope(body)) {
-    res.writeHead(400, JSON_HEADERS).end(JSON.stringify({ error: 'envelope_invalid' }));
-    return;
-  }
-  if (rejectInvalidConfigRef(body, res)) return;
-  const q = getQueue();
-  await q.ensureGroup();
-  await q.enqueue(body);
-  res
-    .writeHead(202, JSON_HEADERS)
-    .end(JSON.stringify({ status: 'accepted', sessionId: body.sessionId }));
 }
 
 async function handleRunLeafParsed(
@@ -1334,21 +1312,17 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       if (rejectInvalidContextWritable(parsed, res)) return;
 
       if (parsed && parsed.async === true) {
-        // Before the gate below, so every asynchronous run naming a workload gets the same answer.
-        if (parsed.workloadId !== undefined) return rejectWorkloadRun(res);
-        if (deps.requireAuth || auth) {
-          // Running it later on its caller's credential would mean storing a bearer in the queue
-          // (MI1 §6.5); running it on the ambient credential would spend the operator's key for a
-          // user. Owned asynchronous runs are MU2's.
-          res.writeHead(501, JSON_HEADERS).end(
-            JSON.stringify({
-              error: 'async_runs_unavailable',
-              message: 'asynchronous runs are not available when callers authenticate',
-            }),
-          );
-          return;
-        }
-        return handleEnqueueLeafParsed(parsed, res);
+        // ADR-0041: the KEDA drainer that consumed the async queue was removed with the
+        // Knative/KEDA deployment path. Refuse by name rather than running the body silently
+        // synchronous — the caller asked for queued dispatch and would otherwise wait forever.
+        res.writeHead(400, JSON_HEADERS).end(
+          JSON.stringify({
+            error: 'async_removed',
+            message:
+              'async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041); run leaves synchronously',
+          }),
+        );
+        return;
       }
       return handleRunLeafParsed(parsed, raw, res, auth);
     };
@@ -1378,10 +1352,6 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
 }
 
 export function startServer(port = PORT): ReturnType<typeof createServer> {
-  // ADR-0041 (2026-10-11): under Knative Serving, say so once at boot. The env vars are the
-  // guard, not the entrypoint: the P6 supervisor forks worker.ts, which imports this module's
-  // handler without ever calling startServer, and must stay silent.
-  warnKnativeDeprecation(process.env);
   // Before anything binds: the shared boot function refuses a malformed keyset and an inconsistent
   // tenancy configuration, and scrubs ambient credentials under multi tenancy (MI1 §5 R2).
   prepareServerProcess(process.env);
@@ -1399,7 +1369,7 @@ export function startServer(port = PORT): ReturnType<typeof createServer> {
   return server;
 }
 
-// Exact entrypoint match (matches cron-dispatch.ts) — avoids a fragile substring
+// Exact entrypoint match — avoids a fragile substring
 // match that would misfire for any argv path containing "knative-server".
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {

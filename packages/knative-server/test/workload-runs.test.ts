@@ -270,12 +270,11 @@ describe('a run on a workload', () => {
     });
   });
 
-  it('keeps asynchronous workload runs unavailable, with or without a token', async () => {
+  it('refuses asynchronous workload runs with the ADR-0041 removal error, with or without a token', async () => {
     await seed(alice, 'demo', 'ready', REVISION);
-    const unavailable = { status: 501, body: { error: 'workload_runs_unavailable' } };
-    // A tokened request would otherwise meet the async gate's async_runs_unavailable first.
-    expect(await run(alice, prompt('demo', { async: true }))).toEqual(unavailable);
-    expect(await run(null, prompt('demo', { async: true }))).toEqual(unavailable);
+    const removed = { status: 400, body: { error: 'async_removed' } };
+    expect(await run(alice, prompt('demo', { async: true }))).toMatchObject(removed);
+    expect(await run(null, prompt('demo', { async: true }))).toMatchObject(removed);
     expect(runLeaf).not.toHaveBeenCalled();
   });
 
