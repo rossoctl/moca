@@ -1,0 +1,151 @@
+# ADR-0047: P6 async fan-out is a drain loop inside the turn worker, sharing its admission budget
+
+- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Date:** 2026-11-05
+- **Deciders:** MOCA team
+- **Spec:** [`../specs/2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md)
+- **Supersedes:** [ADR-0015](0015-async-leaf-completion.md) (KEDA ScaledJob over Redis Streams),
+  which [ADR-0041](0041-deprecate-knative-keda-deployment.md) had already superseded as a deployment
+  model. This record replaces the capability ADR-0041 left owed.
+- **Issue:** [#686](https://github.com/rossoctl/moca/issues/686) (epic),
+  [#386](https://github.com/rossoctl/moca/issues/386) (this record and its spec)
+
+## Context
+
+Async fan-out — Archetype A of [`../concepts/dispatch-archetypes.md`](../concepts/dispatch-archetypes.md)
+— is submitting N leaf turns that run later, draining them at a concurrency cap below N, and
+collecting per-leaf results. Its only implementation was `leaf-job.ts`, a Redis Streams drainer run
+as a KEDA `ScaledJob`, and it existed on the Knative/KEDA deployment path alone.
+
+ADR-0041 deprecated that path on 2026-10-11 and recorded the loss as an accepted cost: "async leaf
+dispatch (the KEDA drainer) and the CronJob scheduled on-ramp have no P6 equivalent yet — ADR-0034
+flagged both as owed, and they still are." #490 confirmed no remaining user depended on it, so #691
+removed it on 2026-11-05 — the drainer, `@moca/work-queue`, and the enqueue route, which now answers
+`400 async_removed`.
+
+P6 therefore has no async path at all. Workers are purely reactive: each is an HTTP server that never
+calls `listen()` and only accepts sockets the supervisor hands it over IPC. Nothing in the codebase
+pulls its own work. The execution lane survived intact — `runLeaf`, `leaf-result-store` and the
+run-lease reaper are all live behind synchronous `/runs` — which is why the removal was survivable and
+what this decision builds on.
+
+Two live constraints shape the answer. The supervisor admits turns against `SH_TURNS_PER_WORKER`
+using a per-worker `TurnCounter` the worker owns and the supervisor reconciles from. And the shutdown
+budget is small: `SHUTDOWN_GRACE_MS` is 20 s against a `MOCA_TURN_MAX_S` of 1800 s.
+
+## Decision
+
+**Async fan-out is a drain loop that runs inside the ordinary turn worker and takes its slots from
+the same `TurnCounter` as interactive turns.** Submission is an authenticated control-plane API; the
+queue carries a turn id and nothing else; the leaf's credentials are minted when a worker claims it.
+
+- **One queue, one consumer, one trust model.** Both callers the epic anticipates — an operator's
+  `mocactl` and an LLM coding agent spawning subagents (#378/#387) — enqueue through the same
+  authenticated, owner-scoped API: `POST /v1/sessions/{id}/turns {async:true}` → `202 {turnId}`. The
+  trust model is uniformly "assume a misbehaving client," because the archetypes spec's assumption of
+  a deterministic non-LLM orchestrator (§5.1) no longer holds.
+- **The data-plane route stays removed, permanently (#687).** It is unauthenticated when
+  `SH_REQUIRE_AUTH` is off, which is the second trust model the point above rules out. `async_removed`
+  gains a pointer to the authenticated path and to this record. A controller that needs fan-out holds
+  a service-account credential.
+- **Shared admission, no reserved headroom.** The loop claims an entry only while
+  `counter.inFlight < SH_TURNS_PER_WORKER`, through the same idempotent `counter.start()` contract the
+  handler uses. The supervisor needs no change: `onChange` already sends the `load` IPC, and
+  `reconcile` already treats the worker as authoritative over its own count.
+- **No credential in the queue.** At claim the worker presents its own identity plus the turn id; the
+  control plane loads the turn record it owns, resolves a credential *name* against the owner's
+  subject document, and mints an inference grant and a sandbox grant (MI1 §6.5). "Turn start" for
+  `turn_exp` is **dequeue**, not enqueue — a leaf that waited an hour must still get its full
+  `MOCA_TURN_MAX_S`.
+- **On drain, abandon without acking.** The loop stops claiming, the in-flight leaf is left pending
+  for `XAUTOCLAIM` to reclaim, and the slot is released so `awaitIdle` exits early. Delivery is
+  at-least-once and the idempotency key makes redelivery safe.
+- **Revive `packages/work-queue` from `38aa2146`** behind its existing `WorkQueue` interface, with
+  the KEDA-era parity audit (#689) recorded below rather than assumed.
+- **Delivery in three milestones.** M1 is a working drain on `deploy/vm`/compose, gated to
+  `MOCA_TENANCY=single`. M2 implements `turn_exp`, completes grant-at-dequeue, and lifts the gate.
+  M3 is `deploy/k8s` manifests and a queued-leaf smoke test.
+
+### The M1 tenancy gate is a dated conditional refusal
+
+M1 refuses async submission under `MOCA_TENANCY=multi`, by name, with the reason. This is a stated
+condition with a lifting criterion — `turn_exp` implemented and both grant audiences minted at
+dequeue (M2) — not an omission to be discovered in production. It takes the shape ADR-0041 used for
+its own deprecation window: a floor plus a condition, rather than a state users must infer from
+absence of evidence.
+
+### The KEDA-era parity audit (#689)
+
+| KEDA-era behaviour                   | Verdict                                                        |
+| ------------------------------------ | -------------------------------------------------------------- |
+| Scale-to-zero                        | **Dropped.** ADR-0041 accepted this cost explicitly            |
+| Queue-depth-driven capacity          | **Dropped.** Admission is slot-driven, not depth-driven        |
+| `pendingEntriesCount` for the scaler | **Repurposed** as an operational metric; nothing scales on it  |
+| Exit-0-when-idle drain semantics     | **Replaced** by the supervisor's `drain` signal                |
+| `XAUTOCLAIM` reaper (#17)            | **Kept.** Crash recovery depends on it                         |
+| Dead-letter past `maxAttempts`       | **Kept**, mapped to a `lost` turn state                        |
+| `LEAF_RESULT_TTL_SECONDS` (86400)    | **Kept** as-is; longer retention is owed                       |
+| Per-class concurrency caps           | **Not carried.** Archetypes §2 wants them; recorded as a gap   |
+
+### Alternatives considered
+
+- **Dedicated leaf workers via the reserved `--role=leaf` seam.** Cleaner blast radius: a drain bug
+  could not reach interactive turns. Rejected because it creates **two capacity budgets that must be
+  reconciled** — `SH_TURNS_PER_WORKER` against a separate leaf concurrency — and because the
+  supervisor would need a new concept of a child it supervises but never routes to. #686's acceptance
+  asks for draining *inside* admission; two budgets is the definition of alongside it. The seam stays
+  reserved and unconsumed.
+- **A separate counter for leaves in the same worker.** Would make `SH_TURNS_PER_WORKER` undercount
+  true load and over-admit — the failure `TurnCounter`'s own idempotent-`end` comment warns about,
+  reached by a different door.
+- **Restore `POST /runs {async:true}` as well (#687).** Two submission paths means every safety
+  property is enforced twice and can diverge once, on the path that is unauthenticated by default.
+  Rejected.
+- **Reserve headroom for interactive turns.** A second number to tune, and the two-budget shape
+  again. Not added before a measurement asks for it.
+- **Abort the in-flight leaf on drain, as `armDetachedDrain` does for a detached interactive turn.**
+  An interactive turn aborts because a client is waiting on a stream; nobody waits on an async leaf,
+  so redelivery is strictly better. A 1800 s leaf cannot finish in a 20 s grace window regardless.
+- **Rewrite the queue rather than revive it.** 261 lines plus 319 lines of tests, none of it
+  Knative-specific — plain Redis Streams behind a `WorkQueue` interface. Rewriting re-derives the same
+  calls with fresh bugs.
+- **Scale-to-zero by some other mechanism.** Out of scope: ADR-0041 traded it away deliberately.
+
+## Consequences
+
+- Positive: async fan-out returns to a P6 deployment, closing the capability ADR-0041 listed as owed
+  and unblocking anyone who could not finish migrating.
+- Positive: leaves are admitted by the same budget as interactive turns, so one knob
+  (`SH_TURNS_PER_WORKER`) describes a worker's whole load — lighter than KEDA, which was a second,
+  blind capacity system beside the first.
+- Positive: no bearer token is ever written to the queue, and a queue entry read by something that
+  should not have it yields an opaque id.
+- Positive: Archetype C (cron, #536) inherits the identity answer and the whole queue-and-drain
+  substrate; only the schedule is left to design.
+- Negative / accepted cost: **workers stop being purely reactive.** A fault in the drain loop shares
+  a process with interactive turns. Contained by the same thing that contains a handler fault — the
+  supervisor's restart backoff — with the abandoned entry reclaimed on redelivery.
+- Negative / accepted cost: **a full queue can occupy every slot**, so an interactive `/turn`
+  arriving then is refused with `429`, exactly as it would be behind other interactive turns. Per-class
+  caps are the knob to reach for if that proves wrong.
+- Negative / accepted cost: **a deterministic controller must now hold a credential**, which on the
+  old unauthenticated data-plane path it never did.
+- Negative / accepted cost / **behaviour change on a live path**: all three synchronous leaf aliases
+  (`/runs`, `/run-leaf`, `/v1/runs`) are brought into the turn counter, fixing a pre-existing
+  over-admission defect — they occupy no slot today. Deployments at their admission ceiling will see
+  `429`s they previously would not have. This is the correct answer and was always
+  `SH_TURNS_PER_WORKER`'s intent, but it is a change operators must be told about, not folded in
+  silently.
+- Negative / accepted cost: at-least-once delivery means a leaf can run twice. Effectively-once rests
+  on the idempotency key and on `runLeaf`'s existing retry contract, not on the queue.
+- Follow-up owed: `turn_exp` is specified in MI1 §6.1 but **implemented nowhere in TypeScript** —
+  expiry today is always `exp = iat + ttlSeconds`. #388 is larger than it reads, and this is where the
+  M1/M2 split comes from. Also owed: result retention beyond 24 h and richer artifacts; per-class
+  concurrency caps; `/v1/batches` (#537) once a working fan-out exists to measure against; the
+  documentation updates in #690 (ADR-0041's "Still owed" note, the Archetype A row, the
+  `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1 §6.5/§10 still say "owned
+  `/v1/runs`" against #279's resolution.
+
+---
+
+_Assisted-By: Claude (Anthropic AI) <noreply@anthropic.com>_
