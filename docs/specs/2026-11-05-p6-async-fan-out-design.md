@@ -525,6 +525,33 @@ is read from. Acceptance: N leaves submitted, drained at a cap below N, all resu
 The ADR records the M1 tenancy gate as a dated, conditional refusal rather than an omission — the
 shape ADR-0041 used for its own deprecation window.
 
+### 9.1 Sequencing against MI1 S2 and S3
+
+#386's acceptance asks for this explicitly, and the milestone split above is where the answer shows
+up: **M1 is deliberately placed before S2, and M2 is gated behind it.**
+
+| This design | MI1 slice                                                 | Relationship                                                                                                        |
+| ----------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| M1          | **before S2**                                             | Uses S2's own stated interim — the credential resolved from the turn record at dequeue, `MOCA_TENANCY=single` only   |
+| M2          | **requires S2** (grants, token endpoint)                  | Grant-at-dequeue with both audiences is S2 machinery; `turn_exp` is MI1 §6.1, unbuilt (§5.4)                         |
+| M3          | independent                                               | `deploy/k8s` manifests; no slice dependency                                                                          |
+| —           | **S3** (bundle ownership, the `cfg` claim)                | No dependency either way: the turn record carries `cfg` as a digest (§5.1), exactly as a session does                |
+
+Two consequences worth stating, because each is a choice rather than a fact:
+
+- **M1 does not wait for S2.** If it did, async fan-out would be blocked on the whole grant and
+  token-endpoint slice, and #386 item 5 asks for the single-tenancy interim precisely so it need not
+  be. The cost is the tenancy gate, which is why the gate is a named refusal with a lifting criterion
+  rather than silence.
+- **M2 does not extend S2.** `turn_exp` is MI1's own specified field, unimplemented; building it is
+  discharging S2's spec, not adding to it. This design is a consumer of that work and says so, so the
+  two are not designed twice.
+
+This design also **feeds the S2 review** rather than only consuming it, as #386 anticipated: §5.4's
+finding that `turn_exp` exists in the spec and nowhere in the TypeScript is a correction S2 needs
+regardless of async fan-out, and "turn start = dequeue, not enqueue" is a semantic S2's own §6.1 does
+not currently pin down.
+
 ---
 
 ## 10. The queue: revive, with the parity audit on the record
@@ -579,7 +606,14 @@ it adds is the schedule. Its design should cite this document for both.
 - `/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
   `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
-- Wording amendments: MU1 §4.2 and MI1 §6.5/§10 still say "owned `/v1/runs`" (§4.1).
+- Updating children #387–#390 and #391 to match this design, per #386's acceptance. The decisions
+  they need are §4.1/§4.4/§4.5 (#387), §5.4's `turn_exp` finding (#388), §6.3 and §8 (#389), §9's
+  milestones (#390), and §10's parity verdicts (#689).
+
+**Done, not owed:** the MU1 and MI1 wording amendments #386's acceptance asks for are applied, as
+dated amendment notes at the head of each spec in that repo's established convention (MI1 §14), and
+registered in MI1 §14's amendment table. MU1 §4.2/§4.3/§9 and MI1 §6.1/§6.5/§10 now read as §4 and
+§5.4 of this document.
 
 ## 13. References
 
