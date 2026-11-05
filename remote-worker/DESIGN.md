@@ -136,7 +136,6 @@ grpcurl -plaintext -H "authorization: Bearer $EXEC_TOKEN" -proto proto/sandbox/v
 #  the worker path itself is exercised by the grpcurl check above.)
 ```
 
-`run-local.sh` wraps steps 1–4.
 
 ### Running it as an in-cluster pod — the verified full path (2026-07-16)
 
@@ -159,12 +158,12 @@ actual file content, so the leaf verdict reflects what is really in
 directly with the `grpcurl` exec above; the worker pod log shows the matching
 `exec req_id=…` frames.
 
-> **Required egress rule (upstream gap).** The harness `serverless-harness-egress`
-> NetworkPolicy is default-deny egress. As shipped it allows DNS, Redis, and
-> :443/:6443 — but **not the relay**, so with `SH_REMOTE_SANDBOX=1` every remote
-> exec is silently default-denied (harness→relay blocked) and times out. This repo's
-> `deploy/knative/harness-egress-policy.yaml` now adds the missing rule
-> (`app=sandbox-relay` :8443). If you deployed before that fix, patch it live:
+> **Required egress rule (upstream gap).** A default-deny egress NetworkPolicy must
+> allow the relay, or with `SH_REMOTE_SANDBOX=1` every remote exec is silently
+> default-denied (harness→relay blocked) and times out. The rule this repo shipped
+> for its deprecated Knative path (`app=sandbox-relay` :8443) was removed with that
+> path (ADR-0041); allow the relay's port and selector in your own policy. If you
+> deployed before that fix, patch it live:
 >
 > ```bash
 > oc patch networkpolicy serverless-harness-egress -n default --type=json \
@@ -204,7 +203,6 @@ outside-the-cluster (`RELAY_TLS=1`, Route host) cases.
 - `internal/session/` — frame loop, dispatch pool, dedup cache.
 - `internal/relaytest/` — test-only in-process relay (not built into the binary).
 - `go.mod` — module; uses the in-repo stubs via `replace … => ../gen/go`.
-- `run-local.sh` — laptop setup (relay token, enable path, port-forward, run).
 - `build-image.sh` — cross-compile linux/amd64 + package via OpenShift internal-registry
   binary build (or `--push <ref>` for an external registry).
 - `deploy-incluster.sh` — create the shared relay-token Secret, SA + `nonroot-v2` SCC, apply

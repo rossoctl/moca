@@ -16,8 +16,7 @@
 // This file deliberately never spells the dead namespace out: it is checked against every
 // tracked file, including itself, so DEAD_NS below is assembled at runtime.
 //
-// Pure file parsing plus `git ls-files`, following the same pattern as
-// authbridge-manifests.test.ts and ocp-authbridge-overlay.test.ts.
+// Pure file parsing plus `git ls-files`.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -61,22 +60,10 @@ describe('GHCR image namespace', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('publishes all three images to the live namespace', () => {
+  it('publishes the live images to the live namespace', () => {
     const workflow = read('.github/workflows/build.yaml');
-    for (const name of ['moca', 'moca-sandbox', 'moca-echo-target']) {
+    for (const name of ['moca', 'moca-remote-worker']) {
       expect(workflow).toContain(`image: ${LIVE_NS}${name}`);
     }
-  });
-
-  // Secondary defect from #177: these were plain assignments, so `HARNESS_IMAGE=... ./setup-ocp.sh`
-  // was silently ignored and only the --image / --sandbox-image flags worked. setup-kind.sh
-  // already had the right shape (`SH_IMAGE="${SH_IMAGE:-...}"`); these now match it.
-  it.each([
-    ['deploy/knative/setup-ocp.sh', 'HARNESS_IMAGE'],
-    ['deploy/knative/setup-ocp.sh', 'SANDBOX_IMAGE'],
-    ['deploy/knative/setup-k8s.sh', 'HARNESS_IMAGE'],
-    ['deploy/knative/setup-k8s.sh', 'SANDBOX_IMAGE'],
-  ])('%s honours $%s from the environment', (script, varName) => {
-    expect(read(script)).toContain(`${varName}="\${${varName}:-`);
   });
 });

@@ -25,7 +25,6 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   const args: PromoteArgs = {
     entry: '',
     mode: 'unattended',
-    // Matches deploy/knative/setup-k8s.sh:30 so the checked-in inventory (Task 14) resolves.
     // The container-tier sandbox image the P6 deployments run; must match the shipped
     // inventory in harness/sandbox-inventory/ or the binary check degrades to warnings.
     sandboxImage: 'ghcr.io/rossoctl/moca-remote-worker:latest',
@@ -134,8 +133,8 @@ export function inventoryFileName(image: string): string {
  *
  * The inventory is a HARNESS-SHIPPED asset, so it must be found relative to where the harness is
  * installed -- NOT relative to the invocation directory. `sh promote` is run from the user's own
- * project (that is the whole point of the feature), and a user's project will never contain
- * `deploy/knative/sandbox-inventory/`. Resolving against `cwd` alone made the binary check
+ * project (that is the whole point of the feature), and a user's project will never contain the
+ * harness's `sandbox-inventory/`. Resolving against `cwd` alone made the binary check
  * silently degrade to `inventory_unavailable` for every real caller, which is the "lying
  * preflight" this inventory exists to prevent -- measured: from the repo root the check produced
  * 29 findings, from one directory deeper it produced none.

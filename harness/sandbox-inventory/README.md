@@ -11,10 +11,10 @@ promotion can be checked on a laptop.
 
 Two checks guard these files, because they catch different failures:
 
-| Check                                       | Runs                   | Catches                                                                |
-| ------------------------------------------- | ---------------------- | ---------------------------------------------------------------------- |
-| the shipped-inventory tests (`test/promote.test.ts`) | every PR, no cluster | malformed JSON, wrong filename, unsorted list, a missing required tool |
-| `../../scripts/verify-sandbox-inventory.sh` | where the image exists | **drift** — the file claiming something the image does not have        |
+| Check                                                | Runs                   | Catches                                                                |
+| ---------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------- |
+| the shipped-inventory tests (`test/promote.test.ts`) | every PR, no cluster   | malformed JSON, wrong filename, unsorted list, a missing required tool |
+| `../../scripts/verify-sandbox-inventory.sh`          | where the image exists | **drift** — the file claiming something the image does not have        |
 
 A file that has drifted makes preflight lie, and a lying preflight is worse than none because
 people stop checking it. Re-run the verify script whenever the sandbox Dockerfile changes.

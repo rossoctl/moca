@@ -87,5 +87,5 @@ done
 [ -n "${rec:-}" ] || { echo "NOT registered — check: oc logs deploy/remote-worker -n $NS"; exit 1; }
 echo "==> worker log:"; oc logs deploy/remote-worker -n "$NS" --tail=5 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g'
 echo "OK. Enable the remote-sandbox path on the harness -- it reads $EXEC_KEY from $SECRET_NAME"
-echo "    by a single-key secretKeyRef (deploy/knative/README-worker.md, Step 2) -- then drive a"
-echo "    leaf: POST a LeafEnvelope to the harness /runs (see DESIGN.md)."
+echo "    by a single-key secretKeyRef -- then drive a leaf: POST a LeafEnvelope to the"
+echo "    harness /runs (see DESIGN.md)."
