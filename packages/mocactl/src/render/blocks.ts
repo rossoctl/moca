@@ -213,6 +213,12 @@ export const INTERRUPTED_TURN_NOTICE =
 export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer available';
 
 /**
+ * The catch-up replayed a turn this device never started: another device ran it while this one was
+ * away (#483). Without the line the turn reads as the reply to whatever prompt sits above it.
+ */
+export const OTHER_DEVICE_TURN_NOTICE = "another device's turn";
+
+/**
  * Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to.
  * A `turn` entry opens one after its prompt, and also with no prompt before it: a 409's attach
  * records another device's turn on its own.
@@ -225,6 +231,22 @@ export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'op
     else if (isTerminal(e.frame)) state = 'finished';
   }
   return state;
+}
+
+/**
+ * The turn id of the transcript's open detachable turn, if it has one. The resume's attach replays
+ * the session's LATEST turn, which need not be this one (spec §4.2): comparing the replayed
+ * `turn` frame's id against this says whether the catch-up continues our turn or starts another
+ * device's (#483). Undefined when the last turn finished, or was open but not detachable — an old
+ * transcript records no `turn` entry, so there is no id to compare and nothing to continue.
+ */
+export function openTurnId(t: Transcript): string | undefined {
+  let id: string | undefined;
+  for (const e of t.entries) {
+    if (e.kind === 'turn') id = e.turnId;
+    else if (e.kind === 'prompt' || (e.kind === 'frame' && isTerminal(e.frame))) id = undefined;
+  }
+  return id;
 }
 
 /** Marks every tool block in [from, to) that has no result as interrupted. */
@@ -243,6 +265,17 @@ function interruptTools(s: BlockState, from = 0, to = Infinity): BlockState {
  */
 export function settleOpenTurn(s: BlockState): BlockState {
   return interruptTools(finalizeOpen(s));
+}
+
+/**
+ * The catch-up is replaying a turn of its own, not the rest of the one the transcript left open
+ * (#483): that turn ends here, settled as `settleOpenTurn` would, and a notice says the turn
+ * about to stream belongs to another device. Settling first is what keeps the two apart — an open
+ * assistant block would otherwise swallow the other turn's text, and an unsettled tool would pin
+ * every later block in the live area for the rest of the session.
+ */
+export function startsForeignTurn(s: BlockState): BlockState {
+  return push(settleOpenTurn(s), { kind: 'notice', text: OTHER_DEVICE_TURN_NOTICE, tone: 'info' });
 }
 
 export function fromTranscript(t: Transcript): BlockState {

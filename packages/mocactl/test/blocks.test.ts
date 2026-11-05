@@ -9,9 +9,12 @@ import {
   fromTranscript,
   lastTurnState,
   markSent,
+  openTurnId,
+  OTHER_DEVICE_TURN_NOTICE,
   reduceFrame,
   settleOpenTurn,
   splitStatic,
+  startsForeignTurn,
   type BlockState,
 } from '../src/render/blocks.js';
 
@@ -279,6 +282,45 @@ describe('fromTranscript', () => {
     expect(lastTurnState(t([{ kind: 'turn', turnId: 't1' }]))).toBe('open-detachable');
   });
 
+  // #483: a resume's attach replays the session's LATEST turn, which may be one another device
+  // ran while this one was away. Telling it from the transcript's own open turn needs that turn's
+  // id, so the catch-up can start a turn of its own instead of appending into the open one.
+  it('names the open detachable turn, and no turn when the last one is not open', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    expect(
+      openTurnId(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'turn', turnId: 't1' },
+        ]),
+      ),
+    ).toBe('t1');
+    expect(openTurnId(t([{ kind: 'turn', turnId: 't1' }]))).toBe('t1');
+    // Finished, so the attach has nothing of this device's to continue.
+    expect(
+      openTurnId(
+        t([
+          { kind: 'turn', turnId: 't1' },
+          { kind: 'frame', frame: done },
+        ]),
+      ),
+    ).toBeUndefined();
+    // Open but not detachable (an old transcript): no turn frame, so no id to compare against.
+    expect(openTurnId(t([{ kind: 'prompt', text: 'p' }]))).toBeUndefined();
+    expect(openTurnId(t([]))).toBeUndefined();
+    // The newest turn is the open one.
+    expect(
+      openTurnId(
+        t([
+          { kind: 'prompt', text: 'p' },
+          { kind: 'turn', turnId: 't1' },
+          { kind: 'frame', frame: done },
+          { kind: 'turn', turnId: 't2' },
+        ]),
+      ),
+    ).toBe('t2');
+  });
+
   it("renders a prompt-less turn, and leaves it open while earlier turns' tools settle", () => {
     const s = fromTranscript({
       sessionId: 's',
@@ -412,6 +454,44 @@ describe('fromTranscript', () => {
     );
     expect(s.blocks[3]).toMatchObject({ kind: 'assistant', final: true });
     expect(s.blocks[4]).toMatchObject({ result: { isError: true, preview: 'interrupted' } });
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // #483: the catch-up turned out to replay a turn of its own, so the transcript's open turn ends
+  // here -- settled exactly as settleOpenTurn would -- and a notice says whose turn follows.
+  it("startsForeignTurn settles the open turn and says the next one is another device's", () => {
+    const open = fromTranscript(
+      midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any,
+    );
+    const s = startsForeignTurn(open);
+    expect(s.blocks[3]).toMatchObject({ kind: 'assistant', final: true });
+    expect(s.blocks[4]).toMatchObject({ result: { isError: true, preview: 'interrupted' } });
+    expect(s.blocks[5]).toMatchObject({ kind: 'notice', text: OTHER_DEVICE_TURN_NOTICE });
+    // Nothing of the settled turn is left live, so the other device's turn renders on its own.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // The other device's turn then streams in. It must not land in the turn just settled.
+  it("renders the other device's turn as a turn of its own after startsForeignTurn", () => {
+    const s = apply(
+      startsForeignTurn(
+        fromTranscript(midTool([{ kind: 'frame', frame: { type: 'text', delta: 'half' } }]) as any),
+      ),
+      { type: 'text', delta: 'theirs' },
+      done,
+    );
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'user',
+      'tool',
+      'user',
+      'assistant',
+      'tool',
+      'notice',
+      'assistant',
+      'turn-end',
+    ]);
+    expect(s.blocks[3]).toMatchObject({ text: 'half', final: true }); // ours, unchanged
+    expect(s.blocks[6]).toMatchObject({ text: 'theirs' }); // theirs, its own block
     expect(splitStatic(s.blocks).live).toEqual([]);
   });
 

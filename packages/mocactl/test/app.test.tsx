@@ -1383,4 +1383,45 @@ describe('leaving a running detachable turn', () => {
     expect(harness.attaches[0]!.lastEventId).toBe('t1:2-0');
     expect(all()).not.toContain("isn't running"); // the attach found the turn: no #472 notice
   });
+
+  // #483: the resume's attach replays the session's LATEST turn, which here is one another device
+  // ran while this one was away. Its reply must not be appended into the turn this device left
+  // open -- the whole path, from the transcript's own turn id to the rendered blocks.
+  it("resume renders another device's newer turn as its own, not as the open turn's reply", async () => {
+    const rt = testRuntime({
+      cp: sessionList('remote-1'),
+      harness: fakeHarness([], {}, [
+        {
+          frames: [
+            { type: 'turn', turnId: 't2', sessionId: 'remote-1' },
+            { type: 'text', delta: 'THEIR REPLY' },
+            doneFrame('remote-1'),
+          ],
+          ids: ['t2:1-0', 't2:2-0', 't2:3-0'],
+        },
+      ]),
+    });
+    rt.transcripts!.appendPrompt('remote-1', 'go');
+    rt.transcripts!.appendFrame(
+      'remote-1',
+      { type: 'turn', turnId: 't1', sessionId: 'remote-1' },
+      't1:1-0',
+    );
+    rt.transcripts!.appendFrame('remote-1', { type: 'text', delta: 'OUR HALF' }, 't1:2-0');
+    rt.transcripts!.flush('remote-1');
+    const { stdin, all, frame, until, ready } = mount(rt);
+    await ready();
+    stdin.write(KEY.ctrl('x'));
+    await tick();
+    stdin.write('l');
+    await until(() => inputReady(stdin) && frame().includes('local history'));
+    await tick();
+    stdin.write(KEY.enter);
+    await until(() => all().includes('THEIR REPLY'));
+    // Our half stands on its own, and the notice separates it from the turn that followed.
+    expect(all()).toContain('OUR HALF');
+    expect(all()).toContain("another device's turn");
+    expect(all().indexOf('OUR HALF')).toBeLessThan(all().indexOf("another device's turn"));
+    expect(all().indexOf("another device's turn")).toBeLessThan(all().indexOf('THEIR REPLY'));
+  });
 });

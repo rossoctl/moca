@@ -39,6 +39,7 @@ import {
   addNotice,
   fromTranscript,
   lastTurnState,
+  openTurnId,
   splitStatic,
   type BlockState,
 } from './render/blocks.js';
@@ -72,6 +73,8 @@ interface Attached {
   session?: ActiveSession;
   initial: BlockState;
   initialUsage?: Usage;
+  /** The detachable turn `initial` left open, so a catch-up on a newer one is told apart (#483). */
+  openTurnId?: string;
   /** The session's config bundle digest, fixed for its life; shown so it is never a guess. */
   configRef?: string;
   /** The session's model; null on the deployment default. */
@@ -273,6 +276,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
   const view = useSession(attached.session, {
     initial: attached.initial,
     initialUsage: attached.initialUsage,
+    openTurnId: attached.openTurnId,
     now: rt.now,
     onTurnEnd,
   });
@@ -420,6 +424,7 @@ export function App({ rt, opts, env, os, write }: AppProps) {
               session: s,
               initial,
               initialUsage: t?.usage,
+              openTurnId: t ? openTurnId(t) : undefined,
               configRef: configRef ?? undefined,
               model: model ?? null,
             },
