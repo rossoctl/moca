@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.1 — November 5, 2026
+Version: 1.2 — November 5, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -87,7 +87,7 @@ The archetypes spec's first cross-archetype invariant (§5.1) is explicit:
 Its §6 is blunter still — for bulk fan-out, Archetype A **rejected** agent-managed subagents: the
 subprocess pool "replaces ask the main agent to spawn N sub-agents in its own context."
 
-But #386 is item B1 of the coding-agent subagents epic (#378), where the submitter *is* an LLM. Its
+But #386 is item B1 of the coding-agent subagents epic (#378), where the submitter _is_ an LLM. Its
 own item 8 names the collision: "Archetypes §5.1 expects a deterministic, non-LLM orchestrator, and
 an LLM coding agent is neither, so every safety property must hold with a misbehaving client."
 
@@ -121,6 +121,10 @@ still say "owned `/v1/runs`"; this design amends that wording (§12).
 `202` rather than `200`: the work is accepted, not done. The response carries the `turnId` the caller
 polls, and nothing else — no result, no partial state.
 
+One refusal carries over from the removed route: an async turn naming a `workloadId` answers
+`501 workload_runs_unavailable` at submission, before admission and before enqueue. §4.2 has the
+reasoning.
+
 ### 4.2 Data-plane `/runs {async:true}`: replaced, not restored (#687)
 
 **Decision: it stays removed, permanently, and `async_removed` names the authenticated path as its
@@ -136,6 +140,29 @@ This closes #687 as "replaced". The refusal message gains a pointer, replacing t
 async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041).
 Use POST /v1/sessions/{id}/turns with async:true (authenticated). See ADR-0047.
 ```
+
+#687 asks how the decision interacts with three specific things, and each answer is load-bearing
+rather than incidental:
+
+- **`MOCA_TENANCY=single`.** The removed route was reachable precisely when nobody authenticated, so
+  the obvious reading of "single tenancy" is that it should come back there. It does not. Single
+  tenancy means one _subject_, not no subject: the credential is the operator's ambient one, and
+  §5.4 resolves it from the turn record at dequeue. The authenticated path works under `single`
+  — that is exactly what M1 ships (§9.1) — so the unauthenticated route has no niche left to fill.
+  What `single` changes is whose credential runs the leaf, not whether a caller must present one.
+- **`LEAF_RESULT_TTL_SECONDS`.** Unchanged, and shared. The result store is keyed by
+  `leafSessionId` (§5.5) and knows nothing about which route submitted the work, so the 24 h
+  retention applies identically to async turns. There is no second store and no second TTL to
+  reconcile; §10 keeps the value as-is and §12 owns the longer-retention question.
+- **The rule refusing async workload runs.** This one is a real behavioural carry-over, and the
+  pre-removal code shows why it was ordered the way it was: `if (parsed.workloadId !== undefined)
+return rejectWorkloadRun(res)` sat _before_ the auth gate, deliberately, "so every asynchronous
+  run naming a workload gets the same answer" (`38aa2146`, `server.ts:1337-1338`). The refusal is
+  `501 workload_runs_unavailable`, and `rejectWorkloadRun` still exists on the synchronous path
+  (`server.ts:971`). **The rule carries to §4.1 unchanged:** an async turn naming a `workloadId` is
+  refused at submission, before admission and before enqueue, so the refusal is synchronous and the
+  caller learns at `POST` time rather than by polling a turn that will never run. Enqueueing it to
+  fail at dequeue would convert a 501 into a dead-letter.
 
 ### 4.3 Caps and idempotency
 
@@ -172,7 +199,7 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 `/v1/batches` can be judged worth building.
 
 **`GET /runs/status` is deliberately left exactly as it is.** It already exists
-(`server.ts:1237-1240`) and infers status *from the result store*: no record answers
+(`server.ts:1237-1240`) and infers status _from the result store_: no record answers
 `{status:'queued'}` (`:1163`). That inference cannot be reused here, for two reasons:
 
 - It conflates three different situations — queued, never submitted, and reaped-as-`lost` all look
@@ -251,7 +278,7 @@ have it.
 | `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)           |
 | `tenant`         | gates M1 (§9)                                                      |
 | `sessionId`      | the session the turn belongs to                                    |
-| `cfg`            | bundle digest, as on the session                                    |
+| `cfg`            | bundle digest, as on the session                                   |
 | `credentialName` | a **name**, resolved server-side at dequeue — never the credential |
 | `caps`           | tokens, cost, wall-clock (§4.3)                                    |
 | `idempotencyKey` | defaults to `sessionId` (§4.3)                                     |
@@ -281,7 +308,7 @@ Two candidates were considered. The reserved `--role=leaf` seam would fork dedic
 cleaner blast radius, since a drain bug could not touch interactive turns. It was rejected because it
 creates **two capacity budgets that must be reconciled** — `SH_TURNS_PER_WORKER` against a separate
 leaf concurrency — and because the supervisor would need a new concept of a child it supervises but
-never routes to. Goal 2 asks for draining *inside* admission; two budgets is the definition of
+never routes to. Goal 2 asks for draining _inside_ admission; two budgets is the definition of
 alongside it.
 
 The accepted cost: workers stop being purely reactive, and a fault in the drain loop shares a process
@@ -418,11 +445,11 @@ property must hold without that assumption:
 | Attack                          | Containment                                                               |
 | ------------------------------- | ------------------------------------------------------------------------- |
 | Unbounded fan-out               | Per-owner queued-turn quota, refused at submission with `429`             |
-| Runaway spend                   | Per-turn caps (§4.3) enforced in the worker, not trusted from the client   |
-| Turns that never end            | `turn_exp` (§5.4) refuses refresh past the cap; the worker's own deadline  |
-| Reading another owner's results | Owner scoping on the turn record; the queue holds no readable payload      |
-| Credential exfiltration         | No credential in the queue; grants minted at dequeue, short-lived          |
-| Retry storms                    | Idempotency key collapses duplicates to one `turnId`                       |
+| Runaway spend                   | Per-turn caps (§4.3) enforced in the worker, not trusted from the client  |
+| Turns that never end            | `turn_exp` (§5.4) refuses refresh past the cap; the worker's own deadline |
+| Reading another owner's results | Owner scoping on the turn record; the queue holds no readable payload     |
+| Credential exfiltration         | No credential in the queue; grants minted at dequeue, short-lived         |
+| Retry storms                    | Idempotency key collapses duplicates to one `turnId`                      |
 
 A drain-loop fault sharing a process with interactive turns (§5.2's accepted cost) is contained by
 the same thing that contains a handler fault today: the supervisor's restart backoff, with the
@@ -442,14 +469,14 @@ body (not Prometheus text) whose `counters` object is snake_case — `restarts`,
 `over_admission`, `spurious_refusals`, `head_truncations` (`supervisor/src/admin.ts`). New async
 counters join that object and follow it.
 
-| Metric                   | Kind  | Why it earns its place                                                     |
-| ------------------------ | ----- | -------------------------------------------------------------------------- |
-| `async_queue_depth`      | gauge | The one KEDA gave for free. Sustained growth means arrival outruns drain    |
-| `async_oldest_age_ms`    | gauge | Depth alone cannot distinguish a deep fast queue from a stalled shallow one |
-| `async_claims`           | count | Drain throughput; with depth, the arrival-vs-drain ratio                    |
-| `async_reclaims`         | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
-| `async_dead_letters`     | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
-| `async_claim_denied_full`| count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
+| Metric                    | Kind  | Why it earns its place                                                      |
+| ------------------------- | ----- | --------------------------------------------------------------------------- |
+| `async_queue_depth`       | gauge | The one KEDA gave for free. Sustained growth means arrival outruns drain    |
+| `async_oldest_age_ms`     | gauge | Depth alone cannot distinguish a deep fast queue from a stalled shallow one |
+| `async_claims`            | count | Drain throughput; with depth, the arrival-vs-drain ratio                    |
+| `async_reclaims`          | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
+| `async_dead_letters`      | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
+| `async_claim_denied_full` | count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
 
 The last one is the design's own stated risk made visible: §5.3 reserves no headroom, so a full queue
 can occupy every slot. If `async_claim_denied_full` and interactive `429`s rise together, that is the
@@ -473,7 +500,7 @@ existing suites.
 **Unit, no Redis.** The drain loop's slot arithmetic against a fake `WorkQueue` and a real
 `TurnCounter`: claims while `inFlight < cap`, stops at the cap, releases on every exit path
 including a throw. `start()`'s end function is idempotent, so the test that matters is that a leaf
-failing *and* the loop's own cleanup running cannot double-decrement — the bias the counter's own
+failing _and_ the loop's own cleanup running cannot double-decrement — the bias the counter's own
 comment warns about. The restored `work-queue` arrives with 319 lines of its own tests (§10).
 
 **Integration, with Redis** — as `session-backend` and the workload suites already require:
@@ -486,6 +513,10 @@ comment warns about. The restored `work-queue` arrives with 319 lines of its own
 - Dead-letter: an entry failing past `maxAttempts` reaches `lost` **and** a failed result, so a
   polling caller always terminates.
 - Cancel: a `queued` turn flips to `cancelled` and is never claimed; a `running` one answers `409`.
+- Parity carry-overs (§10): each of `prompt`, `converge` and `solve` drains; an async turn naming a
+  `workloadId` is refused `501` at `POST` with nothing enqueued; a `failed/saturated` leaf is not
+  acked and is redelivered, which is `classifyOutcome`'s contract exercised for the first time since
+  #691.
 
 **The admission change needs its own characterization test (§5.3).** All three synchronous aliases —
 `/runs`, `/run-leaf`, `/v1/runs` — must each be shown to occupy a slot. A test that covers only
@@ -530,12 +561,12 @@ shape ADR-0041 used for its own deprecation window.
 #386's acceptance asks for this explicitly, and the milestone split above is where the answer shows
 up: **M1 is deliberately placed before S2, and M2 is gated behind it.**
 
-| This design | MI1 slice                                                 | Relationship                                                                                                        |
-| ----------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| M1          | **before S2**                                             | Uses S2's own stated interim — the credential resolved from the turn record at dequeue, `MOCA_TENANCY=single` only   |
-| M2          | **requires S2** (grants, token endpoint)                  | Grant-at-dequeue with both audiences is S2 machinery; `turn_exp` is MI1 §6.1, unbuilt (§5.4)                         |
-| M3          | independent                                               | `deploy/k8s` manifests; no slice dependency                                                                          |
-| —           | **S3** (bundle ownership, the `cfg` claim)                | No dependency either way: the turn record carries `cfg` as a digest (§5.1), exactly as a session does                |
+| This design | MI1 slice                                  | Relationship                                                                                                       |
+| ----------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| M1          | **before S2**                              | Uses S2's own stated interim — the credential resolved from the turn record at dequeue, `MOCA_TENANCY=single` only |
+| M2          | **requires S2** (grants, token endpoint)   | Grant-at-dequeue with both audiences is S2 machinery; `turn_exp` is MI1 §6.1, unbuilt (§5.4)                       |
+| M3          | independent                                | `deploy/k8s` manifests; no slice dependency                                                                        |
+| —           | **S3** (bundle ownership, the `cfg` claim) | No dependency either way: the turn record carries `cfg` as a digest (§5.1), exactly as a session does              |
 
 Two consequences worth stating, because each is a choice rather than a fact:
 
@@ -565,18 +596,44 @@ re-derive the same calls with fresh bugs; the interface keeps a different backin
 later. Its removal settled nothing either way, as #686 notes.
 
 What it inherits from the KEDA era must be audited, not assumed — this is #689, and the ADR records
-the verdict on each item:
+the verdict on each item. The table covers every property on #689's "At minimum" list, so the issue
+can be closed against it rather than against a subset:
 
-| KEDA-era behaviour                   | Verdict                                                           |
-| ------------------------------------ | ----------------------------------------------------------------- |
-| Scale-to-zero                        | **Dropped.** ADR-0041 accepted this cost explicitly               |
-| Queue-depth-driven capacity          | **Dropped.** Admission is slot-driven (§5.3), not depth-driven     |
-| `pendingEntriesCount` for the scaler | **Repurposed** as an operational metric; nothing scales on it      |
-| Exit-0-when-idle drain semantics     | **Replaced** by the `drain` signal (§6.3)                          |
-| `XAUTOCLAIM` reaper (#17)            | **Kept.** §6.2 depends on it                                      |
-| Dead-letter past `maxAttempts`       | **Kept**, mapped to the `lost` state (§5.1)                        |
-| `LEAF_RESULT_TTL_SECONDS` (86400)    | **Kept** as-is; longer retention is owed (§12)                     |
-| Per-class concurrency caps           | **Not carried.** Archetypes §2 wants them; §12 records the gap     |
+| KEDA-era behaviour                                      | Verdict                                                                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Scale-to-zero                                           | **Dropped.** ADR-0041 accepted this cost explicitly                                                     |
+| Queue-depth-driven capacity                             | **Dropped.** Admission is slot-driven (§5.3), not depth-driven                                          |
+| `pendingEntriesCount` for the scaler                    | **Repurposed** as an operational metric; nothing scales on it                                           |
+| Exit-0-when-idle drain semantics                        | **Replaced** by the `drain` signal (§6.3)                                                               |
+| `XAUTOCLAIM` reaper (#17)                               | **Kept.** §6.2 depends on it                                                                            |
+| Dead-letter past `maxAttempts`                          | **Kept**, mapped to the `lost` state (§5.1)                                                             |
+| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is; longer retention is owed (§12)                                                          |
+| At-least-once delivery                                  | **Kept.** §6.1: the claim/ack cycle is unchanged, so a leaf can run twice                               |
+| `runLeaf` idempotency on the session id                 | **Kept, and now the submission default too** — §4.3 defaults `idempotencyKey` to `sessionId`            |
+| `classifyOutcome` retry classes                         | **Kept, and already present** — it survived #691 in `harness/src/classify-outcome.ts`; see below        |
+| Leaf kinds accepted async (`prompt`/`converge`/`solve`) | **All three kept.** `runLeaf` dispatches on `kind` (`run-leaf.ts:391-392`) and the loop calls `runLeaf` |
+| Refusing async workload runs                            | **Kept**, moved to submission time (§4.2) so it stays a synchronous `501`, not a dead-letter            |
+| `queued` when no result record exists                   | **Not carried.** §4.4 reads state from the turn record; `/runs/status` is untouched                     |
+| Global concurrency cap                                  | **Replaced** by supervisor admission (§5.3) — one slot budget, not a separate queue-side limit          |
+| Per-class concurrency caps                              | **Not carried.** Archetypes §2 wants them; §12 records the gap, #360/#391 own quotas                    |
+| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** — §7's six counters, on the supervisor's admin `/metrics`                         |
+
+Two of those deserve a sentence beyond the verdict.
+
+**`classifyOutcome` is the one piece of the async contract #691 did not remove.** It still lives at
+`harness/src/classify-outcome.ts` with its tests, and `run-leaf.ts` and `select-sandbox.ts` still
+carry comments explaining their behaviour in terms of it ("keeps it retryable for the async queue").
+So the retry classes need no revival and no redesign: `failed/error` and `failed/saturated` return
+`{ack: false, retryable: true}` and everything else acks. The drain loop in §5.2 is its first caller
+since the removal, and the comments stop being aspirational. `saturated` matters most here — the
+synchronous path bounded-waits then `503`s, while the async path has no bounded wait, so the entry
+stays pending and drains as capacity frees. That is the behaviour §5.3's no-reserved-headroom choice
+depends on.
+
+**The `queued`-when-absent inference is deliberately dropped, not overlooked.** It was the only
+status signal the KEDA path had, and it is wrong in two directions (§4.4): it cannot distinguish a
+queued turn from one never submitted, nor from one reaped as `lost`. Replacing an inference with a
+record is the parity item where matching the old behaviour would have been the defect.
 
 Housekeeping: delete the dead `LeafEnvelope.async?: boolean` field, whose comment still claims "the
 HTTP layer enqueues instead of running inline." Nothing reads it, and leaving it invites a future

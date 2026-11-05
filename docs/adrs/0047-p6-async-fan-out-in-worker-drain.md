@@ -53,7 +53,7 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   handler uses. The supervisor needs no change: `onChange` already sends the `load` IPC, and
   `reconcile` already treats the worker as authoritative over its own count.
 - **No credential in the queue.** At claim the worker presents its own identity plus the turn id; the
-  control plane loads the turn record it owns, resolves a credential *name* against the owner's
+  control plane loads the turn record it owns, resolves a credential _name_ against the owner's
   subject document, and mints an inference grant and a sandbox grant (MI1 §6.5). "Turn start" for
   `turn_exp` is **dequeue**, not enqueue — a leaf that waited an hour must still get its full
   `MOCA_TURN_MAX_S`.
@@ -62,7 +62,7 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   at-least-once and the idempotency key makes redelivery safe.
 - **Status is read from the turn record on a new route; `GET /runs/status` is untouched.**
   `GET /v1/sessions/{id}/turns/{turnId}` answers from the record, so queued, never-submitted (`404`)
-  and reaped-as-`lost` are distinguishable. The existing route infers status from the *result store*
+  and reaped-as-`lost` are distinguishable. The existing route infers status from the _result store_
   — no record answers `{status:'queued'}` — which conflates all three, and extending it would change
   a live route's responses on top of the admission change below. Two routes, one source of truth
   each.
@@ -86,16 +86,31 @@ absence of evidence.
 
 ### The KEDA-era parity audit (#689)
 
-| KEDA-era behaviour                   | Verdict                                                        |
-| ------------------------------------ | -------------------------------------------------------------- |
-| Scale-to-zero                        | **Dropped.** ADR-0041 accepted this cost explicitly            |
-| Queue-depth-driven capacity          | **Dropped.** Admission is slot-driven, not depth-driven        |
-| `pendingEntriesCount` for the scaler | **Repurposed** as an operational metric; nothing scales on it  |
-| Exit-0-when-idle drain semantics     | **Replaced** by the supervisor's `drain` signal                |
-| `XAUTOCLAIM` reaper (#17)            | **Kept.** Crash recovery depends on it                         |
-| Dead-letter past `maxAttempts`       | **Kept**, mapped to a `lost` turn state                        |
-| `LEAF_RESULT_TTL_SECONDS` (86400)    | **Kept** as-is; longer retention is owed                       |
-| Per-class concurrency caps           | **Not carried.** Archetypes §2 wants them; recorded as a gap   |
+| KEDA-era behaviour                                      | Verdict                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Scale-to-zero                                           | **Dropped.** ADR-0041 accepted this cost explicitly                                  |
+| Queue-depth-driven capacity                             | **Dropped.** Admission is slot-driven, not depth-driven                              |
+| `pendingEntriesCount` for the scaler                    | **Repurposed** as an operational metric; nothing scales on it                        |
+| Exit-0-when-idle drain semantics                        | **Replaced** by the supervisor's `drain` signal                                      |
+| `XAUTOCLAIM` reaper (#17)                               | **Kept.** Crash recovery depends on it                                               |
+| Dead-letter past `maxAttempts`                          | **Kept**, mapped to a `lost` turn state                                              |
+| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is; longer retention is owed                                             |
+| At-least-once delivery                                  | **Kept.** The claim/ack cycle is unchanged                                           |
+| `runLeaf` idempotency on the session id                 | **Kept**, and promoted to the submission-time `idempotencyKey` default               |
+| `classifyOutcome` retry classes                         | **Kept and already in tree** — `harness/src/classify-outcome.ts` survived #691       |
+| Leaf kinds accepted async (`prompt`/`converge`/`solve`) | **All three kept.** The loop calls `runLeaf`, which dispatches on `kind`             |
+| Refusing async workload runs                            | **Kept**, moved to submission time so it stays a synchronous `501`                   |
+| `queued` when no result record exists                   | **Not carried**, deliberately: an inference replaced by a record                     |
+| Global concurrency cap                                  | **Replaced** by supervisor admission — one slot budget, no separate queue-side limit |
+| Per-class concurrency caps                              | **Not carried.** Archetypes §2 wants them; recorded as a gap; #360/#391 own quotas   |
+| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** to six counters on the supervisor's admin `/metrics`           |
+
+`classifyOutcome` is the one piece of the async contract #691 left standing — `run-leaf.ts` and
+`select-sandbox.ts` still explain their behaviour in terms of it. The drain loop is its first caller
+since the removal, so its retry classes need no revival: `failed/error` and `failed/saturated` stay
+retryable and everything else acks. Dropping the `queued`-when-absent inference is the one parity
+item where matching the old behaviour would itself have been the defect, since it conflates queued,
+never-submitted and reaped-as-lost.
 
 ### Alternatives considered
 
@@ -103,7 +118,7 @@ absence of evidence.
   could not reach interactive turns. Rejected because it creates **two capacity budgets that must be
   reconciled** — `SH_TURNS_PER_WORKER` against a separate leaf concurrency — and because the
   supervisor would need a new concept of a child it supervises but never routes to. #686's acceptance
-  asks for draining *inside* admission; two budgets is the definition of alongside it. The seam stays
+  asks for draining _inside_ admission; two budgets is the definition of alongside it. The seam stays
   reserved and unconsumed.
 - **A separate counter for leaves in the same worker.** Would make `SH_TURNS_PER_WORKER` undercount
   true load and over-admit — the failure `TurnCounter`'s own idempotent-`end` comment warns about,
