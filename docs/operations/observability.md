@@ -47,15 +47,14 @@ The control plane's `/healthz` does not depend on Redis, so an outage does not r
   `worker_channel_error`, `handoff_retry`, `handoff_failed`, `head_truncated`, `over_admission`.
 - **Control plane:** plain prefixed lines, for example `[control-plane] redis client error: ...`,
   `[control-plane] audit write failed for <route> <target>: ... -- the write itself SUCCEEDED`.
-- **Audit log mirror** (control plane and knative-server, [ADR-0044](../adrs/0044-audit-log-mirror-stdout.md)):
+- **Audit log mirror** (control plane and the data plane, [ADR-0044](../adrs/0044-audit-log-mirror-stdout.md)):
   one JSON object per audit decision on stdout, shape `{"event":"audit","decision":"...","subject":"...","sessionId":"...",...}`.
   Field whitelist: `event, decision, subject, sessionId, workloadId?, configRef?, sandboxId?, credential?,
 model?, fromModel?, kind?, status?, reason?, bytes?, writable?, family?, graceReplay?`. Never carries
   token / credential / prompt / response / filename / display-name values —
   [the spec](../specs/2026-10-20-audit-log-mirror-design.md) names the data-handling rules; three
   tests in `packages/control-plane/test/audit-log.test.ts` enforce them. `run_started` and
-  `run_finalized` emit from the P6 run path (`handleRunLeafParsed`); the deprecated KEDA drain
-  (ADR-0041) stays silent.
+  `run_finalized` emit from the P6 run path (`handleRunLeafParsed`).
 - **Data plane and workers:** `[redis] <label>: <message> (node-redis will reconnect)`, and
   `[deprecation] ... is deprecated` for the old route aliases.
 - **Relay:** plain text, for example `presence put failed for <id> (attempt N, retrying in X ms): ...`,
@@ -84,6 +83,6 @@ through `kubectl exec`; no HTTP endpoint for the audit stream is documented.
 Workers report, best effort, where each session ran. `GET /v1/sessions/{id}/resources` returns the session, harness,
 sandbox, lease and placement (sandbox id, tier, and `workspaceReset`, either `{at, from}` or null; the stream event
 is called `workspace_reset`). A top-level `queue` is always null. The data is self-reported by the harness
-and display-only. Some fields still carry Knative-era values (`mode` is `leaf-job` or `knative`), and the sandbox
+and display-only. `mode` reports `worker` when the data plane self-reported a pod, and the sandbox
 `phase` probably reads `unknown` on this deployment because the control plane has no pod permissions (inferred from
 the manifests, not run).

@@ -14,10 +14,8 @@ in Redis for polling. The harness does no filesystem I/O of its own.
 
 Nothing checks for the old fields by name. An envelope without the inline fields (the old file-ref shape
 has no `item`, `problemStatement` or `prompt`) is rejected with 400 `envelope_invalid`; an envelope that has
-the old fields **plus** a valid inline shape is accepted and the old fields are ignored. Some scripts under
-`deploy/knative/` (`leaf-cron.yaml`, `leaf-gate-smoke.sh`) still use them; they belong to the deprecated
-path. A leaf's tools still run in a sandbox with its own filesystem, and `workspaceRef` is a path inside
-that sandbox.
+the old fields **plus** a valid inline shape is accepted and the old fields are ignored. A leaf's tools
+still run in a sandbox with its own filesystem, and `workspaceRef` is a path inside that sandbox.
 
 ## Request
 
@@ -118,10 +116,8 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
 
 ## Async and scheduled dispatch
 
-`async: true` and the cron on-ramp exist only on the deprecated Knative/KEDA path. On P6, `async: true`
-with a token returns 501 `async_runs_unavailable` (or `workload_runs_unavailable` when it names a
-`workloadId`). See
-[the migration guide](../migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob).
+`async: true` and the cron on-ramp were removed with the Knative/KEDA path (ADR-0041): a request with
+`async: true` returns 400 `async_removed`. Neither has a P6 equivalent yet.
 
 ## Spec drift
 

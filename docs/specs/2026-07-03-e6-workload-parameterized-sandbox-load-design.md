@@ -49,7 +49,7 @@ where reported, is the sandbox's and is noise-robust.
 ## 3. Workload variants (real Archetype-A code review)
 
 Seed the git-daemon repo (`deploy/knative/gitd.yaml`) with a small real fixture set on a stable ref:
-the existing [`deploy/knative/fixtures/repo/risky.py`](../../deploy/knative/fixtures/repo/risky.py) and
+the existing `risky.py` fixture (moved to `harness/test/fixtures/repo/risky.py`) and
 `safe.py`, plus **1–2 larger source files** (e.g. a ~200-line module with several plausible findings)
 added under `fixtures/repo/`. The gitd seed copies `fixtures/repo/` onto the served ref (replacing the
 per-branch `marker.txt` scheme for the workload refs; E7's mixed-ref refs stay marker-based — see §6).

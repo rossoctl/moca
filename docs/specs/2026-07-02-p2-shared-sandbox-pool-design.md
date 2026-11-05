@@ -14,7 +14,7 @@ per-sandbox copies and no RWX on the deployable path.
 
 After P1, the sandbox tier is a **single** agent-sandbox `Sandbox` CR (`sandbox-0`) with one RWO PVC, serving one
 harness consumer. The harness resolves its exec target by reading `KAGENTI_SANDBOX_NAME` → the CR's
-`.status.selector` → **the first Running pod** ([`packages/k8s-sandbox/src/resolve-pod.ts`](../../packages/k8s-sandbox/src/resolve-pod.ts)).
+`.status.selector` → **the first Running pod** (`packages/k8s-sandbox/src/resolve-pod.ts`, removed with the Knative path).
 That is 1:1.
 
 P2 makes it **N:M**: many short-lived, fresh-context leaf harnesses load-balance across a **static pool of N

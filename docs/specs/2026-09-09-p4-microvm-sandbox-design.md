@@ -1023,7 +1023,7 @@ later step's cost differs by arm.
 - [P2](2026-07-02-p2-shared-sandbox-pool-design.md) — Redis leases, whose expiry-sweep discipline §4.4
   copies.
 - [P3.1](2026-07-03-e6-workload-parameterized-sandbox-load-design.md) ·
-  [`deploy/knative/EXPERIMENTS.md`](../../deploy/knative/EXPERIMENTS-MOVED.md) (since moved to rossoctl/moca-experiments) — E6/E7, `detectKnee`, and the
+  [`EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments) (since moved to rossoctl/moca-experiments) — E6/E7, `detectKnee`, and the
   knee-as-a-floor discipline.
 - [#245](https://github.com/rossoctl/serverless-harness/issues/245) — the gRPC transport's missing
   persistent fast channel. §5.4 gets its benefit inside the guest, where the multi-tenancy problem that

@@ -40,30 +40,16 @@ The first Stable target is **P6 on Kubernetes** (the process manager as ordinary
 | Single VM                        | Preview | Production-oriented, and Redis now persists (named volume + AOF, and a re-run of the installer keeps sessions — #410), but there is no upgrade or backup guide and no end-to-end CI. A later candidate                                                                                                                                                                                                         |
 | Docker Compose                   | Preview | A trial path by design; it will not be promoted                                                                                                                                                                                                                                                                                                                                                                |
 | P4 microVM tier                  | Preview | Open limits (#277 no guest network, #274 fresh VM per call, #338 silent reset, no per-user binding); its CI gate is manual only                                                                                                                                                                                                                                                                                |
-| Knative + KEDA                   | Legacy  | See below                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `mocactl` and the `/v1` HTTP API | Preview | The API is versioned, and a [change policy](change-policy.md) is adopted, with follow-up code changes open. It can reach Stable independently of any deployment path                                                                                                                                                                                                                                           |
 
 Before any path is promoted, a release should be cut whose notes say that P6 is the supported runtime and
 that it is Preview. No release says that today.
 
-## Support for Legacy paths
+## Removed paths
 
-Applies to the Knative + KEDA deployment ([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)):
-
-- **Fixes land on `main` only.** There are no release branches and no backports. A user pinned to an
-  older tag keeps working code but gets no fixes.
-- **What is fixed:** security issues, and breakage, meaning a regression in behaviour that worked or a
-  break caused by a base-image or dependency update. New features and new options are declined; docs and
-  migration help are welcome.
-- **CI:** the cheap, mock-based deploy-script tests and unit tests keep running, and the Knative
-  images keep building. No live Knative end-to-end job is added.
-- **Security updates** (Dependabot and scans) continue until removal.
-- **End of support** is the merge of the removal PR.
-
-## Removal
-
-The removal PR does not merge before the **end of October 2026**. It is announced on the
-[tracking issue](https://github.com/rossoctl/moca/issues/490) first, and it merges only if no one there has
-said they still depend on the path. Archetypes A (async fan-out) and C (scheduled dispatch) have no P6
-equivalent; removal also waits for either one or an explicit decision to drop them (open question 5 in
-[`REORG-PLAN.md`](../REORG-PLAN.md)). No other date, version or notice period is committed.
+The Knative + KEDA deployment was deprecated 2026-10-11 and removed in November 2026
+([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md) records the decision, the window's
+fixes-only policy, and the removal conditions: the end-of-October-2026 floor, and migration confirmed
+on the [tracking issue](https://github.com/rossoctl/moca/issues/490)). Nothing serves it now; the last
+release that carries it keeps working code but gets no fixes. Archetypes A (async fan-out) and C
+(scheduled dispatch) went with it and have no P6 equivalent yet.

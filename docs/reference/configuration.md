@@ -122,7 +122,7 @@ Pi finds provider credentials by variable shape (`*_API_KEY`, `*_AUTH_TOKEN`, `*
 deletes all of them from the worker's environment, not only `ANTHROPIC_API_KEY`.
 
 For authenticated turns, inference credentials come from the control plane per user rather than from
-these variables; see [the migration guide](../migrating-from-knative.md#configuration-what-changes).
+these variables.
 
 ## Worker: Context Service workloads (optional)
 
@@ -364,19 +364,6 @@ header is authoritative.
 - **Kubernetes `setup.sh`:** `SH_P4_SANDBOX_IDS`, `SH_SANDBOX_EGRESS_EXCEPT`, `SH_ROUTE_DOMAIN`,
   `SH_SINGLE_NAMESPACE`, `SH_WAIT_SECONDS`, `SH_PUBLIC_HARNESS_URL` (port-forward-reached targets
   only: overrides the default `http://127.0.0.1:8080`).
-
-## Legacy: Knative-only variables
-
-Read only by code that runs on the deprecated Knative/KEDA path. No P6 template sets them. (Other
-`KAGENTI_*` and `LEAF_*` variables above are live on P6 because the P6 worker serves the same
-handler.)
-
-| Variable                                      | Notes                                                |
-| --------------------------------------------- | ---------------------------------------------------- |
-| `K_SERVICE`, `K_CONFIGURATION`, `K_REVISION`  | Guard for the deprecation warning (`deprecation.ts`) |
-| `SH_SERVICE_URL`, `JOB_NAME`, `CRON_CONFIG`   | The CronJob on-ramp (`cron-dispatch`)                |
-| `KAGENTI_SANDBOX_POD`, `KAGENTI_SANDBOX_NAME` | Single-pod `kubectl exec` sandbox                    |
-| `KAGENTI_EXEC_TIMING`                         | Exec timing logs of the `kubectl` transport          |
 
 ## Known inconsistencies
 

@@ -10,16 +10,14 @@ the pitch; this page is the map.
 Every install path, guide and reference page should carry one of these. The label is a claim about
 the path, not about the project as a whole.
 
-| Label       | Meaning                                                                                                   |
-| ----------- | --------------------------------------------------------------------------------------------------------- |
-| **Stable**  | Supported, no planned removal.                                                                            |
-| **Preview** | Implemented and the recommended direction, but not yet declared Stable. Interfaces and limits may change. |
-| **Legacy**  | Deprecated. Security and breakage fixes only; removal is gated as described in the migration guide.       |
-
-Today every deployment path is **Preview** except the Knative + KEDA path, which is **Legacy**
-([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). The first path to be promoted to Stable is
-P6 on Kubernetes; the criteria, the status of each path and the support policy are in
-[Maturity and lifecycle](reference/maturity-and-lifecycle.md).
+| Label                                                                                                   | Meaning                                                                                                   |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **Stable**                                                                                              | Supported, no planned removal.                                                                            |
+| **Preview**                                                                                             | Implemented and the recommended direction, but not yet declared Stable. Interfaces and limits may change. |
+| Today every deployment path is **Preview**. The first path to be promoted to Stable is P6 on            |
+| Kubernetes; the criteria, the status of each path and the support policy are in                         |
+| [Maturity and lifecycle](reference/maturity-and-lifecycle.md). The Knative + KEDA path this map         |
+| once carried was removed in November 2026 ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). |
 
 ## Start here
 
@@ -27,7 +25,6 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Pick an install path and run MOCA   | [Get started](get-started/index.md)                                                                                                                                                       |
 | Run MOCA for the first time         | [First run](get-started/first-run.md)                                                                                                                                                     |
-| Leave the Knative/KEDA deployment   | [Migrating off the Knative/KEDA deployment](migrating-from-knative.md)                                                                                                                    |
 | Understand the security model       | [Security model](reference/security-model.md); [hardening checklist](operations/hardening.md)                                                                                             |
 | Run a deployment for several users  | [Manage multi-user sessions](guides/manage-multi-user-sessions.md)                                                                                                                        |
 | Attach a sandbox on another host    | [Attach a remote sandbox](guides/remote-sandbox.md)                                                                                                                                       |
@@ -52,7 +49,6 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | Location                                    | What it is                                                                             | Audience                  |
 | ------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------- |
 | `get-started/`                              | Install-path chooser                                                                   | New users                 |
-| `migrating-from-knative.md`                 | The single deprecation and migration page                                              | Operators                 |
 | `guides/`                                   | Task guides: multi-user sessions, remote sandbox, promoting a workflow                 | Operators and users       |
 | `operations/`                               | Upgrades, Redis backup, observability, sizing, troubleshooting                         | Operators                 |
 | `concepts/`                                 | How sessions, sandboxes, multiplexing, multi-user, dispatch and context workflows work | Everyone                  |
@@ -62,7 +58,7 @@ P6 on Kubernetes; the criteria, the status of each path and the support policy a
 | `specs/` (registry: `specs/README.md`)      | Design specs; the milestone registry is the source of truth for status                 | Maintainers               |
 | `adrs/`                                     | Immutable decision records                                                             | Maintainers               |
 | `notes/`                                    | Working notes, runbooks and result write-ups                                           | Maintainers               |
-| `archive/`                                  | Dated historical write-ups (Knative-era)                                               | Background                |
+| `archive/`                                  | Dated historical write-ups                                                             | Background                |
 | `REORG-PLAN.md`                             | The plan this structure follows, with the audit and open questions                     | Maintainers               |
 
 Install guides live next to the scripts they describe: `deploy/compose/`, `deploy/vm/`, `deploy/k8s/` and

@@ -162,7 +162,7 @@ The multi-user isolation design (MI1) lists signed per-session grants, a credent
 sandboxes and bundle ACLs. Its registry status is "design, proposed". Only its first slice (hardening: the exec/attach
 token split, the environment allowlist, the ambient-credential scrub, no sandbox means the turn fails, caller-supplied
 `tenant` refused) is visible in code. The Z-track zero-trust credential plane is design-stage, apart from a static
-single-tenant slice delivered for the Knative path.
+single-tenant slice delivered for the since-removed Knative path.
 
 If your users do not trust each other, run a separate deployment, or at least a separate sandbox set, per trust
 domain.
@@ -206,7 +206,7 @@ Every GitHub Action is pinned to a commit SHA, and Dependabot covers actions, np
 run dependency review (informational: it does not block), Trivy in filesystem mode, CodeQL, ShellCheck and hadolint on
 the root `Dockerfile` only. Scorecard runs weekly. Images are pushed to `ghcr.io/rossoctl/*` and **are not signed or
 attested**. The harness image has no `USER` line (the manifests impose non-root), uses floating base tags and includes
-`kubectl` for the deprecated Knative path. Redis and the OpenShift TLS sidecar are pinned by digest; the harness and
+`kubectl` for the control plane's K8sSecretStore on Kubernetes. Redis and the OpenShift TLS sidecar are pinned by digest; the harness and
 remote-worker images are `:latest` unless you pass `--image` (harness) and `--sandbox-image` (remote worker; the
 VM uses `SANDBOX_IMAGE`). Valkey is digest-pinned only in the Kubernetes manifests; the VM and Compose use
 `valkey/valkey:9-alpine` by tag.

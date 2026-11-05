@@ -4,11 +4,11 @@
 
 An orchestrator can hand work to MOCA in three patterns. Which of them work depends on the deployment.
 
-| Archetype            | Pattern                                                           | On P6 today                                                        |
-| -------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Not available.** Exists only on the deprecated Knative/KEDA path |
-| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                        |
-| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Not available.** Exists only on the deprecated path              |
+| Archetype            | Pattern                                                           | On P6 today                                                     |
+| -------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
+| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Removed.** Ran on the Knative/KEDA path; no P6 equivalent yet |
+| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                     |
+| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Removed.** Ran on the Knative/KEDA path; no P6 equivalent yet |
 
 Interactive turns (`POST /v1/turn`) and synchronous leaves (`POST /v1/runs`) work on P6 and on the
 deprecated path alike.
@@ -36,12 +36,10 @@ session log in Redis, and there is no harness-side timeout. There is no gate on 
 
 ## Archetypes A and C
 
-`async: true` and the cron on-ramp need the Redis-Streams drainer that ran as a KEDA `ScaledJob` and the
-`CronJob`; neither has a P6 counterpart yet, and the supervisor only runs `--role=turn` workers (a
-`--role=leaf` role is reserved and not implemented). An authenticated `async: true` request returns 501
-`async_runs_unavailable`. An _anonymous_ one on a deployment with `SH_REQUIRE_AUTH` off still gets 202 and is
-queued, but nothing drains the queue on P6, so `/runs/status` answers `queued` forever: do not mistake the
-202 for support. If you depend on A or C, stay on the deprecated path and tell the maintainers in
-[the tracking issue](https://github.com/rossoctl/moca/issues/490); the
-[migration guide](../migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob) explains what
-the repository states and what it does not.
+Archetype A's drainer (a Redis-Streams consumer run as a KEDA `ScaledJob`) and archetype C's
+`CronJob` on-ramp were removed with the Knative/KEDA deployment path
+([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)). Neither has a P6 counterpart yet, and the
+supervisor only runs `--role=turn` workers (a `--role=leaf` role is reserved and not implemented). A request
+with `async: true` is answered 400 `async_removed`, naming the removal, rather than accepted and left
+undrained. The P6 equivalents are owed follow-ups flagged in
+[ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md).

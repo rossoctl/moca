@@ -3,7 +3,7 @@
 > **Historical (2026-10-12).** This document describes the Knative + KEDA deployment, deprecated
 > by [ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md) (2026-10-11; removal no earlier than
 > end of October 2026). It is kept as a dated record and is not updated. For the current runtime see
-> [Migrating off the Knative/KEDA deployment](../migrating-from-knative.md).
+> The Knative/KEDA deployment was removed (ADR-0041).
 
 _Consolidated findings, June 2026. Source data:
 [`moca-experiments/experiments/RESULTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/RESULTS.md)
@@ -166,7 +166,7 @@ pnpm -C harness test
 
 # Cluster (needs Kind+Knative deploy + gateway creds): E1, E3-mobility, E4 -- in moca-experiments,
 # also needs this repo's deploy/knative/*.yaml manifests + setup-ocp.sh/lib.sh (not moved --
-# see this repo's deploy/knative/EXPERIMENTS-MOVED.md, and moca-experiments' own README for
+# see moca-experiments' own README for
 # the full split rationale)
 knative/run-experiments.sh         # setup + E1 + E3 + E4, writes knative/EXPERIMENTS.md
 ```

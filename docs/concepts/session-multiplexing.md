@@ -3,7 +3,7 @@
 > **Preview.** Describes the P6 runtime on `main` as of 2026-10-12. No density or latency measurements for
 > P6 are published in this repository; the sizing knobs below have no measured recommendation yet.
 
-On the deprecated Knative path one request meant one scaled-to-zero process. P6 turns that around: a
+On the removed Knative path one request meant one scaled-to-zero process. P6 turns that around: a
 **supervisor** keeps a fixed pool of warm **workers**, each serving many sessions. Scale-to-zero and high
 density trade against each other ([ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md)), so
 idle capacity costs memory, in exchange for no cold start and no autoscaler to operate.

@@ -45,7 +45,7 @@ autoscaling.
 At the design level this supersedes ADR-0002, 0003, 0004, 0009, 0015, 0018, 0019 and 0023, and —
 with wording that keeps the underlying concerns alive while the deprecated path remains in-tree —
 0017, 0025 and 0027. The user-facing record is
-[`../migrating-from-knative.md`](../migrating-from-knative.md).
+`../migrating-from-knative.md` (since removed with the path).
 
 ### Alternatives considered
 
