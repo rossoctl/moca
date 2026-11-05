@@ -200,10 +200,10 @@ export function turnLeaseHolder(sessionId?: string): string {
  * RPC reached the pool fine at the same moment.
  *
  * Going through `selectPoolSandbox` is what makes the no-pool path safe **by construction** rather
- * than by care: its own first branch is `if (!selector) return resolveSandboxConfig(...)`, i.e.
- * exactly the call this function used to make, with a no-op lease. A deployment with no
- * `KAGENTI_SANDBOX_POOL_SELECTOR` therefore resolves identically to before, and no future caller
- * of `executeTurn` can bypass this seam to get the old behavior back.
+ * than by care: with no `KAGENTI_SANDBOX_POOL_SELECTOR` it returns null — the caller runs local
+ * tools (or fails in server mode) — and a stale `KAGENTI_SANDBOX_POD` throws instead of quietly
+ * selecting nothing. No future caller of `executeTurn` can bypass this seam to get a single-pod
+ * path back.
  *
  * One intended behavior change beyond routing: with a selector set and NO candidates,
  * `selectPoolSandbox` throws rather than falling back. Previously such a deployment silently ran
