@@ -402,7 +402,6 @@
     "unexpand",
     "uniq",
     "unix_chkpwd",
-    "unix_update",
     "unlink",
     "unshare",
     "update-alternatives",

@@ -112,14 +112,18 @@ export function k8sSandboxExtension(opts: {
     const fastTransport = watch(fastBase);
 
     // Fast request/response ops → the fast tier.
-    pi.registerTool(createReadTool(localCwd, { operations: createPodReadOps(fastTransport.exec, ctx) }));
+    pi.registerTool(
+      createReadTool(localCwd, { operations: createPodReadOps(fastTransport.exec, ctx) }),
+    );
     pi.registerTool(
       createWriteTool(localCwd, { operations: createPodWriteOps(fastTransport.exec, ctx) }),
     );
     pi.registerTool(
       createEditTool(localCwd, { operations: createPodEditOps(fastTransport.exec, ctx) }),
     );
-    pi.registerTool(createLsTool(localCwd, { operations: createPodLsOps(fastTransport.exec, ctx) }));
+    pi.registerTool(
+      createLsTool(localCwd, { operations: createPodLsOps(fastTransport.exec, ctx) }),
+    );
     pi.registerTool(
       createFindTool(localCwd, { operations: createPodFindOps(fastTransport.exec, ctx) }),
     );

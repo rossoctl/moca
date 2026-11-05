@@ -6,7 +6,7 @@
 # the image.
 #
 # All declared binaries are checked in a SINGLE container rather than one container per
-# binary -- with 347 declared binaries and a ~0.2s container-start cost, one-per-binary would
+# binary -- with 445 declared binaries and a ~0.2s container-start cost, one-per-binary would
 # take well over a minute per run for no benefit: the check itself (`command -v`) is instant.
 #
 # The shape test (harness/test/promote.test.ts) cannot catch drift, because drift is a

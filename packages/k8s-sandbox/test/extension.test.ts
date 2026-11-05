@@ -4,7 +4,6 @@ import { SandboxCapacityRefusedError, type SandboxTransport } from '../src/trans
 import { k8sSandboxExtension } from '../src/extension.js';
 import { createCapacityLatch } from '../src/capacity-latch.js';
 
-
 /** Minimal ExtensionAPI stub recording registrations + event handlers. */
 function fakePi() {
   const tools: unknown[] = [];
@@ -119,9 +118,11 @@ describe('k8sSandboxExtension', () => {
     const both = tagging('both');
     const fast = tagging('fast');
     const { pi, tools } = fakePi();
-    k8sSandboxExtension({ podCwd: '/workspace', transport: both.transport, fastTransport: fast.transport })(
-      pi,
-    );
+    k8sSandboxExtension({
+      podCwd: '/workspace',
+      transport: both.transport,
+      fastTransport: fast.transport,
+    })(pi);
 
     await exec(tools, 'ls', { path: '/workspace' });
     const afterLs = both.calls.length;

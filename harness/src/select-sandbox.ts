@@ -659,11 +659,12 @@ async function select(
   if (!selector) {
     if (workload) throw noRecords();
     // ADR-0041: the single-pod fallback went with the pod-exec path. A stale
-    // KAGENTI_SANDBOX_POD must not quietly mean "no sandbox" — the tools would then run
-    // in the harness process, MI1 §5 R3's hazard.
-    if (env.KAGENTI_SANDBOX_POD) {
+    // KAGENTI_SANDBOX_POD or KAGENTI_SANDBOX_NAME (its two inputs) must not quietly mean
+    // "no sandbox" — the tools would then run in the harness process, MI1 §5 R3's hazard.
+    const stale = ['KAGENTI_SANDBOX_POD', 'KAGENTI_SANDBOX_NAME'].find((k) => env[k]);
+    if (stale) {
       throw new Error(
-        'KAGENTI_SANDBOX_POD was removed with the Knative/KEDA deployment path (ADR-0041); ' +
+        `${stale} was removed with the Knative/KEDA deployment path (ADR-0041); ` +
           'a pool (KAGENTI_SANDBOX_POOL_SELECTOR) of relay-attached sandboxes is required',
       );
     }

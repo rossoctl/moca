@@ -25,14 +25,4 @@ useDefault = true
   # rather than to a path. A path allowlist would also cover a real credential that lands
   # in that path later; a literal cannot. Add the next fake token here, as a literal.
   regexes = [
-    # deploy/knative/demo-promoted-workflow.sh + its fixture. The demo's whole point is that
-    # this string is unguessable and reachable ONLY by reading a promoted skill file inside
-    # the sandbox, which is how the demo proves the bundle materialised there. It is asserted
-    # on in docs/demos/promoted-workflow-demo.md, so it is checked in deliberately.
-    '''SHIPNOTE-7F3A-SANDBOX-OK''',
-
-    # The literal spelled into `--from-literal=api-key=`/`auth-token=` by setup-kind.sh,
-    # setup-ocp.sh and rc1-ocp-gate.sh when no real key is supplied. `generic-api-key` fires
-    # on the assignment, not the value; the value is the placeholder it is named after.
-    '''AB1-PLACEHOLDER''',
   ]

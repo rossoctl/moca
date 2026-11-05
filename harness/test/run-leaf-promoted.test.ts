@@ -262,7 +262,12 @@ describe('configRef on a prompt leaf', () => {
       bundleRedis: {} as never,
     });
     expect(overlayConfig).toHaveBeenCalledTimes(1);
-    expect(overlayConfig).toHaveBeenCalledWith(transport, expect.anything(), expect.anything(), expect.anything());
+    expect(overlayConfig).toHaveBeenCalledWith(
+      transport,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
     // promotedConfig is optional on ExecuteTurnInput, so assert it arrived before reading
     // through it: "the overlay ran but passed nothing on" is the failure this test is for,
     // and it would otherwise surface as a TypeError rather than a clean expectation.

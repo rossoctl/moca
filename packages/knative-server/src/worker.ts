@@ -320,7 +320,7 @@ if (isMainModule) {
   }
   // #558: reconcile sync runs orphaned by a dead worker or supervisor pod. Armed here rather than
   // in startServer because every first-class deployment reaches this code as the P6 worker (the
-  // standalone startServer path is the deprecated Knative one, ADR-0041), and arming it there
+  // standalone startServer path served the removed Knative deployment, ADR-0041), and arming it there
   // would also arm it in the dozens of tests that call startServer as a route harness. The sweep
   // itself is periodic, not boot-only: a worker restarted seconds after an OOM crash would
   // otherwise find the orphan's heartbeat not yet stale and never look again.

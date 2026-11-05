@@ -473,4 +473,16 @@ describe('readInventory', () => {
     expect(c.length).toBeLessThan(20);
     expect(c[0]).toBe(join('/a/b/c', INVENTORY_SUBDIR, FILE));
   });
+
+  it('the module walk stops at the repo root, ignoring a stray inventory above it', () => {
+    // root/sandbox-inventory/ sits ABOVE the repo (root/repo, marked by .git) and must not be found.
+    write(join(INVENTORY_SUBDIR, FILE), JSON.stringify({ image: IMAGE, binaries: ['stray'] }));
+    write(join('repo', '.git'), 'gitdir: elsewhere\n');
+    const moduleDir = join(root, 'repo', 'harness', 'src');
+    mkdirSync(moduleDir, { recursive: true });
+    const c = inventoryCandidates(IMAGE, '/tmp/cwd', moduleDir);
+    expect(c).toContain(join(root, 'repo', INVENTORY_SUBDIR, FILE));
+    expect(c).not.toContain(join(root, INVENTORY_SUBDIR, FILE));
+    expect(resolveInventoryPath(IMAGE, '/tmp/cwd', moduleDir)).toBeUndefined();
+  });
 });

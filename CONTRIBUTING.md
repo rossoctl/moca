@@ -6,7 +6,7 @@
 
 - Node.js 22+
 - pnpm 9+
-- Redis (for work-queue tests)
+- Redis (for the session-backend and knative-server workload tests)
 - Docker (for container builds, and for the hadolint pre-commit hook)
 - [pre-commit](https://pre-commit.com/#install) (git hooks)
 
@@ -68,7 +68,7 @@ moca/
 All PRs must pass:
 
 - **Typecheck**: `tsc --noEmit` across harness, k8s-sandbox, knative-server
-- **Tests**: `pnpm -r test` (requires Redis for work-queue)
+- **Tests**: `pnpm -r test` (requires Redis for session-backend and knative-server)
 - **Lint**: `make lint` -- every pre-commit hook over all files (Prettier, shellcheck,
   hadolint, gitleaks, YAML and whitespace checks)
 - **DCO**: All commits must be signed off

@@ -136,6 +136,13 @@ describe('selectPoolSandbox', () => {
     );
   });
 
+  it('throws naming KAGENTI_SANDBOX_NAME when the removed Sandbox-CR env is still set', async () => {
+    const e = { KAGENTI_SANDBOX_NAME: 'sandbox-cr' } as unknown as NodeJS.ProcessEnv;
+    await expect(selectPoolSandbox(e, '/head', 'leaf-1', opts, {})).rejects.toThrow(
+      /KAGENTI_SANDBOX_NAME was removed/,
+    );
+  });
+
   it('picks the least-loaded record and acquires a lease', async () => {
     const lease = fakeLease({ 'sbx-remote-1': 2, 'sbx-remote-2': 0 }, opts.cap);
     const res = await selectPoolSandbox(env(), '/head', 'leaf-1', opts, {
@@ -170,7 +177,9 @@ describe('selectPoolSandbox', () => {
     }).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(SandboxPoolSaturatedError);
-    expect((err as Error).message).toBe('no sandbox presence records (no sandbox has attached to the relay yet)');
+    expect((err as Error).message).toBe(
+      'no sandbox presence records (no sandbox has attached to the relay yet)',
+    );
   });
 
   it('flag OFF with a selector: fails loudly naming SH_REMOTE_SANDBOX, and never reads records', async () => {
@@ -633,9 +642,9 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
 describe('resolveDiscoverySource', () => {
   it("defaults to records when SH_SANDBOX_DISCOVERY is unset, blank or 'records'", () => {
     expect(resolveDiscoverySource({} as NodeJS.ProcessEnv, true)).toBe('records');
-    expect(
-      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: '   ' } as NodeJS.ProcessEnv, true),
-    ).toBe('records');
+    expect(resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: '   ' } as NodeJS.ProcessEnv, true)).toBe(
+      'records',
+    );
     expect(
       resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: ' records ' } as NodeJS.ProcessEnv, true),
     ).toBe('records');
@@ -646,10 +655,7 @@ describe('resolveDiscoverySource', () => {
     // carrying one of these values must fail loudly, not quietly change behavior.
     for (const value of ['pods', 'both']) {
       expect(() =>
-        resolveDiscoverySource(
-          { SH_SANDBOX_DISCOVERY: value } as NodeJS.ProcessEnv,
-          true,
-        ),
+        resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: value } as NodeJS.ProcessEnv, true),
       ).toThrow(new RegExp(`SH_SANDBOX_DISCOVERY='${value}' was removed`));
     }
     // An unknown value gets the same loud refusal.

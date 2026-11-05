@@ -143,6 +143,10 @@ export function inventoryFileName(image: string): string {
  * The shipped files live under the harness package's own `sandbox-inventory/` (moved there from
  * `deploy/knative/sandbox-inventory/` when the Knative path was removed, ADR-0041) so the walk
  * from the module finds them wherever the harness is installed.
+ *
+ * The module walk stops at the first ancestor holding `.git` (the same boundary as `projectRoot`),
+ * so a stray `sandbox-inventory/` above the repo -- or above the project a published harness is
+ * installed into -- is never picked up. With no `.git` anywhere it still ends at the root.
  */
 export function inventoryCandidates(image: string, cwd: string, moduleDir: string): string[] {
   const file = inventoryFileName(image);
@@ -152,7 +156,7 @@ export function inventoryCandidates(image: string, cwd: string, moduleDir: strin
   for (;;) {
     out.push(join(dir, INVENTORY_SUBDIR, file));
     const parent = dirname(dir);
-    if (parent === dir) break;
+    if (parent === dir || existsSync(join(dir, '.git'))) break;
     dir = parent;
   }
   out.push(join(cwd, INVENTORY_SUBDIR, file));

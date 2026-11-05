@@ -32,8 +32,10 @@ not curated by hand:
 - Image: `ghcr.io/rossoctl/moca-remote-worker:latest`, the container-tier sandbox image the P6
   deployments run (`remote-worker/Dockerfile`).
 - amd64 manifest digest: `sha256:5bf4d766d84a27d0f7bbefd81e87e5697b5ca2844bc781fe00eda0383146c7ee`
-- 446 binaries
+- 445 binaries
 - Enumerated 2026-11-05 by pulling the image's layers from the registry and listing every
   executable under `/bin`, `/usr/bin`, `/usr/local/bin`, `/usr/sbin` and `/sbin`, following
-  symlinks and whiteouts the way a container runtime would. `scripts/verify-sandbox-inventory.sh`
+  symlinks and whiteouts the way a container runtime would. `unix_update` (mode `0700 root`) was
+  then dropped: the image runs as uid 1001, which cannot execute it, so `command -v` does not
+  resolve it -- an inventory lists what the sandbox user can run, not what is on disk. `scripts/verify-sandbox-inventory.sh`
   remains the drift check against the live image.
