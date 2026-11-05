@@ -55,7 +55,7 @@ re-run `setup.sh` to mint another. Never do this on a real deployment: use `moca
 ### The mock model
 
 The mock (`deploy/microvm/mock-anthropic.mjs`) answers only prompts it has a script for, by their
-marker, and runs fixed commands: `moca-DEMO-READ` and `moca-DEMO-FIX` are the demo's. The prompts
+marker, and runs fixed commands: `MOCA-DEMO-READ` and `MOCA-DEMO-FIX` are the demo's. The prompts
 also spell the task out in words, so a real model can run them on a `--target kind` stack with your
 own credential.
 

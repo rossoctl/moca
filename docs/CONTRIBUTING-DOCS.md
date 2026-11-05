@@ -58,6 +58,12 @@ Use [the glossary](glossary.md) terms as defined: `session` (durable, owned, res
 that name, never in new prose. "P6" and "P4" are milestone IDs (process manager and microVM
 sandboxes); introduce them with that gloss on first use in a page.
 
+**Capitalization of moca.** The product name is the lowercase `moca` mid-sentence, but a
+sentence begins with capitalized `Moca` (like `npm`/`Npm` convention). Historical documents —
+ADRs and specs already published — keep their original `MOCA` spelling; do not rewrite them,
+and do not treat their spelling as precedent for new prose. Remaining user-visible `MOCA`
+strings in source will be cleaned up in a follow-up.
+
 ## Links
 
 - Use relative links to files that exist in this repository. Do not link into a parent monorepo.

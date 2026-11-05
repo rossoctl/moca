@@ -42,7 +42,7 @@ inside the control-plane pod with its own signing key, for the subjects `demo:al
 (`DEMO_TOKEN_TTL`); re-run `setup.sh` for new ones. Never do this on a real deployment.
 
 **The mock model.** The tasks run on the scripted mock model in the supervisor pod
-(`deploy/microvm/mock-anthropic.mjs`, markers `moca-DEMO2-*`), so no model key is needed. Each
+(`deploy/microvm/mock-anthropic.mjs`, markers `MOCA-DEMO2-*`), so no model key is needed. Each
 step prints `$HOSTNAME`, which is the sandbox pod's name and its sandbox id.
 
 ## What `run.sh` checks
