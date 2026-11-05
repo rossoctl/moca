@@ -17,8 +17,7 @@ one supervisor hands connections to a fixed pool of warm workers: many sessions 
 cold-start on the next request.
 
 Capacity scales the boring way: **add process-manager pods, or size them up** — on a VM, bare
-metal, or plain Kubernetes. The earlier scale-to-zero Knative + KEDA deployment was removed in
-November 2026 ([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)).
+metal, or plain Kubernetes.
 
 The result is a **leaf-session backend**: an external orchestrator dispatches isolated units of
 agent work ("leaves") over a simple HTTP + shared-volume contract — sync turns, detachable
@@ -168,14 +167,6 @@ Where to go next:
 
 ---
 
-## The Knative + KEDA deployment (removed)
-
-The original scale-to-zero deployment was deprecated 2026-10-11 and removed in November 2026, once
-its users had migrated ([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md) records
-the decision and its consequences).
-
----
-
 ## How It Works
 
 1. **An orchestrator POSTs a turn** to `/turn` (or a leaf to `/runs`).
@@ -202,19 +193,16 @@ you start with `mocactl run --config DIGEST`. Full guide:
 
 ## Dispatch Archetypes
 
-The same backend serves three orchestration patterns, all validated end-to-end on Kind:
+The pipeline archetypes describe how an orchestrator dispatches leaves:
 
-| Archetype             | Pattern                                                      | Example use case                                     |
-| --------------------- | ------------------------------------------------------------ | ---------------------------------------------------- |
-| Archetype             | Pattern                                                      | Example use case                                     |
-| --------------------- | ------------------------------------------------------------ | ---------------------------------------------------- |
-| **B — Human gate**    | Leaf pauses (`paused`) → external verdict → resume/terminate | "Draft a clause, pause for legal sign-off, finalize" |
+| Archetype          | Pattern                                                      | Example use case                                     |
+| ------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
+| **B — Human gate** | Leaf pauses (`paused`) → external verdict → resume/terminate | "Draft a clause, pause for legal sign-off, finalize" |
 
-B is served by the P6 runtime today. Archetypes A (async fan-out, `{async:true}` drained by KEDA
-ScaledJobs) and C (scheduled CronJob dispatch) were removed with the Knative/KEDA path and have
-**no P6 equivalent yet** — the follow-ups are owed, flagged in
-[ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md) and
-[ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md).
+B is served by the P6 runtime today. Archetypes A (async fan-out) and C (scheduled dispatch) ran
+only on the earlier scale-to-zero deployment, removed in November 2026
+([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and have **no P6 equivalent
+yet**; async fan-out is tracked in [#686](https://github.com/rossoctl/moca/issues/686).
 
 ---
 
@@ -297,7 +285,7 @@ Start at the [documentation map](docs/index.md).
 
 This is explorative work and every deployment path is Preview (see [Maturity](#maturity)). The
 warm-worker-pool runtime, durable resume, sandbox isolation (container and microVM tiers), and the
-multi-user control plane are built. Async fan-out and scheduled dispatch were removed with the
-Knative/KEDA path and have no P6 equivalent yet. Interfaces may change.
+multi-user control plane are built. Async fan-out and scheduled dispatch have no P6 equivalent
+yet. Interfaces may change.
 
 Licensed under the [Apache License 2.0](LICENSE).
