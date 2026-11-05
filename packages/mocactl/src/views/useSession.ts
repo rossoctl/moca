@@ -10,6 +10,7 @@ import {
   markSent,
   reduceFrame,
   settleOpenTurn,
+  startsForeignTurn,
   type BlockState,
 } from '../render/blocks.js';
 import type { TurnState } from './status.js';
@@ -34,6 +35,13 @@ interface Options {
   initial: BlockState;
   initialUsage?: Usage;
   now: () => number;
+  /**
+   * The turn `initial` left open, when it is a detachable one (#483). The resume's attach replays
+   * the session's LATEST turn, which may be a newer one another device ran: a `turn` frame naming
+   * any other id means the catch-up is not continuing this turn, so this one is settled first and
+   * the replay renders as a turn of its own. Undefined when there is nothing open to continue.
+   */
+  openTurnId?: string;
   onTurnEnd?: (e: Extract<SessionEvent, { kind: 'turn-end' }>) => void;
 }
 
@@ -45,6 +53,10 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
   stateRef.current = state;
   const onTurnEnd = useRef(opts.onTurnEnd);
   onTurnEnd.current = opts.onTurnEnd;
+  // Which turn the rendered blocks still have open, so a catch-up's `turn` frame can be told from
+  // it (#483). Reset alongside the blocks it describes, and cleared the moment that turn is no
+  // longer open — settled by a foreign turn, or ended by its own terminal.
+  const openTurn = useRef(opts.openTurnId);
 
   // Resets when the session or its initial snapshot changes (a session swap must not carry over
   // another session's blocks/usage/turn state); opts.initialUsage is deliberately not a
@@ -53,6 +65,7 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
     setState(opts.initial);
     setUsage(opts.initialUsage ?? ZERO);
     setTurn({ phase: 'idle', queued: 0 });
+    openTurn.current = opts.openTurnId;
   }, [session, opts.initial]);
 
   useEffect(() => {
@@ -108,6 +121,17 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           break;
         case 'frame': {
           const f = e.frame;
+          // The catch-up named its turn. If it is not the one the blocks still have open, it is
+          // another device's newer turn (#483): end ours here and let the replay render on its
+          // own, rather than appending it into our still-open reply.
+          if (f.type === 'turn') {
+            const ours = openTurn.current;
+            openTurn.current = f.turnId;
+            if (ours !== undefined && ours !== f.turnId) {
+              flush();
+              setState(startsForeignTurn);
+            }
+          }
           if (f.type === 'text' || f.type === 'thinking') pending.push(f);
           else {
             flush();
@@ -115,6 +139,12 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           }
           if (isTerminal(f)) {
             sawTerminal = true;
+            // A terminal can arrive with a tool still result-less: `restarting`, `owner_lost` or a
+            // cancel mid-tool. The resume-time interrupted marking does not run for an open
+            // detachable turn, so without this that tool stays unsettled and pins every later
+            // block in the live area for the rest of the session (#483).
+            openTurn.current = undefined;
+            setState(settleOpenTurn);
             const u = f.usage;
             if (u) {
               setUsage((acc) => ({
