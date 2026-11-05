@@ -51,8 +51,16 @@ interface Props {
   onDeleted: (id: string) => void;
   onInputless: (inputless: boolean) => void;
   bundle?: { digest: string; skills: number; dropped: number };
-  /** The leave-turn overlay's answers. */
-  leave: { keep: () => void; cancel: () => void; stay: () => void };
+  /**
+   * The leave-turn overlay's answers, and the prompt leaving would drop (#479) so that overlay can
+   * say so.
+   */
+  leave: {
+    keep: () => void;
+    cancel: () => void;
+    stay: () => void;
+    pendingPrompt?: string;
+  };
 }
 
 // Every overlay owns Esc on its interactive screens. Onboarding, Sessions, New Session, Model and
@@ -195,6 +203,13 @@ export function AppOverlay({
     case 'help':
       return <HelpOverlay registry={registry} host={host} onClose={close} />;
     case 'leave-turn':
-      return <LeaveTurnOverlay onKeep={leave.keep} onCancel={leave.cancel} onStay={leave.stay} />;
+      return (
+        <LeaveTurnOverlay
+          onKeep={leave.keep}
+          onCancel={leave.cancel}
+          onStay={leave.stay}
+          pendingPrompt={leave.pendingPrompt}
+        />
+      );
   }
 }

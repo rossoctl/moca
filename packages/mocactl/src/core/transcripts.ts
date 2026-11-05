@@ -22,6 +22,12 @@ export interface TranscriptOwner {
 
 export type TranscriptEntry =
   | { kind: 'prompt'; text: string }
+  /**
+   * A prompt the user typed that never reached the server: it was waiting behind another device's
+   * turn when they quit or switched away, so the queue holding it was dropped (#479). Recorded so
+   * the resume can say so and offer it back, instead of losing it without a word.
+   */
+  | { kind: 'unsent'; text: string }
   | { kind: 'turn'; turnId: string }
   | { kind: 'frame'; frame: TurnFrame; eventId?: string };
 
@@ -44,6 +50,7 @@ export interface Transcript {
 type Rec =
   | { kind: 'header'; v: 1; createdAt: number; subject: string; controlPlaneUrl: string }
   | { kind: 'prompt'; at: number; text: string }
+  | { kind: 'unsent'; at: number; text: string }
   | { kind: 'turn'; at: number; turnId: string; eventId?: string }
   | { kind: 'frame'; at: number; frame: TurnFrame; eventId?: string }
   | { kind: 'title'; at: number; title: string; source: 'auto' | 'user' };
@@ -182,6 +189,18 @@ export class TranscriptStore {
     this.write(id, { kind: 'prompt', at: this.now(), text });
   }
 
+  /**
+   * A prompt that was dropped before it ever ran (#479). Unlike `appendPrompt` this does not title
+   * the session and does not join `prompts`: nothing was sent, so it names no session and belongs
+   * in neither the input history nor the record of what this session was asked.
+   */
+  appendUnsent(id: string, text: string): void {
+    if (!this.ownsFile(id)) return;
+    this.ensure(id);
+    this.flush(id);
+    this.write(id, { kind: 'unsent', at: this.now(), text });
+  }
+
   appendFrame(id: string, frame: TurnFrame, eventId?: string): void {
     if (!this.ownsFile(id)) return;
     this.ensure(id);
@@ -265,6 +284,10 @@ export class TranscriptStore {
         case 'prompt':
           t.entries.push({ kind: 'prompt', text: rec.text });
           t.prompts.push(rec.text);
+          break;
+        case 'unsent':
+          // Deliberately not in `prompts`: that is the input history of prompts actually sent.
+          t.entries.push({ kind: 'unsent', text: rec.text });
           break;
         case 'turn':
           t.entries.push({ kind: 'turn', turnId: rec.turnId });

@@ -3,7 +3,9 @@ import type { TurnFrame } from '../src/api/frames.js';
 import {
   EMPTY_BLOCKS,
   TRUNCATED_TURN_NOTICE,
+  UNSENT_PROMPT_NOTICE,
   addNotice,
+  addUnsent,
   addUser,
   endTurn,
   fromTranscript,
@@ -15,6 +17,7 @@ import {
   settleOpenTurn,
   splitStatic,
   startsForeignTurn,
+  unsentPrompt,
   type BlockState,
 } from '../src/render/blocks.js';
 
@@ -512,6 +515,179 @@ describe('fromTranscript', () => {
   it('adds no notice to a transcript without turns', () => {
     const s = fromTranscript({ sessionId: 's', createdAt: 0, entries: [], prompts: [], usage });
     expect(s.blocks).toEqual([]);
+  });
+
+  // #479: a prompt dropped while it waited behind another device's turn. It shows as the user's
+  // own words, under a notice saying they never went out, so it is not read as one that was asked.
+  it('shows an unsent prompt as the user block it never became, under a notice', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: done },
+        { kind: 'unsent', text: 'MINE' },
+      ],
+      prompts: [],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['assistant', 'turn-end', 'notice', 'user']);
+    expect(s.blocks[2]).toMatchObject({ text: UNSENT_PROMPT_NOTICE, tone: 'warning' });
+    expect(s.blocks[3]).toMatchObject({ kind: 'user', text: 'MINE' });
+    // Nothing is left mid-flight: the other device's turn finished and this prompt never ran.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // A resume records the drop while the other device's turn is still open (that is the situation
+  // the drop happens in), so the notice meets an unfinished assistant block. It must still read as
+  // the heading of the prompt below it, not get tucked above the reply it has nothing to do with.
+  it('keeps an unsent prompt directly under its notice, even mid-reply', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'unsent', text: 'MINE' },
+      ],
+      prompts: [],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['assistant', 'notice', 'user']);
+    expect(s.blocks[1]).toMatchObject({ text: UNSENT_PROMPT_NOTICE, tone: 'warning' });
+    expect(s.blocks[2]).toMatchObject({ kind: 'user', text: 'MINE' });
+  });
+
+  // The ordinary resume after a drop: the attach replays the rest of the other device's turn, which
+  // arrives after the unsent record. That reply belongs to the turn above, so it joins the block it
+  // was already filling -- the unsent prompt stays last, as the one thing still owed to the user.
+  it("lets the other device's turn finish above an unsent prompt", () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'half ' } },
+        { kind: 'unsent', text: 'MINE' },
+        { kind: 'frame', frame: { type: 'text', delta: 'the rest' } },
+        { kind: 'frame', frame: done },
+      ],
+      prompts: [],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual(['assistant', 'turn-end', 'notice', 'user']);
+    expect(s.blocks[0]).toMatchObject({ text: 'half the rest', final: true });
+    expect(s.blocks[3]).toMatchObject({ kind: 'user', text: 'MINE' });
+  });
+
+  // The happy path the whole change exists for: the resume prefills the prompt, the user presses
+  // Enter, and the turn it finally runs must land BELOW the warning about it, not above. The
+  // notice and the unsent copy are bottom-pinned only while nothing has answered them -- once the
+  // prompt is sent they are ordinary history, or every later block would be spliced in front of
+  // blocks <Static> has already printed.
+  it('puts the prompt sent from a prefill below the unsent warning, not above it', () => {
+    const s = fromTranscript({
+      sessionId: 's',
+      createdAt: 0,
+      entries: [
+        { kind: 'turn', turnId: 't1' },
+        { kind: 'frame', frame: { type: 'text', delta: 'theirs' } },
+        { kind: 'frame', frame: done },
+        { kind: 'unsent', text: 'MINE' },
+        { kind: 'prompt', text: 'MINE' },
+        { kind: 'frame', frame: { type: 'text', delta: 'at last' } },
+        { kind: 'frame', frame: done },
+      ],
+      prompts: ['MINE'],
+      usage,
+    });
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'notice',
+      'user', // the unsent copy
+      'user', // the same text, now actually sent
+      'assistant',
+      'turn-end',
+    ]);
+    // Both are retired: history now, so nothing later is spliced in front of them.
+    expect(s.blocks[2]).toMatchObject({ text: UNSENT_PROMPT_NOTICE, pinned: false });
+    expect(s.blocks[3]).toMatchObject({ text: 'MINE', unsent: false });
+    expect(s.blocks[4]).toMatchObject({ text: 'MINE', queued: false });
+    expect(s.blocks[5]).toMatchObject({ text: 'at last' });
+    // And all of it is settled, so <Static> prints the whole run exactly once.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // The same prefill sent while the other device's turn is STILL RUNNING, which is the situation
+  // #479 is about: the prompt is queued behind that turn, not sent. A queued prompt has retired
+  // nothing -- it is still waiting -- so the warning and the copy must keep the bottom until it
+  // actually goes out. Unpin them here and `tailStart` drops below them, cutting the other
+  // device's reply in two around the warning and leaving its first half forever unfinalized, which
+  // holds every block in the live area for the rest of the session (#479 review).
+  it("keeps the unsent warning at the bottom while the prompt is only queued, so the other device's reply stays whole", () => {
+    let s = apply(EMPTY_BLOCKS, { type: 'turn', turnId: 't1', sessionId: 's' });
+    s = apply(s, { type: 'text', delta: 'their ' });
+    s = addUnsent(s, 'MINE');
+    s = addUser(s, 'MINE', true); // Enter on the prefill, with their turn still streaming
+    s = apply(s, { type: 'text', delta: 'work' }, done);
+    s = markSent(s); // their turn ended; ours goes out
+    s = apply(s, { type: 'text', delta: 'at last' }, done);
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'notice',
+      'user', // the unsent copy
+      'user', // the same text, sent at last
+      'assistant',
+      'turn-end',
+    ]);
+    // Their reply is one block, not two split around the warning.
+    expect(s.blocks[0]).toMatchObject({ text: 'their work', final: true });
+    expect(s.blocks[2]).toMatchObject({ text: UNSENT_PROMPT_NOTICE });
+    expect(s.blocks[5]).toMatchObject({ text: 'at last', final: true });
+    // And nothing is left open, so <Static> prints the run instead of holding all of it live.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // The record says a prompt never ran; it says nothing about the last turn, so the attach step's
+  // expectOpen (app.tsx) must read exactly as it did before the record existed.
+  it('an unsent prompt does not change the last turn state', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    const unsent = { kind: 'unsent', text: 'MINE' };
+    expect(lastTurnState(t([unsent]))).toBe('none');
+    expect(lastTurnState(t([{ kind: 'prompt', text: 'p' }, unsent]))).toBe('open');
+    expect(
+      lastTurnState(t([{ kind: 'prompt', text: 'p' }, { kind: 'turn', turnId: 't1' }, unsent])),
+    ).toBe('open-detachable');
+    expect(
+      lastTurnState(t([{ kind: 'prompt', text: 'p' }, { kind: 'frame', frame: done }, unsent])),
+    ).toBe('finished');
+  });
+
+  it('names the unsent prompt a resume should offer back, and only the last one', () => {
+    const t = (entries: any[]) => ({ sessionId: 's', createdAt: 0, entries, prompts: [], usage });
+    expect(unsentPrompt(t([{ kind: 'unsent', text: 'MINE' }]))).toBe('MINE');
+    expect(
+      unsentPrompt(
+        t([
+          { kind: 'unsent', text: 'older' },
+          { kind: 'unsent', text: 'newer' },
+        ]),
+      ),
+    ).toBe('newer');
+    // A prompt that was sent after it settles the matter: there is nothing outstanding to offer.
+    expect(
+      unsentPrompt(
+        t([
+          { kind: 'unsent', text: 'MINE' },
+          { kind: 'prompt', text: 'sent' },
+        ]),
+      ),
+    ).toBeUndefined();
+    expect(unsentPrompt(t([{ kind: 'prompt', text: 'p' }]))).toBeUndefined();
+    expect(unsentPrompt(t([]))).toBeUndefined();
   });
 });
 

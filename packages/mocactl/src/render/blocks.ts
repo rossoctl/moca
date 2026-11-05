@@ -2,7 +2,12 @@ import { isTerminal, type TurnFrame, type Usage } from '../api/frames.js';
 import type { Transcript } from '../core/transcripts.js';
 
 export type Block =
-  | { kind: 'user'; id: number; text: string; queued?: boolean }
+  /**
+   * `unsent` is a prompt that never went out (#479). Like `queued` it stays below the turn above
+   * it, so that turn's reply keeps growing in its own block; unlike `queued` it is settled, since
+   * nothing will ever send it.
+   */
+  | { kind: 'user'; id: number; text: string; queued?: boolean; unsent?: boolean }
   | { kind: 'assistant'; id: number; text: string; thinking: string; final: boolean }
   | {
       kind: 'tool';
@@ -20,7 +25,14 @@ export type Block =
       usage?: Usage;
     }
   | { kind: 'event'; id: number; label: string; data: unknown }
-  | { kind: 'notice'; id: number; text: string; tone: 'info' | 'warning' | 'error' };
+  /** `pinned` keeps a notice with the bottom block it heads, rather than with the turn above. */
+  | {
+      kind: 'notice';
+      id: number;
+      text: string;
+      tone: 'info' | 'warning' | 'error';
+      pinned?: boolean;
+    };
 
 export interface BlockState {
   blocks: Block[];
@@ -34,21 +46,25 @@ export type FrameReducer = (s: BlockState, frame: TurnFrame) => BlockState;
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 type NewBlock = DistributiveOmit<Block, 'id'>;
 
-// Queued prompts stay at the bottom, below the turn that is still running (spec §6.1): everything
-// except a new queued prompt is inserted above the trailing run of queued prompts.
+/**
+ * Blocks that belong below the turn above them rather than inside it: a queued prompt waiting for
+ * it (spec §6.1), an unsent one it held back (#479), and a notice pinned to either. Everything else
+ * is inserted above the trailing run of them, so a reply still being written keeps growing in place.
+ */
+function atBottom(b: Block): boolean {
+  if (b.kind === 'user') return b.queued === true || b.unsent === true;
+  return b.kind === 'notice' && b.pinned === true;
+}
+
 function tailStart(blocks: Block[]): number {
   let i = blocks.length;
-  while (i > 0) {
-    const b = blocks[i - 1];
-    if (b.kind !== 'user' || !b.queued) break;
-    i--;
-  }
+  while (i > 0 && atBottom(blocks[i - 1])) i--;
   return i;
 }
 
 function push(s: BlockState, block: NewBlock): BlockState {
   const b = { ...block, id: s.nextId } as Block;
-  const at = b.kind === 'user' && b.queued ? s.blocks.length : tailStart(s.blocks);
+  const at = atBottom(b) ? s.blocks.length : tailStart(s.blocks);
   return { blocks: [...s.blocks.slice(0, at), b, ...s.blocks.slice(at)], nextId: s.nextId + 1 };
 }
 
@@ -147,7 +163,50 @@ export function reduceFrame(s: BlockState, frame: TurnFrame): BlockState {
 }
 
 export function addUser(s: BlockState, text: string, queued = false): BlockState {
-  return push(queued ? s : finalizeOpen(s), { kind: 'user', text, queued });
+  // A prompt that actually goes out is what retires an unsent record: it was pinned to the bottom
+  // only while it was still the one thing owed to the user. Retiring it keeps this prompt -- the
+  // prefill the resume offered, usually this very text -- and everything it leads to BELOW the
+  // warning about it, instead of spliced in front of blocks <Static> has already printed (#479).
+  //
+  // A QUEUED prompt has retired nothing: it is itself still waiting, behind the very turn the
+  // warning is about. Unpinning here would drop the bottom below the warning, so the rest of that
+  // turn's reply could no longer reach the block it was filling and would open a second one under
+  // the warning -- splitting the reply in two and leaving its first half unfinalized, which holds
+  // every block in the live area for good. `markSent` is what finally puts a sent prompt below
+  // them, and nothing can walk back above it, so this runs exactly once per record.
+  return push(queued ? s : unpinBottom(finalizeOpen(s)), { kind: 'user', text, queued });
+}
+
+/**
+ * Turns the bottom-pinned run into ordinary history: the `unsent` prompts and the notices heading
+ * them stop claiming the bottom, so later blocks append after them in the order they happened.
+ * Queued prompts keep their flag — they are still waiting, and it is what marks them on screen.
+ */
+function unpinBottom(s: BlockState): BlockState {
+  const from = tailStart(s.blocks);
+  if (from === s.blocks.length) return s;
+  const blocks = s.blocks.map((b, i) => {
+    if (i < from) return b;
+    if (b.kind === 'user' && b.unsent) return { ...b, unsent: false };
+    if (b.kind === 'notice' && b.pinned) return { ...b, pinned: false };
+    return b;
+  });
+  return { ...s, blocks };
+}
+
+/**
+ * A prompt that never went out (#479), with the line saying so. Both sit at the bottom, under a
+ * turn that may still be running: it is the other device's, and it keeps its own reply block.
+ */
+export function addUnsent(s: BlockState, text: string): BlockState {
+  return push(
+    push(s, { kind: 'notice', text: UNSENT_PROMPT_NOTICE, tone: 'warning', pinned: true }),
+    {
+      kind: 'user',
+      text,
+      unsent: true,
+    },
+  );
 }
 
 export function markSent(s: BlockState): BlockState {
@@ -219,6 +278,14 @@ export const TRUNCATED_TURN_NOTICE = 'earlier output of this turn is no longer a
 export const OTHER_DEVICE_TURN_NOTICE = "another device's turn";
 
 /**
+ * A prompt that was waiting behind another device's turn when this device left, so the queue
+ * holding it was dropped before it was ever sent (#479). Without the line it reads as a prompt
+ * that was asked and answered by the turn above it.
+ */
+export const UNSENT_PROMPT_NOTICE =
+  "your last prompt was not sent — it was waiting for another device's turn";
+
+/**
  * Where the transcript's last turn stands: 'open-detachable' is one a resume can re-attach to.
  * A `turn` entry opens one after its prompt, and also with no prompt before it: a 409's attach
  * records another device's turn on its own.
@@ -228,6 +295,9 @@ export function lastTurnState(t: Transcript): 'none' | 'finished' | 'open' | 'op
   for (const e of t.entries) {
     if (e.kind === 'prompt') state = 'open';
     else if (e.kind === 'turn') state = 'open-detachable';
+    // An unsent prompt (#479) is not a turn: it says one never started, which leaves where the
+    // last turn stands exactly as the entries before it had it.
+    else if (e.kind === 'unsent') continue;
     else if (isTerminal(e.frame)) state = 'finished';
   }
   return state;
@@ -247,6 +317,20 @@ export function openTurnId(t: Transcript): string | undefined {
     else if (e.kind === 'prompt' || (e.kind === 'frame' && isTerminal(e.frame))) id = undefined;
   }
   return id;
+}
+
+/**
+ * The prompt a resume should offer back: one recorded unsent (#479) with nothing sent since. A
+ * later `prompt` entry settles the matter — the user asked something after, so the dropped one is
+ * no longer what they were waiting on.
+ */
+export function unsentPrompt(t: Transcript): string | undefined {
+  let text: string | undefined;
+  for (const e of t.entries) {
+    if (e.kind === 'unsent') text = e.text;
+    else if (e.kind === 'prompt') text = undefined;
+  }
+  return text;
 }
 
 /** Marks every tool block in [from, to) that has no result as interrupted. */
@@ -291,6 +375,11 @@ export function fromTranscript(t: Transcript): BlockState {
       // Another device's turn, recorded by a 409's attach with no prompt of its own.
       if (!open) lastTurnFrom = s.blocks.length;
       open = true;
+    } else if (e.kind === 'unsent') {
+      // A prompt that never went out (#479): the user's own words, under a line saying so, since
+      // on its own it reads as a prompt the turn above it answered. It opens no turn, so `open`
+      // and `lastTurnFrom` stay as they were.
+      s = addUnsent(s, e.text);
     } else {
       s = reduceFrame(s, e.frame);
       if (isTerminal(e.frame)) open = false;

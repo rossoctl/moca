@@ -149,4 +149,31 @@ describe('LeaveTurnOverlay', () => {
       unmount();
     }
   });
+
+  // #479: leaving drops the prompt that was waiting behind the other device's turn. Say so while
+  // the user still has the choice, rather than letting them find out on the next resume.
+  it('says a held-back prompt will not be sent, and says nothing when there is none', async () => {
+    const noop = () => undefined;
+    const overlay = (pendingPrompt?: string) =>
+      render(
+        withTheme(
+          <LeaveTurnOverlay
+            onKeep={noop}
+            onCancel={noop}
+            onStay={noop}
+            pendingPrompt={pendingPrompt}
+          />,
+        ),
+      );
+
+    const withPending = overlay('fix the flaky test');
+    await waitFor(() => (withPending.lastFrame() ?? '').includes('a turn is running'), 1000);
+    expect(withPending.lastFrame()).toContain('will not be sent');
+    withPending.unmount();
+
+    const without = overlay();
+    await waitFor(() => (without.lastFrame() ?? '').includes('a turn is running'), 1000);
+    expect(without.lastFrame()).not.toContain('will not be sent');
+    without.unmount();
+  });
 });
