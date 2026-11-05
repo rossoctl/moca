@@ -54,8 +54,11 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
   const onTurnEnd = useRef(opts.onTurnEnd);
   onTurnEnd.current = opts.onTurnEnd;
   // Which turn the rendered blocks still have open, so a catch-up's `turn` frame can be told from
-  // it (#483). Reset alongside the blocks it describes, and cleared the moment that turn is no
-  // longer open — settled by a foreign turn, or ended by its own terminal.
+  // it (#483). Reset alongside the blocks it describes, and cleared the moment that turn stops
+  // being open — by its own terminal, by a turn-end that brought none, by an attach that found
+  // nothing left of it, or by this device starting a turn of its own. Only an attach's first
+  // `turn` frame is ever compared against it; left set any longer, it would name a turn that is
+  // already settled and label this device's next turn as another device's.
   const openTurn = useRef(opts.openTurnId);
 
   // Resets when the session or its initial snapshot changes (a session swap must not carry over
@@ -95,6 +98,7 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           firstFrame = true;
           sawTerminal = false;
           attaching = false;
+          openTurn.current = undefined;
           setState((s) => markSent(s));
           setTurn((t) => ({ ...t, phase: 'waiting', startedAt }));
           break;
@@ -107,6 +111,7 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           break;
         case 'attach-none':
           attaching = false;
+          openTurn.current = undefined;
           flush();
           // Nothing more of the resumed turn is coming: settle what the transcript left open.
           setState((s) => {
@@ -172,6 +177,7 @@ export function useSession(session: ActiveSession | undefined, opts: Options): S
           setTurn((t) => ({ ...t, queued: e.size }));
           break;
         case 'turn-end':
+          openTurn.current = undefined;
           flush();
           if (!sawTerminal) {
             const message = e.error ? describeError(e.error) : undefined;

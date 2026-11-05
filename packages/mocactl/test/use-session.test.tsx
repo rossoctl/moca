@@ -415,6 +415,95 @@ describe('useSession on resume', () => {
     expect(splitStatic(v.current.state.blocks).live).toEqual([]);
   });
 
+  // #483 review: the open-turn ref outlives the turn it describes. An `attach-none` settles the
+  // resumed turn in the blocks but used to leave the ref naming it, so the NEXT turn this device
+  // ran was compared against it and labelled another device's. The repro the reviewer gave:
+  // resume an open turn the server no longer has, take the notice's advice and say "go on".
+  it("does not label this device's next turn as another's after an attach found nothing", async () => {
+    const manager = new SessionManager({
+      cp: fakeControlPlane(),
+      harness: fakeHarness(
+        [
+          {
+            frames: [
+              { type: 'turn', turnId: 't2', sessionId: 's1' },
+              { type: 'text', delta: 'carrying on' },
+              doneFrame(),
+            ],
+          },
+        ],
+        {},
+        [],
+      ),
+      now,
+      sleep: async () => undefined,
+      cancelPauseMs: 0,
+      detachable: true,
+    });
+    const session = await manager.resume('s1');
+    const initial = openMidTool();
+    const view: { current?: SessionView } = {};
+    function Probe({ s }: { s: ActiveSession }) {
+      view.current = useSession(s, { initial, now, openTurnId: 't1' });
+      return <Text>{view.current.turn.phase}</Text>;
+    }
+    render(<Probe s={session} />);
+    await tick();
+    session.attachExisting({ expectOpen: true });
+    await session.idle();
+    const v = view as { current: SessionView };
+    await waitFor(() => kindsOf(v).includes('notice'));
+    v.current.submit('go on');
+    await session.idle();
+    await waitFor(() => kindsOf(v).includes('end:done'));
+    expect(kindsOf(v)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+      'assistant',
+      'notice', // the interrupted-turn notice, the only one of this session
+      'user',
+      'assistant',
+      'end:done',
+    ]);
+    expect(v.current.state.blocks.filter((b) => b.kind === 'notice')).toHaveLength(1);
+    expect(v.current.state.blocks[6]).toMatchObject({ text: 'carrying on' });
+  });
+
+  // The same stale ref, reached by the other path: a turn that ends with no terminal frame, as a
+  // dropped stream does. turn-end settles the blocks, so the ref must stop naming that turn too.
+  it("does not label this device's next turn as another's after one ended without a terminal", async () => {
+    const view = await mount([
+      {
+        frames: [
+          { type: 'turn', turnId: 't1', sessionId: 's1' },
+          { type: 'text', delta: 'cut off' },
+        ],
+        error: new ApiError('harness', 0, 'network_error', 'dropped'),
+      },
+      {
+        frames: [
+          { type: 'turn', turnId: 't2', sessionId: 's1' },
+          { type: 'text', delta: 'second' },
+          doneFrame(),
+        ],
+      },
+    ]);
+    view.current.submit('first');
+    await waitFor(() => kindsOf(view).includes('end:error'));
+    view.current.submit('second');
+    await waitFor(() => kindsOf(view).includes('end:done'));
+    expect(kindsOf(view)).toEqual([
+      'user',
+      'assistant',
+      'end:error',
+      'user',
+      'assistant',
+      'end:done',
+    ]);
+    expect(view.current.state.blocks.some((b) => b.kind === 'notice')).toBe(false);
+  });
+
   it('shows a failed server-side cancel as an error notice', async () => {
     const { ApiError } = await import('../src/api/errors.js');
     const harness = fakeHarness([
