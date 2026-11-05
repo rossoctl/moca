@@ -13,7 +13,6 @@
   "dependencies": {
     "@moca/control-plane": "workspace:*",
     "@moca/harness": "workspace:*",
-    "@moca/work-queue": "workspace:*",
     "redis": "^6.3.1"
   },
   "devDependencies": {

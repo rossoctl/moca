@@ -17,7 +17,6 @@ moca/
 │   ├── k8s-sandbox/      # Sandbox transports (@moca/k8s-sandbox; K8s pod-exec half deprecated, ADR-0041)
 │   ├── knative-server/   # HTTP server + P6 worker entrypoints (@moca/knative-server; name historical — P6-load-bearing)
 │   ├── session-backend/  # Redis session storage (@moca/session-backend)
-│   ├── work-queue/       # Redis Streams work queue (@moca/work-queue)
 │   ├── sandbox-relay/    # gRPC relay between control plane and remote-worker sandboxes (@moca/sandbox-relay)
 │   ├── supervisor/       # P6 VM process manager / socket-handoff supervisor (@moca/supervisor)
 │   ├── control-plane/    # Multi-user control plane, credential issuance (@moca/control-plane)
@@ -78,7 +77,7 @@ pre-commit install
 ## Testing
 
 - vitest 2.x for all test suites
-- Redis required for work-queue, session-backend and knative-server workload tests
+- Redis required for session-backend and knative-server workload tests
 - Live smoke tests gated by env vars (M3_LIVE_SMOKE, etc.)
 
 ## Context Budget

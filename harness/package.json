@@ -33,7 +33,6 @@
     "@moca/config-bundle": "workspace:*",
     "@moca/session-backend": "workspace:*",
     "@moca/k8s-sandbox": "workspace:*",
-    "@moca/work-queue": "workspace:*",
     "@earendil-works/pi-ai": "link:../pi-fork/packages/ai",
     "@earendil-works/pi-coding-agent": "link:../pi-fork/packages/coding-agent",
     "redis": "^6.3.1"
