@@ -8,7 +8,6 @@ import { RedisSessionBackend } from '@moca/session-backend';
 import {
   createCapacityLatch,
   k8sSandboxExtension,
-  KubectlTransport,
   SandboxCapacityRefusedError,
 } from '@moca/k8s-sandbox';
 import {
@@ -557,10 +556,10 @@ async function runPromptLeaf(
   // that function, and with it that check. Before the heartbeat, the overlay and the turn, so a
   // server-mode prompt leaf with no sandbox holds nothing and runs nothing.
   try {
-    assertServerSandbox(config, selected?.config ?? null);
+    assertServerSandbox(config, selected);
   } catch (err) {
     if (selected) await selected.release();
-    if (selected?.transport) await selected.transport.close();
+    if (selected) await selected.transport.close();
     return {
       status: 'failed',
       reason: 'error',
@@ -657,18 +656,23 @@ async function runPromptLeaf(
     }
     // A workload run starts in its context, as a solve leaf starts in its worktree. The session's
     // own directory stays the scratch space the note points a read-only run at.
-    const turnConfig =
-      contextPath && selected ? { ...selected.config, podCwd: contextPath } : selected?.config;
+    const turnSandbox = selected
+      ? {
+          transport: selected.transport,
+          podCwd: contextPath ?? selected.podCwd,
+          sandboxId: selected.sandboxId,
+        }
+      : undefined;
     const r: TurnResult = await exec({
       prompt:
         contextPath && selected
-          ? `${env.prompt}\n\n${contextNote(contextPath, contextMode(env), selected.config.podCwd)}`
+          ? `${env.prompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
           : env.prompt,
       sessionId: env.sessionId,
       config: leafTurnConfig(config),
       createIfAbsent: true,
       selection,
-      sandbox: { config: turnConfig ?? null, transport: selected?.transport },
+      sandbox: turnSandbox,
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
     if (r.stopReason === 'aborted') return { status: 'aborted' };
@@ -762,17 +766,20 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
   const selected = await selectPoolSandbox(sandboxEnvironment(env), cwd, sid, {
     cap: solveTimings.cap,
     ttlMs: solveTimings.ttlMs,
+    remoteSandbox: process.env.SH_REMOTE_SANDBOX === '1',
   });
   if (!selected) throw new Error('solve leaf requires a configured sandbox pool');
 
-  // MI1 §5 R3: a server-mode caller must not reach k8sSandboxExtension with a null config. selected
-  // always carries a real config when truthy (see SelectedSandbox), so this is defense-in-depth today
-  // — but it keeps this leaf's guard identical to executeTurn's and realProduceVerdict's below, rather
-  // than relying solely on the `if (!selected) throw` above to hold that invariant forever.
+  // MI1 §5 R3: a server-mode caller must not run tools locally. selected always carries a
+  // leased transport (see SelectedSandbox), so this is defense-in-depth today — but it
+  // keeps this leaf's guard identical to executeTurn's and realProduceVerdict's below,
+  // rather than relying solely on the `if (!selected) throw` above to hold that invariant
+  // forever.
   try {
-    assertServerSandbox(config, selected.config);
+    assertServerSandbox(config, selected);
   } catch (err) {
     await selected.release();
+    await selected.transport.close();
     throw err;
   }
 
@@ -794,7 +801,9 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
       // lapse just returns the sandbox to the pool.
       void selected.heartbeat().catch(() => {});
     }, solveTimings.heartbeatMs);
-    const transport = KubectlTransport(selected.config);
+    // The leased relay transport carries the converge/swebench setup execs too — the
+    // KubectlTransport that used to be built here went with the pod-exec path (ADR-0041).
+    const transport = selected.transport;
     const swebench = isSwebenchEnvelope(env);
     let workspaceRef: string;
     if (swebench) {
@@ -830,22 +839,22 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
     }
     // A solve leaf edits files in its worktree; point the agent's sandbox cwd at that worktree so the
     // model's edits (relative or absolute) land where captureWorkspaceDiff reads them.
-    const agentConfig = { ...selected.config, podCwd: workspaceRef };
+    const agentPodCwd = workspaceRef;
 
     // This leaf builds its own Pi stack rather than going through executeTurn, so it needs
-    // its own latch — executeTurn's is unreachable from here (#452).
-    //
-    // INERT TODAY, and wired anyway. No `transport` is passed below, so the extension
-    // builds a KubectlTransport — and only GrpcRelayTransport raises
-    // SandboxCapacityRefusedError. The converge/diff path around it is kubectl-only too,
-    // so nothing on this leaf can latch until it starts using the leased transport. The
-    // wiring is what keeps that change from silently reintroducing #452 here.
+    // its own latch — executeTurn's is unreachable from here (#452). The leased transport is
+    // the relay's, so a host capacity refusal can latch mid-solve exactly as it can mid-turn.
     const capacity = createCapacityLatch();
     const { settingsManager, loaderOptions } = turnLoaderInputs({
       config,
       cwd,
       extensionFactories: [
-        k8sSandboxExtension({ config: agentConfig, capacity }),
+        k8sSandboxExtension({
+          transport: selected.transport,
+          podCwd: agentPodCwd,
+          sandboxId: selected.sandboxId,
+          capacity,
+        }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
       ],
@@ -900,9 +909,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
     // sandbox we hold, so a release-before-detach would leave the overlay link until TTL expiry.
     // Idempotent and best-effort — see promoted-config.ts:97-113.
     await attached?.detach();
-    if (isSwebenchEnvelope(env)) await cleanupSwebench(KubectlTransport(selected.config), sid);
-    else await cleanupWorkspace(KubectlTransport(selected.config), sid);
+    if (isSwebenchEnvelope(env)) await cleanupSwebench(selected.transport, sid);
+    else await cleanupWorkspace(selected.transport, sid);
     await selected.release();
+    await selected.transport.close();
   }
 };
 
@@ -971,10 +981,10 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
   // fast-path must skip leasing a pod entirely), so — unlike realProduceSolve — this can't sit before
   // any session is created; it sits as early as the sandbox itself is known.
   try {
-    assertServerSandbox(config, selected?.config ?? null);
+    assertServerSandbox(config, selected);
   } catch (err) {
     if (selected) await selected.release();
-    if (selected?.transport) await selected.transport.close();
+    if (selected) await selected.transport.close();
     throw err;
   }
 
@@ -987,17 +997,10 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     // pod via exec — the harness opens nothing.
     let workspaceRef = env.workspaceRef;
     if (converging) {
-      // Reuse the leased grpc transport (Task 8) when present; otherwise build a fresh
-      // KubectlTransport exactly as before. For pods, KubectlTransport.close() is a no-op and
-      // each exec spawns fresh, so building + closing per phase stays observationally identical
-      // to today. For grpc, this is the SAME transport instance used by the agent extension and
-      // cleanup below — closed exactly once, in the outer finally.
-      const convergeTransport = selected?.transport ?? KubectlTransport(selected!.config);
-      try {
-        workspaceRef = await convergeWorkspace(convergeTransport, env.repoUrl!, env.ref!, sid);
-      } finally {
-        if (!selected?.transport) await convergeTransport.close();
-      }
+      // The leased relay transport carries the converge — the same transport instance the
+      // agent extension and the cleanup below use, closed exactly once, in the outer finally.
+      const convergeTransport = selected!.transport;
+      workspaceRef = await convergeWorkspace(convergeTransport, env.repoUrl!, env.ref!, sid);
     }
     if (selected) {
       heartbeat = setInterval(() => {
@@ -1038,24 +1041,23 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
       extensionFactories: [
         ...(allowVerdict ? [submitVerdictExtension(capture, sessionManager)] : []),
         requestApprovalExtension(capture, sessionManager, gateState.nextGateId),
-        // THE BOTH-TIERS SHORTHAND, DELIBERATELY (#245). This is the call site the issue
-        // names, and the one where the fast tier silently did not exist — but splitting the
-        // tiers here would be worse, not better: naming only `streamTransport` would let the
-        // fast tier fall through to its default, `persistentExecInPod`, which spawns a LOCAL
-        // `kubectl exec`. `selected` is a leased pool sandbox reached over the relay (ADR-0024
-        // has it dialling out over one :443 connection, possibly from another cloud), so there
-        // is no kubectl path to it and no pod this process could exec into.
-        //
-        // So the shorthand stays until a transport that can amortize over the relay exists —
-        // which needs a long-lived shell on the wire (`sandbox.proto`'s `rpc Exec` is one
-        // command per RPC), not a flag here. What changed is that the fact is now readable:
-        // `selected.transport.fastTier` says `'per-call-exec'`, and the extension's two knobs
-        // are where that transport goes once there is a better one to put beside it.
-        k8sSandboxExtension({
-          config: selected?.config ?? null,
-          transport: selected?.transport,
-          capacity,
-        }),
+        // THE BOTH-TIERS SHORTHAND, DELIBERATELY (#245). `selected` is a leased pool sandbox
+        // reached over the relay (ADR-0024 has it dialling out over one :443 connection,
+        // possibly from another cloud), and `SandboxExec` is one command per RPC, so there is
+        // no fast tier to name beside the leased transport. The shorthand stays until a
+        // transport that can amortize over the relay exists; what changed is that the fact
+        // is readable: `selected.transport.fastTier` says `'per-call-exec'`, and the
+        // extension's two knobs are where that transport goes once there is a better one.
+        ...(selected
+          ? [
+              k8sSandboxExtension({
+                transport: selected.transport,
+                podCwd: selected.podCwd,
+                sandboxId: selected.sandboxId,
+                capacity,
+              }),
+            ]
+          : []),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
@@ -1095,16 +1097,11 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (converging) {
-      const cleanupTransport = selected?.transport ?? KubectlTransport(selected!.config);
-      try {
-        await cleanupWorkspace(cleanupTransport, sid);
-      } finally {
-        if (!selected?.transport) await cleanupTransport.close();
-      }
+      // The leased transport is shared by converge + the agent extension + this cleanup;
+      // closed exactly once below, never per-phase.
+      await cleanupWorkspace(selected!.transport, sid);
     }
     if (selected) await selected.release();
-    // The shared grpc transport (Task 8) is leased once and used by converge + the agent
-    // extension + cleanup above; close it exactly once here, never per-phase.
-    if (selected?.transport) await selected.transport.close();
+    if (selected) await selected.transport.close();
   }
 };

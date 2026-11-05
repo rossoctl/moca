@@ -22,7 +22,6 @@ import {
   createCapacityLatch,
   k8sSandboxExtension,
   SandboxCapacityRefusedError,
-  type K8sSandboxConfig,
   type SandboxTransport,
 } from '@moca/k8s-sandbox';
 // Value import, and safe: select-sandbox.ts imports nothing from run-turn.js, so unlike the
@@ -118,14 +117,15 @@ export function resetSharedSessionStore(): void {
 }
 
 /**
- * The sandbox a turn's tool calls run in: a resolved pod/pool config (null ⇒ run tools in the
- * harness process itself) plus, for a leased grpc presence record, the transport that carries
- * exec frames to it.
+ * The sandbox a turn's tool calls run in: the leased relay transport plus where head paths
+ * map inside the sandbox. Null ⇒ run tools in the harness process itself (no pool resolved).
  */
 export interface TurnSandbox {
-  config: K8sSandboxConfig | null;
-  /** Present ONLY for a leased grpc sandbox; undefined for pods (each exec spawns kubectl). */
-  transport?: SandboxTransport;
+  transport: SandboxTransport;
+  /** The sandbox-side cwd; head paths under the harness cwd map here. */
+  podCwd: string;
+  /** The sandbox's id, named in the model's prompt. */
+  sandboxId?: string;
 }
 
 /**
@@ -135,7 +135,7 @@ export interface TurnSandbox {
  * one turn release the sandbox another turn is still executing in.
  */
 export interface AcquiredTurnSandbox {
-  sandbox: TurnSandbox;
+  sandbox: TurnSandbox | null;
   leased: boolean;
   /** Renew this call's lease. A no-op unless `leased`. */
   heartbeat: () => Promise<void>;
@@ -241,29 +241,26 @@ export async function acquireTurnSandbox(
     { cap, ttlMs, holderId, remoteSandbox: env.SH_REMOTE_SANDBOX === '1', tier },
     deps,
   );
-  if (!selected)
-    return { sandbox: { config: null }, leased: false, heartbeat: noop, release: noop };
+  if (!selected) return { sandbox: null, leased: false, heartbeat: noop, release: noop };
 
-  // `leased` comes from the seam rather than from re-reading the environment here. It is false on the
-  // single-pod path even though selectPoolSandbox returned a value: that branch has no lease behind
-  // its no-op heartbeat/release, and arming a renewal timer for it would add an interval to every turn
-  // on every non-pool deployment — which would show up in the very loop_lag_p99 figure E8 reads.
-  // Re-deriving it (`Boolean(env.KAGENTI_SANDBOX_POOL_SELECTOR)`, agreeing with selectPoolSandbox's
-  // own `if (!selector)`) worked, but duplicated that predicate across two files.
+  // `leased` comes from the seam rather than from re-reading the environment here. It is
+  // false for an injected sandbox (the caller owns that lease) and true only when this call
+  // took one, which is what makes arming a renewal timer correct: arming it for someone
+  // else's lease would renew or release a sandbox another turn is still executing in.
   return {
-    sandbox: { config: selected.config, transport: selected.transport },
-    leased: selected.leased,
+    sandbox: {
+      transport: selected.transport,
+      podCwd: selected.podCwd,
+      sandboxId: selected.sandboxId,
+    },
+    leased: true,
     heartbeat: selected.heartbeat,
     release: selected.release,
-    ...(selected.leased && selected.sandboxId
-      ? {
-          placement: {
-            sandboxId: selected.sandboxId,
-            tier: selected.tier ?? '',
-            ...(selected.workspaceReset ? { workspaceReset: selected.workspaceReset } : {}),
-          },
-        }
-      : {}),
+    placement: {
+      sandboxId: selected.sandboxId,
+      tier: selected.tier ?? '',
+      ...(selected.workspaceReset ? { workspaceReset: selected.workspaceReset } : {}),
+    },
   };
 }
 
@@ -923,10 +920,10 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     input.config?.sandboxTier,
   );
 
-  // A null config would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
+  // A null sandbox would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both
   // ways a turn gets here — no pool resolved, or a leaf's injected sandbox — meet at this line.
   try {
-    assertServerSandbox(input.config, acquired.sandbox.config);
+    assertServerSandbox(input.config, acquired.sandbox);
   } catch (err) {
     await acquired.release();
     throw err;
@@ -954,14 +951,13 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     // Before the reset frame: that frame flushes the SSE headers, and a missing bundle must still be a
     // plain 410, not an error frame.
     if (input.configRef && !input.promotedConfig) {
-      const { config: sandboxConfig, transport } = acquired.sandbox;
       const sessionId = opened.sessionManager.getSessionId();
       attached = await attachPromotedConfig({
         digest: input.configRef,
         sessionId,
         // Per turn: concurrent turns of one session must not release each other's overlay.
         refId: `${sessionId}.${randomUUID().replace(/-/g, '')}`,
-        sandbox: sandboxConfig ? { config: sandboxConfig, transport } : null,
+        sandbox: acquired.sandbox,
         redisUrl: input.config?.redisUrl,
       });
     }
@@ -1038,7 +1034,7 @@ async function openTurnSession(input: ExecuteTurnInput, cwd: string): Promise<Op
 
 async function executeTurnCore(
   input: ExecuteTurnInput,
-  turnSandbox: TurnSandbox,
+  turnSandbox: TurnSandbox | null,
   opened: OpenedTurnSession,
 ): Promise<TurnResult> {
   const { prompt, config } = input;
@@ -1052,14 +1048,14 @@ async function executeTurnCore(
   // k8sSandboxExtension's argument, and it is passed on untransformed below — so a leased
   // transport cannot be dropped by a field-by-field rebuild here.
   const sandbox = turnSandbox;
-  // Surface whether sandbox routing actually resolved: a null config means tool calls run in
-  // the harness pod's own filesystem (local), not a sandbox pod — a common cause of "the file
+  // Surface whether sandbox routing actually resolved: a null sandbox means tool calls run in
+  // the harness pod's own filesystem (local), not a sandbox — a common cause of "the file
   // never appeared in the sandbox". Cheap one-line signal in container logs.
   if (process.env.SH_MODEL_CUSTOM === '1') {
-    const how = sandbox.config
-      ? `${input.sandbox ? 'leased' : 'pod/pool'}${sandbox.transport ? ' (grpc transport)' : ''}`
+    const how = sandbox
+      ? `${input.sandbox ? 'injected' : 'leased'} relay transport`
       : 'NULL (tools run LOCAL)';
-    console.error(`[sandbox] resolved config: ${how}`);
+    console.error(`[sandbox] resolved: ${how}`);
   }
   // One latch per turn, never shared: a replica serves many turns concurrently against
   // different hosts, and a module-level flag would fail one session's turn because some
@@ -1067,7 +1063,8 @@ async function executeTurnCore(
   const capacity = createCapacityLatch();
   const extensionFactories = [
     flushExtension(backend),
-    k8sSandboxExtension({ ...sandbox, capacity }),
+    // Null sandbox ⇒ no extension ⇒ Pi's built-in tools run locally.
+    ...(sandbox ? [k8sSandboxExtension({ ...sandbox, capacity })] : []),
     checkpointExtension(store, sessionManager),
     toolChoiceExtension(),
   ];

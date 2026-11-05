@@ -291,8 +291,8 @@ for name in "${ENV_NAMES[@]}"; do
   [[ -f "$SH_ENV_DIR/$name.env" ]] || fail "install_env did not install $name.env"
 done
 grep -q 'SH_TURNS_PER_WORKER=' "$SH_ENV_DIR/supervisor.env" || fail "env template incomplete"
-grep -q 'SH_SANDBOX_DISCOVERY=records' "$SH_ENV_DIR/supervisor.env" ||
-  fail "VM env must select records discovery (no cluster on a VM)"
+grep -q 'SH_REMOTE_SANDBOX=1' "$SH_ENV_DIR/supervisor.env" ||
+  fail "VM env must read relay records (no cluster on a VM)"
 echo 'SH_TURNS_PER_WORKER=9' >>"$SH_ENV_DIR/supervisor.env"
 echo 'SH_RELAY_PORT=7777' >>"$SH_ENV_DIR/relay.env"
 echo 'SH_GITHUB_CLIENT_ID=Iv1.operator' >>"$SH_ENV_DIR/control-plane.env"
@@ -397,7 +397,7 @@ grep -qE '^MOCA_RELAY_EXEC_ADDR=127\.0\.0\.1:' "$ENV_SRC_DIR/relay.env.example" 
 pass "the supervisor dials the relay's loopback exec listener, on the port it binds"
 
 # --- SANDBOX_IMAGE default is the remote-worker image ------------------------------------------
-# Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1, SH_SANDBOX_DISCOVERY=records), so the
+# Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1; records are the only inventory, ADR-0041), so the
 # container must run remote-worker -- the image compose's sandbox service uses. The Kubernetes
 # scripts' moca-sandbox image is a pod the harness execs into; it never dials the
 # relay, so with it every turn finds no sandbox presence records.
@@ -1103,9 +1103,8 @@ pass "require_root rejects non-root, accepts uid 0"
 # no TLS -- so on a cloud VM it is unauthenticated read/write access to the session log, the ownership
 # index, the lease store and sh:sandbox:records.
 #
-# On THIS deployment that is the execution path, not data at rest: supervisor.env.example ships
-# SH_SANDBOX_DISCOVERY=records, and select-sandbox.ts then never lists pods, so the only inventory of
-# executors is a set of Redis records. Whoever writes them chooses the sandbox every turn dispatches
+# On THIS deployment that is the execution path, not data at rest: records are the only
+# executor inventory (ADR-0041 removed the pod listing), and those records live in Redis. Whoever writes them chooses the sandbox every turn dispatches
 # to. Admission control, the fail-closed relay token and RestrictAddressFamilies are all bypassed
 # because none of them sits in that path.
 if grep -qE '\-p +127\.0\.0\.1:6379:6379' "$SCRIPT"; then

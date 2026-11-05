@@ -45,7 +45,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
 const { executeTurn } = await import('../src/run-turn.js');
 const { SandboxRequiredError } = await import('../src/select-sandbox.js');
 
-const nullSandbox = { config: null };
+const nullSandbox = undefined;
 
 beforeEach(() => createAgentSession.mockClear());
 

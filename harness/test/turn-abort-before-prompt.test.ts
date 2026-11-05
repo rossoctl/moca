@@ -69,7 +69,7 @@ vi.mock('../src/model-switch-record.js', () => ({
 
 const { executeTurn } = await import('../src/run-turn.js');
 
-const nullSandbox = { config: null };
+const nullSandbox = undefined;
 
 beforeEach(() => {
   createAgentSession.mockClear();

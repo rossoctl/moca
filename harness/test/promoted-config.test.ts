@@ -1,15 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const { kubectlTransportMock } = vi.hoisted(() => ({
-  kubectlTransportMock: vi.fn((..._args: unknown[]) => ({
-    exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
-    close: vi.fn(async () => {}),
-  })),
-}));
-vi.mock('@moca/k8s-sandbox', () => ({
-  KubectlTransport: (...args: unknown[]) => kubectlTransportMock(...args),
-}));
-
 import { attachPromotedConfig } from '../src/promoted-config.js';
 
 const digest = 'sha256:' + 'c'.repeat(64);
@@ -26,7 +16,16 @@ const paths = {
   skillsDir: '/workspace/leaves/s1/.sh-config/skills',
   memoryDir: '/workspace/leaves/s1/.sh-config/memory',
 };
-const sandbox = { config: { pod: 'p', namespace: 'n' } as never };
+
+/** A caller-owned relay transport: records execs, closes only if the (absent) owner says so. */
+function fakeTransport() {
+  return {
+    exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
+    close: vi.fn(async () => {}),
+    fastTier: 'per-call-exec' as const,
+  };
+}
+const sandbox = { transport: fakeTransport() };
 const base = (over: Record<string, unknown> = {}) => ({
   digest,
   sessionId: 's1',
@@ -41,46 +40,31 @@ const base = (over: Record<string, unknown> = {}) => ({
 
 describe('attachPromotedConfig', () => {
   it('resolves only, and detaches as a no-op, when there is no sandbox', async () => {
-    kubectlTransportMock.mockClear();
     const opts = base({ sandbox: null });
     const a = await attachPromotedConfig(opts);
     expect(a.promotedConfig).toBe(fakePromoted);
     expect(opts.deps.overlayConfig).not.toHaveBeenCalled();
     await a.detach();
-    expect(kubectlTransportMock).not.toHaveBeenCalled();
   });
 
-  it('overlays, advertises sandbox paths, and closes the transport it built', async () => {
-    kubectlTransportMock.mockClear();
+  it('overlays on the caller-owned transport, advertises sandbox paths, and never closes it', async () => {
     const a = await attachPromotedConfig(base());
     expect(a.promotedConfig.sandboxSkillsDir).toBe(paths.skillsDir);
     expect(a.promotedConfig.promptFragments.at(-1)).toContain(`Skill files: ${paths.skillsDir}`);
-    expect(kubectlTransportMock.mock.results[0]!.value.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('reuses a leased transport and never closes it', async () => {
-    kubectlTransportMock.mockClear();
-    const transport = {
-      exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0 })),
-      close: vi.fn(),
-    };
-    const a = await attachPromotedConfig(base({ sandbox: { ...sandbox, transport } }));
     await a.detach();
-    expect(kubectlTransportMock).not.toHaveBeenCalled();
-    expect(transport.close).not.toHaveBeenCalled();
-    expect(transport.exec).toHaveBeenCalledWith(
+    // The teardown runs through the caller-owned transport...
+    expect(sandbox.transport.exec).toHaveBeenCalledWith(
       expect.stringContaining('/workspace/leaves/s1/.sh-config'),
       expect.objectContaining({ timeout: 60 }),
     );
+    // ...but the lease lifecycle owns it (ADR-0041 removed the KubectlTransport fallback);
+    // an attach must never close what it did not create.
+    expect(sandbox.transport.close).not.toHaveBeenCalled();
   });
 
   it('keys the ref by refId while the session link stays on sessionId', async () => {
-    kubectlTransportMock.mockClear();
-    const transport = {
-      exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0 })),
-      close: vi.fn(),
-    };
-    const opts = base({ refId: 's1.abc123', sandbox: { ...sandbox, transport } });
+    const transport = fakeTransport();
+    const opts = base({ refId: 's1.abc123', sandbox: { transport } });
     const a = await attachPromotedConfig(opts);
     expect(opts.deps.overlayConfig).toHaveBeenCalledWith(
       transport,
@@ -97,40 +81,37 @@ describe('attachPromotedConfig', () => {
   });
 
   it('tears the partial overlay down and rethrows when the overlay fails (#216)', async () => {
-    kubectlTransportMock.mockClear();
-    const opts = base();
+    const transport = fakeTransport();
+    const opts = base({ sandbox: { transport } });
     opts.deps.overlayConfig = vi.fn(async () => {
       throw new Error('config overlay failed (exit 1)');
     });
     await expect(attachPromotedConfig(opts)).rejects.toThrow('config overlay failed');
-    const cleanup = kubectlTransportMock.mock.results[1]!.value;
-    expect(cleanup.exec).toHaveBeenCalledWith(
+    // The teardown runs through the SAME transport the overlay attempted.
+    expect(transport.exec).toHaveBeenCalledWith(
       expect.stringContaining(`.refs/sha256-${'c'.repeat(64)}`),
       expect.objectContaining({ timeout: 60 }),
     );
   });
 
   it('detach is idempotent and swallows teardown errors', async () => {
-    kubectlTransportMock.mockClear();
-    const a = await attachPromotedConfig(base());
-    kubectlTransportMock.mockImplementationOnce(() => ({
-      exec: vi.fn(async () => {
-        throw new Error('boom');
-      }),
-      close: vi.fn(async () => {}),
-    }));
+    const transport = fakeTransport();
+    const a = await attachPromotedConfig(base({ sandbox: { transport } }));
+    transport.exec.mockImplementationOnce(async () => {
+      throw new Error('boom');
+    });
     await expect(a.detach()).resolves.toBeUndefined();
     await a.detach();
-    expect(kubectlTransportMock).toHaveBeenCalledTimes(2); // overlay + ONE teardown
+    expect(transport.exec).toHaveBeenCalledTimes(1); // ONE teardown, however often detach runs
   });
 
   it('propagates a resolve failure without touching the sandbox', async () => {
-    kubectlTransportMock.mockClear();
-    const opts = base();
+    const transport = fakeTransport();
+    const opts = base({ sandbox: { transport } });
     opts.deps.resolvePromotedConfig = vi.fn(async () => {
       throw new Error('config bundle not found: ' + digest);
     });
     await expect(attachPromotedConfig(opts)).rejects.toThrow(digest);
-    expect(kubectlTransportMock).not.toHaveBeenCalled();
+    expect(transport.exec).not.toHaveBeenCalled();
   });
 });

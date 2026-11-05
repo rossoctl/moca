@@ -216,9 +216,19 @@ describe('selectPoolSandbox: workload filter (spec §3.3)', () => {
   it('a workload run is refused outright where no relay records can serve it', async () => {
     const { lease } = fakeLease();
     const recs = [wlRec(`${WL}-0`, WL)];
-    // No pool selector, the flag off, and pods-only discovery: none of these reads relay records.
+    // No pool selector: a deployment that can never serve the run — not "none attached right now".
+    await expect(
+      selectPoolSandbox(
+        env({ KAGENTI_SANDBOX_POOL_SELECTOR: '' }),
+        '/h',
+        's-1',
+        opts({ workload: WL, ownerScope: OWN }),
+        deps(recs, lease),
+      ),
+    ).rejects.toBeInstanceOf(WorkloadSandboxMisconfiguredError);
+    // A stale pods/both discovery mode (ADR-0041) or a missing remote flag is refused loudly
+    // before any record is read — also never "none attached right now".
     for (const [e, o] of [
-      [{ KAGENTI_SANDBOX_POOL_SELECTOR: '' }, {}],
       [{ SH_SANDBOX_DISCOVERY: 'both' }, { remoteSandbox: false }],
       [{ SH_SANDBOX_DISCOVERY: 'pods' }, {}],
     ] as const) {
@@ -228,11 +238,10 @@ describe('selectPoolSandbox: workload filter (spec §3.3)', () => {
           '/h',
           's-1',
           opts({ ...o, workload: WL, ownerScope: OWN }),
-          deps(recs, lease, { listPods: async () => ['pod-0'] }),
+          deps(recs, lease),
         ),
         JSON.stringify(e),
-        // A deployment that can never serve the run: not "none attached right now".
-      ).rejects.toBeInstanceOf(WorkloadSandboxMisconfiguredError);
+      ).rejects.toThrow(/SH_SANDBOX_DISCOVERY|SH_REMOTE_SANDBOX/);
     }
   });
 

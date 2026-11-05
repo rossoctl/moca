@@ -52,7 +52,6 @@ spec:
             - { name: SH_TURNS_PER_WORKER, value: '4' }
             - { name: SH_ROUTING_POLICY, value: leastInFlight }
             - { name: SH_WORKER_RESTART_BACKOFF_MS, value: '250' }
-            - { name: SH_SANDBOX_DISCOVERY, value: records }
             - { name: SH_REMOTE_SANDBOX, value: '1' }
             # P6.3 sandbox tiers: written to moca-settings by setup.sh ONLY on a stack with both
             # tiers; optional, so a stack without them renders exactly as before (untiered).

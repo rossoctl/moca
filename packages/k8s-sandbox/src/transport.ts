@@ -1,10 +1,9 @@
 /**
  * The exec seam Pi sees (spec §3). Everything above `select-sandbox`
  * (`run-leaf`, `run-turn`, `converge`) depends only on `SandboxTransport` and
- * never learns how bytes reach the sandbox. Implementations: `KubectlTransport`
- * (per-call kubectl exec), `GrpcRelayTransport` (added in ST3), and
- * `persistentExecInPod` (one long-lived channel, serving the file tools) — all three
- * are capped at DEFAULT_OUTPUT_CAP, each by its own mechanism (spec §8).
+ * never learns how bytes reach the sandbox. Implementation: `GrpcRelayTransport`,
+ * capped at DEFAULT_OUTPUT_CAP (spec §8). The kubectl-exec implementations were
+ * removed with the Knative/KEDA deployment path (ADR-0041).
  */
 
 /**
@@ -62,6 +61,24 @@ export interface SandboxTransport {
 }
 
 /**
+ * What the sandbox tools need besides a transport: where head paths map inside the
+ * sandbox, and what to call the sandbox in prompts and logs.
+ *
+ * The pod-exec path (ADR-0041) carried this as a full `K8sSandboxConfig` — pod name,
+ * namespace, kubectl context — because the harness built `kubectl exec` arguments from
+ * it. With sandboxes reached over the relay, only the path mapping and a display name
+ * remain.
+ */
+export interface SandboxContext {
+  /** Sandbox-side working directory; head paths under `headCwd` map here. */
+  podCwd: string;
+  /** Harness-side cwd; head paths under it map to `podCwd`. */
+  headCwd: string;
+  /** The sandbox's id (a relay presence-record id), for prompts and logs. */
+  sandboxId?: string;
+}
+
+/**
  * Whether a transport amortizes a burst of small ops over ONE reused shell, or pays a
  * round trip and a fresh process for each (#245).
  *
@@ -95,16 +112,14 @@ export type FastTier = 'persistent-channel' | 'per-call-exec';
 
 /**
  * Total returned-stdout cap per exec (spec §8, "poisoned-output defense"). Enforced by
- * ALL THREE `SandboxTransport` implementations, each by its own mechanism, which it
- * declares to the shared battery (test/conformance.ts):
+ * the `SandboxTransport` implementation, by its own mechanism, which it declares to
+ * the shared battery (test/conformance.ts):
  *
- *  - `KubectlTransport`     `local-kill`        SIGKILLs its `kubectl exec` client
  *  - `GrpcRelayTransport`   `remote-abort`      `Abort` → the worker kills the process group
- *  - `persistentExecInPod`  `producer-side-cap` pod-side `head -c` bounds output at the source
  *
- * On a trip each truncates, appends OUTPUT_TRUNCATED_MARKER, and sets
+ * On a trip it truncates, appends OUTPUT_TRUNCATED_MARKER, and sets
  * `truncated: true` with a null exit code. The battery asserts the invariant and the
- * declared mechanism for every implementation, so none can regress alone.
+ * declared mechanism, so it cannot regress alone.
  *
  * The Go worker's BufferCap (remote-worker/internal/exec/runner.go) is pinned to this
  * value — change one and change the other; test/output-cap-coupling.test.ts enforces it.
@@ -186,12 +201,12 @@ export const MAX_EXEC_MESSAGE_BYTES = 16 * 1024 * 1024; // 16 MiB
 
 /**
  * Ceiling on one exec when the caller names no `timeout` (spec §3; issue #182). Shared by
- * ALL THREE implementations, for the same reason DEFAULT_OUTPUT_CAP is: an exec that
+ * every implementation, for the same reason DEFAULT_OUTPUT_CAP is: an exec that
  * behaves differently depending on which transport happened to serve it is a divergence
  * the caller above the seam cannot see or control.
  *
- * The three used to disagree. `KubectlTransport` and `persistentExecInPod` armed no timer
- * at all, so a command with no timeout ran unbounded; `GrpcRelayTransport` applied 120 s.
+ * The transports used to disagree. The kubectl-exec transports armed no timer at all, so
+ * a command with no timeout ran unbounded; `GrpcRelayTransport` applied 120 s.
  * Pi's bash tool declares `timeout` optional and tells the model there is "no default
  * timeout", so omitting it is the ordinary case, not an edge one — the same model-issued
  * `bash` ran forever on a pod and died after two minutes through a relay.

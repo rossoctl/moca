@@ -78,16 +78,45 @@ vi.mock('../src/sandbox-lease.js', async (importOriginal) => {
 });
 
 describe('a lease handle held as a closure recovers from a dropped shared store', () => {
-  const env = () => ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx' }) as NodeJS.ProcessEnv;
-  const opts = { cap: 4, ttlMs: 60_000 };
-  const deps = { listPods: async () => ['sandbox-0-0'] };
+  const env = () =>
+    ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', SH_REMOTE_SANDBOX: '1' }) as NodeJS.ProcessEnv;
+  const opts = { cap: 4, ttlMs: 60_000, remoteSandbox: true };
+  // One relay record whose id matches the pod name these tests' assertions always used; the
+  // LEASE store is the (mocked) memo under test, so the record store and affinity are inert
+  // stand-ins and the transport a stub (ADR-0041: candidates are records only).
+  const deps = {
+    records: {
+      put: async () => {},
+      remove: async () => {},
+      list: async () => [
+        {
+          sandboxId: 'sandbox-0-0',
+          labels: {},
+          capabilities: [],
+          capacityMax: 4,
+          transport: 'grpc' as const,
+        },
+      ],
+    },
+    affinity: {
+      get: async () => null,
+      claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
+      replace: async () => {},
+      detachedSince: async (_id: string, now: number) => now,
+    },
+    makeExecClient: () => ({}) as never,
+    makeTransport: () => ({
+      exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+      close: async () => {},
+      fastTier: 'per-call-exec' as const,
+    }),
+  };
 
   it('heartbeats through a drop onto the fresh store, with the same pod and runId', async () => {
     resetSharedStores();
     createdLeaseStores.length = 0;
 
     const selected = await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
-    expect(selected?.leased).toBe(true);
     expect(createdLeaseStores).toHaveLength(1);
     const first = createdLeaseStores[0]!;
 

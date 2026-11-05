@@ -70,7 +70,12 @@ vi.mock('../src/select-sandbox.js', async (importOriginal) => {
 
 const { executeTurn } = await import('../src/run-turn.js');
 const digest = 'sha256:' + 'c'.repeat(64);
-const sandbox = { config: { pod: 'p', namespace: 'n' } as never };
+const fakeTransport = {
+  exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+  close: async () => {},
+  fastTier: 'per-call-exec' as const,
+};
+const sandbox = { transport: fakeTransport, podCwd: '/workspace', sandboxId: 'sb-1' };
 
 beforeEach(() => {
   attachMock.mockClear();
@@ -95,7 +100,7 @@ describe('executeTurn configRef', () => {
       expect.objectContaining({
         digest,
         sessionId: 'opened-1',
-        sandbox: expect.objectContaining({ config: sandbox.config }),
+        sandbox: expect.objectContaining({ transport: sandbox.transport }),
       }),
     );
     expect(detachMock).toHaveBeenCalledTimes(1);
@@ -177,8 +182,8 @@ describe('executeTurn lease renewal around detach', () => {
   it('keeps renewing the lease until the remote detach has finished, then releases', async () => {
     const order: string[] = [];
     selectMock.mockImplementation(async () => ({
-      config: sandbox.config,
-      leased: true,
+      transport: fakeTransport,
+      podCwd: '/workspace',
       sandboxId: 'sb-1',
       heartbeat: async () => {},
       release: async () => void order.push('release'),

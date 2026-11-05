@@ -9,8 +9,8 @@ import { createCapacityLatch } from '../src/capacity-latch.js';
 
 /**
  * A scripted sandbox backend, transport-agnostic. Each transport's conformance
- * factory maps these fields onto its own wire (KubectlTransport → a fake child
- * process; ST5's GrpcRelayTransport → scripted ExecEvent frames).
+ * factory maps these fields onto its own wire (GrpcRelayTransport → scripted
+ * ExecEvent frames).
  */
 export interface FakeBehavior {
   /** chunks emitted on stdout (collected into the returned `stdout` buffer) */
@@ -30,16 +30,16 @@ export interface FakeBehavior {
  * local while the remote producer kept running (#185).
  *
  * Why an enum and not a "was it remote?" boolean: a boolean would assert `false` for
- * both kubectl paths, discarding the existing coverage that `child.kill` is actually
- * called — coverage that is load-bearing, since with it removed deleting `child.kill`
- * still passed. Every transport must make a positive claim about its own mechanism.
+ * a transport that only kills something local while the remote producer kept running,
+ * discarding the coverage that the stop actually happened. Every transport must make a
+ * positive claim about its own mechanism.
  *
  *  - `remote-abort`       the far side is told to stop, correlated to this exec's req_id
  *                         (GrpcRelayTransport's `Abort` for this exec's req_id)
  *  - `local-kill`         we kill our local client; the in-pod process stops on EPIPE,
- *                         if at all (KubectlTransport's `child.kill`)
+ *                         if at all (kept for a future in-cluster client)
  *  - `producer-side-cap`  the producer is bounded at the source in the sandbox, so there
- *                         is nothing to kill (persistentExecInPod's pod-side `head -c`)
+ *                         is nothing to kill (kept for a future capped producer)
  *  - `none`               nothing stopped it. No transport may DECLARE this; it exists so
  *                         a regression that deletes the stop fails loudly instead of
  *                         silently reporting `true`.
@@ -50,10 +50,9 @@ export type ProducerStop = 'remote-abort' | 'local-kill' | 'producer-side-cap' |
 export interface TransportCapabilities {
   producerStop: ProducerStop;
   /**
-   * Does this transport replay output to `opts.onData` as it arrives? False for
-   * persistentExecInPod, which is request/response over one multiplexed channel
-   * (persistent-exec.ts:33). Declared rather than silently skipped: quietly omitting a
-   * case for one implementation is how the #185 asymmetry survived in the first place.
+   * Does this transport replay output to `opts.onData` as it arrives? Declared rather
+   * than silently skipped: quietly omitting a case for one implementation is how the
+   * #185 asymmetry survived in the first place.
    */
   streams: boolean;
   /**
@@ -61,9 +60,9 @@ export interface TransportCapabilities {
    *
    * Declared for the same reason `producerStop` is an enum rather than a boolean: every
    * implementation must make a positive claim about itself, so a fourth transport cannot
-   * ship without one being considered. Before this existed, `persistentExecInPod` was the
-   * only transport with a fast tier and nothing recorded that — so `extension.ts`'s
-   * `opts.transport`, which overrides BOTH tiers, silently removed it on the gRPC path.
+   * ship without one being considered. Before this existed nothing recorded a transport's
+   * fast tier — so `extension.ts`'s `opts.transport`, which overrides BOTH tiers, could
+   * silently remove one.
    *
    * Unlike `producerStop`, the battery cannot observe this from one exec: it is a claim
    * about the COST OF N ops, and a scripted fake's process count is the factory's
@@ -95,10 +94,9 @@ export type TransportFactory = (
 ) => FakeHandle;
 
 /**
- * The shared SandboxTransport contract. This battery runs against all three
- * implementations — KubectlTransport, GrpcRelayTransport, and persistentExecInPod.
- * That identical pass is what makes the three implementations safely swappable
- * (spec §11, driver #2).
+ * The shared SandboxTransport contract. This battery runs against every
+ * implementation — today, GrpcRelayTransport. That identical pass is what makes
+ * implementations safely swappable (spec §11, driver #2).
  */
 export function runConformance(
   label: string,

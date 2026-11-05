@@ -1,12 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { ExecInPod } from '../src/exec.js';
-import type { K8sSandboxConfig } from '../src/config.js';
+import type { ExecInPod } from '../src/transport.js';
+import type { SandboxContext } from '../src/transport.js';
 import { createPodGrepTool } from '../src/grep-tool.js';
 
-const cfg: K8sSandboxConfig = {
-  pod: 'sbx-0',
-  namespace: 'default',
-  context: undefined,
+const cfg: SandboxContext = {
   podCwd: '/workspace',
   headCwd: '/head',
 };
