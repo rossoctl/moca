@@ -163,12 +163,18 @@ export function reduceFrame(s: BlockState, frame: TurnFrame): BlockState {
 }
 
 export function addUser(s: BlockState, text: string, queued = false): BlockState {
-  // Sending anything is what retires an unsent record: it was pinned to the bottom only while it
-  // was still the one thing owed to the user. Unpinning first is what keeps this prompt -- the
+  // A prompt that actually goes out is what retires an unsent record: it was pinned to the bottom
+  // only while it was still the one thing owed to the user. Retiring it keeps this prompt -- the
   // prefill the resume offered, usually this very text -- and everything it leads to BELOW the
   // warning about it, instead of spliced in front of blocks <Static> has already printed (#479).
-  const base = unpinBottom(s);
-  return push(queued ? base : finalizeOpen(base), { kind: 'user', text, queued });
+  //
+  // A QUEUED prompt has retired nothing: it is itself still waiting, behind the very turn the
+  // warning is about. Unpinning here would drop the bottom below the warning, so the rest of that
+  // turn's reply could no longer reach the block it was filling and would open a second one under
+  // the warning -- splitting the reply in two and leaving its first half unfinalized, which holds
+  // every block in the live area for good. `markSent` is what finally puts a sent prompt below
+  // them, and nothing can walk back above it, so this runs exactly once per record.
+  return push(queued ? s : unpinBottom(finalizeOpen(s)), { kind: 'user', text, queued });
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   TRUNCATED_TURN_NOTICE,
   UNSENT_PROMPT_NOTICE,
   addNotice,
+  addUnsent,
   addUser,
   endTurn,
   fromTranscript,
@@ -616,6 +617,37 @@ describe('fromTranscript', () => {
     expect(s.blocks[4]).toMatchObject({ text: 'MINE', queued: false });
     expect(s.blocks[5]).toMatchObject({ text: 'at last' });
     // And all of it is settled, so <Static> prints the whole run exactly once.
+    expect(splitStatic(s.blocks).live).toEqual([]);
+  });
+
+  // The same prefill sent while the other device's turn is STILL RUNNING, which is the situation
+  // #479 is about: the prompt is queued behind that turn, not sent. A queued prompt has retired
+  // nothing -- it is still waiting -- so the warning and the copy must keep the bottom until it
+  // actually goes out. Unpin them here and `tailStart` drops below them, cutting the other
+  // device's reply in two around the warning and leaving its first half forever unfinalized, which
+  // holds every block in the live area for the rest of the session (#479 review).
+  it("keeps the unsent warning at the bottom while the prompt is only queued, so the other device's reply stays whole", () => {
+    let s = apply(EMPTY_BLOCKS, { type: 'turn', turnId: 't1', sessionId: 's' });
+    s = apply(s, { type: 'text', delta: 'their ' });
+    s = addUnsent(s, 'MINE');
+    s = addUser(s, 'MINE', true); // Enter on the prefill, with their turn still streaming
+    s = apply(s, { type: 'text', delta: 'work' }, done);
+    s = markSent(s); // their turn ended; ours goes out
+    s = apply(s, { type: 'text', delta: 'at last' }, done);
+    expect(s.blocks.map((b) => b.kind)).toEqual([
+      'assistant',
+      'turn-end',
+      'notice',
+      'user', // the unsent copy
+      'user', // the same text, sent at last
+      'assistant',
+      'turn-end',
+    ]);
+    // Their reply is one block, not two split around the warning.
+    expect(s.blocks[0]).toMatchObject({ text: 'their work', final: true });
+    expect(s.blocks[2]).toMatchObject({ text: UNSENT_PROMPT_NOTICE });
+    expect(s.blocks[5]).toMatchObject({ text: 'at last', final: true });
+    // And nothing is left open, so <Static> prints the run instead of holding all of it live.
     expect(splitStatic(s.blocks).live).toEqual([]);
   });
 
