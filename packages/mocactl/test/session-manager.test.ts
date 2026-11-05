@@ -755,9 +755,11 @@ describe('detachable turns', () => {
       t.entries.map((e) =>
         e.kind === 'prompt'
           ? `prompt ${e.text}`
-          : e.kind === 'turn'
-            ? `turn ${e.turnId}`
-            : `${e.frame.type}${e.frame.type === 'text' ? ` ${e.frame.delta}` : ''}`,
+          : e.kind === 'unsent'
+            ? `unsent ${e.text}`
+            : e.kind === 'turn'
+              ? `turn ${e.turnId}`
+              : `${e.frame.type}${e.frame.type === 'text' ? ` ${e.frame.delta}` : ''}`,
       ),
     ).toEqual(['turn t1', 'text theirs', 'done', 'prompt P', 'turn t2', 'text mine', 'done']);
     expect(t.prompts).toEqual(['P']);
@@ -808,6 +810,83 @@ describe('detachable turns', () => {
     session.submit('P');
     await session.idle();
     expect(transcripts.load('s1')!.prompts).toEqual(['P']);
+  });
+
+  // #479: the prompt held back by a 409 lives only in the queue. A quit or switch with "keep it
+  // running" drops that queue, so without recording it first the prompt is gone without a word.
+  describe('a prompt held back by a 409', () => {
+    const busy = () => new ApiError('harness', 409, 'turn_in_progress');
+    const conflicted = async () => {
+      const transcripts = new TranscriptStore(mkdtempSync(join(tmpdir(), 'sm-')), {
+        subject: 'u',
+        controlPlaneUrl: 'http://cp',
+      });
+      const s = await started(
+        [{ error: busy() }, { frames: [doneFrame()] }],
+        { detachable: true, transcripts, cancelPauseMs: 0 },
+        // The other device's turn hangs, so the leave lands while its attach is still running.
+        [{ frames: [turnF, text('theirs')], ids: ['t1:1-0', 't1:2-0'], hang: true }],
+      );
+      s.session.submit('MINE');
+      await expect.poll(() => s.session.pendingConflictPrompt).toBe('MINE');
+      return { ...s, transcripts };
+    };
+    const kinds = (t: ReturnType<TranscriptStore['load']>) =>
+      t!.entries.map((e) =>
+        e.kind === 'prompt'
+          ? `prompt ${e.text}`
+          : e.kind === 'unsent'
+            ? `unsent ${e.text}`
+            : e.kind === 'turn'
+              ? `turn ${e.turnId}`
+              : e.frame.type,
+      );
+
+    it('is recorded as unsent when a leave drops it, naming neither the session nor its history', async () => {
+      const { session, transcripts } = await conflicted();
+      // What app.tsx's retire() does: record before clearQueue, which is what drops the prompt.
+      session.recordUnsentPrompt();
+      session.clearQueue();
+      session.detach();
+      await session.idle();
+      const t = transcripts.load('s1')!;
+      expect(kinds(t)).toEqual(['turn t1', 'text', 'unsent MINE']);
+      expect(t.prompts).toEqual([]);
+      expect(t.title).toBeUndefined();
+    });
+
+    it('is recorded once, however many times the leave path asks', async () => {
+      const { session, transcripts } = await conflicted();
+      session.recordUnsentPrompt();
+      session.recordUnsentPrompt();
+      session.clearQueue();
+      session.recordUnsentPrompt(); // the queue is gone: there is nothing left to record
+      session.detach();
+      await session.idle();
+      expect(kinds(transcripts.load('s1')!).filter((k) => k.startsWith('unsent'))).toEqual([
+        'unsent MINE',
+      ]);
+    });
+
+    // Esc is a withdrawal, not a leave: the user took the prompt back on purpose (issue #479 says
+    // this path keeps today's behaviour). Nothing is owed to a later resume.
+    it('leaves nothing behind when Esc withdraws it', async () => {
+      const { session, transcripts } = await conflicted();
+      session.cancel();
+      await session.idle();
+      expect(kinds(transcripts.load('s1')!)).toEqual(['turn t1', 'text']);
+    });
+
+    it('reports no pending prompt once the conflict attach is over', async () => {
+      const { session } = await started(
+        [{ error: busy() }, { frames: [doneFrame()] }],
+        { detachable: true, cancelPauseMs: 0 },
+        [{ frames: [turnF, doneFrame()], ids: ['t1:1-0', 't1:2-0'] }],
+      );
+      session.submit('MINE');
+      await session.idle();
+      expect(session.pendingConflictPrompt).toBeUndefined();
+    });
   });
 
   it('a non-detachable session fails a 409 turn_in_progress turn: no attach, no cancel', async () => {

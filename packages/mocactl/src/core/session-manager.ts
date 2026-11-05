@@ -140,6 +140,8 @@ export class ActiveSession {
   };
   /** The running attach job is a 409's, following a turn this client did not start. */
   private conflict?: { resend: PromptJob };
+  /** A leave already recorded the held-back prompt as unsent, so a second ask writes nothing. */
+  private unsentRecorded = false;
   /**
    * The last turn any `turn` frame named. For a server that sends no `outcome`, a turnId-less
    * cancel's 202 naming it cancelled nothing new.
@@ -173,6 +175,30 @@ export class ActiveSession {
 
   get runningDetachable(): boolean {
     return this.running && (this.live !== undefined || this.pending);
+  }
+
+  /**
+   * The prompt a 409 is holding back, while its resend is still queued (#479). `queued` cannot
+   * answer this: it counts prompts waiting behind this client's own turn too, and only this one is
+   * lost unseen, because a 409's prompt is not in the transcript yet (see `runTurn`).
+   */
+  get pendingConflictPrompt(): string | undefined {
+    const resend = this.conflict?.resend;
+    return resend && this.queue.includes(resend) ? resend.prompt : undefined;
+  }
+
+  /**
+   * Records the prompt a 409 held back as one that never ran, before a leave drops the queue that
+   * is the only place it lives (#479). The leave paths call this; Esc does not — a withdrawal is
+   * the user taking their prompt back, and owes a later resume nothing.
+   */
+  recordUnsentPrompt(): void {
+    const prompt = this.pendingConflictPrompt;
+    if (prompt === undefined || this.unsentRecorded) return;
+    // A flag, rather than clearing `conflict`: that marker also decides whether a cancel withdraws
+    // or cancels remotely, and recording a prompt must not change what Esc does next.
+    this.unsentRecorded = true;
+    this.transcriptSafe(() => this.deps.transcripts?.appendUnsent(this.sessionId, prompt));
   }
 
   // The server does not serialize concurrent turns of one session (spec §2.6); this queue does.

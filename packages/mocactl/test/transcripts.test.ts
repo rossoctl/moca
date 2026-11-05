@@ -37,6 +37,52 @@ describe('TranscriptStore', () => {
     expect(t.prompts).toEqual(['fix the bug']);
   });
 
+  // #479: a prompt dropped on quit/switch while another device held the session. It was never
+  // sent, so it must not read as one that was — and must not name the session either.
+  it('records an unsent prompt without titling the session or entering its history', () => {
+    const { s } = store();
+    s.appendUnsent('s1', 'never sent');
+    const t = s.load('s1')!;
+    expect(t.entries).toEqual([{ kind: 'unsent', text: 'never sent' }]);
+    expect(t.prompts).toEqual([]);
+    expect(t.title).toBeUndefined();
+    expect(t.usage.turns).toBe(0);
+    expect(t.lastEventId).toBeUndefined();
+  });
+
+  it('keeps an unsent prompt in order with the turn that held it back', () => {
+    const { s } = store();
+    s.appendFrame('s1', { type: 'turn', turnId: 't1', sessionId: 's1' }, 't1:1-0');
+    s.appendFrame('s1', { type: 'text', delta: 'theirs' }, 't1:2-0');
+    s.appendUnsent('s1', 'mine');
+    expect(s.load('s1')!.entries).toEqual([
+      { kind: 'turn', turnId: 't1' },
+      { kind: 'frame', frame: { type: 'text', delta: 'theirs' }, eventId: 't1:2-0' },
+      { kind: 'unsent', text: 'mine' },
+    ]);
+  });
+
+  // A record kind this version does not know: an older mocactl reading a newer transcript. The
+  // reader skips it, so the rest of the file still loads (#479 adds the first such kind).
+  it('skips a record kind it does not know', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mocactl-tx-'));
+    writeFileSync(
+      join(dir, 's1.jsonl'),
+      [
+        { kind: 'header', v: 1, createdAt: 1, ...owner },
+        { kind: 'prompt', at: 1, text: 'go' },
+        { kind: 'from-the-future', at: 1, whatever: true },
+        { kind: 'frame', at: 1, frame: { type: 'text', delta: 'x' } },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    expect(new TranscriptStore(dir, owner, () => 1).load('s1')!.entries).toEqual([
+      { kind: 'prompt', text: 'go' },
+      { kind: 'frame', frame: { type: 'text', delta: 'x' } },
+    ]);
+  });
+
   it('titles a session from its first prompt only', () => {
     const { s } = store();
     s.appendPrompt('s1', 'first question');
