@@ -138,12 +138,12 @@ jobs:
       - name: Verify sandbox inventory against the image
         run: |
           jq --version
-          IMAGE=ghcr.io/rossoctl/moca-sandbox:latest
+          IMAGE=ghcr.io/rossoctl/moca-remote-worker:latest
           docker pull "$IMAGE" || {
             echo "::warning title=Sandbox inventory drift check skipped::could not pull $IMAGE; inventory drift is UNVERIFIED"
             exit 0
           }
-          bash deploy/knative/verify-sandbox-inventory.sh "$IMAGE"
+          bash scripts/verify-sandbox-inventory.sh "$IMAGE"
 
   # The same deploy/ suites, on bash 3.2 (#440). deploy-scripts above runs them on the runner's
   # bash 5; macOS ships 3.2.57 as /bin/bash, which is what an operator runs deploy/k8s/setup.sh

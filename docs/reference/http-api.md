@@ -20,8 +20,8 @@ sends turns to the harness with that **session token**. A session token has scop
 `SH_API_TOKEN_TTL_SECONDS`, refreshable) are for the control plane and the harness's `/workloads/*` routes;
 they are never accepted on `/turn`.
 
-The same handler runs on the P6 supervisor's workers and on the deprecated Knative service, so the
-data-plane routes below are identical on both.
+The same handler runs on every deployment path (VM, Kubernetes, Compose), so the data-plane
+routes below are identical on all of them.
 
 ## Authentication on the data plane
 
@@ -157,9 +157,9 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
 - `GET /runs/status?sessionId=ID` returns the stored result: `{status: "queued"}` until one exists
   (also for a session that never existed), then the result for that status. 400 `sessionId_required`.
 - An authenticated caller may not pass `tenant` (400 `tenant_not_allowed`).
-- **`async: true` does not work on P6.** With a token it returns 501 `async_runs_unavailable`; without
-  one it returns 202 and enqueues work that only the deprecated KEDA drainer consumes, so on P6 the work
-  would sit unconsumed. See [the migration guide](../migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob).
+- **`async: true` is removed.** It returns 400 `async_removed`, naming the removal: the KEDA drainer
+  that consumed the queue was removed with the Knative/KEDA path (ADR-0041) and no P6 equivalent
+  exists yet.
 - On a saturated pool the sync path waits with backoff (up to `KAGENTI_SYNC_SATURATION_WAIT_MS`, 30 s)
   and then returns 503 with `Retry-After` and `{"status":"failed","reason":"saturated"}`.
 

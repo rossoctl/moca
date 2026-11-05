@@ -15,8 +15,7 @@ metadata:
   labels:
     pod-security.kubernetes.io/enforce: restricted
 ---
-# Per-user inference credentials (K8sSecretStore). Named apart from deploy/knative's sh-credentials so
-# both paths can share a cluster.
+# Per-user inference credentials (K8sSecretStore), named sh-credentials.
 apiVersion: v1
 kind: Namespace
 metadata:

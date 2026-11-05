@@ -54,9 +54,10 @@ export function recordsKey(): string {
  *    `ClientClosedError`. The connect before the outage SUCCEEDED, so `ready` stays resolved and
  *    point 2 cannot see it. The relay holds one store for its whole life, so a Redis restart left
  *    it unable to write or remove presence ever again (#423). `connectOnce` now clears `ready`
- *    when the client is no longer open and reconnects the SAME client (as session-backend's and
- *    work-queue's `open()` do). One client means one command queue, so a put issued before a
- *    remove still reaches Redis first. A store `close()`d on purpose (select-sandbox's dropMemo)
+ *    when the client is no longer open and reconnects the SAME client (the same
+ *    connect-and-reopen-on-give-up pattern session-backend uses). One client means one command
+ *    queue, so a put issued before a remove still reaches Redis first. A store `close()`d on
+ *    purpose (select-sandbox's dropMemo)
  *    is never reopened: its calls reject instead.
  */
 export class RedisRecordStore implements RecordStore {

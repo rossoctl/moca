@@ -2,7 +2,7 @@
 # containers (ADR-0034). W is SH_WORKERS; capacity beyond one pod is `replicas` (spec §3.1).
 #
 # L4 ONLY. The supervisor routes and admits per CONNECTION, never per request. Never put an L7 hop in
-# front of port 8080 -- an Ingress, an edge Route, a mesh sidecar, Knative's queue-proxy -- because
+# front of port 8080 -- an Ingress, an edge Route, a mesh sidecar -- because
 # its upstream connection pooling funnels many sessions' turns down one socket to one worker and
 # silently defeats the S cap. deploy/k8s/README.md, "The front door is L4".
 apiVersion: v1
@@ -52,7 +52,6 @@ spec:
             - { name: SH_TURNS_PER_WORKER, value: '4' }
             - { name: SH_ROUTING_POLICY, value: leastInFlight }
             - { name: SH_WORKER_RESTART_BACKOFF_MS, value: '250' }
-            - { name: SH_SANDBOX_DISCOVERY, value: records }
             - { name: SH_REMOTE_SANDBOX, value: '1' }
             # P6.3 sandbox tiers: written to moca-settings by setup.sh ONLY on a stack with both
             # tiers; optional, so a stack without them renders exactly as before (untiered).

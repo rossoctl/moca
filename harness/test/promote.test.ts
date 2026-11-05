@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import {
   parsePromoteArgs,
   projectMemoryDir,
@@ -32,6 +33,70 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+describe('the shipped inventory (laptop preflight)', () => {
+  // The whole point of a shipped inventory: `sh promote` runs from the user's own project,
+  // never from this repo, so the module walk — not the cwd — must find the file. Asserted
+  // from one directory BELOW the module's package (the exact degradation
+  // inventoryCandidates' doc describes) and with the DEFAULT image, so a change to either
+  // the default or the file's location cannot silently turn the binary check into
+  // warnings-only for every real caller.
+  const moduleDir = dirname(fileURLToPath(import.meta.url)); // .../harness/test
+  const belowPackage = dirname(moduleDir); // .../harness — no inventory here
+  const file = fileURLToPath(new URL('../sandbox-inventory', import.meta.url));
+
+  it('resolves for the default image from a cwd with no inventory of its own', () => {
+    const a = parsePromoteArgs(['--entry', 'go']);
+    const found = resolveInventoryPath(a.sandboxImage, belowPackage, moduleDir);
+    expect(found).toBeDefined();
+    expect(found!.startsWith(file)).toBe(true);
+  });
+
+  it('lists the binaries the config overlays require: tar, base64, flock and git', () => {
+    const a = parsePromoteArgs(['--entry', 'go']);
+    const binaries = readInventory(a.sandboxImage, belowPackage, moduleDir);
+    expect(binaries).toBeDefined();
+    for (const b of ['tar', 'base64', 'flock', 'git']) {
+      expect(binaries, `${b} must be in the shipped inventory`).toContain(b);
+    }
+  });
+});
+
+describe('the shipped inventory files (shape)', () => {
+  // Ported from deploy/knative/tests/sandbox-inventory.test.sh when the Knative tree was
+  // removed (ADR-0041): a malformed or mis-named file makes preflight quietly wrong, and a
+  // preflight that is quietly wrong is worse than none, because people stop checking.
+  // Reality (does the image actually provide these?) stays with scripts/verify-sandbox-inventory.sh.
+  const dir = fileURLToPath(new URL('../sandbox-inventory', import.meta.url));
+  const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+
+  it('has at least one inventory file', () => {
+    expect(files.length).toBeGreaterThan(0);
+  });
+
+  for (const f of files) {
+    describe(f, () => {
+      const inv = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+
+      it('is valid JSON whose filename matches .image', () => {
+        expect(inv.image.replace(/[:/]/g, '_')).toBe(f.replace(/\.json$/, ''));
+      });
+
+      it('declares a sorted, unique, non-empty binaries array', () => {
+        expect(Array.isArray(inv.binaries)).toBe(true);
+        expect(inv.binaries.length).toBeGreaterThan(0);
+        expect([...inv.binaries].sort()).toEqual(inv.binaries);
+        expect(new Set(inv.binaries).size).toBe(inv.binaries.length);
+      });
+
+      it('declares the binaries converge.ts and config-overlay.ts require', () => {
+        for (const b of ['tar', 'base64', 'flock', 'git']) {
+          expect(inv.binaries, `${b} must be declared`).toContain(b);
+        }
+      });
+    });
+  }
+});
+
 describe('parsePromoteArgs --exclude-prompt', () => {
   it('collects repeated exclusions in order', () => {
     const a = parsePromoteArgs([
@@ -60,14 +125,14 @@ describe('parsePromoteArgs', () => {
     expect(() => parsePromoteArgs([])).toThrow(/--entry/);
   });
 
-  it('defaults mode to unattended and the image to the one setup-k8s.sh deploys', () => {
-    // Must match deploy/knative/setup-k8s.sh:30 and the inventory filename created in Task 14,
-    // or readInventory() finds nothing and the binary check degrades to a warning forever.
+  it('defaults mode to unattended and the image to the one the P6 deployments run', () => {
+    // Must match the shipped inventory under harness/sandbox-inventory/, or readInventory()
+    // finds nothing and the binary check degrades to a warning forever.
     const a = parsePromoteArgs(['--entry', 'go']);
     expect(a).toEqual({
       entry: 'go',
       mode: 'unattended',
-      sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
+      sandboxImage: 'ghcr.io/rossoctl/moca-remote-worker:latest',
       deny: [],
       excludePrompts: [],
       dryRun: false,
@@ -161,7 +226,7 @@ describe('resolveHomeDir', () => {
   });
 
   it('falls back to the process home when --home is absent, keeping HOME= working', () => {
-    // The shell demo (deploy/knative/demo-promoted-workflow.sh) still uses `HOME=$SANDBOX`, which
+    // The shell demo still uses `HOME=$SANDBOX`, which
     // is fine outside Claude Code; the flag must not break it.
     expect(resolveHomeDir({}, '/Users/someone')).toBe('/Users/someone');
   });
@@ -407,5 +472,17 @@ describe('readInventory', () => {
     expect(c[c.length - 1]).toBe(join('/tmp/cwd', INVENTORY_SUBDIR, FILE));
     expect(c.length).toBeLessThan(20);
     expect(c[0]).toBe(join('/a/b/c', INVENTORY_SUBDIR, FILE));
+  });
+
+  it('the module walk stops at the repo root, ignoring a stray inventory above it', () => {
+    // root/sandbox-inventory/ sits ABOVE the repo (root/repo, marked by .git) and must not be found.
+    write(join(INVENTORY_SUBDIR, FILE), JSON.stringify({ image: IMAGE, binaries: ['stray'] }));
+    write(join('repo', '.git'), 'gitdir: elsewhere\n');
+    const moduleDir = join(root, 'repo', 'harness', 'src');
+    mkdirSync(moduleDir, { recursive: true });
+    const c = inventoryCandidates(IMAGE, '/tmp/cwd', moduleDir);
+    expect(c).toContain(join(root, 'repo', INVENTORY_SUBDIR, FILE));
+    expect(c).not.toContain(join(root, INVENTORY_SUBDIR, FILE));
+    expect(resolveInventoryPath(IMAGE, '/tmp/cwd', moduleDir)).toBeUndefined();
   });
 });

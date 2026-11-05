@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, control plane and
 # supervisor units.
-# Sibling of deploy/knative/setup-kind.sh and setup-ocp.sh (spec §4.4).
+# The single-VM systemd deployment (spec §4.4).
 #
 # Prerequisites:
 #   - a Linux VM with systemd 247+ (LoadCredential=) and podman, Node 22+
@@ -447,10 +447,8 @@ start_redis() {
   # LOOPBACK ONLY, and this is the execution path rather than a data-at-rest concern.
   #
   # `-p 6379:6379` binds 0.0.0.0 in podman, and this image runs with no --requirepass, no ACL and no
-  # TLS. On THIS deployment the supervisor ships SH_SANDBOX_DISCOVERY=records
-  # (env/supervisor.env.example), and select-sandbox.ts honours that by never listing pods:
-  # `const pods = source === 'records' ? [] : await list(...)`. So the only inventory of executors is
-  # a set of Redis records. Anyone who can write to Redis chooses the sandbox every turn dispatches
+  # TLS. On THIS deployment records are the only executor inventory (ADR-0041 removed the pod
+  # listing; env/supervisor.env.example ships SH_REMOTE_SANDBOX=1), and those records live in Redis. Anyone who can write to Redis chooses the sandbox every turn dispatches
   # to -- receiving the user's prompts and repository contents and returning whatever they like as
   # the agent's output. Admission control, the fail-closed relay token and RestrictAddressFamilies on
   # both units are all bypassed, because none of them is in that path.

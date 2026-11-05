@@ -524,7 +524,7 @@ loader init.
 
 **In-cluster result (2026-09-03).** Taken on kind against a Revision built from `main` with
 this feature in it — the image blocker above was cleared by building the promoted-workflow demo
-([`../demos/promoted-workflow-demo.md`](../demos/promoted-workflow-demo.md)). N=5 per arm,
+(`docs/demos/promoted-workflow-demo.md`, removed with the Knative path). N=5 per arm,
 alternating baseline/promoted, each sample preceded by a wait for Knative's own scale-to-zero, one
 real model call per sample (`claude-haiku-4-5`), promoted arm carrying a 12 KB bundle:
 

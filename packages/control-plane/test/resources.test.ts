@@ -144,7 +144,7 @@ describe('projectResources', () => {
       turns: 3,
       sandboxTier: null,
     });
-    expect(out.harness).toEqual({ mode: 'knative', podName: 'h-1', revision: 'r-1', ready: true });
+    expect(out.harness).toEqual({ mode: 'worker', podName: 'h-1', revision: 'r-1', ready: true });
     expect(out.sandbox).toEqual({
       podName: 'sandbox-0-0',
       phase: 'Running',
@@ -156,26 +156,26 @@ describe('projectResources', () => {
     expect(out.queue).toBeNull();
   });
 
-  it('reports a leaf-job harness and a lease when the runtime hash carries one', async () => {
+  it('reports a worker harness and a lease when the runtime hash carries one', async () => {
     const out = projectResources(
       rec,
-      { harnessPod: 'leaf-worker-abc', leaseKey: 'sh:sandbox:sandbox-0-0:leases' },
+      { harnessPod: 'worker-abc', leaseKey: 'sh:sandbox:sandbox-0-0:leases' },
       { podName: 'sandbox-0-0', phase: 'Running', tenant: 'github:1234' },
     ) as Record<string, Record<string, unknown> | null>;
-    expect(out.harness!.mode).toBe('leaf-job');
+    expect(out.harness!.mode).toBe('worker');
     expect(out.lease).toMatchObject({ key: 'sh:sandbox:sandbox-0-0:leases' });
     expect(out.lease).not.toHaveProperty('runId');
   });
 
   it('reports ready:false and a null pod when the harness never self-reported', async () => {
-    // Knative scaled to zero, so nothing wrote a runtime hash. That is a legitimate state, not an
+    // Nothing wrote a runtime hash between turns. That is a legitimate state, not an
     // error: the session exists, and no pod is serving it right now.
     const out = projectResources(
       rec,
       {},
       { podName: null, phase: 'unknown', tenant: 'github:1234' },
     ) as Record<string, Record<string, unknown>>;
-    expect(out.harness).toEqual({ mode: 'knative', podName: null, revision: null, ready: false });
+    expect(out.harness).toEqual({ mode: null, podName: null, revision: null, ready: false });
     expect(out.session.turns).toBe(0);
     expect(out.session.lastTurnAt).toBeNull();
   });

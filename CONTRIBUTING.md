@@ -6,7 +6,7 @@
 
 - Node.js 22+
 - pnpm 9+
-- Redis (for work-queue tests)
+- Redis (for the session-backend and knative-server workload tests)
 - Docker (for container builds, and for the hadolint pre-commit hook)
 - [pre-commit](https://pre-commit.com/#install) (git hooks)
 
@@ -44,12 +44,11 @@ version pinned in the root `package.json`, so local and CI formatting cannot div
 moca/
 ├── harness/              # Core harness (@moca/harness)
 ├── packages/
-│   ├── k8s-sandbox/      # K8s sandbox client (@moca/k8s-sandbox)
-│   ├── knative-server/   # Knative HTTP server (@moca/knative-server)
-│   ├── session-backend/  # Redis session backend (@moca/session-backend)
-│   └── work-queue/       # Redis work queue (@moca/work-queue)
-├── deploy/knative/       # Deployment scripts and smoke tests (experiment drivers moved to
-│                         # rossoctl/moca-experiments, 2026-09-25)
+│   ├── k8s-sandbox/      # Sandbox transports over the gRPC relay (@moca/k8s-sandbox)
+│   ├── knative-server/   # HTTP server + P6 worker entrypoints (@moca/knative-server; name historical)
+│   └── session-backend/  # Redis session backend (@moca/session-backend)
+├── deploy/               # Deployment: vm, k8s, compose, microvm, claude (experiment drivers moved
+│                         # to rossoctl/moca-experiments, 2026-09-25)
 ├── pi-fork/              # Submodule: Pi AI framework
 └── Dockerfile            # Container build
 ```
@@ -69,7 +68,7 @@ moca/
 All PRs must pass:
 
 - **Typecheck**: `tsc --noEmit` across harness, k8s-sandbox, knative-server
-- **Tests**: `pnpm -r test` (requires Redis for work-queue)
+- **Tests**: `pnpm -r test` (requires Redis for session-backend and knative-server)
 - **Lint**: `make lint` -- every pre-commit hook over all files (Prettier, shellcheck,
   hadolint, gitleaks, YAML and whitespace checks)
 - **DCO**: All commits must be signed off

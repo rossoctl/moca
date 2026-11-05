@@ -1360,8 +1360,8 @@ write_p4_bundles() {
   done
 }
 
-# Explicit non-root UIDs need nonroot-v2 (restricted-v2 does not reliably admit them; see
-# deploy/knative/setup-ocp.sh). Granted BEFORE the apply, so no pod is rejected first.
+# Explicit non-root UIDs need nonroot-v2 (restricted-v2 does not reliably admit them).
+# Granted BEFORE the apply, so no pod is rejected first.
 grant_scc() {
   [[ "$TARGET" == ocp ]] || return 0
   local sa

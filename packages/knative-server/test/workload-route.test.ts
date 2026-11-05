@@ -1,14 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { runLeaf, enqueue } = vi.hoisted(() => ({
+const { runLeaf } = vi.hoisted(() => ({
   runLeaf: vi.fn(),
-  enqueue: vi.fn(async () => '1-0'),
-}));
-vi.mock('@moca/work-queue', () => ({
-  RedisWorkQueue: class {
-    ensureGroup = async () => {};
-    enqueue = enqueue;
-  },
 }));
 vi.mock('@moca/harness/leaf-result-store', async (orig) => {
   const actual = await orig<typeof import('@moca/harness/leaf-result-store')>();
@@ -33,7 +26,6 @@ let base: string;
 
 beforeEach(() => {
   runLeaf.mockReset();
-  enqueue.mockClear();
   server = startServer(0);
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
@@ -80,10 +72,10 @@ describe('workloads are off unless enabled and Context Service is configured', (
     expect(runLeaf).not.toHaveBeenCalled();
   });
 
-  it('refuses an async run that names a workload rather than queueing it', async () => {
+  it('refuses an async run that names a workload with the ADR-0041 removal error', async () => {
     const res = await json('POST', '/runs', { ...envelope, async: true, workloadId: 'demo' });
-    expect(res).toEqual({ status: 501, body: { error: 'workload_runs_unavailable' } });
-    expect(enqueue).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ status: 400, body: { error: 'async_removed' } });
+    expect(runLeaf).not.toHaveBeenCalled();
   });
 
   it('refuses an anonymous run that names a workload when workloads are enabled', async () => {

@@ -208,19 +208,6 @@ describe('selectPoolSandbox: tier filter (P6.3 spec §4 step 1)', () => {
     await expect(p).rejects.not.toThrow('pool selector');
   });
 
-  it('pods (discovery both) count as the default tier only', async () => {
-    // pod-0 is the MORE loaded, so an unfiltered container selection would pick m-1.
-    const { lease } = fakeLease({ 'pod-0': 1 });
-    const e = env({ ...TIERS, SH_SANDBOX_DISCOVERY: 'both' });
-    const d = deps([rec('m-1', 'microvm')], lease, { listPods: async () => ['pod-0'] });
-    expect(
-      (await selectPoolSandbox(e, '/h', 's-c', opts({ tier: 'container' }), d))?.sandboxId,
-    ).toBe('pod-0');
-    expect((await selectPoolSandbox(e, '/h', 's-m', opts({ tier: 'microvm' }), d))?.sandboxId).toBe(
-      'm-1',
-    );
-  });
-
   it('a bad SH_SANDBOX_TIERS fails the selection naming the variable', async () => {
     const { lease } = fakeLease();
     const p = selectPoolSandbox(
@@ -667,24 +654,21 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     expect(acquired).toEqual([]);
   });
 
-  it('INERT off the records path: remote off, or discovery=pods, never touches affinity', async () => {
+  it('never touches affinity when the selection fails before it (remote off, or a removed discovery mode)', async () => {
+    // ADR-0041: a selector without the remote flag, or a stale pods/both discovery mode, is
+    // refused before any store is consulted — affinity included.
     const explode = new Proxy(
       {},
       { get: () => () => Promise.reject(new Error('affinity touched')) },
     );
     for (const [e, o] of [
-      [env({ SH_SANDBOX_DISCOVERY: 'both' }), opts({ remoteSandbox: false })],
+      [env(), opts({ remoteSandbox: false })],
       [env({ SH_SANDBOX_DISCOVERY: 'pods' }), opts()],
     ] as const) {
       const { lease } = fakeLease();
-      const sel = await selectPoolSandbox(
-        e,
-        '/h',
-        's',
-        o,
-        deps([], lease, { affinity: explode as never, listPods: async () => ['pod-0'] }),
-      );
-      expect(sel?.sandboxId).toBe('pod-0');
+      await expect(
+        selectPoolSandbox(e, '/h', 's', o, deps([], lease, { affinity: explode as never })),
+      ).rejects.toThrow();
     }
   });
 

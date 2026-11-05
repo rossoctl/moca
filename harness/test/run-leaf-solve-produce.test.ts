@@ -29,27 +29,17 @@ vi.mock('../src/select-sandbox.js', async (importOriginal) => {
   };
 });
 
-// Record every exec() the leaf makes against the pod — this is where the ordering proof lives.
-const { kubectlTransportMock, execMock } = vi.hoisted(() => {
-  const execMock = vi.fn();
-  return {
-    execMock,
-    kubectlTransportMock: vi.fn((..._args: unknown[]) => ({
-      exec: execMock,
-      close: vi.fn(async () => {}),
-    })),
-  };
-});
+// Record every exec() the leaf makes against the sandbox — this is where the ordering proof lives.
+const { execMock } = vi.hoisted(() => ({ execMock: vi.fn() }));
 // Spread the real module: run-leaf.ts also imports createCapacityLatch and
-// SandboxCapacityRefusedError from here (#452), and a factory listing only the two
-// overrides leaves those undefined — which fails as an `instanceof undefined` TypeError
+// SandboxCapacityRefusedError from here (#452), and a factory listing only the
+// override leaves those undefined — which fails as an `instanceof undefined` TypeError
 // inside a catch block rather than as a recognisable missing mock.
 vi.mock('@moca/k8s-sandbox', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@moca/k8s-sandbox')>();
   return {
     ...actual,
     k8sSandboxExtension: () => () => {},
-    KubectlTransport: (...args: unknown[]) => kubectlTransportMock(...args),
   };
 });
 
@@ -101,9 +91,10 @@ const solveEnv = (): LeafEnvelope =>
     configRef: digest,
   }) as LeafEnvelope;
 
-const FAKE_CONFIG = { podName: 'sbx-0', namespace: 'team1' } as never;
 const podLease = () => ({
-  config: FAKE_CONFIG,
+  transport: { exec: execMock, close: vi.fn(async () => {}) },
+  podCwd: '/workspace',
+  sandboxId: 'sbx-0',
   heartbeat: vi.fn(async () => {}),
   release: vi.fn(async () => {}),
 });

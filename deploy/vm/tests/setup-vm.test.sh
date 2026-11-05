@@ -194,10 +194,9 @@ grep -q 'systemctl daemon-reload' "$MOCK_LOG" || fail "daemon-reload not invoked
 
 # unit -> package-dir pairs. WorkingDirectory must be the package's OWN dir (not the repo
 # root) and ExecStart must match that package's own `start` script (`node --import tsx
-# src/main.ts`) -- the same CWD-resolution fix already documented at
-# deploy/knative/relay-deployment.yaml:20-32 and deploy/knative/control-plane.yaml:184-187:
-# `node --import tsx` resolves the tsx loader relative to the CWD, and tsx is linked only
-# into each package's own node_modules, never root-hoisted.
+# src/main.ts`) -- `node --import tsx` resolves the tsx loader relative to the CWD, and tsx
+# is linked only into each package's own node_modules, never root-hoisted, so a CWD of the
+# repo root crashes with ERR_MODULE_NOT_FOUND 'tsx'.
 UNIT_PACKAGES=(
   "$UNIT_SUPERVISOR:supervisor:serverless-harness"
   "$UNIT_RELAY:sandbox-relay:serverless-harness"
@@ -244,15 +243,14 @@ fi
 pass "supervisor unit uses KillMode=mixed, so its own drain can actually run"
 
 # --- the supervisor unit must set HOME -------------------------------------------------------
-# deploy/knative/service.yaml, leaf-scaledjob.yaml and control-plane.yaml all set HOME=/tmp for
-# this same harness code, each with a writable path behind it. This unit runs as User=harness
+# The supervisor unit must set HOME to a writable path. This unit runs as User=harness
 # (README: useradd --no-create-home) under ProtectHome=true and ProtectSystem=strict, so $HOME is
 # nonexistent or masked and the only writable places are PrivateTmp's /tmp and StateDirectory. Any
 # turn writing agent/session state under $HOME fails at runtime, after a green bring-up -- and the
 # hardening loop above could not see it, because it only asserts what IS present.
 grep -qE '^Environment=HOME=' "$UNIT_SUPERVISOR" ||
-  fail "sh-supervisor.service must set Environment=HOME= (every Knative manifest running this" \
-    "code sets HOME=/tmp; here ProtectHome=true and a --no-create-home user leave \$HOME unusable)"
+  fail "sh-supervisor.service must set Environment=HOME= (ProtectHome=true and a" \
+    "--no-create-home user leave \$HOME unusable)"
 HOME_PATH="$(grep -oE '^Environment=HOME=.*' "$UNIT_SUPERVISOR" | head -1 | cut -d= -f3-)"
 # Whatever it is set to must be writable under this unit's own sandboxing: PrivateTmp gives /tmp,
 # StateDirectory gives /var/lib/serverless-harness. Anything else is a path ProtectSystem=strict
@@ -291,8 +289,8 @@ for name in "${ENV_NAMES[@]}"; do
   [[ -f "$SH_ENV_DIR/$name.env" ]] || fail "install_env did not install $name.env"
 done
 grep -q 'SH_TURNS_PER_WORKER=' "$SH_ENV_DIR/supervisor.env" || fail "env template incomplete"
-grep -q 'SH_SANDBOX_DISCOVERY=records' "$SH_ENV_DIR/supervisor.env" ||
-  fail "VM env must select records discovery (no cluster on a VM)"
+grep -q 'SH_REMOTE_SANDBOX=1' "$SH_ENV_DIR/supervisor.env" ||
+  fail "VM env must read relay records (no cluster on a VM)"
 echo 'SH_TURNS_PER_WORKER=9' >>"$SH_ENV_DIR/supervisor.env"
 echo 'SH_RELAY_PORT=7777' >>"$SH_ENV_DIR/relay.env"
 echo 'SH_GITHUB_CLIENT_ID=Iv1.operator' >>"$SH_ENV_DIR/control-plane.env"
@@ -397,7 +395,7 @@ grep -qE '^MOCA_RELAY_EXEC_ADDR=127\.0\.0\.1:' "$ENV_SRC_DIR/relay.env.example" 
 pass "the supervisor dials the relay's loopback exec listener, on the port it binds"
 
 # --- SANDBOX_IMAGE default is the remote-worker image ------------------------------------------
-# Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1, SH_SANDBOX_DISCOVERY=records), so the
+# Sandboxes here attach to the relay (SH_REMOTE_SANDBOX=1; records are the only inventory, ADR-0041), so the
 # container must run remote-worker -- the image compose's sandbox service uses. The Kubernetes
 # scripts' moca-sandbox image is a pod the harness execs into; it never dials the
 # relay, so with it every turn finds no sandbox presence records.
@@ -1103,9 +1101,8 @@ pass "require_root rejects non-root, accepts uid 0"
 # no TLS -- so on a cloud VM it is unauthenticated read/write access to the session log, the ownership
 # index, the lease store and sh:sandbox:records.
 #
-# On THIS deployment that is the execution path, not data at rest: supervisor.env.example ships
-# SH_SANDBOX_DISCOVERY=records, and select-sandbox.ts then never lists pods, so the only inventory of
-# executors is a set of Redis records. Whoever writes them chooses the sandbox every turn dispatches
+# On THIS deployment that is the execution path, not data at rest: records are the only
+# executor inventory (ADR-0041 removed the pod listing), and those records live in Redis. Whoever writes them chooses the sandbox every turn dispatches
 # to. Admission control, the fail-closed relay token and RestrictAddressFamilies are all bypassed
 # because none of them sits in that path.
 if grep -qE '\-p +127\.0\.0\.1:6379:6379' "$SCRIPT"; then

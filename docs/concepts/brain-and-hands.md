@@ -35,8 +35,8 @@ implemented over gRPC and a relay:
 
 Because the sandbox dials out, it can live behind NAT, on another network, or on a laptop. The relay is a
 single replica: a restart drops attached streams and fails in-flight execs, and recovery is a retry.
-The older `kubectl exec` transport belongs to the deprecated Knative path
-([migration guide](../migrating-from-knative.md)).
+The older `kubectl exec` transport was removed with the Knative/KEDA deployment path
+([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)).
 
 ## Limits on what the hands return
 

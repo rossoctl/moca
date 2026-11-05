@@ -1,1 +1,0 @@
-- [Auth timeout incident](auth-timeout-incident.md) — the idle reaper that closed live sessions, and the ticket tracking it

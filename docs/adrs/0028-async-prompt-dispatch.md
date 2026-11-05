@@ -45,7 +45,7 @@ default`) and inherits `/turn`'s `resolveSandboxConfig` sandbox routing.
 
 The deferred follow-up above now has its driver, and the deferral turned out to cost more than
 "no per-leaf isolation". The remote-sandbox demo
-([`../demos/remote-sandbox-demo.md`](../demos/remote-sandbox-demo.md)) needs a free-form prompt to
+(`docs/demos/remote-sandbox-demo.md`, removed with the Knative path) needs a free-form prompt to
 run its tool calls on a laptop container reached over the sandbox relay, and
 `SH_REMOTE_SANDBOX`/`SH_RELAY_ADDR` are read only on the lease path — so a prompt leaf could not
 reach a remote sandbox at all. Worse, on any deployment that configures a pool the way

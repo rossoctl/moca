@@ -32,9 +32,6 @@ importers:
       '@moca/session-backend':
         specifier: workspace:*
         version: link:../packages/session-backend
-      '@moca/work-queue':
-        specifier: workspace:*
-        version: link:../packages/work-queue
       redis:
         specifier: ^6.3.1
         version: 6.3.1
@@ -47,7 +44,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/config-bundle:
     devDependencies:
@@ -59,7 +56,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/control-plane:
     dependencies:
@@ -81,7 +78,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
       yaml:
         specifier: ^2.5.0
         version: 2.9.0
@@ -99,7 +96,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/k8s-sandbox:
     dependencies:
@@ -121,7 +118,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/knative-server:
     dependencies:
@@ -131,9 +128,6 @@ importers:
       '@moca/harness':
         specifier: workspace:*
         version: link:../../harness
-      '@moca/work-queue':
-        specifier: workspace:*
-        version: link:../work-queue
       redis:
         specifier: ^6.3.1
         version: 6.3.1
@@ -149,7 +143,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
       yaml:
         specifier: ^2.5.0
         version: 2.9.0
@@ -164,7 +158,7 @@ importers:
         version: link:../sandbox-client
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
-        version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
+        version: 1.32.2(zod@4.6.7)
       chalk:
         specifier: ^5.4.0
         version: 5.6.2
@@ -207,7 +201,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
       yaml:
         specifier: ^2.5.0
         version: 2.9.0
@@ -232,7 +226,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/sandbox-client:
     dependencies:
@@ -244,7 +238,7 @@ importers:
         version: 1.14.7
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
-        version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
+        version: 1.32.2(zod@4.6.7)
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: link:../../pi-fork/packages/coding-agent
@@ -257,7 +251,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/sandbox-relay:
     dependencies:
@@ -288,7 +282,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
       yaml:
         specifier: ^2.5.0
         version: 2.9.0
@@ -304,7 +298,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
 
   packages/supervisor:
     devDependencies:
@@ -325,23 +319,10 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+        version: 2.1.9(@types/node@22.19.21)
       yaml:
         specifier: ^2.5.0
         version: 2.9.0
-
-  packages/work-queue:
-    dependencies:
-      redis:
-        specifier: ^6.3.1
-        version: 6.3.1
-    devDependencies:
-      typescript:
-        specifier: ^5.5.0
-        version: 5.9.3
-      vitest:
-        specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
 
 packages:
 
@@ -924,6 +905,11 @@ packages:
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
+    peerDependencies:
+      ajv: ^8.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -2150,18 +2136,18 @@ snapshots:
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
-  '@modelcontextprotocol/sdk@1.32.2(supports-color@7.2.0)(zod@4.6.7)':
+  '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
       '@hono/node-server': 2.1.4(hono@4.13.13)
       ajv: 8.20.0
-      ajv-formats: 3.0.1
+      ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
       eventsource: 3.0.7
       eventsource-parser: 3.1.1
-      express: 5.3.0(supports-color@7.2.0)
-      express-rate-limit: 8.7.1(express@5.3.0(supports-color@7.2.0))(supports-color@7.2.0)
+      express: 5.3.0
+      express-rate-limit: 8.7.1(express@5.3.0)
       hono: 4.13.13
       jose: 6.2.12
       json-schema-typed: 8.0.2
@@ -2346,8 +2332,8 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.1.0
 
-  ajv-formats@3.0.1:
-    dependencies:
+  ajv-formats@3.0.1(ajv@8.20.0):
+    optionalDependencies:
       ajv: 8.20.0
 
   ajv@8.20.0:
@@ -2379,11 +2365,11 @@ snapshots:
 
   auto-bind@5.0.1: {}
 
-  body-parser@2.4.0(supports-color@7.2.0):
+  body-parser@2.4.0:
     dependencies:
       bytes: 3.1.2
       content-type: 2.1.0
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       http-errors: 2.0.1
       iconv-lite: 0.7.3
       on-finished: 2.4.1
@@ -2518,11 +2504,9 @@ snapshots:
 
   csstype@3.2.3: {}
 
-  debug@4.4.3(supports-color@7.2.0):
+  debug@4.4.3:
     dependencies:
       ms: 2.1.3
-    optionalDependencies:
-      supports-color: 7.2.0
 
   deep-eql@5.0.2: {}
 
@@ -2660,28 +2644,28 @@ snapshots:
 
   expect-type@1.3.0: {}
 
-  express-rate-limit@8.7.1(express@5.3.0(supports-color@7.2.0))(supports-color@7.2.0):
+  express-rate-limit@8.7.1(express@5.3.0):
     dependencies:
-      debug: 4.4.3(supports-color@7.2.0)
-      express: 5.3.0(supports-color@7.2.0)
+      debug: 4.4.3
+      express: 5.3.0
       ip-address: 10.7.4
     transitivePeerDependencies:
       - supports-color
 
-  express@5.3.0(supports-color@7.2.0):
+  express@5.3.0:
     dependencies:
       accepts: 2.0.0
-      body-parser: 2.4.0(supports-color@7.2.0)
+      body-parser: 2.4.0
       content-disposition: 2.0.1
       content-type: 2.1.0
       cookie: 0.7.2
       cookie-signature: 1.2.2
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       depd: 2.0.0
       encodeurl: 2.0.0
       escape-html: 1.0.3
       etag: 1.8.1
-      finalhandler: 2.1.1(supports-color@7.2.0)
+      finalhandler: 2.1.1
       fresh: 2.0.0
       http-errors: 2.0.1
       merge-descriptors: 2.0.0
@@ -2692,9 +2676,9 @@ snapshots:
       proxy-addr: 2.0.8
       qs: 6.16.1
       range-parser: 1.3.0
-      router: 2.2.0(supports-color@7.2.0)
-      send: 1.2.1(supports-color@7.2.0)
-      serve-static: 2.2.1(supports-color@7.2.0)
+      router: 2.2.0
+      send: 1.2.1
+      serve-static: 2.2.1
       statuses: 2.0.2
       type-is: 2.1.0
       vary: 1.1.2
@@ -2709,9 +2693,9 @@ snapshots:
     dependencies:
       is-unicode-supported: 2.1.0
 
-  finalhandler@2.1.1(supports-color@7.2.0):
+  finalhandler@2.1.1:
     dependencies:
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       encodeurl: 2.0.0
       escape-html: 1.0.3
       on-finished: 2.4.1
@@ -3097,9 +3081,9 @@ snapshots:
       '@rollup/rollup-win32-x64-msvc': 4.61.1
       fsevents: 2.3.3
 
-  router@2.2.0(supports-color@7.2.0):
+  router@2.2.0:
     dependencies:
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       depd: 2.0.0
       is-promise: 4.0.0
       parseurl: 1.3.3
@@ -3120,9 +3104,9 @@ snapshots:
 
   semver@7.8.5: {}
 
-  send@1.2.1(supports-color@7.2.0):
+  send@1.2.1:
     dependencies:
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       encodeurl: 2.0.0
       escape-html: 1.0.3
       etag: 1.8.1
@@ -3136,12 +3120,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  serve-static@2.2.1(supports-color@7.2.0):
+  serve-static@2.2.1:
     dependencies:
       encodeurl: 2.0.0
       escape-html: 1.0.3
       parseurl: 1.3.3
-      send: 1.2.1(supports-color@7.2.0)
+      send: 1.2.1
     transitivePeerDependencies:
       - supports-color
 
@@ -3307,10 +3291,10 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vite-node@2.1.9(@types/node@22.19.21)(supports-color@7.2.0):
+  vite-node@2.1.9(@types/node@22.19.21):
     dependencies:
       cac: 6.7.14
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 1.1.2
       vite: 5.4.21(@types/node@22.19.21)
@@ -3334,7 +3318,7 @@ snapshots:
       '@types/node': 22.19.21
       fsevents: 2.3.3
 
-  vitest@2.1.9(@types/node@22.19.21)(supports-color@7.2.0):
+  vitest@2.1.9(@types/node@22.19.21):
     dependencies:
       '@vitest/expect': 2.1.9
       '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.19.21))
@@ -3344,7 +3328,7 @@ snapshots:
       '@vitest/spy': 2.1.9
       '@vitest/utils': 2.1.9
       chai: 5.3.3
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
       expect-type: 1.3.0
       magic-string: 0.30.21
       pathe: 1.1.2
@@ -3354,7 +3338,7 @@ snapshots:
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
       vite: 5.4.21(@types/node@22.19.21)
-      vite-node: 2.1.9(@types/node@22.19.21)(supports-color@7.2.0)
+      vite-node: 2.1.9(@types/node@22.19.21)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.19.21

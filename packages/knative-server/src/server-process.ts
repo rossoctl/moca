@@ -40,8 +40,8 @@ export function scrubAmbientCredentials(env: NodeJS.ProcessEnv): void {
 }
 
 /**
- * Boot-time preparation shared by every server entry point — `startServer()`, the P6 worker and the
- * async-run job (`leaf-job.ts`) — so none can run unprepared (MI1 §5 R2, P6 §3.6). Throws on an
+ * Boot-time preparation shared by every server entry point — `startServer()` and the P6 worker —
+ * so none can run unprepared (MI1 §5 R2, P6 §3.6). Throws on an
  * inconsistent configuration; callers turn that into a boot failure.
  */
 export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): {

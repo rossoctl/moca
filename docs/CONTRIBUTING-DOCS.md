@@ -25,17 +25,7 @@ Every install path, guide and reference page states **Stable**, **Preview** or *
 in the [documentation map](index.md#maturity-labels)). The label must agree with the milestone
 registry; if it does not, fix the registry in the same change.
 
-Use these banners verbatim, changing only the bracketed parts.
-
-Legacy (matches the banners already on `deploy/knative/`):
-
-```markdown
-> **Deprecated 2026-10-11 ([ADR-0041](<relative path>/adrs/0041-deprecate-knative-keda-deployment.md)).**
-> <What this page describes> is deprecated: security and breakage fixes only, and removal comes no
-> earlier than **end of October 2026**, once the remaining users have migrated. P6, the
-> process-manager runtime, is the primary way to run MOCA sessions: see [Migrating off the Knative/KEDA
-> deployment](<relative path>/migrating-from-knative.md).
-```
+Use this banner verbatim, changing only the bracketed parts.
 
 Preview:
 
@@ -44,8 +34,7 @@ Preview:
 > and limits may change. Known limits: <link to the limits section or issues>.
 ```
 
-Do not state a removal date or a support commitment that [ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)
-and the migration guide do not state.
+Do not state a support commitment the ADRs do not state.
 
 ## Page conventions
 
@@ -75,8 +64,6 @@ sandboxes); introduce them with that gloss on first use in a page.
 - Moving a file: `git mv` it, leave a one-line stub at the old path if anything links to it, and
   fix inbound links in the same change.
 - Run `make check-links` before pushing; CI runs the same check.
-- Do not rename `docs/migrating-from-knative.md` before the Knative path is removed. Banners and
-  the runtime notice link to it.
 
 ## Status vocabulary
 

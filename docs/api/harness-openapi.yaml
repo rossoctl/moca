@@ -15,7 +15,7 @@ info:
   title: MOCA harness (data plane)
   version: 1.0.0
   description: |
-    The agent execution tier: a Knative Service that runs turns and jobs against sandboxed
+    The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
     the control-plane URL finds this one through `GET /v1/discovery` there (SH_PUBLIC_HARNESS_URL).
 
@@ -406,7 +406,7 @@ paths:
   /v1/runs:
     post:
       operationId: createRun
-      summary: 'Run a leaf/solve/prompt job — inline, or queued with async: true'
+      summary: 'Run a leaf/solve/prompt job synchronously'
       description: |
         The job mode of the data plane: a self-contained unit of agent work (review one finding,
         solve one problem, answer one prompt) rather than a conversational turn. The `kind`
@@ -417,17 +417,16 @@ paths:
         503 is never persisted — `/runs/status` must not report a retryable refusal as a
         terminal failure.
 
-        `async: true` asks for queueing instead of inline execution. It is available only to
-        unauthenticated callers: running a queued job later on its caller's credential would
-        mean storing a bearer in the queue (MI1 §6.5), and running it on the ambient credential
-        would spend the operator's key for a user. Owned asynchronous runs are MU2's.
+        `async: true` is removed: it was removed with the Knative/KEDA deployment path (ADR-0041),
+        whose KEDA drainer consumed the queue, and is answered 400 async_removed. No P6
+        equivalent exists yet.
 
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs
         with that workload's frozen context, which Moca copies read-only into the sandbox; the
-        session token's user must own the workload (docs/context-service.md). With workloads off,
-        or for any async run, it is refused with 501 workload_runs_unavailable rather than run on
-        the default pool; a synchronous one without a token is 401 token_required.
+        session token's user must own the workload (docs/context-service.md). With workloads off
+        it is refused with 501 workload_runs_unavailable rather than run on the default pool; a
+        synchronous one without a token is 401 token_required.
         `contextWritable: true` gives that run its own writable copy of the context instead,
         discarded when the run ends. A workload created with `sandboxes` runs only on its own
         sandboxes, never on the shared pool. One created with `workspace.mount` as well has its
@@ -446,16 +445,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LeafResult' }
-        '202':
-          description: 'Accepted onto the queue (async: true, unauthenticated caller only).'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AcceptedRun' }
         '400':
           description: |
             envelope_invalid (the body matches no run shape) · configRef_invalid (an empty
             configRef is a well-formed envelope making an unsatisfiable request, so the error
-            names the field) · tenant_not_allowed (an authenticated caller named a tenant) ·
+            names the field) · async_removed (async: true — removed with the Knative/KEDA path,
+            ADR-0041) · tenant_not_allowed (an authenticated caller named a tenant) ·
             session_mismatch · subject_conflict · credential_required · credential_ambiguous ·
             endpoint_unresolved (the control-plane exchange refused the caller's credential or
             its endpoint) · workload_run_requires_prompt (a run naming a workloadId must be a
@@ -484,12 +479,7 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '501':
           description: |
-            async_runs_unavailable — async: true with a token-bearing caller. Not a capability
-            this deployment grants; a token-less caller on a require-auth deployment never
-            reaches it (401 token_required fires first). workload_runs_unavailable — the
-            envelope named a workloadId, but workloads are off or the run is async. It is
-            checked before async_runs_unavailable, so an async run naming a workload gets it
-            whether or not it carries a token.
+            workload_runs_unavailable — the envelope named a workloadId, but workloads are off.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -527,9 +517,9 @@ paths:
   /runs/status:
     get:
       operationId: getRunStatus
-      summary: Poll an async run by session id
+      summary: Poll a run by session id
       description: |
-        Reads the result record an async run wrote. A missing record is `queued`, not an error:
+        Reads the result record a run wrote. A missing record is `queued`, not an error:
         polling is the contract, and "not finished yet" is a normal answer. No credential is
         exchanged — a status read spends nothing upstream — but the same token rules as a turn
         apply (MI1 §5 R7): required under SH_REQUIRE_AUTH, verified when present, and the token
@@ -817,7 +807,7 @@ components:
         maxTurns: { type: integer }
         async:
           type: boolean
-          description: Queue instead of running inline. Unauthenticated callers only — a 501 otherwise.
+          description: Removed with the Knative/KEDA path (ADR-0041); answered 400 async_removed.
         tenant:
           type: string
           description: Unauthenticated deployments only; namespaces the session id.
@@ -934,12 +924,6 @@ components:
               type: string
               enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated]
             message: { type: string }
-    AcceptedRun:
-      type: object
-      required: [status, sessionId]
-      properties:
-        status: { type: string, enum: [accepted] }
-        sessionId: { type: string, description: Poll /runs/status with this. }
     RunStatus:
       oneOf:
         - type: object

@@ -67,4 +67,4 @@ can delete it.
   egress proxy and one-container-per-user sandboxes; none of that is implemented.
 
 If your users do not trust each other, run one deployment (or at least one sandbox set) per trust domain
-until MI1 lands. The Knative path has no multi-user mode at all.
+until MI1 lands.

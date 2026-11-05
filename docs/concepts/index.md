@@ -15,6 +15,5 @@
 | [Context workflows](context-workflows.md)       | How do users move context into and out of MOCA, and which ways work today?       |
 
 The ideas that hold across deployments are: durable resumable sessions, a brain/hands split, several
-users on one deployment, and disposable sandboxes. Scale-to-zero was a property of the deprecated
-Knative/KEDA deployment, not of these ideas; see
-[the migration guide](../migrating-from-knative.md).
+users on one deployment, and disposable sandboxes. Scale-to-zero was a property of the removed
+Knative/KEDA deployment, not of these ideas.

@@ -1,7 +1,7 @@
 import { gzipSync } from 'node:zlib';
 import { createClient } from 'redis';
 import { canonicalTar, type BundleRedisLike } from '@moca/config-bundle';
-import { KubectlTransport, type K8sSandboxConfig, type SandboxTransport } from '@moca/k8s-sandbox';
+import type { SandboxTransport } from '@moca/k8s-sandbox';
 import { resilientClientOptions, swallowRedisErrors } from '@moca/session-backend';
 import { resolvePromotedConfig, type PromotedConfig } from './config-resolver.js';
 import { buildConfigCleanupScript, overlayConfig } from './config-overlay.js';
@@ -64,9 +64,13 @@ export interface PromotedConfigDeps {
   overlayConfig?: typeof overlayConfig;
 }
 
+/**
+ * The sandbox a promoted config overlays into: its exec channel. The transport is
+ * caller-owned (a leased relay transport, ADR-0041 removed pod-exec) and is never closed
+ * here — the caller's lease lifecycle owns it.
+ */
 export interface PromotedSandbox {
-  config: K8sSandboxConfig;
-  transport?: SandboxTransport;
+  transport: SandboxTransport;
 }
 
 export interface AttachedPromotedConfig {
@@ -99,29 +103,24 @@ export async function attachPromotedConfig(opts: {
     if (detached) return;
     detached = true;
     // Best-effort, matching cleanupWorkspace (converge.ts): swallow errors so a teardown hiccup
-    // never masks the leaf's actual verdict. Same transport fallback as the overlay below.
-    const transport = sandbox.transport ?? KubectlTransport(sandbox.config);
+    // never masks the leaf's actual verdict. Same transport as the overlay below.
     try {
-      await transport.exec(buildConfigCleanupScript(opts.sessionId, opts.digest, opts.refId), {
-        timeout: 60,
-      });
+      await sandbox.transport.exec(
+        buildConfigCleanupScript(opts.sessionId, opts.digest, opts.refId),
+        { timeout: 60 },
+      );
     } catch {
       /* ignore */
-    } finally {
-      if (!sandbox.transport) await transport.close();
     }
   };
 
-  // SelectedSandbox.transport is present ONLY for a leased grpc presence record and is
-  // undefined for pods (select-sandbox.ts:33-34), which is the DEFAULT deployment. Guarding
-  // on `sandbox.transport` would therefore skip the overlay entirely on pods: the sandbox
-  // half of the bundle would never arrive, so skill sibling files and memory would be
-  // unreadable — and a unit test injecting a fake transport could not detect it. Build a
-  // KubectlTransport when none is leased, and close only what we created.
-  const overlayTransport = sandbox.transport ?? KubectlTransport(sandbox.config);
+  // The overlay runs on the caller's leased relay transport (ADR-0041 removed the
+  // KubectlTransport fallback for pods): the sandbox half of the bundle always arrives —
+  // skill sibling files and memory must be readable — and the transport is never closed
+  // here, because the caller's lease lifecycle owns it.
   try {
     const paths = await overlayFn(
-      overlayTransport,
+      sandbox.transport,
       opts.digest,
       opts.sessionId,
       gzipSync(canonicalTar(resolved.entries)),
@@ -159,7 +158,5 @@ export async function attachPromotedConfig(opts: {
     // release script is idempotent, so running it after a failure is free.
     await detach();
     throw err;
-  } finally {
-    if (!sandbox.transport) await overlayTransport.close();
   }
 }

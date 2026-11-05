@@ -338,8 +338,7 @@ If it reports that the harness does not trust this control plane, the harness is
 control plane's public keyset, the exchange token, or `SH_CONTROL_PLANE_URL`/`SH_REQUIRE_AUTH`. On
 the VM/P6 path, re-run `sudo ./deploy/vm/setup-vm.sh`, which installs the control plane beside the
 supervisor and wires all four (`deploy/vm/README.md`, "The control plane"). There the exchange token
-is a systemd credential, not a `supervisor.env` line. On the Knative path they are set in
-`deploy/knative/service.yaml`.
+is a systemd credential, not a `supervisor.env` line.
 
 Resuming a session started on another machine shows no history: the control plane has no route
 that returns a session's messages yet, so history is kept locally.

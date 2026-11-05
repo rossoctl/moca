@@ -6,8 +6,6 @@ import { describe, expect, it } from 'vitest';
 const src = readFileSync(fileURLToPath(new URL('../src/worker.ts', import.meta.url)), 'utf8');
 const serverSrc = readFileSync(fileURLToPath(new URL('../src/server.ts', import.meta.url)), 'utf8');
 const workerPath = fileURLToPath(new URL('../src/worker.ts', import.meta.url));
-const leafJobPath = fileURLToPath(new URL('../src/leaf-job.ts', import.meta.url));
-const leafJobSrc = readFileSync(leafJobPath, 'utf8');
 const PKG_DIR = fileURLToPath(new URL('..', import.meta.url));
 const TSX = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
 
@@ -71,18 +69,9 @@ describe('every server entry point runs the same boot function (MI1 R2)', () => 
     expect(r.status).toBe(2);
     expect(r.ready).toBe(false);
   }, 30_000);
-  it('the async-run job calls prepareServerProcess before it touches the queue', () => {
-    // The anchored match, as above: a comment naming the call must not satisfy the ordering either.
-    const boot = BOOT_CALL.exec(leafJobSrc)?.index ?? -1;
-    const queue = leafJobSrc.indexOf('new RedisWorkQueue(');
-    expect(boot).toBeGreaterThan(-1);
-    expect(queue).toBeGreaterThan(-1);
-    expect(boot).toBeLessThan(queue);
-  });
   it('no entry point calls assertKeysetUsable directly any more', () => {
     expect(src).not.toMatch(/^\s*assertKeysetUsable\(/m);
     expect(serverSrc).not.toMatch(/^\s*assertKeysetUsable\(/m);
-    expect(leafJobSrc).not.toMatch(/^\s*assertKeysetUsable\(/m);
   });
 });
 
@@ -111,29 +100,5 @@ describe('the P6 worker validates the sandbox tiers at boot (P6.3 spec §3.4)', 
     });
     expect(r.stderr).toBe('');
     expect(r.ready).toBe(true);
-  }, 30_000);
-});
-
-describe('the async-run job builds its turn config the way the server does (MI1 R3/R4)', () => {
-  it('uses the shared buildConfig instead of a field list of its own', () => {
-    expect(leafJobSrc).not.toMatch(/function buildConfig\s*\(/);
-    expect(leafJobSrc).toMatch(/import \{[^}]*\bbuildConfig\b[^}]*\} from '\.\/server\.js'/);
-  });
-
-  it('refuses to boot under MOCA_TENANCY=multi without SH_REQUIRE_AUTH, before it dials Redis', () => {
-    const r = spawnSync(TSX, [leafJobPath], {
-      cwd: PKG_DIR,
-      encoding: 'utf8',
-      timeout: 20_000,
-      env: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        MOCA_TENANCY: 'multi',
-        // Nothing listens here: reaching the queue would be a connection error, not this refusal.
-        REDIS_URL: 'redis://127.0.0.1:1',
-      },
-    });
-    expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/MOCA_TENANCY=multi requires SH_REQUIRE_AUTH=true/);
   }, 30_000);
 });

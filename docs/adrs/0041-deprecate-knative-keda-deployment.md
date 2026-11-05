@@ -45,7 +45,7 @@ autoscaling.
 At the design level this supersedes ADR-0002, 0003, 0004, 0009, 0015, 0018, 0019 and 0023, and —
 with wording that keeps the underlying concerns alive while the deprecated path remains in-tree —
 0017, 0025 and 0027. The user-facing record is
-[`../migrating-from-knative.md`](../migrating-from-knative.md).
+`../migrating-from-knative.md` (since removed with the path).
 
 ### Alternatives considered
 
@@ -122,3 +122,27 @@ halves of one deliberately-duplicated protocol, not a fork with silent drift.
 deprecation labels only — `leaf-job.ts` carries the `@deprecated` header; `worker.ts` and
 `pool.ts` carry none — and the package itself stays unlabeled, consistent with this ADR's rule
 that the shared code is P6-load-bearing, whatever its package name says.
+
+### 2026-11-05 — removal executed
+
+The Decision's removal conditions were met and the removal PR landed:
+
+- The **end-of-October-2026 floor** passed.
+- **Migration was confirmed** on the tracking issue (#490): every respondent had moved to P6
+  or never used the path, and none depended on async fan-out or the CronJob on-ramp.
+
+Removed with the path: `deploy/knative/` in full (manifests, setup/smoke/demo scripts,
+overlays, Shipwright builds, shell suites), the KEDA drainer (`leaf-job.ts`), the CronJob
+on-ramp (`cron-dispatch.ts`), the async-enqueue route (`async: true` now answers 400
+`async_removed`), `@moca/work-queue` (whose only consumers were that path), and the kubectl
+half of `packages/k8s-sandbox` (`KubectlTransport`, pod listing, single-pod config) — sandbox
+selection is records-only, and `SelectedSandbox` always carries the leased relay transport.
+
+Not removed, per the Decision: `deploy/k8s/` (ADR-0037), the container and microVM sandbox
+tiers, and the shared code in `packages/knative-server` and the relay half of
+`packages/k8s-sandbox` — all P6-load-bearing. The runtime image keeps `kubectl` for the
+control plane's `K8sSecretStore` on Kubernetes.
+
+Still owed, now open rather than gated: the P6 equivalents of async fan-out (archetype A) and
+the scheduled on-ramp (archetype C), flagged in ADR-0034; the `knative-server` rename decision;
+the `sandbox-transport` extraction (RA1 §9.1).

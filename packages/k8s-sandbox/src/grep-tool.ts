@@ -1,7 +1,7 @@
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { createGrepTool } from '@earendil-works/pi-coding-agent';
-import type { K8sSandboxConfig } from './config.js';
-import type { ExecInPod } from './exec.js';
+import type { SandboxContext } from './transport.js';
+import type { ExecInPod } from './transport.js';
 import { mapPath, shQuote } from './paths.js';
 
 /**
@@ -13,7 +13,7 @@ import { mapPath, shQuote } from './paths.js';
 export function createPodGrepTool(
   localCwd: string,
   exec: ExecInPod,
-  cfg: K8sSandboxConfig,
+  cfg: SandboxContext,
 ): ReturnType<typeof createGrepTool> {
   const base = createGrepTool(localCwd);
   return {

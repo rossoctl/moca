@@ -67,7 +67,7 @@ export async function promoteDirectory(
       roots: { userDir: configRoot },
       promptsDir: join(configRoot, 'commands'),
       mode: 'attended',
-      sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
+      sandboxImage: 'ghcr.io/rossoctl/moca-remote-worker:latest',
       versions: { pi: 'unknown', harness: 'mocactl' },
     });
   } catch (err) {

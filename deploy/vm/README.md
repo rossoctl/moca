@@ -5,9 +5,8 @@
 
 Round one's target for the VM process-manager runtime (spec §4.3, §4.4, step 4): a single
 Linux VM running the supervisor, the relay and the MU1 control plane under systemd, with Redis and
-the sandbox containers as podman containers alongside them. `setup-vm.sh` is the P6 counterpart of the
-deprecated `deploy/knative/setup-kind.sh` and `deploy/knative/setup-ocp.sh`
-(see [Migrating off the Knative/KEDA deployment](../../docs/migrating-from-knative.md)).
+the sandbox containers as podman containers alongside them. The Knative/KEDA deployment path this
+once contrasted with has been removed (ADR-0041).
 
 > P4 microVM tier on the same host: see [deploy/microvm/P4-ON-P6.md](../microvm/P4-ON-P6.md).
 

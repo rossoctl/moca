@@ -11,9 +11,8 @@ import type { LeaseStore } from '../src/sandbox-lease.js';
 // the harness process. Proven on hardware — the tool's file landed in the supervisor unit's own
 // PrivateTmp namespace, never in a sandbox container.
 //
-// The load-bearing property in here is the no-pool EQUIVALENCE: /turn is live for every Knative
-// deployment, so a deployment with no KAGENTI_SANDBOX_POOL_SELECTOR must resolve exactly as it did
-// before, and must arm no lease renewal.
+// Since ADR-0041 removed the pod-exec path, every pool selection leases a relay transport, and
+// the no-pool path resolves to null (tools run local) rather than to a single pod.
 
 /** Records every call, so a test can assert on the lease store rather than on a spy's count. */
 function fakeLeaseStore(): LeaseStore & { calls: string[] } {
@@ -37,47 +36,60 @@ function fakeLeaseStore(): LeaseStore & { calls: string[] } {
   };
 }
 
+const fakeTransport = () => ({
+  exec: async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false }),
+  close: async () => {},
+  fastTier: 'per-call-exec' as const,
+});
+
+/** One relay presence record the pool can lease. */
+const record = (sandboxId: string, labels: Record<string, string> = {}) => ({
+  sandboxId,
+  labels,
+  capabilities: [],
+  capacityMax: 4,
+  transport: 'grpc' as const,
+});
+
+/** The deps a records-only pool needs to lease without a live relay. */
+const poolDeps = (lease: LeaseStore, recs = [record('sandbox-a')]) => ({
+  lease,
+  records: { put: async () => {}, remove: async () => {}, list: async () => recs },
+  affinity: {
+    get: async () => null,
+    claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
+    replace: async () => {},
+    detachedSince: async (_id: string, now: number) => now,
+  },
+  makeExecClient: () => ({}) as never,
+  makeTransport: () => fakeTransport(),
+});
+
 describe('acquireTurnSandbox', () => {
   it('returns the injected sandbox verbatim, including its transport, and never leases', async () => {
-    const transport = {
-      exec: async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false }),
-      close: async () => {},
-      fastTier: 'per-call-exec' as const,
-    };
-    // `context` is a required key on K8sSandboxConfig (its value may be undefined, meaning
-    // "use current-context"), so a config literal that omits it is not one -- unnoticed until
-    // harness/test came under the typechecker (#190).
+    const transport = fakeTransport();
     const injected = {
-      config: {
-        pod: 'sbx-laptop',
-        namespace: 'default',
-        context: undefined,
-        podCwd: '/workspace',
-        headCwd: '/head',
-      },
       transport,
+      podCwd: '/workspace',
+      sandboxId: 'sbx-laptop',
     };
 
     const got = await acquireTurnSandbox(injected, {}, '/head', 'run-1');
 
     expect(got.sandbox).toEqual(injected);
-    expect(got.sandbox.transport).toBe(transport);
+    expect(got.sandbox?.transport).toBe(transport);
     // The injecting caller owns the lease. Renewing or returning it from here would let one turn
     // release the sandbox another turn is still executing in.
     expect(got.leased).toBe(false);
   });
 
   it('ignores env resolution entirely when a sandbox is injected', async () => {
-    // A leased remote sandbox must win over an ambient KAGENTI_SANDBOX_POD: honouring the env
+    // A leased remote sandbox must win over a stale KAGENTI_SANDBOX_POD: honouring the env
     // here would silently route a remote prompt leaf back to an in-cluster pod.
     const injected = {
-      config: {
-        pod: 'sbx-leased',
-        namespace: 'default',
-        context: undefined,
-        podCwd: '/workspace',
-        headCwd: '/head',
-      },
+      transport: fakeTransport(),
+      podCwd: '/workspace',
+      sandboxId: 'sbx-leased',
     };
 
     const got = await acquireTurnSandbox(
@@ -87,33 +99,21 @@ describe('acquireTurnSandbox', () => {
       'run-1',
     );
 
-    expect(got.sandbox.config?.pod).toBe('sbx-leased');
+    expect(got.sandbox?.sandboxId).toBe('sbx-leased');
   });
 
-  it('falls back to single-pod env resolution when nothing is injected and no pool is configured', async () => {
-    const got = await acquireTurnSandbox(
-      undefined,
-      { KAGENTI_SANDBOX_POD: 'sandbox-0' },
-      '/head',
-      'run-1',
-    );
-
-    expect(got.sandbox.config).toMatchObject({
-      pod: 'sandbox-0',
-      namespace: 'default',
-      podCwd: '/workspace',
-      headCwd: '/head',
-    });
-    expect(got.sandbox.transport).toBeUndefined();
-    // No pool ⇒ no lease behind it ⇒ executeTurn must not arm a renewal interval, which would
-    // otherwise land on every turn of every non-pool deployment and perturb loop_lag_p99.
-    expect(got.leased).toBe(false);
+  it('throws naming KAGENTI_SANDBOX_POD when the removed single-pod env is all that is set', async () => {
+    // ADR-0041: there is no single-pod path to fall back to, and quietly running tools in the
+    // harness process is MI1 §5 R3's hazard.
+    await expect(
+      acquireTurnSandbox(undefined, { KAGENTI_SANDBOX_POD: 'sandbox-0' }, '/head', 'run-1'),
+    ).rejects.toThrow(/KAGENTI_SANDBOX_POD was removed/);
   });
 
-  it('resolves to a null config when neither injected nor configured (tools run local)', async () => {
+  it('resolves to a null sandbox when neither injected nor configured (tools run local)', async () => {
     const got = await acquireTurnSandbox(undefined, {}, '/head', 'run-1');
 
-    expect(got.sandbox).toEqual({ config: null });
+    expect(got.sandbox).toBeNull();
     expect(got.leased).toBe(false);
   });
 
@@ -122,13 +122,13 @@ describe('acquireTurnSandbox', () => {
 
     const got = await acquireTurnSandbox(
       undefined,
-      { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' },
+      { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox', SH_REMOTE_SANDBOX: '1' },
       '/head',
       'sess-42',
-      { lease, listPods: async () => ['sandbox-a'] },
+      poolDeps(lease),
     );
 
-    expect(got.sandbox.config?.pod).toBe('sandbox-a');
+    expect(got.sandbox?.sandboxId).toBe('sandbox-a');
     expect(got.leased).toBe(true);
     // The member is the per-turn HOLDER, derived here from the session id -- not the session id
     // itself, which would make N concurrent turns of one session share one lease slot
@@ -143,10 +143,10 @@ describe('acquireTurnSandbox', () => {
 
     const got = await acquireTurnSandbox(
       undefined,
-      { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' },
+      { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox', SH_REMOTE_SANDBOX: '1' },
       '/head',
       'sess-42',
-      { lease, listPods: async () => ['sandbox-a'] },
+      poolDeps(lease),
     );
     await got.heartbeat();
     await got.release();
@@ -163,19 +163,17 @@ describe('acquireTurnSandbox', () => {
     expect(lease.calls).toContain(`release:sandbox-a:${holder}`);
   });
 
-  it('treats an empty-string selector as no pool, matching selectPoolSandbox exactly', async () => {
-    // selectPoolSandbox branches on `if (!selector)`, so '' takes its no-lease path and now REPORTS
-    // that through `SelectedSandbox.leased`. This used to be re-derived here from the environment,
-    // which agreed only as long as both copies of the predicate did.
-    const got = await acquireTurnSandbox(
-      undefined,
-      { KAGENTI_SANDBOX_POOL_SELECTOR: '', KAGENTI_SANDBOX_POD: 'sandbox-0' },
-      '/head',
-      'run-1',
-    );
-
-    expect(got.sandbox.config?.pod).toBe('sandbox-0');
-    expect(got.leased).toBe(false);
+  it('treats an empty-string selector as no pool, and a stale pod env still throws', async () => {
+    // selectPoolSandbox branches on `if (!selector)`, so '' takes its no-lease path — and a
+    // KAGENTI_SANDBOX_POD alongside it is still a stale deployment that must fail loudly.
+    await expect(
+      acquireTurnSandbox(
+        undefined,
+        { KAGENTI_SANDBOX_POOL_SELECTOR: '', KAGENTI_SANDBOX_POD: 'sandbox-0' },
+        '/head',
+        'run-1',
+      ),
+    ).rejects.toThrow(/KAGENTI_SANDBOX_POD was removed/);
   });
 
   it('throws rather than silently running local when a configured pool has no candidates', async () => {
@@ -185,15 +183,12 @@ describe('acquireTurnSandbox', () => {
     await expect(
       acquireTurnSandbox(
         undefined,
-        { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' },
+        { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox', SH_REMOTE_SANDBOX: '1' },
         '/head',
         'r',
-        {
-          lease: fakeLeaseStore(),
-          listPods: async () => [],
-        },
+        poolDeps(fakeLeaseStore(), []),
       ),
-    ).rejects.toThrow(/pool selector/);
+    ).rejects.toThrow(/no sandbox presence records/);
   });
 
   it('passes the tier to the selection and reports where the turn landed (P6.3)', async () => {
@@ -202,20 +197,8 @@ describe('acquireTurnSandbox', () => {
       put: async () => {},
       remove: async () => {},
       list: async () => [
-        {
-          sandboxId: 'c-0',
-          labels: { 'moca.dev/tier': 'container' },
-          capabilities: [],
-          capacityMax: 4,
-          transport: 'grpc' as const,
-        },
-        {
-          sandboxId: 'm-0',
-          labels: { 'moca.dev/tier': 'microvm' },
-          capabilities: [],
-          capacityMax: 4,
-          transport: 'grpc' as const,
-        },
+        record('c-0', { 'moca.dev/tier': 'container' }),
+        record('m-0', { 'moca.dev/tier': 'microvm' }),
       ],
     };
     const affinity = {
@@ -243,11 +226,7 @@ describe('acquireTurnSandbox', () => {
           records,
           affinity,
           makeExecClient: () => ({}) as never,
-          makeTransport: () => ({
-            exec: async () => ({}) as never,
-            close: async () => {},
-            fastTier: 'per-call-exec' as const,
-          }),
+          makeTransport: () => fakeTransport(),
         },
         'microvm',
       );

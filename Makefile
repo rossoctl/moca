@@ -1,6 +1,4 @@
-.PHONY: lint fmt check-links test test-deploy test-deploy-bash32 typecheck demo-remote-sandbox demo-remote-sandbox-teardown \
-	demo-promoted-workflow demo-promoted-workflow-teardown demo-multiuser demo-multiuser-teardown \
-	mocactl-quickstart mocactl-quickstart-teardown
+.PHONY: lint fmt check-links test test-deploy test-deploy-bash32 typecheck
 
 lint:
 	pre-commit run --all-files
@@ -30,7 +28,7 @@ test:
 # deploy/k8s/tests covers setup.sh, the Kubernetes deployment of P6 (kubectl/kind/docker/oc mocked).
 # scripts/tests covers install-mocactl.sh, the mocactl one-line installer (curl/node mocked).
 test-deploy:
-	@failed=''; for t in deploy/knative/tests/*.test.sh deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh deploy/sbx/tests/*.test.sh scripts/tests/*.test.sh; do \
+	@failed=''; for t in deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh deploy/sbx/tests/*.test.sh scripts/tests/*.test.sh; do \
 		echo "== $$t"; \
 		bash "$$t" || failed="$$failed $$t"; \
 	done; \
@@ -71,50 +69,3 @@ test-deploy-bash32:
 # (`pnpm -r` skips a package that does not, silently, and still exits 0).
 typecheck:
 	pnpm -r typecheck
-
-# DEPRECATED (ADR-0041): drives the deprecated Knative/KEDA path under deploy/knative. Fixes-only
-# support; removal no earlier than end of October 2026 — see docs/migrating-from-knative.md.
-# Current-runtime demos: docs/demos/vm-multi-user-demo.md, or deploy/compose for a local trial.
-# Laptop showcase: harness on kind, remote worker as a host container dialing out.
-# See deploy/knative/README-worker.md. Add --reuse-cluster to skip setup on a warm cluster.
-demo-remote-sandbox:
-	bash deploy/knative/demo-remote-worker.sh $(DEMO_ARGS)
-
-demo-remote-sandbox-teardown:
-	bash deploy/knative/demo-remote-worker.sh --teardown
-
-# DEPRECATED (ADR-0041): drives the deprecated Knative/KEDA path under deploy/knative. Fixes-only
-# support; removal no earlier than end of October 2026 — see docs/migrating-from-knative.md.
-# Current-runtime demos: docs/demos/vm-two-user-acceptance.md.
-# Promote a Claude Code workflow authored in a minimal local sandbox, then prove it ran remotely.
-# Needs a warm cluster whose image contains the promotion feature; the script gates on that.
-# See docs/demos/promoted-workflow-demo.md.
-demo-promoted-workflow:
-	bash deploy/knative/demo-promoted-workflow.sh $(DEMO_ARGS)
-
-demo-promoted-workflow-teardown:
-	bash deploy/knative/demo-promoted-workflow.sh --teardown
-
-# DEPRECATED (ADR-0041): drives the deprecated Knative/KEDA path under deploy/knative. Fixes-only
-# support; removal no earlier than end of October 2026 — see docs/migrating-from-knative.md.
-# Current-runtime demos: docs/demos/vm-two-user-acceptance.md.
-# MU1 multi-user demo: two GitHub logins, owned sessions, per-user credentials, and a credential
-# property that holds with the deployment's own key present in the environment. Needs a warm cluster,
-# a GitHub OAuth app with device flow enabled, and two GitHub accounts; it SKIPS with a message
-# otherwise. See docs/specs/2026-09-08-multi-user-control-plane-design.md §10.
-demo-multiuser:
-	bash deploy/knative/demo-multiuser.sh $(DEMO_ARGS)
-
-demo-multiuser-teardown:
-	bash deploy/knative/demo-multiuser.sh --teardown
-
-# DEPRECATED (ADR-0041): drives the deprecated Knative/KEDA path under deploy/knative. Fixes-only
-# support; removal no earlier than end of October 2026 — see docs/migrating-from-knative.md.
-# Current-runtime demos: deploy/vm/README.md.
-# Wire a warm kind cluster for mocactl and hold the port-forwards open, so `mocactl` needs one URL
-# (packages/mocactl/QUICKSTART.md). Needs SH_GITHUB_CLIENT_ID: a GitHub OAuth app with device flow on.
-mocactl-quickstart:
-	bash deploy/knative/mocactl-quickstart.sh $(DEMO_ARGS)
-
-mocactl-quickstart-teardown:
-	bash deploy/knative/mocactl-quickstart.sh --teardown

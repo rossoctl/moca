@@ -25,8 +25,9 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   const args: PromoteArgs = {
     entry: '',
     mode: 'unattended',
-    // Matches deploy/knative/setup-k8s.sh:30 so the checked-in inventory (Task 14) resolves.
-    sandboxImage: 'ghcr.io/rossoctl/moca-sandbox:latest',
+    // The container-tier sandbox image the P6 deployments run; must match the shipped
+    // inventory in harness/sandbox-inventory/ or the binary check degrades to warnings.
+    sandboxImage: 'ghcr.io/rossoctl/moca-remote-worker:latest',
     deny: [],
     excludePrompts: [],
     dryRun: false,
@@ -120,7 +121,7 @@ export function projectMemoryDir(cwd: string, home: string): string {
 }
 
 /** Relative location of the checked-in sandbox inventories, from a repo or package root. */
-export const INVENTORY_SUBDIR = join('deploy', 'knative', 'sandbox-inventory');
+export const INVENTORY_SUBDIR = 'sandbox-inventory';
 
 /** The inventory filename for an image ref: `:` and `/` become `_`. Mirrors readInventory's key. */
 export function inventoryFileName(image: string): string {
@@ -132,13 +133,20 @@ export function inventoryFileName(image: string): string {
  *
  * The inventory is a HARNESS-SHIPPED asset, so it must be found relative to where the harness is
  * installed -- NOT relative to the invocation directory. `sh promote` is run from the user's own
- * project (that is the whole point of the feature), and a user's project will never contain
- * `deploy/knative/sandbox-inventory/`. Resolving against `cwd` alone made the binary check
+ * project (that is the whole point of the feature), and a user's project will never contain the
+ * harness's `sandbox-inventory/`. Resolving against `cwd` alone made the binary check
  * silently degrade to `inventory_unavailable` for every real caller, which is the "lying
  * preflight" this inventory exists to prevent -- measured: from the repo root the check produced
  * 29 findings, from one directory deeper it produced none.
  *
  * `cwd` is kept as a LOWER-precedence fallback so a caller can still override with a local file.
+ * The shipped files live under the harness package's own `sandbox-inventory/` (moved there from
+ * `deploy/knative/sandbox-inventory/` when the Knative path was removed, ADR-0041) so the walk
+ * from the module finds them wherever the harness is installed.
+ *
+ * The module walk stops at the first ancestor holding `.git` (the same boundary as `projectRoot`),
+ * so a stray `sandbox-inventory/` above the repo -- or above the project a published harness is
+ * installed into -- is never picked up. With no `.git` anywhere it still ends at the root.
  */
 export function inventoryCandidates(image: string, cwd: string, moduleDir: string): string[] {
   const file = inventoryFileName(image);
@@ -148,7 +156,7 @@ export function inventoryCandidates(image: string, cwd: string, moduleDir: strin
   for (;;) {
     out.push(join(dir, INVENTORY_SUBDIR, file));
     const parent = dirname(dir);
-    if (parent === dir) break;
+    if (parent === dir || existsSync(join(dir, '.git'))) break;
     dir = parent;
   }
   out.push(join(cwd, INVENTORY_SUBDIR, file));

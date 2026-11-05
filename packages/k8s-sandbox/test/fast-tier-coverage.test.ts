@@ -13,9 +13,9 @@ const SRC = resolve(HERE, '../src');
  * that much is a compile error, and it is the half `transport.ts` already pins. What the
  * type cannot pin is that the claim was ever CHECKED: a fourth transport can declare
  * `fastTier: 'persistent-channel'` and never enrol in `conformance.ts`, and nothing fails.
- * That is exactly how the divergence this issue is about survived — `persistentExecInPod`
- * was the only transport with a fast tier and nothing recorded the fact, so
- * `extension.ts`'s `opts.transport` could override both tiers and silently remove it.
+ * That is exactly how the divergence this issue is about survived — the kubectl-era
+ * transports' fast tiers went unrecorded, so `extension.ts`'s `opts.transport` could
+ * override both tiers and silently remove one.
  *
  * So the discipline needs the second half: every transport that MAKES the claim must be
  * held to the battery. This test is the link between the two lists. It is the same
@@ -28,7 +28,7 @@ const SRC = resolve(HERE, '../src');
 /** A `fastTier:` declaration site, as `{ file, exported constructor }`. */
 interface Declarer {
   file: string;
-  /** The exported function that returns the transport, e.g. `KubectlTransport`. */
+  /** The exported function that returns the transport, e.g. `GrpcRelayTransport`. */
   name: string;
 }
 
@@ -50,12 +50,11 @@ const readDeclarers = (): Declarer[] => {
     .sort()) {
     const lines = readFileSync(resolve(SRC, file), 'utf8').split('\n');
     // The ENCLOSING export, i.e. the last one at or above the declaration — not the
-    // file's first. Both transport files open with an argv builder
-    // (`buildKubectlArgs`, `buildPersistentKubectlArgs`), so taking the first export
-    // would name a helper no conformance file imports and report a failure that is the
-    // reader's own, which is worse than no test: it trains the next person to edit the
-    // expectation. `transport.ts` holds the type and no implementation, so it declares no
-    // literal and never reaches here.
+    // file's first. A transport file that opens with a helper would otherwise name a
+    // helper no conformance file imports and report a failure that is the reader's own,
+    // which is worse than no test: it trains the next person to edit the expectation.
+    // `transport.ts` holds the type and no implementation, so it declares no literal
+    // and never reaches here.
     let enclosing: string | undefined;
     for (const line of lines) {
       const fn = /^export function (\w+)\(/.exec(line);
@@ -70,7 +69,7 @@ const readDeclarers = (): Declarer[] => {
       if (!out.some((d) => d.name === enclosing)) out.push({ file, name: enclosing });
     }
   }
-  if (out.length < 3) {
+  if (out.length < 1) {
     throw new Error(
       `found ${out.length} literal fastTier declarations under src/ — field renamed, ` +
         'or FastTier gained a member this reader does not know?',

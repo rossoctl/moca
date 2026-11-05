@@ -32,9 +32,9 @@ const relayLease = () => {
   };
   return {
     lease: {
-      config: { pod: 'sbx-0', namespace: 'moca', podCwd: '/workspace/run-1', headCwd: '/tmp' },
+      podCwd: '/workspace/run-1',
+      sandboxId: 'sbx-0',
       transport,
-      leased: true,
       heartbeat: vi.fn(async () => {}),
       release: vi.fn(async () => {}),
     },
@@ -78,12 +78,13 @@ describe('frozen context on a prompt leaf', () => {
       "Inspect.\n\nYour working directory, /workspace/.moca-context/runs/run-1, is the workload's " +
         'read-only context. Use /workspace/run-1 as writable scratch space.',
     );
-    // The run starts in its context; the rest of the lease's config is passed through unchanged.
+    // The run starts in its context; the rest of the lease is passed through unchanged.
     expect(turn.sandbox).toEqual({
-      config: { ...lease.config, podCwd: '/workspace/.moca-context/runs/run-1' },
       transport,
+      podCwd: '/workspace/.moca-context/runs/run-1',
+      sandboxId: 'sbx-0',
     });
-    expect(lease.config.podCwd).toBe('/workspace/run-1');
+    expect(lease.podCwd).toBe('/workspace/run-1');
     expect(
       transport.exec.mock.calls.some(([script]) => String(script).includes('CONTEXT_CLEANUP')),
     ).toBe(true);
@@ -138,7 +139,7 @@ describe('frozen context on a prompt leaf', () => {
     expect(prompt).toBe(
       `Inspect.\n\n${contextNote('/workspace/.moca-context/runs/run-1', 'copy', '/workspace/run-1')}`,
     );
-    expect(executeTurn.mock.calls[0]![0].sandbox?.config?.podCwd).toBe(
+    expect(executeTurn.mock.calls[0]![0].sandbox?.podCwd).toBe(
       '/workspace/.moca-context/runs/run-1',
     );
     expect(prompt).toContain('working directory');
@@ -335,7 +336,7 @@ describe('a run on a mounted workload (workload sandboxes spec §5.3)', () => {
     // The same root rule as a copied revision.
     expect(first).toContain('SRC="$CACHE/workspace"');
     const turn = executeTurn.mock.calls[0]![0];
-    expect(turn.sandbox?.config?.podCwd).toBe('/workspace/context/workspace');
+    expect(turn.sandbox?.podCwd).toBe('/workspace/context/workspace');
     expect(turn.prompt).toContain("is the workload's read-only context");
     // Nothing to clean up: no copy was made, and no cache ref taken.
     expect(scripts(transport).some((s) => /CONTEXT_(CLEANUP|MOUNTED_CLEANUP)/.test(s))).toBe(false);

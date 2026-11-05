@@ -771,7 +771,7 @@ ladder must include the single-session rung, which is also §5.2's W=1 baseline.
 - [P4](https://github.com/rossoctl/serverless-harness/issues/57) — Kata/VM/gVisor isolation, where
   the sandbox-boundary question already lives.
 - [P3.1](2026-07-03-e6-workload-parameterized-sandbox-load-design.md) ·
-  [`EXPERIMENTS.md`](../../deploy/knative/EXPERIMENTS-MOVED.md) (since moved to rossoctl/moca-experiments) — E6/E7, the saturation machinery and the three
+  [`EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments) (since moved to rossoctl/moca-experiments) — E6/E7, the saturation machinery and the three
   duty rows §2.3 keeps apart (E6/OCP's `0.061–0.079` / `12.6–16.5`, which this design provisions from;
   E6/Kind's `0.042–0.051` / `19.7–24.0`; E7's `0.021`/`0.035` / `28.6–47.6`, superseded for
   real-converge work at `:65`).

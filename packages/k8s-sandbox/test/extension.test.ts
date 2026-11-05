@@ -1,16 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { K8sSandboxConfig } from '../src/config.js';
+
 import { SandboxCapacityRefusedError, type SandboxTransport } from '../src/transport.js';
 import { k8sSandboxExtension } from '../src/extension.js';
 import { createCapacityLatch } from '../src/capacity-latch.js';
-
-const cfg: K8sSandboxConfig = {
-  pod: 'sbx-0',
-  namespace: 'default',
-  context: undefined,
-  podCwd: '/workspace',
-  headCwd: '/head',
-};
 
 /** Minimal ExtensionAPI stub recording registrations + event handlers. */
 function fakePi() {
@@ -61,9 +53,21 @@ const exec = async (tools: unknown[], name: string, args: Record<string, unknown
 };
 
 describe('k8sSandboxExtension', () => {
+  it('throws when no transport is given: never installs local-running tools', () => {
+    // The off-gate used to be a null config (local tools stand). With the pod-exec path gone
+    // (ADR-0041) there is no config and no default transport: a caller that reaches the
+    // extension without a transport is misconfigured, and silently registering LOCAL tools
+    // would run the model's bash in the harness process — MI1 §5 R3's exact hazard.
+    const { pi, tools } = fakePi();
+    expect(() => k8sSandboxExtension({ podCwd: '/workspace' } as never)(pi)).toThrow(
+      /k8sSandboxExtension requires a transport/,
+    );
+    expect(tools).toHaveLength(0);
+  });
+
   it('registers the seven pod tools and wires the lifecycle handlers', () => {
     const { pi, tools, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: okTransport() })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: okTransport() })(pi);
     expect(tools).toHaveLength(7);
     expect(typeof handlers.user_bash).toBe('function');
     expect(typeof handlers.before_agent_start).toBe('function');
@@ -73,15 +77,9 @@ describe('k8sSandboxExtension', () => {
   it('closes the fast channel on session_shutdown', async () => {
     const close = vi.fn(async () => {});
     const { pi, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: okTransport(close) })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: okTransport(close) })(pi);
     await handlers.session_shutdown();
     expect(close).toHaveBeenCalledTimes(1);
-  });
-
-  it('is inert (registers nothing) when config is null', () => {
-    const { pi, tools } = fakePi();
-    k8sSandboxExtension({ config: null })(pi);
-    expect(tools).toHaveLength(0);
   });
 
   it('sends fast ops to the fast tier and streaming ops to the stream tier (#245)', async () => {
@@ -94,7 +92,8 @@ describe('k8sSandboxExtension', () => {
     const stream = tagging('stream');
     const { pi, tools } = fakePi();
     k8sSandboxExtension({
-      config: cfg,
+      podCwd: '/workspace',
+      transport: okTransport(),
       fastTransport: fast.transport,
       streamTransport: stream.transport,
     })(pi);
@@ -119,9 +118,11 @@ describe('k8sSandboxExtension', () => {
     const both = tagging('both');
     const fast = tagging('fast');
     const { pi, tools } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: both.transport, fastTransport: fast.transport })(
-      pi,
-    );
+    k8sSandboxExtension({
+      podCwd: '/workspace',
+      transport: both.transport,
+      fastTransport: fast.transport,
+    })(pi);
 
     await exec(tools, 'ls', { path: '/workspace' });
     const afterLs = both.calls.length;
@@ -141,7 +142,8 @@ describe('k8sSandboxExtension', () => {
     const streamClose = vi.fn(async () => {});
     const { pi, handlers } = fakePi();
     k8sSandboxExtension({
-      config: cfg,
+      podCwd: '/workspace',
+      transport: okTransport(),
       fastTransport: okTransport(fastClose),
       streamTransport: okTransport(streamClose),
     })(pi);
@@ -159,7 +161,7 @@ describe('k8sSandboxExtension', () => {
     const close = vi.fn(async () => {});
     const { pi, handlers } = fakePi();
     k8sSandboxExtension({
-      config: cfg,
+      podCwd: '/workspace',
       transport: okTransport(close),
       capacity: createCapacityLatch(),
     })(pi);
@@ -181,7 +183,7 @@ describe('k8sSandboxExtension', () => {
     process.env.MI1_PLANTED_SECRET = 'planted-value-must-not-cross'; // notsecret
     try {
       const { pi, tools } = fakePi();
-      k8sSandboxExtension({ config: cfg, transport: recording })(pi);
+      k8sSandboxExtension({ podCwd: '/workspace', transport: recording })(pi);
       const bash = (
         tools as Array<{ name: string; execute: (...a: unknown[]) => Promise<unknown> }>
       ).find((t) => t.name === 'bash')!;
@@ -229,14 +231,14 @@ describe('k8sSandboxExtension capacity latch', () => {
     // Keeps every existing caller's handler set exactly as it was. The hook is a hard stop
     // on a turn and must not appear on a path with nothing to read the latch afterwards.
     const { pi, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: okTransport() })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: okTransport() })(pi);
     expect(handlers.tool_call).toBeUndefined();
   });
 
   it('latches a refusal that passes through a tool, and then blocks the loop', async () => {
     const capacity = createCapacityLatch();
     const { pi, tools, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: refusing(), capacity })(pi);
 
     // Transparent until a refusal is seen, or it would end every turn it is attached to.
     expect(handlers.tool_call(sandboxCall(), {})).toEqual({});
@@ -265,7 +267,7 @@ describe('k8sSandboxExtension capacity latch', () => {
       close: vi.fn(async () => {}),
       fastTier: 'per-call-exec',
     };
-    k8sSandboxExtension({ config: cfg, transport: failing, capacity })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: failing, capacity })(pi);
     await runBash(tools);
     expect(capacity.refusal()).toBeUndefined();
     expect(handlers.tool_call(sandboxCall(), {})).toEqual({});
@@ -281,7 +283,7 @@ describe('k8sSandboxExtension capacity latch', () => {
     // to redo it.
     const capacity = createCapacityLatch();
     const { pi, tools, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: refusing(), capacity })(pi);
     await runBash(tools);
     expect(capacity.refusal()).toBeInstanceOf(SandboxCapacityRefusedError);
 
@@ -301,7 +303,7 @@ describe('k8sSandboxExtension capacity latch', () => {
     // the model keeps retrying through a doomed turn; this fails instead.
     const capacity = createCapacityLatch();
     const { pi, tools, handlers } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: refusing(), capacity })(pi);
     const registered = (tools as Array<{ name: string }>).map((t) => t.name).sort();
 
     await runBash(tools);
@@ -323,7 +325,7 @@ describe('k8sSandboxExtension capacity latch', () => {
       close: vi.fn(async () => {}),
       fastTier: 'per-call-exec',
     };
-    k8sSandboxExtension({ config: cfg, transport, capacity })(pi);
+    k8sSandboxExtension({ podCwd: '/workspace', transport, capacity })(pi);
     await runBash(tools);
     await runBash(tools);
     expect(capacity.refusal()?.message).toBe('memory-budget: refusal 1');
@@ -336,8 +338,8 @@ describe('k8sSandboxExtension capacity latch', () => {
     const theirs = createCapacityLatch();
     const { pi: piA, tools: toolsA } = fakePi();
     const { pi: piB } = fakePi();
-    k8sSandboxExtension({ config: cfg, transport: refusing(), capacity: theirs })(piA);
-    k8sSandboxExtension({ config: cfg, transport: okTransport(), capacity: mine })(piB);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: refusing(), capacity: theirs })(piA);
+    k8sSandboxExtension({ podCwd: '/workspace', transport: okTransport(), capacity: mine })(piB);
     await runBash(toolsA);
     expect(theirs.refusal()).toBeInstanceOf(SandboxCapacityRefusedError);
     expect(mine.refusal()).toBeUndefined();

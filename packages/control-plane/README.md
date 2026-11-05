@@ -8,7 +8,7 @@ per-user credentials, and the session tokens the harness verifies. Design:
 node --import tsx src/main.ts        # from this directory; tsx resolves from the package dir
 ```
 
-Deployments: [`deploy/knative/control-plane.yaml`](../../deploy/knative/control-plane.yaml)
+Deployments: `deploy/vm/systemd/`, `deploy/k8s/base/control-plane.yaml`
 (Kubernetes) and the `control-plane` profile in
 [`deploy/compose`](../../deploy/compose/README.md#using-mocactl-the-control-plane).
 

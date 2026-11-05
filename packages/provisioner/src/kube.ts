@@ -8,8 +8,8 @@ import https from 'node:https';
  * in-memory fake and only this file talks to a cluster.
  *
  * Plain REST over node:https rather than kubectl or a client library: the runtime image's kubectl
- * serves only the deprecated Knative path (Dockerfile), and six verbs on six kinds do not justify
- * a dependency.
+ * serves only the control plane's K8sSecretStore (deploy/k8s), and six verbs on six kinds do not
+ * justify a dependency.
  */
 export type Kind =
   'secrets' | 'services' | 'statefulsets' | 'pods' | 'podtemplates' | 'persistentvolumeclaims';

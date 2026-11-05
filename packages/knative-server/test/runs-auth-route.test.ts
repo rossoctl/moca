@@ -15,15 +15,6 @@ vi.mock('@moca/harness/leaf-result-store', async (orig) => {
   return { ...actual, RedisResultStore: FakeStore };
 });
 
-const enqueue = vi.fn(async () => {});
-vi.mock('@moca/work-queue', () => ({
-  RedisWorkQueue: class {
-    async ensureGroup() {}
-    enqueue = (...a: unknown[]) => enqueue(...(a as []));
-    async close() {}
-  },
-}));
-
 const runLeaf = vi.fn(async () => ({ status: 'responded', text: 'ok' }));
 vi.mock('@moca/harness/run-leaf', () => ({
   runLeaf: (...a: unknown[]) => runLeaf(...(a as [])),
@@ -78,7 +69,6 @@ beforeEach(async () => {
   process.env.SH_CONTROL_PLANE_URL = `http://127.0.0.1:${(cp.address() as { port: number }).port}`;
   process.env.SH_EXCHANGE_TOKEN = 'shared-abc'; // notsecret
   runLeaf.mockClear();
-  enqueue.mockClear();
   server = startServer(0);
   await new Promise<void>((r) => server.once('listening', () => r()));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -144,10 +134,10 @@ describe('POST /runs under SH_REQUIRE_AUTH=true (MI1 R7)', () => {
     expect(config).not.toHaveProperty('anthropicAuthToken');
   });
 
-  it('refuses an asynchronous run rather than store or borrow a credential for it', async () => {
+  it('refuses an asynchronous run with the ADR-0041 removal error', async () => {
     const r = await call('POST', '/runs', envelope('sid-1', { async: true }), tokenFor('sid-1'));
-    expect(r.status).toBe(501);
-    expect(r.json.error).toBe('async_runs_unavailable');
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('async_removed');
   });
 
   it('refuses a caller-supplied tenant on an authenticated run: the token alone scopes it', async () => {
@@ -213,18 +203,18 @@ describe('without SH_REQUIRE_AUTH, /runs behaves as today', () => {
     expect(runLeaf).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses an asynchronous run presented with a session token rather than queue it on the ambient credential', async () => {
+  it('refuses an asynchronous run presented with a session token rather than run it on the ambient credential', async () => {
     const r = await call('POST', '/runs', envelope('sid-1', { async: true }), tokenFor('sid-1'));
-    expect(r.status).toBe(501);
-    expect(r.json.error).toBe('async_runs_unavailable');
-    expect(enqueue).not.toHaveBeenCalled();
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('async_removed');
     expect(runLeaf).not.toHaveBeenCalled();
   });
 
-  it('queues an unauthenticated asynchronous run', async () => {
+  it('refuses an unauthenticated asynchronous run with the ADR-0041 removal error', async () => {
     const r = await call('POST', '/runs', envelope('sid-9', { async: true }));
-    expect(r.status).toBe(202);
-    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('async_removed');
+    expect(runLeaf).not.toHaveBeenCalled();
   });
 
   it('still refuses a present-but-bad token', async () => {

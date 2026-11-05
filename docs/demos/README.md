@@ -6,13 +6,10 @@ performed live in front of an audience.
 
 ## What lives here
 
-| Demo                                                       | Shows                                                                                                                                                                                                                                                                                            | Time    |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| [`moca-demo.md`](./moca-demo.md)                           | **(deprecated path)** An agent that **scales to a true zero**, resumes from cold with full memory, then **fans out into a worker fleet** that appears on demand and vanishes when the queue drains                                                                                               | ~10 min |
-| [`remote-sandbox-demo.md`](./remote-sandbox-demo.md)       | **(deprecated path)** A **sandbox outside the cluster** with zero inbound rules, executing a leaf's tool calls — one free-form prompt that names a different OS on each backend, and a secret planted by hand that the cluster reads back                                                        | ~10 min |
-| [`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md) | **Two GitHub users on one P6 VM**, each on their own laptop: real device-flow logins, disjoint session lists, another user's session answering 404 like one that never existed, and a session token that cannot drive a turn in any other session                                                | ~20 min |
-| [`vm-multi-user-demo.md`](./vm-multi-user-demo.md)         | **The whole stack on one VM**: two GitHub users on their own laptops, each agent researching live content with `curl` and `git` on its own user's key, sessions neither can reach, then the same host switched to a **Firecracker microVM per tool call**                                        | ~40 min |
-| [`promoted-workflow-demo.md`](./promoted-workflow-demo.md) | **(deprecated path)** A Claude Code workflow authored on your laptop — one skill, a `CLAUDE.md`, one memory file — **running unchanged in the cluster**: the same prompt twice, one field apart, and only the promoted run can cite an incident id that exists nowhere but your memory directory | ~8 min  |
+| Demo                                                       | Shows                                                                                                                                                                                                                                                     | Time    |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| [`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md) | **Two GitHub users on one P6 VM**, each on their own laptop: real device-flow logins, disjoint session lists, another user's session answering 404 like one that never existed, and a session token that cannot drive a turn in any other session         | ~20 min |
+| [`vm-multi-user-demo.md`](./vm-multi-user-demo.md)         | **The whole stack on one VM**: two GitHub users on their own laptops, each agent researching live content with `curl` and `git` on its own user's key, sessions neither can reach, then the same host switched to a **Firecracker microVM per tool call** | ~40 min |
 
 ## Demo vs. smoke test vs. spec
 
@@ -21,12 +18,8 @@ These three overlap and are easy to confuse:
 - **A demo (here)** is _performed_. It optimizes for a human explaining a claim out loud, so it
   narrates why each step matters and deliberately pauses on the moments that are hard to believe.
   Every command is copy-pasteable.
-- **A smoke test** ([`../../deploy/knative/SMOKE.md`](../../deploy/knative/SMOKE.md) — the
-  deprecated path's smoke record) is _asserted_.
-  It optimizes for an unattended pass/fail with no narration. Most demos here have a scripted
-  sibling — `remote-sandbox-demo.md` is `make demo-remote-sandbox`, and Act 2 of
-  `moca-demo.md` is `leaf-async-smoke.sh`. Prefer the script when you want a pass/fail;
-  prefer the demo when you want to _convince someone_.
+  _asserted_. It optimizes for an unattended pass/fail with no narration. Prefer the script
+  when you want a pass/fail; prefer the demo when you want to _convince someone_.
 - **A spec or ADR** ([`../specs/`](../specs/), [`../adrs/`](../adrs/)) records the _**why**_ — the
   decision and its rejected alternatives. A demo shows the _what_, and goes stale when the
   commands change; a decision record does not.

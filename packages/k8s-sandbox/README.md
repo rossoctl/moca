@@ -1,29 +1,20 @@
 # @moca/k8s-sandbox
 
-> **Deprecated 2026-10-11 ([ADR-0041](../../docs/adrs/0041-deprecate-knative-keda-deployment.md)).**
-> The `kubectl exec` sandbox transport (`KubectlTransport`) described here is deprecated: security and
-> breakage fixes only, removal no earlier than **end of October 2026**. Sandboxes run through the gRPC
-> relay on P6; see [Migrating off the Knative/KEDA deployment](../../docs/migrating-from-knative.md).
+Routes Pi tool execution (read/write/edit/bash/ls/grep/find) into a remote sandbox
+over the gRPC relay (`GrpcRelayTransport`), using Pi's native `Operations` seam.
+The package name is historical — the `kubectl exec` transport it was named for was
+removed with the Knative/KEDA deployment path (ADR-0041).
 
-Routes Pi tool execution (read/write/edit/bash/ls/grep/find) to a remote
-Kubernetes pod via `kubectl exec`, using Pi's native `Operations` seam. Part of
-MOCA (Milestone 2). See
-[`docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md`](../../docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md).
+Part of MOCA. The transport's design history:
+[`docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md`](../../docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md)
+and the relay-transport spec
+[`docs/specs/2026-08-26-st4-go-reference-worker-design.md`](../../docs/specs/2026-08-26-st4-go-reference-worker-design.md).
 
 ## Use
 
-`harness/cli.ts` registers `k8sSandboxExtension()`. It is **inert unless
-`KAGENTI_SANDBOX_POD` is set**:
-
-| Env var                     | Default         | Meaning                                  |
-| --------------------------- | --------------- | ---------------------------------------- |
-| `KAGENTI_SANDBOX_POD`       | (unset → off)   | pod to exec into                         |
-| `KAGENTI_SANDBOX_NAMESPACE` | `default`       | namespace                                |
-| `KAGENTI_SANDBOX_CONTEXT`   | current-context | kube context                             |
-| `KAGENTI_SANDBOX_CWD`       | `/workspace`    | pod working dir (announced to the model) |
-
-Apply the fixture pod first: `kubectl apply -f deploy/sandbox.yaml`.
-See `SMOKE.md` for the end-to-end runbook.
+The harness's `selectPoolSandbox` leases a relay presence record and hands the
+leased transport to `k8sSandboxExtension()`, which requires one — a caller with
+no sandbox omits the extension and Pi's local tools stand.
 
 ## Notes
 
@@ -32,5 +23,5 @@ See `SMOKE.md` for the end-to-end runbook.
   override (`grep-tool.ts`). See `NOTES-pi-operations.md`.
 - `find` honours basename globs only (no .gitignore/ignore list) — an M2
   simplification vs Pi's local `fd`.
-- Per-op `kubectl exec` latency is acceptable for M2 (not the perf milestone);
-  a persistent in-pod channel is the M3 upgrade path.
+- `SandboxExec` is one command per RPC, so the transport's `fastTier` is
+  `'per-call-exec'`; a long-lived shell on the wire would be the upgrade path.

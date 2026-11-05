@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, '../../deploy/knative/fixtures');
+const root = join(__dirname, 'fixtures');
 
 describe('fixtures', () => {
   for (const id of ['i1', 'i2', 'i3']) {

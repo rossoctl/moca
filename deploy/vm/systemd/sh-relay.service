@@ -7,8 +7,7 @@ Wants=network-online.target
 Type=simple
 User=harness
 Group=harness
-# Run from the relay's own package dir, matching the Knative precedent
-# (deploy/knative/relay-deployment.yaml, deploy/knative/control-plane.yaml): `node --import
+# Run from the relay's own package dir: `node --import
 # tsx` resolves the tsx loader relative to the CWD, and tsx (a devDep) is linked only into
 # each package's own node_modules, never root-hoisted -- a CWD of the repo root crashes with
 # ERR_MODULE_NOT_FOUND 'tsx'. Do not "simplify" this back to the repo root. The relay's own

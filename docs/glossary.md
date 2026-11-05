@@ -34,8 +34,8 @@ treats `session_id` as opaque and holds no separate "run" identity.
 
 - As an English verb ("run to completion" vs. "one turn").
 - In the frozen, legacy data-plane route names `POST /runs` and its deprecated alias
-  `POST /run-leaf` (`packages/knative-server/src/server.ts`) — kept as-is because the scripts
-  under `deploy/knative/` already call them and a second rename cycle isn't worth the churn.
+  `POST /run-leaf` (`packages/knative-server/src/server.ts`) — kept as-is; a second rename
+  cycle isn't worth the churn.
 
 If a genuine grouping identity is ever needed inside the harness (e.g. parent/child lineage for a
 leaf dispatching a child leaf), it should be named `parentSessionId`, not `runId`.
@@ -49,15 +49,15 @@ child leaf through `/runs`; re-invoking the same `session_id` re-runs and overwr
 the [leaf-session contract](specs/2026-06-26-mvp-leaf-session-contract-design.md). Contrast `turn`,
 which is one interactive exchange on `POST /turn`. Under P6 a `--role=leaf` worker role is reserved for queued leaf work, but it is not
 implemented yet (the worker exits 2 for any role but `turn`), and async leaf dispatch has no P6
-equivalent ([migration guide](migrating-from-knative.md#if-you-depend-on-async-fan-out-or-the-cronjob)).
+equivalent.
 
 ## archetype
 
 A dispatch pattern an orchestrator can use against the same backend. **A** is async fan-out
 (`async: true`, a Redis Streams queue, many leaves at once), **B** is the human gate (a leaf pauses
 with status `paused` and resumes on an external verdict), **C** is scheduled dispatch (a cron
-trigger posts async leaves). B is served by the P6 runtime; A and C run only on the deprecated
-Knative/KEDA path today. See the [README](../README.md#dispatch-archetypes).
+trigger posts async leaves). B is served by the P6 runtime; A and C were removed with the
+Knative/KEDA path. See the [README](../README.md#dispatch-archetypes).
 
 ## brain and hands
 
@@ -83,7 +83,7 @@ historical. Not to be confused with a sandbox worker (below).
 The isolated environment where a session's tools run. Two tiers exist: a container, and (P4) a
 Firecracker microVM per `Exec`. A sandbox runs a `remote-worker` process that dials out to the relay,
 so it needs no inbound route ([ADR-0024](adrs/0024-sandbox-transport-remote-exec.md),
-[ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)). On the deprecated Knative path a sandbox was
+[ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)). On the removed Knative path a sandbox was
 the single pod reached with `kubectl exec` (`sandbox-0`).
 
 ## relay

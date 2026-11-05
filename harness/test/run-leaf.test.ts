@@ -34,12 +34,8 @@ vi.mock('../src/select-sandbox.js', async (importOriginal) => {
 // below forward their arguments with a spread, and a mock whose implementation declares no
 // parameters is typed as taking none -- so neither the forwarding call nor the `call[0]`
 // assertions further down would typecheck.
-const { k8sSandboxExtensionMock, kubectlTransportMock } = vi.hoisted(() => ({
+const { k8sSandboxExtensionMock } = vi.hoisted(() => ({
   k8sSandboxExtensionMock: vi.fn((..._args: unknown[]) => () => {}),
-  kubectlTransportMock: vi.fn((..._args: unknown[]) => ({
-    exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
-    close: vi.fn(async () => {}),
-  })),
 }));
 // Spread the real module first, for the same reason the select-sandbox mock above does:
 // run-leaf.ts also imports createCapacityLatch and SandboxCapacityRefusedError from here
@@ -51,7 +47,6 @@ vi.mock('@moca/k8s-sandbox', async (importOriginal) => {
   return {
     ...actual,
     k8sSandboxExtension: (...args: unknown[]) => k8sSandboxExtensionMock(...args),
-    KubectlTransport: (...args: unknown[]) => kubectlTransportMock(...args),
   };
 });
 
@@ -369,54 +364,21 @@ describe('leafSessionId', () => {
 });
 
 describe('realProduceVerdict transport wiring (Task 9)', () => {
-  const FAKE_CONFIG = {
-    pod: 'sandbox-0',
-    namespace: 'default',
-    context: undefined,
+  const lease = (transport: { exec: unknown; close: unknown }) => ({
+    transport,
     podCwd: '/workspace',
-    headCwd: '/head',
-  };
-
-  it('pod path: builds a fresh KubectlTransport per phase and passes no transport to the extension', async () => {
-    selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
-      heartbeat: vi.fn(async () => {}),
-      release: vi.fn(async () => {}),
-    });
-    kubectlTransportMock.mockClear();
-    k8sSandboxExtensionMock.mockClear();
-
-    const env: LeafEnvelope = {
-      sessionId: 'run/pod-1',
-      item: { item_id: 'i1', file: 'f', pattern: 'p' },
-      repoUrl: 'https://git.example/r.git',
-      ref: 'abc123',
-    };
-    await runLeaf(env);
-
-    // Built once for converge and once for cleanup — the pod path never shares a transport
-    // across phases, exactly like the pre-Task-9 code.
-    expect(kubectlTransportMock).toHaveBeenCalledTimes(2);
-    for (const call of kubectlTransportMock.mock.calls) expect(call[0]).toBe(FAKE_CONFIG);
-    // Each per-phase transport is closed once, right after its own phase.
-    for (const result of kubectlTransportMock.mock.results) {
-      expect(result.value.close).toHaveBeenCalledTimes(1);
-    }
-
-    // objectContaining, because the verdict path also hands the extension its per-turn
-    // capacity latch (#452) and this case is about the TRANSPORT: `transport: undefined` is
-    // still asserted explicitly, since that absence is what makes each phase build its own.
-    expect(k8sSandboxExtensionMock).toHaveBeenCalledWith(
-      expect.objectContaining({ config: FAKE_CONFIG, transport: undefined }),
-    );
+    sandboxId: 'sandbox-0',
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
   });
 
   it('uses a request-scoped sandbox pool selector', async () => {
-    selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
-      heartbeat: vi.fn(async () => {}),
-      release: vi.fn(async () => {}),
-    });
+    selectPoolSandboxMock.mockReset().mockResolvedValue(
+      lease({
+        exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
+        close: vi.fn(async () => {}),
+      }),
+    );
 
     await runLeaf({
       sessionId: 'run/workload-1',
@@ -434,19 +396,15 @@ describe('realProduceVerdict transport wiring (Task 9)', () => {
     );
   });
 
-  it('grpc path: reuses selected.transport for converge + cleanup and closes it exactly once', async () => {
+  it('reuses the leased transport for converge + cleanup and closes it exactly once', async () => {
+    // ADR-0041: every selection leases a relay transport, so converge, the agent extension and
+    // cleanup share ONE transport — closed exactly once, in the outer finally.
     const close = vi.fn(async () => {});
     const transport = {
       exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
       close,
     };
-    selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
-      transport,
-      heartbeat: vi.fn(async () => {}),
-      release: vi.fn(async () => {}),
-    });
-    kubectlTransportMock.mockClear();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease(transport));
     k8sSandboxExtensionMock.mockClear();
 
     const env: LeafEnvelope = {
@@ -457,76 +415,12 @@ describe('realProduceVerdict transport wiring (Task 9)', () => {
     };
     await runLeaf(env);
 
-    // The shared transport serves both converge and cleanup — KubectlTransport is never built.
-    expect(kubectlTransportMock).not.toHaveBeenCalled();
+    // The shared transport serves both converge and cleanup.
     expect(transport.exec).toHaveBeenCalledTimes(2);
     expect(close).toHaveBeenCalledTimes(1);
     expect(k8sSandboxExtensionMock).toHaveBeenCalledWith(
-      expect.objectContaining({ config: FAKE_CONFIG, transport }),
+      expect.objectContaining({ transport, podCwd: '/workspace', sandboxId: 'sandbox-0' }),
     );
-  });
-});
-
-describe('realProduceSolve / realProduceVerdict: a lease without a sandbox config (MI1 R3, defense in depth)', () => {
-  // A truthy lease with a falsy `config` cannot happen via the real selectPoolSandbox
-  // (SelectedSandbox's `config` is a non-optional K8sSandboxConfig) — see select-sandbox.test.ts's
-  // assertServerSandbox unit tests for the exhaustive truth table. This mocked shape exists only to
-  // prove BOTH leaf kinds' guards actually fire here, in case that invariant is ever loosened.
-  const nullConfigLease = () => ({
-    config: null,
-    heartbeat: vi.fn(async () => {}),
-    release: vi.fn(async () => {}),
-  });
-
-  it('realProduceSolve: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
-    const lease = nullConfigLease();
-    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
-    createAgentSessionMock.mockClear();
-    k8sSandboxExtensionMock.mockClear();
-
-    const env: LeafEnvelope = {
-      sessionId: 'run/solve-1',
-      item: { item_id: 'i1', file: 'f', pattern: 'p' },
-    };
-
-    await expect(realProduceSolve(env, { serverMode: true }, {})).rejects.toBeInstanceOf(
-      SandboxRequiredError,
-    );
-    const err = await realProduceSolve(env, { serverMode: true }, {}).catch((e: unknown) => e);
-    expect((err as Error).name).toBe('SandboxRequiredError');
-
-    // The lease taken to resolve `selected` is released on the throw path, and nothing past the
-    // guard — Redis session creation, the resource loader, the agent session — ever ran.
-    expect(lease.release).toHaveBeenCalled();
-    expect(createAgentSessionMock).not.toHaveBeenCalled();
-    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
-  });
-
-  it('realProduceVerdict: throws SandboxRequiredError and never builds a session or the sandbox extension', async () => {
-    const lease = nullConfigLease();
-    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
-    createAgentSessionMock.mockClear();
-    k8sSandboxExtensionMock.mockClear();
-
-    const item = { item_id: 'i1', file: 'f', pattern: 'p' };
-    const env: LeafEnvelope = { sessionId: 'run/verdict-1', item };
-
-    await expect(realProduceVerdict(item, env, { serverMode: true }, {})).rejects.toBeInstanceOf(
-      SandboxRequiredError,
-    );
-    const err = await realProduceVerdict(item, env, { serverMode: true }, {}).catch(
-      (e: unknown) => e,
-    );
-    expect((err as Error).name).toBe('SandboxRequiredError');
-
-    // Session/verdict-recovery work (the resuming fast-path) runs BEFORE this guard — by design, so
-    // a recovered verdict never leases a pod at all — but that fast-path only touches the mocked
-    // Redis/session-manager stubs above, never createAgentSession or k8sSandboxExtension. Both of
-    // those still sit downstream of the guard, so asserting they never ran is exactly what proves
-    // the guard fired before either could be reached.
-    expect(lease.release).toHaveBeenCalled();
-    expect(createAgentSessionMock).not.toHaveBeenCalled();
-    expect(k8sSandboxExtensionMock).not.toHaveBeenCalled();
   });
 });
 
@@ -582,15 +476,13 @@ describe('realProduceSolve / realProduceVerdict: no resolvable sandbox in server
 describe('realProduceSolve / realProduceVerdict: resource-loader lockdown (MI1 R4)', () => {
   // A real (non-null) lease, so both leaves run past the R3 sandbox gate into the resource-loader
   // construction this test targets.
-  const LEASE_CONFIG = {
-    pod: 'sandbox-0',
-    namespace: 'default',
-    context: undefined,
-    podCwd: '/workspace',
-    headCwd: '/head',
-  };
   const lease = () => ({
-    config: LEASE_CONFIG,
+    transport: {
+      exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
+      close: vi.fn(async () => {}),
+    },
+    podCwd: '/workspace',
+    sandboxId: 'sandbox-0',
     heartbeat: vi.fn(async () => {}),
     release: vi.fn(async () => {}),
   });
@@ -807,21 +699,14 @@ describe('runLeaf — prompt routing', () => {
 
   it('refuses a server-mode prompt leaf with no sandbox itself, even with executeTurn injected (MI1 R3)', async () => {
     // The injected executeTurn replaces the real one's own R3 check, so only the leaf's check can
-    // stop this. It must fail before the turn runs, and give back any lease it took.
-    const lease = {
-      config: null,
-      heartbeat: vi.fn(async () => {}),
-      release: vi.fn(async () => {}),
-    };
-    for (const selected of [null, lease]) {
-      selectPoolSandboxMock.mockReset().mockResolvedValue(selected);
-      const executeTurn = vi.fn();
-      const r = await runLeaf(base, { serverMode: true }, { executeTurn });
-      expect(r).toMatchObject({ status: 'failed', reason: 'error' });
-      expect((r as { message?: string }).message).toMatch(/sandbox/i);
-      expect(executeTurn).not.toHaveBeenCalled();
-    }
-    expect(lease.release).toHaveBeenCalledTimes(1);
+    // stop this. It must fail before the turn runs. (A truthy lease without a sandbox is no
+    // longer constructible: every selection carries a transport, ADR-0041.)
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    const executeTurn = vi.fn();
+    const r = await runLeaf(base, { serverMode: true }, { executeTurn });
+    expect(r).toMatchObject({ status: 'failed', reason: 'error' });
+    expect((r as { message?: string }).message).toMatch(/sandbox/i);
+    expect(executeTurn).not.toHaveBeenCalled();
     selectPoolSandboxMock.mockReset();
   });
 
@@ -859,13 +744,6 @@ it('solve without env_key uses convergeWorkspace, not swebench setup', async () 
 });
 
 describe('runPromptLeaf sandbox leasing', () => {
-  const FAKE_CONFIG = {
-    pod: 'sandbox-0',
-    namespace: 'default',
-    context: undefined,
-    podCwd: '/workspace',
-    headCwd: '/head',
-  };
   const base: LeafEnvelope = {
     sessionId: 'run-1/i1',
     item: { item_id: 'x', file: 'f', pattern: 'p' },
@@ -883,8 +761,9 @@ describe('runPromptLeaf sandbox leasing', () => {
       close: vi.fn(async () => {}),
     };
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
       transport,
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release: vi.fn(async () => {}),
     });
@@ -894,14 +773,16 @@ describe('runPromptLeaf sandbox leasing', () => {
 
     expect(executeTurn).toHaveBeenCalledWith(
       expect.objectContaining({
-        sandbox: { config: FAKE_CONFIG, transport },
+        sandbox: { transport, podCwd: '/workspace', sandboxId: 'sandbox-0' },
       }),
     );
   });
 
   it('asks for remote candidates when SH_REMOTE_SANDBOX=1', async () => {
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
+      transport: { exec: vi.fn(), close: vi.fn(async () => {}) },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release: vi.fn(async () => {}),
     });
@@ -924,7 +805,9 @@ describe('runPromptLeaf sandbox leasing', () => {
 
   it('uses a request-scoped sandbox pool selector', async () => {
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
+      transport: { exec: vi.fn(), close: vi.fn(async () => {}) },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release: vi.fn(async () => {}),
     });
@@ -959,8 +842,9 @@ describe('runPromptLeaf sandbox leasing', () => {
     const release = vi.fn(async () => {});
     const close = vi.fn(async () => {});
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
       transport: { exec: vi.fn(), close },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release,
     });
@@ -975,7 +859,9 @@ describe('runPromptLeaf sandbox leasing', () => {
   it('releases the lease even when the turn throws', async () => {
     const release = vi.fn(async () => {});
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
+      transport: { exec: vi.fn(), close: vi.fn(async () => {}) },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release,
     });
@@ -997,8 +883,9 @@ describe('runPromptLeaf sandbox leasing', () => {
     const release = vi.fn(async () => {});
     const close = vi.fn(async () => {});
     selectPoolSandboxMock.mockReset().mockResolvedValue({
-      config: FAKE_CONFIG,
       transport: { exec: vi.fn(), close },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
       heartbeat: vi.fn(async () => {}),
       release,
     });

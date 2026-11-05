@@ -29,7 +29,7 @@ spec:
         - name: sandbox-relay
           image: moca-harness
           # From the package dir: tsx resolves from the CWD and is linked only into each package's
-          # own node_modules (deploy/knative/relay-deployment.yaml has the history).
+          # own node_modules (the removed Knative relay manifest has the history in git, ADR-0041).
           workingDir: /app/packages/sandbox-relay
           command: [node, --import, tsx, src/main.ts]
           env:

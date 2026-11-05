@@ -1,11 +1,7 @@
 import { credentials, InterceptingCall, type Interceptor } from '@grpc/grpc-js';
 import {
-  listPoolPods,
-  resolveSandboxConfig,
   GrpcRelayTransport,
   SandboxExecClient,
-  type RunKubectl,
-  type K8sSandboxConfig,
   type SandboxTransport,
   type ExecClientLike,
 } from '@moca/k8s-sandbox';
@@ -240,34 +236,41 @@ export function orderByLoad(loads: { pod: string; active: number }[]): string[] 
     .map((l) => l.pod);
 }
 
-/** Which sandbox inventories `selectPoolSandbox` consults. */
-export type DiscoverySource = 'pods' | 'records' | 'both';
+/**
+ * Which sandbox inventory `selectPoolSandbox` consults. Records only since the pod listing
+ * was removed with the Knative/KEDA deployment path (ADR-0041); the type survives so
+ * `SH_SANDBOX_DISCOVERY`'s validation and the pool-empty wording can name it.
+ */
+export type DiscoverySource = 'records';
 
 /**
- * Resolve `SH_SANDBOX_DISCOVERY`. Unset ⇒ `both`, which is byte-for-byte today's behaviour
- * (pods always listed; records only read when the remote flag is on).
- *  - `pods`    — kubectl listing only; mirrored grpc records are ignored even with the flag on.
- *  - `records` — mirrored grpc records only; never shells out to kubectl. This is what lets a
- *                bare VM (no cluster, no kubeconfig) reach a relay-fronted sandbox.
- *  - `both`    — the historical default.
+ * Resolve `SH_SANDBOX_DISCOVERY`. Unset or `records` ⇒ records. `pods`/`both` throw: they
+ * named the kubectl pod listing removed with the Knative/KEDA deployment path (ADR-0041),
+ * and a deployment still carrying one must fail loudly, not quietly change behavior.
+ * `records` additionally requires `SH_REMOTE_SANDBOX=1`, because records are only read
+ * when the remote flag is on.
  */
 export function resolveDiscoverySource(
   env: NodeJS.ProcessEnv,
   remoteSandbox: boolean,
 ): DiscoverySource {
   const raw = env.SH_SANDBOX_DISCOVERY?.trim();
-  if (!raw) return 'both';
-  if (raw !== 'pods' && raw !== 'records' && raw !== 'both') {
-    throw new Error(`SH_SANDBOX_DISCOVERY='${raw}' is not one of pods|records|both`);
+  if (!raw || raw === 'records') {
+    if (raw === 'records' && !remoteSandbox) {
+      // Blame the flag, not the pool: without this the caller sees "no sandbox presence
+      // records", which sends them debugging a healthy relay.
+      throw new Error(
+        'SH_SANDBOX_DISCOVERY=records requires SH_REMOTE_SANDBOX=1 (records are only read when the remote flag is on)',
+      );
+    }
+    return 'records';
   }
-  if (raw === 'records' && !remoteSandbox) {
-    // Blame the flag, not the pool: without this the caller sees "no Running pods for pool
-    // selector '…'", which sends them debugging a healthy pool.
-    throw new Error(
-      'SH_SANDBOX_DISCOVERY=records requires SH_REMOTE_SANDBOX=1 (records are only read when the remote flag is on)',
-    );
-  }
-  return raw;
+  // Loud, not silent: a deployment still carrying a pods/both setting would otherwise
+  // quietly change behavior (records-only) the moment the pod inventory is gone.
+  throw new Error(
+    `SH_SANDBOX_DISCOVERY='${raw}' was removed with the Knative/KEDA deployment path (ADR-0041); ` +
+      "records is the only discovery source — unset the variable (or set it to 'records')",
+  );
 }
 
 /** Thrown when a pool is configured but every pod is at the soft cap. */
@@ -306,39 +309,29 @@ export class SandboxAffinityPendingError extends SandboxPoolSaturatedError {
 }
 
 /**
- * Thrown when a pool is configured but has no candidate sandbox YET — pods rolling, an HPA scaling
- * from zero, presence records not re-mirrored after a restart.
+ * Thrown when a pool is configured but has no candidate sandbox YET — presence records not
+ * (re-)mirrored after a relay or worker restart.
  *
  * A named class purely so callers can tell this apart from a generic failure. It used to be a plain
  * `Error`, which since /turn started leasing from the pool meant an empty pool surfaced as a 500 —
  * "this can never succeed" — while a FULL pool got the 503 it deserves. Same underlying fact from the
  * caller's side (no capacity available right now, retry), so the two now map identically
- * (`turnErrorStatus`). The async path already agreed: `classifyOutcome` keeps both retryable.
+ * (`turnErrorStatus`). `classifyOutcome` keeps both retryable.
  *
- * The message is phrased per DISCOVERY SOURCE, because one wording cannot be true of all three. In
- * `records` mode no pod listing happens at all — `pods` is forced to `[]` — so blaming the pool
- * selector sent an operator to debug a healthy pool, the exact misdirection `resolveDiscoverySource`'s
- * own guard was added to prevent. That mode is the shipped VM default
- * (`env/supervisor.env.example`), where "no sandbox has attached to the relay yet" is the likeliest
- * first-run state, so it is the message operators actually hit.
+ * The records wording blames neither the pool selector nor the operator: "no sandbox has attached
+ * to the relay yet" is the likeliest first-run state on a fresh VM deployment
+ * (`env/supervisor.env.example`), so it is the message operators actually hit.
  *
- * The pods wording is unchanged, which is what keeps existing log greps and the `/pool selector/`
- * assertions matching; only the source that never produced it truthfully says something else.
- *
- * With a tier given, neither wording is used: both would be untrue. Pods are never candidates for a
- * non-default tier, so "no Running pods" blames the wrong inventory, and records of OTHER tiers may
- * well be attached, so "no sandbox has attached" is false too. The message names the tier and the
- * fix instead, because an empty TIER on a healthy relay is the commonest misconfiguration (P6.3 spec
- * §5).
+ * With a tier given, that wording is not used: records of OTHER tiers may well be attached, so
+ * "no sandbox has attached" would be false too. The message names the tier and the fix instead,
+ * because an empty TIER on a healthy relay is the commonest misconfiguration (P6.3 spec §5).
  */
 export class SandboxPoolEmptyError extends Error {
-  constructor(selector: string, source: DiscoverySource = 'both', tier?: string) {
+  constructor(selector: string, tier?: string) {
     super(
       tier
         ? `no attached sandbox in sandbox tier '${tier}' (SH_SANDBOX_TIERS is set; check that the workers of this tier set SANDBOX_TIER=${tier})`
-        : source === 'records'
-          ? `no sandbox presence records (SH_SANDBOX_DISCOVERY=records — no sandbox has attached to the relay yet)`
-          : `no Running pods for pool selector '${selector}'`,
+        : `no sandbox presence records (no sandbox has attached to the relay yet)`,
     );
     this.name = 'SandboxPoolEmptyError';
   }
@@ -450,24 +443,14 @@ export interface WorkspaceReset {
 }
 
 export interface SelectedSandbox {
-  config: K8sSandboxConfig;
-  /** Present ONLY for a leased grpc presence record; undefined for pods. */
-  transport?: SandboxTransport;
-  /**
-   * Whether a lease was actually TAKEN, reported here rather than re-derived by the caller.
-   *
-   * `heartbeat`/`release` cannot answer it: the no-selector branch returns no-op closures that are
-   * indistinguishable from real ones, so `acquireTurnSandbox` used to re-evaluate this function's own
-   * `if (!selector)` condition against the environment to decide whether to arm a renewal timer. That
-   * agreed today and was pinned by a test, but it put one predicate in two files — and a change here
-   * (trimming the selector, say, as `resolveDiscoverySource` already does for its own value) would
-   * have made them disagree silently, arming or skipping a renewal against the truth.
-   */
-  leased: boolean;
+  /** The leased sandbox's exec channel — always the relay transport (ADR-0041 removed pod-exec). */
+  transport: SandboxTransport;
+  /** The sandbox-side cwd for this session; head paths under the harness cwd map here. */
+  podCwd: string;
   heartbeat: () => Promise<void>;
   release: () => Promise<void>;
-  /** The leased sandbox's id (pod name or presence-record id). Absent on the no-selector path. */
-  sandboxId?: string;
+  /** The leased sandbox's id (its presence-record id). */
+  sandboxId: string;
   /** The effective tier this selection ran in; '' when the deployment declares none. */
   tier?: string;
   /** Present when this selection moved the session off its previous sandbox (P6.3 spec §4, §6). */
@@ -475,14 +458,7 @@ export interface SelectedSandbox {
 }
 
 export interface SelectDeps {
-  listPods?: (
-    selector: string,
-    namespace: string,
-    context?: string,
-    run?: RunKubectl,
-  ) => Promise<string[]>;
   lease?: LeaseStore;
-  run?: RunKubectl;
   /** Mirrored grpc presence records; defaults to a RedisRecordStore. Only consulted when opts.remoteSandbox is true. */
   records?: RecordStore;
   /** Builds the exec client for a leased grpc record; defaults to a real SandboxExecClient at SH_RELAY_ADDR. */
@@ -592,13 +568,12 @@ async function remember<T>(
 }
 
 /**
- * Choose a sandbox pod for a leaf.
- *  - No `KAGENTI_SANDBOX_POOL_SELECTOR` ⇒ fall back to single-pod resolution
- *    (`KAGENTI_SANDBOX_POD`/`_NAME`); returns null if that too is unset (run local tools).
- *  - Pool configured ⇒ list Running pods (plus mirrored grpc records when `opts.remoteSandbox`
- *    is true), pick least-loaded under the soft cap, acquire a lease. Throws
+ * Choose a sandbox for a leaf or turn.
+ *  - No `KAGENTI_SANDBOX_POOL_SELECTOR` ⇒ returns null (run local tools). A stale
+ *    `KAGENTI_SANDBOX_POD` (the removed single-pod path, ADR-0041) throws instead.
+ *  - Pool configured ⇒ read the relay presence records (when `opts.remoteSandbox` is
+ *    true), pick least-loaded under the soft cap, acquire a lease. Throws
  *    SandboxPoolSaturatedError if every candidate is full.
- *  - `SH_SANDBOX_DISCOVERY` narrows which inventories are consulted (see resolveDiscoverySource).
  *
  * TWO identities arrive here and they are not interchangeable. `sessionId` keys the microVM WORKSPACE
  * and must be stable across the turns of a session; `opts.holderId` is the lease's ZSET member and
@@ -606,10 +581,10 @@ async function remember<T>(
  * differ for `/turn` (many concurrent turns of one session), which is why the holder is a separate,
  * optional argument that defaults to the session id rather than something derived here.
  *
- * **Tiers and affinity (P6.3).** On the records path the candidates are the session's tier, and the
- * sandbox that served its previous turn is preferred: saturated → `SandboxPoolSaturatedError`, absent
- * within the grace → `SandboxAffinityPendingError`, absent past it (or retiered) → least-loaded in the
- * tier, with `workspaceReset` set. See spec §4.
+ * **Tiers and affinity (P6.3).** The candidates are the session's tier, and the sandbox that
+ * served its previous turn is preferred: saturated → `SandboxPoolSaturatedError`, absent
+ * within the grace → `SandboxAffinityPendingError`, absent past it (or retiered) →
+ * least-loaded in the tier, with `workspaceReset` set. See spec §4.
  */
 export async function selectPoolSandbox(
   env: NodeJS.ProcessEnv,
@@ -683,33 +658,32 @@ async function select(
     );
   if (!selector) {
     if (workload) throw noRecords();
-    const config = await resolveSandboxConfig(env, headCwd, deps.run);
-    return config
-      ? { config, leased: false, heartbeat: async () => {}, release: async () => {} }
-      : null;
+    // ADR-0041: the single-pod fallback went with the pod-exec path. A stale
+    // KAGENTI_SANDBOX_POD or KAGENTI_SANDBOX_NAME (its two inputs) must not quietly mean
+    // "no sandbox" — the tools would then run in the harness process, MI1 §5 R3's hazard.
+    const stale = ['KAGENTI_SANDBOX_POD', 'KAGENTI_SANDBOX_NAME'].find((k) => env[k]);
+    if (stale) {
+      throw new Error(
+        `${stale} was removed with the Knative/KEDA deployment path (ADR-0041); ` +
+          'a pool (KAGENTI_SANDBOX_POOL_SELECTOR) of relay-attached sandboxes is required',
+      );
+    }
+    return null;
   }
 
-  const namespace = env.KAGENTI_SANDBOX_NAMESPACE ?? 'default';
-  const context = env.KAGENTI_SANDBOX_CONTEXT || undefined;
   const podCwd = env.KAGENTI_SANDBOX_CWD ?? '/workspace';
-  const list = deps.listPods ?? listPoolPods;
   const lease = deps.lease ?? sharedLease(env.REDIS_URL);
 
   const source = resolveDiscoverySource(env, opts.remoteSandbox === true);
-  if (workload && (opts.remoteSandbox !== true || source === 'pods')) throw noRecords();
+  if (workload && opts.remoteSandbox !== true) throw noRecords();
   // Read per call, like every other knob here; a bad value fails the selection naming the variable.
   const tiers = parseSandboxTiers(env);
   // `||`, not `??`: a session stored with '' (created before tiers were declared) gets the default.
   const tier = tiers ? opts.tier || tiers.default : '';
-  // A workload run never lists pods: no pod is a workload sandbox.
-  const listed =
-    source === 'records' || workload ? [] : await list(selector, namespace, context, deps.run);
-  // Pods are the Knative-era container inventory: the default tier, and only that (spec §4 step 1).
-  const pods = tiers && tier !== tiers.default ? [] : listed;
 
   // Inertness: when the flag is off, never construct a RedisRecordStore or call .list() —
-  // the pod path must stay byte-for-byte identical to today (no extra Redis connection).
-  const remoteOn = opts.remoteSandbox === true && source !== 'pods';
+  // a deployment without the remote flag keeps today's no-extra-Redis-connection behaviour.
+  const remoteOn = opts.remoteSandbox === true;
   let grpcRecs: SandboxRecord[] = [];
   if (remoteOn) {
     const injected = deps.records;
@@ -735,11 +709,11 @@ async function select(
   grpcRecs = grpcRecs.filter(inScope);
   const grpcById = new Map(grpcRecs.map((r) => [r.sandboxId, r]));
 
-  const candidates = [...pods, ...grpcRecs.map((r) => r.sandboxId)];
+  const candidates = grpcRecs.map((r) => r.sandboxId);
   const empty = () =>
     workload
       ? new WorkloadSandboxUnavailableError(workload)
-      : new SandboxPoolEmptyError(selector, source, tiers ? tier : undefined);
+      : new SandboxPoolEmptyError(selector, tiers ? tier : undefined);
 
   // Acquire `name`, then build what the caller gets; a throw after the acquire releases the lease
   // before the original error propagates (unchanged from before -- it is just shared by two paths now).
@@ -752,46 +726,38 @@ async function select(
     // throw (an exec client that cannot be built, a transport constructor) releases it before the
     // original error propagates, rather than holding a slot until the lease TTL expires.
     try {
+      // Every candidate is a presence-record id, so the record is always found; `rec` stays
+      // optional only because `sessionPodCwd` takes `SandboxRecord | undefined`.
       const rec = grpcById.get(name);
-      const config: K8sSandboxConfig = {
-        pod: name,
-        namespace,
-        context,
-        podCwd: sessionPodCwd(podCwd, rec, sessionId),
-        headCwd,
-      };
       const make = deps.makeTransport ?? GrpcRelayTransport;
-      const transport = rec
-        ? make(
-            name,
-            (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
-            // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
-            // is the ONLY harness change the microVM tier needs, and it is required for
-            // correctness rather than convenience: without it, consecutive leaseholders of one
-            // sandbox_id inherit the previous session's workspace (spec §3.4).
-            //
-            // It has to be the session id specifically, because the key is also what makes a
-            // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
-            // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
-            // open turn 2 of a session in an empty workspace and give it its own standby VM pool
-            // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
-            // The key is dropped only when the agent's only writable dir is the context view AND
-            // the record advertises WORKSPACE_SUBDIR_CAPABILITY. The microVM worker does not
-            // advertise it and refuses an empty key; today's workload deployments default to the
-            // container tier, but the capability gate protects correctness regardless of default.
-            {
-              workspaceKey:
-                agentWritesInContext && rec.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)
-                  ? ''
-                  : sessionId,
-              ...(workload ? { workload } : {}),
-            },
-          )
-        : undefined;
+      const transport = make(
+        name,
+        (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
+        // The SESSION id becomes the Exec's workspace_key -- never the lease holder id. This
+        // is the ONLY harness change the microVM tier needs, and it is required for
+        // correctness rather than convenience: without it, consecutive leaseholders of one
+        // sandbox_id inherit the previous session's workspace (spec §3.4).
+        //
+        // It has to be the session id specifically, because the key is also what makes a
+        // session CONTINUOUS: `WorkspaceRoot/<workspace_key>` is created on the first Exec for
+        // an unseen key and lives until an idle Reclaim (§4.4), so keying it per turn would
+        // open turn 2 of a session in an empty workspace and give it its own standby VM pool
+        // (§4.3) -- continuity lost and standbys multiplied per turn rather than per session.
+        // The key is dropped only when the agent's only writable dir is the context view AND
+        // the record advertises WORKSPACE_SUBDIR_CAPABILITY. The microVM worker does not
+        // advertise it and refuses an empty key; today's workload deployments default to the
+        // container tier, but the capability gate protects correctness regardless of default.
+        {
+          workspaceKey:
+            agentWritesInContext && rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)
+              ? ''
+              : sessionId,
+          ...(workload ? { workload } : {}),
+        },
+      );
       return {
-        config,
         transport,
-        leased: true,
+        podCwd: sessionPodCwd(podCwd, rec, sessionId),
         sandboxId: name,
         tier,
         ...(workspaceReset ? { workspaceReset } : {}),
@@ -811,14 +777,14 @@ async function select(
       ),
     );
 
-  // The pods-only path stays byte-for-byte what it was: no affinity store is built or called.
+  // Pool mode has read records only since the pod listing was removed (ADR-0041), and records
+  // are read only with the remote flag on. A selector without the flag is therefore a stale
+  // deployment: say so, rather than answering "no sandbox has attached" for a healthy relay.
   if (!remoteOn) {
-    if (candidates.length === 0) throw empty();
-    for (const name of await leastLoaded()) {
-      const got = await take(name);
-      if (got) return got;
-    }
-    throw new SandboxPoolSaturatedError(selector);
+    throw new Error(
+      'KAGENTI_SANDBOX_POOL_SELECTOR is set but SH_REMOTE_SANDBOX is not "1": pool mode reads ' +
+        'relay presence records, which require SH_REMOTE_SANDBOX=1 (the pod listing was removed, ADR-0041)',
+    );
   }
 
   // P6.3 spec §4 steps 2-4. A READ failure propagates (the turn fails rather than scattering the

@@ -18,9 +18,17 @@ import type { ExecClientLike } from '@moca/k8s-sandbox';
 
 // Spy on the RedisRecordStore constructor select-sandbox.ts falls back to when
 // deps.records isn't injected, so we can assert its lifecycle (list + close)
-// without ever touching a real Redis connection.
-const { createdRecordStores } = vi.hoisted(() => ({
+// without ever touching a real Redis connection. Its list() serves one record so a
+// selection through the default store succeeds without pods (ADR-0041: records only).
+const { createdRecordStores, memoRecord } = vi.hoisted(() => ({
   createdRecordStores: [] as { list: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }[],
+  memoRecord: {
+    sandboxId: 'memo-sbx-1',
+    labels: {},
+    capabilities: [],
+    capacityMax: 4,
+    transport: 'grpc',
+  } as SandboxRecord,
 }));
 vi.mock('../src/pool-records.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/pool-records.js')>();
@@ -30,7 +38,7 @@ vi.mock('../src/pool-records.js', async (importOriginal) => {
       const store = {
         put: vi.fn(async () => {}),
         remove: vi.fn(async () => {}),
-        list: vi.fn(async () => [] as SandboxRecord[]),
+        list: vi.fn(async () => [memoRecord] as SandboxRecord[]),
         close: vi.fn(async () => {}),
       };
       createdRecordStores.push(store);
@@ -81,58 +89,6 @@ function fakeLease(
   };
 }
 
-describe('selectPoolSandbox', () => {
-  const opts = { cap: 2, ttlMs: 60000 };
-
-  it('returns null when no sandbox is configured at all', async () => {
-    const res = await selectPoolSandbox({} as NodeJS.ProcessEnv, '/head', 'leaf-1', opts, {
-      listPods: async () => [],
-    });
-    expect(res).toBeNull();
-  });
-
-  it('falls back to single-pod resolution when no pool selector is set', async () => {
-    const env = { KAGENTI_SANDBOX_POD: 'sandbox-x' } as unknown as NodeJS.ProcessEnv;
-    const res = await selectPoolSandbox(env, '/head', 'leaf-1', opts, {});
-    expect(res?.config.pod).toBe('sandbox-x');
-  });
-
-  it('picks the least-loaded pod and acquires a lease', async () => {
-    const env = { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' } as unknown as NodeJS.ProcessEnv;
-    const lease = fakeLease({ 'sandbox-0-0': 2, 'sandbox-1-0': 0 }, opts.cap);
-    const res = await selectPoolSandbox(env, '/head', 'leaf-1', opts, {
-      listPods: async () => ['sandbox-0-0', 'sandbox-1-0'],
-      lease,
-    });
-    expect(res?.config.pod).toBe('sandbox-1-0');
-    expect(lease.acquired).toEqual(['sandbox-1-0']);
-    expect(lease.acquiredTtl).toEqual([opts.ttlMs]);
-  });
-
-  it('throws SandboxPoolSaturatedError when every pod is at cap', async () => {
-    const env = { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' } as unknown as NodeJS.ProcessEnv;
-    const lease = fakeLease({ 'sandbox-0-0': 2, 'sandbox-1-0': 2 }, opts.cap);
-    await expect(
-      selectPoolSandbox(env, '/head', 'leaf-1', opts, {
-        listPods: async () => ['sandbox-0-0', 'sandbox-1-0'],
-        lease,
-      }),
-    ).rejects.toBeInstanceOf(SandboxPoolSaturatedError);
-  });
-
-  it('throws a plain Error (not SandboxPoolSaturatedError) when a pool selector is set but no pods are Running', async () => {
-    const env = { KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox' } as unknown as NodeJS.ProcessEnv;
-    // lease is never touched: the empty-list guard throws before any lease call.
-    const err = await selectPoolSandbox(env, '/head', 'leaf-1', opts, {
-      listPods: async () => [],
-      lease: fakeLease({}, opts.cap),
-    }).catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(SandboxPoolSaturatedError);
-    expect((err as Error).message).toBe("no Running pods for pool selector 'app=sandbox'");
-  });
-});
-
 const grpcRec: SandboxRecord = {
   sandboxId: 'sbx-remote-1',
   labels: {},
@@ -140,12 +96,13 @@ const grpcRec: SandboxRecord = {
   capacityMax: 4,
   transport: 'grpc',
 };
+const grpcRec2: SandboxRecord = { ...grpcRec, sandboxId: 'sbx-remote-2' };
 const fakeRecords = (recs: SandboxRecord[]): RecordStore => ({
   put: async () => {},
   remove: async () => {},
   list: async () => recs,
 });
-/** The records path now consults affinity (P6.3); these tests are about other things, so it is inert. */
+/** The records path consults affinity (P6.3); these tests are about other things, so it is inert. */
 const noAffinity = {
   get: async () => null,
   claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
@@ -160,37 +117,99 @@ const fakeExecClient: ExecClientLike = {
   },
 };
 
+describe('selectPoolSandbox', () => {
+  const opts = { cap: 2, ttlMs: 60000, remoteSandbox: true };
+  const env = (extra: Record<string, string> = {}) =>
+    ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sandbox', ...extra }) as NodeJS.ProcessEnv;
+
+  it('returns null when no sandbox is configured at all', async () => {
+    const res = await selectPoolSandbox({} as NodeJS.ProcessEnv, '/head', 'leaf-1', opts, {});
+    expect(res).toBeNull();
+  });
+
+  it('throws naming KAGENTI_SANDBOX_POD when the removed single-pod env is still set', async () => {
+    // ADR-0041: the single-pod path is gone. A stale KAGENTI_SANDBOX_POD must not
+    // silently mean "no sandbox" — the tools would run in the harness process.
+    const e = { KAGENTI_SANDBOX_POD: 'sandbox-x' } as unknown as NodeJS.ProcessEnv;
+    await expect(selectPoolSandbox(e, '/head', 'leaf-1', opts, {})).rejects.toThrow(
+      /KAGENTI_SANDBOX_POD was removed/,
+    );
+  });
+
+  it('throws naming KAGENTI_SANDBOX_NAME when the removed Sandbox-CR env is still set', async () => {
+    const e = { KAGENTI_SANDBOX_NAME: 'sandbox-cr' } as unknown as NodeJS.ProcessEnv;
+    await expect(selectPoolSandbox(e, '/head', 'leaf-1', opts, {})).rejects.toThrow(
+      /KAGENTI_SANDBOX_NAME was removed/,
+    );
+  });
+
+  it('picks the least-loaded record and acquires a lease', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 2, 'sbx-remote-2': 0 }, opts.cap);
+    const res = await selectPoolSandbox(env(), '/head', 'leaf-1', opts, {
+      lease,
+      affinity: noAffinity,
+      records: fakeRecords([grpcRec, grpcRec2]),
+      makeExecClient: () => fakeExecClient,
+    });
+    expect(res?.sandboxId).toBe('sbx-remote-2');
+    expect(lease.acquired).toEqual(['sbx-remote-2']);
+    expect(lease.acquiredTtl).toEqual([opts.ttlMs]);
+  });
+
+  it('throws SandboxPoolSaturatedError when every record is at cap', async () => {
+    const lease = fakeLease({ 'sbx-remote-1': 2, 'sbx-remote-2': 2 }, opts.cap);
+    await expect(
+      selectPoolSandbox(env(), '/head', 'leaf-1', opts, {
+        lease,
+        affinity: noAffinity,
+        records: fakeRecords([grpcRec, grpcRec2]),
+        makeExecClient: () => fakeExecClient,
+      }),
+    ).rejects.toBeInstanceOf(SandboxPoolSaturatedError);
+  });
+
+  it('throws a plain Error (not SandboxPoolSaturatedError) when a pool selector is set but no records exist', async () => {
+    // lease is never touched: the empty-candidates guard throws before any lease call.
+    const err = await selectPoolSandbox(env(), '/head', 'leaf-1', opts, {
+      lease: fakeLease({}, opts.cap),
+      affinity: noAffinity,
+      records: fakeRecords([]),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(SandboxPoolSaturatedError);
+    expect((err as Error).message).toBe(
+      'no sandbox presence records (no sandbox has attached to the relay yet)',
+    );
+  });
+
+  it('flag OFF with a selector: fails loudly naming SH_REMOTE_SANDBOX, and never reads records', async () => {
+    // ADR-0041: pool mode reads records only, and records are read only with the flag on.
+    // A selector without the flag is a stale deployment — the pod listing it used to fall
+    // back to is gone, so say so rather than answering "no sandbox has attached" for a
+    // healthy relay. The #1 inertness gate stands: records.list() is never invoked.
+    const list = vi.fn(async () => [grpcRec]);
+    const records: RecordStore = { put: async () => {}, remove: async () => {}, list };
+    await expect(
+      selectPoolSandbox(
+        env(),
+        '/head',
+        'run-1',
+        { cap: 4, ttlMs: 60000 /* remoteSandbox omitted ⇒ false */ },
+        { lease: fakeLease({}, 4), records },
+      ),
+    ).rejects.toThrow(/SH_REMOTE_SANDBOX/);
+    expect(list).not.toHaveBeenCalled();
+  });
+});
+
 describe('selectPoolSandbox remote dispatch', () => {
   const env = (extra: Record<string, string> = {}) =>
     ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', ...extra }) as NodeJS.ProcessEnv;
   const opts = { cap: 4, ttlMs: 60000, remoteSandbox: true };
 
-  it('flag OFF: ignores grpc records, transport is undefined, and never calls records.list()', async () => {
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const list = vi.fn(async () => [grpcRec]);
-    const records: RecordStore = { put: async () => {}, remove: async () => {}, list };
-    const sel = await selectPoolSandbox(
-      env(),
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000 /* remoteSandbox omitted ⇒ false */ },
-      {
-        listPods: async () => ['sandbox-0-0'],
-        lease,
-        records,
-      },
-    );
-    expect(sel?.transport).toBeUndefined();
-    expect(sel?.config.pod).toBe('sandbox-0-0');
-    // The #1 inertness gate: when remoteSandbox is off, RecordStore.list() must never be invoked.
-    expect(list).not.toHaveBeenCalled();
-  });
-
   it('flag ON: a leased grpc record yields a GrpcRelayTransport', async () => {
-    // Only the grpc record is available (no pods) so it must be chosen.
     const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
     const sel = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
-      listPods: async () => [],
       lease,
       affinity: noAffinity,
       records: fakeRecords([grpcRec]),
@@ -198,7 +217,7 @@ describe('selectPoolSandbox remote dispatch', () => {
     });
     expect(sel?.transport).toBeDefined();
     expect(typeof sel?.transport?.exec).toBe('function');
-    expect(sel?.config.pod).toBe('sbx-remote-1');
+    expect(sel?.sandboxId).toBe('sbx-remote-1');
   });
 
   it('gives the leased transport the SESSION id as its workspace key', async () => {
@@ -210,7 +229,6 @@ describe('selectPoolSandbox remote dispatch', () => {
       fastTier: 'per-call-exec' as const,
     };
     const sel = await selectPoolSandbox(env(), '/head', 'leaf-abc123', opts, {
-      listPods: async () => [],
       lease,
       affinity: noAffinity,
       records: fakeRecords([grpcRec]),
@@ -248,7 +266,6 @@ describe('selectPoolSandbox remote dispatch', () => {
       'sess-1',
       { ...opts, holderId: 'sess-1:11111111-2222-3333-4444-555555555555' },
       {
-        listPods: async () => [],
         lease,
         affinity: noAffinity,
         records: fakeRecords([{ ...grpcRec, capabilities: [WORKSPACE_SUBDIR_CAPABILITY] }]),
@@ -284,7 +301,6 @@ describe('selectPoolSandbox remote dispatch', () => {
       'sess-wl-1',
       { ...opts, agentWritesInContext: true },
       {
-        listPods: async () => [],
         lease,
         affinity: noAffinity,
         records: fakeRecords([{ ...grpcRec, capabilities: [WORKSPACE_SUBDIR_CAPABILITY] }]),
@@ -315,7 +331,6 @@ describe('selectPoolSandbox remote dispatch', () => {
       'sess-wl-2',
       { ...opts, agentWritesInContext: true },
       {
-        listPods: async () => [],
         lease,
         affinity: noAffinity,
         records: fakeRecords([{ ...grpcRec, capabilities: [] }]),
@@ -335,24 +350,22 @@ describe('selectPoolSandbox remote dispatch', () => {
   // directory alone would leave every session writing to the shared /workspace.
   it('points podCwd at the session subdirectory when the worker advertises workspace-subdir', async () => {
     const sel = await selectPoolSandbox(env(), '/head', 'sess-1', opts, {
-      listPods: async () => [],
       lease: fakeLease({ 'sbx-remote-1': 0 }, opts.cap),
       affinity: noAffinity,
       records: fakeRecords([{ ...grpcRec, capabilities: ['bash', WORKSPACE_SUBDIR_CAPABILITY] }]),
       makeExecClient: () => fakeExecClient,
     });
-    expect(sel?.config.podCwd).toBe('/workspace/sess-1');
+    expect(sel?.podCwd).toBe('/workspace/sess-1');
   });
 
   it('keeps the shared podCwd for a worker without workspace-subdir', async () => {
     const sel = await selectPoolSandbox(env(), '/head', 'sess-1', opts, {
-      listPods: async () => [],
       lease: fakeLease({ 'sbx-remote-1': 0 }, opts.cap),
       affinity: noAffinity,
       records: fakeRecords([{ ...grpcRec, capabilities: ['bash'] }]),
       makeExecClient: () => fakeExecClient,
     });
-    expect(sel?.config.podCwd).toBe('/workspace');
+    expect(sel?.podCwd).toBe('/workspace');
   });
 });
 
@@ -368,7 +381,6 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
     let transportBuilt = false;
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
-      listPods: async () => [],
       lease,
       affinity: noAffinity,
       records: fakeRecords([grpcRec]),
@@ -399,7 +411,7 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
       '/head',
       'run-1',
       { ...opts, holderId: 'turn-7' },
-      { listPods: async () => [], lease, affinity: noAffinity, records: fakeRecords([grpcRec]) },
+      { lease, affinity: noAffinity, records: fakeRecords([grpcRec]) },
     ).catch((e) => e);
     expect((err as Error).message).toMatch(/MOCA_RELAY_EXEC_TOKEN is not set/);
     expect(lease.acquired).toEqual(['sbx-remote-1']);
@@ -414,7 +426,6 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     };
     const boom = new Error('transport construction failed');
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
-      listPods: async () => [],
       lease,
       affinity: noAffinity,
       records: fakeRecords([grpcRec]),
@@ -433,7 +444,6 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
       throw new Error('redis down');
     };
     const err = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
-      listPods: async () => [],
       lease,
       affinity: noAffinity,
       records: fakeRecords([grpcRec]),
@@ -469,7 +479,6 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
       'run-1',
       opts,
       {
-        listPods: async () => [],
         lease,
         affinity: noAffinity,
         records: fakeRecords([grpcRec]),
@@ -525,15 +534,15 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     // began selecting from the pool it meant a Redis connect and disconnect PER TURN. Measured on a
     // real run: ~10k turns produced 35,654 connections, Redis answered
     // `ERR max number of clients reached` (11 rejected against maxclients 10000, closes lagging
-    // opens), node-redis raised that as an 'error' on a client with no listener, and all four
-    // workers exited code 1 SIMULTANEOUSLY mid-rung, stranding their in-flight turns.
+    // opens), node-redis raised that as an 'error' event on a client with no listener, and all four
+    // workers exited code 1 SIMULTANEOUSLY mid-rung, stranding every in-flight turns.
     resetSharedStores();
     createdRecordStores.length = 0;
-    const lease = fakeLease({ 'sandbox-0-0': 0, 'sandbox-0-1': 0 }, opts.cap);
+    const lease = fakeLease({ 'memo-sbx-1': 0 }, opts.cap);
     const deps = {
-      listPods: async () => ['sandbox-0-0', 'sandbox-0-1'],
       lease,
       affinity: noAffinity,
+      makeExecClient: () => fakeExecClient,
     };
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
@@ -550,12 +559,12 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
 
   it('drops the cached store when a list fails, so one blip is not permanent', async () => {
     // Memoising a broken client would turn a transient Redis failure into a permanent "no
-    // sandboxes" verdict for the life of the process -- selection would then throw
-    // `no Running pods for pool selector` forever, which reads as a misconfigured pool.
+    // sandboxes" verdict for the life of the process -- selection would then throw the
+    // empty-pool error forever, which reads as a misconfigured relay.
     resetSharedStores();
     createdRecordStores.length = 0;
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const deps = { listPods: async () => ['sandbox-0-0'], lease, affinity: noAffinity };
+    const lease = fakeLease({ 'memo-sbx-1': 0 }, opts.cap);
+    const deps = { lease, affinity: noAffinity, makeExecClient: () => fakeExecClient };
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
     expect(createdRecordStores).toHaveLength(1);
@@ -583,8 +592,8 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
     // unreferenced, never closed) and spending the guard's rebuild on something already healthy.
     resetSharedStores();
     createdRecordStores.length = 0;
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const deps = { listPods: async () => ['sandbox-0-0'], lease, affinity: noAffinity };
+    const lease = fakeLease({ 'memo-sbx-1': 0 }, opts.cap);
+    const deps = { lease, affinity: noAffinity, makeExecClient: () => fakeExecClient };
     const other = env({ REDIS_URL: 'redis://other:6379' });
 
     await selectPoolSandbox(env(), '/head', 'run-1', opts, deps);
@@ -616,13 +625,13 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
 
   it('does not construct (or close) a RedisRecordStore when deps.records is injected', async () => {
     createdRecordStores.length = 0;
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, opts.cap);
-    const injected = fakeRecords([]);
+    const lease = fakeLease({ 'sbx-remote-1': 0 }, opts.cap);
+    const injected = fakeRecords([grpcRec]);
     await selectPoolSandbox(env(), '/head', 'run-1', opts, {
-      listPods: async () => ['sandbox-0-0'],
       lease,
       affinity: noAffinity,
       records: injected,
+      makeExecClient: () => fakeExecClient,
     });
     // Caller owns the injected store's lifecycle: we must never construct our
     // own (and therefore never call .close on anything the caller didn't hand us).
@@ -631,34 +640,33 @@ describe('selectPoolSandbox remote dispatch: ad-hoc RedisRecordStore lifecycle',
 });
 
 describe('resolveDiscoverySource', () => {
-  it('defaults to both when SH_SANDBOX_DISCOVERY is unset or blank', () => {
-    expect(resolveDiscoverySource({} as NodeJS.ProcessEnv, false)).toBe('both');
+  it("defaults to records when SH_SANDBOX_DISCOVERY is unset, blank or 'records'", () => {
+    expect(resolveDiscoverySource({} as NodeJS.ProcessEnv, true)).toBe('records');
+    expect(resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: '   ' } as NodeJS.ProcessEnv, true)).toBe(
+      'records',
+    );
     expect(
-      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: '   ' } as NodeJS.ProcessEnv, false),
-    ).toBe('both');
-  });
-
-  it('accepts pods|records|both and trims whitespace', () => {
-    expect(
-      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: ' pods ' } as NodeJS.ProcessEnv, false),
-    ).toBe('pods');
-    expect(
-      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: 'records' } as NodeJS.ProcessEnv, true),
+      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: ' records ' } as NodeJS.ProcessEnv, true),
     ).toBe('records');
-    expect(
-      resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: 'both' } as NodeJS.ProcessEnv, true),
-    ).toBe('both');
   });
 
-  it('rejects an unknown value naming the variable and the legal set', () => {
+  it('rejects pods and both with the ADR-0041 removal error, naming the variable', async () => {
+    // The pod listing was removed with the Knative/KEDA deployment path. A deployment still
+    // carrying one of these values must fail loudly, not quietly change behavior.
+    for (const value of ['pods', 'both']) {
+      expect(() =>
+        resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: value } as NodeJS.ProcessEnv, true),
+      ).toThrow(new RegExp(`SH_SANDBOX_DISCOVERY='${value}' was removed`));
+    }
+    // An unknown value gets the same loud refusal.
     expect(() =>
       resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: 'grpc' } as NodeJS.ProcessEnv, true),
-    ).toThrow(/SH_SANDBOX_DISCOVERY='grpc' is not one of pods\|records\|both/);
+    ).toThrow(/SH_SANDBOX_DISCOVERY='grpc' was removed/);
   });
 
   it('records without the remote flag fails loudly naming SH_REMOTE_SANDBOX', () => {
-    // Falling through would surface "no Running pods for pool selector '…'", which blames
-    // the pool for what is a flag mistake. Blame the flag.
+    // Falling through would surface "no sandbox presence records", which blames the relay
+    // for what is a flag mistake. Blame the flag.
     expect(() =>
       resolveDiscoverySource({ SH_SANDBOX_DISCOVERY: 'records' } as NodeJS.ProcessEnv, false),
     ).toThrow(/SH_REMOTE_SANDBOX=1/);
@@ -668,126 +676,33 @@ describe('resolveDiscoverySource', () => {
 describe('selectPoolSandbox discovery source', () => {
   const env = (extra: Record<string, string> = {}) =>
     ({ KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx', ...extra }) as NodeJS.ProcessEnv;
+  const opts = { cap: 4, ttlMs: 60000, remoteSandbox: true };
 
-  it('REGRESSION PIN: unset ⇒ pods are listed exactly as before', async () => {
-    // The "changed nothing" gate. If this breaks, the seam is not inert.
-    const listPods = vi.fn(async () => ['sandbox-0-0']);
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, 4);
-    const sel = await selectPoolSandbox(
-      env(),
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000 },
-      { listPods, lease },
-    );
-    expect(listPods).toHaveBeenCalledTimes(1);
-    expect(sel?.config.pod).toBe('sandbox-0-0');
-  });
-
-  it('records: never shells out to kubectl, serves from mirrored records', async () => {
-    const listPods = vi.fn(async () => ['sandbox-0-0']);
+  it('serves from mirrored records with no kubectl anywhere on the path', async () => {
     const lease = fakeLease({ 'sbx-remote-1': 0 }, 4);
-    const sel = await selectPoolSandbox(
-      env({ SH_SANDBOX_DISCOVERY: 'records' }),
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000, remoteSandbox: true },
-      {
-        listPods,
-        lease,
-        affinity: noAffinity,
-        records: fakeRecords([grpcRec]),
-        makeExecClient: () => fakeExecClient,
-      },
-    );
-    // The whole point of step 0: no kubectl on a VM with no cluster.
-    expect(listPods).not.toHaveBeenCalled();
-    expect(sel?.config.pod).toBe('sbx-remote-1');
+    const sel = await selectPoolSandbox(env(), '/head', 'run-1', opts, {
+      lease,
+      affinity: noAffinity,
+      records: fakeRecords([grpcRec]),
+      makeExecClient: () => fakeExecClient,
+    });
+    expect(sel?.sandboxId).toBe('sbx-remote-1');
     expect(sel?.transport).toBeDefined();
   });
 
-  it('pods: ignores mirrored records even when the remote flag is on', async () => {
-    const list = vi.fn(async () => [grpcRec]);
-    const lease = fakeLease({ 'sandbox-0-0': 0 }, 4);
-    const sel = await selectPoolSandbox(
-      env({ SH_SANDBOX_DISCOVERY: 'pods' }),
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000, remoteSandbox: true },
-      {
-        listPods: async () => ['sandbox-0-0'],
-        lease,
-        affinity: noAffinity,
-        records: { put: async () => {}, remove: async () => {}, list },
-      },
-    );
-    expect(list).not.toHaveBeenCalled();
-    expect(sel?.transport).toBeUndefined();
-    expect(sel?.config.pod).toBe('sandbox-0-0');
-  });
-
-  it('records with an empty record set blames the records, not the pool selector', async () => {
-    // `pods` is forced to [] in this mode, so no pod was ever matched against the selector -- naming
-    // it sends an operator to debug a healthy pool, which is the same misdirection
-    // resolveDiscoverySource's own guard exists to prevent. This is also the likeliest first-run state
-    // on the shipped VM default (SH_SANDBOX_DISCOVERY=records), so it is the message operators hit.
+  it('an empty record set blames the records, not the pool selector', async () => {
+    // No record was ever matched against the selector -- naming it sends an operator to
+    // debug a healthy pool, the same misdirection resolveDiscoverySource's own guard
+    // exists to prevent. This is also the likeliest first-run state on a fresh VM
+    // deployment, so it is the message operators hit.
     const lease = fakeLease({}, 4);
     await expect(
-      selectPoolSandbox(
-        env({ SH_SANDBOX_DISCOVERY: 'records' }),
-        '/head',
-        'run-1',
-        { cap: 4, ttlMs: 60000, remoteSandbox: true },
-        {
-          listPods: async () => ['sandbox-0-0'],
-          lease,
-          affinity: noAffinity,
-          records: fakeRecords([]),
-        },
-      ),
-    ).rejects.toThrow('no sandbox presence records');
-  });
-
-  it('keeps the pods wording for the pod paths, so existing log greps still match', async () => {
-    const lease = fakeLease({}, 4);
-    for (const discovery of ['pods', 'both'] as const) {
-      await expect(
-        selectPoolSandbox(
-          env({ SH_SANDBOX_DISCOVERY: discovery }),
-          '/head',
-          'run-1',
-          { cap: 4, ttlMs: 60000 },
-          { listPods: async () => [], lease },
-        ),
-      ).rejects.toThrow("no Running pods for pool selector 'app=sbx'");
-    }
-  });
-
-  it('reports whether a lease was taken, so the caller need not re-read the environment', async () => {
-    // acquireTurnSandbox arms its renewal timer off this flag. It used to re-evaluate this function's
-    // own `if (!selector)` against the env instead, putting one predicate in two files.
-    const lease = fakeLease({}, 4);
-    const leasedSel = await selectPoolSandbox(
-      env({}),
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000 },
-      {
-        listPods: async () => ['sandbox-0-0'],
+      selectPoolSandbox(env(), '/head', 'run-1', opts, {
         lease,
-      },
-    );
-    expect(leasedSel?.leased).toBe(true);
-
-    const singlePod = await selectPoolSandbox(
-      { KAGENTI_SANDBOX_POOL_SELECTOR: '', KAGENTI_SANDBOX_POD: 'sandbox-0' },
-      '/head',
-      'run-1',
-      { cap: 4, ttlMs: 60000 },
-      { lease },
-    );
-    expect(singlePod?.config.pod).toBe('sandbox-0');
-    expect(singlePod?.leased).toBe(false);
+        affinity: noAffinity,
+        records: fakeRecords([]),
+      }),
+    ).rejects.toThrow('no sandbox presence records');
   });
 });
 
@@ -795,7 +710,7 @@ describe('assertServerSandbox (MI1 §5 R3)', () => {
   // The four combinations of {serverMode, sandbox present}, plus the allowLocalTools opt-out —
   // every caller of this helper (executeTurn, realProduceSolve, realProduceVerdict) collapses onto
   // this same truth table.
-  it('throws SandboxRequiredError when server-mode has no sandbox config', () => {
+  it('throws SandboxRequiredError when server-mode has no sandbox', () => {
     expect(() => assertServerSandbox({ serverMode: true }, null)).toThrow(SandboxRequiredError);
     expect(() => assertServerSandbox({ serverMode: true }, undefined)).toThrow(
       SandboxRequiredError,
@@ -808,7 +723,7 @@ describe('assertServerSandbox (MI1 §5 R3)', () => {
     }
   });
 
-  it('does not throw when server-mode HAS a sandbox config', () => {
+  it('does not throw when server-mode HAS a sandbox', () => {
     expect(() => assertServerSandbox({ serverMode: true }, { pod: 'sandbox-0' })).not.toThrow();
   });
 
@@ -818,7 +733,7 @@ describe('assertServerSandbox (MI1 §5 R3)', () => {
     expect(() => assertServerSandbox({ serverMode: false }, null)).not.toThrow();
   });
 
-  it('does not throw when allowLocalTools opts out, even with no sandbox config', () => {
+  it('does not throw when allowLocalTools opts out, even with no sandbox', () => {
     expect(() =>
       assertServerSandbox({ serverMode: true, allowLocalTools: true }, null),
     ).not.toThrow();
@@ -832,7 +747,7 @@ describe('sessionPodCwd', () => {
     expect(sessionPodCwd('/srv/ws/', capable, 'sess-1')).toBe('/srv/ws/sess-1');
   });
 
-  it('leaves pods (no record) and workers without the capability on podCwd', () => {
+  it('leaves a missing record and workers without the capability on podCwd', () => {
     expect(sessionPodCwd('/workspace', undefined, 'sess-1')).toBe('/workspace');
     expect(sessionPodCwd('/workspace', grpcRec, 'sess-1')).toBe('/workspace');
   });

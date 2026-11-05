@@ -88,7 +88,7 @@ export const ROUTES: RouteSpec[] = [
     operationId: 'createRun',
     auth: 'session',
     surface: 'client',
-    summary: 'Run a leaf/solve/prompt job — inline, or queued with async: true',
+    summary: 'Run a leaf/solve/prompt job synchronously',
   },
   {
     method: 'POST',
@@ -115,7 +115,7 @@ export const ROUTES: RouteSpec[] = [
     operationId: 'getRunStatus',
     auth: 'session',
     surface: 'client',
-    summary: 'Poll an async run by session id',
+    summary: 'Poll a run by session id',
   },
   {
     method: 'GET',

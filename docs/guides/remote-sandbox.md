@@ -101,7 +101,7 @@ Do not trust that a command ran where you meant: a pool can contain several sand
 
 2. **Make the answer unambiguous.** With several sandboxes in the tier, either use a tier only that sandbox advertises, or
    attach it alone while testing, so `HKEYS sh:sandbox:records` shows one entry. The original demo used a pool selector
-   that matched no other pod; that mechanism is Knative-specific and has no documented P6 equivalent.
+   that matched no other pod; that mechanism went with the removed Knative path.
 3. **On the microVM tier,** the host journal records each execution:
    `journalctl -u microvm-worker | grep 'vmpool: exec' | grep 'workspace_key="<session id>"'`. The container worker logs no
    individual executions.

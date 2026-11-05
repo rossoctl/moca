@@ -16,7 +16,7 @@
 
 It applies to **Stable** surfaces. A **Preview** surface may change at any time, but changes are listed in the release
 notes. A **Legacy** surface does not change except for security and breakage fixes
-([support policy](maturity-and-lifecycle.md#support-for-legacy-paths)).
+([support policy](maturity-and-lifecycle.md#removed-paths)).
 
 ## What is the contract today
 

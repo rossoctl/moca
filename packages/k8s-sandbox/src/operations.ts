@@ -6,19 +6,19 @@ import type {
   ReadOperations,
   WriteOperations,
 } from '@earendil-works/pi-coding-agent';
-import type { K8sSandboxConfig } from './config.js';
-import type { ExecInPod } from './exec.js';
+import type { SandboxContext } from './transport.js';
+import type { ExecInPod } from './transport.js';
 import { mapPath, shQuote } from './paths.js';
 import { DEFAULT_OUTPUT_CAP } from './transport.js';
 import { sandboxEnv } from './sandbox-env.js';
 
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-function mapper(cfg: K8sSandboxConfig) {
+function mapper(cfg: SandboxContext) {
   return (p: string) => shQuote(mapPath(p, cfg.headCwd, cfg.podCwd));
 }
 
-export function createPodReadOps(exec: ExecInPod, cfg: K8sSandboxConfig): ReadOperations {
+export function createPodReadOps(exec: ExecInPod, cfg: SandboxContext): ReadOperations {
   const q = mapper(cfg);
   return {
     readFile: async (p) => {
@@ -60,7 +60,7 @@ export function createPodReadOps(exec: ExecInPod, cfg: K8sSandboxConfig): ReadOp
   };
 }
 
-export function createPodWriteOps(exec: ExecInPod, cfg: K8sSandboxConfig): WriteOperations {
+export function createPodWriteOps(exec: ExecInPod, cfg: SandboxContext): WriteOperations {
   const q = mapper(cfg);
   return {
     writeFile: async (p, content) => {
@@ -75,7 +75,7 @@ export function createPodWriteOps(exec: ExecInPod, cfg: K8sSandboxConfig): Write
   };
 }
 
-export function createPodEditOps(exec: ExecInPod, cfg: K8sSandboxConfig): EditOperations {
+export function createPodEditOps(exec: ExecInPod, cfg: SandboxContext): EditOperations {
   const read = createPodReadOps(exec, cfg);
   const write = createPodWriteOps(exec, cfg);
   const q = mapper(cfg);
@@ -89,7 +89,7 @@ export function createPodEditOps(exec: ExecInPod, cfg: K8sSandboxConfig): EditOp
   };
 }
 
-export function createPodBashOps(exec: ExecInPod, cfg: K8sSandboxConfig): BashOperations {
+export function createPodBashOps(exec: ExecInPod, cfg: SandboxContext): BashOperations {
   const q = mapper(cfg);
   return {
     // Pi passes `env` only to the bash tool, and it is the WHOLE harness process environment. Only
@@ -119,7 +119,7 @@ export function createPodBashOps(exec: ExecInPod, cfg: K8sSandboxConfig): BashOp
   };
 }
 
-export function createPodLsOps(exec: ExecInPod, cfg: K8sSandboxConfig): LsOperations {
+export function createPodLsOps(exec: ExecInPod, cfg: SandboxContext): LsOperations {
   const q = mapper(cfg);
   return {
     exists: async (p) => (await exec(`test -e ${q(p)}`)).exitCode === 0,
@@ -149,7 +149,7 @@ export function createPodLsOps(exec: ExecInPod, cfg: K8sSandboxConfig): LsOperat
   };
 }
 
-export function createPodFindOps(exec: ExecInPod, cfg: K8sSandboxConfig): FindOperations {
+export function createPodFindOps(exec: ExecInPod, cfg: SandboxContext): FindOperations {
   const q = mapper(cfg);
   return {
     exists: async (p) => (await exec(`test -e ${q(p)}`)).exitCode === 0,
