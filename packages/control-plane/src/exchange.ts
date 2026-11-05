@@ -14,7 +14,7 @@ import { verifyToken } from './token.js';
  * control plane hands back that subject's credential.
  *
  * This puts the control plane on the CONTROL path once per turn -- never on the data path. It sees no
- * prompt and no model output; the SSE stream stays direct from the Knative Service to the client.
+ * prompt and no model output; the SSE stream stays direct from the data plane to the client.
  *
  * If the credential rode inside the token instead, a client-visible bearer string would contain a
  * provider key -- landing in browser storage, proxy logs and shell history. This keeps it server-side.

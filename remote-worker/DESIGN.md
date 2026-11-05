@@ -95,7 +95,7 @@ oc set env deploy/sandbox-relay SH_RELAY_TOKEN=dev-token -n default
 # 2. Enable the remote-sandbox path on the harness (rolls a new revision), with the relay's
 #    exec token: the relay refuses every SandboxExec without it (MI1 R5). The harness reads
 #    it by a secretKeyRef to that ONE key of sh-relay-token (setup-ocp.sh creates it), never
-#    the whole Secret. `oc set env` does not work on a Knative Service, so upsert by name:
+#    the whole Secret. Upsert by name (oc set env does not work on every object kind):
 NEWENV=$(oc get ksvc serverless-harness -n default -o json | jq -c '
   (.spec.template.spec.containers[0].env // [])
   | map(select(.name | IN("SH_REMOTE_SANDBOX", "SH_RELAY_ADDR", "MOCA_RELAY_EXEC_TOKEN") | not))
@@ -135,7 +135,6 @@ grpcurl -plaintext -H "authorization: Bearer $EXEC_TOKEN" -proto proto/sandbox/v
 # (NOTE: /turn's LLM step needs LiteLLM egress, currently blocked from ykt1 —
 #  the worker path itself is exercised by the grpcurl check above.)
 ```
-
 
 ### Running it as an in-cluster pod — the verified full path (2026-07-16)
 

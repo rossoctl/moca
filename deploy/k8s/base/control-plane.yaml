@@ -1,6 +1,5 @@
-# The MU1 control plane (spec §3.5), adapted from deploy/knative/control-plane.yaml (copied, not
-# referenced: deploy/k8s shares nothing with the deprecated path). Dropped: the pods Role, which
-# only serves a pod-exec harness. Its three secrets are FILES under CREDENTIALS_DIRECTORY
+# The MU1 control plane (spec §3.5). No pods Role: it would only serve a pod-exec harness,
+# which ADR-0041 removed. Its three secrets are FILES under CREDENTIALS_DIRECTORY
 # (withCredentials, src/main.ts); non-secret settings come from ConfigMap moca-settings, which
 # setup.sh writes.
 apiVersion: v1

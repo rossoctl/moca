@@ -2,7 +2,7 @@
 # containers (ADR-0034). W is SH_WORKERS; capacity beyond one pod is `replicas` (spec §3.1).
 #
 # L4 ONLY. The supervisor routes and admits per CONNECTION, never per request. Never put an L7 hop in
-# front of port 8080 -- an Ingress, an edge Route, a mesh sidecar, Knative's queue-proxy -- because
+# front of port 8080 -- an Ingress, an edge Route, a mesh sidecar -- because
 # its upstream connection pooling funnels many sessions' turns down one socket to one worker and
 # silently defeats the S cap. deploy/k8s/README.md, "The front door is L4".
 apiVersion: v1

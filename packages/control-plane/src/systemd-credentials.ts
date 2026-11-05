@@ -6,7 +6,7 @@ import { join } from 'node:path';
  * (`LoadCredential=<name>:<path>`, deploy/vm/systemd/), else the environment variable of the same
  * name. MI1 §6.7 -- secrets are files, never env vars: a credential is never inherited by a child
  * and never in /proc/<pid>/environ. The fallback is what every deployment without systemd
- * credentials (Knative, compose) keeps using, unchanged.
+ * credentials (compose) keeps using, unchanged.
  *
  * Both at once is refused, not ranked: a stale env line shadowing a regenerated credential (or the
  * reverse) is a mismatched exchange token or keypair, i.e. every turn refused by a healthy process.

@@ -83,13 +83,12 @@ export function projectResources(
       sandboxTier: viewTier(rec, tiers),
     },
     harness: {
-      // A leaf runs in a KEDA-spawned worker Job whose pod name starts with the ScaledJob name; a
-      // Knative revision pod does not. Display-only, so a heuristic is the right cost here.
-      mode: harnessPod?.startsWith('leaf-worker') ? 'leaf-job' : 'knative',
+      // A P6 worker pod name when the data plane self-reported one. Display-only.
+      mode: harnessPod ? 'worker' : null,
       podName: harnessPod,
       revision: runtime.revision ?? null,
-      // Nothing self-reported means nothing is serving the session right now -- which is the normal
-      // state of a scaled-to-zero Knative Service, not an error.
+      // Nothing self-reported means nothing is serving the session right now -- the normal
+      // state between turns, not an error.
       ready: harnessPod !== null,
     },
     sandbox,

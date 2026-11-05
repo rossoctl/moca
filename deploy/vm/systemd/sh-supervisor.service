@@ -10,8 +10,7 @@ Wants=network-online.target
 Type=simple
 User=harness
 Group=harness
-# Run from the supervisor's own package dir, matching the Knative precedent
-# (deploy/knative/relay-deployment.yaml, deploy/knative/control-plane.yaml): `node --import
+# Run from the supervisor's own package dir: `node --import
 # tsx` resolves the tsx loader relative to the CWD, and tsx (a devDep) is linked only into
 # each package's own node_modules, never root-hoisted -- a CWD of the repo root crashes with
 # ERR_MODULE_NOT_FOUND 'tsx'. Do not "simplify" this back to the repo root.
@@ -21,10 +20,8 @@ EnvironmentFile=/etc/serverless-harness/supervisor.env
 # §6.7) -- the same file sh-control-plane.service loads. setup-vm.sh creates it before installing
 # this unit; a unit whose credential file is missing does not start.
 LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token
-# Every manifest that runs this same harness code sets HOME explicitly with a writable path
-# behind it (deploy/knative/service.yaml:33, leaf-scaledjob.yaml:39, control-plane.yaml:190 all
-# use /tmp; relay-deployment.yaml does not, consistent with this being a harness-side need
-# rather than the relay's). This unit runs as User=harness -- which the README has the operator
+# This unit sets HOME explicitly with a writable path behind it (the relay's unit does not,
+# consistent with this being a harness-side need rather than the relay's). This unit runs as User=harness -- which the README has the operator
 # create with --no-create-home -- under ProtectHome=true and ProtectSystem=strict, so $HOME is a
 # nonexistent or masked path and the only writable locations are PrivateTmp's /tmp and
 # StateDirectory. Without this, any turn that writes agent or session state under $HOME fails at

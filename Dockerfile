@@ -10,7 +10,6 @@ COPY packages/session-backend/package.json ./packages/session-backend/
 COPY packages/k8s-sandbox/package.json ./packages/k8s-sandbox/
 COPY packages/knative-server/package.json ./packages/knative-server/
 COPY packages/sandbox-relay/package.json ./packages/sandbox-relay/
-COPY packages/work-queue/package.json ./packages/work-queue/
 COPY packages/ibac-stub/package.json ./packages/ibac-stub/
 COPY packages/control-plane/package.json ./packages/control-plane/
 COPY packages/supervisor/package.json ./packages/supervisor/
@@ -43,8 +42,8 @@ WORKDIR /app
 
 # Stage 2: slim runtime
 FROM node:24-alpine
-# kubectl serves only the deprecated Knative path's KubectlTransport (ADR-0041); it stays while
-# that path does — removal no earlier than end of October 2026.
+# kubectl is spawned by the control plane's K8sSecretStore on deploy/k8s
+# (packages/control-plane/src/kubectl.ts), so the runtime image must carry it.
 RUN apk add --no-cache kubectl cairo pango libjpeg-turbo giflib librsvg pixman
 WORKDIR /app
 COPY --from=builder /app ./
@@ -63,7 +62,6 @@ ARG MOCA_VERSION=dev
 ENV MOCA_VERSION=${MOCA_VERSION}
 EXPOSE 8080
 WORKDIR /app/packages/knative-server
-# Default entrypoint: the HTTP server. Under Knative — the deprecated path (ADR-0041) — this is
-# the Service's container; the P6 supervisor forks src/worker.ts instead (deploy/vm, deploy/k8s,
-# deploy/compose).
+# Default entrypoint: the HTTP server (package name historical — ADR-0041). The P6 supervisor
+# forks src/worker.ts instead (deploy/vm, deploy/k8s, deploy/compose).
 CMD ["node", "--import", "tsx", "src/server.ts"]

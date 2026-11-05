@@ -300,8 +300,8 @@ export class ActiveSession {
           return false;
         }
       }
-      // No turn holds the session, on every try: on Knative or an older harness the abort stopped
-      // it, and on P6 the request was aborted before begin(). Nothing is left to cancel.
+      // No turn holds the session, on every try: on an older harness the abort stopped it,
+      // and on P6 the request was aborted before begin(). Nothing is left to cancel.
       if (attempt >= BLIND_CANCEL_TRIES) return true;
       await this.deps.sleep(BLIND_CANCEL_RETRY_MS);
     }

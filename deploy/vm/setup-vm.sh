@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the P6 single-VM deployment: Redis, relay, sandbox containers, control plane and
 # supervisor units.
-# Sibling of deploy/knative/setup-kind.sh and setup-ocp.sh (spec §4.4).
+# The single-VM systemd deployment (spec §4.4).
 #
 # Prerequisites:
 #   - a Linux VM with systemd 247+ (LoadCredential=) and podman, Node 22+

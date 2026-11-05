@@ -194,10 +194,9 @@ grep -q 'systemctl daemon-reload' "$MOCK_LOG" || fail "daemon-reload not invoked
 
 # unit -> package-dir pairs. WorkingDirectory must be the package's OWN dir (not the repo
 # root) and ExecStart must match that package's own `start` script (`node --import tsx
-# src/main.ts`) -- the same CWD-resolution fix already documented at
-# deploy/knative/relay-deployment.yaml:20-32 and deploy/knative/control-plane.yaml:184-187:
-# `node --import tsx` resolves the tsx loader relative to the CWD, and tsx is linked only
-# into each package's own node_modules, never root-hoisted.
+# src/main.ts`) -- `node --import tsx` resolves the tsx loader relative to the CWD, and tsx
+# is linked only into each package's own node_modules, never root-hoisted, so a CWD of the
+# repo root crashes with ERR_MODULE_NOT_FOUND 'tsx'.
 UNIT_PACKAGES=(
   "$UNIT_SUPERVISOR:supervisor:serverless-harness"
   "$UNIT_RELAY:sandbox-relay:serverless-harness"
@@ -244,15 +243,14 @@ fi
 pass "supervisor unit uses KillMode=mixed, so its own drain can actually run"
 
 # --- the supervisor unit must set HOME -------------------------------------------------------
-# deploy/knative/service.yaml, leaf-scaledjob.yaml and control-plane.yaml all set HOME=/tmp for
-# this same harness code, each with a writable path behind it. This unit runs as User=harness
+# The supervisor unit must set HOME to a writable path. This unit runs as User=harness
 # (README: useradd --no-create-home) under ProtectHome=true and ProtectSystem=strict, so $HOME is
 # nonexistent or masked and the only writable places are PrivateTmp's /tmp and StateDirectory. Any
 # turn writing agent/session state under $HOME fails at runtime, after a green bring-up -- and the
 # hardening loop above could not see it, because it only asserts what IS present.
 grep -qE '^Environment=HOME=' "$UNIT_SUPERVISOR" ||
-  fail "sh-supervisor.service must set Environment=HOME= (every Knative manifest running this" \
-    "code sets HOME=/tmp; here ProtectHome=true and a --no-create-home user leave \$HOME unusable)"
+  fail "sh-supervisor.service must set Environment=HOME= (ProtectHome=true and a" \
+    "--no-create-home user leave \$HOME unusable)"
 HOME_PATH="$(grep -oE '^Environment=HOME=.*' "$UNIT_SUPERVISOR" | head -1 | cut -d= -f3-)"
 # Whatever it is set to must be writable under this unit's own sandboxing: PrivateTmp gives /tmp,
 # StateDirectory gives /var/lib/serverless-harness. Anything else is a path ProtectSystem=strict

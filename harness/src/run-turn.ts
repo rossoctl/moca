@@ -68,8 +68,8 @@ export { BundleNotFoundError } from '@moca/config-bundle';
  *
  * `executeTurnCore` used to `new RedisSessionBackend(...)` on every call and never close it. Its
  * constructor connects eagerly, so each turn leaked one live Redis connection — and this predates
- * the supervisor, but the supervisor is what makes it fatal: before P6 a turn was served by a
- * Knative container that went away afterwards, whereas a supervisor worker is process-lived and
+ * the supervisor, but the supervisor is what makes it fatal: a turn used to be served by a
+ * short-lived request-scaled container, whereas a supervisor worker is process-lived and
  * admits S concurrent turns for hours. The leak then climbs to `maxclients` (10000), Redis answers
  * `ERR max number of clients reached`, and node-redis raises that as an `'error'` on a client with
  * no listener, so every worker exits at once. Measured: all four died simultaneously ~13 minutes

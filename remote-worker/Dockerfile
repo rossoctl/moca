@@ -17,7 +17,7 @@ WORKDIR /src/remote-worker
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/remote-worker ./cmd/worker
 
 # ripgrep is vendored because it is the IMPLEMENTATION of two registered tools, not a scheduling
-# label. The Find/Glob tool runs `rg --files --hidden` (k8s-sandbox `createPodFindOps`.glob) and the
+# label. The Find/Glob tool runs `rg --files --hidden` (k8s-sandbox operations.ts's glob) and the
 # Grep tool runs `rg` directly (`createPodGrepTool`), and both land in THIS container whenever a
 # leased gRPC presence record supplies a relay transport: extension.ts's `opts?.transport ??`
 # overrides the fast AND the stream transport, so every pod operation runs over the relay. Without
