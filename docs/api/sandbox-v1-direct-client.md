@@ -230,4 +230,4 @@ line: anything in argv is visible to every user of the machine through `ps`. Chu
 back base64-encoded in grpcurl's JSON.
 
 **Other languages:** generate a client from the one proto file with `buf generate` or `protoc`.
-MOCA's own TypeScript client is generated in `packages/k8s-sandbox/src/gen/`.
+Moca's own TypeScript client is generated in `packages/k8s-sandbox/src/gen/`.

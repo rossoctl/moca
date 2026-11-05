@@ -1,6 +1,6 @@
 # Two-user Kind demo: workloads with sandboxes of their own
 
-Two users, Alice and Bob, each upload their own small repo as a MOCA workload with sandboxes of
+Two users, Alice and Bob, each upload their own small repo as a moca workload with sandboxes of
 its own ([#476](https://github.com/rossoctl/moca/issues/476), per-workload sandboxes and storage;
 built in [#588](https://github.com/rossoctl/moca/pull/588), the provisioner, and
 [#600](https://github.com/rossoctl/moca/pull/600), a volume per workload). Their tasks run, and
@@ -29,7 +29,7 @@ skills/moca-delegate-task/demo-two-users/setup.sh --delete  # the cluster and th
 ```
 
 `setup.sh` creates the Kind cluster from [`kind.yaml`](kind.yaml) (127.0.0.1 port mappings to
-NodePorts, no port-forwarding), installs MOCA P6 (the process-manager runtime) with
+NodePorts, no port-forwarding), installs moca P6 (the process-manager runtime) with
 `deploy/k8s/setup.sh --target kind-ci` and `SH_WORKLOAD_SANDBOXES=1` (which adds
 `moca-provisioner`, the component that creates each workload's pods and volume), installs Context
 Service as the phase 1 demo does, and logs in two demo users. `--skip-build` reuses the images

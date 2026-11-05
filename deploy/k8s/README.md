@@ -350,7 +350,7 @@ before it touches the cluster. It is sticky (section 2): a re-run keeps the list
 `kubectl get nodes -o wide` (the `INTERNAL-IP` column) when you have node read access, or ask the
 cluster administrator when you do not (`--target ocp-single`).
 
-The only Secret any MOCA object references
+The only Secret any moca object references
 in the sandbox namespace is the attach token (OpenShift adds its own per-ServiceAccount pull Secrets
 there): the exec token, the Redis password and the MU1 keys never exist there. The manifest tests
 check that nothing in it references any other Secret.

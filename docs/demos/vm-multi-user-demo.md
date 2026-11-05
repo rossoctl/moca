@@ -1,4 +1,4 @@
-# Two users, one VM, two sandbox tiers: the MOCA VM demo
+# Two users, one VM, two sandbox tiers: the moca VM demo
 
 > **Preview.** This walkthrough runs the single-VM deployment and was run by one person with two GitHub accounts on one
 > laptop. Parts predate the `mocactl` installer (use the one-line installer in [Get started](../get-started/index.md)

@@ -73,7 +73,7 @@ Re-run it after any change; tokens, the signing key and certificates are kept. A
 setting, the public keyset or a route certificate rolls the control plane and the relay, which read
 them only at boot.
 
-**One namespace per SBX stack.** The run refuses a `moca-mu1` Secret it did not create: a MOCA
+**One namespace per SBX stack.** The run refuses a `moca-mu1` Secret it did not create: a moca
 control plane's signing key, in a shared namespace or copied in. The two stacks also mint API tokens
 under different issuers, so neither accepts the other's.
 

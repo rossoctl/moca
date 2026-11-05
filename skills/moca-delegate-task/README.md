@@ -1,17 +1,17 @@
-# Delegate tasks to MOCA
+# Delegate tasks to moca
 
 > **Preview.** The `moca-delegate-task` skill is implemented but not yet declared Stable;
 > interfaces and limits may change. Known limits: [Runs](../../docs/context-service.md#runs).
 
 `moca-delegate-task` teaches a local agent harness, such as Claude Code or Codex, to hand bounded
-tasks to MOCA. The agent packs a local directory with `contextctl`, uploads it once as a MOCA
+tasks to moca. The agent packs a local directory with `contextctl`, uploads it once as a moca
 workload, runs one task or many on it with `mocactl spawn`, and brings the answers back with
-`mocactl get`. Each task runs in its own MOCA session on a shared sandbox, with the context
+`mocactl get`. Each task runs in its own moca session on a shared sandbox, with the context
 read-only or as a writable copy for that task.
 
 ## Requirements
 
-- [`mocactl`](../../packages/mocactl/README.md), logged in to a MOCA deployment that has workloads
+- [`mocactl`](../../packages/mocactl/README.md), logged in to a moca deployment that has workloads
   turned on ([Context Service and workloads](../../docs/context-service.md))
 - [`contextctl`](https://github.com/rossoctl/context-service#install) with `ctx pack`
   ([rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56), workspace
@@ -19,7 +19,7 @@ read-only or as a writable copy for that task.
 
 ## Install
 
-From a MOCA checkout, link the skill into your harness's skills directory.
+From a moca checkout, link the skill into your harness's skills directory.
 
 Claude Code, for every project (or use the project's `.claude/skills/` instead):
 
@@ -55,5 +55,5 @@ errors, one task per package, and summarize the findings with file references.
 ## More
 
 - [`SKILL.md`](SKILL.md): the instructions the agent follows
-- [How delegation works inside MOCA](references/internal-flow.md)
+- [How delegation works inside moca](references/internal-flow.md)
 - [Context workflows](../../docs/concepts/context-workflows.md): this skill covers workflows 1 and 2

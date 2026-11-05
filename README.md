@@ -1,4 +1,4 @@
-# MOCA — Micro Orchestrator for Cloud Agents
+# moca
 
 **Run stateful AI coding agents on a dense, warm process-manager runtime — sessions resume exactly where they left off.**
 
@@ -8,9 +8,9 @@
 ![node](https://img.shields.io/badge/node-22%2B-green)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-MOCA runs long-lived AI agents as **warm, dense sessions on a process-manager runtime (P6)**. An
+Moca runs long-lived AI agents as **warm, dense sessions on a process-manager runtime (P6)**. An
 agent process normally has to stay resident — holding its conversation, tool state, and working
-directory in memory — while it waits for the next turn or for a human to approve a step. MOCA
+directory in memory — while it waits for the next turn or for a human to approve a step. Moca
 decouples the agent's **state** (durable in Redis) and its **tool execution** (an isolated remote
 sandbox — a container, or a Firecracker microVM per `Exec`) from the **agent process** itself, so
 one supervisor hands connections to a fixed pool of warm workers: many sessions per worker, no
@@ -58,7 +58,7 @@ Criteria for Stable and the support policy are in
 
 ## Why
 
-| Persistent agent                                    | MOCA                                                                |
+| Persistent agent                                    | moca                                                                |
 | --------------------------------------------------- | ------------------------------------------------------------------- |
 | Process stays resident between turns                | Warm worker pool — many sessions per worker, no cold-start          |
 | State lives in process memory — lost on crash/evict | State lives in **Redis** — survives eviction, restart, and resume   |
@@ -221,7 +221,7 @@ moca/
 │   ├── control-plane/     # Multi-user control plane, credential issuance
 │   ├── config-bundle/     # Promoted config bundle loading
 │   ├── ibac-stub/         # IBAC stub
-│   └── mocactl/           # MOCA terminal client for the control plane
+│   └── mocactl/           # moca terminal client for the control plane
 ├── remote-worker/         # Go: container + microVM sandbox workers
 ├── deploy/
 │   ├── vm/                # P6 single-VM systemd deployment (production)

@@ -5,7 +5,7 @@ over the gRPC relay (`GrpcRelayTransport`), using Pi's native `Operations` seam.
 The package name is historical — the `kubectl exec` transport it was named for was
 removed with the Knative/KEDA deployment path (ADR-0041).
 
-Part of MOCA. The transport's design history:
+Part of moca. The transport's design history:
 [`docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md`](../../docs/specs/2026-06-17-m2-k8s-sandbox-client-design.md)
 and the relay-transport spec
 [`docs/specs/2026-08-26-st4-go-reference-worker-design.md`](../../docs/specs/2026-08-26-st4-go-reference-worker-design.md).

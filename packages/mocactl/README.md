@@ -18,7 +18,7 @@ local kind cluster, with one script doing the cluster wiring.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
-export SH_CONTROL_PLANE_URL=https://moca.example.com   # your MOCA server; the only URL mocactl needs
+export SH_CONTROL_PLANE_URL=https://moca.example.com   # your moca server; the only URL mocactl needs
 mocactl            # interactive; the first run walks you through setup
 mocactl --setup    # re-run setup on a configured machine
 ```

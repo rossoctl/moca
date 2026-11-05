@@ -350,7 +350,7 @@ no pod mounts it.
   at the workload's own tree, which later runs (on any of its sandboxes) see as the last one left it.
   A run starts there, at `workspace/` when that is the revision's only content root, as with a copy.
   `contextWritable: true` on a `read-only` mount gives that run its own copy; on a `writable` one it
-  changes nothing. Concurrent runs of a `writable` workload share the tree; MOCA adds no locking.
+  changes nothing. Concurrent runs of a `writable` workload share the tree; moca adds no locking.
 - **A provisioner restart before the seed**, or a seed that has not run within
   `MOCA_PROVISIONER_SEED_HOLD_S`, loses the held bundle: pod 0's init container keeps failing, and
   `GET /workloads/{id}` shows `provisioning` with `error: seed_bundle_missing`. Repeat the activate,
