@@ -22,7 +22,12 @@ export interface Principal {
 
 export interface DeviceStart {
   deviceCode: string;
-  userCode: string;
+  /**
+   * The code the user reads and types at the verification URI. Absent when the provider needs no
+   * typed code (the OIDC authorization-code flow: the browser session is what the person completes,
+   * and the state rides in the URL) -- a client must not assume it is present.
+   */
+  userCode?: string;
   verificationUri: string;
   interval: number;
   expiresIn: number;
@@ -40,6 +45,14 @@ export interface IdentityProvider {
    * so an SH_ADMIN_SUBJECTS change reaches a long-lived login within one API-token lifetime (B14).
    */
   rolesFor(subject: string): string[];
+
+  /**
+   * A provider whose user completes login in a browser pointed BACK at the control plane (the OIDC
+   * authorization-code flow, oidc.ts): the callback route hands the query parameters here. Absent
+   * on providers that hold the whole flow themselves (GitHub's device flow), and the callback
+   * route answers those deployments with a plain refusal.
+   */
+  handleCallback?(q: { code?: string; state?: string; error?: string }): Promise<void>;
 }
 
 /** Structural subset of fetch, so tests inject a scripted transport and no test touches the network. */
@@ -192,6 +205,12 @@ export class TestUserProvider implements IdentityProvider {
     return rolesFor(subject, this.adminSubjects);
   }
 }
+/**
+ * Every subject form the control plane mints, across providers: `github:<numeric id>`,
+ * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>` (oidc.ts). One RE so enrollment
+ * (SH_ALLOWED_SUBJECTS) can validate entries without knowing which provider the deployment runs.
+ */
+export const SUBJECT_RE = /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
 
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')

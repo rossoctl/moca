@@ -406,11 +406,15 @@ paths:
   /v1/auth/device:
     post:
       operationId: startDeviceAuth
-      summary: Start a GitHub OAuth device-flow login
+      summary: Start a login (GitHub device flow, or the OIDC provider's authorize URL)
       description: |
         GitHub's user-login flow is plain OAuth 2.0, not OIDC (spec §5.1). The device flow is what a
         shell script can complete, and it needs no client secret. The GitHub OAuth app must have
         device flow ENABLED -- it is off by default (spec §5.1.1).
+
+        With the oidc identity provider (SH_IDENTITY_PROVIDER=oidc), the same reply carries the
+        provider's authorize URL in verificationUri and a state token in deviceCode, with NO
+        userCode: the browser session at the provider is what the person completes.
       security: []
       responses:
         '200':
@@ -419,10 +423,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [deviceCode, userCode, verificationUri, interval, expiresIn]
+                required: [deviceCode, verificationUri, interval, expiresIn]
                 properties:
                   deviceCode: { type: string }
-                  userCode: { type: string }
+                  userCode:
+                    {
+                      type: string,
+                      description: absent when the provider needs no typed code (oidc),
+                    }
                   verificationUri: { type: string }
                   interval: { type: integer }
                   expiresIn: { type: integer }
@@ -567,6 +575,34 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      summary: The OIDC provider's browser redirect target
+      description: |
+        Mounted for every deployment, but answers only when SH_IDENTITY_PROVIDER=oidc: the control
+        plane exchanges the authorization code server-side (it alone holds the client secret),
+        verifies the id_token against the provider's JWKS, and settles the login the `state` names.
+        The next /v1/auth/device/token poll picks it up. Answered as plain text -- the caller is a
+        person in a browser.
+      security: []
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: error, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: the sign-in was received; return to the terminal
+          content:
+            text/plain: { schema: { type: string } }
+        '400':
+          description: no oidc provider configured, or the callback is missing its parameters
+          content:
+            text/plain: { schema: { type: string } }
+        '401':
+          description: unknown or expired sign-in state
+          content:
+            text/plain: { schema: { type: string } }
   /v1/auth/token:
     post:
       operationId: refreshAuth

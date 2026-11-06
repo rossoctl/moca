@@ -37,7 +37,7 @@ describe('deviceLogin', () => {
       pollDeviceAuth: async () => (polls.push(c.now()), ++n < 3 ? 'pending' : login),
     });
     const shown: string[] = [];
-    const result = await deviceLogin({ cp, ...c }, (s) => shown.push(s.userCode));
+    const result = await deviceLogin({ cp, ...c }, (s) => shown.push(s.userCode ?? ''));
     expect(result).toEqual(login);
     expect(shown).toEqual(['ABCD-1234']);
     expect(polls).toEqual([5000, 10000, 15000]);
@@ -74,7 +74,7 @@ describe('deviceLogin', () => {
     });
     const shown: Array<[string, number]> = [];
     const result = await deviceLogin({ cp, ...c }, (s, attempt) =>
-      shown.push([s.userCode, attempt]),
+      shown.push([s.userCode ?? '', attempt]),
     );
     expect(result).toEqual(login);
     expect(issued).toEqual(['d1', 'd2']);
@@ -89,9 +89,9 @@ describe('deviceLogin', () => {
     const c = clock();
     const { cp, issued } = issuing(12, async () => 'pending');
     const shown: string[] = [];
-    await expect(deviceLogin({ cp, ...c }, (s) => shown.push(s.userCode))).rejects.toBeInstanceOf(
-      LoginExpiredError,
-    );
+    await expect(
+      deviceLogin({ cp, ...c }, (s) => shown.push(s.userCode ?? '')),
+    ).rejects.toBeInstanceOf(LoginExpiredError);
     expect(issued).toEqual(['d1', 'd2']);
     expect(shown).toEqual(['U1', 'U2']);
   });

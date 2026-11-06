@@ -109,6 +109,7 @@ export {
   type SessionRecord,
 } from './ownership.js';
 export {
+  GITHUB_SUBJECT_RE,
   GithubOAuthProvider,
   TestUserProvider,
   testSubject,
@@ -118,6 +119,7 @@ export {
   TEST_SUBJECT_RE,
   TEST_USERS_MAX,
   TEST_USER_SECRET_MIN_CHARS,
+  SUBJECT_RE,
   adminSubjectsFromEnv,
   rolesFor,
   type DeviceStart,
@@ -125,6 +127,13 @@ export {
   type IdentityProvider,
   type Principal,
 } from './identity.js';
+export {
+  MemoryPendingAuthStore,
+  OIDC_SUBJECT_PREFIX,
+  OidcProvider,
+  type PendingAuthStore,
+  type PendingOidcAuth,
+} from './oidc.js';
 export {
   HANDLERS,
   assertOwner,

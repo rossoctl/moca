@@ -116,10 +116,21 @@ export const ROUTES: readonly RouteSpec[] = [
     // off -- not merely 404'd by the handler after the body has already been validated.
     feature: 'testUsers',
     // HARNESS, not BOTH: main.ts refuses to boot test users on the sandbox profile (it admits only
-    // enrolled github: subjects, SBX0 §4.2), so the route is not mounted there at all. One fewer
+    // enrolled subjects, SBX0 §4.2), so the route is not mounted there at all. One fewer
     // place for the invariant to be broken later.
     profiles: HARNESS,
     operationId: 'testUserToken',
+  },
+  // The OIDC provider's browser redirect target (oidc.ts): the URL registered with the provider,
+  // typically this control plane's own Route. Unauthenticated by design, like the device-flow
+  // routes -- the `state` in the query is the capability, and it is single-use and TTL-bound.
+  {
+    method: 'GET',
+    path: '/v1/auth/oidc/callback',
+    auth: 'none',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'oidcCallback',
   },
   // B14: the refresh token is the credential on the first two, so they take no API token.
   {

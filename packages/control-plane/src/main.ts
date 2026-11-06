@@ -19,7 +19,9 @@ import {
   TestUserProvider,
   testUsersFromEnv,
   testUserSecretFromEnv,
+  type IdentityProvider,
 } from './identity.js';
+import { OidcProvider } from './oidc.js';
 import { K8sSecretStore } from './k8s-secret-store.js';
 import { defaultRunKubectl } from './kubectl.js';
 import { OwnershipIndex, type CpRedisLike } from './ownership.js';
@@ -111,6 +113,38 @@ function turnRecordTtlFromEnv(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * `SH_IDENTITY_PROVIDER`: `github` (the default, unchanged behavior) or `oidc`. A near-miss
+ * refuses to boot, as routeProfileFromEnv refuses one, rather than silently serving GitHub.
+ * The oidc client secret arrives through withCredentials (CONTROL_PLANE_SECRETS), so it is a
+ * systemd credential or a K8s secret, never a committed value.
+ */
+function identityProviderFromEnv(env: NodeJS.ProcessEnv): IdentityProvider {
+  const adminSubjects = adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS);
+  const kind = env.SH_IDENTITY_PROVIDER || 'github';
+  if (kind === 'github') {
+    return new GithubOAuthProvider({
+      clientId: required(env, 'SH_GITHUB_CLIENT_ID'),
+      adminSubjects,
+    });
+  }
+  if (kind !== 'oidc') {
+    throw new Error(`SH_IDENTITY_PROVIDER must be exactly 'github' or 'oidc'`);
+  }
+  const redirectUri = urlEnv(env, 'SH_OIDC_REDIRECT_URI');
+  if (!redirectUri) throw new Error('SH_OIDC_REDIRECT_URI is required for the oidc provider');
+  return new OidcProvider({
+    issuer: required(env, 'SH_OIDC_ISSUER'),
+    clientId: required(env, 'SH_OIDC_CLIENT_ID'),
+    clientSecret: required(env, 'SH_OIDC_CLIENT_SECRET'),
+    // The callback route's public URL, as registered with the provider; a mismatch is the one
+    // misconfiguration every OIDC deployment hits first, so it is caught at boot, not mid-login.
+    redirectUri,
+    adminSubjects,
+    ...(env.SH_OIDC_SCOPE ? { scope: env.SH_OIDC_SCOPE } : {}),
+  });
+}
+
+/**
  * `SH_MODEL_CATALOG_HOSTS`: the hosts the model catalog may contact besides api.anthropic.com and
  * SH_DEFAULT_INFERENCE_ENDPOINT's (per-session model spec §4.1). Comma-separated, case-insensitive,
  * exact hostnames: a URL, a port or a path is refused at BOOT rather than silently never matching.
@@ -148,7 +182,7 @@ export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
  */
 // prettier-ignore
-export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_TEST_USER_SECRET'] as const;
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET'] as const;
 
 /** The API, session and refresh token lifetimes, shared by both route profiles. */
 function tokenTtlsFromEnv(
@@ -507,10 +541,9 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     ...(sandboxProfile
       ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
       : {}),
-    identity: new GithubOAuthProvider({
-      clientId: env.SH_GITHUB_CLIENT_ID!,
-      adminSubjects: adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),
-    }),
+    // github or oidc, per SH_IDENTITY_PROVIDER (identityProviderFromEnv above); the oidc
+    // provider additionally carries the browser-callback half the seam defines.
+    identity: identityProviderFromEnv(env),
     // ADR-0045: constructed ONLY when SH_TEST_USERS > 0. Its absence is what makes the
     // test-login route 404, so an ordinary deployment gains no new code path at all.
     ...testUserProvider(env, config),

@@ -10,7 +10,7 @@ export class LoginCancelledError extends Error {
 
 export class LoginExpiredError extends Error {
   constructor() {
-    super('the login code expired before it was approved — start again');
+    super('the sign-in window expired before the login completed — start again');
     this.name = 'LoginExpiredError';
   }
 }

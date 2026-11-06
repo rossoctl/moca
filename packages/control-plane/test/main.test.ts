@@ -422,6 +422,7 @@ describe('the control plane`s secrets as systemd credentials (deploy/vm)', () =>
       'SH_CREDENTIAL_KEK',
       'SH_EXCHANGE_TOKEN',
       'SH_JANITOR_TOKEN',
+      'SH_OIDC_CLIENT_SECRET',
       'SH_OPERATOR_INFERENCE_TOKEN',
       'SH_SESSION_TOKEN_PRIVATE_KEY',
       // ADR-0045: a password on a login path, so it travels as a credential FILE like the rest --

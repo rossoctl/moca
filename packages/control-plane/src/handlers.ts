@@ -21,7 +21,7 @@ import {
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { type AuditLog, defaultAuditLog } from './audit-log.js';
-import { CpError } from './errors.js';
+import { CpError, statusFor } from './errors.js';
 import {
   asRecord,
   auditBestEffort,
@@ -582,6 +582,30 @@ export const HANDLERS: Record<string, Handler> = {
       nowMs: deps.now(),
     });
     return { status: 200, body: loginBody(deps, principal, issued) };
+  },
+
+  // The OIDC callback is the one route answered by a BROWSER, not by mocactl: plain text, so the
+  // person landing here reads a sentence instead of a JSON error body. The refusal for a provider
+  // that holds its own flow (GitHub) names the setting to change, as the device-flow refusals do.
+  oidcCallback: async (ctx, deps) => {
+    if (!deps.identity.handleCallback) {
+      return {
+        status: 400,
+        body: 'this control plane has no oidc identity provider: set SH_IDENTITY_PROVIDER=oidc',
+      };
+    }
+    try {
+      await deps.identity.handleCallback({
+        code: ctx.query.get('code') ?? undefined,
+        state: ctx.query.get('state') ?? undefined,
+        error: ctx.query.get('error') ?? undefined,
+      });
+      return { status: 200, body: 'Sign-in received — return to your terminal.' };
+    } catch (err) {
+      const status = err instanceof CpError ? statusFor(err.code) : 500;
+      const message = err instanceof CpError && err.message ? err.message : 'sign-in failed';
+      return { status, body: message };
+    }
   },
 
   refreshAuth: async (ctx, deps) => {

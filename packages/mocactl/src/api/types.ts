@@ -18,7 +18,8 @@ export interface ModelList {
 
 export interface DeviceStart {
   deviceCode: string;
-  userCode: string;
+  /** Absent when the provider needs no typed code (the oidc flow: the browser is the approval). */
+  userCode?: string;
   verificationUri: string;
   interval: number;
   expiresIn: number;
