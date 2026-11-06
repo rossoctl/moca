@@ -57,6 +57,20 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   subject document, and mints an inference grant and a sandbox grant (MI1 §6.5). "Turn start" for
   `turn_exp` is **dequeue**, not enqueue — a leaf that waited an hour must still get its full
   `MOCA_TURN_MAX_S`.
+- **A per-turn `turn_exp` that can only tighten, clamped at mint.**
+  `turn_exp = dequeue + min(caps.wallClock ?? MOCA_TURN_MAX_S, MOCA_TURN_MAX_S)`. #386 item 5 asks
+  for a policy allowing "hour-long detached turns within a bound"; today's bound is 1800 s, so an
+  hour is an **operator** decision — raising `MOCA_TURN_MAX_S` — not a caller's. A caller asking for
+  more is clamped rather than refused, because the ceiling is a deployment property and a refusal
+  would make it a negotiation. The clamp lives in the control plane at mint, never in a value the
+  worker or the caller supplies, since §3 assumes a misbehaving client and an unclamped request
+  would hand that client control of its own credential's lifetime.
+- **The turn record outlives its result.** Its TTL is `LEAF_RESULT_TTL_SECONDS` plus a margin, set
+  when the turn goes terminal, not at creation; a non-terminal record carries no TTL and the
+  reaper's `lost` transition is what guarantees every record eventually becomes terminal. Deriving
+  the record's TTL from the result's keeps one knob: raising retention moves both. The inverse
+  ordering would reintroduce the queued/never-submitted conflation this record rejects elsewhere —
+  a succeeded turn answering `404` because its record expired first.
 - **On drain, abandon without acking.** The loop stops claiming, the in-flight leaf is left pending
   for `XAUTOCLAIM` to reclaim, and the slot is released so `awaitIdle` exits early. Delivery is
   at-least-once and the idempotency key makes redelivery safe.
@@ -193,7 +207,11 @@ never-submitted and reaped-as-lost.
   submits a long leaf by mistake waits for its cap to expire.
 - Follow-up owed: `turn_exp` is specified in MI1 §6.1 but **implemented nowhere in TypeScript** —
   expiry today is always `exp = iat + ttlSeconds`. #388 is larger than it reads, and this is where the
-  M1/M2 split comes from. Also owed: cancelling a running leaf; result retention beyond 24 h and
+  M1/M2 split comes from, and the clamp above is where the policy lands when it is built. One
+  question inside it stays open and belongs to #388: whether refresh past `turn_exp` is refused
+  outright (MI1 §6.2's current rule, and what M2 should ship) or whether a provably-still-running
+  leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
+  already proves liveness. Also owed: cancelling a running leaf; result retention beyond 24 h and
   richer artifacts; per-class concurrency caps, for which `async_claim_denied_full` against
   interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working
   fan-out exists to measure against; the documentation updates in #690 (ADR-0041's "Still owed" note,

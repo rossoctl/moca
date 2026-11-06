@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.4 — November 5, 2026
+Version: 1.5 — November 5, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -152,8 +152,9 @@ rather than incidental:
   What `single` changes is whose credential runs the leaf, not whether a caller must present one.
 - **`LEAF_RESULT_TTL_SECONDS`.** Unchanged, and shared. The result store is keyed by
   `leafSessionId` (§5.5) and knows nothing about which route submitted the work, so the 24 h
-  retention applies identically to async turns. There is no second store and no second TTL to
-  reconcile; §10 keeps the value as-is and §12 owns the longer-retention question.
+  retention applies identically to async turns. There is no second _result_ store to reconcile; §10
+  keeps the value as-is and §12 owns the longer-retention question. The turn record has a TTL of its
+  own, derived from this one rather than tuned separately (§5.1).
 - **The rule refusing async workload runs.** This one is a real behavioural carry-over, and the
   pre-removal code shows why it was ordered the way it was: `if (parsed.workloadId !== undefined)
 return rejectWorkloadRun(res)` sat _before_ the auth gate, deliberately, "so every asynchronous
@@ -309,6 +310,26 @@ Stored like `SessionRecord`: Redis hash plus per-owner zset, via `OwnershipIndex
 flat subject string on the record, following the existing convention rather than inventing a scope
 object (mind #361).
 
+**The record's TTL, which item 2 asks for and which is not the result TTL.** Two different lifetimes
+get confused here, so both are named:
+
+- The **result** lives in `leaf-result-store` under `LEAF_RESULT_TTL_SECONDS` (86400). Unchanged
+  (§5.5).
+- The **turn record** is the thing §4.4 reads `state` from, so it must outlive the result or a
+  caller polling a finished turn would get `404` — "never submitted" — for a turn that in fact
+  succeeded. That is the same conflation §4.4 rejects in `/runs/status`, reintroduced by a TTL
+  mismatch instead of by an inference.
+
+So the turn record's TTL is **`LEAF_RESULT_TTL_SECONDS` plus a margin**, set when the turn reaches a
+terminal state, not at creation — a queued turn that waits is not a turn whose record should expire
+underneath it. A non-terminal record carries no TTL at all; the reaper's `lost` transition (§6.2) is
+what guarantees every record eventually becomes terminal and therefore eventually expires. That
+ordering is the invariant worth testing: **a record must never expire while its turn is live, and
+must never outlive its own result by more than the margin.**
+
+§12 notes that if #390 raises result retention to 7 days, this TTL follows it rather than being
+re-decided — one knob, with the record's margin derived from it.
+
 ### 5.2 Where the consumer runs
 
 **Decision: a drain loop inside the turn worker, sharing the existing `TurnCounter`.**
@@ -392,6 +413,35 @@ is where the M1/M2 split in §9 comes from.
 
 For an async leaf, "turn start" is **dequeue**, not enqueue. A leaf that waits an hour in the queue
 must still get its full `MOCA_TURN_MAX_S`, and a grant minted at enqueue would already be expired.
+
+**The long-turn policy itself, which item 5 asks for in as many words: "a per-turn `turn_exp` policy
+that allows hour-long detached turns within a bound."** Today's numbers do not allow one.
+`MOCA_TURN_MAX_S` defaults to **1800 s — thirty minutes** (MI1 §14's table), so an hour-long turn is
+over the cap by a factor of two. The policy:
+
+- **`MOCA_TURN_MAX_S` stays the deployment-wide ceiling and keeps its 1800 s default.** It is the
+  bound the request asks the policy to stay within, and MI1's table notes it "should match the
+  worker's own turn deadline" — raising the default would silently desynchronise it from
+  `MOCA_TURN_MAX_S`'s sibling deadlines and change every interactive turn too.
+- **A turn may request less, never more.** `caps.wallClock` (§4.3) is already on the record, so
+  `turn_exp = dequeue + min(caps.wallClock ?? MOCA_TURN_MAX_S, MOCA_TURN_MAX_S)`. The `min` is the
+  whole policy: a per-turn value that can only tighten. A caller asking for more is not refused —
+  the request is clamped, because refusing would make a client's cap request a deployment-coupling
+  concern.
+- **An hour-long turn is therefore an operator decision, not a caller's.** Raising
+  `MOCA_TURN_MAX_S` to 3600 is the supported way to get one, and it is a deliberate, auditable
+  change to a deployment-wide ceiling rather than something any client can ask for. This is a
+  narrower answer than item 5's phrasing implies, and it is the deliberate one: letting a caller
+  name its own expiry above the ceiling hands an untrusted client (§3) control of how long its own
+  credential lives.
+- **The clamp is enforced at mint, in the control plane** — never from a value the worker or the
+  caller supplies, for the same reason §6.4 enforces caps in the worker rather than trusting the
+  client.
+
+That leaves one genuinely open question, and it belongs to #388 rather than here: whether refresh
+past `turn_exp` should be refused outright (MI1 §6.2's current rule) or whether a leaf that is
+provably still running may extend once. Refusing is the safe default and what M2 should ship; the
+heartbeat in §6.2 is what a future extension would key off, since it already proves liveness.
 
 ### 5.5 Execution and results
 
@@ -605,6 +655,11 @@ comment warns about. The restored `work-queue` arrives with 319 lines of its own
   injects `setHeartbeat`/`clearHeartbeat` for exactly this, so the test needs no real 90 s wait. This
   is the one async property whose absence is invisible until a leaf runs longer than 90 s in
   production, which is most real leaves.
+- Record TTL ordering (§5.1): a queued record carries no TTL; a terminal one expires **after** its
+  result, not before. The failure this catches is a caller polling a succeeded turn and reading
+  `404` because the record went first.
+- The `turn_exp` clamp (§5.4), at M2: a turn requesting `caps.wallClock` below `MOCA_TURN_MAX_S` gets
+  what it asked for; one requesting above it gets the ceiling, not a refusal and not the request.
 - Parity carry-overs (§10): each of `prompt`, `converge` and `solve` drains; an async turn naming a
   `workloadId` is refused `501` at `POST` with nothing enqueued; a `failed/saturated` leaf is not
   acked and is redelivered, which is `classifyOutcome`'s contract exercised for the first time since
@@ -756,7 +811,9 @@ it adds is the schedule. Its design should cite this document for both.
   it — new control-plane-to-worker machinery, since interactive cancel (ADR-0040) rides the turn's own
   connection and async has none. The §4.3 caps bound how long a leaf runs meanwhile, so this is a
   latency improvement rather than a missing containment property.
-- Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.
+- Result retention beyond 24 h, and richer artifacts than the current patch/text/summary. The turn
+  record's TTL is derived from `LEAF_RESULT_TTL_SECONDS` (§5.1), so raising retention moves one knob
+  and the record follows — not two values to keep in step.
 - Per-class concurrency caps (archetypes §2) — §10 drops them for now; a global slot cap is what M1
   delivers. §7's `async_claim_denied_full` against interactive `429`s is the measurement that would
   justify adding them.
