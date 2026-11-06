@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.2 — November 5, 2026
+Version: 1.3 — November 5, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -398,6 +398,29 @@ Retention beyond 24 h and richer artifacts are out of scope here; §12 lists the
 The caller polls the turn record for state, and the result store for the artifact. Whether N-way
 collection needs `/v1/batches` is #537, decided once this is measurable.
 
+**What this retires: #380's interim contract.** A synchronous `/runs` leaf keeps running after its
+client disconnects, and #380 pinned that accident as a tested interim contract explicitly "until
+async leaf turns on P6 (#389) replace it" — #389's scope item 5 is "retire #380's interim contract."
+This design is that replacement, so the retirement has a condition and it is **not** the moment M1
+merges:
+
+- The contract is retired once a caller who disconnects has a supported alternative, which is
+  async submission plus the §4.4 status read. That is M1 for `MOCA_TENANCY=single` and M2 for
+  `multi`, so the sync-disconnect behaviour must survive until M2 lands rather than being removed
+  with the first drain.
+- Retiring it means replacing the behaviour's _documentation_, not changing the behaviour. ADR-0028's
+  amendment and the `/runs` entry in `docs/api/openapi.yaml` currently say async turns supersede it;
+  those pointers become ADR-0047 and §4.1. Whether sync `/runs` then _starts_ aborting on disconnect
+  is a separate decision this design does not make — it would be a third live-path behaviour change,
+  and §5.3 already carries one.
+- The §5.3 admission fix is the part that touches sync `/runs` now, and it is orthogonal: counting a
+  run in admission says nothing about whether a disconnect cancels it.
+
+#380 is open and unimplemented, so there may be nothing to retire. If it ships before M2, the
+retirement is a docs change against ADR-0028 and the OpenAPI entry; if it does not, the interim
+contract is simply never pinned and this design supersedes the need for it. Either way the obligation
+belongs to #389, and §12 records it.
+
 ---
 
 ## 6. Failure, safety and the misbehaving client
@@ -416,7 +439,31 @@ A claimed entry stays in the consumer group's PEL. `XAUTOCLAIM` reclaims entries
 after their owner dies; past `maxAttempts`, an entry dead-letters to a `lost` turn record plus a
 failed result, so a caller polling always reaches a terminal state rather than waiting forever.
 
-The restored queue brings this machinery with it (§10).
+The restored queue brings this machinery with it (§10). What it does **not** bring is a caller, and
+that is a real gap rather than a detail: the removed drainer ran all of it from process startup,
+which worked only because a KEDA pod was born per batch of work.
+
+**Consumer identity.** The drainer used `process.env.HOSTNAME ?? 'leaf-job-${pid}'` — one pod, one
+consumer, gone when the pod exited. A P6 worker is long-lived and restarted in place by the
+supervisor, so it needs an identity that is stable across a claim but distinguishable per process.
+`SH_WORKER_ID` is already injected into every worker's env (`supervisor/src/main.ts:60`) and is the
+natural basis: `moca-w{SH_WORKER_ID}`. It must be **stable across a restart**, because that is what
+lets a restarted worker find its own abandoned PEL entries rather than waiting out `minIdleMs` for
+another worker to reclaim them.
+
+**Who reaps, and when.** The drainer did a startup reap plus `gcIdleConsumers`, timed to let KEDA
+scale to zero. Neither trigger survives: workers do not start per batch and nothing scales to zero.
+So the reap becomes **periodic and armed by every worker**, which is exactly the shape
+`run-lease.ts`'s `reapOrphanedRuns` already uses for sandbox run leases — armed by every worker,
+sweeping on an interval, with claim-based mutual exclusion "so the N workers that each arm a reaper
+cannot double-finalize one run" (`run-lease.ts:189`). Async reclaim reuses that pattern rather than
+inventing a second one: `reapDeadLetters` and `gcIdleConsumers` on a timer, idempotent, safe to run
+concurrently on every worker. `XAUTOCLAIM` is already mutually exclusive by construction.
+
+The three constants come across unchanged, and are now worth naming because nothing else in P6
+implies them: `minIdleMs` 90 s, `maxAttempts` 3, consumer GC idle 300 s. `minIdleMs` must stay well
+above the drain window (§6.3) so a drained-and-restarted worker reclaims its own entries before a
+peer does.
 
 ### 6.3 Shutdown: the one place async differs sharply from interactive
 
@@ -513,6 +560,8 @@ comment warns about. The restored `work-queue` arrives with 319 lines of its own
 - Dead-letter: an entry failing past `maxAttempts` reaches `lost` **and** a failed result, so a
   polling caller always terminates.
 - Cancel: a `queued` turn flips to `cancelled` and is never claimed; a `running` one answers `409`.
+- Reaper concurrency (§6.2): two workers arming the periodic reap over one stale entry finalize it
+  once, not twice — the property `run-lease.ts:189` already states for sandbox leases.
 - Parity carry-overs (§10): each of `prompt`, `converge` and `solve` drains; an async turn naming a
   `workloadId` is refused `501` at `POST` with nothing enqueued; a `failed/saturated` leaf is not
   acked and is redelivered, which is `classifyOutcome`'s contract exercised for the first time since
@@ -663,9 +712,14 @@ it adds is the schedule. Its design should cite this document for both.
 - `/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
   `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
+- Retiring #380's interim sync-disconnect contract (§5.5), which belongs to #389's scope item 5. The
+  condition is M2, not M1, and it is a docs change rather than a behaviour change.
 - Updating children #387–#390 and #391 to match this design, per #386's acceptance. The decisions
-  they need are §4.1/§4.4/§4.5 (#387), §5.4's `turn_exp` finding (#388), §6.3 and §8 (#389), §9's
-  milestones (#390), and §10's parity verdicts (#689).
+  they need are §4.1/§4.4/§4.5 (#387), §5.4's `turn_exp` finding (#388), §5.5/§6.2/§6.3 and §8
+  (#389), §9's milestones (#390), and §10's parity verdicts (#689).
+- **Not a design gap, but the epic's acceptance:** #686 closes on a pipeline running end to end on
+  `deploy/k8s` **and** on `deploy/vm` or compose, which is M1 plus M3. A reviewed spec and ADR close
+  #386, not #686.
 
 **Done, not owed:** the MU1 and MI1 wording amendments #386's acceptance asks for are applied, as
 dated amendment notes at the head of each spec in that repo's established convention (MI1 §14), and

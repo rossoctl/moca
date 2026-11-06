@@ -72,6 +72,14 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   which does not exist for async — interactive cancel (ADR-0040) rides the turn's own connection.
 - **Revive `packages/work-queue` from `38aa2146`** behind its existing `WorkQueue` interface, with
   the KEDA-era parity audit (#689) recorded below rather than assumed.
+- **Reclaim is periodic and armed by every worker, keyed on `SH_WORKER_ID`.** The removed drainer
+  reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger
+  exists when workers are long-lived and nothing scales to zero. `reapDeadLetters` and
+  `gcIdleConsumers` move onto a timer every worker arms — the shape `run-lease.ts`'s
+  `reapOrphanedRuns` already uses for sandbox leases, with claim-based mutual exclusion so N reapers
+  cannot double-finalize one entry. The consumer id is `moca-w{SH_WORKER_ID}` and must be stable
+  across a restart, so a restarted worker reclaims its own abandoned entries instead of waiting out
+  `minIdleMs`.
 - **Delivery in three milestones.** M1 is a working drain on `deploy/vm`/compose, gated to
   `MOCA_TENANCY=single`. M2 implements `turn_exp`, completes grant-at-dequeue, and lifts the gate.
   M3 is `deploy/k8s` manifests and a queued-leaf smoke test.
