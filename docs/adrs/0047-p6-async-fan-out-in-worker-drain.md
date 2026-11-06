@@ -70,8 +70,13 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   `cancelled` and the drain loop skips it at claim; a `running` leaf runs to completion and the call
   answers `409`. Interrupting a running leaf needs a cancel signal addressed to one specific worker,
   which does not exist for async — interactive cancel (ADR-0040) rides the turn's own connection.
-- **Revive `packages/work-queue` from `38aa2146`** behind its existing `WorkQueue` interface, with
-  the KEDA-era parity audit (#689) recorded below rather than assumed.
+- **Revive `packages/work-queue` _and_ `harness/src/leaf-job-runner.ts` from `38aa2146`** behind the
+  existing `WorkQueue` interface, with the KEDA-era parity audit (#689) recorded below rather than
+  assumed. The runner is not optional detail: its `processOne` holds the `touch` heartbeat that keeps
+  a long leaf's claim alive. `minIdleMs` is 90 s against a 1800 s `MOCA_TURN_MAX_S`, so without it a
+  leaf running past 90 s is reclaimed **while still running** and two workers execute one turn —
+  idempotent in its result, but double-spent in budget and sandboxes. Only the runner's
+  exit-between-entries outcome vocabulary needs rework for a long-lived loop.
 - **Reclaim is periodic and armed by every worker, keyed on `SH_WORKER_ID`.** The removed drainer
   reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger
   exists when workers are long-lived and nothing scales to zero. `reapDeadLetters` and

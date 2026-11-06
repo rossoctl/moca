@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.3 — November 5, 2026
+Version: 1.4 — November 5, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -296,6 +296,15 @@ still `queued` (§4.5); it is never reached from `running`. `lost` is the termin
 when attempts are exhausted (§6.2) — distinct from `failed`, because "we never found out" is
 operationally different from "it ran and failed."
 
+**`running` needs no separate heartbeat, and #390 should know why.** #390 scopes "a `running` state
+with a heartbeat, plus stale detection (`lost`)" as new work. For async turns the liveness signal
+already exists one layer down: the claim heartbeat in §6.2 keeps the queue entry alive, and its
+absence is what promotes a turn to `lost` through the reaper. Adding a second heartbeat on the turn
+record would mean two liveness signals that can disagree — a record that says `running` while the
+entry has been reclaimed, or the reverse. So the record's `state` is written at the queue's
+transitions, and `lost` has exactly one author: the reaper. #390's heartbeat scope applies to
+turns that are **not** queue-backed, if any exist.
+
 Stored like `SessionRecord`: Redis hash plus per-owner zset, via `OwnershipIndex`. Owner scoping is a
 flat subject string on the record, following the existing convention rather than inventing a scope
 object (mind #361).
@@ -465,6 +474,31 @@ implies them: `minIdleMs` 90 s, `maxAttempts` 3, consumer GC idle 300 s. `minIdl
 above the drain window (§6.3) so a drained-and-restarted worker reclaims its own entries before a
 peer does.
 
+**The claim heartbeat, which is not optional.** `minIdleMs` is 90 s and `MOCA_TURN_MAX_S` is 1800 s,
+so a leaf running longer than 90 s goes idle in the PEL **while it is still running** and a peer's
+`XAUTOCLAIM` reclaims it. Two workers then run the same leaf concurrently. Idempotency makes the
+_result_ survivable (§6.1), but the duplicated work is not: it spends the owner's budget twice and
+holds two sandboxes for one turn.
+
+The removed runner solved this and the solution must come across: it armed
+`setInterval(() => queue.touch(entryId, consumerId), 30_000)` for the life of the leaf and cleared it
+in a `finally` (`leaf-job-runner.ts` at `38aa2146`, lines 70-77). So:
+
+- Every claimed entry is touched on a **30 s** heartbeat — a third of `minIdleMs`, so two missed
+  beats do not trigger a reclaim — armed at claim and cleared in a `finally` on every exit path,
+  alongside the `counter.start()` end function §5.3 describes.
+- Stopping the heartbeat is exactly what makes a crashed or drained worker's entry reclaimable, so
+  §6.3's "abandon without acking" works _because_ the interval dies with the process. The heartbeat
+  is the liveness signal; its absence is the death signal the reaper trusts. This mirrors
+  `run-lease.ts`'s marker heartbeat, whose comment makes the same point: absence is "the only
+  evidence of death the reaper trusts."
+- **`harness/src/leaf-job-runner.ts` was removed by #691**, so `processOne` — the claim, the
+  heartbeat, the `maxAttempts` dead-letter branch, the `classifyOutcome` dispatch and the result
+  write — has to be restored along with `packages/work-queue` (§10). §10's "restore the queue"
+  understated the surface: the runner is the second half, and it is where this heartbeat lives. Its
+  shape needs one change for P6 — it returns `'retry'`/`'idle'` outcomes designed for a process that
+  exits between entries, and the drain loop keeps running instead.
+
 ### 6.3 Shutdown: the one place async differs sharply from interactive
 
 The numbers do not leave a choice. `MOCA_TURN_MAX_S` is 1800 s. The supervisor's
@@ -477,6 +511,10 @@ So on `drain`:
 - An in-flight leaf is **abandoned without an ack**. It stays pending, is reclaimed by another
   worker, and the idempotency key makes that safe.
 - The slot is released so `awaitIdle` can exit early rather than burning the full 20 s.
+- The claim heartbeat (§6.2) stops with the process, which is what makes the abandoned entry
+  reclaimable at all. There is nothing extra to do here, but the dependency is worth stating: if a
+  future change moved the heartbeat anywhere outside the leaf's own lifetime, abandonment would
+  silently stop working and the entry would look alive forever.
 
 This is deliberately different from an interactive detached turn, which `armDetachedDrain` aborts
 with `restarting` (turn-reattach spec §5.5) because a client is waiting on a stream. Nobody is
@@ -562,6 +600,11 @@ comment warns about. The restored `work-queue` arrives with 319 lines of its own
 - Cancel: a `queued` turn flips to `cancelled` and is never claimed; a `running` one answers `409`.
 - Reaper concurrency (§6.2): two workers arming the periodic reap over one stale entry finalize it
   once, not twice — the property `run-lease.ts:189` already states for sandbox leases.
+- **The heartbeat, with time controlled** (§6.2): a leaf running past `minIdleMs` is **not**
+  reclaimed while it is alive, and becomes reclaimable once the heartbeat stops. `processOne` already
+  injects `setHeartbeat`/`clearHeartbeat` for exactly this, so the test needs no real 90 s wait. This
+  is the one async property whose absence is invisible until a leaf runs longer than 90 s in
+  production, which is most real leaves.
 - Parity carry-overs (§10): each of `prompt`, `converge` and `solve` drains; an async turn naming a
   `workloadId` is refused `501` at `POST` with nothing enqueued; a `failed/saturated` leaf is not
   acked and is redelivered, which is `classifyOutcome`'s contract exercised for the first time since
@@ -636,13 +679,21 @@ not currently pin down.
 
 ## 10. The queue: revive, with the parity audit on the record
 
-**Decision: restore `packages/work-queue` from `38aa2146` behind its existing `WorkQueue` interface.**
+**Decision: restore `packages/work-queue` _and_ `harness/src/leaf-job-runner.ts` from `38aa2146`,
+behind the existing `WorkQueue` interface.**
 
-It is 261 lines plus 319 lines of tests across five files, and nothing in it is Knative-specific:
-`ensureGroup`/`enqueue`/`claim`/`ack`/`touch`/`pending`/`gcIdleConsumers`/`reapDeadLetters` is plain
-Redis Streams behind an interface, with `RedisWorkQueue` as one implementation. Rewriting it would
-re-derive the same calls with fresh bugs; the interface keeps a different backing store available
-later. Its removal settled nothing either way, as #686 notes.
+The queue is 261 lines plus 319 lines of tests across five files, and nothing in it is
+Knative-specific: `ensureGroup`/`enqueue`/`claim`/`ack`/`touch`/`pending`/`gcIdleConsumers`/`reapDeadLetters`
+is plain Redis Streams behind an interface, with `RedisWorkQueue` as one implementation. Rewriting it
+would re-derive the same calls with fresh bugs; the interface keeps a different backing store
+available later. Its removal settled nothing either way, as #686 notes.
+
+`leaf-job-runner.ts`'s `processOne` is the second half and was removed by the same PR. It holds the
+per-entry sequence — claim, the `maxAttempts` dead-letter branch, the `touch` heartbeat that keeps a
+long leaf's claim alive (§6.2), the `classifyOutcome` dispatch, the result write and the ack. Only
+the KEDA-shaped outcome vocabulary needs rework: `'retry'` and `'idle'` were signals for a process
+that exits between entries, and a long-lived drain loop continues instead. Everything else is the
+behaviour this design depends on, and rewriting it is how the heartbeat gets forgotten.
 
 What it inherits from the KEDA era must be audited, not assumed — this is #689, and the ADR records
 the verdict on each item. The table covers every property on #689's "At minimum" list, so the issue
@@ -716,7 +767,7 @@ it adds is the schedule. Its design should cite this document for both.
   condition is M2, not M1, and it is a docs change rather than a behaviour change.
 - Updating children #387–#390 and #391 to match this design, per #386's acceptance. The decisions
   they need are §4.1/§4.4/§4.5 (#387), §5.4's `turn_exp` finding (#388), §5.5/§6.2/§6.3 and §8
-  (#389), §9's milestones (#390), and §10's parity verdicts (#689).
+  (#389), §5.1's heartbeat note and §9's milestones (#390), and §10's parity verdicts (#689).
 - **Not a design gap, but the epic's acceptance:** #686 closes on a pipeline running end to end on
   `deploy/k8s` **and** on `deploy/vm` or compose, which is M1 plus M3. A reviewed spec and ADR close
   #386, not #686.
