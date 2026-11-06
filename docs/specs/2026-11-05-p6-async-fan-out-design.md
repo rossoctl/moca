@@ -1,6 +1,6 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.5 — November 5, 2026
+Version: 1.6 — November 6, 2026
 Status: Proposed
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
@@ -165,10 +165,35 @@ return rejectWorkloadRun(res)` sat _before_ the auth gate, deliberately, "so eve
   caller learns at `POST` time rather than by polling a turn that will never run. Enqueueing it to
   fail at dequeue would convert a 501 into a dead-letter.
 
-### 4.3 Caps and idempotency
+### 4.3 Caps, the fan-out quota, and idempotency
 
 Every async turn carries caps resolved at submission and stored on the turn record: tokens, cost and
 wall-clock. §6 covers enforcement.
+
+**The per-owner queued-turn quota, which §6.4 leans on and which has to be more than a table row.**
+It is the only containment for unbounded fan-out from a submitter §3 assumes is misbehaving, so it is
+specified here rather than left to the implementation:
+
+- **`MOCA_ASYNC_QUEUED_PER_OWNER`, default 50.** It joins the control plane's existing per-owner
+  limits and follows their naming and shape — `MOCA_CONTEXT_MAX_WORKLOADS_PER_OWNER` (default 5) is
+  the precedent. The default is a fan-out breadth a legitimate orchestrator stays well inside while
+  still bounding a loop that submits without checking.
+- **It counts non-terminal turns** — `queued` plus `running` — not lifetime submissions. The thing
+  being bounded is concurrent claim on the deployment, and a turn that finished released its claim.
+- **Enforced at submission, in the control plane, before the enqueue**, answering
+  `429 async_quota_exhausted` with the owner's current count. The record is created and the entry
+  enqueued only after the check passes, so a refusal leaves nothing behind: the measurement §8 asserts
+  is the queue depth, not the error body.
+- **It reads the per-owner zset §5.1 already stores the record in.** `OwnershipIndex`'s owner zset
+  is how `listByOwner` avoids an all-tenant keyspace scan (`ownership.ts:209-211`), and a non-terminal
+  count is a bounded read of that same key — no second index, and no counter that can drift from the
+  records it describes.
+- **Distinct from `SH_TURNS_PER_SUBJECT` (#360), deliberately.** That cap is per worker, in-process,
+  and counts turns _executing_; this one is per deployment, in Redis, and counts turns _waiting_. A
+  per-worker in-memory counter cannot bound a queue it does not hold. Both apply: the quota bounds
+  what an owner may enqueue, and #360 bounds what an owner may simultaneously run once drained.
+
+The quota lands in M1 (§9), with the drain loop it exists to protect.
 
 `idempotencyKey` defaults to the session id. A resubmission with a key already in a non-terminal
 state returns `202` with the **existing** `turnId` rather than enqueueing a second copy — a
@@ -219,8 +244,10 @@ from the result store as it always has, and the route above serves async callers
 DELETE /v1/sessions/{sessionId}/turns/{turnId}  → 202 | 409
 ```
 
-A `queued` record flips to `cancelled`, and the drain loop skips it at claim — it checks
-`state === 'queued'` when minting (§5.4), so a cancelled entry is acked and dropped without running.
+A `queued` record flips to `cancelled`, and the drain loop skips it at claim — `cancelled` is one of
+the two states the mint refuses (§5.4), so a cancelled entry is acked and dropped without running.
+The refusal is deliberately narrow: `cancelled` and terminal only, never `running`, because a
+redelivered entry's record already says `running` and must still run.
 
 **A `running` leaf is not interrupted.** It finishes and writes its result; the `DELETE` answers
 `409` naming the state. This is a deliberate scope line, not an oversight:
@@ -273,19 +300,19 @@ credential, no config. Everything authoritative is read from the record at deque
 makes §5.4 possible and what bounds the damage if the queue is ever read by something that should not
 have it.
 
-| Field            | Notes                                                              |
-| ---------------- | ------------------------------------------------------------------ |
-| `turnId`         | opaque; the only thing in the queue                                |
-| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)           |
-| `tenant`         | gates M1 (§9)                                                      |
-| `sessionId`      | the session the turn belongs to                                    |
-| `cfg`            | bundle digest, as on the session                                   |
-| `credentialName` | a **name**, resolved server-side at dequeue — never the credential |
-| `caps`           | tokens, cost, wall-clock (§4.3)                                    |
-| `idempotencyKey` | defaults to `sessionId` (§4.3)                                     |
-| `envelope`       | the `LeafEnvelope` to run                                          |
-| `state`          | below                                                              |
-| `attempts`       | incremented at claim; bounds redelivery (§6.2)                     |
+| Field            | Notes                                                                 |
+| ---------------- | --------------------------------------------------------------------- |
+| `turnId`         | opaque; the only thing in the queue                                   |
+| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)              |
+| `tenant`         | gates M1 (§9)                                                         |
+| `sessionId`      | the session the turn belongs to                                       |
+| `cfg`            | bundle digest, as on the session                                      |
+| `credentialName` | a **name**, resolved server-side at dequeue — never the credential    |
+| `caps`           | tokens, cost, wall-clock (§4.3)                                       |
+| `idempotencyKey` | defaults to `sessionId` (§4.3)                                        |
+| `envelope`       | the `LeafEnvelope` to run                                             |
+| `state`          | below                                                                 |
+| `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4) |
 
 ```
 queued → running → paused | responded | done | solved | failed | cancelled | lost
@@ -294,8 +321,12 @@ queued → running → paused | responded | done | solved | failed | cancelled |
 `paused`, `responded`, `done`, `solved` and `failed` mirror `LeafResult`'s existing discriminants, so
 a result maps to a state without translation. `cancelled` is a caller's withdrawal of a turn that was
 still `queued` (§4.5); it is never reached from `running`. `lost` is the terminal the reaper writes
-when attempts are exhausted (§6.2) — distinct from `failed`, because "we never found out" is
-operationally different from "it ran and failed."
+when the entry's `deliveryCount` exceeds `maxAttempts` (§6.2) — distinct from `failed`, because "we
+never found out" is operationally different from "it ran and failed."
+
+`running` is **not** terminal and a redelivered entry re-mints against it, which §5.4 states as a
+rule because the narrower "`queued` only" reading of it is a defect: it would drop exactly the
+entries goal 3 exists to recover.
 
 **`running` needs no separate heartbeat, and #390 should know why.** #390 scopes "a `running` state
 with a heartbeat, plus stale detection (`lost`)" as new work. For async turns the liveness signal
@@ -374,6 +405,33 @@ asking for it. The consequence is stated rather than hidden: a full queue can oc
 an interactive `/turn` arriving then is refused with `429` exactly as it would be behind other
 interactive turns. §12 records per-class caps as the knob to reach for if that proves wrong.
 
+**The slot is taken before the claim, not after it.** `claim()` ends in an `XREADGROUP` with
+`BLOCK: blockMs`, so "check the cap, then await a claim, then `start()`" leaves a window the length
+of `blockMs` in which the worker looks free. The supervisor goes on handing it `/turn` sockets
+against that estimate — `handOff` increments its own copy optimistically and `reconcile` corrects
+from the next `load` (`pool.ts:219`, `:442`) — so a handler can fill the slot the loop was about to
+use, and the loop's `start()` then lands at `inFlight == cap`, one above it. So:
+
+```ts
+if (counter.inFlight >= cap) { await sleep(idleBackoffMs); continue; }
+const end = counter.start();            // same tick as the check; nothing can interleave
+try {
+  const claimed = await queue.claim(consumerId, { minIdleMs, blockMs });
+  if (!claimed) { end(); continue; }    // idempotent; see `start()`'s own comment
+  ...
+} finally { end(); }
+```
+
+The check and the take are one synchronous tick, so **the loop never takes a slot it has not just
+observed free** — which is what makes §8's "never observed above the cap" an invariant rather than a
+hope. The cost is paid in the other direction and is real: for up to `blockMs` the worker reports a
+slot busy that is running nothing, so an interactive turn arriving in that window can be refused by
+a supervisor that did in fact have capacity. That is already a measured condition rather than a
+silent one — `reconcile` stamps it `spurious_refusals` on the next `load` (`pool.ts:454-465`) — and
+it is the safer direction to err in, because the opposite error is a worker running `cap + 1` turns.
+`blockMs` is the knob that bounds it, and a shorter block trades Redis round-trips for a tighter
+window.
+
 Pull-when-ready, rather than claim-then-queue-internally: an entry claimed but not started is an
 entry no other worker can take, and it is also the window in which a crash costs a reclaim cycle.
 
@@ -398,11 +456,28 @@ turn id to mint.
 At claim:
 
 1. The worker calls the control plane with the `turnId`.
-2. The control plane loads the turn record, checks `state === 'queued'`, resolves `credentialName`
-   against the owner's `SubjectDocument`, and mints an **inference grant** and a **sandbox grant** —
-   `aud: moca-inference` / `moca-sandbox`, the claim sets in MI1 §6.1's table.
-3. `state → running`, `attempts` incremented.
+2. The control plane loads the turn record and mints unless the record is **`cancelled` or already
+   terminal**, then resolves `credentialName` against the owner's `SubjectDocument` and mints an
+   **inference grant** and a **sandbox grant** — `aud: moca-inference` / `moca-sandbox`, the claim
+   sets in MI1 §6.1's table.
+3. `state → running` as a compare-and-set from `queued`; a record already `running` is a redelivery
+   and stays `running`. `attempts` is written from the entry's `deliveryCount`.
 4. The worker runs `runLeaf` with the grants.
+
+**Why the mint check is "not terminal" rather than "`queued`".** A narrower check would defeat goal
+3 in exactly the case it exists for. Step 3 sets `running` on the first claim, so every redelivery
+arrives with the record already `running`: a crash-reclaimed entry (§6.2), a drained one (§6.3), and
+a `retryable` outcome that `processOne` returns without acking (§10's `classifyOutcome` row) all look
+identical to the mint. Refusing those would ack and drop them, and — because §5.1 gives a
+non-terminal record no TTL and makes attempt exhaustion the only author of `lost` — would strand the
+record in `running` forever with no entry left for the reaper to find. So the mint refuses only a
+withdrawal (`cancelled`, §4.5) and a turn that has already reached a terminal state.
+
+**Attempt exhaustion is the queue's call, not the record's.** `deliveryCount` is the single
+authority, checked by `processOne`'s dead-letter branch before the mint is ever reached (§6.2), so
+the mint does not test `attempts` as well — two counters that can disagree is the shape §5.1's
+heartbeat note already rejects for liveness. The record's `attempts` is descriptive, written from
+`deliveryCount` at claim so §4.4 can report it.
 
 **`turn_exp` must be built.** #386 item 5 reads like a policy to tune on an existing field; it is not.
 MI1 §6.1 specifies `turn_exp` as "an absolute cap: turn start + `MOCA_TURN_MAX_S`" with
@@ -504,11 +579,26 @@ which worked only because a KEDA pod was born per batch of work.
 
 **Consumer identity.** The drainer used `process.env.HOSTNAME ?? 'leaf-job-${pid}'` — one pod, one
 consumer, gone when the pod exited. A P6 worker is long-lived and restarted in place by the
-supervisor, so it needs an identity that is stable across a claim but distinguishable per process.
-`SH_WORKER_ID` is already injected into every worker's env (`supervisor/src/main.ts:60`) and is the
-natural basis: `moca-w{SH_WORKER_ID}`. It must be **stable across a restart**, because that is what
-lets a restarted worker find its own abandoned PEL entries rather than waiting out `minIdleMs` for
-another worker to reclaim them.
+supervisor, so it needs an identity that is stable across a restart but distinct per live worker.
+
+`SH_WORKER_ID` is already injected into every worker's env (`supervisor/src/main.ts:60`) and gives
+the stability half: it is the pool **slot index** (`String(id)`), and `restart` reuses the slot, so a
+replaced worker inherits its predecessor's id. It does **not** give uniqueness. Being a slot index
+means it is `0..W-1` in every supervisor process, and `deploy/k8s/base/supervisor.yaml:1` is explicit
+that capacity beyond one pod is `replicas` (so is `deploy/k8s/README.md:255`). With two replicas,
+two live workers would share one consumer name in one group — and therefore share a PEL, share their
+`XINFO CONSUMERS` idle and pending numbers, and make `gcIdleConsumers`'s "pending 0 and idle past
+300 s" a statement about two processes rather than one. One of them being busy would hold the other's
+abandoned entries out of the reaper's reach.
+
+So the consumer id includes the supervisor process's own identity:
+**`moca-${HOSTNAME}-w${SH_WORKER_ID}`**, falling back to the supervisor's pid where `HOSTNAME` is
+unset. `HOSTNAME` is the pod name under `deploy/k8s` and the container id under `deploy/compose`,
+which is exactly the per-replica discriminator missing above, and it survives an in-place worker
+restart because the pod does not restart with it. The invariant the implementation owes is narrow and
+worth stating as such: **two concurrently live workers must never share a consumer id, and a
+restarted worker should reuse its predecessor's.** Whatever supplies the first half, the second comes
+from `SH_WORKER_ID`.
 
 **Who reaps, and when.** The drainer did a startup reap plus `gcIdleConsumers`, timed to let KEDA
 scale to zero. Neither trigger survives: workers do not start per batch and nothing scales to zero.
@@ -519,10 +609,21 @@ cannot double-finalize one run" (`run-lease.ts:189`). Async reclaim reuses that 
 inventing a second one: `reapDeadLetters` and `gcIdleConsumers` on a timer, idempotent, safe to run
 concurrently on every worker. `XAUTOCLAIM` is already mutually exclusive by construction.
 
+**Nobody reclaims faster for being the original owner.** `claim()` is `XAUTOCLAIM` over the group's
+whole PEL at `minIdleMs`, then `XREADGROUP '>'` (`queue.ts:122-153` at `38aa2146`) — it never reads
+its own PEL from `0`. An abandoned entry is therefore invisible to **every** worker, its restarted
+self included, until it has been idle past `minIdleMs`; after that, whichever worker's sweep lands
+first takes it. That is the behaviour §6.3 describes and this design wants: redelivery is the point,
+and which worker redelivers is not a property anything depends on. An own-PEL read from `0` would
+shorten the window for one worker, and is not specified here — it would only be safe once the
+consumer id above is genuinely unique per live worker, and it buys nothing a `minIdleMs` wait does
+not already give.
+
 The three constants come across unchanged, and are now worth naming because nothing else in P6
-implies them: `minIdleMs` 90 s, `maxAttempts` 3, consumer GC idle 300 s. `minIdleMs` must stay well
-above the drain window (§6.3) so a drained-and-restarted worker reclaims its own entries before a
-peer does.
+implies them: `minIdleMs` 90 s, `maxAttempts` 3, consumer GC idle 300 s. The constraint on
+`minIdleMs` is the heartbeat below, not the drain window: it must stay a comfortable multiple of the
+30 s beat so an alive leaf is never reclaimed, which is also what makes it necessarily longer than
+the 20 s grace a drained worker gets.
 
 **The claim heartbeat, which is not optional.** `minIdleMs` is 90 s and `MOCA_TURN_MAX_S` is 1800 s,
 so a leaf running longer than 90 s goes idle in the PEL **while it is still running** and a peer's
@@ -558,8 +659,10 @@ terminal frames land before SIGKILL. **A long leaf cannot finish inside the grac
 So on `drain`:
 
 - The loop stops claiming immediately.
-- An in-flight leaf is **abandoned without an ack**. It stays pending, is reclaimed by another
-  worker, and the idempotency key makes that safe.
+- An in-flight leaf is **abandoned without an ack**. It stays pending until it is idle past
+  `minIdleMs`, then goes to whichever worker's `XAUTOCLAIM` sweep reaches it first — possibly the
+  restarted worker itself, with no priority either way (§6.2) — and the idempotency key makes that
+  safe.
 - The slot is released so `awaitIdle` can exit early rather than burning the full 20 s.
 - The claim heartbeat (§6.2) stops with the process, which is what makes the abandoned entry
   reclaimable at all. There is nothing extra to do here, but the dependency is worth stating: if a
@@ -579,7 +682,7 @@ property must hold without that assumption:
 
 | Attack                          | Containment                                                               |
 | ------------------------------- | ------------------------------------------------------------------------- |
-| Unbounded fan-out               | Per-owner queued-turn quota, refused at submission with `429`             |
+| Unbounded fan-out               | `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3), refused at submission with `429`    |
 | Runaway spend                   | Per-turn caps (§4.3) enforced in the worker, not trusted from the client  |
 | Turns that never end            | `turn_exp` (§5.4) refuses refresh past the cap; the worker's own deadline |
 | Reading another owner's results | Owner scoping on the turn record; the queue holds no readable payload     |
@@ -612,10 +715,14 @@ counters join that object and follow it.
 | `async_reclaims`          | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
 | `async_dead_letters`      | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
 | `async_claim_denied_full` | count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
+| `async_quota_refusals`    | count | Submissions refused by §4.3's per-owner quota — the containment, firing     |
 
-The last one is the design's own stated risk made visible: §5.3 reserves no headroom, so a full queue
-can occupy every slot. If `async_claim_denied_full` and interactive `429`s rise together, that is the
-measurement which would justify the per-class caps §12 holds in reserve.
+`async_claim_denied_full` is the design's own stated risk made visible: §5.3 reserves no headroom, so
+a full queue can occupy every slot. If it and interactive `429`s rise together, that is the
+measurement which would justify the per-class caps §12 holds in reserve. `async_quota_refusals` is
+the other one that is about this design's choices rather than the queue's health — §4.3's quota is
+the single containment against a runaway submitter, so a deployment needs to see it firing to know
+whether 50 is the right number.
 
 **The reporting path already exists and is the constraint.** The drain loop runs in the worker, which
 reaches the admin port only through the advisory `stats` IPC row — and that row is deliberately
@@ -623,6 +730,11 @@ reaches the admin port only through the advisory `stats` IPC row — and that ro
 counters ride it on the same terms: telemetry only, never an input to admission or routing. Queue
 depth and oldest-entry age are properties of Redis rather than of any one worker, so whichever
 component reports them must do so once per deployment, not once per worker.
+
+`async_quota_refusals` is the one exception to the shape above, because §4.3 enforces the quota in
+the **control plane** — a worker never sees a refused submission. It is counted where it happens and
+surfaced on the control plane's own telemetry rather than smuggled through a worker that has no
+knowledge of it.
 
 ---
 
@@ -641,13 +753,26 @@ comment warns about. The restored `work-queue` arrives with 319 lines of its own
 **Integration, with Redis** — as `session-backend` and the workload suites already require:
 
 - N submitted, cap below N, all N results collected, and the counter never observed above the cap.
-- Crash mid-leaf: kill a worker holding a claimed entry, assert `XAUTOCLAIM` reclaims it, it runs to
-  completion elsewhere, and the idempotency key makes the redelivery effectively once.
+  **Under mixed load specifically** — interactive `/turn`s arriving while the loop drains — since
+  that is the case §5.3's take-before-claim ordering exists for, and a drain-only test passes whether
+  or not the ordering is right.
+- Crash mid-leaf: kill a worker holding a claimed entry, assert `XAUTOCLAIM` reclaims it, **the mint
+  succeeds against a record that already says `running`**, it runs to completion elsewhere, and the
+  idempotency key makes the redelivery effectively once. The mint is the half worth asserting
+  separately: a reclaim that lands on a refused mint looks like a successful reclaim right up to the
+  point where the entry is acked and dropped (§5.4).
+- The same mint, for the other two redelivery paths: a `retryable` outcome (`failed/saturated`) and a
+  drained entry (§6.3) both re-mint on a `running` record. Only `cancelled` and terminal states are
+  refused, and a cancelled record's entry is acked without running.
 - Drain: `drain` stops claiming, the in-flight entry is abandoned **unacked** and still pending, the
   slot is released, and `awaitIdle` exits early rather than burning the full 20 s (§6.3).
 - Dead-letter: an entry failing past `maxAttempts` reaches `lost` **and** a failed result, so a
   polling caller always terminates.
 - Cancel: a `queued` turn flips to `cancelled` and is never claimed; a `running` one answers `409`.
+- The fan-out quota (§4.3): submitting `MOCA_ASYNC_QUEUED_PER_OWNER + 1` refuses the last one with
+  `429` and **enqueues nothing for it** — the queue depth, not just the status code, is the
+  assertion. A terminal turn frees a slot (the count is of non-terminal records, so draining one
+  lets the next submission through), and one owner's exhausted quota does not refuse another's.
 - Reaper concurrency (§6.2): two workers arming the periodic reap over one stale entry finalize it
   once, not twice — the property `run-lease.ts:189` already states for sandbox leases.
 - **The heartbeat, with time controlled** (§6.2): a leaf running past `minIdleMs` is **not**
@@ -685,8 +810,10 @@ The design is whole; the delivery is staged, because §5.4 showed `turn_exp` and
 new construction and nothing can be demonstrated until something drains.
 
 **M1 — a working drain, single tenancy.** Restore the queue (§10). Drain loop in the worker, sharing
-`TurnCounter`. All three synchronous aliases brought into the counter (§5.3). Submission, the status
-read (§4.4) and queued-only cancel (§4.5). Results through the existing store. Credentials resolved
+`TurnCounter`. All three synchronous aliases brought into the counter (§5.3). Submission with the
+per-owner fan-out quota (§4.3) — it is M1's only containment against the submitter §3 assumes, so it
+ships with the path it protects, not after it — the status read (§4.4) and queued-only cancel
+(§4.5). Results through the existing store. Credentials resolved
 from the turn record at dequeue under **`MOCA_TENANCY=single` only**; async under `multi` is refused
 by name, as #386 item 5's interim allows. The §7 counters land with the loop that increments them —
 a drain whose depth and reclaims are invisible cannot be operated, and they are what M1's acceptance
@@ -771,7 +898,7 @@ can be closed against it rather than against a subset:
 | `queued` when no result record exists                   | **Not carried.** §4.4 reads state from the turn record; `/runs/status` is untouched                     |
 | Global concurrency cap                                  | **Replaced** by supervisor admission (§5.3) — one slot budget, not a separate queue-side limit          |
 | Per-class concurrency caps                              | **Not carried.** Archetypes §2 wants them; §12 records the gap, #360/#391 own quotas                    |
-| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** — §7's six counters, on the supervisor's admin `/metrics`                         |
+| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** — §7's seven counters, on the supervisor's admin `/metrics`                       |
 
 Two of those deserve a sentence beyond the verdict.
 
@@ -820,6 +947,8 @@ it adds is the schedule. Its design should cite this document for both.
 - `/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
   `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
+  `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3) joins `docs/reference/configuration.md`'s table with the code
+  that reads it, as that file's own rule requires — it lists variables as they exist in the code.
 - Retiring #380's interim sync-disconnect contract (§5.5), which belongs to #389's scope item 5. The
   condition is M2, not M1, and it is a docs change rather than a behaviour change.
 - Updating children #387–#390 and #391 to match this design, per #386's acceptance. The decisions

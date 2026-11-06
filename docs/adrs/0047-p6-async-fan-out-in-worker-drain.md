@@ -51,7 +51,12 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
 - **Shared admission, no reserved headroom.** The loop claims an entry only while
   `counter.inFlight < SH_TURNS_PER_WORKER`, through the same idempotent `counter.start()` contract the
   handler uses. The supervisor needs no change: `onChange` already sends the `load` IPC, and
-  `reconcile` already treats the worker as authoritative over its own count.
+  `reconcile` already treats the worker as authoritative over its own count. **The slot is taken in
+  the same tick as the check, before the blocking claim** — `claim()` ends in `XREADGROUP BLOCK`, and
+  checking the cap then awaiting it would leave the worker looking free for `blockMs` while the
+  supervisor keeps handing it sockets, so the loop's `start()` could land one above the cap. Taking
+  first costs apparent busyness for up to `blockMs` instead, which `reconcile` already measures as
+  `spurious_refusals`; a measured refusal is the safer error than a worker running `cap + 1` turns.
 - **No credential in the queue.** At claim the worker presents its own identity plus the turn id; the
   control plane loads the turn record it owns, resolves a credential _name_ against the owner's
   subject document, and mints an inference grant and a sandbox grant (MI1 §6.5). "Turn start" for
@@ -91,14 +96,33 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   leaf running past 90 s is reclaimed **while still running** and two workers execute one turn —
   idempotent in its result, but double-spent in budget and sandboxes. Only the runner's
   exit-between-entries outcome vocabulary needs rework for a long-lived loop.
-- **Reclaim is periodic and armed by every worker, keyed on `SH_WORKER_ID`.** The removed drainer
-  reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger
-  exists when workers are long-lived and nothing scales to zero. `reapDeadLetters` and
-  `gcIdleConsumers` move onto a timer every worker arms — the shape `run-lease.ts`'s
-  `reapOrphanedRuns` already uses for sandbox leases, with claim-based mutual exclusion so N reapers
-  cannot double-finalize one entry. The consumer id is `moca-w{SH_WORKER_ID}` and must be stable
-  across a restart, so a restarted worker reclaims its own abandoned entries instead of waiting out
-  `minIdleMs`.
+- **Reclaim is periodic and armed by every worker.** The removed drainer reaped once at process start
+  and GC'd idle consumers so KEDA could scale to zero; neither trigger exists when workers are
+  long-lived and nothing scales to zero. `reapDeadLetters` and `gcIdleConsumers` move onto a timer
+  every worker arms — the shape `run-lease.ts`'s `reapOrphanedRuns` already uses for sandbox leases,
+  with claim-based mutual exclusion so N reapers cannot double-finalize one entry. The consumer id is
+  **`moca-${HOSTNAME}-w${SH_WORKER_ID}`**: `SH_WORKER_ID` alone is the pool _slot index_
+  (`String(id)`, reused across an in-place restart, which is the stability wanted) and so repeats
+  across supervisor replicas, which `deploy/k8s/base/supervisor.yaml` names as the way to add
+  capacity — two live workers sharing one consumer name would share a PEL and share the idle and
+  pending numbers `gcIdleConsumers` decides on. No worker gets priority on its own abandoned
+  entries: `claim()` is `XAUTOCLAIM` over the whole group PEL at `minIdleMs` and never reads its own
+  PEL from `0`, so an abandoned entry waits out `minIdleMs` and then goes to whichever sweep reaches
+  it first — which is all redelivery needs.
+- **The mint at claim refuses only `cancelled` and terminal records, not "not `queued`".** The first
+  claim sets `running`, so every redelivery — crash-reclaimed, drained, or a `retryable` outcome
+  returned unacked — arrives on a record that already says `running`. Refusing those would ack and
+  drop them, defeating crash survival in the case it exists for and stranding a record in `running`
+  with no TTL and no entry left for the reaper. `queued → running` is a compare-and-set; attempt
+  exhaustion stays the queue's `deliveryCount`, checked before the mint, so there is one authority
+  for it rather than two that can disagree.
+- **Unbounded fan-out is bounded by a per-owner queued-turn quota**,
+  `MOCA_ASYNC_QUEUED_PER_OWNER` (default 50), counting non-terminal turns and enforced in the control
+  plane before the enqueue, `429 async_quota_exhausted`. It reads the per-owner zset the turn record
+  already lives in, so there is no second index to drift. It is the one containment against the
+  misbehaving submitter the trust model assumes, so it ships in M1 with the path it protects.
+  Distinct from `SH_TURNS_PER_SUBJECT` (#360), which is per worker and in-process and bounds turns
+  _executing_; a per-worker in-memory counter cannot bound a queue it does not hold.
 - **Delivery in three milestones.** M1 is a working drain on `deploy/vm`/compose, gated to
   `MOCA_TENANCY=single`. M2 implements `turn_exp`, completes grant-at-dequeue, and lifts the gate.
   M3 is `deploy/k8s` manifests and a queued-leaf smoke test.
@@ -130,7 +154,7 @@ absence of evidence.
 | `queued` when no result record exists                   | **Not carried**, deliberately: an inference replaced by a record                     |
 | Global concurrency cap                                  | **Replaced** by supervisor admission — one slot budget, no separate queue-side limit |
 | Per-class concurrency caps                              | **Not carried.** Archetypes §2 wants them; recorded as a gap; #360/#391 own quotas   |
-| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** to six counters on the supervisor's admin `/metrics`           |
+| Queue-depth and leaf-outcome metrics                    | **Kept and expanded** to seven counters on the supervisor's admin `/metrics`         |
 
 `classifyOutcome` is the one piece of the async contract #691 left standing — `run-leaf.ts` and
 `select-sandbox.ts` still explain their behaviour in terms of it. The drain loop is its first caller
@@ -199,8 +223,8 @@ never-submitted and reaped-as-lost.
   on the idempotency key and on `runLeaf`'s existing retry contract, not on the queue.
 - Negative / accepted cost: **nothing watches the queue as a side effect any more.** KEDA's scaler
   read `pendingEntriesCount` because it acted on it; slot-driven admission removes the actor and with
-  it the observation. Depth, oldest-entry age, claims, reclaims, dead-letters and claims-denied-when-
-  full must therefore be reported deliberately, on the supervisor's existing admin `GET /metrics`
+  it the observation. Depth, oldest-entry age, claims, reclaims, dead-letters, claims-denied-when-
+  full and quota refusals must therefore be reported deliberately, on the supervisor's admin `GET /metrics`
   JSON body. They ride the advisory `stats` IPC row, which stays advisory: telemetry only, never an
   input to admission or routing.
 - Negative / accepted cost: a queued turn can be withdrawn but a running one cannot, so a caller who
