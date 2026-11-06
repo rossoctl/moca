@@ -47,6 +47,16 @@ describe('portFromEnv', () => {
 });
 
 describe('configFromEnv', () => {
+  it('boots an oidc deployment without SH_GITHUB_CLIENT_ID', () => {
+    // The github client id belongs to the github provider; an oidc deployment carries
+    // SH_OIDC_CLIENT_ID instead, and requiring the github one would CrashLoop it at boot
+    // (found on a real deployment: configFromEnv checked before identityProviderFromEnv ran).
+    const { SH_GITHUB_CLIENT_ID: _gh, ...oidcEnv } = baseEnv;
+    expect(() =>
+      configFromEnv({ ...oidcEnv, SH_IDENTITY_PROVIDER: 'oidc' } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
   it('uses the spec`s defaults', () => {
     const c = configFromEnv(baseEnv);
     expect(c.apiTokenTtlSeconds).toBe(900); // B14: 15 minutes bounds revocation latency

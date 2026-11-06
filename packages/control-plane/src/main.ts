@@ -208,7 +208,11 @@ function tokenTtlsFromEnv(
 
 export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
-  required(env, 'SH_GITHUB_CLIENT_ID');
+  // The github client id belongs to the github provider only; an oidc deployment has
+  // SH_OIDC_CLIENT_ID instead, and identityProviderFromEnv enforces that one (main.ts).
+  if ((env.SH_IDENTITY_PROVIDER || 'github') === 'github') {
+    required(env, 'SH_GITHUB_CLIENT_ID');
+  }
   if (routeProfileFromEnv(env) === 'sandbox') return sandboxProfileConfig(env);
   keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
   const config: CpConfig = {
