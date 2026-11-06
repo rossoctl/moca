@@ -35,7 +35,10 @@ Each linked README is the authority on its own prerequisites, verification and t
 - **MicroVM or P6 on macOS or Windows.** On a dev machine use Docker Compose or Kind, which use
   container sandboxes.
 - **Async fan-out (`async: true`) and the scheduled CronJob.** Both were removed with the
-  Knative/KEDA path and have no P6 equivalent yet (ADR-0034 tracks the debt).
+  Knative/KEDA path and neither runs on P6 yet. Async fan-out is designed but not implemented
+  ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md),
+  [#686](https://github.com/rossoctl/moca/issues/686)); the schedule on-ramp has no design yet
+  ([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ## After the install
 

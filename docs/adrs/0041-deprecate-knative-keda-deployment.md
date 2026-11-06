@@ -70,7 +70,12 @@ with wording that keeps the underlying concerns alive while the deprecated path 
   fixes.
 - Negative / accepted cost: async leaf dispatch (the KEDA drainer) and the CronJob scheduled
   on-ramp have no P6 equivalent yet — ADR-0034 flagged both as owed, and they still are. Users
-  depending on them cannot finish migrating until that lands.
+  depending on them cannot finish migrating until that lands. _Update 2026-11-06:_ async fan-out
+  (archetype A) now has a decision record and design —
+  [ADR-0047](0047-p6-async-fan-out-in-worker-drain.md), tracked by
+  [#686](https://github.com/rossoctl/moca/issues/686) — which replaces the capability rather than
+  the deployment; implementation is still owed. The scheduled on-ramp (archetype C) is
+  [#536](https://github.com/rossoctl/moca/issues/536) and has no design yet. See the revision below.
 - Follow-up owed: the rollout this record authorizes — a runtime startup warning on the deprecated
   path, `deploy/knative/` banners, setup-script notices, README/CLAUDE.md/Makefile/Dockerfile/
   `build.yaml` relabeling, demo rewrites — lands in follow-up PRs on this branch.
@@ -146,3 +151,30 @@ control plane's `K8sSecretStore` on Kubernetes.
 Still owed, now open rather than gated: the P6 equivalents of async fan-out (archetype A) and
 the scheduled on-ramp (archetype C), flagged in ADR-0034; the `knative-server` rename decision;
 the `sandbox-transport` extraction (RA1 §9.1).
+
+### 2026-11-06 — archetype A's replacement decided (design only)
+
+The first of the two owed capabilities above has a decision record:
+[ADR-0047](0047-p6-async-fan-out-in-worker-drain.md), with its design spec
+[`2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md), tracked
+by [#686](https://github.com/rossoctl/moca/issues/686). It is a **design**; nothing is implemented
+yet, so the owed note above narrows rather than clears.
+
+What it settles that bears on this record:
+
+- The consumer is a drain loop **inside the ordinary `--role=turn` worker**, sharing one admission
+  budget with interactive turns — not a `--role=leaf` worker and not a separate process. So the
+  capability returns without reviving the per-workload-pod scaling model this ADR deprecated.
+- **Scale-to-zero stays gone**, as does queue-depth-driven capacity. This ADR accepted the first
+  cost explicitly; ADR-0047 §10 records the second, with a kept-or-dropped verdict for every other
+  KEDA-era behaviour (the `XAUTOCLAIM` reaper, dead-lettering, `LEAF_RESULT_TTL_SECONDS`,
+  at-least-once delivery and the `classifyOutcome` retry classes are all kept). Nothing is lost by
+  omission.
+- The unauthenticated data-plane `POST /runs {async:true}` route this revision removed is **not
+  restored** (#687, closed as "replaced"). The replacement is authenticated and owner-scoped,
+  `POST /v1/sessions/{id}/turns`, so the path comes back with one trust model rather than two.
+- Archetype A's first milestone ships under `MOCA_TENANCY=single` only, a dated conditional
+  refusal in the shape this record used for its own deprecation window.
+
+**Archetype C** (#536) remains owed in full — no design. It is expected to build on archetype A's
+consumer rather than a second one.

@@ -1,14 +1,14 @@
 # Dispatch archetypes
 
-> **Preview.** Describes the P6 runtime on `main` as of 2026-10-12.
+> **Preview.** Describes the P6 runtime on `main` as of 2026-11-06.
 
 An orchestrator can hand work to moca in three patterns. Which of them work depends on the deployment.
 
-| Archetype            | Pattern                                                           | On P6 today                                                     |
-| -------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
-| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Removed.** Ran on the Knative/KEDA path; no P6 equivalent yet |
-| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                     |
-| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Removed.** Ran on the Knative/KEDA path; no P6 equivalent yet |
+| Archetype            | Pattern                                                           | On P6 today                                                                                                      |
+| -------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Removed; replacement designed, not yet built** (ADR-0047, [#686](https://github.com/rossoctl/moca/issues/686)) |
+| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                                                                      |
+| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Removed.** No P6 equivalent; design owed ([#536](https://github.com/rossoctl/moca/issues/536))                 |
 
 Interactive turns (`POST /v1/turn`) and synchronous leaves (`POST /v1/runs`) work on P6 and on the
 deprecated path alike.
@@ -38,8 +38,30 @@ session log in Redis, and there is no harness-side timeout. There is no gate on 
 
 Archetype A's drainer (a Redis-Streams consumer run as a KEDA `ScaledJob`) and archetype C's
 `CronJob` on-ramp were removed with the Knative/KEDA deployment path
-([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)). Neither has a P6 counterpart yet, and the
-supervisor only runs `--role=turn` workers (a `--role=leaf` role is reserved and not implemented). A request
-with `async: true` is answered 400 `async_removed`, naming the removal, rather than accepted and left
-undrained. The P6 equivalents are owed follow-ups flagged in
-[ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md).
+([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)). Neither runs on P6 today: the
+supervisor only runs `--role=turn` workers (a `--role=leaf` role is reserved and not implemented), and
+a data-plane request with `async: true` is answered 400 `async_removed`, naming the removal, rather
+than accepted and left undrained.
+
+**Archetype A has a designed replacement, not yet implemented.**
+[ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and its
+[design spec](../specs/2026-11-05-p6-async-fan-out-design.md) put the consumer in the ordinary turn
+worker as a drain loop sharing the same admission budget as interactive turns, rather than in a
+separate process or a `--role=leaf` worker. Two consequences matter to an orchestrator planning
+against it:
+
+- **The submission route changes.** The unauthenticated data-plane `POST /runs {async:true}` is not
+  coming back — it stays removed permanently, because an unauthenticated enqueue is a second trust
+  model for the same queue. Its replacement is authenticated and owner-scoped:
+  `POST /v1/sessions/{id}/turns` with `async: true`, answering `202 {turnId}`. A controller with no
+  interactive user behind it holds a service-account credential like any other caller.
+- **Scale-to-zero and queue-depth-driven capacity are dropped, deliberately.** ADR-0041 already
+  accepted the first as a cost of leaving Knative; P6 admission is slot-driven, so queue depth
+  becomes an operational metric rather than a scaling input. The design's §10 lists every KEDA-era
+  behaviour with a kept/dropped verdict, so what changed is on the record rather than inferred.
+
+Tracking is [#686](https://github.com/rossoctl/moca/issues/686) (the epic), which closes when a
+fan-out pipeline runs end to end on `deploy/k8s` and on `deploy/vm` or compose. Until then this row
+stays "removed". **Archetype C** has no design yet;
+[#536](https://github.com/rossoctl/moca/issues/536) owns it, and it is expected to build on
+archetype A's consumer rather than a second one.
