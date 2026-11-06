@@ -22,6 +22,23 @@ contributor's track. P5 reserved `Authorization` for caller auth, which is exact
 set the split, what MU1 does before P5 lands, and the three interactions MU1 carries.
 Decision record: [ADR-0033](../adrs/0033-multi-user-control-plane.md).
 
+> **Amendment, 2026-11-05 — MU2's "owned `/v1/runs`" is `async:true` on a session.** §4.2's control-plane
+> table lists `POST /v1/runs` (slice 2, "user-owned async dispatch"), and §9's slice-2 summary repeats
+> it. [#279](https://github.com/rossoctl/moca/issues/279) resolved that there is no `run` noun and no
+> second `/v1/runs`: user-owned async dispatch is **`POST /v1/sessions/{id}/turns {async:true}` →
+> `202`**, with status read back at `GET /v1/sessions/{id}/turns/{turnId}` and a queued turn withdrawn
+> with `DELETE` on the same path. See [P6AF](2026-11-05-p6-async-fan-out-design.md) §4
+> ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)). Batches stay with the caller;
+> `/v1/batches` is deferred until a working fan-out can measure whether it is needed.
+>
+> §4.3's data-plane row for `POST /v1/runs` ("unchanged — operator-authenticated,
+> orchestrator-facing") holds for _synchronous_ runs only. Its async half was removed with the
+> Knative/KEDA path (#691, `400 async_removed`) and P6AF §4.2 keeps it removed permanently: the route
+> is unauthenticated when `SH_REQUIRE_AUTH` is off, which is the second trust model that design rules
+> out. An orchestrator needing fan-out holds a service-account credential and uses the authenticated
+> path above. `/v1/schedules` is untouched by this amendment; Archetype C (#536) inherits the same
+> identity answer.
+
 > **The one-sentence thesis.** Multi-user reduces to one property — _a request's upstream identity is
 > determined solely by that request_ — and the cheapest way to make that property enforceable rather
 > than hoped-for is to move both the identity and the credential out of the model-influenced pod and

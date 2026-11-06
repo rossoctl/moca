@@ -22,6 +22,23 @@ Decision record: to be written with the S2 slice (§14), at the next free number
 Naming: new components and settings use the **MOCA** name from day one (`moca-egress`,
 `MOCA_*`); existing `SH_*` names are left for RA1 Phase 1's rename.
 
+> **Amendment, 2026-11-05 — owned async dispatch is `async:true` on a session, not `/v1/runs`, and
+> `turn_exp` is unbuilt.** §6.5 and §10 describe owned asynchronous runs as `/v1/runs`;
+> [#279](https://github.com/rossoctl/moca/issues/279) resolved that there is no `run` noun and no
+> second `/v1/runs`, so read those as **`POST /v1/sessions/{id}/turns {async:true}`** per
+> [P6AF](2026-11-05-p6-async-fan-out-design.md) §4.1
+> ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)).
+> R7's `501 async_runs_unavailable` is superseded twice over: #691 removed the data-plane async
+> route (`400 async_removed`), and P6AF §4.2 keeps it removed permanently — the replacement is the
+> authenticated path above, not a restored `/v1/runs`. §6.5's actual requirement, that no bearer
+> token is ever written to the queue, is unchanged and is what P6AF §5.4 implements.
+>
+> Two findings S2 needs regardless of async fan-out: **`turn_exp` (§6.1) is specified here and
+> implemented nowhere in TypeScript** — expiry is always `exp = iat + ttlSeconds`, clamped only for
+> sandbox tokens by the resource's own `expiresAt` — and for a queued turn, "turn start" must mean
+> **dequeue, not enqueue**, which §6.1 does not currently pin down. P6AF M1 uses this section's own
+> single-tenancy interim and is deliberately sequenced before S2; its M2 consumes S2 (P6AF §9.1).
+
 > **Amendment, 2026-10-26 — the SBX path takes a different route to S4's credentials.** For
 > `mocactl sbx` microVMs, [SBX0.2b](2026-10-26-sbx-egress-credentials-design.md)
 > ([ADR-0046](../adrs/0046-sbx-egress-credentials-owner-lookup.md)) delivers `sandbox-egress`
@@ -946,6 +963,8 @@ Amendment notes, each a short dated paragraph at the head of the amended spec, p
 | P5                 | §3.2            | the per-request credential is a signed grant, not a subject-derived placeholder                                      |
 | MU1                | §5.3, §3.6      | `/internal/turn-grants` replaces `/internal/credentials`; direct mode only under `single` with the first-subject pin |
 | Workflow promotion | §4.4, §4.5      | in-memory loading, no harness-side unpack; per-session sandbox copy, no shared cache in `multi`                      |
+| MU1 (2026-11-05)   | §4.2, §4.3, §9  | MU2's owned `/v1/runs` is `async:true` on a session (#279); the data-plane async half stays removed                  |
+| This spec (MI1)    | §6.1, §6.5, §10 | owned async dispatch is `async:true` on a session; `turn_exp` is unbuilt; turn start = dequeue — P6AF, ADR-0047      |
 
 **The Cortex path (S6).** cortex#905 is rescoped to the contract in §8 and the suite in §12.3. Cortex
 replaces `moca-egress` when **both** hold: it passes that suite unchanged, run against the pinned

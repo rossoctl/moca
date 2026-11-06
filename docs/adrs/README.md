@@ -25,7 +25,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0012](0012-inference-injector.md)                        | A separate injector pod holds the provider key and owns public LLM egress                       | Accepted                                                        |
 | [0013](0013-leaf-session-backend-reprioritization.md)     | Reprioritize the harness as a leaf-session backend; defer the heavy credential plane            | Accepted                                                        |
 | [0014](0014-mvp-leaf-session-contract.md)                 | Prove the backend with a run-to-completion `/runs` invocation contract                          | Implemented                                                     |
-| [0015](0015-async-leaf-completion.md)                     | KEDA ScaledJob over a Redis Streams queue for background leaf execution                         | Superseded by [0041](0041-deprecate-knative-keda-deployment.md) |
+| [0015](0015-async-leaf-completion.md)                     | KEDA ScaledJob over a Redis Streams queue for background leaf execution                         | Superseded by [0047](0047-p6-async-fan-out-in-worker-drain.md)  |
 | [0016](0016-human-gate.md)                                | Human-gate as a structured terminal plus externally-triggered continuation                      | Implemented                                                     |
 | [0017](0017-registry-securitycontext-hardening.md)        | Apply the non-root least-privilege securityContext baseline to agent pods                       | Superseded by [0041](0041-deprecate-knative-keda-deployment.md) |
 | [0018](0018-scheduled-leaf-dispatch.md)                   | Native Kubernetes CronJob as the scheduled dispatch start signal                                | Superseded by [0041](0041-deprecate-knative-keda-deployment.md) |
@@ -57,6 +57,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0044](0044-audit-log-mirror-stdout.md)                   | Mirror audit decisions to component stdout as structured JSON, carrying subject and sessionId   | Proposed                                                        |
 | [0045](0045-test-user-logins.md)                          | Test-user logins (`SH_TEST_USERS`) behind a shared secret, so automation can log in unattended  | Proposed                                                        |
 | [0046](0046-sbx-egress-credentials-owner-lookup.md)       | Inject SBX egress credentials at `moca-egress`: owner lookup (phase 1), sandbox token (phase 2) | Proposed                                                        |
+| [0047](0047-p6-async-fan-out-in-worker-drain.md)          | P6 async fan-out as a drain loop inside the turn worker, sharing its admission budget           | Proposed                                                        |
 
 ## What an ADR is (and isn't)
 
