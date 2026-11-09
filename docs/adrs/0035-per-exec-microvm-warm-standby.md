@@ -250,6 +250,15 @@ exception. That gate must prove a coalesced VM runs only service-built read comm
 process started by an earlier `Exec` is never visible to a later batch. Client `Exec`s are never
 coalesced.
 
+### 2026-11-08 — SBX lease mode proposed (ADR-0048)
+
+[ADR-0048](0048-sbx-lease-mode.md) (Proposed) revises the 2026-10-08 decision for SBX sandboxes. It
+adds an opt-in lease mode beside per-`Exec`, which stays the default. Two of the inputs behind
+2026-10-08 changed: internal users need a self-operated service, so a hosted resident provider is not
+an option for them, and E15 measured resident with a 300 s idle timeout at more sessions per host
+than per-`Exec`. The per-`Exec` guarantees, gates and read-coalescing exception in this ADR are
+unchanged. #274's decision stands for per-`Exec` mode.
+
 ---
 
 _Assisted-By: Claude (Anthropic AI) <noreply@anthropic.com>_
