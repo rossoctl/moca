@@ -4,13 +4,16 @@ import type { CpRedisLike } from '../../src/ownership.js';
 
 /**
  * In-memory CpRedisLike. Reproduces node-redis's REV argument order -- (key, max, min) when REV is
- * set -- on purpose: a fake that accepted either order would let a reversed page ship.
+ * set -- on purpose: a fake that accepted either order would let a reversed page ship. `expire` is
+ * RECORDED rather than simulated: `expires` is what a test asserts against, so a TTL assertion reads
+ * the same way here as against `fakeBundleRedis`.
  */
 export function fakeRedis() {
   const hashes = new Map<string, Record<string, string>>();
   const zsets = new Map<string, { score: number; value: string }[]>();
   const streams = new Map<string, Record<string, string>[]>();
   const ops: string[] = [];
+  const expires: { key: string; seconds: number }[] = [];
   const redis: CpRedisLike = {
     async hSet(key, values) {
       ops.push(`hSet ${key}`);
@@ -78,8 +81,25 @@ export function fakeRedis() {
       streams.set(key, [...(streams.get(key) ?? []), fields]);
       return '1-0';
     },
+    async hSetNX(key, field, value) {
+      ops.push(`hSetNX ${key} ${field}`);
+      const h = hashes.get(key) ?? {};
+      if (h[field] !== undefined) return false;
+      hashes.set(key, { ...h, [field]: value });
+      return true;
+    },
+    async expire(key, seconds) {
+      // RECORDED, not simulated: `expires` is what a test asserts against, and a fake that actually
+      // dropped the key on a timer would make the TTL-ordering assertion a race.
+      ops.push(`expire ${key}`);
+      expires.push({ key, seconds });
+      return 1;
+    },
+    async zCard(key) {
+      return (zsets.get(key) ?? []).length;
+    },
   };
-  return { redis, hashes, zsets, streams, ops };
+  return { redis, hashes, zsets, streams, ops, expires };
 }
 
 /** Parse a node-redis score bound: a number, '+inf'/'-inf', or '(' for exclusive. */
