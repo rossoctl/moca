@@ -4,15 +4,21 @@ package guestagent
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -307,4 +313,361 @@ func mountIsNosuid(t *testing.T, path string) bool {
 		t.Fatal(err)
 	}
 	return nosuid
+}
+
+// newLeaseAgent starts an Agent in lease mode on a per-test cgroup root,
+// /sys/fs/cgroup/moca-ga-test-<random>, which t.Cleanup removes after the agent is
+// closed. It returns the agent and that root. The workspace and HOME are made
+// traversable, because t.TempDir and its parent are 0700 root and the Exec runs as 7000.
+func newLeaseAgent(t *testing.T) (*Agent, string) {
+	t.Helper()
+	requireRootCgroupV2(t)
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	root := "/sys/fs/cgroup/moca-ga-test-" + hex.EncodeToString(b[:])
+	t.Cleanup(func() { removeCgroupTree(t, root) })
+
+	work := t.TempDir()
+	homeParent := t.TempDir()
+	for _, d := range []string{filepath.Dir(work), work, homeParent} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, _ := strconv.Atoi(testExecID)
+	a, err := NewAgent(AgentOptions{
+		WorkDir: work, ScratchDir: t.TempDir(),
+		Lease: LeaseOptions{CgroupRoot: root, UID: id, GID: id, Home: filepath.Join(homeParent, "home"), ShimPath: os.Args[0]},
+	})
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	return a, root
+}
+
+// removeCgroupTree removes root's per-Exec cgroups, then root. A cgroup left by a
+// failed teardown may take a moment to empty after its cgroup.kill, so it retries.
+func removeCgroupTree(t *testing.T, root string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		subs, _ := filepath.Glob(filepath.Join(root, "e*"))
+		for _, s := range subs {
+			_ = os.WriteFile(filepath.Join(s, "cgroup.kill"), []byte("1"), 0)
+			_ = os.Remove(s)
+		}
+		err := os.Remove(root)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("removing test cgroup %s: %v", root, err)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func leaseReq(cmd string) Request { return Request{Command: cmd, Lease: true, CapBytes: 1 << 20} }
+
+// procsMatching lists the live processes whose space-joined cmdline matches re and,
+// if uid >= 0, whose real uid is uid. A zombie has an empty cmdline, so it never matches.
+func procsMatching(t *testing.T, re *regexp.Regexp, uid int) []string {
+	t.Helper()
+	dirs, err := filepath.Glob("/proc/[0-9]*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, d := range dirs {
+		raw, err := os.ReadFile(filepath.Join(d, "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		cmd := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
+		if !re.MatchString(cmd) {
+			continue
+		}
+		if uid >= 0 && procUID(d) != uid {
+			continue
+		}
+		out = append(out, filepath.Base(d)+": "+cmd)
+	}
+	return out
+}
+
+func procUID(procDir string) int {
+	st, err := os.ReadFile(filepath.Join(procDir, "status"))
+	if err != nil {
+		return -1
+	}
+	for _, line := range strings.Split(string(st), "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == "Uid:" {
+			n, _ := strconv.Atoi(f[1])
+			return n
+		}
+	}
+	return -1
+}
+
+func TestLeaseKillsEveryProcessTheExecStarted(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	out, stderr, end, errMsg := drive(t, a, leaseReq(
+		`sleep 300 & setsid sleep 301 & nohup sleep 302 >/dev/null 2>&1 & (sleep 303 &); ( setsid bash -c 'sleep 304 &' ); echo started`), nil)
+	if errMsg != "" || end.ExitCode != 0 || out != "started\n" {
+		t.Fatalf("end %+v, err %q, stdout %q, stderr %q", end, errMsg, out, stderr)
+	}
+	// Checked at once, not polled: the cgroup must be empty BEFORE End goes out.
+	if left := procsMatching(t, regexp.MustCompile(`^sleep 30[0-4]$`), -1); len(left) > 0 {
+		t.Errorf("processes the Exec started survived its End: %v", left)
+	}
+	if _, err := os.Stat(filepath.Join(root, "e1")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s/e1 still exists after End (stat err %v)", root, err)
+	}
+}
+
+func TestLeaseEndDoesNotWaitForABackgroundPipeHolder(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	start := time.Now()
+	out, _, end, errMsg := drive(t, a, leaseReq(`sleep 300 & echo hi`), nil)
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("End took %s: it waited on the background job holding stdout", el)
+	}
+	if errMsg != "" || end.ExitCode != 0 || out != "hi\n" {
+		t.Fatalf("end %+v, err %q, stdout %q", end, errMsg, out)
+	}
+}
+
+// setChildSubreaperForTheRestOfTheBinary makes the test process a child subreaper, so
+// an Exec's orphans reparent to it as they would to the agent as PID 1 in a guest.
+// It cannot safely be unset (orphans already reparented would be left to whoever
+// clears it), so it stays set for the rest of the test binary's life. Later tests are
+// unaffected: os/exec waits on its own children by pidfd, and orphans of later tests
+// become at worst zombies of this short-lived process.
+func setChildSubreaperForTheRestOfTheBinary(t *testing.T) {
+	t.Helper()
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		t.Fatalf("PR_SET_CHILD_SUBREAPER: %v", err)
+	}
+}
+
+// zombieChildren lists this process's children in state Z.
+func zombieChildren(t *testing.T) []string {
+	t.Helper()
+	dirs, err := filepath.Glob("/proc/[0-9]*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	var out []string
+	for _, d := range dirs {
+		st, err := os.ReadFile(filepath.Join(d, "stat"))
+		if err != nil {
+			continue
+		}
+		// pid (comm) state ppid ...; comm may contain spaces and parentheses.
+		i := strings.LastIndexByte(string(st), ')')
+		if i < 0 {
+			continue
+		}
+		f := strings.Fields(string(st[i+1:]))
+		if len(f) < 2 || f[0] != "Z" {
+			continue
+		}
+		if ppid, _ := strconv.Atoi(f[1]); ppid == self {
+			out = append(out, string(st[:i+1]))
+		}
+	}
+	return out
+}
+
+func TestLeaseReapsOrphansAndKeepsTheExitCode(t *testing.T) {
+	requireRootCgroupV2(t)
+	setChildSubreaperForTheRestOfTheBinary(t)
+	a, _ := newLeaseAgent(t)
+	for i := range 20 {
+		_, stderr, end, errMsg := drive(t, a, leaseReq(`for i in 1 2 3; do sleep 100 & done; exit 7`), nil)
+		if errMsg != "" || end.ExitCode != 7 {
+			t.Fatalf("request %d: end %+v, err %q, stderr %q; want exit 7", i, end, errMsg, stderr)
+		}
+	}
+	// The cgroup empties before the last orphans finish reparenting (cgroup_exit runs
+	// before exit_notify), so their SIGCHLD can land just after End: allow the reaper
+	// that moment, but no more.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		z := zombieChildren(t)
+		if len(z) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d unreaped zombie children of the test process: %v", len(z), z)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestLeaseRunsEachExecInAFreshShell(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	if _, stderr, end, errMsg := drive(t, a, leaseReq(`export FOO=1; cd /; alias x=y; f(){ :; }`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("request 1: end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	out, stderr, end, errMsg := drive(t, a, leaseReq(`echo "${FOO-unset}"; pwd; type f >/dev/null 2>&1 && echo has-f || echo no-f`), nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("request 2: end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if want := "unset\n" + a.WorkDir() + "\nno-f\n"; out != want {
+		t.Errorf("request 2 stdout %q, want %q: state leaked from request 1", out, want)
+	}
+}
+
+func TestLeaseExecCannotLeaveOrTouchTheCgroupTree(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	out, stderr, end, errMsg := drive(t, a, leaseReq(fmt.Sprintf(
+		`echo $$ > %[1]s/cgroup.procs 2>/dev/null; echo procs=$?; mkdir %[1]s/evil 2>/dev/null; echo mkdir=$?; kill -STOP %[2]d 2>/dev/null; echo kill=$?`,
+		root, os.Getpid())), nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	for _, step := range []string{"procs", "mkdir", "kill"} {
+		m := regexp.MustCompile(`(?m)^` + step + `=(\d+)$`).FindStringSubmatch(out)
+		if m == nil || m[1] == "0" {
+			t.Errorf("%s: exit status %v, want non-zero\n%s", step, m, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil")); err == nil {
+		t.Errorf("the Exec created %s/evil", root)
+	}
+
+	out, stderr, end, errMsg = drive(t, a, leaseReq(fmt.Sprintf(`echo $$; echo ---; cat %[1]s/e2/cgroup.procs; echo ---; cat %[1]s/cgroup.procs`, root)), nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("second Exec: end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	parts := strings.Split(out, "---\n")
+	if len(parts) != 3 {
+		t.Fatalf("second Exec output %q", out)
+	}
+	pid := strings.TrimSpace(parts[0])
+	if !slicesContainsLine(parts[1], pid) {
+		t.Errorf("pid %s is not in %s/e2/cgroup.procs (%q)", pid, root, parts[1])
+	}
+	if slicesContainsLine(parts[2], pid) {
+		t.Errorf("pid %s is in %s/cgroup.procs, the root", pid, root)
+	}
+}
+
+func slicesContainsLine(text, line string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimSpace(l) == line {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLeaseTimeoutKillsTheCgroupAndKeepsTheAgent(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`sleep 30 & sleep 30`)
+	req.TimeoutS = 1
+	if _, _, _, errMsg := drive(t, a, req, nil); errMsg != "timeout:1" {
+		t.Fatalf("error %q, want timeout:1", errMsg)
+	}
+	// uid 7000 only: earlier parked-shell timeout tests in this binary leave root-owned
+	// `sleep 30`s running for half a minute, and they are not this Exec's.
+	if left := procsMatching(t, regexp.MustCompile(`^sleep 30$`), 7000); len(left) > 0 {
+		t.Errorf("the timed-out Exec's processes survived: %v", left)
+	}
+	if out, _, end, errMsg := drive(t, a, leaseReq(`echo ok`), nil); errMsg != "" || end.ExitCode != 0 || out != "ok\n" {
+		t.Fatalf("lease request after a timeout: end %+v, err %q, stdout %q", end, errMsg, out)
+	}
+}
+
+func TestLeaseTeardownFailureMarksTheAgentDead(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	orig := waitCgroupEmpty
+	waitCgroupEmpty = func(*execCgroup, time.Duration) error { return errors.New("injected: still populated") }
+	t.Cleanup(func() { waitCgroupEmpty = orig })
+
+	_, _, end, errMsg := drive(t, a, leaseReq(`echo hi; exit 3`), nil)
+	if errMsg != "" || !end.TeardownFailed || end.ExitCode != 3 {
+		t.Fatalf("end %+v, err %q; want teardown_failed with the command's exit 3", end, errMsg)
+	}
+	if _, _, _, errMsg := drive(t, a, leaseReq(`true`), nil); !strings.Contains(errMsg, "teardown failed") {
+		t.Fatalf("next request's error %q, want it to say teardown failed", errMsg)
+	}
+}
+
+func TestLeaseStdinWritesAFileAsTheExecUser(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	id, _ := strconv.Atoi(testExecID)
+	if err := os.Chown(a.WorkDir(), id, id); err != nil {
+		t.Fatal(err)
+	}
+	req := leaseReq(`base64 -d > f`)
+	req.HasStdin = true
+	if _, stderr, end, errMsg := drive(t, a, req, []byte("aGk=")); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	path := filepath.Join(a.WorkDir(), "f")
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "hi" {
+		t.Fatalf("f = %q, %v; want hi", got, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); int(st.Uid) != id || int(st.Gid) != id {
+		t.Errorf("f owned by %d:%d, want %d:%d", st.Uid, st.Gid, id, id)
+	}
+}
+
+func TestLeaseLatchRefusesPerExecAfterTheFirstLease(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	if _, _, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("lease true: end %+v, err %q", end, errMsg)
+	}
+	_, _, _, errMsg := drive(t, a, Request{Command: "true", CapBytes: 1 << 20}, nil)
+	if want := "guest-agent: this agent serves lease requests only"; errMsg != want {
+		t.Fatalf("per-Exec request after a lease: error %q, want %q", errMsg, want)
+	}
+}
+
+func TestLeaseLatchIsNotSetByPerExecRequests(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	pid := a.ShellPID()
+	for i := range 2 {
+		if _, _, end, errMsg := drive(t, a, Request{Command: "true", CapBytes: 1 << 20}, nil); errMsg != "" || end.ExitCode != 0 {
+			t.Fatalf("per-Exec request %d: end %+v, err %q", i, end, errMsg)
+		}
+	}
+	if a.leaseOn.Load() {
+		t.Error("a per-Exec request set the lease latch")
+	}
+	if a.lease.r != nil {
+		t.Error("a per-Exec request started the reaper")
+	}
+	if a.ShellPID() != pid {
+		t.Errorf("ShellPID changed %d -> %d", pid, a.ShellPID())
+	}
+}
+
+// Not root-only: the check comes before any cgroup or shim work, so the agent need
+// not have been prepared for lease mode. Task 4 replaces the refusal with the real
+// normalisation.
+func TestLeaseNormaliseWorkspaceIsNotImplementedYet(t *testing.T) {
+	a := newTestAgent(t)
+	a.opts.Lease.CgroupRoot = "/nonexistent/moca-ga-test"
+	req := leaseReq(`true`)
+	req.NormaliseWorkspace = true
+	_, _, _, errMsg := drive(t, a, req, nil)
+	if want := "guest-agent: normalise_workspace not implemented"; errMsg != want {
+		t.Fatalf("error %q, want %q", errMsg, want)
+	}
+	if a.leaseOn.Load() {
+		t.Error("a refused lease request set the lease latch")
+	}
 }
