@@ -157,9 +157,13 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
 - `GET /runs/status?sessionId=ID` returns the stored result: `{status: "queued"}` until one exists
   (also for a session that never existed), then the result for that status. 400 `sessionId_required`.
 - An authenticated caller may not pass `tenant` (400 `tenant_not_allowed`).
-- **`async: true` is removed.** It returns 400 `async_removed`, naming the removal: the KEDA drainer
-  that consumed the queue was removed with the Knative/KEDA path (ADR-0041) and no P6 equivalent
-  exists yet.
+- **`async: true` is removed, and stays removed.** It returns 400 `async_removed`: the KEDA drainer
+  that consumed the queue went with the Knative/KEDA path (ADR-0041). This route is not coming back
+  — it is unauthenticated when `SH_REQUIRE_AUTH` is off, which would be a second trust model for one
+  queue. Its replacement is the authenticated, owner-scoped
+  `POST /v1/sessions/{id}/turns` with `async: true` → `202 {turnId}`, designed in
+  [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and **not yet implemented**
+  ([#686](https://github.com/rossoctl/moca/issues/686)). Until it ships, run leaves synchronously.
 - On a saturated pool the sync path waits with backoff (up to `KAGENTI_SYNC_SATURATION_WAIT_MS`, 30 s)
   and then returns 503 with `Retry-After` and `{"status":"failed","reason":"saturated"}`.
 

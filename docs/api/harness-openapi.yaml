@@ -417,9 +417,11 @@ paths:
         503 is never persisted — `/runs/status` must not report a retryable refusal as a
         terminal failure.
 
-        `async: true` is removed: it was removed with the Knative/KEDA deployment path (ADR-0041),
-        whose KEDA drainer consumed the queue, and is answered 400 async_removed. No P6
-        equivalent exists yet.
+        `async: true` is removed and stays removed: it went with the Knative/KEDA deployment path
+        (ADR-0041), whose KEDA drainer consumed the queue, and is answered 400 async_removed. This
+        route is not restored (#687) — it is unauthenticated when `SH_REQUIRE_AUTH` is off. Its
+        replacement is the authenticated `POST /v1/sessions/{id}/turns` with `async: true`
+        (ADR-0047, #686), designed and not yet implemented.
 
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs
@@ -807,7 +809,10 @@ components:
         maxTurns: { type: integer }
         async:
           type: boolean
-          description: Removed with the Knative/KEDA path (ADR-0041); answered 400 async_removed.
+          description: |
+            Removed with the Knative/KEDA path (ADR-0041); answered 400 async_removed. Permanently
+            removed, not pending restoration — the replacement is the authenticated
+            POST /v1/sessions/{id}/turns (ADR-0047, #686).
         tenant:
           type: string
           description: Unauthenticated deployments only; namespaces the session id.

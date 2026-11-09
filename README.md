@@ -201,9 +201,11 @@ The pipeline archetypes describe how an orchestrator dispatches leaves:
 
 B is served by the P6 runtime today. Archetypes A (async fan-out) and C (scheduled dispatch) ran
 only on the earlier scale-to-zero deployment, removed in November 2026
-([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and have **no P6 equivalent
-yet**; async fan-out is tracked in [#686](https://github.com/rossoctl/moca/issues/686) and
-scheduled dispatch in [#536](https://github.com/rossoctl/moca/issues/536).
+([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and **neither runs on P6 yet**.
+Async fan-out has a decision record and design
+([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md)) and is tracked in
+[#686](https://github.com/rossoctl/moca/issues/686); scheduled dispatch has no design yet
+([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ---
 
@@ -286,7 +288,7 @@ Start at the [documentation map](docs/index.md).
 
 This is explorative work and every deployment path is Preview (see [Maturity](#maturity)). The
 warm-worker-pool runtime, durable resume, sandbox isolation (container and microVM tiers), and the
-multi-user control plane are built. Async fan-out and scheduled dispatch have no P6 equivalent
-yet. Interfaces may change.
+multi-user control plane are built. Async fan-out and scheduled dispatch do not run on P6 yet —
+async fan-out is designed (ADR-0047) and awaiting implementation. Interfaces may change.
 
 Licensed under the [Apache License 2.0](LICENSE).
