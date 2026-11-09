@@ -90,13 +90,18 @@ if [ $rc -gt 1 ]; then echo PGREP-ERROR:$rc; exit 0; fi
 if [ -z "$pids" ]; then echo none; else for p in $pids; do tr '\0' ' ' </proc/$p/cmdline; echo; done; fi`
 }
 
-// countProcs is the positive control: a guest command that polls for up to 3 s until
-// `pgrep -fc pattern` reports want, then prints started=<count>. Without it, a Run 1 whose
-// processes never started would make Run 2's `none` a pass for the wrong reason.
-func countProcs(pattern string, want int) string {
-	return fmt.Sprintf(`command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }
-i=0; while n=$(pgrep -fc '%s'); [ "$n" != %d ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
-echo started=$n`, pattern, want)
+// countProcs is the positive control: a guest command that, for each pattern in turn,
+// polls for up to 3 s until `pgrep -fc` reports exactly one match, then prints
+// started=<index>:<count>. Without it, a Run 1 whose processes never started would make
+// Run 2's `none` a pass for the wrong reason. Per pattern, not a total: a daemon's
+// transient intermediate process could make a total right while one process never ran.
+func countProcs(patterns ...string) string {
+	var b strings.Builder
+	b.WriteString("command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }\n")
+	for i, p := range patterns {
+		fmt.Fprintf(&b, "i=0; while n=$(pgrep -fc '%s'); [ \"$n\" != 1 ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; echo started=%d:$n\n", p, i)
+	}
+	return b.String()
 }
 
 // requireProbeWorked fails the gate when a pgrep probe could not run.
@@ -110,12 +115,19 @@ func requireProbeWorked(t *testing.T, out string) {
 	}
 }
 
-// requireStarted asserts countProcs's line reports want processes.
-func requireStarted(t *testing.T, out string, want int) {
+// requireStarted asserts countProcs reported exactly one live process for each of its
+// patterns.
+func requireStarted(t *testing.T, out string, patterns ...string) {
 	t.Helper()
 	requireProbeWorked(t, out)
-	if m := regexp.MustCompile(`(?m)^started=(\d+)$`).FindStringSubmatch(out); m == nil || m[1] != strconv.Itoa(want) {
-		t.Fatalf("Run 1 started %v marked processes, want %d -- the gate would check for leftovers of nothing:\n%s", m, want, out)
+	for i, p := range patterns {
+		m := regexp.MustCompile(`(?m)^started=` + strconv.Itoa(i) + `:(\d*)$`).FindStringSubmatch(out)
+		if m == nil || m[1] != "1" {
+			t.Errorf("Run 1: %v processes match %q, want 1 -- the gate would check for leftovers of nothing", m, p)
+		}
+	}
+	if t.Failed() {
+		t.Fatalf("Run 1 output:\n%s", out)
 	}
 }
 
@@ -145,11 +157,12 @@ func TestGateLeaseExecKillsProcesses(t *testing.T) {
 	// sees, never carries the literal "sleep 30N" or the marker: only the started
 	// processes match, in Run 1's count and in Run 2's search.
 	const pattern = `[s]leep 30[0-3]|[l]ease-kill-marker`
+	started := []string{`[s]leep 300`, `[s]leep 301`, `[s]leep 302`, `[s]leep 303`, `[l]ease-kill-marker`}
 	out := run(`s=30; m=lease-kill
 sleep ${s}0 & setsid sleep ${s}1 & nohup sleep ${s}2 >/dev/null 2>&1 & (sleep ${s}3 &)
 python3 -c ` + shQuote(leaseDaemonScript) + ` "$m-marker"
-` + countProcs(pattern, 5))
-	requireStarted(t, out, 5)
+` + countProcs(started...))
+	requireStarted(t, out, started...)
 
 	got := run(leftoverProcs(pattern))
 	requireProbeWorked(t, got)
@@ -202,11 +215,21 @@ except OSError as e:
     print("mem=" + errno.errorcode.get(e.errno, str(e.errno)))
 `
 
+// leaseMountScript calls mount(2) directly and prints mountsys=<errno name>, or
+// mountsys=ok if the mount succeeded.
+const leaseMountScript = `
+import ctypes, errno
+libc = ctypes.CDLL(None, use_errno=True)
+r = libc.mount(b"t", b"/tmp/sbx-home", b"tmpfs", 0, None)
+e = ctypes.get_errno()
+print("mountsys=" + ("ok" if r == 0 else errno.errorcode.get(e, str(e))))
+`
+
 // TestGateLeasePrivilege is the Exec half of spec §9's LeasePrivilege (plan 5 adds the
-// tracked-process half): a lease Exec runs as uid 7000 with no_new_privs, on an image
-// with no setuid or setgid file, and can leave its cgroup, make one, signal or open PID
-// 1, mount, make a user namespace, or ptrace -- none of it. Then Run 2 shows that nothing
-// Run 1 started, or created, is left.
+// tracked-process half): a lease Exec runs as uid 7000 with no capabilities and
+// no_new_privs, on an image with no setuid or setgid file, and can leave its cgroup, make
+// one, signal or open PID 1, mount, make a user namespace, or ptrace -- none of it. Then
+// Run 2 shows that nothing Run 1 started, or created, is left.
 //
 // The cgroup escape is checked twice: by exit status, and by consequence. $BASHPID, not
 // $$, because wrapCommand runs the command in a subshell whose $$ is its parent's pid.
@@ -219,10 +242,12 @@ func TestGateLeasePrivilege(t *testing.T) {
 
 	const pattern = `[l]ease-priv-marker`
 	out := run(`echo $BASHPID > /sys/fs/cgroup/cgroup.procs 2>/dev/null; echo procs=$?
-echo $BASHPID > /sys/fs/cgroup/moca-execs/cgroup.procs 2>/dev/null; echo execsprocs=$?
-mkdir /sys/fs/cgroup/moca-execs/x 2>/dev/null; echo mkdir=$?
+e=$(mktemp); { echo $BASHPID > /sys/fs/cgroup/moca-execs/cgroup.procs; } 2>"$e"; echo execsprocs=$?
+echo "execsprocserr=$(tr '\n' ' ' <"$e")"; rm -f "$e"
+u=$(mkdir /sys/fs/cgroup/moca-execs/x 2>&1); echo mkdir=$?; echo "mkdirerr=$(echo "$u" | tr '\n' ' ')"
 kill -0 1 2>/dev/null; echo kill=$?
-mount -t tmpfs t /tmp/sbx-home 2>/dev/null; echo mount=$?
+echo "capeff=$(awk '/^CapEff:/ {print $2}' /proc/self/status)"
+python3 -c ` + shQuote(leaseMountScript) + `
 u=$(unshare -U true 2>&1); echo unshare=$?; echo "unshareerr=$(echo "$u" | tr '\n' ' ')"
 python3 -c ` + shQuote(leaseProcMemScript) + `
 python3 -c ` + shQuote(leasePtraceScript) + `
@@ -231,15 +256,30 @@ echo "suid=[$(find / -xdev -perm /6000 -type f 2>/dev/null | tr '\n' ' ')]"
 echo "nnp=$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
 echo uid=$(id -u)
 m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2>&1 &
-` + countProcs(pattern, 1))
-	requireStarted(t, out, 1)
+` + countProcs(pattern))
+	requireStarted(t, out, pattern)
 
 	// 127 is "command not found": the image lacks the tool, which proves nothing denied it.
-	for _, step := range []string{"procs", "execsprocs", "mkdir", "kill", "mount", "unshare"} {
+	for _, step := range []string{"procs", "execsprocs", "mkdir", "kill", "unshare"} {
 		m := regexp.MustCompile(`(?m)^` + step + `=(\d+)$`).FindStringSubmatch(out)
 		if m == nil || m[1] == "0" || m[1] == "127" {
 			t.Errorf("%s: exit status %v, want a non-zero status other than 127\n%s", step, m, out)
 		}
+	}
+	// EACCES, not ENOENT: an ENOENT would mean the cgroup layout is broken, which also
+	// fails the write and the mkdir but proves nothing about privilege.
+	for _, step := range []string{"execsprocserr", "mkdirerr"} {
+		if m := regexp.MustCompile(`(?m)^` + step + `=(.*)$`).FindStringSubmatch(out); m == nil || !strings.Contains(m[1], "Permission denied") {
+			t.Errorf("%s: %v, want \"Permission denied\"\n%s", step, m, out)
+		}
+	}
+	// The capability set itself, and mount(2) called directly: util-linux mount refuses a
+	// non-root caller in userspace before any syscall, so its exit status proves nothing.
+	if !strings.Contains(out, "\ncapeff=0000000000000000\n") {
+		t.Errorf("the Exec has effective capabilities:\n%s", out)
+	}
+	if !strings.Contains(out, "\nmountsys=EPERM\n") {
+		t.Errorf("mount(2) of a tmpfs did not fail with EPERM:\n%s", out)
 	}
 	// A usage message would also exit non-zero; these are the kernel's refusals.
 	if m := regexp.MustCompile(`(?m)^unshareerr=(.*)$`).FindStringSubmatch(out); m == nil ||
