@@ -97,9 +97,16 @@ Decisions taken during design, each recorded in the spec with its section:
     (`no_new_privs`, setuid bits stripped, user namespaces disabled). The guest agent stays root as
     PID 1, non-dumpable, and owns a cgroup tree that is not delegated. An Exec therefore cannot migrate
     out of its cgroup, reach the agent, or forge what the agent reports. Without this, decisions 1, 2
-    and 10 hold only against a cooperative Exec. Per-`Exec` stays root in v1. The security review
-    decides whether it moves to the same uid. _(our call, from the PR #698 review)_
-16. **An unknown epoch never restores a higher mode.** After the worker loses its stored epoch, the
+    and 10 hold only against a cooperative Exec. **Each tracked process gets its own uid** from a
+    reserved range, and Execs run under a seccomp filter against `ptrace` and `process_vm_*`, so a
+    later Exec cannot inject code into a running tracked process. The workspace is shared through a
+    common group with `umask 0002`. Per-`Exec` stays root in v1. The security review decides whether
+    it moves to the same uid. _(our call, from the PR #698 review)_
+16. **Workspace ownership is normalised at the start of every lease that follows root writes.** A
+    `root_wrote` flag is set by any per-`Exec` Exec on the workspace, and cleared by a walk that never
+    follows symlinks and stays on the workspace mount. A lease after a lease skips the walk.
+    _(our call, from the PR #698 review)_
+17. **An unknown epoch never restores a higher mode.** After the worker loses its stored epoch, the
     sandbox runs `per-exec` until a control-plane-signed `LeaseControl set_mode` arrives. A stale
     token's epoch is not trusted as "higher". _(our call, from the PR #698 review)_
 

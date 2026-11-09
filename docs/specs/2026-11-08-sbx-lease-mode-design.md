@@ -184,9 +184,26 @@ move itself into `tracked/` (`echo $$ > …/cgroup.procs`), create its own cgrou
 forge the stopped-process list in later notices. That defeats acceptance items 3, 4 and 6. So, in
 both lease levels:
 
-- **The agent stays root (PID 1). Execs and tracked processes run as an unprivileged uid** (`sbx`,
-  for example 1000) with an empty capability set: bounding set dropped, `no_new_privs` set. The agent
-  starts each Exec through `SysProcAttr.Credential` and an explicit capability drop.
+- **The agent stays root (PID 1). Execs run as an unprivileged uid** (`sbx`, for example 1000) with
+  an empty capability set: bounding set dropped, `no_new_privs` set. The agent starts each Exec
+  through `SysProcAttr.Credential` and an explicit capability drop.
+- **Each tracked process runs under its own uid**, taken fresh from a reserved range (for example
+  20000 up to 20000 + `SH_LEASE_MAX_PROCESSES` − 1) and not reused while any process of it is alive in
+  the lease. It has the same empty capability set and `no_new_privs`. Without this, a later and possibly
+  injected Exec under the same uid could `ptrace`, `process_vm_writev` or write `/proc/<pid>/mem` of a
+  running tracked process: same-uid ptrace is allowed by default, and the guest has no Yama. Its code
+  would then outlive the Exec while `process_list` still showed the original command, a side door
+  around the strict rule. A different uid fails the kernel's ptrace-mode access check for all three
+  routes, and signals too. As defence in depth, Execs also run under a seccomp filter that denies
+  `ptrace`, `process_vm_readv` and `process_vm_writev`. The filter cannot cover `/proc/<pid>/mem`,
+  which is an `open()` with a permission check, so the uid split is the protection there.
+  `PR_SET_DUMPABLE 0` is no substitute: `execve` resets it, and only the process itself can set it.
+- **The workspace is shared through a group.** The Exec uid and every tracked uid share a primary
+  group (`sbx-ws`). Workspace directories are group-writable and setgid, and the agent starts every
+  Exec and tracked process with `umask 0002`. Then a dev server can write build output, and a later
+  Exec can edit what the dev server wrote. Files created with an explicit mode that drops group write
+  (for example `0644` from a tool that ignores umask) stay writable only by their creator. That is an
+  accepted residual, because the agent can always `process_stop` and restart the process.
 - **The cgroup tree is root-owned and not delegated.** `cgroup.procs` and `cgroup.subtree_control`
   under `/sys/fs/cgroup` are writable by root only. The Exec uid can neither migrate a process nor
   create a cgroup.
@@ -201,17 +218,29 @@ both lease levels:
   bit, so the rule does not rest on one flag. User namespaces (`CONFIG_USER_NS=y`) are disabled
   (`user.max_user_namespaces = 0` in the guest), because a user namespace gives an unprivileged
   process capabilities inside it.
-- **Workspace ownership.** The workspace becomes owned by the Exec uid. `mocactl sbx push` already
-  extracts with `--no-same-owner` (`packages/mocactl/src/sbx/push.ts:502`), so pushed files take the
-  extracting uid. A workspace created under root gets a one-time `chown -R`, done by the agent as
-  root, at the first Exec of its first lease.
+- **Workspace ownership.** In a lease the workspace is owned by the Exec uid and the `sbx-ws` group.
+  `mocactl sbx push` already extracts with `--no-same-owner` (`packages/mocactl/src/sbx/push.ts:502`),
+  so pushed files take the extracting uid. Per-`Exec` runs as root (next bullet), so files written
+  during a per-`Exec` period are root-owned. The rule is therefore **per lease, not once**:
+  - The worker sets a `root_wrote` flag in the sandbox's state file (next to the epoch, §8.2) whenever
+    it runs a per-`Exec` Exec on that workspace. A workspace that predates lease mode starts with the
+    flag set.
+  - At the start of every lease whose flag is set, the agent normalises ownership before the first
+    Exec runs: owner the Exec uid, group `sbx-ws`, setgid on directories, group write added. Then it
+    clears the flag. A lease that follows another lease, with no per-`Exec` period between them, skips
+    the walk.
+  - The walk never follows a symlink. It uses `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)` and does not
+    cross out of the workspace mount. A root `chown -R` that dereferenced a symlink planted in the
+    workspace would otherwise change the owner of its target, for example a file in `/tmp` or `/var`.
+  - The walk's time is part of the first Exec's latency. E17 measures it against workspace size.
+    Moving per-`Exec` to the Exec uid (§16 item 4) would remove the walk.
 - **Per-`Exec` mode** runs as root today and stays so in v1. It destroys the VM, so root there has no
   lease-specific effect. Moving per-`Exec` to the same uid would give one guest model and one
   workspace ownership. Then a mode switch needs no `chown`, and tools see the same environment in every
   mode. The security review decides (§16 item 4). Tools that need root, such as `apt` or writes to
   system paths, already fail on the read-only rootfs in every mode.
 
-`TestGateLeasePrivilege` (§9) checks this.
+`TestGateLeasePrivilege` and `TestGateLeaseOwnership` (§9) check this.
 
 ## 4. Lease lifecycle
 
@@ -410,17 +439,18 @@ apart.
 `TestGateNoVMReuse` and the other per-`Exec` gates stay as written and run in `per-exec` mode. Lease
 mode gets its own gates, real-launcher halves on KVM, fake-launcher halves in CI:
 
-| Gate                              | Property                                                                                                                                                                                                                                                                     |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TestGateLeaseOneSandbox`         | A lease VM never serves a second sandbox, workspace key or owner, and never goes back to the standby pool                                                                                                                                                                    |
-| `TestGateLeaseExecKillsProcesses` | After each Exec at both levels, nothing it started is alive: `&`, `nohup`, `setsid`, double fork, a daemon. `process_start` processes at level 2 are the only survivors                                                                                                      |
-| `TestGateLeaseFreshShell`         | `export`, `cd`, `alias` and shell functions from one Exec are not visible in the next                                                                                                                                                                                        |
-| `TestGateLeaseTeardown`           | Each end reason destroys the VM and leaks no cgroup, tap, vsock or jail on the host (the lease variant of `TestGateLeakFreeTeardown`)                                                                                                                                        |
-| `TestGateLeaseStaleEpoch`         | An Exec with an older `mode_epoch` is refused, and a downgrade stops tracked processes. After the epoch file is lost, an Exec on a stale `lease+processes` token runs `per-exec`, and only a signed `set_mode` restores the mode                                             |
-| `TestGateLeasePrivilege`          | In a lease, an Exec that tries to write another cgroup's `cgroup.procs`, create a cgroup, signal or ptrace PID 1, write `/proc/1/mem`, regain root through a setuid binary, or create a user namespace fails, and every process it started still dies at the end of the Exec |
-| `TestGateLeaseNotice`             | Every end reason produces exactly one notice, on the next response and in `sandbox_info`                                                                                                                                                                                     |
-| `TestGateLeaseReclaim`            | Under a budget squeeze the idle-longest lease goes first, and busy leases are never reclaimed for memory. When a new lease VM does not fit, the worker reclaims idle-longest leases, then refuses with `memory-budget`                                                       |
-| `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest (the lease variant of `TestGateSnapshotHoldsNoSecrets`: the snapshot gate assumed per-call teardown)                                                                                                                            |
+| Gate                              | Property                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TestGateLeaseOneSandbox`         | A lease VM never serves a second sandbox, workspace key or owner, and never goes back to the standby pool                                                                                                                                                                                                                                                                                                                                                                        |
+| `TestGateLeaseExecKillsProcesses` | After each Exec at both levels, nothing it started is alive: `&`, `nohup`, `setsid`, double fork, a daemon. `process_start` processes at level 2 are the only survivors                                                                                                                                                                                                                                                                                                          |
+| `TestGateLeaseFreshShell`         | `export`, `cd`, `alias` and shell functions from one Exec are not visible in the next                                                                                                                                                                                                                                                                                                                                                                                            |
+| `TestGateLeaseTeardown`           | Each end reason destroys the VM and leaks no cgroup, tap, vsock or jail on the host (the lease variant of `TestGateLeakFreeTeardown`)                                                                                                                                                                                                                                                                                                                                            |
+| `TestGateLeaseStaleEpoch`         | An Exec with an older `mode_epoch` is refused, and a downgrade stops tracked processes. After the epoch file is lost, an Exec on a stale `lease+processes` token runs `per-exec`, and only a signed `set_mode` restores the mode                                                                                                                                                                                                                                                 |
+| `TestGateLeasePrivilege`          | In a lease, an Exec that tries to write another cgroup's `cgroup.procs`, create a cgroup, signal or ptrace PID 1, write `/proc/1/mem`, regain root through a setuid binary, or create a user namespace fails, and every process it started still dies at the end of the Exec. At level 2, an Exec that tries to `ptrace`, `process_vm_writev`, write `/proc/<pid>/mem` of, or signal a running tracked process fails, and the tracked process's memory and command are unchanged |
+| `TestGateLeaseOwnership`          | After `lease` → `per-exec` (root writes a file and a directory) → `lease`, the first lease Exec can modify both. A symlink in the workspace pointing at a file in `/tmp` leaves that file's owner unchanged. A lease after a lease with no per-`Exec` period between them does not walk the workspace                                                                                                                                                                            |
+| `TestGateLeaseNotice`             | Every end reason produces exactly one notice, on the next response and in `sandbox_info`                                                                                                                                                                                                                                                                                                                                                                                         |
+| `TestGateLeaseReclaim`            | Under a budget squeeze the idle-longest lease goes first, and busy leases are never reclaimed for memory. When a new lease VM does not fit, the worker reclaims idle-longest leases, then refuses with `memory-budget`                                                                                                                                                                                                                                                           |
+| `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest (the lease variant of `TestGateSnapshotHoldsNoSecrets`: the snapshot gate assumed per-call teardown)                                                                                                                                                                                                                                                                                                                                |
 
 ## 10. Validation: E17
 
@@ -450,7 +480,8 @@ What changes against per-`Exec`, and what bounds it:
 | An agent could try to raise the mode                                                                                                                       | No MCP tool changes the mode. A change needs the user API token, which the MCP server does not expose to the harness. **Residual:** if the user lets the harness run local shell commands, the agent could run `mocactl sbx mode` itself. `mocactl sbx mode` therefore refuses an upgrade without a TTY |
 | Memory charged by measurement, not reserved                                                                                                                | Reclaim, the host-memory floor, cgroup limits, swap off; E17's squeeze point                                                                                                                                                                                                                            |
 | Clock drift in a long-lived guest                                                                                                                          | Clock correction on every Exec                                                                                                                                                                                                                                                                          |
-| An Exec could tamper with its own teardown (cgroup migration, the agent)                                                                                   | Unprivileged Exec uid, no capabilities, `no_new_privs`, root-owned cgroup tree, non-dumpable agent, setuid bits stripped, no user namespaces (§3.3, `TestGateLeasePrivilege`)                                                                                                                           |
+| An Exec could tamper with its own teardown (cgroup migration, the agent) or inject into a tracked process                                                  | Unprivileged Exec uid, a separate uid per tracked process, no capabilities, `no_new_privs`, a seccomp filter on `ptrace` and `process_vm_*`, root-owned cgroup tree, non-dumpable agent, setuid bits stripped, no user namespaces (§3.3, `TestGateLeasePrivilege`)                                      |
+| A tracked process runs code it loads from the workspace (a dev server with hot reload), so a later Exec can change what it runs by editing files           | Accepted. The workspace is the channel the agent works through. The strict rule bounds which _processes_ exist and are visible, not what code a visible process loads. `process_list` shows each tracked process; `process_stop` and `reset` end it                                                     |
 
 The security review of SBX0 (`docs/sbx/security-review.md`) gets a lease section before level 1
 reaches the cohort, and a level-2 section before level 2 is allowed by policy.
@@ -481,8 +512,9 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
   routing; token checks the same as `Exec`.
 - **Worker and guest agent (Go):** the gates in §9; the lease state machine with the fake clock (every
   transition and every end reason); measured charge and reclaim order; reclaim, then refuse with `memory-budget`; the
-  per-Exec cgroup kill, including `D`-state handling and `teardown_failed`; the privilege drop (uid,
-  capabilities, `no_new_privs`, non-dumpable agent).
+  per-Exec cgroup kill, including `D`-state handling and `teardown_failed`; the privilege drop (Exec uid,
+  per-tracked-process uids, capabilities, `no_new_privs`, the seccomp filter, non-dumpable agent); the
+  ownership walk (the `root_wrote` flag, no symlink following, staying on the workspace mount).
 - **Live (`SBX_LIVE_SMOKE=1`, KVM):** create in `lease`, run two commands and see a warm second run,
   idle out and see the notice; switch to `lease+processes`, `process_start` an HTTP server, reach it with
   `curl localhost` in a later Exec, downgrade and see it stopped.
