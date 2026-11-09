@@ -179,6 +179,12 @@ services:
       SH_REFRESH_IDLE_TTL_SECONDS:
       SH_REFRESH_MAX_TTL_SECONDS:
       SH_REFRESH_REUSE_GRACE_SECONDS:
+      # Async fan-out (ADR-0047). Bare pass-throughs: compose's control plane cannot see a .env
+      # variable that is not listed here. Unset = 50 and `single`, which is what this stack runs.
+      MOCA_ASYNC_QUEUED_PER_OWNER:
+      MOCA_TENANCY:
+      # The result TTL the turn record's own TTL is derived from (+1 h margin).
+      LEAF_RESULT_TTL_SECONDS:
     volumes:
       - moca-credentials:/var/lib/moca/credentials
     ports:
