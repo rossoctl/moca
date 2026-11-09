@@ -1,7 +1,12 @@
 # Async Leaf Completion (spec §9.1) — Design
 
 Version: 1.0 — June 27, 2026
-Status: Superseded by [ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md) — the KEDA ScaledJob dispatch half is deprecated with the Knative path (2026-10-11)
+Status: Superseded by [`2026-11-05-p6-async-fan-out-design.md`](2026-11-05-p6-async-fan-out-design.md)
+(P6.4) and [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) — the capability, on P6
+(2026-11-05). The KEDA `ScaledJob` substrate below was first deprecated with the Knative path by
+[ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md) (2026-10-11) and removed by #691
+(2026-11-05); the successor keeps the Redis Streams queue and moves the consumer into the turn
+worker.
 Scope: The first **post-MVP scale increment** — true **background** (asynchronous) execution of
 leaf sessions, so an external orchestrator can dispatch work that runs for minutes without holding a
 blocking HTTP connection. Realizes MVP spec [§9.1 Async completion](2026-06-26-mvp-leaf-session-contract-design.md).
