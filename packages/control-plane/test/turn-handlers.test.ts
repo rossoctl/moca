@@ -115,6 +115,14 @@ describe('submitTurn (spec §4.1)', () => {
     expect(d.turnQueue.depth()).toBe(0);
   });
 
+  it('404s a tombstoned session, so a deleted session cannot start a new turn', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    await d.index.tombstone(sid);
+    expect(await codeOf(() => submit(d, sid, { item, async: true }))).toBe('session_not_found');
+    expect(d.turnQueue.depth()).toBe(0);
+  });
+
   it('401s with no principal, which is what the enumeration sweep asserts', async () => {
     const d = turnDeps();
     expect(
