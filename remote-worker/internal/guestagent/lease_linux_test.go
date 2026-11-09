@@ -656,20 +656,118 @@ func TestLeaseLatchIsNotSetByPerExecRequests(t *testing.T) {
 	}
 }
 
-// Not root-only: the check comes before any cgroup or shim work, so the agent need
-// not have been prepared for lease mode. Task 4 replaces the refusal with the real
-// normalisation.
-func TestLeaseNormaliseWorkspaceIsNotImplementedYet(t *testing.T) {
+// The workspace newLeaseAgent makes is root-owned and 0755, so `touch` as 7000 fails
+// unless normalisation ran first, and before the Exec.
+func TestLeaseNormaliseWorkspaceHandsTheWorkspaceToTheExecUser(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`touch f`)
+	req.NormaliseWorkspace = true
+	if _, stderr, end, errMsg := drive(t, a, req, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	id, _ := strconv.Atoi(testExecID)
+	for _, p := range []string{a.WorkDir(), filepath.Join(a.WorkDir(), "f")} {
+		var st unix.Stat_t
+		if err := unix.Lstat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		if int(st.Uid) != id || int(st.Gid) != id {
+			t.Errorf("%s owned by %d:%d, want %d:%d", p, st.Uid, st.Gid, id, id)
+		}
+	}
+}
+
+// Not root-only: normalisation fails on the missing workspace before any cgroup or
+// shim work, so the agent need not have been prepared for lease mode.
+func TestLeaseNormaliseWorkspaceFailureDoesNotSetTheLatch(t *testing.T) {
 	a := newTestAgent(t)
 	a.opts.Lease.CgroupRoot = "/nonexistent/moca-ga-test"
+	a.opts.WorkDir = filepath.Join(t.TempDir(), "missing")
 	req := leaseReq(`true`)
 	req.NormaliseWorkspace = true
 	_, _, _, errMsg := drive(t, a, req, nil)
-	if want := "guest-agent: normalise_workspace not implemented"; errMsg != want {
-		t.Fatalf("error %q, want %q", errMsg, want)
+	if want := "normalise workspace: " + a.opts.WorkDir + ": "; !strings.HasPrefix(errMsg, want) {
+		t.Fatalf("error %q, want it to start %q", errMsg, want)
 	}
 	if a.leaseOn.Load() {
-		t.Error("a refused lease request set the lease latch")
+		t.Error("a failed lease request set the lease latch")
+	}
+}
+
+// statOwner returns path's owner and mode bits without following a symlink.
+func statOwner(t *testing.T, path string) (uid, gid int, mode uint32) {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	return int(st.Uid), int(st.Gid), st.Mode & 0o7777
+}
+
+func TestNormaliseWorkspaceOwnsGroupWritesAndStaysInside(t *testing.T) {
+	requireRootCgroupV2(t)
+	ws, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "target")
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(ws, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "d", "b"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(ws, "ln")); err != nil {
+		t.Fatal(err)
+	}
+	m := filepath.Join(ws, "m")
+	if err := os.Mkdir(m, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount("tmpfs", m, "tmpfs", 0, "size=1m,mode=0755"); err != nil {
+		t.Fatalf("mount tmpfs: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount(m, unix.MNT_DETACH); err != nil {
+			t.Errorf("unmount %s: %v", m, err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(m, "x"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The umask must not decide the starting modes the assertions below build on.
+	for p, mode := range map[string]os.FileMode{ws: 0o755, filepath.Join(ws, "a"): 0o644, filepath.Join(ws, "d"): 0o755, filepath.Join(ws, "d", "b"): 0o644} {
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := normaliseWorkspace(ws, 7000, 7000); err != nil {
+		t.Fatalf("normaliseWorkspace: %v", err)
+	}
+
+	for rel, wantMode := range map[string]uint32{".": 0o2775, "a": 0o664, "d": 0o2775, "d/b": 0o664} {
+		uid, gid, mode := statOwner(t, filepath.Join(ws, rel))
+		if uid != 7000 || gid != 7000 {
+			t.Errorf("%s owned by %d:%d, want 7000:7000", rel, uid, gid)
+		}
+		if mode != wantMode {
+			t.Errorf("%s mode %04o, want %04o", rel, mode, wantMode)
+		}
+	}
+	if uid, gid, _ := statOwner(t, filepath.Join(ws, "ln")); uid != 7000 || gid != 7000 {
+		t.Errorf("ln owned by %d:%d, want 7000:7000", uid, gid)
+	}
+	if uid, gid, mode := statOwner(t, target); uid != 0 || gid != 0 || mode != 0o644 {
+		t.Errorf("symlink target is %d:%d %04o, want 0:0 0644: the walk followed ln", uid, gid, mode)
+	}
+	for _, p := range []string{m, filepath.Join(m, "x")} {
+		if uid, gid, _ := statOwner(t, p); uid != 0 || gid != 0 {
+			t.Errorf("%s owned by %d:%d, want 0:0: the walk crossed the mount", p, uid, gid)
+		}
 	}
 }
 

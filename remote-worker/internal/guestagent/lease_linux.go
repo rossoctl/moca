@@ -89,10 +89,6 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	if lo.CgroupRoot == "" {
 		return End{}, errors.New("guest-agent: lease mode is not available in this guest")
 	}
-	if req.NormaliseWorkspace {
-		// Task 4 replaces this with the real normalisation.
-		return End{}, errors.New("guest-agent: normalise_workspace not implemented")
-	}
 	shim := lo.ShimPath
 	if shim == "" {
 		shim = "/proc/self/exe"
@@ -101,6 +97,14 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	l := &a.lease
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Under mu, so no lease Exec runs during the walk; before the latch, so a failed
+	// normalisation leaves the agent as it was. The host sets the flag when root has
+	// written to the workspace since the last lease Exec (spec §3.3).
+	if req.NormaliseWorkspace {
+		if err := normaliseWorkspace(a.opts.WorkDir, lo.UID, lo.GID); err != nil {
+			return End{}, err
+		}
+	}
 	a.leaseOn.Store(true)
 	l.once.Do(func() { l.r.Store(startReaper()) })
 	r := l.r.Load()
