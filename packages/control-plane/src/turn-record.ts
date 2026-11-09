@@ -140,7 +140,18 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
   };
 
   const item = asRecord(b.item);
-  if (b.kind === undefined && str(item.item_id) && str(item.file) && str(item.pattern)) {
+  // `converge` is the explicit wire spelling of the default kind (spec §10 parity table: "Leaf
+  // kinds accepted async (prompt/converge/solve) -- All three kept"); runLeaf treats an absent
+  // `kind` and `kind: 'converge'` identically (harness/src/run-leaf.ts). Accepting both here but
+  // normalising the stored envelope to the absent form keeps exactly one representation in the
+  // turn record rather than two that mean the same thing. `'verdict'` itself is never a wire
+  // value -- it is this parser's internal discriminant -- so it is deliberately NOT accepted here.
+  if (
+    (b.kind === undefined || b.kind === 'converge') &&
+    str(item.item_id) &&
+    str(item.file) &&
+    str(item.pattern)
+  ) {
     return { kind: 'verdict', envelope: { item: b.item }, ...common };
   }
   if (b.kind === 'prompt' && str(b.prompt)) {

@@ -63,6 +63,20 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(p.envelope).toMatchObject({ item });
   });
 
+  it('accepts an explicit kind:converge as the same verdict leaf as an absent kind', () => {
+    const withConverge = parseTurnSubmission({ kind: 'converge', item, async: true });
+    const withoutKind = parseTurnSubmission({ item, async: true });
+    expect(withConverge.kind).toBe('verdict');
+    expect(withConverge.envelope).toEqual({ item });
+    expect(withConverge.envelope).toEqual(withoutKind.envelope);
+  });
+
+  it('refuses kind:verdict -- "verdict" is the internal discriminant, not a wire value', () => {
+    expect(codeOf(() => parseTurnSubmission({ kind: 'verdict', item, async: true }))).toBe(
+      'envelope_invalid',
+    );
+  });
+
   it('accepts a prompt leaf', () => {
     expect(parseTurnSubmission({ kind: 'prompt', prompt: 'hi', async: true }).kind).toBe('prompt');
   });
