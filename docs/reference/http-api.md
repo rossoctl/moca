@@ -160,10 +160,13 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
 - **`async: true` is removed, and stays removed.** It returns 400 `async_removed`: the KEDA drainer
   that consumed the queue went with the Knative/KEDA path (ADR-0041). This route is not coming back
   — it is unauthenticated when `SH_REQUIRE_AUTH` is off, which would be a second trust model for one
-  queue. Its replacement is the authenticated, owner-scoped
-  `POST /v1/sessions/{id}/turns` with `async: true` → `202 {turnId}`, designed in
-  [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and **not yet implemented**
-  ([#686](https://github.com/rossoctl/moca/issues/686)). Until it ships, run leaves synchronously.
+  queue. Its replacement is the authenticated, owner-scoped `POST /v1/sessions/{id}/turns` with
+  `async: true` → `202 {sessionId, turnId}`, designed in
+  [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and documented in
+  [`docs/api/openapi.yaml`](../api/openapi.yaml). **Submission is implemented; the consumer that
+  drains the queue is not** ([#389](https://github.com/rossoctl/moca/issues/389)) — a submitted turn
+  is recorded and queued, and runs once the drain loop ships. Poll
+  `GET /v1/sessions/{id}/turns/{turnId}` for its state. Run leaves synchronously meanwhile.
 - On a saturated pool the sync path waits with backoff (up to `KAGENTI_SYNC_SATURATION_WAIT_MS`, 30 s)
   and then returns 503 with `Retry-After` and `{"status":"failed","reason":"saturated"}`.
 

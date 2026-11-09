@@ -62,8 +62,11 @@ describe('async /runs rejection', () => {
     expect(r.status).toBe(400);
     expect(r.json).toMatchObject({
       error: 'async_removed',
+      // Pinned in full, deliberately: the value of this refusal is the POINTER. A caller who gets
+      // "it was removed" and nothing else has to search the issue tracker to find the replacement.
       message:
-        'async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041); run leaves synchronously',
+        'async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041). ' +
+        'Use POST /v1/sessions/{id}/turns with async:true (authenticated). See ADR-0047.',
     });
     server.close();
   });

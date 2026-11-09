@@ -1312,14 +1312,16 @@ export function handler(req: IncomingMessage, res: ServerResponse): void {
       if (rejectInvalidContextWritable(parsed, res)) return;
 
       if (parsed && parsed.async === true) {
-        // ADR-0041: the KEDA drainer that consumed the async queue was removed with the
-        // Knative/KEDA deployment path. Refuse by name rather than running the body silently
-        // synchronous — the caller asked for queued dispatch and would otherwise wait forever.
+        // ADR-0041 removed the KEDA drainer that consumed the async queue; ADR-0047 §4.2 keeps this
+        // route removed PERMANENTLY rather than restoring it -- it is unauthenticated when
+        // SH_REQUIRE_AUTH is off, which would be a second trust model for one queue. The replacement
+        // is authenticated and owner-scoped, so the refusal names it instead of dead-ending.
         res.writeHead(400, JSON_HEADERS).end(
           JSON.stringify({
             error: 'async_removed',
             message:
-              'async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041); run leaves synchronously',
+              'async leaf dispatch was removed with the Knative/KEDA deployment path (ADR-0041). ' +
+              'Use POST /v1/sessions/{id}/turns with async:true (authenticated). See ADR-0047.',
           }),
         );
         return;

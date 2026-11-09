@@ -30,7 +30,7 @@ still run in a sandbox with its own filesystem, and `workspaceRef` is a path ins
 `item` is `{item_id: string, file: string, pattern: string, require_approval?: boolean}`.
 
 Optional fields on any envelope: `decision`, `model`, `provider`, `workspaceRef`, `repoUrl`, `ref`,
-`maxTurns` (verdict leaf only), `async`, `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
+`maxTurns` (verdict leaf only), `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
 
 **`configRef`** names a [config bundle](../guides/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
 characters). It applies to **prompt and solve leaves only**; a verdict leaf never reads it and runs without the
@@ -116,8 +116,14 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
 
 ## Async and scheduled dispatch
 
-`async: true` and the cron on-ramp were removed with the Knative/KEDA path (ADR-0041): a request with
-`async: true` returns 400 `async_removed`. Neither has a P6 equivalent yet.
+`async: true` on this route and the cron on-ramp were both removed with the Knative/KEDA path
+(ADR-0041): a `/runs` request with `async: true` returns 400 `async_removed`, and the field is gone
+from the envelope type. Async dispatch has a replacement on the **control plane**, not here:
+`POST /v1/sessions/{id}/turns` with `async: true` (ADR-0047), authenticated and owner-scoped, which
+records a turn and queues its id. The queue carries a turn id and nothing else — no envelope, no
+credential, no bearer token — and the worker rebuilds the envelope from the record at dequeue. The
+drain loop that does so is [#389](https://github.com/rossoctl/moca/issues/389). Cron still has no P6
+equivalent ([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ## Spec drift
 
