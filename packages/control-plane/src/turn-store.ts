@@ -84,6 +84,26 @@ export class TurnStore {
     await this.guard(() => this.redis.del([idempotencyKeyKey(this.tag(owner), key)]));
   }
 
+  /**
+   * Release `key` ONLY while `expected` still holds it, answering whether it was released. The
+   * compare is the point: a submission that steps over a terminal holder (turn-handlers.claimKey)
+   * must not remove a claim some OTHER submission made in between, or both would believe they were
+   * first and fan out two turns for one idempotency key (§4.3).
+   *
+   * Compare-then-delete over two round trips, not one atomic op: `CpRedisLike` is deliberately a
+   * handful of typed commands with no WATCH, no MULTI and no EVAL, and §5.1 rules out Lua here. The
+   * residual window is between this read and its delete; a caller that loses it is still caught by
+   * re-reading the holder after its second claim, which is why claimKey does both.
+   */
+  async releaseIdempotencyKeyIf(owner: string, key: string, expected: string): Promise<boolean> {
+    const k = idempotencyKeyKey(this.tag(owner), key);
+    const held = await this.guard(() => this.redis.hGetAll(k));
+    // An already-empty key counts as released: the caller's next claim then wins it outright.
+    if (held.turnId !== undefined && held.turnId !== expected) return false;
+    await this.guard(() => this.redis.del([k]));
+    return true;
+  }
+
   async create(rec: TurnRecord): Promise<void> {
     await this.guard(() =>
       this.redis.hSet(this.key(rec.turnId), {
@@ -192,7 +212,10 @@ export class TurnStore {
     await this.guard(() => this.redis.hSet(this.key(rec.turnId), { state, endedAt: String(now) }));
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
     await this.guard(() =>
-      this.redis.expire(this.key(rec.turnId), this.opts.resultTtlSeconds + this.opts.ttlMarginSeconds),
+      this.redis.expire(
+        this.key(rec.turnId),
+        this.opts.resultTtlSeconds + this.opts.ttlMarginSeconds,
+      ),
     );
     return 'ok';
   }

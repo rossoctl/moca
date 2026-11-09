@@ -38,6 +38,13 @@ export function makeDeps(
   over: Partial<Omit<CpDeps, 'config'>> & {
     config?: Partial<CpConfig>;
     withStreams?: boolean;
+    /**
+     * Overridable because a caller-supplied `index` brings its OWN fake Redis: left at the default
+     * this would point at a different fake than the one `index` writes to, so every audit-stream
+     * assertion would read a permanently empty map and could never fail. See the note at the end of
+     * this function.
+     */
+    streams?: Map<string, Record<string, string>[]>;
   } = {},
 ): TestDeps {
   const { privateKey } = generateKeyPairSync('ed25519');

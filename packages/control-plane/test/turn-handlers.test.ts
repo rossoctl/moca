@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
-import { OwnershipIndex } from '../src/ownership.js';
+import { AUDIT_STREAM, OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
-import { turnKey } from '../src/turn-record.js';
+import { idempotencyKeyKey, turnKey } from '../src/turn-record.js';
 import { asyncCounters, resetAsyncCounters } from '../src/counters.js';
 import { alice, bob, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -14,8 +14,13 @@ const item = { item_id: 'i1', file: 'f.ts', pattern: 'p' };
  * Deps with a real OwnershipIndex and a real TurnStore over ONE fake Redis, so a session created
  * through createSession is the session submitTurn reads. `newId` is a counter rather than the
  * fixture's constant: a submission and its session must not share an id, or an idempotency test
- * would pass by accident. `leafResults` is re-pointed at the same fake for the same reason -- the
- * fixture's own default reads a DIFFERENT fake, so a result seeded here would be invisible.
+ * would pass by accident.
+ *
+ * `leafResults` and `streams` are both re-pointed at that same fake, which is the hazard the comment
+ * at the end of makeDeps warns about: overriding `index` brings a new fake with it, and the fixture's
+ * own defaults still read the OTHER one. Left alone, a `leaf:result:<sid>` seeded here would be
+ * written to one map and read from another, so the §4.4 result assertion would fail; and `d.streams`
+ * would be a permanently empty map, so an audit-stream assertion could never fail.
  */
 function turnDeps(over: Record<string, unknown> = {}) {
   const fake = fakeRedis();
@@ -23,6 +28,7 @@ function turnDeps(over: Record<string, unknown> = {}) {
   const deps = makeDeps({
     index: new OwnershipIndex(fake.redis),
     leafResults: { get: async (k: string) => fake.strings.get(k) ?? null },
+    streams: fake.streams,
     newId: () => `id-${++n}`,
     ...over,
   });
@@ -34,6 +40,14 @@ function turnDeps(over: Record<string, unknown> = {}) {
     fake: ReturnType<typeof fakeRedis>;
   };
 }
+
+/**
+ * Every turn id that has a RECORD in the fake, read out of the hash keyspace rather than from a
+ * handler's answer -- a duplicate-submission test has to see the record a 202 never mentioned.
+ */
+const PREFIX = turnKey('');
+const recordedTurnIds = (d: ReturnType<typeof turnDeps>): string[] =>
+  [...d.fake.hashes.keys()].filter((k) => k.startsWith(PREFIX)).map((k) => k.slice(PREFIX.length));
 
 /** Create a session owned by alice and return its id. */
 async function session(d: ReturnType<typeof turnDeps>): Promise<string> {
@@ -145,11 +159,16 @@ describe('submitTurn (spec §4.1)', () => {
   });
 
   it('names the owner s current count in the refusal message', async () => {
-    const d = turnDeps({ config: { asyncQueuedPerOwner: 1 } });
-    const a = await session(d);
-    const b = await session(d);
-    await submit(d, a, { item, async: true });
-    await expect(submit(d, b, { item, async: true })).rejects.toThrow(/1/);
+    // The count (3) and the limit (1) are deliberately DIFFERENT numbers, which takes submitting
+    // under a generous limit and then lowering it -- as an operator may. With count == limit a bare
+    // /1/ would match the limit and pass on a message that never names the count at all.
+    const d = turnDeps({ config: { asyncQueuedPerOwner: 5 } });
+    const sessions = [await session(d), await session(d), await session(d), await session(d)];
+    for (const s of sessions.slice(0, 3)) await submit(d, s, { item, async: true });
+    d.config.asyncQueuedPerOwner = 1;
+    await expect(submit(d, sessions[3]!, { item, async: true })).rejects.toThrow(
+      /you already have 3 non-terminal async turns \(limit 1\)/,
+    );
   });
 
   it('frees a quota slot when a turn goes terminal, and never refuses another owner', async () => {
@@ -183,6 +202,37 @@ describe('submitTurn (spec §4.1)', () => {
     expect(d.turnQueue.depth()).toBe(2);
   });
 
+  it('creates ONE turn when two submissions race past the same terminal holder (§4.3)', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    // The key's holder is a finished turn, so BOTH racing submissions are entitled to step over it.
+    const stale = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    await d.turns.finalize(stale.turnId, 'done', NOW_MS);
+
+    // Deterministic interleave, no real concurrency: B's read of the stale holder is the gap, so A
+    // runs to completion -- release, re-claim, create -- inside it, and B then continues on the
+    // reading it already took. An unconditional release at that point deletes A's LIVE claim, and B
+    // creates a second record and a second queue entry for one key: the duplicate fan-out.
+    const realGet = d.turns.get.bind(d.turns);
+    let aResult: { turnId: string } | null = null;
+    let armed = true;
+    d.turns.get = async (turnId: string) => {
+      if (armed && turnId === stale.turnId) {
+        armed = false;
+        aResult = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+      }
+      return realGet(turnId);
+    };
+    const b = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+
+    expect(aResult).not.toBeNull();
+    expect(b.turnId).toBe(aResult!.turnId);
+    // One record for the stale turn and one for A -- B added none.
+    expect(recordedTurnIds(d).sort()).toEqual([aResult!.turnId, stale.turnId].sort());
+    expect(d.turnQueue.ids).toEqual([stale.turnId, aResult!.turnId]);
+    expect(d.turnQueue.depth()).toBe(2);
+  });
+
   it('honours an explicit idempotencyKey, so two turns on one session are possible', async () => {
     const d = turnDeps();
     const sid = await session(d);
@@ -201,13 +251,20 @@ describe('submitTurn (spec §4.1)', () => {
     const sid = await session(d);
     d.turnQueue.failWith = new Error('redis gone');
     await expect(submit(d, sid, { item, async: true })).rejects.toThrow();
-    // A `queued` record with no queue entry would never drain, never go terminal and therefore never
-    // acquire a TTL -- a leak that outlives the process. The compensation is what prevents it, and
-    // releasing the key is what lets the caller retry at all.
+    // Each half of the compensation is pinned SEPARATELY, because the retry's 202 proves neither:
+    // without `finalize` the first record sits `queued` with no queue entry -- never drained, never
+    // terminal, so never given a TTL, a leak that outlives the process -- and without the release
+    // the retry still succeeds, because claimKey steps over the now-terminal holder. So the released
+    // key is asserted DIRECTLY, on the keyspace, rather than inferred from the retry succeeding.
+    const firstId = recordedTurnIds(d)[0]!;
+    expect((await d.turns.get(firstId))?.state).toBe('failed');
+    expect(d.fake.hashes.has(idempotencyKeyKey('github:1234', sid))).toBe(false);
+
     d.turnQueue.failWith = null;
-    const retry = await submit(d, sid, { item, async: true });
-    expect(retry.status).toBe(202);
-    expect(d.turnQueue.depth()).toBe(1);
+    const retry = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    expect(retry.turnId).not.toBe(firstId);
+    expect((await d.turns.get(retry.turnId))?.state).toBe('queued');
+    expect(d.turnQueue.ids).toEqual([retry.turnId]);
   });
 
   it('audits the submission with the turn id and the credential name', async () => {
@@ -219,6 +276,24 @@ describe('submitTurn (spec §4.1)', () => {
       subject: 'github:1234',
       sessionId: sid,
       turnId: (res.body as { turnId: string }).turnId,
+      credential: 'my-anthropic',
+    });
+  });
+
+  it('writes the turn id into the audit STREAM, not just the log line', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const res = await submit(d, sid, { item, async: true });
+    const { turnId } = res.body as { turnId: string };
+    // d.logLines is written by handler-util BEFORE index.audit(), so it is blind to the stream's
+    // field set: the whole `turnId` field could vanish from ownership.audit and every logLines
+    // assertion above would still pass. The stream is the durable, queryable record -- a submission
+    // whose row names no turn cannot be traced to the turn it authorized.
+    const row = d.streams.get(AUDIT_STREAM)!.find((r) => r.decision === 'turn_submitted')!;
+    expect(row.turnId).toBe(turnId);
+    expect(row).toMatchObject({
+      subject: 'github:1234',
+      sessionId: sid,
       credential: 'my-anthropic',
     });
   });
@@ -261,6 +336,28 @@ describe('getTurn (spec §4.4)', () => {
     expect((await get(d, sid, turnId)).body).toMatchObject({
       state: 'solved',
       result: { status: 'solved', patch: 'diff --git' },
+    });
+  });
+
+  it('withholds a result while the turn is non-terminal, and reports it once terminal', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    // The result key is per SESSION and shared with the synchronous path, so this is what an earlier
+    // INTERACTIVE turn on the same session leaves behind. Reporting it beside `queued` would hand a
+    // caller polling for completion a stale result as if it were this turn's.
+    d.fake.strings.set(`leaf:result:${sid}`, JSON.stringify({ status: 'done', patch: 'stale' }));
+    const queued = (await get(d, sid, turnId)).body as Record<string, unknown>;
+    expect(queued).toEqual({ turnId, state: 'queued', attempts: 0 });
+    expect(queued.result).toBeUndefined();
+
+    await d.turns.markRunning(turnId, 1);
+    expect(((await get(d, sid, turnId)).body as Record<string, unknown>).result).toBeUndefined();
+
+    await d.turns.finalize(turnId, 'done', NOW_MS);
+    expect((await get(d, sid, turnId)).body).toMatchObject({
+      state: 'done',
+      result: { status: 'done', patch: 'stale' },
     });
   });
 
@@ -308,6 +405,9 @@ describe('cancelTurn (spec §4.5)', () => {
     // Interrupting a running leaf needs control-plane-to-specific-worker machinery that does not
     // exist; interactive cancel rides the turn's own connection and async has none (§4.5, §12).
     expect(await codeOf(() => cancel(d, sid, turnId))).toBe('turn_not_cancellable');
+    // The STATE, not just the code: a caller told only "not cancellable" cannot tell a turn already
+    // running from one already finished, and the two call for different next steps.
+    await expect(cancel(d, sid, turnId)).rejects.toThrow(/'running'/);
     expect((await d.turns.get(turnId))?.state).toBe('running');
   });
 

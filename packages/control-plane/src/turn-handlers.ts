@@ -1,6 +1,6 @@
 import { countAsync } from './counters.js';
 import { CpError } from './errors.js';
-import { asRecord, auditBestEffort } from './handler-util.js';
+import { auditBestEffort } from './handler-util.js';
 import { assertOwner, type CpDeps, type Handler, type RequestCtx } from './handlers.js';
 import type { SessionRecord } from './ownership.js';
 import { isTerminalState, parseTurnSubmission, type TurnRecord } from './turn-record.js';
@@ -60,6 +60,13 @@ async function turnOnSession(
  * Claim `key`, stepping over a holder whose turn is already terminal. One retry, not a loop: the
  * only way the second claim loses is another submission winning the key in between, and that
  * submission's turn is by definition non-terminal, so returning its id is the right answer anyway.
+ *
+ * The release is CONDITIONAL on the stale holder we actually read, and that compare is what keeps
+ * one key to one turn. Two submissions can both read the same terminal holder; the first then
+ * releases, re-claims and creates its record. An unconditional release would let the second delete
+ * that live claim and create a SECOND record and queue entry for one key -- exactly the duplicate
+ * fan-out idempotency exists to prevent (§4.3). Comparing means the loser's release is a no-op, so
+ * its second claim loses too and it returns the winner's id, the same answer a live holder gives.
  */
 async function claimKey(
   turns: TurnStore,
@@ -71,8 +78,9 @@ async function claimKey(
   if (held === turnId) return { turnId, fresh: true };
   const existing = await turns.get(held);
   if (existing && !isTerminalState(existing.state)) return { turnId: held, fresh: false };
-  // The holder finished (or its record is gone): the key is stale, so release and take it.
-  await turns.releaseIdempotencyKey(owner, key);
+  // The holder finished (or its record is gone): the key is stale, so release THAT holder and take
+  // it. The second claim re-reads the holder, so losing the compare and losing the claim converge.
+  await turns.releaseIdempotencyKeyIf(owner, key, held);
   const second = await turns.claimIdempotencyKey(owner, key, turnId);
   return { turnId: second, fresh: second === turnId };
 }
@@ -172,7 +180,16 @@ export const TURN_HANDLERS: Record<string, Handler> = {
   getTurn: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const turn = await turnOnSession(ctx, deps, rec);
-    const result = deps.leafResults ? await readLeafResult(deps.leafResults, turn.sessionId) : null;
+    // Only once the turn is TERMINAL. The result key is per SESSION and shared with the synchronous
+    // path, so a session that ran an interactive turn and then submitted an async one would report
+    // `queued` beside the PREVIOUS turn's result, and a caller polling for completion would read it
+    // as this turn's. Nothing is written for an async turn until it finishes, so there is no partial
+    // result being withheld here (§4.4).
+    const result = isTerminalState(turn.state)
+      ? deps.leafResults
+        ? await readLeafResult(deps.leafResults, turn.sessionId)
+        : null
+      : null;
     return {
       status: 200,
       body: {
@@ -210,6 +227,3 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     return { status: 202, body: { turnId: turn.turnId, state: 'cancelled' } };
   },
 };
-
-/** Exported for the e2e test, which asserts the submitted envelope reaches a fake worker intact. */
-export const envelopeOf = (turn: TurnRecord): Record<string, unknown> => asRecord(turn.envelope);

@@ -144,6 +144,23 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('releases a key only while the expected turn still holds it (§4.3)', async () => {
+      const { store, done } = await make();
+      expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-first')).toBe('t-first');
+      // The compare is what stops a submission stepping over a TERMINAL holder from deleting the
+      // live claim another submission made in between -- which would fan out two turns for one key.
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-someone-else')).toBe(
+        false,
+      );
+      expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-second')).toBe('t-first');
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-first')).toBe(true);
+      expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-third')).toBe('t-third');
+      // An already-absent key reads as released: the caller's own next claim then wins it outright.
+      await store.releaseIdempotencyKey('github:1234', 's-1');
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-gone')).toBe(true);
+      await done();
+    });
+
     it('carries no TTL while non-terminal, in `queued` or `running` (§5.1)', async () => {
       const { store, ttlOf, done } = await make();
       await store.create(rec());
