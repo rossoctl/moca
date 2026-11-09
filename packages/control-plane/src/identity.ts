@@ -207,10 +207,12 @@ export class TestUserProvider implements IdentityProvider {
 }
 /**
  * Every subject form the control plane mints, across providers: `github:<numeric id>`,
- * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>` (oidc.ts). One RE so enrollment
- * (SH_ALLOWED_SUBJECTS) can validate entries without knowing which provider the deployment runs.
+ * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>` (oidc.ts; w3id's sub is an
+ * email address, hence `@` in the charset). One RE so enrollment (SH_ALLOWED_SUBJECTS) can
+ * validate entries without knowing which provider the deployment runs.
  */
-export const SUBJECT_RE = /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
+export const SUBJECT_RE =
+  /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$/;
 
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')

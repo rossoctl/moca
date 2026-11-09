@@ -281,6 +281,15 @@ describe('id_token verification', () => {
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(p.subject).toBe('oidc:user-1');
   });
+
+  it('accepts an email sub (w3id mints the intranet address), refusing only exotic values', async () => {
+    const r = rig();
+    mint(r, { sub: 'george@us.ibm.com', email: 'george@us.ibm.com', name: 'George Almasi' });
+    const start = await r.provider.startDeviceAuth();
+    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    const p = await r.provider.completeDeviceAuth(start.deviceCode);
+    expect(p.subject).toBe('oidc:george@us.ibm.com');
+  });
 });
 
 describe('the callback route', () => {
