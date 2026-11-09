@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -647,7 +648,7 @@ func TestLeaseLatchIsNotSetByPerExecRequests(t *testing.T) {
 	if a.leaseOn.Load() {
 		t.Error("a per-Exec request set the lease latch")
 	}
-	if a.lease.r != nil {
+	if a.lease.r.Load() != nil {
 		t.Error("a per-Exec request started the reaper")
 	}
 	if a.ShellPID() != pid {
@@ -669,5 +670,86 @@ func TestLeaseNormaliseWorkspaceIsNotImplementedYet(t *testing.T) {
 	}
 	if a.leaseOn.Load() {
 		t.Error("a refused lease request set the lease latch")
+	}
+}
+
+// A timeout and a failed teardown together must still reach the host as
+// teardown_failed: a KindError would be an opaque guest error to vmpool (spec §3.1).
+func TestLeaseTimeoutWithTeardownFailureStillReportsTeardownFailed(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	orig := waitCgroupEmpty
+	waitCgroupEmpty = func(*execCgroup, time.Duration) error { return errors.New("injected: still populated") }
+	t.Cleanup(func() { waitCgroupEmpty = orig })
+
+	req := leaseReq(`sleep 30`)
+	req.TimeoutS = 1
+	_, _, end, errMsg := drive(t, a, req, nil)
+	if errMsg != "" || !end.TeardownFailed || end.ExitCode != -1 {
+		t.Fatalf("end %+v, err %q; want an End with teardown_failed and exit -1", end, errMsg)
+	}
+	if _, _, _, errMsg := drive(t, a, leaseReq(`true`), nil); !strings.Contains(errMsg, "teardown failed") {
+		t.Fatalf("next request's error %q, want it to say teardown failed", errMsg)
+	}
+}
+
+// The host aborts an Exec by closing the connection (vmpool's closeConn on ctx.Done).
+// The cgroup must be killed then, as on a timeout, and the agent must take the next Exec.
+func TestLeaseConnectionCloseKillsTheExec(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	host, guest := net.Pipe()
+	served := make(chan struct{})
+	go func() { _ = a.ServeConn(guest); close(served) }()
+	if err := WriteJSON(host, KindRequest, leaseReq(`sleep 30 & sleep 30`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(host, KindStdinEOF, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	sleeps := regexp.MustCompile(`^sleep 30$`)
+	if n := len(procsMatching(t, sleeps, 7000)); n != 2 {
+		t.Fatalf("%d `sleep 30`s running as 7000 before the close, want 2: the test would prove nothing", n)
+	}
+	_ = host.Close()
+
+	deadline := time.Now().Add(6 * time.Second)
+	for len(procsMatching(t, sleeps, 7000)) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the aborted Exec's processes survived 6 s: %v", procsMatching(t, sleeps, 7000))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case <-served:
+	case <-time.After(6 * time.Second):
+		t.Fatal("ServeConn did not return after the host closed the connection")
+	}
+	if out, _, end, errMsg := drive(t, a, leaseReq(`echo ok`), nil); errMsg != "" || end.ExitCode != 0 || out != "ok\n" {
+		t.Fatalf("lease request after an abort: end %+v, err %q, stdout %q", end, errMsg, out)
+	}
+}
+
+// Close must not wait for a running lease Exec: it once took the lease mutex, which
+// runLease holds for the Exec's whole run.
+func TestLeaseCloseDoesNotWaitForARunningExec(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`sleep 30`)
+	req.TimeoutS = 3 // ends the Exec on its own once the reaper is stopped
+	done := make(chan struct{})
+	go func() { defer close(done); _, _, _, _ = drive(t, a, req, nil) }()
+	t.Cleanup(func() { <-done })
+	sleeps := regexp.MustCompile(`^sleep 30$`)
+	for deadline := time.Now().Add(2 * time.Second); len(procsMatching(t, sleeps, 7000)) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("the Exec never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	closed := make(chan struct{})
+	go func() { _ = a.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on the running lease Exec")
 	}
 }

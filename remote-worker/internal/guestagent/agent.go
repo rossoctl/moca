@@ -144,6 +144,8 @@ func (a *Agent) forkShell() error {
 }
 
 func (a *Agent) Close() error {
+	// Before shell.Wait below: the lease reaper's wait4(-1) could otherwise reap the
+	// parked shell first and leave Wait with ECHILD.
 	a.stopLease()
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -282,10 +284,13 @@ func (a *Agent) ServeConn(rw io.ReadWriteCloser) error {
 
 	var end End
 	if req.Lease {
-		end, err = a.runLease(req, stdin, w)
+		end, err = a.runLease(req, stdin, w, rw)
 	} else if a.leaseOn.Load() {
 		// The latch. A per-Exec request runs as root on the parked shell, which a lease
-		// VM must not offer once an Exec has run in it as the exec user.
+		// VM must not offer once an Exec has run in it as the exec user. The latch alone
+		// does not exclude a per-Exec request already in flight when the first lease
+		// request arrives: that relies on the host serialising Execs per VM, and on a
+		// VM's mode being fixed for its life.
 		err = errors.New("guest-agent: this agent serves lease requests only")
 	} else if req.HasStdin {
 		// Spec §5.4's one thing the parked shell cannot do: `base64 -d > file` only

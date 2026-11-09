@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,10 +27,12 @@ const leaseTeardownBound = 5 * time.Second
 // leaseRuntime is the Agent's lease-mode state. mu is held for the whole of runLease,
 // so two lease Execs never interleave: the host serialises Execs per VM anyway, and
 // the per-Exec cgroup and the reaper's registration window both assume one at a time.
+// r is an atomic rather than under mu so that Close can stop the reaper while an Exec
+// is still running, instead of blocking until it ends.
 type leaseRuntime struct {
 	mu   sync.Mutex
 	once sync.Once
-	r    *reaper
+	r    atomic.Pointer[reaper]
 	seq  uint64
 }
 
@@ -59,12 +63,10 @@ func (a *Agent) leasePrepare() error {
 	return nil
 }
 
-// stopLease stops the reaper, if a lease request ever started it.
+// stopLease stops the reaper, if a lease request ever started it. It does not take
+// lease.mu, which a running Exec holds: Close must not wait for that Exec to end.
 func (a *Agent) stopLease() {
-	a.lease.mu.Lock()
-	r := a.lease.r
-	a.lease.mu.Unlock()
-	if r != nil {
+	if r := a.lease.r.Load(); r != nil {
 		r.stop()
 	}
 }
@@ -77,7 +79,12 @@ func (a *Agent) stopLease() {
 // Each Exec is a fresh `bash -c` through the shim, never the parked shell: one VM now
 // serves many Execs, so a shell's variables, cwd, aliases and functions would leak
 // from one to the next.
-func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error) {
+//
+// conn is the request's connection, already drained of stdin. The host sends nothing
+// more on it, so a read that returns at all means the host closed it: that is how the
+// host aborts an Exec (vmpool's closeConn on ctx.Done), and the Exec is torn down as
+// on a timeout (spec §3.1: killed when it "exits, times out or is aborted").
+func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Reader) (End, error) {
 	lo := a.opts.Lease
 	if lo.CgroupRoot == "" {
 		return End{}, errors.New("guest-agent: lease mode is not available in this guest")
@@ -95,7 +102,8 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a.leaseOn.Store(true)
-	l.once.Do(func() { l.r = startReaper() })
+	l.once.Do(func() { l.r.Store(startReaper()) })
+	r := l.r.Load()
 	l.seq++
 
 	c, err := newExecCgroup(lo.CgroupRoot, l.seq)
@@ -123,7 +131,7 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 	// Inherits the agent's environment on purpose; see forkShell for why R6's filter is
 	// absent here. CgroupFD places the child in its cgroup at clone time
 	// (CLONE_INTO_CGROUP), so there is no window in which it runs outside it.
-	l.r.expect()
+	r.expect()
 	pid, err := syscall.ForkExec(shim, argv, &syscall.ProcAttr{
 		Dir:   a.opts.WorkDir,
 		Env:   os.Environ(),
@@ -131,12 +139,12 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 		Sys:   &syscall.SysProcAttr{Setsid: true, UseCgroupFD: true, CgroupFD: c.fd()},
 	})
 	if err != nil {
-		l.r.cancel()
+		r.cancel()
 		closeAll()
 		_ = c.remove()
 		return End{}, fmt.Errorf("guest-agent: lease: starting the command: %w", err)
 	}
-	exited := l.r.await(pid)
+	exited := r.await(pid)
 	// The child holds its own copies now; the agent keeping these would stop the drains
 	// from ever seeing EOF.
 	_ = stdinR.Close()
@@ -159,13 +167,23 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 		defer tm.Stop()
 		timeout = tm.C
 	}
+	gone := make(chan struct{})
+	go func() {
+		// Returns, at the latest, when ServeConn closes the connection after this Exec.
+		var b [1]byte
+		_, _ = conn.Read(b[:])
+		close(gone)
+	}()
+
 	var end End
-	timedOut := false
+	timedOut, aborted := false, false
 	select {
 	case ws := <-exited:
 		end.ExitCode = exitCode(ws)
 	case <-timeout:
 		timedOut = true
+	case <-gone:
+		aborted = true
 	}
 
 	// Kill whatever the command left behind, then wait for the cgroup to empty. This
@@ -175,21 +193,25 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 	if terr == nil {
 		terr = waitCgroupEmpty(c, leaseTeardownBound)
 	}
-	l.r.sweep()
-	l.r.cancel()
+	r.sweep()
+	r.cancel()
 	if terr != nil {
 		// Something in the cgroup may still hold the pipes' write ends, so force the
 		// drains and the stdin feeder off them rather than join a read that never ends.
-		// The cgroup is left in place: rmdir of a populated cgroup fails anyway.
+		// The cgroup directory is left in place: rmdir of a populated cgroup fails anyway.
 		_ = stdoutR.Close()
 		_ = stderrR.Close()
 		_ = stdinW.Close()
 		wg.Wait()
+		_ = c.dir.Close()
 		msg := "guest-agent: lease teardown failed: " + terr.Error() + "; this agent is dead"
 		a.deadMsg.Store(&msg)
 		a.dead.Store(true)
-		if timedOut {
-			return End{}, fmt.Errorf("timeout:%d; %s", req.TimeoutS, msg)
+		// Always an End, never a KindError, so the host can tell teardown_failed apart
+		// from any other guest error (spec §3.1). A timed-out or aborted command has no
+		// exit code of its own: -1.
+		if timedOut || aborted {
+			end.ExitCode = -1
 		}
 		end.TeardownFailed = true
 		return end, nil
@@ -201,6 +223,10 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter) (End, error)
 	// The cgroup is empty, so rmdir succeeds; if it somehow does not, the leftover is
 	// an empty, unused directory and the next Exec gets a fresh e<seq> regardless.
 	_ = c.remove()
+	if aborted {
+		// The host is gone; ServeConn's write of this fails harmlessly.
+		return End{}, errors.New("guest-agent: the connection closed; the Exec was aborted")
+	}
 	if timedOut {
 		// Not dead, unlike the parked shell's timeout: there is no long-lived shell
 		// whose state the timeout could corrupt, and the cgroup is gone.
@@ -301,9 +327,10 @@ type reaper struct {
 	order   []int // early's pids, oldest first, for the cap
 	pending bool  // between expect and await/cancel
 
-	sig  chan os.Signal
-	quit chan struct{}
-	done chan struct{}
+	sig      chan os.Signal
+	quit     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 const reaperEarlyCap = 1024
@@ -332,10 +359,13 @@ func startReaper() *reaper {
 	return r
 }
 
+// stop is idempotent: Close may run more than once.
 func (r *reaper) stop() {
-	signal.Stop(r.sig)
-	close(r.quit)
-	<-r.done
+	r.stopOnce.Do(func() {
+		signal.Stop(r.sig)
+		close(r.quit)
+		<-r.done
+	})
 }
 
 // sweep reaps every exited child. SIGCHLD coalesces, so one signal can stand for many
