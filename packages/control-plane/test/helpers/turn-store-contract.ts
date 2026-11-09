@@ -6,6 +6,15 @@ export type MakeTurnStore = () => Promise<{
   store: TurnStore;
   /** Epoch ms the suite treats as "now"; real Redis TTLs are real time, so this is the wall clock. */
   now: number;
+  /** The store's own `resultTtlSeconds`/`ttlMarginSeconds`, so the suite builds its TTL band from
+   *  the constructor options it actually passed rather than a hardcoded number. */
+  resultTtlSeconds: number;
+  ttlMarginSeconds: number;
+  /**
+   * Seconds of TTL remaining on the turn record's key, or -1 when it carries none. Mirrors Redis
+   * TTL semantics so the §5.1 invariant reads the same against both backings.
+   */
+  ttlOf(turnId: string): Promise<number>;
   done(): Promise<void>;
 }>;
 
@@ -132,7 +141,36 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       // Released when the turn goes terminal, so the same session can submit again afterwards.
       await store.releaseIdempotencyKey('github:1234', 's-1');
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-third')).toBe('t-third');
-      expect(now).toBeGreaterThan(0);
+      await done();
+    });
+
+    it('carries no TTL while non-terminal, in `queued` or `running` (§5.1)', async () => {
+      const { store, ttlOf, done } = await make();
+      await store.create(rec());
+      expect(await ttlOf('t-1')).toBe(-1);
+      // `running` is a long-lived non-terminal state too -- a leaf can sit there for the turn's
+      // whole wall-clock budget, so it must not pick up a TTL either.
+      expect(await store.markRunning('t-1', 1)).toBe('ok');
+      expect(await ttlOf('t-1')).toBe(-1);
+      await done();
+    });
+
+    it('sets the TTL to resultTtl + margin at a terminal transition (§5.1)', async () => {
+      const { store, now, resultTtlSeconds, ttlMarginSeconds, ttlOf, done } = await make();
+      const band = resultTtlSeconds + ttlMarginSeconds;
+
+      await store.create(rec({ turnId: 't-done' }));
+      expect(await store.finalize('t-done', 'done', now)).toBe('ok');
+      const doneTtl = await ttlOf('t-done');
+      expect(doneTtl).toBeGreaterThan(band - 5);
+      expect(doneTtl).toBeLessThanOrEqual(band);
+
+      // `cancelled` is terminal too, and must get the TTL exactly like `done` does.
+      await store.create(rec({ turnId: 't-cancel' }));
+      expect(await store.cancel('t-cancel', now)).toBe('cancelled');
+      const cancelTtl = await ttlOf('t-cancel');
+      expect(cancelTtl).toBeGreaterThan(band - 5);
+      expect(cancelTtl).toBeLessThanOrEqual(band);
       await done();
     });
   });

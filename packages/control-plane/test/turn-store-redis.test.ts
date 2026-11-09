@@ -2,8 +2,12 @@ import { afterAll, beforeAll } from 'vitest';
 import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { TurnStore } from '../src/turn-store.js';
+import { turnKey } from '../src/turn-record.js';
 import type { CpRedisLike } from '../src/ownership.js';
 import { turnStoreContract } from './helpers/turn-store-contract.js';
+
+const resultTtlSeconds = 86_400;
+const ttlMarginSeconds = 3_600;
 
 // Needs Redis on 6379, as sandbox-redis.test.ts and refresh-redis.test.ts do; CI provides a redis:7
 // service. The contract suite's TTL and set-membership rules are exactly the ones a fake can get
@@ -28,11 +32,16 @@ async function isolated() {
   const tag = `${process.pid}:${randomUUID()}`;
   return {
     store: new TurnStore(client as unknown as CpRedisLike, {
-      resultTtlSeconds: 86_400,
-      ttlMarginSeconds: 3_600,
+      resultTtlSeconds,
+      ttlMarginSeconds,
       keyTag: tag,
     }),
     now: Date.now(),
+    resultTtlSeconds,
+    ttlMarginSeconds,
+    // Observes the exact key the store wrote: the same `${id}:${tag}` suffix `TurnStore.tag()`
+    // applies internally, wrapped in the same `turnKey()` the store uses.
+    ttlOf: async (turnId: string) => client.ttl(turnKey(`${turnId}:${tag}`)),
     done: async () => {
       const keys = await client.keys(`*${tag}*`);
       if (keys.length) await client.del(keys);
