@@ -2,7 +2,9 @@ package vmpool
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -79,12 +81,42 @@ func leaseRunner(t *testing.T, vm VM) func(cmd string) string {
 
 // leftoverProcs is a guest command that prints `none` when no process matches the
 // (bracketed) pgrep -f pattern, and otherwise each match's command line. Without pgrep it
-// prints MISSING-PGREP, so a snapshot lacking procps fails loudly rather than reading as
-// "nothing left".
+// prints MISSING-PGREP, and on a pgrep error (status > 1) PGREP-ERROR:<status>, so a
+// broken probe fails loudly rather than reading as "nothing left".
 func leftoverProcs(pattern string) string {
 	return `command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }
-pids=$(pgrep -f '` + pattern + `')
+pids=$(pgrep -f '` + pattern + `'); rc=$?
+if [ $rc -gt 1 ]; then echo PGREP-ERROR:$rc; exit 0; fi
 if [ -z "$pids" ]; then echo none; else for p in $pids; do tr '\0' ' ' </proc/$p/cmdline; echo; done; fi`
+}
+
+// countProcs is the positive control: a guest command that polls for up to 3 s until
+// `pgrep -fc pattern` reports want, then prints started=<count>. Without it, a Run 1 whose
+// processes never started would make Run 2's `none` a pass for the wrong reason.
+func countProcs(pattern string, want int) string {
+	return fmt.Sprintf(`command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }
+i=0; while n=$(pgrep -fc '%s'); [ "$n" != %d ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+echo started=$n`, pattern, want)
+}
+
+// requireProbeWorked fails the gate when a pgrep probe could not run.
+func requireProbeWorked(t *testing.T, out string) {
+	t.Helper()
+	if strings.Contains(out, "MISSING-PGREP") {
+		t.Fatalf("the snapshot has no pgrep (procps), so the gate cannot look")
+	}
+	if strings.Contains(out, "PGREP-ERROR:") {
+		t.Fatalf("pgrep failed in the guest:\n%s", out)
+	}
+}
+
+// requireStarted asserts countProcs's line reports want processes.
+func requireStarted(t *testing.T, out string, want int) {
+	t.Helper()
+	requireProbeWorked(t, out)
+	if m := regexp.MustCompile(`(?m)^started=(\d+)$`).FindStringSubmatch(out); m == nil || m[1] != strconv.Itoa(want) {
+		t.Fatalf("Run 1 started %v marked processes, want %d -- the gate would check for leftovers of nothing:\n%s", m, want, out)
+	}
 }
 
 // leaseDaemonScript forks, lets the parent exit, setsids in the child and forks again,
@@ -109,14 +141,18 @@ func TestGateLeaseExecKillsProcesses(t *testing.T) {
 	requireKVM(t)
 	run := leaseRunner(t, leaseGateVM(t, "vm-lkill"))
 
-	if got := run(`sleep 300 & setsid sleep 301 & nohup sleep 302 >/dev/null 2>&1 & (sleep 303 &); ` +
-		`python3 -c ` + shQuote(leaseDaemonScript) + ` lease-kill-marker; echo started`); got != "started\n" {
-		t.Fatalf("Run 1 stdout %q, want %q", got, "started\n")
-	}
-	got := run(leftoverProcs(`[s]leep 30[0-3]|[l]ease-kill-marker`))
-	if strings.Contains(got, "MISSING-PGREP") {
-		t.Fatalf("the snapshot has no pgrep (procps), so the gate cannot look")
-	}
+	// Built from variables so that the Exec's own bash command line, which pgrep -f also
+	// sees, never carries the literal "sleep 30N" or the marker: only the started
+	// processes match, in Run 1's count and in Run 2's search.
+	const pattern = `[s]leep 30[0-3]|[l]ease-kill-marker`
+	out := run(`s=30; m=lease-kill
+sleep ${s}0 & setsid sleep ${s}1 & nohup sleep ${s}2 >/dev/null 2>&1 & (sleep ${s}3 &)
+python3 -c ` + shQuote(leaseDaemonScript) + ` "$m-marker"
+` + countProcs(pattern, 5))
+	requireStarted(t, out, 5)
+
+	got := run(leftoverProcs(pattern))
+	requireProbeWorked(t, got)
 	if got != "none\n" {
 		t.Errorf("processes Run 1 started survived into Run 2:\n%s", got)
 	}
@@ -154,43 +190,84 @@ r = libc.ptrace(0, 0, None, None)
 print("ptrace", r, ctypes.get_errno() if r == -1 else 0)
 `
 
+// leaseProcMemScript opens PID 1's memory for writing and prints mem=<errno name>, or
+// mem=opened. Opening, not reading: a read at offset 0 fails with EIO even when the
+// open succeeded, so `cat /proc/1/mem` failing proves nothing.
+const leaseProcMemScript = `
+import errno, os
+try:
+    os.close(os.open("/proc/1/mem", os.O_WRONLY))
+    print("mem=opened")
+except OSError as e:
+    print("mem=" + errno.errorcode.get(e.errno, str(e.errno)))
+`
+
 // TestGateLeasePrivilege is the Exec half of spec §9's LeasePrivilege (plan 5 adds the
-// tracked-process half): a lease Exec runs as uid 7000 and can leave its cgroup, make
-// one, signal or read PID 1, become root, mount, make a user namespace, or ptrace -- none
-// of it. Then Run 2 shows that nothing Run 1 started, or created, is left.
+// tracked-process half): a lease Exec runs as uid 7000 with no_new_privs, on an image
+// with no setuid or setgid file, and can leave its cgroup, make one, signal or open PID
+// 1, mount, make a user namespace, or ptrace -- none of it. Then Run 2 shows that nothing
+// Run 1 started, or created, is left.
+//
+// The cgroup escape is checked twice: by exit status, and by consequence. $BASHPID, not
+// $$, because wrapCommand runs the command in a subshell whose $$ is its parent's pid.
+// The marker starts AFTER the migration attempts and from that same shell, so if one had
+// succeeded the marker would sit outside the Exec's cgroup, survive its kill, and Run 2
+// would find it.
 func TestGateLeasePrivilege(t *testing.T) {
 	requireKVM(t)
 	run := leaseRunner(t, leaseGateVM(t, "vm-lpriv"))
 
-	out := run(`python3 -c 'import time; time.sleep(300)' lease-priv-marker >/dev/null 2>&1 &
-echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null; echo procs=$?
+	const pattern = `[l]ease-priv-marker`
+	out := run(`echo $BASHPID > /sys/fs/cgroup/cgroup.procs 2>/dev/null; echo procs=$?
+echo $BASHPID > /sys/fs/cgroup/moca-execs/cgroup.procs 2>/dev/null; echo execsprocs=$?
 mkdir /sys/fs/cgroup/moca-execs/x 2>/dev/null; echo mkdir=$?
 kill -0 1 2>/dev/null; echo kill=$?
-cat /proc/1/mem >/dev/null 2>&1; echo mem=$?
-su -c id </dev/null >/dev/null 2>&1; echo su=$?
-mount -t tmpfs t /mnt 2>/dev/null; echo mount=$?
-unshare -U true 2>/dev/null; echo unshare=$?
+mount -t tmpfs t /tmp/sbx-home 2>/dev/null; echo mount=$?
+u=$(unshare -U true 2>&1); echo unshare=$?; echo "unshareerr=$(echo "$u" | tr '\n' ' ')"
+python3 -c ` + shQuote(leaseProcMemScript) + `
 python3 -c ` + shQuote(leasePtraceScript) + `
-echo uid=$(id -u)`)
-	for _, step := range []string{"procs", "mkdir", "kill", "mem", "su", "mount", "unshare"} {
+command -v find >/dev/null || echo MISSING-FIND
+echo "suid=[$(find / -xdev -perm /6000 -type f 2>/dev/null | tr '\n' ' ')]"
+echo "nnp=$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
+echo uid=$(id -u)
+m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2>&1 &
+` + countProcs(pattern, 1))
+	requireStarted(t, out, 1)
+
+	// 127 is "command not found": the image lacks the tool, which proves nothing denied it.
+	for _, step := range []string{"procs", "execsprocs", "mkdir", "kill", "mount", "unshare"} {
 		m := regexp.MustCompile(`(?m)^` + step + `=(\d+)$`).FindStringSubmatch(out)
-		// 127 is "command not found": the image lacks the tool, which proves nothing denied it.
 		if m == nil || m[1] == "0" || m[1] == "127" {
 			t.Errorf("%s: exit status %v, want a non-zero status other than 127\n%s", step, m, out)
 		}
 	}
+	// A usage message would also exit non-zero; these are the kernel's refusals.
+	if m := regexp.MustCompile(`(?m)^unshareerr=(.*)$`).FindStringSubmatch(out); m == nil ||
+		!(strings.Contains(m[1], "Operation not permitted") || strings.Contains(m[1], "No space left on device") ||
+			strings.Contains(m[1], "Invalid argument")) {
+		t.Errorf("unshare -U did not fail with EPERM, ENOSPC or EINVAL: %v\n%s", m, out)
+	}
+	if !strings.Contains(out, "\nmem=EACCES\n") && !strings.Contains(out, "\nmem=EPERM\n") {
+		t.Errorf("opening /proc/1/mem for writing did not fail with EACCES or EPERM:\n%s", out)
+	}
 	if !strings.Contains(out, "ptrace -1 1\n") { // errno 1 = EPERM
 		t.Errorf("ptrace(PTRACE_TRACEME) did not fail with EPERM:\n%s", out)
 	}
-	if !strings.Contains(out, "uid=7000\n") {
+	if strings.Contains(out, "MISSING-FIND") {
+		t.Errorf("the snapshot has no find, so the setuid check cannot look:\n%s", out)
+	} else if !strings.Contains(out, "\nsuid=[]\n") {
+		t.Errorf("setuid or setgid files on the root filesystem:\n%s", out)
+	}
+	if !strings.Contains(out, "\nnnp=1\n") {
+		t.Errorf("the Exec does not have no_new_privs set:\n%s", out)
+	}
+	if !strings.Contains(out, "\nuid=7000\n") {
 		t.Errorf("the Exec is not uid 7000:\n%s", out)
 	}
 
-	got := run(`test -e /sys/fs/cgroup/moca-execs/x && echo cgroup-x-exists; ` + leftoverProcs(`[l]ease-priv-marker`))
-	if strings.Contains(got, "MISSING-PGREP") {
-		t.Fatalf("the snapshot has no pgrep (procps), so the gate cannot look")
-	}
+	got := run(`test -e /sys/fs/cgroup/moca-execs/x && echo cgroup-x-exists; ` + leftoverProcs(pattern))
+	requireProbeWorked(t, got)
 	if got != "none\n" {
-		t.Errorf("Run 2 found what Run 1 left behind:\n%s", got)
+		t.Errorf("Run 2 found what Run 1 left behind (a marker here means a cgroup escape worked):\n%s", got)
 	}
 }
