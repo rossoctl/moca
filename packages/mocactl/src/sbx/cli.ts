@@ -37,6 +37,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
+import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL] [--no-browser]
@@ -70,7 +71,10 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  this exists, #577; Claude Code still asks once
                                                  whether you trust the folder. The session loads
                                                  no MCP server but the sandbox's; run claude
-                                                 yourself for your own servers)
+                                                 yourself for your own servers). Its local tools
+                                                 are denied (--disallowed-tools) from any
+                                                 directory, except in a repo up --cortex set up,
+                                                 where Cortex blocks them
   mocactl sbx codex [-- CODEX_ARGS ...]          run Codex CLI on this sandbox's MCP tools, for one
                                                  run (-c, nothing written: Codex reads no
                                                  project-local config, so up cannot configure it).
@@ -678,13 +682,16 @@ export async function sbxMain(
       // that claude starts resolves the binding itself, so the agent follows .sbx/sandbox.json as
       // it changes. Claude Code passes its whole environment to a stdio server, so the env-var
       // URL case needs no help (#639 was Codex-specific); an explicit --control-plane-url is
-      // forwarded (as the normalized ctx.url) because a flag is not the environment.
+      // forwarded (as the normalized ctx.url) because a flag is not the environment. The local
+      // tools are denied unless this is a repository `up --cortex` set up (#702); outside a
+      // repository, or with a record that cannot be read, they are denied.
       return cmdClaude(
         ctx,
         positionals.slice(1),
         deps.claude ?? {},
         values.sandbox,
         values['control-plane-url'] !== undefined ? ctx.url : undefined,
+        await repoRoot(cwd).then(cortexMode, () => false),
       );
     case 'codex':
       // Only an explicit --sandbox is passed on: without one, the `mocactl sbx mcp` that codex

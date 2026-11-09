@@ -133,6 +133,12 @@ that question never returns either. It is the smaller
 session: `--strict-mcp-config` means Claude Code loads no MCP server but the sandbox's, so run
 `claude` yourself when you want your own servers.
 
+The launcher denies Claude Code's local tools itself, with `--disallowed-tools` and the same
+list `up` writes. That covers directories with no `.claude/settings.json` from `up`, such as
+`mocactl sbx claude --sandbox ID` outside a repository. `--strict-mcp-config` alone limits only
+the MCP servers, not the built-in tools. In a repository `up --cortex` set up, the launcher
+leaves the local tools to Cortex, as `up` does, and says so when it starts.
+
 Headless use (scripts, CI) works the same way, without the prompts:
 
 ```bash
@@ -486,7 +492,9 @@ its highlighted default exits — answer yes, nothing was lost, and it never ret
 recorded for the folder, so subdirectories inherit it, which is also why the launcher works
 from any directory). The trade: the session loads no MCP
 server but the sandbox's. Run `claude` yourself, answer the two questions once, and every later
-session started in the root has your own servers too and asks nothing.
+session started in the root has your own servers too and asks nothing. Neither flag affects
+the local tools: the launcher denies those with `--disallowed-tools`
+([First run](#3-first-run)), so they stay off wherever it is started.
 
 **To undo it**, delete the sandbox:
 
