@@ -48,6 +48,22 @@ func ShimMain(args []string) {
 			shimFail("capbset drop "+strconv.Itoa(c), err)
 		}
 	}
+	// Empty the inheritable set while still root. setresuid clears permitted, effective
+	// and ambient, but the inheritable set survives it and execve, so without this it is
+	// empty only if whoever started the shim made it so. capset is per-thread: this
+	// thread is the one that execs, and it must keep permitted and effective for now,
+	// because setgroups/setres[ug]id run on EVERY thread (glibc's setxid broadcast under
+	// cgo) and abort the process if this one has lost CAP_SETGID/CAP_SETUID. Version 3
+	// carries two data words, for caps 0-31 and 32-63.
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var caps [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &caps[0]); err != nil {
+		shimFail("capset inheritable", err)
+	}
+	caps[0].Inheritable, caps[1].Inheritable = 0, 0
+	if err := unix.Capset(&hdr, &caps[0]); err != nil {
+		shimFail("capset inheritable", err)
+	}
 	// Go applies these three to every thread of the process (AllThreadsSyscall).
 	if err := syscall.Setgroups([]int{gid}); err != nil {
 		shimFail("setgroups", err)
@@ -94,6 +110,12 @@ func parseShimArgs(args []string) (uid, gid int, home string, argv []string, err
 	}
 	if gid, err = strconv.Atoi(args[1]); err != nil || gid <= 0 {
 		return 0, 0, "", nil, fmt.Errorf("gid %q: must be a positive integer", args[1])
+	}
+	if args[2] == "" {
+		return 0, 0, "", nil, errors.New("home is empty")
+	}
+	if args[4] == "" {
+		return 0, 0, "", nil, errors.New("argv[0] is empty")
 	}
 	return uid, gid, args[2], args[4:], nil
 }

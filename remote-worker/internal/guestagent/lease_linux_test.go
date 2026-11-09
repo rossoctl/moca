@@ -4,12 +4,14 @@ package guestagent
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -83,7 +85,41 @@ func TestShimDropsToTheExecUserWithNoPrivileges(t *testing.T) {
 	}
 }
 
-// Both calls target the caller itself, which an unfiltered process may do: TRACEME
+// The shim must clear the inheritable set itself, not rely on the agent starting with
+// it empty: CapInh survives setresuid and execve. AmbientCaps makes Go raise
+// CAP_NET_BIND_SERVICE in the shim's permitted, inheritable and ambient sets before it
+// execs the test binary, and root's execve keeps the inheritable set.
+func TestShimClearsAnInheritedCapabilitySet(t *testing.T) {
+	requireRootCgroupV2(t)
+	args := []string{ShimArg, testExecID, testExecID, t.TempDir(), "--",
+		"grep", "-E", "^(CapInh|CapAmb):", "/proc/self/status"}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Dir = "/"
+	cmd.SysProcAttr = &syscall.SysProcAttr{AmbientCaps: []uintptr{unix.CAP_NET_BIND_SERVICE}}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim: %v\n%s", err, out)
+	}
+	for _, want := range []string{"CapInh:\t0000000000000000", "CapAmb:\t0000000000000000"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	// The setup above must actually hand the shim a non-empty inheritable set, or the
+	// assertion is vacuous: the same launch without the shim shows it.
+	probe := exec.Command("grep", "^CapInh:", "/proc/self/status")
+	probe.SysProcAttr = &syscall.SysProcAttr{AmbientCaps: []uintptr{unix.CAP_NET_BIND_SERVICE}}
+	pout, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe: %v\n%s", err, pout)
+	}
+	if strings.Contains(string(pout), "0000000000000000") {
+		t.Fatalf("AmbientCaps did not raise CapInh, so this test proves nothing: %s", pout)
+	}
+}
+
+// All three calls target the caller itself, which an unfiltered process may do: TRACEME
 // needs no tracer privilege and reading one's own memory passes the ptrace access
 // check. So EPERM here is the filter's doing, not the uid drop's.
 const ptraceAndProcessVMScript = `
@@ -101,6 +137,10 @@ libc.process_vm_readv.restype = ctypes.c_ssize_t
 ctypes.set_errno(0)
 r = libc.process_vm_readv(os.getpid(), ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
 print("process_vm_readv", r, ctypes.get_errno() if r == -1 else 0)
+libc.process_vm_writev.restype = ctypes.c_ssize_t
+ctypes.set_errno(0)
+r = libc.process_vm_writev(os.getpid(), ctypes.byref(remote), 1, ctypes.byref(local), 1, 0)
+print("process_vm_writev", r, ctypes.get_errno() if r == -1 else 0)
 `
 
 func TestShimSeccompDeniesPtraceAndProcessVM(t *testing.T) {
@@ -109,7 +149,7 @@ func TestShimSeccompDeniesPtraceAndProcessVM(t *testing.T) {
 		t.Skip("needs python3")
 	}
 	out := runInShim(t, t.TempDir(), "python3", "-c", ptraceAndProcessVMScript)
-	for _, want := range []string{"ptrace -1 1", "process_vm_readv -1 1"} { // errno 1 = EPERM
+	for _, want := range []string{"ptrace -1 1", "process_vm_readv -1 1", "process_vm_writev -1 1"} { // errno 1 = EPERM
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("output lacks %q (want EPERM):\n%s", want, out)
 		}
@@ -179,6 +219,33 @@ func TestSeccompFilterDeniesTheBuildArchSyscalls(t *testing.T) {
 		if !compared[nr] {
 			t.Errorf("filter for %s never compares nr with %s (%d)", runtime.GOARCH, name, nr)
 		}
+	}
+}
+
+func TestShimArgsRejectAnEmptyHomeOrCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"empty home", []string{"7000", "7000", "", "--", "true"}},
+		{"empty argv[0]", []string{"7000", "7000", "/tmp/sbx-home", "--", ""}},
+		{"no argv", []string{"7000", "7000", "/tmp/sbx-home", "--"}},
+		{"root uid", []string{"0", "7000", "/tmp/sbx-home", "--", "true"}},
+		{"no separator", []string{"7000", "7000", "/tmp/sbx-home", "true", "x"}},
+	} {
+		if _, _, _, _, err := parseShimArgs(tc.args); err == nil {
+			t.Errorf("%s: parseShimArgs(%q) accepted it", tc.name, tc.args)
+		}
+	}
+	if _, _, _, _, err := parseShimArgs([]string{"7000", "7000", "/tmp/sbx-home", "--", "true"}); err != nil {
+		t.Errorf("valid args rejected: %v", err)
+	}
+	// The same check must be what the shim process does: step "args", exit 127.
+	cmd := exec.Command(os.Args[0], ShimArg, "7000", "7000", "", "--", "true")
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 127 || !strings.Contains(string(out), "guest-agent: lease-shim: args: ") {
+		t.Errorf("shim with an empty home: err %v, output %q; want exit 127 at step args", err, out)
 	}
 }
 
