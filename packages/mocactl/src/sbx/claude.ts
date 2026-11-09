@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { q } from '@moca/sandbox-client';
 import { SBX_EXIT, type SbxCtx } from './commands.js';
-import { SERVER } from './agent-config.js';
+import { CLAUDE_DENY, SERVER } from './agent-config.js';
+import { CORTEX_NOTE } from './sync.js';
 
 /**
  * `mocactl sbx claude` (#577): Claude Code pointed at this sandbox for one run, with the
@@ -24,9 +26,16 @@ import { SERVER } from './agent-config.js';
  * yes records the trust for the folder, and subdirectories inherit it). Harmless, but not
  * nothing — the messages and docs say "asks nothing about the server", not "asks nothing".
  *
- * `--strict-mcp-config` also means the session loads no MCP server but this one. That is the
- * same containment `up` applies when it denies the local tools: the agent works through the
- * sandbox. Run `claude` yourself when you want your other servers, and answer its questions.
+ * `--strict-mcp-config` also means the session loads no MCP server but this one. Run `claude`
+ * yourself when you want your other servers, and answer its questions.
+ *
+ * Neither flag touches Claude Code's built-in tools, which act on the laptop: only a deny does.
+ * `up`'s deny list is in the repository's `.claude/settings.json`, so it is missing from any
+ * other directory, `--sandbox ID` from outside a repository included (#702). `--disallowed-tools`
+ * carries the same list for this one run instead, so the agent works through the sandbox wherever
+ * it is started. The exception is a repository `up --cortex` set up: there Cortex blocks the local
+ * tools in every session with the sandbox's tools, this one included, and a `Read` deny would stop
+ * Claude Code loading the project's CLAUDE.md, which is what that mode is for (#568).
  */
 
 /**
@@ -48,12 +57,30 @@ export function serverConfig(id?: string, url?: string): string {
 }
 
 /**
- * What `claude` is run with: the server, strictly, then the caller's own arguments, so a user's
- * `--mcp-config` (the flag takes several) or model choice wins by coming later.
+ * What `claude` is run with: the server, the local tools denied (unless Cortex blocks them), then
+ * `--strict-mcp-config`, then the caller's own arguments, so a user's `--mcp-config` (the flag
+ * takes several) or model choice wins by coming later. `--mcp-config` and `--disallowed-tools`
+ * both take several values; the switch after each one ends it, so a prompt in `rest` is never
+ * read as a server or a tool. The deny list is one comma-separated value for the same reason.
  */
-export function claudeArgs(rest: readonly string[], id?: string, url?: string): string[] {
-  return ['--mcp-config', serverConfig(id, url), '--strict-mcp-config', ...rest];
+export function claudeArgs(
+  rest: readonly string[],
+  id?: string,
+  url?: string,
+  cortex = false,
+): string[] {
+  return [
+    '--mcp-config',
+    serverConfig(id, url),
+    ...(cortex ? [] : ['--disallowed-tools', CLAUDE_DENY.join(',')]),
+    '--strict-mcp-config',
+    ...rest,
+  ];
 }
+
+/** `args` as a shell would take them back: a word with anything but `[\w,./:=-]` is quoted. */
+const shellArgs = (args: readonly string[]): string =>
+  args.map((a) => (/^[\w,./:=-]+$/.test(a) ? a : q(a))).join(' ');
 
 /** What `cmdClaude` needs of a child process: its exit code, or why it could not start. */
 export interface ClaudeChild {
@@ -68,7 +95,8 @@ export interface ClaudeDeps {
 
 /**
  * Runs `claude` with this sandbox's MCP server, inheriting the terminal (Claude Code is a TUI),
- * and exits with its code. `sandboxId` is only set when the user named one with `--sandbox`.
+ * and exits with its code. `sandboxId` is only set when the user named one with `--sandbox`;
+ * `cortex` only when the repository it was started in is in Cortex mode.
  */
 export async function cmdClaude(
   c: SbxCtx,
@@ -76,10 +104,12 @@ export async function cmdClaude(
   deps: ClaudeDeps = {},
   sandboxId?: string,
   urlFromFlag?: string,
+  cortex = false,
 ): Promise<number> {
   // `--json` is refused before dispatch: `claude` is in the CLI's NO_JSON set, since a TUI
   // prints none and a caller parsing stdout would get the TUI.
-  const args = claudeArgs(rest, sandboxId, urlFromFlag);
+  const args = claudeArgs(rest, sandboxId, urlFromFlag, cortex);
+  if (cortex) c.io.err(`sbx: ${CORTEX_NOTE}`);
   const child: ClaudeChild = deps.spawnClaude
     ? deps.spawnClaude(args)
     : spawn('claude', args, { stdio: 'inherit' });
@@ -88,8 +118,7 @@ export async function cmdClaude(
       c.io.err(
         err.code === 'ENOENT'
           ? 'sbx: claude is not on PATH: install Claude Code (npm i -g @anthropic-ai/claude-code), ' +
-              `or run it yourself with: claude --mcp-config '${serverConfig(sandboxId, urlFromFlag)}' ` +
-              '--strict-mcp-config'
+              `or run it yourself with: claude ${shellArgs(claudeArgs([], sandboxId, urlFromFlag, cortex))}`
           : `sbx: could not run claude: ${err.message}`,
       );
       resolve(SBX_EXIT.failed);
