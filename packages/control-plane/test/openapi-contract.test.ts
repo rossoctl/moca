@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { ROUTES } from '../src/routes.js';
 import { CP_ERROR_CODES } from '../src/errors.js';
+import { TURN_STATES } from '../src/turn-record.js';
 import { CREDENTIAL_NAME_RE } from '../src/credential-store.js';
 import { LABEL_KEY_RE, SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
 
@@ -200,5 +201,13 @@ describe('§9.3 test 3 — contract drift', () => {
     // cannot actually emit, which sends integrators down a branch that never happens.
     const enumerated = doc().components.schemas.Error.properties.error.enum as string[];
     expect([...enumerated].sort()).toEqual([...CP_ERROR_CODES].sort());
+  });
+
+  it('documents EXACTLY the nine turn states -- no more, no fewer', () => {
+    // Same shape as the error-code check above, and for the same reason: mocactl hand-transcribes
+    // this enum into AsyncTurnState (layering.test.ts forbids it importing TURN_STATES), so this
+    // document is the only mechanical link between the two nine-state lists.
+    const enumerated = doc().components.schemas.TurnStatus.properties.state.enum as string[];
+    expect([...enumerated].sort()).toEqual([...TURN_STATES].sort());
   });
 });
