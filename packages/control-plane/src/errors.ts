@@ -35,6 +35,8 @@ export const CP_ERROR_CODES = [
   'bundle_quota_exceeded',
   'config_bundle_not_found',
   'configRef_invalid',
+  'envelope_invalid',
+  'async_quota_exhausted',
   'credential_required',
   'credential_ambiguous',
   'credential_not_found',
@@ -88,6 +90,11 @@ const STATUS: Record<CpErrorCode, number> = {
   config_bundle_not_found: 404,
   // Spelled as knative-server's existing /v1/turn code on purpose: same concept, second call site.
   configRef_invalid: 400,
+  // Spelled as knative-server's existing /runs code on purpose: same concept, second call site.
+  envelope_invalid: 400,
+  // 429: the per-owner queued-turn quota (async fan-out spec §4.3). The body names the owner's
+  // current count, so a client backs off against a number rather than guessing.
+  async_quota_exhausted: 429,
   credential_required: 400,
   credential_ambiguous: 400,
   credential_not_found: 404,
