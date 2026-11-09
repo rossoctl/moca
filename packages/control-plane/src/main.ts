@@ -166,6 +166,14 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     bundleTotalBytes: byteBudgetEnv(env, 'SH_BUNDLE_TOTAL_BYTES', 64 * 1024 * 1024),
     version: resolveVersion(env),
     testUsers: testUsersFromEnv(env.SH_TEST_USERS),
+    // Async fan-out (spec §4.3, §5.1, §9). The documented DEFAULTS, written as literals because
+    // nothing reads the environment for them yet: the env readers, and the boot refusal a misnamed
+    // MOCA_TENANCY earns, land with depsFromEnv's store and queue (#387 Task 5). Until then these
+    // keep one meaning for the fields rather than letting a deployment's config disagree with the
+    // test fixture's.
+    asyncQueuedPerOwner: 50,
+    tenancy: 'single',
+    turnRecordTtlSeconds: 86_400 + 3_600,
   };
   // Validated at startup even though only the provider uses it: a deployment with
   // SH_TEST_USERS set and no secret must fail to boot, not serve an unguarded login path.
@@ -224,6 +232,11 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     bundleTotalBytes: 0,
     version: resolveVersion(env),
     testUsers: 0,
+    // Inert: this profile mounts no session routes, so no async turn can be submitted here. Absent
+    // fields would not typecheck, and 0 is the value that refuses every submission (#387 Task 5).
+    asyncQueuedPerOwner: 0,
+    tenancy: 'single',
+    turnRecordTtlSeconds: 86_400 + 3_600,
   };
   checkRefreshConfig(config);
   return config;

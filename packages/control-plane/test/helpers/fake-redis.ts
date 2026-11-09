@@ -1,6 +1,7 @@
 import type { BundleRedisLike } from '@moca/config-bundle';
 import type { BundleBudgetRedisLike } from '../../src/bundle-budget.js';
 import type { CpRedisLike } from '../../src/ownership.js';
+import type { ResultRedisLike } from '../../src/turn-result.js';
 
 /**
  * In-memory CpRedisLike. Reproduces node-redis's REV argument order -- (key, max, min) when REV is
@@ -10,11 +11,14 @@ import type { CpRedisLike } from '../../src/ownership.js';
  */
 export function fakeRedis() {
   const hashes = new Map<string, Record<string, string>>();
+  // Plain string keys. Only `leaf:result:<sid>` lives here today -- the leaf result the async status
+  // route reads (async spec §4.4), which a test seeds as the worker would have written it.
+  const strings = new Map<string, string>();
   const zsets = new Map<string, { score: number; value: string }[]>();
   const streams = new Map<string, Record<string, string>[]>();
   const ops: string[] = [];
   const expires: { key: string; seconds: number }[] = [];
-  const redis: CpRedisLike = {
+  const redis: CpRedisLike & ResultRedisLike = {
     async hSet(key, values) {
       ops.push(`hSet ${key}`);
       hashes.set(key, { ...(hashes.get(key) ?? {}), ...values });
@@ -98,8 +102,11 @@ export function fakeRedis() {
     async zCard(key) {
       return (zsets.get(key) ?? []).length;
     },
+    async get(key) {
+      return strings.get(key) ?? null;
+    },
   };
-  return { redis, hashes, zsets, streams, ops, expires };
+  return { redis, hashes, strings, zsets, streams, ops, expires };
 }
 
 /** Parse a node-redis score bound: a number, '+inf'/'-inf', or '(' for exclusive. */

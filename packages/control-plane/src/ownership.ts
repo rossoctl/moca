@@ -324,6 +324,8 @@ export class OwnershipIndex {
     sessionId?: string;
     /** The sandbox a decision is about (SBX0 §5). */
     sandboxId?: string;
+    /** The async turn a decision is about (async fan-out spec §5.1). */
+    turnId?: string;
     credential?: string;
     /** The host an egress lookup asked for (SBX0.2b), and the egress host that asked. */
     destination?: string;
@@ -346,6 +348,7 @@ export class OwnershipIndex {
           decision: entry.decision,
           ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
           ...(entry.sandboxId ? { sandboxId: entry.sandboxId } : {}),
+          ...(entry.turnId ? { turnId: entry.turnId } : {}),
           // The credential NAME, never its value (spec §7.2).
           ...(entry.credential ? { credential: entry.credential } : {}),
           ...(entry.destination ? { destination: entry.destination } : {}),

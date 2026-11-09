@@ -22,6 +22,10 @@ describe('the route table', () => {
         'GET /v1/sessions/{id}/resources',
         'GET /v1/sessions/{id}/models',
         'POST /v1/sessions/{id}/token',
+        // The async turn routes (async fan-out spec §4.1, §4.4, §4.5).
+        'POST /v1/sessions/{id}/turns',
+        'GET /v1/sessions/{id}/turns/{turnId}',
+        'DELETE /v1/sessions/{id}/turns/{turnId}',
         'GET /v1/credentials',
         'PUT /v1/credentials/{name}',
         'DELETE /v1/credentials/{name}',
