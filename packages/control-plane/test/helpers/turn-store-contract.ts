@@ -132,6 +132,17 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('releases the idempotency key at the terminal transition, so a resubmission gets a NEW turn (F1)', async () => {
+      const { store, now, done } = await make();
+      await store.create(rec({ turnId: 't-1', idempotencyKey: 'k-1' }));
+      expect(await store.claimIdempotencyKey('github:1234', 'k-1', 't-1')).toBe('t-1');
+      expect(await store.finalize('t-1', 'done', now)).toBe('ok');
+      // The key must be gone outright -- not merely stale -- so the NEXT submission claims it
+      // outright rather than deduplicating against the finished turn (turn-store.ts:82's promise).
+      expect(await store.claimIdempotencyKey('github:1234', 'k-1', 't-2')).toBe('t-2');
+      await done();
+    });
+
     it('claims an idempotency key for the first turn and returns the FIRST id to the second (§4.3)', async () => {
       const { store, now, done } = await make();
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-first')).toBe('t-first');

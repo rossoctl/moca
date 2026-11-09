@@ -79,7 +79,13 @@ export class TurnStore {
     return held.turnId ?? turnId;
   }
 
-  /** Released when the turn goes terminal, so the same session can submit again (§4.3). */
+  /**
+   * Blind release: the caller already knows no one else can hold this claim (the enqueue-failure
+   * compensation in turn-handlers.ts, which releases a key its OWN candidate just won). `toTerminal`
+   * cannot use this -- a newer submission may have re-claimed the key by the time a turn goes
+   * terminal, and a blind `del` would delete that live claim out from under it. Kept for the
+   * compensation path and for the contract suite; see `releaseIdempotencyKeyIf` for the terminal one.
+   */
   async releaseIdempotencyKey(owner: string, key: string): Promise<void> {
     await this.guard(() => this.redis.del([idempotencyKeyKey(this.tag(owner), key)]));
   }
@@ -203,6 +209,16 @@ export class TurnStore {
    * Record first, open-set second, TTL last. That order is the invariant: the TTL is the only
    * irreversible step, so it goes after the state is durable, and the open-set removal goes before
    * it so a reader that arrives mid-way sees a terminal record rather than an expiring open one.
+   *
+   * The idempotency-key release sits between record and open-set. It cannot go before the record
+   * write: releasing first would let a resubmission re-claim the key and create a SECOND record
+   * while this one still reads `queued`, which is the duplicate fan-out §4.3 exists to prevent. Once
+   * the record is terminal, though, a resubmission that wins the freed key is safe no matter when it
+   * arrives -- `claimKey`'s stale-stepover already handles "key points at a terminal turn" for every
+   * caller that loses this race, so putting the release any later only widens that window for no
+   * benefit. It uses the COMPARE release, not the blind one (TurnStore.releaseIdempotencyKey): by the
+   * time a turn goes terminal, a newer submission may already have re-claimed this key (F1), and a
+   * blind `del` would delete that live claim instead of the stale one that belongs to this turn.
    */
   private async toTerminal(
     rec: TurnRecord,
@@ -210,6 +226,7 @@ export class TurnStore {
     now: number,
   ): Promise<'ok' | 'refused'> {
     await this.guard(() => this.redis.hSet(this.key(rec.turnId), { state, endedAt: String(now) }));
+    await this.releaseIdempotencyKeyIf(rec.owner, rec.idempotencyKey, rec.turnId);
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
     await this.guard(() =>
       this.redis.expire(

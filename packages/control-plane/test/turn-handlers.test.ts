@@ -208,6 +208,10 @@ describe('submitTurn (spec §4.1)', () => {
     // The key's holder is a finished turn, so BOTH racing submissions are entitled to step over it.
     const stale = (await submit(d, sid, { item, async: true })).body as { turnId: string };
     await d.turns.finalize(stale.turnId, 'done', NOW_MS);
+    // finalize (F1) already released the key on this path; re-seed it to a stale claim, which is
+    // the state claimKey's stepover exists for -- e.g. a resubmission racing finalize's own release
+    // (the `releaseIdempotencyKeyIf` window toTerminal uses, not the one tested here).
+    await d.turns.claimIdempotencyKey('github:1234', sid, stale.turnId);
 
     // Deterministic interleave, no real concurrency: B's read of the stale holder is the gap, so A
     // runs to completion -- release, re-claim, create -- inside it, and B then continues on the
