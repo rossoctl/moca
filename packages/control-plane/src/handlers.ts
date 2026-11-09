@@ -880,6 +880,11 @@ export const HANDLERS: Record<string, Handler> = {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
     await deps.index.cascadeDelete(rec);
+    // Reclaim this session's open async turns and their quota slots (F2): nothing else in the
+    // design will ever move an orphaned queued/running turn to terminal, so without this a
+    // submit-then-delete cycle burns a slot forever. `deps.turns` is absent on the sandbox profile,
+    // which mounts no turn routes and so can never have created one.
+    await deps.turns?.deleteSessionTurns(rec.sessionId, rec.owner);
     const deletedEntry = {
       subject: rec.owner,
       sessionId: rec.sessionId,

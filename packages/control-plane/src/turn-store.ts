@@ -170,6 +170,35 @@ export class TurnStore {
   }
 
   /**
+   * Delete `sessionId`'s OPEN turns and return their quota slots, for `OwnershipIndex.cascadeDelete`
+   * (F2). A TERMINAL turn is left alone -- it already carries a TTL (§5.1) and will expire on its
+   * own, so re-deleting it here would only duplicate that clock. Only `queued`/`running` turns are
+   * at risk: nothing else in this design will ever move them to terminal once their session is gone,
+   * so without this they would hold their owner's quota slot forever.
+   *
+   * This is the only place outside `turn-handlers.ts` that knows a session can own several turns
+   * over its life, which is why the cleanup lives here rather than as a `dataKeys` entry in
+   * `ownership.ts`: a turn key is keyed by turnId, not sessionId, so `cascadeDelete` cannot name it
+   * without restating `TurnStore`'s own key derivation.
+   *
+   * Open-set member removed BEFORE the hash: a crash between the two steps must leave the quota
+   * slot freed (the bug this method exists to fix) even if the orphaned hash itself lingers, which
+   * matches `get`'s existing rule that a member with no hash reads as "already gone".
+   */
+  async deleteSessionTurns(sessionId: string, owner: string): Promise<void> {
+    const ids = await this.guard(() =>
+      this.redis.zRange(this.ownerKey(owner), '+inf', '-inf', { BY: 'SCORE', REV: true }),
+    );
+    for (const turnId of ids) {
+      const rec = await this.get(turnId);
+      if (!rec || rec.sessionId !== sessionId) continue;
+      await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
+      await this.guard(() => this.redis.del([this.key(turnId)]));
+      await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
+    }
+  }
+
+  /**
    * `queued → running` at claim, writing `attempts` from the entry's `deliveryCount`. A record
    * ALREADY `running` is a redelivery and stays `running` with the new count: refusing it would ack
    * and drop every crash-reclaimed, drained or `retryable` entry (§5.4). Only `cancelled` and

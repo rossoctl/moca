@@ -189,6 +189,17 @@ describe('submitTurn (spec §4.1)', () => {
     expect((await submit(d, b, { item, async: true })).status).toBe(202);
   });
 
+  it('frees the quota slot of a turn whose session was deleted (F2)', async () => {
+    const d = turnDeps({ config: { asyncQueuedPerOwner: 1 } });
+    const a = await session(d);
+    await submit(d, a, { item, async: true });
+    // The turn is still `queued` -- nothing drains it in this branch -- so without the cleanup
+    // this slot would stay burned for the deployment's lifetime (#387 review F2).
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: a } }), d);
+    const b = await session(d);
+    expect((await submit(d, b, { item, async: true })).status).toBe(202);
+  });
+
   it('deduplicates a resubmission on a non-terminal key, returning the FIRST turn id (§4.3)', async () => {
     const d = turnDeps();
     const sid = await session(d);
