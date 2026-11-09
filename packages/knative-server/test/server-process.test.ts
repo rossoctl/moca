@@ -121,6 +121,8 @@ describe('readTenancy', () => {
         // The implementation moved to @moca/control-plane (#387); its doc comment names the
         // near-misses the rule refuses, so it is excluded here as it always was.
         ':(top,exclude)packages/control-plane/src/tenancy.ts',
+        // Boot test fixture: deliberately names a misspelled variable to assert it is refused.
+        ':(top,exclude)packages/control-plane/test/main.test.ts',
         ':(top,exclude)packages/knative-server/test/server-process.test.ts',
         // Names near-misses on purpose, to document the rule.
         ':(top,exclude)docs/specs/2026-09-28-moca-multi-user-isolation-design.md',
