@@ -110,7 +110,10 @@ func TestManifestFeaturesAreOptional(t *testing.T) {
 	if m.HasFeature(FeatureLeaseV1) {
 		t.Fatal("an old manifest with no features claims lease-v1")
 	}
-	b, _ := json.Marshal(m)
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(b), "features") {
 		t.Fatalf("an empty Features is encoded: %s", b)
 	}

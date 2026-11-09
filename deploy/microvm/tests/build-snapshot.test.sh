@@ -1835,6 +1835,10 @@ cg_ln=$(in_init 'mount -t cgroup2 cgroup2 /sys/fs/cgroup')
 userns_ln=$(in_init 'echo 0 > /proc/sys/user/max_user_namespaces')
 check "init mounts cgroup2 after sysfs" \
   "$([ -n "$cg_ln" ] && [ -n "$sysfs_ln" ] && [ "$sysfs_ln" -lt "$cg_ln" ] && echo yes || echo no)" "yes"
+check "init names the reason when the cgroup2 mount fails" \
+  "$(sed -n "${cg_ln:-1}p" "$SCRIPT" | grep -cF '|| { echo "init: cgroup2 mount failed (guest kernel lacks cgroup v2?)" >&2; exit 1; }')" "1"
+check "init names the reason when user namespaces cannot be disabled" \
+  "$(sed -n "${userns_ln:-1}p" "$SCRIPT" | grep -cF '|| { echo "init: cannot disable user namespaces')" "1"
 check "init disables user namespaces before the agent exec" \
   "$([ -n "$userns_ln" ] && [ -n "$exec_line" ] && [ "$userns_ln" -lt "$exec_line" ] && echo yes || echo no)" "yes"
 check "the agent exec carries --lease-cgroup-root /sys/fs/cgroup/moca-execs" \
@@ -1849,6 +1853,9 @@ check "nothing runs useradd/groupadd (comments aside)" \
   "$(grep -vE '^\s*#' "$SCRIPT" | grep -cE 'useradd|groupadd')" "0"
 check "assemble_rootfs strips setuid and setgid bits" \
   "$(fn_body assemble_rootfs | grep -cF 'find "$STAGE/rootfs-tree" -xdev -type f -perm /6000 -exec chmod ug-s {} +')" "1"
+# Last: after install_egress_ca (chroot hooks) and the gitconfig append, before mkfs.
+check "the setuid strip is the last tree change, just before mkfs" \
+  "$(fn_body assemble_rootfs | awk '/install_egress_ca/{c=NR} /etc\/gitconfig/{g=NR} /-perm \/6000/{f=NR} /mkfs.ext4/{m=NR} END{print (c<f && g<f && f<m) ? "yes":"no"}')" "yes"
 for fn in probe_guest_kernel check_lease_support; do
   check "both boot paths call $fn" "$(grep -cF -- "$fn \"\$vsock_uds\"" "$SCRIPT")" "2"
 done
@@ -1892,9 +1899,10 @@ check "rerun is idempotent (one sbx line)" "$(grep -c '^sbx:' "$w/stage/rootfs-t
 check "rerun is idempotent (one sbx-ws line)" "$(grep -c '^sbx-ws:' "$w/stage/rootfs-tree/etc/group")" "1"
 w="$LT/uid"; id_tree "$w" $'root:x:0:0:root:/root:/bin/bash\nother:x:7000:100::/home/o:/bin/sh\n' $'root:x:0:\n'
 check "uid 7000 under another name: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
-check "uid 7000 under another name: the message names it" "$(grep -c 'other' "$w/out")" "1"
+check "uid 7000 under another name: the message names it" "$(grep -cF 'other:x:7000:100' "$w/out")" "1"
 w="$LT/gid"; id_tree "$w" $'root:x:0:0:root:/root:/bin/bash\n' $'root:x:0:\nstaff7:x:7000:\n'
 check "gid 7000 under another name: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "gid 7000 under another name: the message names it" "$(grep -cF 'staff7:x:7000:' "$w/out")" "1"
 check "gid 7000 under another name: passwd untouched" "$(grep -c '^sbx:' "$w/stage/rootfs-tree/etc/passwd")" "0"
 w="$LT/name"; id_tree "$w" $'sbx:x:1234:1234::/home/sbx:/bin/sh\n' $'root:x:0:\n'
 check "the name sbx under another uid: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"

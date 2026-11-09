@@ -634,12 +634,6 @@ assemble_rootfs() {
     "$STAGE/rootfs-tree/tmp" "$STAGE/rootfs-tree/var" "$STAGE/rootfs-tree/workspace"
   install -m 0555 "$STAGE/agent" "$STAGE/rootfs-tree/usr/local/bin/agent"
   add_sbx_identity
-  # Lease mode runs each Exec as sbx with no capabilities and no_new_privs, but a setuid
-  # root binary (su, sudo, mount, passwd) is still the shortest way back to root in a VM
-  # that now outlives one Exec. No sandbox command needs one, so the bits go; the tree
-  # is the staged copy, never the caller's ROOTFS. check_lease_support re-checks in the
-  # booted guest.
-  find "$STAGE/rootfs-tree" -xdev -type f -perm /6000 -exec chmod ug-s {} +
 
   # A minimal init: mount the ephemeral filesystems every run needs writable, then
   # EXEC (not fork) the agent as PID 1 so the agent's own exit tears the VM down
@@ -652,7 +646,7 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 # Lease mode puts each Exec in its own cgroup under /sys/fs/cgroup/moca-execs, and kills
 # the whole cgroup when the Exec ends; the agent creates that directory itself.
-mount -t cgroup2 cgroup2 /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup || { echo "init: cgroup2 mount failed (guest kernel lacks cgroup v2?)" >&2; exit 1; }
 mount -t tmpfs -o mode=1777 tmpfs /tmp
 mount -t tmpfs tmpfs /var
 
@@ -694,7 +688,7 @@ export GITHUB_TOKEN=moca-placeholder
 # Lease mode: no user namespaces. An unprivileged Exec that can create one gains a full
 # capability set inside it, and with it most of the kernel attack surface the uid drop
 # exists to keep out of reach. 0 forbids new ones for everything in the guest.
-echo 0 > /proc/sys/user/max_user_namespaces
+echo 0 > /proc/sys/user/max_user_namespaces || { echo "init: cannot disable user namespaces (guest kernel lacks CONFIG_USER_NS?)" >&2; exit 1; }
 
 # Fail loudly here rather than let a missing/non-executable agent binary reach
 # `exec` and communicate only as a bare kernel panic ("Attempted to kill
@@ -725,6 +719,15 @@ INIT
 GITCONFIG
 
   [ -n "$EGRESS_CA" ] && install_egress_ca
+
+  # Lease mode runs each Exec as sbx with no capabilities and no_new_privs, but a setuid
+  # root binary (su, sudo, mount, passwd) is still the shortest way back to root in a VM
+  # that now outlives one Exec. No sandbox command needs one, so the bits go. This is the
+  # last change to the tree before mkfs, after every step that writes into it (the chroot
+  # trust-store hooks included), so nothing can reintroduce a bit afterwards; the tree is
+  # the staged copy, never the caller's ROOTFS. check_lease_support re-checks in the
+  # booted guest.
+  find "$STAGE/rootfs-tree" -xdev -type f -perm /6000 -exec chmod ug-s {} +
 
   # A single ext4 image is what the VMM's block device backend wants; building it
   # here (rather than shipping a directory tree) is also what makes the "rootfs"
