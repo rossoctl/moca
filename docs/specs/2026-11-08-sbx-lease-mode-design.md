@@ -3,7 +3,7 @@
 Version: 0.1 — November 8, 2026 (draft for review)
 Status: Design. Not approved. Nothing is built.
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
-to be registered in [the milestone registry](README.md).
+registered in [the milestone registry](README.md).
 Decision record: [ADR-0048](../adrs/0048-sbx-lease-mode.md), which revises
 [ADR-0035](../adrs/0035-per-exec-microvm-warm-standby.md)'s 2026-10-08 decision "per-`Exec` is the
 tier's only mode" (§12).
@@ -86,18 +86,21 @@ deletedAt?` (`packages/control-plane/src/sandbox-store.ts:9-23`). It has no mode
    Only the sandbox owner can change it, from `mocactl`, on a live sandbox.
 2. In `per-exec` mode nothing changes. Every current gate still passes.
 3. In `lease` mode, consecutive Execs of one sandbox run in the same guest until the lease ends. **No
-   process survives the end of its Exec.** Files outside the workspace survive until the lease ends.
+   process survives the end of its Exec.** Files in the guest's tmpfs mounts (`/tmp`, `/var`)
+   survive until the lease ends. The rootfs is read-only in every mode.
 4. In `lease+processes` mode, a process started through `process_start` survives between Execs. A
    process started any other way (`&`, `nohup`, `setsid`, a daemon that forks itself) dies at the end
    of its Exec, exactly as in level 1.
 5. A lease ends on an idle timeout, at the maximum duration (when the sandbox is idle, or at the hard
-   grace limit), on `reset`, on a mode downgrade, on memory reclaim, on heartbeat loss, or on a worker
-   restart. After any end, the next Exec starts a cold guest on the same workspace.
+   grace limit), on `reset`, on a mode downgrade, on memory reclaim, on keepalive loss, on a worker
+   restart, on a failed teardown, on a dead guest agent, or on sandbox deletion (§4.1). After any end, the next Exec starts a cold guest on the same workspace.
 6. **No lease end is silent.** The next tool result and `sandbox_info` give the reason. At level 2
    they also list the tracked processes that were stopped. Every lease end has an audit record.
 7. Lease VMs are admitted on measured memory. Reclaim keeps the host above a headroom target, and the
    existing physical guards never trip in E17's memory-squeeze point.
 8. E17 meets its pass criteria (§10).
+9. In lease mode an Exec cannot defeat its own teardown: it runs unprivileged, and it cannot move
+   into another cgroup, create one, or signal, trace or write the guest agent (§3.3).
 
 ## 2. Decision summary
 
@@ -106,6 +109,7 @@ deletedAt?` (`packages/control-plane/src/sandbox-store.ts:9-23`). It has no mode
 | Levels            | Two opt-in levels over per-`Exec`: `lease` (warm guest, processes killed at the end of each Exec) and `lease+processes` (tracked processes survive) | user                        |
 | Level 1           | Processes are killed at the end of each Exec. Keeping processes is an explicit property, never a side effect                                        | user                        |
 | Level 2 survivors | Only processes started through `process_start` (strict rule)                                                                                        | user                        |
+| Exec privilege    | In lease mode, Execs and tracked processes run as an unprivileged uid with no capabilities; the agent stays root (§3.3)                             | our call (PR #698 review)   |
 | Idle              | Measured from the last Exec end. A keepalive never resets it                                                                                        | our call                    |
 | Idle timeout      | Default 300 s, owner-settable up to an operator ceiling                                                                                             | our call (E15 resident-300) |
 | Keepalive         | The MCP server sends one while the harness runs. Loss for 120 s ends the lease                                                                      | our call                    |
@@ -119,19 +123,27 @@ deletedAt?` (`packages/control-plane/src/sandbox-store.ts:9-23`). It has no mode
 
 ## 3. Modes
 
-|                                                           | `per-exec`      | `lease` (level 1)                          | `lease+processes` (level 2)    |
-| --------------------------------------------------------- | --------------- | ------------------------------------------ | ------------------------------ |
-| Guest across Execs                                        | fresh each time | the same guest until the lease ends        | same as level 1                |
-| Page cache, CPU caches                                    | cold            | warm                                       | warm                           |
-| `/tmp`, files outside the workspace, system-wide installs | lost            | kept until the lease ends                  | kept until the lease ends      |
-| Shell state (env, cwd, functions)                         | n/a             | **not kept**: each Exec gets a fresh shell | not kept                       |
-| Processes after an Exec                                   | none            | none: killed at the end of the Exec        | only `process_start` processes |
-| Workspace                                                 | persists        | persists                                   | persists                       |
-| `process_*` tools                                         | refused         | refused                                    | available                      |
+|                                                 | `per-exec`      | `lease` (level 1)                          | `lease+processes` (level 2)    |
+| ----------------------------------------------- | --------------- | ------------------------------------------ | ------------------------------ |
+| Guest across Execs                              | fresh each time | the same guest until the lease ends        | same as level 1                |
+| Page cache, CPU caches                          | cold            | warm                                       | warm                           |
+| `/tmp` and `/var` (tmpfs, counted in guest RAM) | lost            | kept until the lease ends                  | kept until the lease ends      |
+| Rootfs (system paths, system-wide installs)     | read-only       | read-only                                  | read-only                      |
+| Shell state (env, cwd, functions)               | n/a             | **not kept**: each Exec gets a fresh shell | not kept                       |
+| Processes after an Exec                         | none            | none: killed at the end of the Exec        | only `process_start` processes |
+| Workspace                                       | persists        | persists                                   | persists                       |
+| Exec user                                       | root (today)    | unprivileged uid (§3.3)                    | unprivileged uid (§3.3)        |
+| `process_*` tools                               | refused         | refused                                    | available                      |
 
 **One lease VM serves one sandbox, for its whole life.** A lease VM is never handed to another
 sandbox, another workspace key or another owner. When a lease ends its VM is destroyed. It never goes
 back to the standby pool.
+
+The rootfs is mounted read-only in every mode (`build-snapshot.sh:1530` boot argument `ro`, `:1545`
+`is_read_only: true`). Outside `/workspace`, only the tmpfs mounts `/tmp` and `/var` are writable.
+Package installs survive a lease only if they target one of those or the workspace (for example
+`pip install --target /tmp/deps`). The tmpfs files are guest RAM. They raise the VM's
+`memory.current` and are not freed until the lease ends, so §6 and E17 count them.
 
 **Execs stay serial for each sandbox**, as today. `process_*` calls are Execs for that rule.
 
@@ -144,7 +156,8 @@ later with cgroup v2 enabled, and a `cgroup2` mount in init. The current init mo
 The guest agent runs each Exec in its own cgroup v2 inside the guest. At the end of the Exec, whether
 it exits, times out or is aborted, the agent writes `cgroup.kill` for that cgroup and waits until it is
 empty before it sends `End`. `setsid`, double forks and re-parenting to init cannot escape a cgroup,
-which is why a process group is not enough. A `process_start` process gets its own cgroup under a
+which is why a process group is not enough. This holds only for an Exec that cannot write the cgroup
+tree or reach the agent, so it depends on the privilege model in §3.3. A `process_start` process gets its own cgroup under a
 `tracked/` parent that the end-of-Exec kill does not touch.
 
 An Exec whose cgroup does not empty within a bound (for example 5 s, which covers `D`-state
@@ -160,6 +173,45 @@ shell is kept for the first Exec of a lease if that saves measurable time.
 
 The agent's "dead after one timeout" latch (`agent.go:51-56`) becomes a lease end with reason
 `agent_dead` instead of a refusal of every later command.
+
+### 3.3 Guest privilege model
+
+Today every Exec runs as root. Init `exec`s the agent as PID 1 (`build-snapshot.sh:658`), and the
+agent starts `bash` with no credential drop (`guestagent/agent.go:97`, `:433`). Under per-`Exec` that
+does not matter, because the VM is destroyed after the command. In a lease it does. A root Exec could
+move itself into `tracked/` (`echo $$ > …/cgroup.procs`), create its own cgroup, or trace or write
+`/proc/1/mem` of the agent. Then it could hide processes from `process_list`, skip `cgroup.kill`, or
+forge the stopped-process list in later notices. That defeats acceptance items 3, 4 and 6. So, in
+both lease levels:
+
+- **The agent stays root (PID 1). Execs and tracked processes run as an unprivileged uid** (`sbx`,
+  for example 1000) with an empty capability set: bounding set dropped, `no_new_privs` set. The agent
+  starts each Exec through `SysProcAttr.Credential` and an explicit capability drop.
+- **The cgroup tree is root-owned and not delegated.** `cgroup.procs` and `cgroup.subtree_control`
+  under `/sys/fs/cgroup` are writable by root only. The Exec uid can neither migrate a process nor
+  create a cgroup.
+- **The agent is out of the Exec uid's reach.** A different uid already rules out `kill`, `ptrace` and
+  `/proc/1/mem` writes without `CAP_KILL` and `CAP_SYS_PTRACE`. The guest kernel has no Yama
+  (`CONFIG_SECURITY_YAMA` is not set on SBX0's `6.18.51+`), so `kernel.yama.ptrace_scope` is not
+  available. The uid boundary and the empty capability set are the protection. The agent also sets
+  itself non-dumpable (`PR_SET_DUMPABLE 0`).
+- **No route back to root.** The rootfs carries setuid binaries today: `su`, `mount`, `umount`,
+  `newgrp`, `gpasswd`, `chage`, `unix_chkpwd` and `pam_timestamp_check` in SBX0's build tree.
+  `no_new_privs` neutralises them for the Exec's process tree. The image work also strips the setuid
+  bit, so the rule does not rest on one flag. User namespaces (`CONFIG_USER_NS=y`) are disabled
+  (`user.max_user_namespaces = 0` in the guest), because a user namespace gives an unprivileged
+  process capabilities inside it.
+- **Workspace ownership.** The workspace becomes owned by the Exec uid. `mocactl sbx push` already
+  extracts with `--no-same-owner` (`packages/mocactl/src/sbx/push.ts:502`), so pushed files take the
+  extracting uid. A workspace created under root gets a one-time `chown -R`, done by the agent as
+  root, at the first Exec of its first lease.
+- **Per-`Exec` mode** runs as root today and stays so in v1. It destroys the VM, so root there has no
+  lease-specific effect. Moving per-`Exec` to the same uid would give one guest model and one
+  workspace ownership. Then a mode switch needs no `chown`, and tools see the same environment in every
+  mode. The security review decides (§16 item 4). Tools that need root, such as `apt` or writes to
+  system paths, already fail on the read-only rootfs in every mode.
+
+`TestGateLeasePrivilege` (§9) checks this.
 
 ## 4. Lease lifecycle
 
@@ -262,12 +314,12 @@ event for each sandbox until a client has seen it.
 New MCP tools, offered only when the mode is `lease+processes` (at other modes a call fails with
 `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode <id> lease+processes`):
 
-| Tool            | Arguments                                                                            | Result                                       |
-| --------------- | ------------------------------------------------------------------------------------ | -------------------------------------------- |
-| `process_start` | `command`, `cwd` (in the workspace, default `/workspace`), `name` (optional, unique) | `id`, `name`, `pid`                          |
-| `process_list`  | —                                                                                    | id, name, pid, state (`running               | exited(code) | killed(signal)`), age, memory |
-| `process_logs`  | `id` or `name`, `tail` (default 200 lines)                                           | the last lines of combined stdout and stderr |
-| `process_stop`  | `id` or `name`, `signal` (default TERM, then KILL after 10 s)                        | final state                                  |
+| Tool            | Arguments                                                                            | Result                                                                          |
+| --------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `process_start` | `command`, `cwd` (in the workspace, default `/workspace`), `name` (optional, unique) | `id`, `name`, `pid`                                                             |
+| `process_list`  | —                                                                                    | id, name, pid, state (`running \| exited(code) \| killed(signal)`), age, memory |
+| `process_logs`  | `id` or `name`, `tail` (default 200 lines)                                           | the last lines of combined stdout and stderr                                    |
+| `process_stop`  | `id` or `name`, `signal` (default TERM, then KILL after 10 s)                        | final state                                                                     |
 
 - A tracked process runs in its own guest cgroup under `tracked/`, in its own session, with stdin from
   `/dev/null`. Output goes to a ring log in the guest, capped per process (default 4 MiB).
@@ -305,9 +357,12 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
   for its remaining 15 minutes.
 - **The epoch survives a worker restart.** The worker writes it next to the workspace on the host
   disk (the workspace already survives a restart) and reads it back before serving. A missing or
-  unreadable file fails closed: the sandbox runs `per-exec` until an Exec arrives with a higher epoch.
-  To make that happen without user action, every mode change raises the epoch, and `mocactl sbx get`
-  re-sends `LeaseControl set_mode` with a fresh token when the worker reports an unknown epoch.
+  unreadable file fails closed. The sandbox runs `per-exec`, and **no Exec epoch can restore a higher
+  mode**: with the file lost, a token minted before a downgrade would otherwise count as higher. Only
+  a `LeaseControl set_mode` restores the mode. The control plane signs that call's mode and epoch
+  (the record's current `modeEpoch`) under the sandbox token key with a distinct `typ`, so an Exec
+  token cannot stand in for it. `mocactl` sends it on every mode change, and `mocactl sbx get` re-sends
+  it when the worker reports an unknown epoch.
 - **A downgrade takes effect right away.** After the `PUT`, `mocactl` mints a fresh token and sends a
   `LeaseControl {set_mode}` call through the relay with it. The worker applies the new epoch: from
   `lease+processes` to `lease` it stops every tracked process (notice, audit), and to `per-exec` it
@@ -355,16 +410,17 @@ apart.
 `TestGateNoVMReuse` and the other per-`Exec` gates stay as written and run in `per-exec` mode. Lease
 mode gets its own gates, real-launcher halves on KVM, fake-launcher halves in CI:
 
-| Gate                              | Property                                                                                                                                                                |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TestGateLeaseOneSandbox`         | A lease VM never serves a second sandbox, workspace key or owner, and never goes back to the standby pool                                                               |
-| `TestGateLeaseExecKillsProcesses` | After each Exec at both levels, nothing it started is alive: `&`, `nohup`, `setsid`, double fork, a daemon. `process_start` processes at level 2 are the only survivors |
-| `TestGateLeaseFreshShell`         | `export`, `cd`, `alias` and shell functions from one Exec are not visible in the next                                                                                   |
-| `TestGateLeaseTeardown`           | Each end reason destroys the VM and leaks no cgroup, tap, vsock or jail on the host (the lease variant of `TestGateLeakFreeTeardown`)                                   |
-| `TestGateLeaseStaleEpoch`         | An Exec with an older `mode_epoch` is refused, and a downgrade stops tracked processes                                                                                  |
-| `TestGateLeaseNotice`             | Every end reason produces exactly one notice, on the next response and in `sandbox_info`                                                                                |
-| `TestGateLeaseReclaim`            | Under a budget squeeze the idle-longest lease goes first, busy leases are never reclaimed for memory, and a lease VM that does not fit falls back to per-`Exec`         |
-| `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest (the lease variant of `TestGateSnapshotHoldsNoSecrets`: the snapshot gate assumed per-call teardown)                       |
+| Gate                              | Property                                                                                                                                                                                                                                                                     |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TestGateLeaseOneSandbox`         | A lease VM never serves a second sandbox, workspace key or owner, and never goes back to the standby pool                                                                                                                                                                    |
+| `TestGateLeaseExecKillsProcesses` | After each Exec at both levels, nothing it started is alive: `&`, `nohup`, `setsid`, double fork, a daemon. `process_start` processes at level 2 are the only survivors                                                                                                      |
+| `TestGateLeaseFreshShell`         | `export`, `cd`, `alias` and shell functions from one Exec are not visible in the next                                                                                                                                                                                        |
+| `TestGateLeaseTeardown`           | Each end reason destroys the VM and leaks no cgroup, tap, vsock or jail on the host (the lease variant of `TestGateLeakFreeTeardown`)                                                                                                                                        |
+| `TestGateLeaseStaleEpoch`         | An Exec with an older `mode_epoch` is refused, and a downgrade stops tracked processes. After the epoch file is lost, an Exec on a stale `lease+processes` token runs `per-exec`, and only a signed `set_mode` restores the mode                                             |
+| `TestGateLeasePrivilege`          | In a lease, an Exec that tries to write another cgroup's `cgroup.procs`, create a cgroup, signal or ptrace PID 1, write `/proc/1/mem`, regain root through a setuid binary, or create a user namespace fails, and every process it started still dies at the end of the Exec |
+| `TestGateLeaseNotice`             | Every end reason produces exactly one notice, on the next response and in `sandbox_info`                                                                                                                                                                                     |
+| `TestGateLeaseReclaim`            | Under a budget squeeze the idle-longest lease goes first, and busy leases are never reclaimed for memory. When a new lease VM does not fit, the worker reclaims idle-longest leases, then refuses with `memory-budget`                                                       |
+| `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest (the lease variant of `TestGateSnapshotHoldsNoSecrets`: the snapshot gate assumed per-call teardown)                                                                                                                            |
 
 ## 10. Validation: E17
 
@@ -387,13 +443,14 @@ Pass criteria (proposals; E17 seals the numbers):
 
 What changes against per-`Exec`, and what bounds it:
 
-| Change                                                                                                                                           | Bound                                                                                                                                                                                                                                                                                                   |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Files outside the workspace (`/tmp`, `~`, system installs) last for the lease, so an injected command can leave a file that a later command uses | `idle_timeout`, `max_duration`, `reset`; the guest has no network; the same owner and the same sandbox only (`TestGateLeaseOneSandbox`)                                                                                                                                                                 |
-| At level 2 a process can survive and keep working between Execs                                                                                  | Only through `process_start`, which is visible in the tool call, in `process_list` and in the audit. Level 2 is off by operator policy until the review. Tighter `max_duration` (4 h). `grace_limit`. `SH_LEASE_MAX_PROCESSES`                                                                          |
-| An agent could try to raise the mode                                                                                                             | No MCP tool changes the mode. A change needs the user API token, which the MCP server does not expose to the harness. **Residual:** if the user lets the harness run local shell commands, the agent could run `mocactl sbx mode` itself. `mocactl sbx mode` therefore refuses an upgrade without a TTY |
-| Memory charged by measurement, not reserved                                                                                                      | Reclaim, the host-memory floor, cgroup limits, swap off; E17's squeeze point                                                                                                                                                                                                                            |
-| Clock drift in a long-lived guest                                                                                                                | Clock correction on every Exec                                                                                                                                                                                                                                                                          |
+| Change                                                                                                                                                     | Bound                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Files in the guest's tmpfs (`/tmp`, `/var`) last for the lease, so an injected command can leave a file that a later command uses. The rootfs is read-only | `idle_timeout`, `max_duration`, `reset`; the guest has no network; the same owner and the same sandbox only (`TestGateLeaseOneSandbox`)                                                                                                                                                                 |
+| At level 2 a process can survive and keep working between Execs                                                                                            | Only through `process_start`, which is visible in the tool call, in `process_list` and in the audit. Level 2 is off by operator policy until the review. Tighter `max_duration` (4 h). `grace_limit`. `SH_LEASE_MAX_PROCESSES`                                                                          |
+| An agent could try to raise the mode                                                                                                                       | No MCP tool changes the mode. A change needs the user API token, which the MCP server does not expose to the harness. **Residual:** if the user lets the harness run local shell commands, the agent could run `mocactl sbx mode` itself. `mocactl sbx mode` therefore refuses an upgrade without a TTY |
+| Memory charged by measurement, not reserved                                                                                                                | Reclaim, the host-memory floor, cgroup limits, swap off; E17's squeeze point                                                                                                                                                                                                                            |
+| Clock drift in a long-lived guest                                                                                                                          | Clock correction on every Exec                                                                                                                                                                                                                                                                          |
+| An Exec could tamper with its own teardown (cgroup migration, the agent)                                                                                   | Unprivileged Exec uid, no capabilities, `no_new_privs`, root-owned cgroup tree, non-dumpable agent, setuid bits stripped, no user namespaces (§3.3, `TestGateLeasePrivilege`)                                                                                                                           |
 
 The security review of SBX0 (`docs/sbx/security-review.md`) gets a lease section before level 1
 reaches the cohort, and a level-2 section before level 2 is allowed by policy.
@@ -423,8 +480,9 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
 - **Relay (vitest):** `mode` and `mode_epoch` set from the token's claims, a client-sent value overwritten; `LeaseKeepalive` and `LeaseControl`
   routing; token checks the same as `Exec`.
 - **Worker and guest agent (Go):** the gates in §9; the lease state machine with the fake clock (every
-  transition and every end reason); measured charge and reclaim order; fallback to per-`Exec`; the
-  per-Exec cgroup kill, including `D`-state handling and `teardown_failed`.
+  transition and every end reason); measured charge and reclaim order; reclaim, then refuse with `memory-budget`; the
+  per-Exec cgroup kill, including `D`-state handling and `teardown_failed`; the privilege drop (uid,
+  capabilities, `no_new_privs`, non-dumpable agent).
 - **Live (`SBX_LIVE_SMOKE=1`, KVM):** create in `lease`, run two commands and see a warm second run,
   idle out and see the notice; switch to `lease+processes`, `process_start` an HTTP server, reach it with
   `curl localhost` in a later Exec, downgrade and see it stopped.
@@ -480,3 +538,5 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    manifest). There, `PerVMBytes` is already small, so measured admission gains less than E17 shows at
    1 GiB, and a cache-heavy lease VM reaches its guest RAM sooner. E17 reports its memory results at
    both sizes (E17 §6).
+4. **Per-`Exec` under the same unprivileged uid.** §3.3 keeps per-`Exec` as root in v1. Moving it to
+   the Exec uid would give one guest model and one workspace ownership. The security review decides.

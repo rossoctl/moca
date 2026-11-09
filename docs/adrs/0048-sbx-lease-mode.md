@@ -48,9 +48,10 @@ of three modes:
 Decisions taken during design, each recorded in the spec with its section:
 
 1. **Two levels. Process survival is an explicit property, never a side effect.** Level 1 keeps the
-   page cache, CPU caches and files outside the workspace for the lease. It kills every process at the
-   end of each Exec, using a guest cgroup and `cgroup.kill` (`setsid` cannot escape it), and starts
-   each Exec in a fresh shell. _(user)_
+   page cache, CPU caches and the guest's tmpfs files (`/tmp`, `/var`) for the lease. The rootfs stays
+   read-only. It kills every process at the end of each Exec, using a guest cgroup and `cgroup.kill`,
+   and starts each Exec in a fresh shell. `setsid` cannot escape the cgroup **because the Exec cannot
+   write the cgroup tree** (decision 15). _(user)_
 2. **Level 2 strict rule:** only processes started through the `process_start` MCP tool survive.
    `&`, `nohup`, `setsid` and self-daemonizing processes from `bash` still die. Tracked processes are
    visible in `process_list` and in the audit. _(user)_
@@ -92,6 +93,15 @@ Decisions taken during design, each recorded in the spec with its section:
     _(user: separate spec; stages and criteria: our call)_
 14. **The target workload is cache-heavy Python.** Level 1 serves on-disk caches re-read through a
     warm page cache. Level 2 serves in-memory process state. _(user)_
+15. **In lease mode, Execs and tracked processes run as an unprivileged uid with no capabilities**
+    (`no_new_privs`, setuid bits stripped, user namespaces disabled). The guest agent stays root as
+    PID 1, non-dumpable, and owns a cgroup tree that is not delegated. An Exec therefore cannot migrate
+    out of its cgroup, reach the agent, or forge what the agent reports. Without this, decisions 1, 2
+    and 10 hold only against a cooperative Exec. Per-`Exec` stays root in v1. The security review
+    decides whether it moves to the same uid. _(our call, from the PR #698 review)_
+16. **An unknown epoch never restores a higher mode.** After the worker loses its stored epoch, the
+    sandbox runs `per-exec` until a control-plane-signed `LeaseControl set_mode` arrives. A stale
+    token's epoch is not trusted as "higher". _(our call, from the PR #698 review)_
 
 ### Alternatives considered
 
@@ -111,15 +121,15 @@ Decisions taken during design, each recorded in the spec with its section:
   survives a command" property (level 1). Process survival is available when needed, and visible
   (level 2). Measured admission lets one host hold many more idle leases than a full guest-RAM charge
   would allow. One API and one token model cover all three modes.
-- **Negative / accepted cost:** in lease mode, files outside the workspace persist for the lease, so an
-  injected command can leave a file that a later command uses. This is bounded by the idle timeout,
+- **Negative / accepted cost:** in lease mode, files in the guest's tmpfs persist for the lease (and
+  count as guest RAM), so an injected command can leave a file that a later command uses. This is bounded by the idle timeout,
   maximum duration, `reset`, no guest network, and one sandbox per lease VM. At level 2 a process can
   keep working between Execs, but only through `process_start`, under tighter limits. Measured
   admission trades a reservation for reclaim, so a lease VM's growth during a long Exec is caught after
-  the fact. The guest init must mount `cgroup2`, which changes every host's snapshot once, per-`Exec`
-  included.
+  the fact. The guest image must mount `cgroup2`, add the Exec uid and strip setuid bits, which
+  changes every host's snapshot once, per-`Exec` included. Lease workspaces are owned by the Exec uid.
 - **Follow-up owed:** E17 (a and b); a lease section and a level-2 section in the SBX security review;
-  the implementation plan; a 2026-11 revision note on ADR-0035 pointing here; fixing the snapshot
+  the implementation plan; fixing the snapshot
   manifest's `kernel_release` (it records the build host's kernel, not the guest's); a Firecracker
   balloon if E17 shows lease VMs pinned near guest RAM.
 
