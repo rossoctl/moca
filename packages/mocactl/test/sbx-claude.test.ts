@@ -1,11 +1,10 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CLAUDE_DENY } from '../src/sbx/agent-config.js';
 import { claudeArgs, serverConfig } from '../src/sbx/claude.js';
 import { sbxMain } from '../src/sbx/cli.js';
-import { cleanupTmp, fakeCp, repo, SBX, setup, TOKEN, URL_ } from './helpers/sbx.js';
+import { cleanupTmp, fakeCp, repo, SBX, setup, tmp, TOKEN, URL_ } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -184,7 +183,7 @@ describe("mocactl sbx claude denies Claude Code's local tools (#702)", () => {
   it('denies them outside a repository, where no settings.json of up can', async () => {
     const { home, env, io } = setup();
     const c = fakeClaude();
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'sbx-not-a-repo-')));
+    const outside = tmp('sbx-not-a-repo-');
     const code = await sbxMain(['claude', '--sandbox', SBX], env, io, {
       home,
       fetchImpl: mint().fetchImpl,

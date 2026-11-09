@@ -130,12 +130,15 @@ export const TOKEN = {
   execCa: null,
 };
 
-/** Temp directories made by `localWorkspace` and `repo`, removed by `cleanupTmp` (afterEach). */
+/**
+ * Temp directories made by `tmp` (`localWorkspace` and `repo` included), removed by `cleanupTmp`
+ * (afterEach).
+ */
 const made: string[] = [];
 export function cleanupTmp(): void {
   for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
 }
-function tmp(prefix: string): string {
+export function tmp(prefix: string): string {
   const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   made.push(d);
   return d;
