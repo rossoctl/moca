@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -48,6 +49,21 @@ type Manifest struct {
 	// cover vmstate or memfile: those are derived from the three, are enormous, and
 	// change on every rebuild even when nothing behavioural did.
 	Hash string `json:"hash"`
+
+	// Features names what the guest image supports beyond per-Exec, e.g. lease-v1.
+	// Like egress_ca_sha256 it is outside Hash, so a snapshot built before the field
+	// existed still verifies; it simply advertises nothing.
+	Features []string `json:"features,omitempty"`
+}
+
+// FeatureLeaseV1 marks an image built for lease mode: cgroup2 mounted, user
+// namespaces disabled, the sbx exec identity present and no setuid binaries
+// (deploy/microvm/build-snapshot.sh). A worker refuses lease mode without it.
+const FeatureLeaseV1 = "lease-v1"
+
+// HasFeature reports whether the snapshot advertises f.
+func (m Manifest) HasFeature(f string) bool {
+	return slices.Contains(m.Features, f)
 }
 
 // Fill computes the component digests and Hash from the files in dir.
