@@ -256,3 +256,67 @@ it('switches a model with PATCH, null for the default', async () => {
   expect(calls[0]).toMatchObject({ url: 'http://cp/v1/sessions/s', method: 'PATCH' });
   expect(calls[0]!.body).toEqual({ model: null });
 });
+
+describe('async turns (ADR-0047)', () => {
+  it("POSTs to the session's turns route and returns both ids", async () => {
+    const { fetch, calls } = scriptedFetch(json({ sessionId: 's1', turnId: 't-9' }));
+    const c = client(fetch);
+    expect(await c.submitTurn('s 1', { async: true, prompt: 'go' })).toEqual({
+      sessionId: 's1',
+      turnId: 't-9',
+    });
+    // The session id is encoded: a session id with a slash must not become a second path segment,
+    // which would silently address a different route.
+    expect(calls[0]!.url).toBe('http://cp/v1/sessions/s%201/turns');
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toEqual({ async: true, prompt: 'go' });
+  });
+
+  it("GETs a turn's status, encoding both path segments", async () => {
+    const { fetch, calls } = scriptedFetch(json({ turnId: 't/9', state: 'running', attempts: 2 }));
+    const c = client(fetch);
+    const st = await c.getTurn('s1', 't/9');
+    expect(st.state).toBe('running');
+    expect(st.attempts).toBe(2);
+    expect(calls[0]!.url).toBe('http://cp/v1/sessions/s1/turns/t%2F9');
+  });
+
+  it('returns the result once present', async () => {
+    const { fetch } = scriptedFetch(
+      json({
+        turnId: 't1',
+        state: 'solved',
+        attempts: 1,
+        result: { status: 'solved', patch: 'd' },
+      }),
+    );
+    const c = client(fetch);
+    expect((await c.getTurn('s1', 't1')).result).toEqual({ status: 'solved', patch: 'd' });
+  });
+
+  it('cancels a queued turn and surfaces the 409 as a typed error', async () => {
+    const { fetch, calls } = scriptedFetch(
+      json({ turnId: 't1', state: 'cancelled' }),
+      json({ error: 'turn_not_cancellable', message: "this turn is 'running'" }, 409),
+    );
+    const c = client(fetch);
+    await c.cancelTurn('s1', 't1');
+    expect(calls[0]!.method).toBe('DELETE');
+    // A caller must be able to branch on "it was already running" without parsing prose.
+    await expect(c.cancelTurn('s1', 't1')).rejects.toMatchObject({
+      code: 'turn_not_cancellable',
+    });
+  });
+
+  it('surfaces the quota refusal as a typed error too', async () => {
+    const { fetch } = scriptedFetch(
+      json({ error: 'async_quota_exhausted', message: 'you already have 50' }, 429),
+    );
+    const c = client(fetch);
+    // The orchestrator (#390) backs off on this code; a 429 it could not name would look like any
+    // other server error and be retried immediately.
+    await expect(c.submitTurn('s1', { async: true, prompt: 'x' })).rejects.toMatchObject({
+      code: 'async_quota_exhausted',
+    });
+  });
+});

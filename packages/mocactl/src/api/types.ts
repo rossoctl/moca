@@ -85,6 +85,62 @@ export interface CreatedSession extends SessionToken {
   modelVerified?: boolean;
 }
 
+/**
+ * An async turn submission (ADR-0047 §4.1). `async` is required and must be `true`: the async path
+ * is REQUESTED, never inferred from which payload field is set.
+ */
+export interface SubmitTurnRequest {
+  async: true;
+  kind?: string;
+  prompt?: string;
+  item?: Record<string, unknown>;
+  problemStatement?: string;
+  repoUrl?: string;
+  ref?: string;
+  /**
+   * Printable ASCII, 1-128 chars. DEFAULTS TO THE SESSION ID server-side, so a session holds at most
+   * one async turn in flight and a resubmission returns the same turn rather than queueing a second.
+   * Set it only to run two async turns on one session deliberately.
+   */
+  idempotencyKey?: string;
+  caps?: { tokens?: number; costUsd?: number; wallClock?: number };
+}
+
+export interface SubmittedTurn {
+  sessionId: string;
+  turnId: string;
+}
+
+/** `queued` and `running` are the only non-terminal states; `lost` is reaper-written. */
+export type AsyncTurnState =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'responded'
+  | 'done'
+  | 'solved'
+  | 'failed'
+  | 'cancelled'
+  | 'lost';
+
+export interface TurnStatus {
+  turnId: string;
+  state: AsyncTurnState;
+  /**
+   * Deliveries so far, DESCRIPTIVE only. The server's queue holds the only authoritative delivery
+   * count, so do not compute "the server gave up" from this -- read `state: 'failed' | 'lost'`.
+   */
+  attempts: number;
+  /** Absent until the leaf writes one. `status: 'aborted'` has no state of its own; it reads `failed`. */
+  result?: {
+    status: string;
+    patch?: string;
+    text?: string;
+    gate?: Record<string, unknown>;
+    reason?: string;
+  };
+}
+
 export type CredentialConsumer = 'inference' | 'sandbox-egress' | 'control-plane';
 
 /** Where a credential goes on the wire; `sandbox-egress` may hold a list of 1-4. */
@@ -160,6 +216,21 @@ export interface ControlPlaneApi {
   listConfigBundles(): Promise<{ bundles: ConfigBundleSummary[] }>;
   /** Only the subject the digest is charged to, or an admin, may delete it. */
   deleteConfigBundle(digest: string): Promise<void>;
+  /**
+   * Submit a turn asynchronously; answers as soon as it is queued (ADR-0047 §4.1). Throws ApiError
+   * `async_quota_exhausted` (429) when the caller already holds the deployment's limit of
+   * non-terminal turns -- back off rather than retrying at once.
+   */
+  submitTurn(sessionId: string, req: SubmitTurnRequest): Promise<SubmittedTurn>;
+  /** An async turn's state, and its result once written. */
+  getTurn(sessionId: string, turnId: string): Promise<TurnStatus>;
+  /**
+   * Cancel a QUEUED async turn. Throws ApiError `turn_not_cancellable` for a running or finished
+   * one. Distinct from `HarnessApi.cancelTurn` below: that one interrupts a streaming turn over its
+   * own connection; this one removes a queued async turn from the queue. Neither can do the other's
+   * job, which is exactly why DELETE answers 409 for a running async turn.
+   */
+  cancelTurn(sessionId: string, turnId: string): Promise<void>;
 }
 
 /** One of the caller's stored config bundles (rossoctl/moca#559). */
