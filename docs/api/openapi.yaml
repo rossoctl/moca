@@ -1063,7 +1063,7 @@ paths:
                   sessionId: { type: string }
                   turnId: { type: string }
         '400':
-          description: '`invalid_request`, `envelope_invalid`'
+          description: '`invalid_json`, `invalid_request`, or `envelope_invalid`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
