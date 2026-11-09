@@ -230,6 +230,13 @@ jobs:
           cat "$log"
           exit $rc
 
+      - name: Run the guest agent's lease tests as root (cgroup v2, uid drop, seccomp)
+        working-directory: remote-worker
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" GOCACHE="$RUNNER_TEMP/gocache-root" go test -race -v -run 'TestShim|TestSeccomp|TestLease|TestNormalise' ./internal/guestagent/ 2>&1 | tee "$RUNNER_TEMP/lease.log"
+          grep -q '^--- PASS: TestShimDropsToTheExecUserWithNoPrivileges' "$RUNNER_TEMP/lease.log" || { echo '::error title=Lease root tests asserted nothing::'; exit 1; }
+
   proto:
     runs-on: ubuntu-latest
     timeout-minutes: 10

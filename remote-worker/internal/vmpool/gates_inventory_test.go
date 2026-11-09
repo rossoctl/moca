@@ -214,7 +214,7 @@ func TestTheCIWorkflowsRunTheGates(t *testing.T) {
 	}{
 		{
 			path:     filepath.Join(root, ".github", "workflows", "ci.yml"),
-			contains: []string{"microvm-gates:", "TestGate"},
+			contains: []string{"microvm-gates:", "TestGate", "TestShim"},
 			why:      "the job that runs the hardware-free §8 gates on every PR",
 		},
 		{
