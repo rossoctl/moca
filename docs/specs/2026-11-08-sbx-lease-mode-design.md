@@ -463,10 +463,19 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
 
 ## 16. Open items
 
-1. **Guest kernel and image.** The E15/E16 rig pins Firecracker's CI kernel `vmlinux-6.18.44`
-   (moca-experiments `e15/rig/pins.sh:46`), new enough for `cgroup.kill`. Whether its config enables
-   cgroup v2, and which kernel the SBX0 host's snapshot uses, is unverified (the release is in each
-   snapshot's manifest, not in this repository). If either lacks cgroup v2, the per-Exec kill
-   (§3.1) needs a new guest kernel, a workstream that lands before E17b. Mounting `cgroup2` in init
-   changes the snapshot manifest hash for per-`Exec` too. Per-`Exec` behaviour does not change, but every
-   host rebuilds its snapshot.
+1. **Guest image: a `cgroup2` mount in init (kernel already sufficient).** Checked 2026-11-08 on the
+   SBX0 KVM host (worker `sbx_default`, snapshot `default-p41-ca-gh`, built 2026-10-29). The guest
+   kernel is `6.18.51+`, and its embedded config has `CONFIG_CGROUPS`, `CONFIG_MEMCG`,
+   `CONFIG_CGROUP_PIDS` and `CONFIG_CGROUP_FREEZER`. It carries the `cgroup2` filesystem and
+   `cgroup.kill` (kernel ≥ 5.14). The E15/E16 rig pins `vmlinux-6.18.44` (moca-experiments
+   `e15/rig/pins.sh:46`). No kernel change is needed. What remains is mounting `cgroup2` in the guest
+   init (`build-snapshot.sh:604-610`). That changes the rootfs and so the snapshot hash for per-`Exec`
+   too. Per-`Exec` behaviour does not change, but each host rebuilds its snapshot once.
+2. **The snapshot manifest's `kernel_release` is the host's, not the guest's.** `build-snapshot.sh:1803`
+   writes `$(uname -r)` of the build host (`6.8.0-1061-nvidia` on SBX0). The guest kernel is
+   identified only by `kernel_sha256`. Recording the guest's release is a small fix that the image work
+   in item 1 can carry.
+3. **SBX0 guests have 256 MiB of RAM**, not E15/E16's 1024 MiB (`guest_ram_mb` in the same
+   manifest). There, `PerVMBytes` is already small, so measured admission gains less than E17 shows at
+   1 GiB, and a cache-heavy lease VM reaches its guest RAM sooner. E17 reports its memory results at
+   both sizes (E17 §6).
