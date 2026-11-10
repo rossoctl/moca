@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -318,8 +319,12 @@ func mountIsNosuid(t *testing.T, path string) bool {
 
 // newLeaseAgent starts an Agent in lease mode on a per-test cgroup root,
 // /sys/fs/cgroup/moca-ga-test-<random>, which t.Cleanup removes after the agent is
-// closed. It returns the agent and that root. The workspace and HOME are made
-// traversable, because t.TempDir and its parent are 0700 root and the Exec runs as 7000.
+// closed. It returns the agent and that root. The workspace is a tmpfs of its own,
+// as /workspace is a mount in a guest: the first lease request remounts it nodev,nosuid.
+// The user-namespace sysctl that request writes is a scratch file here, so the suite
+// does not change the test host (TestLeaseFirstRequestDisablesUserNamespaces checks the
+// real one). The workspace and HOME are made traversable, because t.TempDir and its
+// parent are 0700 root and the Exec runs as 7000.
 func newLeaseAgent(t *testing.T) (*Agent, string) {
 	t.Helper()
 	requireRootCgroupV2(t)
@@ -330,8 +335,25 @@ func newLeaseAgent(t *testing.T) (*Agent, string) {
 	root := "/sys/fs/cgroup/moca-ga-test-" + hex.EncodeToString(b[:])
 	t.Cleanup(func() { removeCgroupTree(t, root) })
 
+	sysctl := filepath.Join(t.TempDir(), "max_user_namespaces")
+	if err := os.WriteFile(sysctl, []byte("15000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origSysctl := userNamespacesSysctl
+	userNamespacesSysctl = sysctl
+	t.Cleanup(func() { userNamespacesSysctl = origSysctl })
+
 	work := t.TempDir()
 	homeParent := t.TempDir()
+	if err := unix.Mount("tmpfs", work, "tmpfs", 0, "size=4m,mode=0755"); err != nil {
+		t.Fatalf("mount tmpfs workspace: %v", err)
+	}
+	// Registered before the agent's Close, so it runs after it (cleanups are LIFO).
+	t.Cleanup(func() {
+		if err := unix.Unmount(work, unix.MNT_DETACH); err != nil {
+			t.Errorf("unmount workspace %s: %v", work, err)
+		}
+	})
 	for _, d := range []string{filepath.Dir(work), work, homeParent} {
 		if err := os.Chmod(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -677,20 +699,204 @@ func TestLeaseNormaliseWorkspaceHandsTheWorkspaceToTheExecUser(t *testing.T) {
 	}
 }
 
-// Not root-only: normalisation fails on the missing workspace before any cgroup or
-// shim work, so the agent need not have been prepared for lease mode.
-func TestLeaseNormaliseWorkspaceFailureDoesNotSetTheLatch(t *testing.T) {
+// Not root-only: the first request's remount fails on the missing workspace before any
+// cgroup or shim work, so the agent need not have been prepared for lease mode.
+func TestLeaseFirstRequestRemountFailureDoesNotSetTheLatch(t *testing.T) {
 	a := newTestAgent(t)
 	a.opts.Lease.CgroupRoot = "/nonexistent/moca-ga-test"
 	a.opts.WorkDir = filepath.Join(t.TempDir(), "missing")
 	req := leaseReq(`true`)
 	req.NormaliseWorkspace = true
 	_, _, _, errMsg := drive(t, a, req, nil)
-	if want := "normalise workspace: " + a.opts.WorkDir + ": "; !strings.HasPrefix(errMsg, want) {
+	if want := "guest-agent: lease: remount workspace nodev,nosuid: " + a.opts.WorkDir + ": "; !strings.HasPrefix(errMsg, want) {
 		t.Fatalf("error %q, want it to start %q", errMsg, want)
 	}
 	if a.leaseOn.Load() {
 		t.Error("a failed lease request set the lease latch")
+	}
+}
+
+// A workspace mounted read-only lets the first request's remount and sysctl write
+// through, then fails the normalise walk's first chown with EROFS. The latch must stay
+// unset, and once the workspace is writable again the next request runs.
+func TestLeaseNormaliseWorkspaceFailureDoesNotSetTheLatch(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	ws := a.WorkDir()
+	if err := unix.Mount("", ws, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY, ""); err != nil {
+		t.Fatalf("remount ro: %v", err)
+	}
+	req := leaseReq(`true`)
+	req.NormaliseWorkspace = true
+	_, _, _, errMsg := drive(t, a, req, nil)
+	if want := "normalise workspace: " + ws + ": "; !strings.HasPrefix(errMsg, want) {
+		t.Fatalf("error %q, want it to start %q", errMsg, want)
+	}
+	if a.leaseOn.Load() {
+		t.Error("a failed normalisation set the lease latch")
+	}
+	if err := unix.Mount("", ws, "", unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
+		t.Fatalf("remount rw: %v", err)
+	}
+	if _, stderr, end, errMsg := drive(t, a, req, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("retry: end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if !a.leaseOn.Load() {
+		t.Error("the successful retry did not set the lease latch")
+	}
+}
+
+// mountOptions returns the per-mount options of the mount at exactly mountPoint, from
+// /proc/self/mountinfo (field 6), or fails the test if there is none.
+func mountOptions(t *testing.T, mountPoint string) []string {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opts []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) >= 6 && f[4] == mountPoint {
+			opts = strings.Split(f[5], ",") // the last match is the top of the stack
+		}
+	}
+	if opts == nil {
+		t.Fatalf("no mount at %s in /proc/self/mountinfo", mountPoint)
+	}
+	return opts
+}
+
+// Spec §3.3, no route back to root: a device node in the workspace (root left it, or
+// a per-Exec run made it) is removed before the Exec uid is handed the tree, and the
+// workspace is remounted nodev,nosuid with its other options kept.
+func TestLeaseFirstRequestRemovesDevicesAndRemountsNoDevNoSuid(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	ws := a.WorkDir()
+	if err := unix.Mount("", ws, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_NOATIME, ""); err != nil {
+		t.Fatalf("remount noatime: %v", err)
+	}
+	null := filepath.Join(ws, "null")
+	if err := unix.Mknod(null, unix.S_IFCHR|0o666, int(unix.Mkdev(1, 3))); err != nil {
+		t.Fatalf("mknod c 1 3: %v", err)
+	}
+	blk := filepath.Join(ws, "sub", "blk")
+	if err := os.Mkdir(filepath.Dir(blk), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(blk, unix.S_IFBLK|0o600, int(unix.Mkdev(7, 0))); err != nil {
+		t.Fatalf("mknod b 7 0: %v", err)
+	}
+	req := leaseReq(`true`)
+	req.NormaliseWorkspace = true
+	if _, stderr, end, errMsg := drive(t, a, req, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	for _, p := range []string{null, blk} {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived normalisation (lstat err %v)", p, err)
+		}
+	}
+	opts := mountOptions(t, ws)
+	for _, want := range []string{"rw", "nodev", "nosuid", "noatime"} {
+		if !slices.Contains(opts, want) {
+			t.Errorf("workspace mount options %v lack %s", opts, want)
+		}
+	}
+}
+
+// The real sysctl, unlike the rest of the suite: the first lease request writes 0 to
+// it, a per-Exec request does not. The test host's value is put back afterwards.
+func TestLeaseFirstRequestDisablesUserNamespaces(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	userNamespacesSysctl = "/proc/sys/user/max_user_namespaces"
+	orig, err := os.ReadFile(userNamespacesSysctl)
+	if err != nil {
+		t.Skipf("no user namespace sysctl: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", orig, 0); err != nil {
+			t.Errorf("restoring max_user_namespaces to %q: %v", strings.TrimSpace(string(orig)), err)
+		}
+	})
+	if strings.TrimSpace(string(orig)) == "0" {
+		if err := os.WriteFile(userNamespacesSysctl, []byte("15000"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, end, errMsg := drive(t, a, Request{Command: "true", CapBytes: 1 << 20}, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("per-Exec request: end %+v, err %q", end, errMsg)
+	}
+	if got, _ := os.ReadFile(userNamespacesSysctl); strings.TrimSpace(string(got)) == "0" {
+		t.Fatal("a per-Exec request disabled user namespaces")
+	}
+	if _, _, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("lease request: end %+v, err %q", end, errMsg)
+	}
+	if got, _ := os.ReadFile(userNamespacesSysctl); strings.TrimSpace(string(got)) != "0" {
+		t.Errorf("max_user_namespaces is %q after the first lease request, want 0", strings.TrimSpace(string(got)))
+	}
+	if out, _, _, errMsg := drive(t, a, leaseReq(`unshare -U true 2>/dev/null; echo rc=$?`), nil); errMsg != "" || out == "rc=0\n" {
+		t.Errorf("unshare -U in a lease Exec: %q, err %q; want it refused", out, errMsg)
+	}
+}
+
+// Spec §3.3: every Exec runs with umask 0002. Inside the normalised workspace, whose
+// root is setgid, a new directory inherits setgid, so mkdir gives 2775, not 775.
+func TestLeaseExecUmaskIs0002(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`umask; touch f; mkdir d; stat -c %a f d`)
+	req.NormaliseWorkspace = true
+	out, stderr, end, errMsg := drive(t, a, req, nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if want := "0002\n664\n2775\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+}
+
+// fd hygiene: the agent's listener, the request connection, the cgroup dir fd and the
+// Exec's own pipe ends must not reach an Exec. Only 0, 1 and 2 (and bash's own 255, if
+// it opens one) may be open in it. The open listener comes from listenSocket, the
+// vsock listener's creation path (AF_UNIX, as the test host may lack vsock): Listen's
+// unix: scheme goes through net.Listen, which is close-on-exec regardless.
+func TestLeaseExecInheritsOnlyStdio(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	lfd, err := listenSocket(unix.AF_UNIX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(lfd) })
+	if err := unix.Bind(lfd, &unix.SockaddrUnix{Name: filepath.Join(t.TempDir(), "agent.sock")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(lfd, 8); err != nil {
+		t.Fatal(err)
+	}
+	// The shell lists its own fds, not ls's (a pipeline element's $BASHPID is its own
+	// pid), and into a file: while a pipe or a $(...) runs, the shell holds its end.
+	out, stderr, end, errMsg := drive(t, a, leaseReq(`p=$BASHPID; ls /proc/$p/fd >"$HOME/fdl"; sort -n "$HOME/fdl" | tr '\n' ' '`), nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if got := strings.TrimSpace(out); got != "0 1 2" && got != "0 1 2 255" {
+		t.Errorf("fds open in the Exec: %q, want 0 1 2 (and maybe 255)", got)
+	}
+}
+
+// listenSocket is listenVsock's socket creation; AF_UNIX stands in for AF_VSOCK, which
+// the test host may lack. Not root-only.
+func TestListenSocketIsCloseOnExec(t *testing.T) {
+	fd, err := listenSocket(unix.AF_UNIX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Error("the listening socket lacks FD_CLOEXEC: every lease Exec would inherit the agent's listener")
 	}
 }
 
@@ -745,7 +951,7 @@ func TestNormaliseWorkspaceOwnsGroupWritesAndStaysInside(t *testing.T) {
 		}
 	}
 
-	if err := normaliseWorkspace(ws, 7000, 7000); err != nil {
+	if _, err := normaliseWorkspace(ws, 7000, 7000); err != nil {
 		t.Fatalf("normaliseWorkspace: %v", err)
 	}
 

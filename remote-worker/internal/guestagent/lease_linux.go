@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -63,6 +64,60 @@ func (a *Agent) leasePrepare() error {
 	return nil
 }
 
+// userNamespacesSysctl is the knob leaseHarden turns off. A package variable so the
+// lease tests can point it at a scratch file: the real one is the test host's, and only
+// TestLeaseFirstRequestDisablesUserNamespaces touches it (and restores it).
+var userNamespacesSysctl = "/proc/sys/user/max_user_namespaces"
+
+// leaseHarden runs the one-time root steps of the first lease request (spec §3.3, "no
+// route back to root"). Not in leasePrepare: that runs before the snapshot, when the
+// workspace is not yet mounted (Resume mounts it), and per-Exec VMs restored from the
+// same snapshot keep user namespaces. Both steps are idempotent, so a retry after a
+// partial failure is safe.
+//   - The workspace is remounted nodev,nosuid: the Exec uid owns it, and a device node
+//     or setuid file that root left there (or that a per-Exec run made) must not work.
+//   - User namespaces are disabled for the rest of the VM's life: one gives an
+//     unprivileged process a full capability set inside it.
+func (a *Agent) leaseHarden() error {
+	if err := remountNoDevNoSuid(a.opts.WorkDir); err != nil {
+		return fmt.Errorf("guest-agent: lease: remount workspace nodev,nosuid: %s: %w", a.opts.WorkDir, err)
+	}
+	if err := os.WriteFile(userNamespacesSysctl, []byte("0"), 0); err != nil {
+		return fmt.Errorf("guest-agent: lease: disable user namespaces: %w", err)
+	}
+	return nil
+}
+
+// mountFlagsKept maps the statfs flags of a mount to the mount(2) flags that keep them
+// across a bind remount, which otherwise resets every per-mount flag it is not given
+// (rw,noatime from Resume's mount would become rw,relatime). Only RELATIME's value
+// differs between the two sets.
+var mountFlagsKept = []struct{ st, ms uintptr }{
+	{unix.ST_RDONLY, unix.MS_RDONLY},
+	{unix.ST_NOEXEC, unix.MS_NOEXEC},
+	{unix.ST_SYNCHRONOUS, unix.MS_SYNCHRONOUS},
+	{unix.ST_MANDLOCK, unix.MS_MANDLOCK},
+	{unix.ST_NOATIME, unix.MS_NOATIME},
+	{unix.ST_NODIRATIME, unix.MS_NODIRATIME},
+	{unix.ST_RELATIME, unix.MS_RELATIME},
+}
+
+// remountNoDevNoSuid adds nodev and nosuid to the mount at dir, keeping its other
+// per-mount flags. dir must be a mount point (EINVAL otherwise).
+func remountNoDevNoSuid(dir string) error {
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil {
+		return err
+	}
+	flags := uintptr(unix.MS_REMOUNT | unix.MS_BIND | unix.MS_NODEV | unix.MS_NOSUID)
+	for _, f := range mountFlagsKept {
+		if uintptr(st.Flags)&f.st != 0 {
+			flags |= f.ms
+		}
+	}
+	return unix.Mount("", dir, "", flags, "")
+}
+
 // stopLease stops the reaper, if a lease request ever started it. It does not take
 // lease.mu, which a running Exec holds: Close must not wait for that Exec to end.
 func (a *Agent) stopLease() {
@@ -97,12 +152,23 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	l := &a.lease
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// Under mu, so no lease Exec runs during the walk; before the latch, so a failed
-	// normalisation leaves the agent as it was. The host sets the flag when root has
-	// written to the workspace since the last lease Exec (spec §3.3).
-	if req.NormaliseWorkspace {
-		if err := normaliseWorkspace(a.opts.WorkDir, lo.UID, lo.GID); err != nil {
+	// Under mu, so no lease Exec runs during these steps; before the latch, so a failure
+	// leaves the agent as it was and the next lease request retries them. leaseOn is
+	// only ever set under mu, so reading it here is exact.
+	if !a.leaseOn.Load() {
+		if err := a.leaseHarden(); err != nil {
 			return End{}, err
+		}
+	}
+	// The host sets the flag when root has written to the workspace since the last
+	// lease Exec (spec §3.3).
+	if req.NormaliseWorkspace {
+		n, err := normaliseWorkspace(a.opts.WorkDir, lo.UID, lo.GID)
+		if err != nil {
+			return End{}, err
+		}
+		if n > 0 {
+			log.Printf("guest-agent: lease: normalise workspace removed %d device node(s) from %s", n, a.opts.WorkDir)
 		}
 	}
 	a.leaseOn.Store(true)

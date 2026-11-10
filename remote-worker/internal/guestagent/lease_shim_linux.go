@@ -87,6 +87,11 @@ func ShimMain(args []string) {
 	}
 	runtime.KeepAlive(filter)
 
+	// Spec §3.3: every Exec starts with umask 0002, so what it creates in the setgid,
+	// group-writable workspace stays writable by the sbx-ws group (a later Exec, a
+	// tracked process). The agent's own umask is left as it is.
+	syscall.Umask(0o002)
+
 	// After the uid drop, so the lookup sees what the exec identity may run. Only
 	// HOME, USER and LOGNAME change, so PATH is this process's.
 	path, err := exec.LookPath(argv[0])

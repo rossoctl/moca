@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -299,7 +300,8 @@ print("mountsys=" + ("ok" if r == 0 else errno.errorcode.get(e, str(e))))
 // TestGateLeasePrivilege is the Exec half of spec §9's LeasePrivilege (plan 5 adds the
 // tracked-process half): a lease Exec runs as uid 7000 with no capabilities and
 // no_new_privs, on an image with no setuid or setgid file, and can leave its cgroup, make
-// one, signal or open PID 1, mount, make a user namespace, or ptrace -- none of it. Then
+// one, signal or open PID 1, mount, make a user namespace, or ptrace -- none of it. It
+// inherits no fd but stdio, and /workspace is mounted nodev,nosuid. Then
 // Run 2 shows that nothing Run 1 started, or created, is left.
 //
 // The cgroup escape is checked twice: by exit status, and by consequence. $BASHPID, not
@@ -326,6 +328,8 @@ command -v find >/dev/null || echo MISSING-FIND
 echo "suid=[$(find / -xdev -perm /6000 -type f 2>/dev/null | tr '\n' ' ')]"
 echo "nnp=$(awk '/^NoNewPrivs:/ {print $2}' /proc/$BASHPID/status)"
 echo uid=$(id -u)
+p=$BASHPID; ls /proc/$p/fd >"$HOME/fdl"; echo "fdlist=$(sort -n "$HOME/fdl" | tr '\n' ' ')"
+echo "mountopts=$(awk '$5 == "/workspace" {o = $6} END {print o}' /proc/self/mountinfo)"
 m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2>&1 &
 ` + countProcs(procWant{pattern, false}))
 	requireStarted(t, out, procWant{pattern, false})
@@ -374,6 +378,21 @@ m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2
 	}
 	if !strings.Contains(out, "\nuid=7000\n") {
 		t.Errorf("the Exec is not uid 7000:\n%s", out)
+	}
+	// Only stdio may reach an Exec: an inherited agent fd (the port-1024 listener, a
+	// request connection) would hand uid 7000 the agent's channel to the host. bash may
+	// hold 255 of its own. The subshell lists its own fds (not ls's: a pipeline
+	// element's $BASHPID is its own pid) into a file, since it holds a pipe's end while
+	// a pipe or $(...) runs.
+	if m := regexp.MustCompile(`(?m)^fdlist=(.*)$`).FindStringSubmatch(out); m == nil ||
+		(m[1] != "0 1 2 " && m[1] != "0 1 2 255 ") {
+		t.Errorf("fds open in the Exec: %v, want exactly 0 1 2 (and maybe 255)\n%s", m, out)
+	}
+	// The first lease request remounts /workspace nodev,nosuid, so a device node or a
+	// setuid file there is inert.
+	if m := regexp.MustCompile(`(?m)^mountopts=(.*)$`).FindStringSubmatch(out); m == nil ||
+		!slices.Contains(strings.Split(m[1], ","), "nodev") || !slices.Contains(strings.Split(m[1], ","), "nosuid") {
+		t.Errorf("/workspace is not mounted nodev,nosuid: %v\n%s", m, out)
 	}
 
 	got := run(`test -e /sys/fs/cgroup/moca-execs/x && echo cgroup-x-exists; ` + leftoverProcs(pattern))

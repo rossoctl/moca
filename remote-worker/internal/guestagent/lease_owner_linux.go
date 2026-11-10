@@ -22,16 +22,20 @@ import (
 //   - a directory on another filesystem (a mount inside the workspace) is skipped with
 //     everything under it, and the mount point itself is left as it is;
 //   - only regular files and directories are chmodded, decided from an lstat of the
-//     entry; devices, sockets, FIFOs and symlinks are only chowned.
+//     entry; sockets, FIFOs and symlinks are only chowned;
+//   - character and block devices are removed (unlinkat does not follow the entry), not
+//     handed over: a device node the Exec uid owned would be a route back to root. The
+//     workspace is also mounted nodev (leaseHarden); removing them does not rest the
+//     rule on that one flag. It returns how many it removed.
 //
 // It runs with no Exec in the VM (runLease holds the lease mutex), so nothing changes
 // the tree between the lstat and the chown or chmod of an entry.
 //
 // The first error aborts the walk, as `normalise workspace: <path>: <err>`.
-func normaliseWorkspace(root string, uid, gid int) error {
+func normaliseWorkspace(root string, uid, gid int) (removed int, err error) {
 	var rootDev uint64
 	first := true
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		fail := func(err error) error { return fmt.Errorf("normalise workspace: %s: %w", path, err) }
 		if err != nil {
 			return fail(err)
@@ -47,6 +51,13 @@ func normaliseWorkspace(root string, uid, gid int) error {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if t := st.Mode & unix.S_IFMT; t == unix.S_IFCHR || t == unix.S_IFBLK {
+			if err := unix.Unlinkat(unix.AT_FDCWD, path, 0); err != nil {
+				return fail(err)
+			}
+			removed++
 			return nil
 		}
 		if err := unix.Fchownat(unix.AT_FDCWD, path, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -68,4 +79,5 @@ func normaliseWorkspace(root string, uid, gid int) error {
 		}
 		return nil
 	})
+	return removed, err
 }
