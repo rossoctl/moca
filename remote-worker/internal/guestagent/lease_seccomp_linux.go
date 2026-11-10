@@ -9,8 +9,9 @@ import (
 )
 
 // seccompFilter builds the lease Exec's seccomp program for goarch (spec §3.3). It
-// denies ptrace, process_vm_readv and process_vm_writev with EPERM, so an Exec cannot
-// trace or read into another process of its uid, and allows everything else. A syscall
+// denies ptrace, process_vm_readv, process_vm_writev and pidfd_getfd with EPERM, so an
+// Exec cannot trace, read into or copy an fd out of another process of its uid, and
+// allows everything else. A syscall
 // made under a foreign audit arch, or an amd64 x32 syscall number, kills the process:
 // those are other syscall tables, where the numbers below would mean something else.
 func seccompFilter(goarch string) ([]unix.SockFilter, error) {
@@ -20,10 +21,10 @@ func seccompFilter(goarch string) ([]unix.SockFilter, error) {
 	switch goarch {
 	case "amd64":
 		auditArch, x32 = unix.AUDIT_ARCH_X86_64, true
-		denied = []uint32{101, 310, 311} // ptrace, process_vm_readv, process_vm_writev
+		denied = []uint32{101, 310, 311, 438} // ptrace, process_vm_readv, process_vm_writev, pidfd_getfd
 	case "arm64":
 		auditArch = unix.AUDIT_ARCH_AARCH64
-		denied = []uint32{117, 270, 271} // ptrace, process_vm_readv, process_vm_writev
+		denied = []uint32{117, 270, 271, 438} // ptrace, process_vm_readv, process_vm_writev, pidfd_getfd
 	default:
 		return nil, fmt.Errorf("no lease seccomp filter for GOARCH %q", goarch)
 	}

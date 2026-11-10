@@ -127,7 +127,7 @@ func TestShimClearsAnInheritedCapabilitySet(t *testing.T) {
 	}
 }
 
-// All three calls target the caller itself, which an unfiltered process may do: TRACEME
+// Every call targets the caller itself, which an unfiltered process may do: TRACEME
 // needs no tracer privilege and reading one's own memory passes the ptrace access
 // check. So EPERM here is the filter's doing, not the uid drop's.
 const ptraceAndProcessVMScript = `
@@ -149,6 +149,11 @@ libc.process_vm_writev.restype = ctypes.c_ssize_t
 ctypes.set_errno(0)
 r = libc.process_vm_writev(os.getpid(), ctypes.byref(remote), 1, ctypes.byref(local), 1, 0)
 print("process_vm_writev", r, ctypes.get_errno() if r == -1 else 0)
+libc.syscall.restype = ctypes.c_long
+pidfd = libc.syscall(434, os.getpid(), 0)  # pidfd_open (434 on amd64 and arm64)
+ctypes.set_errno(0)
+r = libc.syscall(438, pidfd, 0, 0)  # pidfd_getfd(pidfd, fd 0, 0)
+print("pidfd_getfd", r, ctypes.get_errno() if r == -1 else 0)
 `
 
 func TestShimSeccompDeniesPtraceAndProcessVM(t *testing.T) {
@@ -157,7 +162,7 @@ func TestShimSeccompDeniesPtraceAndProcessVM(t *testing.T) {
 		t.Skip("needs python3")
 	}
 	out := runInShim(t, t.TempDir(), "python3", "-c", ptraceAndProcessVMScript)
-	for _, want := range []string{"ptrace -1 1", "process_vm_readv -1 1", "process_vm_writev -1 1"} { // errno 1 = EPERM
+	for _, want := range []string{"ptrace -1 1", "process_vm_readv -1 1", "process_vm_writev -1 1", "pidfd_getfd -1 1"} { // errno 1 = EPERM
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("output lacks %q (want EPERM):\n%s", want, out)
 		}
@@ -223,6 +228,7 @@ func TestSeccompFilterDeniesTheBuildArchSyscalls(t *testing.T) {
 		"ptrace":            unix.SYS_PTRACE,
 		"process_vm_readv":  unix.SYS_PROCESS_VM_READV,
 		"process_vm_writev": unix.SYS_PROCESS_VM_WRITEV,
+		"pidfd_getfd":       unix.SYS_PIDFD_GETFD,
 	} {
 		if !compared[nr] {
 			t.Errorf("filter for %s never compares nr with %s (%d)", runtime.GOARCH, name, nr)
