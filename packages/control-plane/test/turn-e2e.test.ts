@@ -19,6 +19,9 @@ import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
 
 const ALICE = 'github:1234';
 const BOB = 'github:9999';
+// The data-plane shared bearer this suite presents (spec §5.3.1). A literal, like server.test.ts's:
+// a generated one would make the 401 cases depend on the generator rather than on the comparison.
+const EXCHANGE_TOKEN = 'e2e-shared-exchange'; // notsecret
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 
 let server: ReturnType<typeof startControlPlane>;
@@ -93,6 +96,9 @@ beforeEach(async () => {
     turnQueue: new RedisTurnQueue(redis, stream),
     leafResults: client as unknown as { get(k: string): Promise<string | null> },
     newId: () => randomUUID(),
+    // The dequeue exchange's shared bearer. makeDeps leaves it undefined, and checkStaticBearer
+    // rejects every call when none is configured, so without this the new route 401s unconditionally.
+    config: { exchangeToken: EXCHANGE_TOKEN },
   });
   await seedCredential(d, ALICE);
   await seedCredential(d, BOB);
@@ -123,12 +129,24 @@ afterEach(async () => {
 });
 
 /**
- * The fake worker. Deliberately minimal and deliberately blind: it is handed NOTHING but the stream,
- * so the only way it can run a turn is by reading the id and loading the record -- which is the
- * contract #389's drain loop has to honour.
+ * The fake worker. Deliberately minimal and deliberately blind: it is handed NOTHING but the stream
+ * and the shared bearer, so the only way it can run a turn is to read the id, exchange it for a
+ * credential, and load the record -- which is the contract #389's drain loop has to honour.
  */
 async function fakeWorker(result: Record<string, unknown>): Promise<{
   fields: Record<string, string>;
+  exchanged: {
+    status: number;
+    body: {
+      turnId: string;
+      mode: string;
+      anthropicAuthToken: string;
+      anthropicBaseUrl: string;
+      sessionId: string;
+      subject: string;
+      caps: Record<string, number>;
+    };
+  };
   rebuilt: { sessionId: string; credentialName: string; envelope: unknown; attempts: number };
 }> {
   try {
@@ -150,8 +168,23 @@ async function fakeWorker(result: Record<string, unknown>): Promise<{
   const fields = msg.message as Record<string, string>;
   // Everything below uses ONLY fields.turnId. If a future change put the envelope back on the queue,
   // this worker would keep passing while the real one quietly depended on it.
+
+  // The dequeue exchange, over real HTTP with the shared bearer and nothing else (§5.4, MI1 §6.5).
+  // This is the step that makes "the queue carries one id" survivable rather than merely true: the
+  // credential the leaf spends is fetched here, from the record, and was never on the queue.
+  const exchange = await request('POST', '/internal/turn-credentials', {
+    body: { turnId: fields.turnId },
+    headers: { Authorization: `Bearer ${EXCHANGE_TOKEN}` },
+  });
+  if (exchange.status !== 200) {
+    throw new Error(`the dequeue exchange refused the claim: ${exchange.status}`);
+  }
+
   const loaded = await d.turns!.get(fields.turnId!);
   if (!loaded) throw new Error(`no record for ${fields.turnId}`);
+  // The CONSUMER performs the transition (#389), not the exchange: the endpoint is a pure read, so a
+  // worker that skipped this call would leave the record in `queued` forever. Asserting the state
+  // after the exchange (below) is what pins that division.
   await d.turns!.markRunning(loaded.turnId, 1);
   await client.set(`leaf:result:${loaded.sessionId}`, JSON.stringify(result), { EX: 300 });
   await d.turns!.finalize(
@@ -167,6 +200,7 @@ async function fakeWorker(result: Record<string, unknown>): Promise<{
   if (!turn) throw new Error(`record for ${loaded.turnId} vanished mid-drain`);
   return {
     fields,
+    exchanged: { status: exchange.status, body: exchange.json() },
     rebuilt: {
       sessionId: turn.sessionId,
       credentialName: turn.credentialName,
@@ -198,7 +232,7 @@ describe('async turn, end to end (#387 acceptance)', () => {
     expect(queued.status).toBe(200);
     expect(queued.json()).toEqual({ turnId, state: 'queued', attempts: 0 });
 
-    const { fields, rebuilt } = await fakeWorker({
+    const { fields, exchanged, rebuilt } = await fakeWorker({
       status: 'solved',
       patch: 'diff --git a/x b/x',
       sessionId: sid,
@@ -212,6 +246,22 @@ describe('async turn, end to end (#387 acceptance)', () => {
     expect(rebuilt.credentialName).toBe('my-anthropic');
     expect(rebuilt.envelope).toMatchObject({ kind: 'prompt', prompt: 'summarise the repo' });
     expect(rebuilt.attempts).toBe(1);
+
+    // ...and the credential the leaf spends came from the dequeue exchange, over HTTP, in return for
+    // that one id (§5.4). This is the half that makes the line above safe to keep: a queue entry with
+    // no credential in it is only workable because this exchange exists.
+    expect(exchanged.status).toBe(200);
+    expect(exchanged.body).toMatchObject({
+      turnId,
+      mode: 'direct',
+      anthropicBaseUrl: 'https://litellm.internal/v1',
+      sessionId: sid,
+      subject: ALICE,
+      caps: { tokens: 1000 },
+    });
+    // The real stored secret, resolved from the NAME on the record. Asserted explicitly because a
+    // placeholder here -- or an echo of the name -- would look like success to every other assertion.
+    expect(exchanged.body.anthropicAuthToken).toBe('sk-fake'); // notsecret
 
     const done = await request('GET', `/v1/sessions/${sid}/turns/${turnId}`, {
       headers: auth(ALICE),
@@ -322,6 +372,85 @@ describe('async turn, end to end (#387 acceptance)', () => {
       headers: auth(ALICE),
     });
     expect(after.json().state).toBe('cancelled');
+  });
+
+  it('refuses the claim for a CANCELLED turn, which is what makes a cancel effective', async () => {
+    const sid = await createSession(ALICE);
+    const { turnId } = (
+      await request('POST', `/v1/sessions/${sid}/turns`, {
+        body: { async: true, kind: 'prompt', prompt: 'go' },
+        headers: auth(ALICE),
+      })
+    ).json();
+    expect(
+      (await request('DELETE', `/v1/sessions/${sid}/turns/${turnId}`, { headers: auth(ALICE) }))
+        .status,
+    ).toBe(202);
+
+    // §4.5's withdrawal is enforced at the CLAIM. The entry is still on the stream -- cancel flips
+    // the record and never reaches into the queue -- so a worker will pick this id up, and the only
+    // thing that can stop the leaf running is this refusal. Over real HTTP, because that is the hop
+    // the worker makes.
+    const claim = await request('POST', '/internal/turn-credentials', {
+      body: { turnId },
+      headers: { Authorization: `Bearer ${EXCHANGE_TOKEN}` },
+    });
+    expect(claim.status).toBe(409);
+    expect(claim.json().error).toBe('turn_not_claimable');
+    // No credential in the refusal body, by any name.
+    expect(JSON.stringify(claim.json())).not.toContain('sk-fake'); // notsecret
+    expect(await client.xLen(stream)).toBe(1);
+  });
+
+  it('refuses the claim after the session is DELETED, so a cascade cannot be outrun', async () => {
+    const sid = await createSession(ALICE);
+    const { turnId } = (
+      await request('POST', `/v1/sessions/${sid}/turns`, {
+        body: { async: true, kind: 'prompt', prompt: 'go' },
+        headers: auth(ALICE),
+      })
+    ).json();
+    expect((await request('DELETE', `/v1/sessions/${sid}`, { headers: auth(ALICE) })).status).toBe(
+      204,
+    );
+    // The entry OUTLIVES the session: DELETE cannot reach into the stream, so a worker will still
+    // pick this id up, and without a refusal a deleted session's queued leaves would each run and
+    // each spend the owner's credential.
+    expect(await client.xLen(stream)).toBe(1);
+
+    const claim = await request('POST', '/internal/turn-credentials', {
+      body: { turnId },
+      headers: { Authorization: `Bearer ${EXCHANGE_TOKEN}` },
+    });
+    expect(claim.status).toBe(404);
+    // `turn_not_found`, not `session_not_found`, and this is exact rather than a two-code toContain:
+    // deleteSession runs cascadeDelete AND TurnStore.deleteSessionTurns (handlers.ts:887, the F2 slot
+    // reclaim), so by the time the claim arrives the turn HASH is gone and check 1 fires before the
+    // session is ever loaded. Pinning the code is what would catch deleteSessionTurns silently
+    // ceasing to reach this turn -- which would leak a quota slot as well as change this answer.
+    expect(claim.json().error).toBe('turn_not_found');
+  });
+
+  it('refuses every claim under MOCA_TENANCY=multi, even for turns already queued', async () => {
+    const sid = await createSession(ALICE);
+    const { turnId } = (
+      await request('POST', `/v1/sessions/${sid}/turns`, {
+        body: { async: true, kind: 'prompt', prompt: 'go' },
+        headers: auth(ALICE),
+      })
+    ).json();
+    // Flipped AFTER the submission, which is the only way to reach this state: submitTurn refuses
+    // `multi` outright, so a deployment that switches with work already on the queue is exactly the
+    // case the second gate exists for (MI1 §6.6 -- under `multi` it never returns a real key).
+    d.config = { ...d.config, tenancy: 'multi' };
+
+    const claim = await request('POST', '/internal/turn-credentials', {
+      body: { turnId },
+      headers: { Authorization: `Bearer ${EXCHANGE_TOKEN}` },
+    });
+    expect(claim.status).toBe(501);
+    expect(claim.json().error).toBe('async_tenancy_unsupported');
+    expect(JSON.stringify(claim.json())).not.toContain('sk-fake'); // notsecret
   });
 
   it('refuses past the quota over HTTP with 429, and the stream stops growing', async () => {
