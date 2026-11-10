@@ -160,7 +160,6 @@ export interface LeafEnvelope {
   repoUrl?: string; // P2: git remote to converge the sandbox repo copy from
   ref?: string; // P2: commit/branch/tag the leaf's worktree is pinned to
   maxTurns?: number;
-  async?: boolean; // when true, the HTTP layer enqueues instead of running inline
   tenant?: string; // namespaces the session id
   /**
    * Digest of a promoted Claude Code config bundle (`sha256:…`). Absent ⇒ no promoted config and

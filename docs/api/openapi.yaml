@@ -71,6 +71,11 @@ components:
       schema:
         type: string
         pattern: '^sbx-[0-9a-f]{26}$'
+    turnId:
+      name: turnId
+      in: path
+      required: true
+      schema: { type: string }
   schemas:
     Error:
       type: object
@@ -108,6 +113,11 @@ components:
             - bundle_quota_exceeded
             - config_bundle_not_found
             - configRef_invalid
+            - envelope_invalid
+            - async_quota_exhausted
+            - workload_runs_unavailable
+            - async_tenancy_unsupported
+            - turn_not_cancellable
             - credential_required
             - credential_ambiguous
             - credential_not_found
@@ -157,6 +167,39 @@ components:
           description: |
             the model the session's turns run on, as chosen at creation or by PATCH; null when it
             runs on the deployment default
+    TurnStatus:
+      type: object
+      required: [turnId, state, attempts]
+      properties:
+        turnId: { type: string }
+        state:
+          type: string
+          description: |
+            `queued` and `running` are the only non-terminal states; everything else is final. The
+            five result-shaped terminals mirror the leaf result's own discriminants, so a result maps
+            to a state with no translation. `lost` is written by the reaper for a turn whose worker
+            died without a result -- it guarantees every record eventually reaches a terminal state,
+            and therefore eventually expires.
+          enum: [queued, running, paused, responded, done, solved, failed, cancelled, lost]
+        attempts:
+          type: integer
+          description: |
+            deliveries so far, DESCRIPTIVE only: the queue's delivery count is the sole authority for
+            retry exhaustion. `0` while queued.
+        result:
+          type: object
+          description: |
+            the leaf's result, absent until one is written. Its own `status` may read `aborted`, which
+            has no corresponding turn `state` -- such a turn reads `state: "failed"`.
+          required: [status]
+          properties:
+            status:
+              type: string
+              enum: [done, failed, aborted, paused, solved, responded]
+            patch: { type: string }
+            text: { type: string }
+            gate: { type: object }
+            reason: { type: string }
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -951,6 +994,152 @@ paths:
                   expiresAt: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/sessions/{id}/turns:
+    post:
+      operationId: submitTurn
+      summary: Submit a turn asynchronously
+      description: |
+        Async is a property of the TURN, not of the session, so one session may mix interactive and
+        async turns (ADR-0047 §4.1). Answers `202` with the turn id and nothing else: no result and no
+        partial state. Poll `GET /v1/sessions/{id}/turns/{turnId}` for both.
+
+        `idempotencyKey` DEFAULTS TO THE SESSION ID, so a session holds at most one async turn in
+        flight and a resubmission is deduplicated rather than queued behind -- matching the
+        interactive `409 turn_in_progress`. A fan-out of N leaves is therefore N sessions, each with
+        its own leaf result record. Resubmitting on a key whose turn is still non-terminal answers
+        `202` with the EXISTING turn id.
+
+        Interactive turns do not come through here: they stream over the harness's own
+        `POST /turns` with a session token (docs/reference/http-api.md).
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sessionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [async]
+              properties:
+                async:
+                  type: boolean
+                  description: |
+                    must be `true`. The field exists so the async path is REQUESTED rather than
+                    inferred from which other fields are present.
+                kind:
+                  type: string
+                  description: the leaf kind; defaults to the kind implied by the payload field
+                prompt: { type: string, description: a free-form turn }
+                item:
+                  type: object
+                  description: a work item (`item_id`, `file`, `pattern`), as the fan-out leaves send
+                problemStatement: { type: string, description: a SWE-bench style task }
+                repoUrl: { type: string }
+                ref: { type: string }
+                idempotencyKey:
+                  type: string
+                  maxLength: 128
+                  description: |
+                    printable ASCII, 1-128 characters. Defaults to the session id.
+                caps:
+                  type: object
+                  description: |
+                    per-turn budget ceilings, recorded on the turn record and enforced by the worker
+                    that runs it (ADR-0047 §5.1); a cap above the deployment's own limit does not
+                    raise it.
+                  properties:
+                    tokens: { type: integer }
+                    costUsd: { type: number }
+                    wallClock: { type: integer, description: seconds }
+      responses:
+        '202':
+          description: accepted; poll the status route
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, turnId]
+                properties:
+                  sessionId: { type: string }
+                  turnId: { type: string }
+        '400':
+          description: '`invalid_json`, `invalid_request`, or `envelope_invalid`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: |
+            `async_quota_exhausted`: the caller already holds `MOCA_ASYNC_QUEUED_PER_OWNER`
+            non-terminal async turns. Refused BEFORE the enqueue, so nothing was created; the message
+            names the caller's current count. Wait for one to finish rather than retrying immediately.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '501':
+          description: |
+            `workload_runs_unavailable` for a submission naming a `workloadId`, and
+            `async_tenancy_unsupported` under `MOCA_TENANCY=multi`, where async turns land in M2. Both
+            are refused at submission so they stay synchronous rather than becoming dead letters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sessions/{id}/turns/{turnId}:
+    get:
+      operationId: getTurn
+      summary: An async turn's state
+      description: |
+        The turn record is the single source of truth for `state` and `attempts`; `result` appears
+        once the leaf has written one. A turn reaped as lost reads `state: "lost"` -- which is why
+        this route exists alongside `GET /runs/status`, whose inference from the result store cannot
+        tell queued from never-submitted from reaped.
+
+        `attempts` is DESCRIPTIVE -- the queue's own delivery count is the sole authority for retry
+        exhaustion, so a client must not compute "gave up" from this number.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/sessionId' }
+        - { $ref: '#/components/parameters/turnId' }
+      responses:
+        '200':
+          description: the turn
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: cancelTurn
+      summary: Cancel a QUEUED async turn
+      description: |
+        A queued turn flips to `cancelled` and the drain loop drops it when it would have claimed it.
+        A RUNNING turn is NOT interrupted and answers `409`: interrupting one needs
+        control-plane-to-worker machinery that does not exist, because interactive cancel rides the
+        turn's own connection and an async turn has none (ADR-0047 §4.5). Let it finish and read its
+        result.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/sessionId' }
+        - { $ref: '#/components/parameters/turnId' }
+      responses:
+        '202':
+          description: cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [turnId, state]
+                properties:
+                  turnId: { type: string }
+                  state: { type: string, enum: [cancelled] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`turn_not_cancellable`: the turn is not queued. The message names its state.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/credentials:
     get:
       operationId: listCredentials

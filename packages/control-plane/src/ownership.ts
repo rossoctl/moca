@@ -41,6 +41,21 @@ export interface CpRedisLike {
    * own position rather than from a surviving record -- see the comment there for why.
    */
   zScore(key: string, member: string): Promise<number | null>;
+  /**
+   * Set a field only if it is absent, answering whether this caller won. The async turn store's
+   * idempotency claim (async spec §4.3) needs the check and the write to be ONE command: two
+   * concurrent submissions on one key must produce one turn, not two that each believe they were
+   * first.
+   */
+  hSetNX(key: string, field: string, value: string): Promise<boolean>;
+  /**
+   * A key's TTL in seconds. The async turn record carries NO TTL while it is non-terminal and gets
+   * one at its terminal state (async spec §5.1) -- a record that expired on a schedule from creation
+   * would 404 a caller polling a turn that in fact succeeded.
+   */
+  expire(key: string, seconds: number): Promise<unknown>;
+  /** A sorted set's cardinality: the per-owner open-turn count the fan-out quota reads (§4.3). */
+  zCard(key: string): Promise<number>;
 }
 
 export interface SessionRecord {
@@ -309,6 +324,8 @@ export class OwnershipIndex {
     sessionId?: string;
     /** The sandbox a decision is about (SBX0 §5). */
     sandboxId?: string;
+    /** The async turn a decision is about (async fan-out spec §5.1). */
+    turnId?: string;
     credential?: string;
     /** The host an egress lookup asked for (SBX0.2b), and the egress host that asked. */
     destination?: string;
@@ -331,6 +348,7 @@ export class OwnershipIndex {
           decision: entry.decision,
           ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
           ...(entry.sandboxId ? { sandboxId: entry.sandboxId } : {}),
+          ...(entry.turnId ? { turnId: entry.turnId } : {}),
           // The credential NAME, never its value (spec §7.2).
           ...(entry.credential ? { credential: entry.credential } : {}),
           ...(entry.destination ? { destination: entry.destination } : {}),

@@ -15,6 +15,9 @@ import type {
   SessionPage,
   SessionSummary,
   SessionToken,
+  SubmitTurnRequest,
+  SubmittedTurn,
+  TurnStatus,
 } from './types.js';
 
 type Query = Record<string, string | number | undefined>;
@@ -215,6 +218,24 @@ export class ControlPlaneClient implements ControlPlaneApi {
 
   mintSessionToken(id: string): Promise<SessionToken> {
     return this.json('POST', `/v1/sessions/${encodeURIComponent(id)}/token`);
+  }
+
+  submitTurn(sessionId: string, req: SubmitTurnRequest): Promise<SubmittedTurn> {
+    return this.json('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/turns`, { body: req });
+  }
+
+  getTurn(sessionId: string, turnId: string): Promise<TurnStatus> {
+    return this.json(
+      'GET',
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+    );
+  }
+
+  async cancelTurn(sessionId: string, turnId: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+    );
   }
 
   async listCredentials(): Promise<CredentialDescriptor[]> {

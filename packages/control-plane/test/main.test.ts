@@ -202,6 +202,73 @@ describe('configFromEnv', () => {
   });
 });
 
+describe('async turn settings (async fan-out spec §4.3, §5.1, §9)', () => {
+  it('defaults the per-owner quota to 50 and the tenancy to single', () => {
+    const c = configFromEnv(baseEnv);
+    expect(c.asyncQueuedPerOwner).toBe(50);
+    expect(c.tenancy).toBe('single');
+  });
+
+  it('reads MOCA_ASYNC_QUEUED_PER_OWNER', () => {
+    expect(
+      configFromEnv({ ...baseEnv, MOCA_ASYNC_QUEUED_PER_OWNER: '7' }).asyncQueuedPerOwner,
+    ).toBe(7);
+  });
+
+  it('allows 0, which refuses every async submission', () => {
+    // intEnv's `n > 0` guard would silently turn 0 into the default -- and an operator who sets 0
+    // means "no async here", so silently serving 50 would be the opposite of what they asked.
+    expect(
+      configFromEnv({ ...baseEnv, MOCA_ASYNC_QUEUED_PER_OWNER: '0' }).asyncQueuedPerOwner,
+    ).toBe(0);
+  });
+
+  it('refuses a non-integer quota at BOOT rather than falling back', () => {
+    for (const bad of ['-1', '1.5', 'many', '1e3']) {
+      expect(() => configFromEnv({ ...baseEnv, MOCA_ASYNC_QUEUED_PER_OWNER: bad }), bad).toThrow(
+        'MOCA_ASYNC_QUEUED_PER_OWNER',
+      );
+    }
+  });
+
+  it('reads MOCA_TENANCY, and refuses a near-miss NAME at boot', () => {
+    expect(configFromEnv({ ...baseEnv, MOCA_TENANCY: 'multi' }).tenancy).toBe('multi');
+    // readTenancy's near-miss check, now load-bearing in the control plane too: a misnamed tenancy
+    // switch must fail to boot, not be silently ignored by a process that serves async turns.
+    expect(() =>
+      configFromEnv({ ...baseEnv, MOCA_TENANCEY: 'single' } as NodeJS.ProcessEnv),
+    ).toThrow('MOCA_TENANCY');
+    expect(() => configFromEnv({ ...baseEnv, MOCA_TENANCY: 'sngle' })).toThrow("must be 'single'");
+  });
+
+  it('derives the turn record TTL from LEAF_RESULT_TTL_SECONDS plus a margin', () => {
+    // The record must outlive its own result, or a caller polling a finished turn would 404 a turn
+    // that succeeded (§5.1). The margin is what makes "outlive" true rather than "expire together".
+    const dflt = configFromEnv(baseEnv);
+    expect(dflt.turnRecordTtlSeconds).toBeGreaterThan(86_400);
+    expect(configFromEnv({ ...baseEnv, LEAF_RESULT_TTL_SECONDS: '600' }).turnRecordTtlSeconds).toBe(
+      600 + 3_600,
+    );
+  });
+
+  it('gives the sandbox profile the same fields, inert', () => {
+    // CpConfig is one type across both profiles; the sandbox profile mounts no session routes, so
+    // the values are inert -- but absent fields would not typecheck.
+    const c = configFromEnv({
+      ...baseEnv,
+      SH_CREDENTIAL_KEK: undefined,
+      SH_ROUTE_PROFILE: 'sandbox',
+      SH_ALLOWED_SUBJECTS: 'github:1',
+      SH_SANDBOX_TEMPLATES: JSON.stringify([
+        { id: 'default', worker: 'sbx_default', description: 'bash', tools: ['bash'] },
+      ]),
+      SH_SANDBOX_EXEC_ENDPOINT: 'sbx-exec.apps.example.invalid:443',
+    });
+    expect(c.asyncQueuedPerOwner).toBe(0);
+    expect(c.tenancy).toBe('single');
+  });
+});
+
 describe('verifyKeysFromEnv', () => {
   it('always includes the signer`s own public key', () => {
     const keys = verifyKeysFromEnv(baseEnv, publicKeyToBase64(publicKey));

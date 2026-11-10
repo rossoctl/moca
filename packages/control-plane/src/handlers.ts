@@ -66,6 +66,11 @@ import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
+import { TURN_HANDLERS } from './turn-handlers.js';
+import type { Tenancy } from './tenancy.js';
+import type { TurnQueue } from './turn-queue.js';
+import type { ResultRedisLike } from './turn-result.js';
+import type { TurnStore } from './turn-store.js';
 import type { EgressHost } from './egress-config.js';
 import { formatDestination, parseDestination } from './egress-destination.js';
 
@@ -134,6 +139,24 @@ export interface CpConfig {
   testUsers: number;
   /** The sandbox profile's settings (SBX0 §4, §5); configFromEnv sets it on that profile only. */
   sandbox?: SandboxConfig;
+  /**
+   * Non-terminal async turns one owner may hold (`MOCA_ASYNC_QUEUED_PER_OWNER`, default 50; async
+   * spec §4.3). The only containment against unbounded fan-out in M1, which is why it ships with
+   * the submission route rather than after it. Distinct from the worker's SH_TURNS_PER_SUBJECT
+   * (#360): that counts turns EXECUTING, in one process; this counts turns WAITING, per deployment.
+   */
+  asyncQueuedPerOwner: number;
+  /**
+   * `MOCA_TENANCY` (async spec §9). Async submission is refused by name under `multi` until M2:
+   * M1 resolves the credential from the turn record at dequeue, which MI1 S2's interim allows under
+   * `single` only.
+   */
+  tenancy: Tenancy;
+  /**
+   * How long a TERMINAL turn record lives: `LEAF_RESULT_TTL_SECONDS` plus a margin (async spec
+   * §5.1). A non-terminal record has no TTL at all, which is the invariant TurnStore owns.
+   */
+  turnRecordTtlSeconds: number;
 }
 
 export interface CpDeps {
@@ -183,6 +206,12 @@ export interface CpDeps {
   sandboxes?: SandboxStore;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
+  /** The async turn record store (async spec §5.1); absent only in suites that never submit. */
+  turns?: TurnStore;
+  /** The leaf queue, holding turn ids and nothing else (§5.1). */
+  turnQueue?: TurnQueue;
+  /** Reads `leaf:result:<sid>` for the status route (§4.4); absent means a turn reports no result. */
+  leafResults?: ResultRedisLike;
 }
 
 /** `deps.log` with the production default; keeps the field optional on `CpDeps`. */
@@ -851,6 +880,11 @@ export const HANDLERS: Record<string, Handler> = {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
     await deps.index.cascadeDelete(rec);
+    // Reclaim this session's open async turns and their quota slots (F2): nothing else in the
+    // design will ever move an orphaned queued/running turn to terminal, so without this a
+    // submit-then-delete cycle burns a slot forever. `deps.turns` is absent on the sandbox profile,
+    // which mounts no turn routes and so can never have created one.
+    await deps.turns?.deleteSessionTurns(rec.sessionId, rec.owner);
     const deletedEntry = {
       subject: rec.owner,
       sessionId: rec.sessionId,
@@ -1096,4 +1130,5 @@ export const HANDLERS: Record<string, Handler> = {
   // SBX0 §5.1: the sandbox resource (sandbox-handlers.ts), mounted on the sandbox profile only.
   ...SANDBOX_HANDLERS,
   ...EGRESS_HANDLERS,
+  ...TURN_HANDLERS,
 };

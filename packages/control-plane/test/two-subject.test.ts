@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import { startControlPlane } from '../src/server.js';
+import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
 
 // The #367 scope-item-3 suite: the two-subject story the VM demo runs manually (two mocactl users
@@ -191,5 +192,58 @@ describe('two minted subjects over HTTP (#367 scope item 3)', () => {
     });
     expect(res.status).toBe(404);
     expect((res.json() as { error: string }).error).toBe('session_not_found');
+  });
+
+  it("alice cannot submit an async turn on bob's session, and nothing is queued", async () => {
+    await createSession(BOB, 'b-1');
+    const res = await request('POST', '/v1/sessions/b-1/turns', {
+      body: { async: true, prompt: 'go' },
+      headers: { Authorization: `Bearer ${apiToken(ALICE)}` },
+    });
+    // 404, not 403: a distinguishable answer tells alice bob's session exists (spec §8.1).
+    expect(res.status).toBe(404);
+    expect(res.json()).toEqual({ error: 'session_not_found', sessionId: 'b-1' });
+    expect((d.turnQueue as MemoryTurnQueue).depth()).toBe(0);
+  });
+
+  it("alice's read of bob's turn 404s identically to an unknown turn id", async () => {
+    await createSession(BOB, 'b-1');
+    const submitted = await request('POST', '/v1/sessions/b-1/turns', {
+      body: { async: true, kind: 'prompt', prompt: 'go' },
+      headers: { Authorization: `Bearer ${apiToken(BOB)}` },
+    });
+    expect(submitted.status).toBe(202);
+    const { turnId } = submitted.json() as { turnId: string };
+    const cross = await request(`GET`, `/v1/sessions/b-1/turns/${turnId}`, {
+      headers: { Authorization: `Bearer ${apiToken(ALICE)}` },
+    });
+    const unknown = await request('GET', '/v1/sessions/b-1/turns/never-existed', {
+      headers: { Authorization: `Bearer ${apiToken(ALICE)}` },
+    });
+    // Both refusals come from the SESSION check, before the turn is looked at at all -- so knowing
+    // a real turn id buys alice nothing.
+    expect(cross.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    expect(cross.json()).toEqual(unknown.json());
+  });
+
+  it("alice's DELETE of bob's turn 404s and leaves it queued", async () => {
+    await createSession(BOB, 'b-1');
+    const { turnId } = (
+      await request('POST', '/v1/sessions/b-1/turns', {
+        body: { async: true, kind: 'prompt', prompt: 'go' },
+        headers: { Authorization: `Bearer ${apiToken(BOB)}` },
+      })
+    ).json() as { turnId: string };
+    const res = await request('DELETE', `/v1/sessions/b-1/turns/${turnId}`, {
+      headers: { Authorization: `Bearer ${apiToken(ALICE)}` },
+    });
+    expect(res.status).toBe(404);
+    // The refusal must not be a cancel: a 404 that still cancelled would be a denial of service
+    // dressed as an authorization failure.
+    const mine = await request(`GET`, `/v1/sessions/b-1/turns/${turnId}`, {
+      headers: { Authorization: `Bearer ${apiToken(BOB)}` },
+    });
+    expect(mine.json()).toMatchObject({ state: 'queued' });
   });
 });

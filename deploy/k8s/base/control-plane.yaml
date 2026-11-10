@@ -102,6 +102,25 @@ spec:
                   configMapKeyRef:
                     { name: moca-settings, key: SH_MODEL_CATALOG_HOSTS, optional: true },
                 }
+            # Async fan-out (ADR-0047). `optional`, like the tier keys: a moca-settings written by
+            # an older setup.sh still boots, and unset is the M1 default (50, single).
+            - name: MOCA_ASYNC_QUEUED_PER_OWNER
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_ASYNC_QUEUED_PER_OWNER, optional: true },
+                }
+            - name: MOCA_TENANCY
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: MOCA_TENANCY, optional: true } }
+            # The turn record's TTL is derived from this (+1 h margin), so raising it on the worker
+            # without setting it here leaves records expiring before the results they explain.
+            - name: LEAF_RESULT_TTL_SECONDS
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: LEAF_RESULT_TTL_SECONDS, optional: true },
+                }
           ports:
             - { name: http, containerPort: 8080 }
           securityContext:

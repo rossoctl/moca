@@ -229,6 +229,32 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: HARNESS,
     operationId: 'mintSessionToken',
   },
+  // The async turn routes (async fan-out spec §4.1, §4.4, §4.5). No `bodyRequired: false` on the
+  // POST -- the body IS the envelope, so the router's generic empty-body guard is correct here.
+  {
+    method: 'POST',
+    path: '/v1/sessions/{id}/turns',
+    auth: 'api',
+    sessionScoped: true,
+    profiles: HARNESS,
+    operationId: 'submitTurn',
+  },
+  {
+    method: 'GET',
+    path: '/v1/sessions/{id}/turns/{turnId}',
+    auth: 'api',
+    sessionScoped: true,
+    profiles: HARNESS,
+    operationId: 'getTurn',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/sessions/{id}/turns/{turnId}',
+    auth: 'api',
+    sessionScoped: true,
+    profiles: HARNESS,
+    operationId: 'cancelTurn',
+  },
   {
     method: 'GET',
     path: '/v1/credentials',

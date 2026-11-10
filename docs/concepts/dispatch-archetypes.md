@@ -4,11 +4,11 @@
 
 An orchestrator can hand work to moca in three patterns. Which of them work depends on the deployment.
 
-| Archetype            | Pattern                                                           | On P6 today                                                                                                      |
-| -------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Removed; replacement designed, not yet built** (ADR-0047, [#686](https://github.com/rossoctl/moca/issues/686)) |
-| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                                                                      |
-| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Removed.** No P6 equivalent; design owed ([#536](https://github.com/rossoctl/moca/issues/536))                 |
+| Archetype            | Pattern                                                           | On P6 today                                                                                                          |
+| -------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **A. Async fan-out** | Dispatch many leaves with `async: true`, collect results later    | **Submission implemented; drain loop not yet built** (ADR-0047, [#389](https://github.com/rossoctl/moca/issues/389)) |
+| **B. Human gate**    | A leaf pauses for an external verdict, then resumes or terminates | **Works** (verdict leaves, `POST /v1/runs`)                                                                          |
+| **C. Scheduled**     | A cron trigger dispatches async leaves                            | **Removed.** No P6 equivalent; design owed ([#536](https://github.com/rossoctl/moca/issues/536))                     |
 
 Interactive turns (`POST /v1/turn`) and synchronous leaves (`POST /v1/runs`) work on P6 and on the
 deprecated path alike.
@@ -43,11 +43,13 @@ supervisor only runs `--role=turn` workers (a `--role=leaf` role is reserved and
 a data-plane request with `async: true` is answered 400 `async_removed`, naming the removal, rather
 than accepted and left undrained.
 
-**Archetype A has a designed replacement, not yet implemented.**
+**Archetype A's replacement is designed, and its submission half is implemented.**
 [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and its
 [design spec](../specs/2026-11-05-p6-async-fan-out-design.md) put the consumer in the ordinary turn
 worker as a drain loop sharing the same admission budget as interactive turns, rather than in a
-separate process or a `--role=leaf` worker. Two consequences matter to an orchestrator planning
+separate process or a `--role=leaf` worker. `POST /v1/sessions/{id}/turns` accepts and records turns
+today; the drain loop that runs them is [#389](https://github.com/rossoctl/moca/issues/389), so a
+submitted turn stays `queued` until it ships. Two consequences matter to an orchestrator planning
 against it:
 
 - **The submission route changes.** The unauthenticated data-plane `POST /runs {async:true}` is not
@@ -61,7 +63,8 @@ against it:
   behaviour with a kept/dropped verdict, so what changed is on the record rather than inferred.
 
 Tracking is [#686](https://github.com/rossoctl/moca/issues/686) (the epic), which closes when a
-fan-out pipeline runs end to end on `deploy/k8s` and on `deploy/vm` or compose. Until then this row
-stays "removed". **Archetype C** has no design yet;
+fan-out pipeline runs end to end on `deploy/k8s` and on `deploy/vm` or compose; [#389](https://github.com/rossoctl/moca/issues/389)
+tracks the drain loop specifically. Until it ships this row stays "submission implemented; drain
+loop not yet built". **Archetype C** has no design yet;
 [#536](https://github.com/rossoctl/moca/issues/536) owns it, and it is expected to build on
 archetype A's consumer rather than a second one.
