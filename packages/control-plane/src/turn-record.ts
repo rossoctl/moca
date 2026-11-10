@@ -64,6 +64,25 @@ export interface TurnRecord {
 }
 
 export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
+
+/**
+ * The shape `turn-handlers.submitTurn` mints: `t-` plus a lowercase UUID (`deps.newId()` is
+ * randomUUID in production, main.ts). Anchored, so nothing trails or leads it.
+ *
+ * Only the DEQUEUE exchange needs this. That route's caller is authenticated by the deployment-wide
+ * `SH_EXCHANGE_TOKEN` rather than by a session, so the turn id is the one piece of caller input that
+ * reaches a key -- `HGETALL sh:cp:turn:<input>` -- and `TurnStore.tag` may append `:${keyTag}` to it
+ * besides. Checking the shape first bounds that key space to ids the control plane could have
+ * written. It closes no hole on its own: `get` only reads, and the handler re-checks the record's
+ * owner against its session. It is the cheaper default on a shared-bearer route.
+ *
+ * The owner-scoped `/v1` turn routes deliberately do NOT use it. There a malformed id must stay a
+ * 404, indistinguishable from another subject's turn, or the error code becomes the existence oracle
+ * `assertOwner` exists to deny (spec §8.1).
+ */
+const MINTED_TURN_ID_RE = /^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export const isMintedTurnId = (turnId: string): boolean => MINTED_TURN_ID_RE.test(turnId);
 /**
  * One owner's OPEN turns, scored by `createdAt`. The quota (§4.3) counts the members of this set,
  * which is why `finalize` REMOVES from it rather than rescoring: a count then costs one `ZCARD`

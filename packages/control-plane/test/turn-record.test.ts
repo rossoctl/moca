@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  isMintedTurnId,
   isTerminalState,
   ownerTurnsKey,
   parseTurnSubmission,
@@ -41,6 +43,40 @@ describe('turn states (spec §5.1)', () => {
     // entries crash recovery exists for.
     const nonTerminal = TURN_STATES.filter((s: TurnState) => !isTerminalState(s));
     expect([...nonTerminal].sort()).toEqual(['queued', 'running']);
+  });
+});
+
+describe('isMintedTurnId', () => {
+  // The ONLY minter is turn-handlers.submitTurn's `t-${deps.newId()}`, and in production newId is
+  // randomUUID (main.ts). So the shape is knowable, and the dequeue exchange refuses anything else
+  // before it builds a Redis key from caller input (handlers.exchangeTurnCredential).
+  it('accepts exactly what submitTurn mints', () => {
+    expect(isMintedTurnId(`t-${randomUUID()}`)).toBe(true);
+  });
+
+  it('refuses ids that are not a t-prefixed UUID', () => {
+    for (const bad of [
+      '',
+      't-',
+      't-1',
+      't-nobody',
+      randomUUID(), // the UUID without the prefix
+      `T-${randomUUID()}`, // uppercase prefix
+      `t-${randomUUID()}`.toUpperCase(),
+      `t-${randomUUID()}x`, // trailing junk
+      ` t-${randomUUID()}`, // leading space
+      `t-${randomUUID()}\n`,
+    ]) {
+      expect(isMintedTurnId(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('refuses the key-structure characters a Redis key must not take from a caller', () => {
+    // `:` is the key separator and TurnStore.tag appends `:${keyTag}`, so a caller-supplied `:`
+    // addresses a key shape the control plane never wrote. `*` and `?` are glob metacharacters.
+    for (const bad of ['t-*', 't-x:y', `t-${randomUUID()}:tag`, 'sh:cp:turn:t-1', 't-?']) {
+      expect(isMintedTurnId(bad), bad).toBe(false);
+    }
   });
 });
 

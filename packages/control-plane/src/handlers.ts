@@ -48,6 +48,7 @@ import {
 } from './exchange.js';
 import { MODEL_ID_RE } from './models.js';
 import { exchangeTurnCredential } from './turn-exchange.js';
+import { isMintedTurnId } from './turn-record.js';
 import {
   catalogAllowList,
   chooseModel,
@@ -1108,6 +1109,15 @@ export const HANDLERS: Record<string, Handler> = {
     const turnId = asRecord(ctx.body).turnId;
     if (typeof turnId !== 'string' || turnId.length === 0) {
       throw new CpError('invalid_request', 'turnId is required');
+    }
+    // Refused BEFORE Redis, so caller input cannot pick the key shape this route reads. `submitTurn`
+    // is the only minter and its ids are always `t-<uuid>`, so a well-formed id that has no record
+    // still answers 404 `turn_not_found` -- the shape check only removes ids no submission could
+    // have produced. 400 rather than 404 deliberately: this caller holds the deployment-wide
+    // exchange token and gets the credential on success, so a distinguishable "you sent nonsense"
+    // tells it nothing it could not already learn, and it is the answer that names the actual bug.
+    if (!isMintedTurnId(turnId)) {
+      throw new CpError('invalid_request', 'turnId is not a turn id this control plane minted');
     }
     // `turnId` ALONE. No deliveryCount, no caps, no envelope: everything else comes from the record
     // the control plane wrote at the authenticated enqueue, which is what makes a queue entry
