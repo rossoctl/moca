@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { defaultNewId } from '../src/handler-util.js';
 import {
   isMintedTurnId,
   isTerminalState,
@@ -48,10 +49,12 @@ describe('turn states (spec §5.1)', () => {
 
 describe('isMintedTurnId', () => {
   // The ONLY minter is turn-handlers.submitTurn's `t-${deps.newId()}`, and in production newId is
-  // randomUUID (main.ts). So the shape is knowable, and the dequeue exchange refuses anything else
-  // before it builds a Redis key from caller input (handlers.exchangeTurnCredential).
+  // `defaultNewId` (main.ts). So the shape is knowable, and the dequeue exchange refuses anything
+  // else before it builds a Redis key from caller input (handlers.exchangeTurnCredential).
   it('accepts exactly what submitTurn mints', () => {
-    expect(isMintedTurnId(`t-${randomUUID()}`)).toBe(true);
+    // `defaultNewId`, not a restatement of it: this is the same binding main.ts wires, so changing
+    // the production generator fails here too rather than only at the handler and e2e layers.
+    expect(isMintedTurnId(`t-${defaultNewId()}`)).toBe(true);
   });
 
   it('refuses everything else, key-structure characters included', () => {

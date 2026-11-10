@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { AuditLog } from './audit-log.js';
 import { defaultAuditLog } from './audit-log.js';
 import type { OwnershipIndex } from './ownership.js';
@@ -20,6 +21,21 @@ export const asRecord = (body: unknown): Record<string, unknown> =>
 
 /** The injectable clock (CpDeps.now, epoch ms) in epoch seconds. */
 export const seconds = (deps: { now(): number }): number => Math.floor(deps.now() / 1000);
+
+/**
+ * The production `CpDeps.newId`, as `defaultAuditLog` and `defaultRunKubectl` are for their fields:
+ * main.ts wires THIS rather than spelling a generator out, so there is one place the id shape is
+ * decided and tests can exercise it instead of restating it.
+ *
+ * Three consumers depend on the shape, not just on uniqueness, which is why it is named and not
+ * inlined: session ids are their own leafSessionId sanitisation (gap #10, handlers.ts); `sandboxId`
+ * needs 26 random hex and REFUSES a shorter source (sandbox-handlers.ts); and `turn-handlers` mints
+ * `t-${newId()}`, which the dequeue exchange then checks against `MINTED_TURN_ID_RE`. That last one
+ * fails SILENTLY if the two drift -- every submission still answers 202 while every claim 400s, so
+ * the turn is enqueued, never claimable, and redelivered until it dead-letters. Swap this and the
+ * coupling tests that import it fail, which is the point.
+ */
+export const defaultNewId = (): string => randomUUID();
 
 /** Whether the caller holds the admin role (SH_ADMIN_SUBJECTS). */
 export const isAdmin = (p: TokenClaims): boolean => (p.roles ?? []).includes('admin');

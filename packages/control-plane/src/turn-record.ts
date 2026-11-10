@@ -67,7 +67,11 @@ export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
 
 /**
  * The shape `turn-handlers.submitTurn` mints: `t-` plus a lowercase UUID (`deps.newId()` is
- * randomUUID in production, main.ts). Anchored, so nothing trails or leads it.
+ * `handler-util.defaultNewId` in production, main.ts). Anchored, so nothing trails or leads it.
+ *
+ * The coupling to that generator is silent if it breaks -- enqueued, never claimable, redelivered
+ * until dead-letter -- so the tests that claim a turn inject `defaultNewId` itself rather than
+ * restating what it does (turn-handlers.test.ts, turn-e2e.test.ts).
  *
  * Only the DEQUEUE exchange needs this. That route's caller is authenticated by the deployment-wide
  * `SH_EXCHANGE_TOKEN` rather than by a session, so the turn id is the one piece of caller input that

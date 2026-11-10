@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
+import { defaultNewId } from '../src/handler-util.js';
 import { AUDIT_STREAM, OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
@@ -102,11 +102,14 @@ describe('submitTurn (spec §4.1)', () => {
 
   it('mints an id the dequeue exchange will accept, with production newId', async () => {
     // The COUPLING, and the only test that fails when it breaks. `isMintedTurnId` encodes
-    // `t-${deps.newId()}` with newId = randomUUID (main.ts), but newId is injectable: point it at
-    // anything shorter and every submission still 202s while every claim 400s -- the turn is
-    // enqueued, never claimable, and redelivered until it dead-letters. So this test uses the
-    // PRODUCTION newId rather than the fixture's counter, which the gate rightly refuses.
-    const d = turnDeps({ newId: () => randomUUID() });
+    // `t-${deps.newId()}`, but newId is injectable: point it at anything shorter and every
+    // submission still 202s while every claim 400s -- the turn is enqueued, never claimable, and
+    // redelivered until it dead-letters.
+    //
+    // `defaultNewId` is the BINDING main.ts wires, not a restatement of it. Writing
+    // `() => randomUUID()` here would pass forever if production switched to nanoid or a prefixed
+    // id -- the drift this test exists to catch would be invisible to it.
+    const d = turnDeps({ newId: defaultNewId });
     const sid = await session(d);
     const res = await submit(d, sid, { item, async: true });
     const { turnId } = res.body as { turnId: string };
