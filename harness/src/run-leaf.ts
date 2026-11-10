@@ -523,6 +523,7 @@ async function runPromptLeaf(
       cap: promptTimings.cap,
       ttlMs: promptTimings.ttlMs,
       remoteSandbox: process.env.SH_REMOTE_SANDBOX === '1',
+      tier: config?.sandboxTier,
       agentWritesInContext: env.internalContext !== undefined && contextMode(env) !== 'read-only',
       ...(workload ? { workload, ownerScope } : {}),
     });
@@ -766,6 +767,7 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
     cap: solveTimings.cap,
     ttlMs: solveTimings.ttlMs,
     remoteSandbox: process.env.SH_REMOTE_SANDBOX === '1',
+    tier: config?.sandboxTier,
   });
   if (!selected) throw new Error('solve leaf requires a configured sandbox pool');
 
@@ -972,6 +974,7 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     cap: verdictTimings.cap,
     ttlMs: verdictTimings.ttlMs,
     remoteSandbox,
+    tier: config?.sandboxTier,
   });
 
   // MI1 §5 R3: a server-mode caller with no sandbox must fail HERE, before the workspace converge,

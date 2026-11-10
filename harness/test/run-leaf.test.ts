@@ -903,3 +903,81 @@ describe('runPromptLeaf sandbox leasing', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 });
+
+// agentic-node-cluster#62: /v1/runs put the session's sandbox tier in the TurnConfig (buildConfig),
+// but run-leaf never passed it to selectPoolSandbox, so every leaf ran in the default tier while
+// /v1/turn honoured it. Each leaf kind must now forward config.sandboxTier as the selection tier.
+describe('runLeaf: the session sandbox tier reaches sandbox selection', () => {
+  const tierOf = () => (selectPoolSandboxMock.mock.calls[0]?.[3] as { tier?: string })?.tier;
+  const promptEnv: LeafEnvelope = {
+    sessionId: 'run-tier/i1',
+    item: { item_id: 'x', file: 'f', pattern: 'p' },
+    kind: 'prompt',
+    prompt: 'hello',
+  };
+  const leasePrompt = () =>
+    selectPoolSandboxMock.mockReset().mockResolvedValue({
+      transport: { exec: vi.fn(), close: vi.fn(async () => {}) },
+      podCwd: '/workspace',
+      sandboxId: 'sandbox-0',
+      heartbeat: vi.fn(async () => {}),
+      release: vi.fn(async () => {}),
+    });
+  const okTurn = () =>
+    vi.fn(async () => ({ sessionId: 'run-tier-i1', response: 'ok', stopReason: 'end_turn' }));
+  const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+
+  it('prompt leaf: passes the session tier', async () => {
+    leasePrompt();
+    await runLeaf(promptEnv, { sandboxTier: 'microvm' }, { executeTurn: okTurn() });
+    expect(tierOf()).toBe('microvm');
+  });
+
+  it('prompt leaf: passes no tier when the config has none', async () => {
+    leasePrompt();
+    await runLeaf(promptEnv, {}, { executeTurn: okTurn() });
+    expect(selectPoolSandboxMock).toHaveBeenCalledTimes(1);
+    expect(tierOf()).toBeUndefined();
+  });
+
+  // A null selection makes both producers stop right after selecting, before any agent work.
+  it('solve leaf: passes the session tier', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    await realProduceSolve(
+      { sessionId: 'run-tier/solve', item },
+      { sandboxTier: 'microvm' },
+      {},
+    ).catch(() => {});
+    expect(tierOf()).toBe('microvm');
+  });
+
+  it('solve leaf: passes no tier when the config has none', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    await realProduceSolve({ sessionId: 'run-tier/solve-none', item }, {}, {}).catch(() => {});
+    expect(selectPoolSandboxMock).toHaveBeenCalledTimes(1);
+    expect(tierOf()).toBeUndefined();
+  });
+
+  it('verdict leaf: passes the session tier', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    await realProduceVerdict(
+      item,
+      { sessionId: 'run-tier/verdict', item },
+      { serverMode: true, sandboxTier: 'microvm' },
+      {},
+    ).catch(() => {});
+    expect(tierOf()).toBe('microvm');
+  });
+
+  it('verdict leaf: passes no tier when the config has none', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(null);
+    await realProduceVerdict(
+      item,
+      { sessionId: 'run-tier/verdict-none', item },
+      { serverMode: true },
+      {},
+    ).catch(() => {});
+    expect(selectPoolSandboxMock).toHaveBeenCalledTimes(1);
+    expect(tierOf()).toBeUndefined();
+  });
+});
