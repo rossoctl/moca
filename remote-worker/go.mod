@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/rossoctl/moca/gen/go v0.0.0
 	golang.org/x/net v0.62.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
