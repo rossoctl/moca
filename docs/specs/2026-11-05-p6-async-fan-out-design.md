@@ -1,7 +1,8 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.6 — November 6, 2026
-Status: Proposed
+Version: 1.7 — November 10, 2026
+Status: Proposed (M1 submission and dequeue-exchange slices built; §9.2 records the drain loop's
+implementation decisions and one correction to §5.5)
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
 Decision record: [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)
@@ -520,6 +521,9 @@ heartbeat in §6.2 is what a future extension would key off, since it already pr
 
 ### 5.5 Execution and results
 
+> **Corrected by §9.2.** "Keyed by `leafSessionId`" below is wrong for the async path and would break
+> every async turn's result read, not merely a tenanted one. §9.2 has the finding and the resolution.
+
 Unchanged, and deliberately so. `runLeaf` builds the `pi-coding-agent` session, converges the
 workspace, selects a sandbox, runs the turn and captures the diff; `leaf-result-store` writes one
 record per leaf keyed by `leafSessionId` under `LEAF_RESULT_TTL_SECONDS` (86400 default). The
@@ -857,12 +861,66 @@ finding that `turn_exp` exists in the spec and nowhere in the TypeScript is a co
 regardless of async fan-out, and "turn start = dequeue, not enqueue" is a semantic S2's own §6.1 does
 not currently pin down.
 
+### 9.2 M1 implementation decisions (#389), and one thing §5.5 got wrong
+
+Added November 10, 2026, after #387 and #388's M1 slice landed (`11da422d`, `bb89a84e`). The drain
+loop is the last piece of M1, and building against the sections above surfaced **six** questions they
+do not settle. Five are choices. The sixth is not a choice at all — it is **a claim in §5.5 that is
+false**, and it blocks M1's acceptance. Each is recorded against the section it refines, so a reader
+who finds the original text first also finds the correction.
+
+**The one that is a defect, not a decision — §5.5's result key.** §5.5 says execution and results are
+"unchanged, and deliberately so," with `leaf-result-store` writing "one record per leaf keyed by
+`leafSessionId`." That is exactly what breaks. `leafSessionId` prefixes the tenant and then sanitizes
+(`run-leaf.ts:183-185`), while the control plane reads the raw `leaf:result:${turn.sessionId}`
+(`turn-result.ts:13`) — and `ownership.ts:208` is `tenant: h.tenant ?? h.owner`, so **a turn record's
+tenant is never empty**: under `single` it falls back to the owner. The async path would therefore
+write `leaf:result:github-1234-<uuid>` where the reader looks for `leaf:result:<uuid>`, on _every_
+async turn rather than only on tenanted ones. #704's review carried this as a latent divergence; it
+is in fact blocking, because M1's "all results collected" acceptance cannot pass with it.
+
+**Resolution:** the async path writes under `turn.sessionId` — the control plane's own id, already a
+uuid, unique without a tenant prefix and needing no sanitization, and the authority §5.1 names.
+Synchronous leaves keep `leafSessionId` unchanged: their envelope ids genuinely are caller-supplied
+`<run>/<item>` strings that need sanitizing, so this is a divergence in the _inputs_, not two
+conventions for one input. The test that pins it asserts the written key and the read key are the
+same string for a turn whose tenant is non-empty, which is now every turn.
+
+**The other five.**
+
+| Decision                                                                      | Refines | Why                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ClaimedEntry` carries `turnId`, not a parsed `envelope`                      | §10     | A verbatim restore is **broken**. The old queue writes `{envelope: JSON.stringify(…)}` and parses it back; #387's `RedisTurnQueue` writes `{turnId}` only (`turn-queue.ts:44`), and #388's e2e test asserts the entry's fields are exactly `['turnId']`. Restored as-is, `claim()` would `JSON.parse(undefined)` on every entry                                                                                                                   |
+| `RedisWorkQueue` takes an injected client                                     | §10     | Its own `createClient`, reconnect strategy, error listener and `isOpen` re-arm duplicate `@moca/session-backend`'s `resilientClientOptions`/`swallowRedisErrors`, with an inline `redactUrl` copy kept honest by a cross-package parity test. The worker already holds a client. The **stream commands are still restored verbatim** — that is what §10 protects; the connection boilerplate is not                                               |
+| `envelope` joins the dequeue exchange response                                | §5.4    | A worker needs one to call `runLeaf`, and #388 shipped without it, so its e2e fake worker reads the record straight from Redis (`turn-e2e.test.ts:183`). One authenticated hop instead, no second reader of the record schema #387 owns, and the endpoint becomes the complete claim handshake its own description implies                                                                                                                        |
+| `async_queue_depth` and `async_oldest_age_ms` are reported by **slot 0 only** | §7      | §7 requires them "once per deployment, not once per worker" without naming who. `packages/supervisor` ships `dependencies: {}` deliberately and cannot query Redis. Slot 0 adds them to the existing advisory `stats` row; the others omit them. Every worker reporting would mean W Redis queries for one number. Cost: the two gauges go stale while slot 0 restarts, which is acceptable for telemetry nothing routes on                       |
+| Injected timings in CI, one env-gated live `kill -9`                          | §8      | `minIdleMs` is 90 s, so a faithful reclaim test waits 90 s+ and CI will not gate on it. `processOne` already takes `minIdleMs`/`heartbeatMs`/`maxAttempts` as deps, so reclaim, heartbeat, dead-letter and cap saturation run against real Redis in seconds with no test-only seam. The live crash test proves the one thing injected timings cannot: that the supervisor restarts a worker whose leaf was mid-flight and the leaf completes once |
+
+**Two findings that are not decisions, recorded because they shrink the work.** The claim path needs
+**no new environment variable on either deployment**: the worker already has `SH_EXCHANGE_TOKEN` as a
+systemd credential (`LoadCredential` in `sh-supervisor.service`, set directly in compose),
+`SH_CONTROL_PLANE_URL` and `REDIS_URL`. `deploy/vm/env/supervisor.env.example:65` is explicit that
+setting `SH_EXCHANGE_TOKEN` as an env line instead makes the workers refuse to boot, so scope item 4
+is narrower than it reads — one knob for the loop, plus the three §6.2 constants documented where an
+operator looks. And `asyncCounters()` (`counters.ts:19`), which #704 noted had no reader, gets its
+first one here.
+
+**Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
+sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported
+alternative for a caller who disconnects, which is async submission plus the §4.4 status read, and
+under `multi` that is M2. §12 carries it.
+
 ---
 
 ## 10. The queue: revive, with the parity audit on the record
 
 **Decision: restore `packages/work-queue` _and_ `harness/src/leaf-job-runner.ts` from `38aa2146`,
 behind the existing `WorkQueue` interface.**
+
+> **Qualified by §9.2.** "Restore" is not "restore verbatim": the queue's wire format changed under
+> this section when #387 shipped `RedisTurnQueue`, so a literal restore does not work. §9.2 names
+> what is restored as-is (the stream commands) and what is not (the envelope payload, the owned
+> Redis client).
 
 The queue is 261 lines plus 319 lines of tests across five files, and nothing in it is
 Knative-specific: `ensureGroup`/`enqueue`/`claim`/`ack`/`touch`/`pending`/`gcIdleConsumers`/`reapDeadLetters`
@@ -950,7 +1008,8 @@ it adds is the schedule. Its design should cite this document for both.
   `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3) joins `docs/reference/configuration.md`'s table with the code
   that reads it, as that file's own rule requires — it lists variables as they exist in the code.
 - Retiring #380's interim sync-disconnect contract (§5.5), which belongs to #389's scope item 5. The
-  condition is M2, not M1, and it is a docs change rather than a behaviour change.
+  condition is M2, not M1, and it is a docs change rather than a behaviour change. §9.2 confirms this
+  as M1's one deliberately deferred scope item.
 - Updating children #387–#390 and #391 to match this design, per #386's acceptance. The decisions
   they need are §4.1/§4.4/§4.5 (#387), §5.4's `turn_exp` finding (#388), §5.5/§6.2/§6.3 and §8
   (#389), §5.1's heartbeat note and §9's milestones (#390), and §10's parity verdicts (#689).
