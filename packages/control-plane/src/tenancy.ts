@@ -8,8 +8,24 @@ const LEADING = ['MOCA', 'KAGENTI', 'SH', 'MULTI'];
 // Kubernetes injects <SERVICE>_SERVICE_HOST, _SERVICE_PORT[_<name>], _PORT and _PORT_<n>_<proto>[_*]
 // for every Service in the namespace (enableServiceLinks). A Service named `tenancy` or
 // `moca-tenancy` must not crashloop every pod beside it.
-const SERVICE_LINK =
-  /_(SERVICE_HOST|SERVICE_PORT(_[A-Z0-9_]+)?|PORT|PORT_\d+_(TCP|UDP|SCTP)(_[A-Z]+)?)$/;
+//
+// The named-port shape is tested by a string split (isServiceLink) rather than folded in here as
+// `SERVICE_PORT(_[A-Z0-9_]+)?$`: that trailing class can itself match `_SERVICE_PORT`, so the
+// engine has quadratically many ways to split a name that repeats it, and one 832 KB variable name
+// took 70 s (js/polynomial-redos). Every quantifier left below runs over a character set its
+// neighbours cannot match.
+const SERVICE_LINK = /_(?:SERVICE_HOST|SERVICE_PORT|PORT|PORT_\d+_(?:TCP|UDP|SCTP)(?:_[A-Z]+)?)$/;
+// `<SERVICE>_SERVICE_PORT_<port-name>`. The LAST occurrence is the one to test: the literal is
+// itself all `[A-Z0-9_]`, so an earlier occurrence with an all-`[A-Z0-9_]` tail implies this one
+// has it too. Both patterns are anchored at both ends over a single quantifier -- linear.
+const NAMED_PORT = '_SERVICE_PORT_';
+const PORT_NAME = /^[A-Z0-9_]+$/;
+
+function isServiceLink(name: string): boolean {
+  if (SERVICE_LINK.test(name)) return true;
+  const at = name.lastIndexOf(NAMED_PORT);
+  return at >= 0 && PORT_NAME.test(name.slice(at + NAMED_PORT.length));
+}
 
 function editDistanceAtMostOne(a: string, b: string): boolean {
   if (Math.abs(a.length - b.length) > 1) return false;
@@ -72,7 +88,7 @@ const TENAN = 'TENAN';
 export function isTenancyNearMiss(name: string): boolean {
   if (name === 'MOCA_TENANCY') return false;
   const upper = name.toUpperCase();
-  if (SERVICE_LINK.test(upper.trim())) return false;
+  if (isServiceLink(upper.trim())) return false;
   const segments = upper.split(/[^A-Z0-9]+/).filter(Boolean);
   let led = false;
   for (const segment of segments) {

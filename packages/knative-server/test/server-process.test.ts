@@ -106,6 +106,17 @@ describe('readTenancy', () => {
     );
   });
 
+  it('answers a pathological name in linear time (js/polynomial-redos)', () => {
+    // The service-link exemption once tested `SERVICE_PORT(_[A-Z0-9_]+)?$`, whose trailing class
+    // matches `_SERVICE_PORT` itself -- so a name repeating that literal gave the engine
+    // quadratically many ways to split it. This input took 7 s before the fix. The budget is
+    // deliberately loose: it has to separate linear from quadratic, not time the machine.
+    const pathological = '_SERVICE_PORT'.repeat(20_000) + '!';
+    const started = performance.now();
+    expect(isTenancyNearMiss(pathological)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('flags no environment variable name used anywhere in this repository', () => {
     // A false positive is a crashloop on a correctly configured deployment. Every name this repo
     // sets, reads or documents is fixed input here; only the deliberate test fixtures above match.
