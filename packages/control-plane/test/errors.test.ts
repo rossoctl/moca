@@ -42,6 +42,10 @@ const EXPECTED: Record<CpErrorCode, number> = {
   workload_runs_unavailable: 501,
   async_tenancy_unsupported: 501,
   turn_not_cancellable: 409,
+  // 404: a turn id with no record. The dequeue exchange's answer (async spec §5.4).
+  turn_not_found: 404,
+  // 409: the record is `cancelled` or terminal, so the claim is refused. Never for `running`.
+  turn_not_claimable: 409,
   credential_required: 400,
   credential_ambiguous: 400,
   credential_not_found: 404,

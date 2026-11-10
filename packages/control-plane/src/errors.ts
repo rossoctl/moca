@@ -40,6 +40,8 @@ export const CP_ERROR_CODES = [
   'workload_runs_unavailable',
   'async_tenancy_unsupported',
   'turn_not_cancellable',
+  'turn_not_found',
+  'turn_not_claimable',
   'credential_required',
   'credential_ambiguous',
   'credential_not_found',
@@ -109,6 +111,15 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: DELETE on a turn that is not `queued`. A running leaf finishes and writes its result; the
   // message names the state so a client need not guess why (async spec §4.5).
   turn_not_cancellable: 409,
+  // 404: the dequeue exchange was handed a turn id with no record. Shaped like every other
+  // not-found answer -- a shared-bearer caller gets no existence oracle either (spec §8.1) -- and it
+  // is what tells a worker holding a stale queue entry to ack and drop rather than retry.
+  turn_not_found: 404,
+  // 409: the record exists but is `cancelled` or already terminal, so no credential is minted
+  // (async spec §5.4). NEVER returned for `running`: a redelivery is the case the claim exists for.
+  // Distinct from turn_not_cancellable, which is the CALLER's DELETE being refused; this is the
+  // WORKER's claim being refused.
+  turn_not_claimable: 409,
   credential_required: 400,
   credential_ambiguous: 400,
   credential_not_found: 404,
