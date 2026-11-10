@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.16.0",
+    "@bufbuild/protobuf": "^2.17.0",
     "@grpc/grpc-js": "^1.14.7",
     "@modelcontextprotocol/sdk": "^1.32.2"
   },
