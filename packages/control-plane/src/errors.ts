@@ -111,9 +111,14 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: DELETE on a turn that is not `queued`. A running leaf finishes and writes its result; the
   // message names the state so a client need not guess why (async spec §4.5).
   turn_not_cancellable: 409,
-  // 404: the dequeue exchange was handed a turn id with no record. Shaped like every other
-  // not-found answer -- a shared-bearer caller gets no existence oracle either (spec §8.1) -- and it
-  // is what tells a worker holding a stale queue entry to ack and drop rather than retry.
+  // 404: the dequeue exchange was handed a turn id with no record, and it is what tells a worker
+  // holding a stale queue entry to ack and drop rather than retry.
+  // This is NOT the 404-not-403 of spec §8.1, and it is deliberately not indistinguishable from the
+  // other claim refusals: `turn_not_found`, `session_not_found` and `turn_not_claimable` are three
+  // different codes, and the last one's message names the state. A worker needs those apart to log
+  // why it dropped an entry. What holds instead is narrower and sufficient: none of them tells the
+  // caller anything a SUCCESSFUL call would not have told the same caller, who authenticated with
+  // the deployment-wide `SH_EXCHANGE_TOKEN` and would have been handed the credential itself.
   // The harness emits a same-named `turn_not_found` of its own (knative-server server.ts); the two
   // are distinct codes at distinct hops that happen to share a name, not one code reused.
   turn_not_found: 404,
