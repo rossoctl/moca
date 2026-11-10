@@ -293,6 +293,42 @@ describe('the exchange hop', () => {
     });
   });
 
+  it('401s the dequeue exchange without the shared exchange token', async () => {
+    const res = await request('POST', '/internal/turn-credentials', { body: { turnId: 't-1' } });
+    expect(res.status).toBe(401);
+    expect((res.json() as { error: string }).error).toBe('unauthorized');
+  });
+
+  it('401s the dequeue exchange with the wrong shared token, before reading the body', async () => {
+    // Authentication comes first and the body second (server.ts). A caller with a bad bearer must not
+    // learn whether `t-1` exists, so the 401 has to arrive for a turn id that was never submitted.
+    const res = await request('POST', '/internal/turn-credentials', {
+      body: { turnId: 't-1' },
+      headers: { Authorization: 'Bearer wrong' }, // notsecret
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('400s a dequeue exchange with no turnId, authenticated', async () => {
+    const res = await request('POST', '/internal/turn-credentials', {
+      body: {},
+      headers: { Authorization: 'Bearer shared-abc' }, // notsecret
+    });
+    expect(res.status).toBe(400);
+    expect((res.json() as { error: string }).error).toBe('invalid_request');
+  });
+
+  it('404s an unknown turn id, authenticated', async () => {
+    // The authenticated no-such-turn answer, over real HTTP: this is what proves the new code maps
+    // to 404 through the server's error mapper and not only in the unit suite.
+    const res = await request('POST', '/internal/turn-credentials', {
+      body: { turnId: 't-nobody' },
+      headers: { Authorization: 'Bearer shared-abc' }, // notsecret
+    });
+    expect(res.status).toBe(404);
+    expect((res.json() as { error: string }).error).toBe('turn_not_found');
+  });
+
   it('does not accept the exchange token as an /v1 credential', async () => {
     // The exchange token is an opaque shared secret, not a JWT, so it fails verifyToken's structural
     // check before requiredScope is ever evaluated -- this does not exercise scope separation (that is

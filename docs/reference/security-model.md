@@ -68,7 +68,7 @@ tokens but not mint them. No credential travels in a token.
 | API token      | `api`                       | 15 minutes (default)           | Stateless and never revoked, so its lifetime is the revocation latency                                                                                                                                                                                                                                                                                             |
 | Session token  | `turn:write`, carries `sid` | 5 minutes (default)            | Re-minted per session                                                                                                                                                                                                                                                                                                                                              |
 | Refresh token  | opaque (`mrt_...`)          | 30 days idle, 90 days absolute | Stored hashed in Redis, except that during the grace window the grace key holds the **plaintext** successor so a replay can be answered: anyone who can read Redis sees each new refresh token for up to 30 seconds (`SH_REFRESH_REUSE_GRACE_SECONDS`, capped at 300). Rotates on every use; replaying a superseded token after the grace revokes the whole family |
-| Exchange token | shared bearer               | none                           | Used by workers to call `/internal/credentials`; compared in constant time                                                                                                                                                                                                                                                                                         |
+| Exchange token | shared bearer               | none                           | Used by workers to call `/internal/credentials` and `/internal/turn-credentials`; compared in constant time. One value for the whole deployment, so any holder can resolve the credential of any session or queued turn it can name an id for                                                                                                                      |
 
 Tokens are EdDSA (Ed25519) JWS with `aud: harness`. A session token for one session cannot drive another
 (`session_mismatch`), and an `X-SH-Subject` that differs from the token's subject is refused (`subject_conflict`). A
@@ -113,9 +113,15 @@ callers cannot reach workload sandboxes.
    authenticated data, so a relabelled ciphertext fails to open.
 3. On each turn the worker verifies the session token locally, then calls `/internal/credentials` with the exchange
    bearer. The control plane checks the session's owner and returns the credential for that turn.
-4. The worker puts the key in the request headers only; its environment holds a constant sentinel. If the control
+4. An async turn is different: there is no session token at dequeue, so the worker presents the turn
+   id it read off the queue to `/internal/turn-credentials` with the same exchange bearer. The
+   control plane resolves the credential NAME recorded on the turn, after checking the turn is
+   claimable and its session still exists and still belongs to the same owner. No credential and no
+   bearer token is ever written to the work queue. Today this returns a real key and is therefore
+   confined to `MOCA_TENANCY=single`; the scoped grants that replace it are M2 of ADR-0047.
+5. The worker puts the key in the request headers only; its environment holds a constant sentinel. If the control
    plane is unreachable the turn fails; there is no fallback to the environment.
-5. Under `MOCA_TENANCY=multi` the worker also scrubs every ambient provider credential from its environment at boot.
+6. Under `MOCA_TENANCY=multi` the worker also scrubs every ambient provider credential from its environment at boot.
 
 Stores: Kubernetes Secrets (one per user, in `moca-credentials`; only the secret field is sealed, while the kind,
 consumer, destination, binding and endpoint sit in plaintext annotations), a file store (0700 directory, 0600 files,
