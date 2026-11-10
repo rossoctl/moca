@@ -685,11 +685,6 @@ export no_proxy=localhost,127.0.0.1,::1
 export GH_TOKEN=moca-placeholder
 export GITHUB_TOKEN=moca-placeholder
 
-# Lease mode: no user namespaces. An unprivileged Exec that can create one gains a full
-# capability set inside it, and with it most of the kernel attack surface the uid drop
-# exists to keep out of reach. 0 forbids new ones for everything in the guest.
-echo 0 > /proc/sys/user/max_user_namespaces || { echo "init: cannot disable user namespaces (guest kernel lacks CONFIG_USER_NS?)" >&2; exit 1; }
-
 # Fail loudly here rather than let a missing/non-executable agent binary reach
 # `exec` and communicate only as a bare kernel panic ("Attempted to kill
 # init!") with nothing on the console saying why. This is a different failure
@@ -1005,19 +1000,22 @@ probe_guest_kernel() {
 }
 
 # check_lease_support (lease-v1): the image advertises lease-v1, so prove in the booted
-# guest what lease mode relies on -- cgroup2 mounted at /sys/fs/cgroup, user namespaces
-# disabled, no setuid/setgid file on the rootfs -- rather than trusting that init and
-# assemble_rootfs did it. ONE ordinary per-Exec request, never `lease: true`: the first
-# lease request sets the agent's lease latch, and anything set before the snapshot is
-# baked into every VM restored from it (the old clockOK latch failure). It creates
-# nothing in the guest, so nothing reaches the snapshot either.
+# guest what lease mode relies on -- cgroup2 mounted at /sys/fs/cgroup, a user-namespace
+# sysctl the agent can write (it disables user namespaces at the first lease request;
+# per-Exec VMs keep them), the sbx identity in /etc/passwd, no setuid/setgid file on the
+# rootfs -- rather than trusting that init and assemble_rootfs did it. ONE ordinary
+# per-Exec request, never `lease: true`: the first lease request sets the agent's lease
+# latch, and anything set before the snapshot is baked into every VM restored from it
+# (the old clockOK latch failure). It creates nothing in the guest, so nothing reaches
+# the snapshot either. grep, not getent: the guest image need not have getent.
 check_lease_support() {
   local uds="$1"
-  local out rc cg userns suid err="$STAGE/lease-check.err"
+  local out rc cg userns sbx suid err="$STAGE/lease-check.err"
   # stdout only is parsed, line by line; stderr goes aside so a stray diagnostic cannot
-  # shift the three answers, and is shown when the check could not run at all.
+  # shift the four answers, and is shown when the check could not run at all. Each probe
+  # prints exactly one line, so a missing answer cannot shift the next into its place.
   out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 60 \
-    -command 'cat /sys/fs/cgroup/cgroup.controllers >/dev/null 2>&1 && echo cg2; cat /proc/sys/user/max_user_namespaces 2>/dev/null; find / -xdev -type f -perm /6000 2>/dev/null | head -1' \
+    -command 'cat /sys/fs/cgroup/cgroup.controllers >/dev/null 2>&1 && echo cg2 || echo no-cg2; test -w /proc/sys/user/max_user_namespaces && echo userns-ok || echo no-userns; grep "^sbx:" /etc/passwd || echo no-sbx; find / -xdev -type f -perm /6000 2>/dev/null | head -1' \
     2>"$err")" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "build-snapshot.sh: the lease-v1 check could not run in the guest (exit $rc); guest_client diagnostics: $(cat "$err")" >&2
@@ -1025,13 +1023,18 @@ check_lease_support() {
   fi
   cg="$(printf '%s\n' "$out" | sed -n 1p)"
   userns="$(printf '%s\n' "$out" | sed -n 2p)"
-  suid="$(printf '%s\n' "$out" | sed -n 3p)"
+  sbx="$(printf '%s\n' "$out" | sed -n 3p)"
+  suid="$(printf '%s\n' "$out" | sed -n 4p)"
   if [ "$cg" != cg2 ]; then
     echo "build-snapshot.sh: lease-v1: cgroup2 is not mounted at /sys/fs/cgroup in the guest (the init must mount it, and the guest kernel needs cgroup v2)" >&2
     exit 1
   fi
-  if [ "$userns" != 0 ]; then
-    echo "build-snapshot.sh: lease-v1: user namespaces are enabled in the guest (/proc/sys/user/max_user_namespaces is '$userns', want 0)" >&2
+  if [ "$userns" != userns-ok ]; then
+    echo "build-snapshot.sh: lease-v1: /proc/sys/user/max_user_namespaces is not writable in the guest (got '$userns'; the agent disables user namespaces through it at the first lease request, and the guest kernel needs CONFIG_USER_NS)" >&2
+    exit 1
+  fi
+  if [ "$sbx" != 'sbx:x:7000:7000::/tmp/sbx-home:/bin/bash' ]; then
+    echo "build-snapshot.sh: lease-v1: the guest /etc/passwd has no 'sbx:x:7000:7000::/tmp/sbx-home:/bin/bash' line (got '$sbx')" >&2
     exit 1
   fi
   if [ -n "$suid" ]; then
@@ -1886,7 +1889,7 @@ write_manifest() {
   # boots -- both now need it in place at the jail-relative name "/kernel"
   # pre-boot, not just afterwards for hashing.
 
-  local khash rhash ahash hash caps_json built_at egress_json
+  local khash rhash ahash hash caps_json built_at egress_json features_json
   khash="sha256:$(sha256sum "$STAGE/kernel" | cut -d' ' -f1)"
   rhash="sha256:$(sha256sum "$STAGE/rootfs" | cut -d' ' -f1)"
   ahash="sha256:$(sha256sum "$STAGE/agent" | cut -d' ' -f1)"
@@ -1907,6 +1910,14 @@ write_manifest() {
   \"egress_ca_sha256\": \"sha256:$(openssl x509 -in "$EGRESS_CA" -outform DER | sha256sum | cut -d' ' -f1)\""
   fi
 
+  # lease-v1 on the Firecracker arm only: Cloud Hypervisor's Run mounts the virtiofs
+  # workspace inside every command (chvWrapCommand), which a lease Exec, uid 7000 with
+  # no capabilities, cannot do.
+  features_json=""
+  if [ "$VMM" = firecracker ]; then
+    features_json='"lease-v1"'
+  fi
+
   cat >"$STAGE/manifest.json" <<MANIFEST
 {
   "image": "$IMAGE",
@@ -1915,7 +1926,7 @@ write_manifest() {
   "kernel_release": "$MANIFEST_GUEST_KERNEL",
   "guest_ram_mb": $GUEST_RAM_MB,
   "capabilities": [$caps_json],
-  "features": ["lease-v1"],
+  "features": [$features_json],
   "built_at": "$built_at",
   "kernel_sha256": "$khash",
   "rootfs_sha256": "$rhash",

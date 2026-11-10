@@ -1784,11 +1784,13 @@ done
 
 echo "== SBX0.2b: the manifest fingerprint is the DER sha256, outside hash"
 mw="$EGT/mf"; mkdir -p "$mw/stage"
-for mode in with without; do
+for mode in with without chv; do
   : >"$mw/stage/kernel"; : >"$mw/stage/rootfs"; : >"$mw/stage/agent"
+  vmm=firecracker
+  [ "$mode" = chv ] && vmm=cloud-hypervisor
   {
     echo 'log() { :; }'
-    echo "STAGE='$mw/stage'; IMAGE=i; VMM=firecracker; INSTANCE_TYPE=t; GUEST_RAM_MB=256; MANIFEST_CAPABILITIES=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+    echo "STAGE='$mw/stage'; IMAGE=i; VMM=$vmm; INSTANCE_TYPE=t; GUEST_RAM_MB=256; MANIFEST_CAPABILITIES=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
     if [ "$mode" = with ]; then
       echo "EGRESS_CA='$EGT/ca.crt'"
       fn_body validate_egress_ca
@@ -1813,8 +1815,11 @@ check "the field comes after hash (outside it)" \
   "$(awk '/"hash"/{h=NR} /egress_ca_sha256/{e=NR} END{print (h<e)?"yes":"no"}' "$mw/with.json")" "yes"
 check "the manifest's kernel_release is the probed guest kernel" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_release"])' "$mw/without.json")" "6.1.155-guest"
-check "the manifest's features are [lease-v1]" \
+check "the Firecracker manifest's features are [lease-v1]" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1']"
+# CHV cannot serve a lease: chvWrapCommand mounts the workspace inside every Run.
+check "the Cloud Hypervisor manifest's features are []" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/chv.json")" "[]"
 check "the with-flag manifest is valid JSON" \
   "$(python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mw/with.json" && echo yes || echo no)" "yes"
 check "assemble_rootfs calls install_egress_ca only when the flag is set" \
@@ -1823,7 +1828,8 @@ rm -rf "$EGT"
 
 echo "== lease-v1 image"
 # Lease mode (one VM, many Execs, each as uid 7000 in its own cgroup) needs cgroup2
-# mounted, no user namespaces, the sbx identity in the rootfs and no setuid binaries.
+# mounted, a user-namespace sysctl the agent can turn off, the sbx identity in the
+# rootfs and no setuid binaries.
 # The build proves each in the booted guest with ONE per-Exec request (never lease:
 # true, whose latch the snapshot would bake into every restored VM).
 in_init() { # $1 = fixed string; prints its first line number inside the init heredoc
@@ -1832,15 +1838,14 @@ in_init() { # $1 = fixed string; prints its first line number inside the init he
 }
 sysfs_ln=$(in_init 'mount -t sysfs sysfs /sys')
 cg_ln=$(in_init 'mount -t cgroup2 cgroup2 /sys/fs/cgroup')
-userns_ln=$(in_init 'echo 0 > /proc/sys/user/max_user_namespaces')
 check "init mounts cgroup2 after sysfs" \
   "$([ -n "$cg_ln" ] && [ -n "$sysfs_ln" ] && [ "$sysfs_ln" -lt "$cg_ln" ] && echo yes || echo no)" "yes"
 check "init names the reason when the cgroup2 mount fails" \
   "$(sed -n "${cg_ln:-1}p" "$SCRIPT" | grep -cF '|| { echo "init: cgroup2 mount failed (guest kernel lacks cgroup v2?)" >&2; exit 1; }')" "1"
-check "init names the reason when user namespaces cannot be disabled" \
-  "$(sed -n "${userns_ln:-1}p" "$SCRIPT" | grep -cF '|| { echo "init: cannot disable user namespaces')" "1"
-check "init disables user namespaces before the agent exec" \
-  "$([ -n "$userns_ln" ] && [ -n "$exec_line" ] && [ "$userns_ln" -lt "$exec_line" ] && echo yes || echo no)" "yes"
+# User namespaces are lease-only: the agent disables them at the first lease request,
+# so a per-Exec VM restored from the same snapshot keeps them.
+check "init leaves user namespaces enabled (the agent disables them for a lease)" \
+  "$(awk -v s="$init_start" -v e="$init_end" 'NR>=s && NR<=e' "$SCRIPT" | grep -c 'max_user_namespaces')" "0"
 check "the agent exec carries --lease-cgroup-root /sys/fs/cgroup/moca-execs" \
   "$(printf '%s' "$exec_text" | grep -cF -- '--lease-cgroup-root /sys/fs/cgroup/moca-execs')" "1"
 check "assemble_rootfs adds the sbx identity" \
@@ -1867,8 +1872,8 @@ check "write_manifest records the guest kernel" \
   "$(grep -cF '"kernel_release": "$MANIFEST_GUEST_KERNEL"' "$SCRIPT")" "1"
 check "write_manifest no longer records the build host's kernel" \
   "$(grep -cF '"kernel_release": "$(uname -r)"' "$SCRIPT")" "0"
-check "write_manifest advertises lease-v1" \
-  "$(grep -cF '"features": ["lease-v1"]' "$SCRIPT")" "1"
+check "write_manifest advertises lease-v1 on the Firecracker arm only" \
+  "$(fn_body write_manifest | grep -cF 'if [ "$VMM" = firecracker ]; then')" "1"
 
 # add_sbx_identity, run for real against fake trees.
 LT="$(mktemp -d "${TMPDIR:-/tmp}/bs-lease-test.XXXXXX")"
@@ -1920,12 +1925,33 @@ ls_harness() { # $1 = work dir, $2 = what the guest prints
   bash "$1/run.sh" >"$1/out" 2>&1
   echo $?
 }
-check "lease support: cg2, 0, empty passes" "$(ls_harness "$LT/ok" $'cg2\n0\n')" "0"
-check "lease support: no cgroup2 fails" "$([ "$(ls_harness "$LT/nocg" $'0\n')" != 0 ] && echo yes || echo no)" "yes"
+sbx_pw='sbx:x:7000:7000::/tmp/sbx-home:/bin/bash'
+check "lease support: cg2, userns-ok, sbx, empty passes" "$(ls_harness "$LT/ok" "cg2
+userns-ok
+$sbx_pw
+")" "0"
+check "lease support: no cgroup2 fails" "$([ "$(ls_harness "$LT/nocg" "no-cg2
+userns-ok
+$sbx_pw
+")" != 0 ] && echo yes || echo no)" "yes"
 check "lease support: no cgroup2 is named" "$(grep -c 'cgroup2' "$LT/nocg/out")" "1"
-check "lease support: userns enabled fails" "$([ "$(ls_harness "$LT/userns" $'cg2\n15000\n')" != 0 ] && echo yes || echo no)" "yes"
-check "lease support: userns enabled is named" "$(grep -c 'max_user_namespaces' "$LT/userns/out")" "1"
-check "lease support: a setuid binary fails" "$([ "$(ls_harness "$LT/suid" $'cg2\n0\n/usr/bin/su\n')" != 0 ] && echo yes || echo no)" "yes"
+check "lease support: an unwritable userns sysctl fails" "$([ "$(ls_harness "$LT/userns" "cg2
+no-userns
+$sbx_pw
+")" != 0 ] && echo yes || echo no)" "yes"
+check "lease support: an unwritable userns sysctl is named" "$(grep -c 'max_user_namespaces' "$LT/userns/out")" "1"
+check "lease support: no sbx account fails" "$([ "$(ls_harness "$LT/nosbx" $'cg2\nuserns-ok\nno-sbx\n')" != 0 ] && echo yes || echo no)" "yes"
+check "lease support: no sbx account is named" "$(grep -c "no '$sbx_pw' line" "$LT/nosbx/out")" "1"
+check "lease support: a wrong sbx line fails" "$([ "$(ls_harness "$LT/badsbx" $'cg2\nuserns-ok\nsbx:x:1000:1000::/home/sbx:/bin/sh\n')" != 0 ] && echo yes || echo no)" "yes"
+check "lease support: the guest command greps passwd for sbx (no getent)" \
+  "$(fn_body check_lease_support | grep -cF 'grep "^sbx:" /etc/passwd')" "1"
+check "lease support: the guest command checks the userns sysctl is writable" \
+  "$(fn_body check_lease_support | grep -cF 'test -w /proc/sys/user/max_user_namespaces && echo userns-ok')" "1"
+check "lease support: a setuid binary fails" "$([ "$(ls_harness "$LT/suid" "cg2
+userns-ok
+$sbx_pw
+/usr/bin/su
+")" != 0 ] && echo yes || echo no)" "yes"
 check "lease support: the setuid binary is named" "$(grep -c '/usr/bin/su' "$LT/suid/out")" "1"
 mkdir -p "$LT/fail/stage"; printf '#!/bin/sh\necho "guest_client: dial: refused" >&2\nexit 1\n' >"$LT/fail/stage/guest_client"
 chmod 0755 "$LT/fail/stage/guest_client"
