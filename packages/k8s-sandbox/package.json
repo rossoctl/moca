@@ -15,7 +15,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.16.0",
+    "@bufbuild/protobuf": "^2.17.0",
     "@earendil-works/pi-coding-agent": "link:../../pi-fork/packages/coding-agent",
     "@grpc/grpc-js": "^1.14.7"
   }
