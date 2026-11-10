@@ -25,8 +25,11 @@ Async turns: the owner-scoped submission API
   anything else is 400 `invalid_request`, refused before Redis is read.
 - New error codes `turn_not_cancellable` (409, cancelling a turn that is not queued),
   `turn_not_claimable` (409, claiming a cancelled or terminal turn), `turn_not_found` (404),
-  `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held) and
-  `async_tenancy_unsupported` (501, async under `MOCA_TENANCY=multi`).
+  `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held),
+  `async_tenancy_unsupported` (501, async under `MOCA_TENANCY=multi`) and
+  `workload_runs_unavailable` (501, a submission naming a `workloadId`). Either 501 is answered
+  before the quota is touched, so a request that can never be served is never reported as a 429 and
+  leaves no record, no queue entry and no quota slot behind (§4.2).
 - `async: true` on the harness's own turn route stays removed and still answers 400 `async_removed`;
   these routes are its replacement.
 
