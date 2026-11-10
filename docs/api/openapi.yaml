@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.2.0
+  version: 1.3.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -118,6 +118,8 @@ components:
             - workload_runs_unavailable
             - async_tenancy_unsupported
             - turn_not_cancellable
+            - turn_not_claimable
+            - turn_not_found
             - credential_required
             - credential_ambiguous
             - credential_not_found
@@ -1690,3 +1692,135 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /internal/turn-credentials:
+    post:
+      operationId: exchangeTurnCredential
+      summary: Data-plane only — resolve a queued turn's credential at dequeue
+      description: |
+        Not part of the public surface, and the DEQUEUE counterpart of `/internal/credentials`
+        (async fan-out spec §5.4). Same shared `SH_EXCHANGE_TOKEN`, same fail-closed-with-none-
+        configured rule, same once-per-turn position on the control path. It differs in what the
+        caller presents: a turn id, not a session token, because at dequeue no session token exists
+        and putting a credential or a bearer in the work queue is what MI1 §6.5 forbids. The id alone
+        is sufficient because everything else comes from the turn record the control plane wrote at
+        the authenticated enqueue.
+
+        This is M1's **interim** form: it returns the credential resolved from the record, and only
+        under `MOCA_TENANCY=single` (`501 async_tenancy_unsupported` otherwise). M2 replaces the
+        return with MI1 S2 grants for both audiences and a `turn_exp`, and that is what lifts the
+        tenancy gate (ADR-0047).
+
+        The call is a pure READ. It does not move the turn to `running` — the consumer does that,
+        because it holds the delivery count the transition records, and because a deployment-wide
+        shared bearer must not be able to mutate turn state.
+      security: [{ exchangeToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [turnId]
+              properties:
+                turnId:
+                  type: string
+                  description: |
+                    the id the worker read off the queue, and the ONLY thing the queue carries.
+      responses:
+        '200':
+          description: the credential this turn spends, resolved from its record
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [turnId, mode, anthropicAuthToken, anthropicBaseUrl, sessionId, subject, caps]
+                properties:
+                  turnId:
+                    type: string
+                    description: echoed, so a response cannot be misattributed to another claim
+                  mode:
+                    type: string
+                    enum: [placeholder, direct]
+                    description: |
+                      as on /internal/credentials: `placeholder` when the deployment has an injector
+                      to rewrite it, `direct` when none is configured. `direct` is reachable only
+                      under `MOCA_TENANCY=single` (MI1 §6.6).
+                  anthropicAuthToken: { type: string }
+                  anthropicBaseUrl:
+                    { type: string, description: never absent — see endpoint_unresolved }
+                  sessionId:
+                    type: string
+                    description: the session the turn belongs to, from the record
+                  subject: { type: string }
+                  caps:
+                    type: object
+                    description: |
+                      the per-turn budget ceilings recorded at submission, returned so the worker
+                      that enforces them does not have to re-read the record. Empty when the
+                      submission named none.
+                    properties:
+                      tokens: { type: integer }
+                      costUsd: { type: number }
+                      wallClock: { type: integer, description: seconds }
+                  authHeader:
+                    type: string
+                    enum: [x-api-key]
+                    description: |
+                      present only when the credential must be sent as `x-api-key` rather than as a
+                      bearer; omitting it would make the worker 401 against the endpoint
+                  configRef:
+                    { type: string, description: present only when the turn named a config bundle }
+                  sandboxTier:
+                    type: string
+                    description: |
+                      the tier this turn runs in, from the SESSION (the turn record does not copy
+                      it); absent whenever the deployment declares no tiers
+                  model:
+                    type: object
+                    description: |
+                      the session's model and the limits recorded when it was chosen; absent when the
+                      session names none, and the worker then uses its deployment default
+                    required: [id]
+                    properties:
+                      id: { type: string }
+                      contextWindow: { type: integer }
+                      maxTokens: { type: integer }
+                      reasoning: { type: boolean }
+                      vision: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `turn_not_found` for an id with no record, and `session_not_found` when the turn's session
+            is gone, tombstoned, or owned by someone else. Both are 404 and deliberately
+            indistinguishable from each other in kind: a shared-bearer caller gets no existence
+            oracle either (spec §8.1). A worker seeing this should ack its queue entry and drop it —
+            retrying cannot help.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `turn_not_claimable`: the record exists but is `cancelled` or already terminal, so no
+            credential is minted (§5.4). This is what makes `DELETE …/turns/{turnId}` effective —
+            cancel flips the record and never reaches into the queue. NEVER returned for a `running`
+            record: a redelivery is the case the claim exists for.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '501':
+          description: |
+            `async_tenancy_unsupported` under `MOCA_TENANCY=multi`. Checked BEFORE the credential is
+            resolved, because under `multi` this hop must never return a real key (MI1 §6.6); the
+            grants that replace it are M2.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            `redis_unavailable` when the record cannot be read, or `credential_unavailable` when the
+            credential store cannot be reached. Retryable, unlike the 404.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
