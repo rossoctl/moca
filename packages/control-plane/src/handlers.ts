@@ -1113,9 +1113,8 @@ export const HANDLERS: Record<string, Handler> = {
     // Refused BEFORE Redis, so caller input cannot pick the key shape this route reads. `submitTurn`
     // is the only minter and its ids are always `t-<uuid>`, so a well-formed id that has no record
     // still answers 404 `turn_not_found` -- the shape check only removes ids no submission could
-    // have produced. 400 rather than 404 deliberately: this caller holds the deployment-wide
-    // exchange token and gets the credential on success, so a distinguishable "you sent nonsense"
-    // tells it nothing it could not already learn, and it is the answer that names the actual bug.
+    // have produced. 400 rather than 404 deliberately, for the reason openapi.yaml's 404 description
+    // gives: nothing this route refuses tells its caller anything a success would not.
     if (!isMintedTurnId(turnId)) {
       throw new CpError('invalid_request', 'turnId is not a turn id this control plane minted');
     }

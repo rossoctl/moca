@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { AUDIT_STREAM, OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
-import { idempotencyKeyKey, turnKey } from '../src/turn-record.js';
+import { idempotencyKeyKey, isMintedTurnId, turnKey } from '../src/turn-record.js';
 import { asyncCounters, resetAsyncCounters } from '../src/counters.js';
 import { alice, bob, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -97,6 +98,19 @@ describe('submitTurn (spec §4.1)', () => {
     // record that carried the secret beside it.
     const raw = d.fake.hashes.get(turnKey(rec!.turnId))!;
     expect(JSON.stringify(raw)).not.toContain('sk-fake');
+  });
+
+  it('mints an id the dequeue exchange will accept, with production newId', async () => {
+    // The COUPLING, and the only test that fails when it breaks. `isMintedTurnId` encodes
+    // `t-${deps.newId()}` with newId = randomUUID (main.ts), but newId is injectable: point it at
+    // anything shorter and every submission still 202s while every claim 400s -- the turn is
+    // enqueued, never claimable, and redelivered until it dead-letters. So this test uses the
+    // PRODUCTION newId rather than the fixture's counter, which the gate rightly refuses.
+    const d = turnDeps({ newId: () => randomUUID() });
+    const sid = await session(d);
+    const res = await submit(d, sid, { item, async: true });
+    const { turnId } = res.body as { turnId: string };
+    expect(isMintedTurnId(turnId), turnId).toBe(true);
   });
 
   it('carries no TTL while the turn is queued (§5.1)', async () => {

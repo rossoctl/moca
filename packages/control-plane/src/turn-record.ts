@@ -74,15 +74,21 @@ export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
  * reaches a key -- `HGETALL sh:cp:turn:<input>` -- and `TurnStore.tag` may append `:${keyTag}` to it
  * besides. Checking the shape first bounds that key space to ids the control plane could have
  * written. It closes no hole on its own: `get` only reads, and the handler re-checks the record's
- * owner against its session. It is the cheaper default on a shared-bearer route.
+ * owner against its session. It is the cheaper default on a shared-bearer route, and the 400 it
+ * produces costs that caller nothing (openapi.yaml's 404 description argues why).
  *
  * The owner-scoped `/v1` turn routes deliberately do NOT use it. There a malformed id must stay a
  * 404, indistinguishable from another subject's turn, or the error code becomes the existence oracle
  * `assertOwner` exists to deny (spec §8.1).
+ *
+ * Exported because `openapi.yaml` states the same pattern on the route's request body, pinned by
+ * openapi-contract.test.ts -- two sources of truth for a validation rule is how a documented API
+ * starts lying, the same reading `CREDENTIAL_NAME_RE` and `SANDBOX_ID_RE` already get.
  */
-const MINTED_TURN_ID_RE = /^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const MINTED_TURN_ID_RE = /^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export const isMintedTurnId = (turnId: string): boolean => MINTED_TURN_ID_RE.test(turnId);
+
 /**
  * One owner's OPEN turns, scored by `createdAt`. The quota (§4.3) counts the members of this set,
  * which is why `finalize` REMOVES from it rather than rescoring: a count then costs one `ZCARD`

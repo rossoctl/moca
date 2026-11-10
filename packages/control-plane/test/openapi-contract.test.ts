@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { ROUTES } from '../src/routes.js';
 import { CP_ERROR_CODES } from '../src/errors.js';
-import { TURN_STATES } from '../src/turn-record.js';
+import { MINTED_TURN_ID_RE, TURN_STATES } from '../src/turn-record.js';
 import { CREDENTIAL_NAME_RE } from '../src/credential-store.js';
 import { LABEL_KEY_RE, SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
 
@@ -156,6 +156,18 @@ describe('§9.3 test 3 — contract drift', () => {
     // Two sources of truth for a validation rule is how a documented API starts lying.
     const param = doc().components.parameters.credentialName;
     expect(param.schema.pattern).toBe(CREDENTIAL_NAME_RE.source);
+  });
+
+  it('states the turn-id shape the dequeue exchange enforces, and that its 400 is reachable', () => {
+    // Same reading as credentialName above. This one matters more than a path parameter's: the route
+    // is authenticated by a deployment-wide shared bearer, so a worker author writing a client from
+    // this document is the only reader of the rule -- and the 400 cannot be the generic BadRequest
+    // ref, because a worker must be told to ACK AND DROP a corrupt id rather than retry it.
+    const post = doc().paths['/internal/turn-credentials'].post;
+    const body = post.requestBody.content['application/json'].schema;
+    expect(body.properties.turnId.pattern).toBe(MINTED_TURN_ID_RE.source);
+    expect(post.responses['400'].description).toContain('invalid_request');
+    expect(post.responses['400'].description).toContain('ack');
   });
 
   it('never describes a RESPONSE that returns a credential value', () => {

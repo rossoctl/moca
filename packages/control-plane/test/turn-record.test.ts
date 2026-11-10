@@ -54,7 +54,7 @@ describe('isMintedTurnId', () => {
     expect(isMintedTurnId(`t-${randomUUID()}`)).toBe(true);
   });
 
-  it('refuses ids that are not a t-prefixed UUID', () => {
+  it('refuses everything else, key-structure characters included', () => {
     for (const bad of [
       '',
       't-',
@@ -66,16 +66,13 @@ describe('isMintedTurnId', () => {
       `t-${randomUUID()}x`, // trailing junk
       ` t-${randomUUID()}`, // leading space
       `t-${randomUUID()}\n`,
+      // `:` is the key separator and TurnStore.tag appends `:${keyTag}`, so a caller-supplied `:`
+      // would address a key shape the control plane never wrote. These two are the only entries the
+      // length and prefix checks above do not already cover.
+      `t-${randomUUID()}:tag`,
+      'sh:cp:turn:t-1',
     ]) {
       expect(isMintedTurnId(bad), JSON.stringify(bad)).toBe(false);
-    }
-  });
-
-  it('refuses the key-structure characters a Redis key must not take from a caller', () => {
-    // `:` is the key separator and TurnStore.tag appends `:${keyTag}`, so a caller-supplied `:`
-    // addresses a key shape the control plane never wrote. `*` and `?` are glob metacharacters.
-    for (const bad of ['t-*', 't-x:y', `t-${randomUUID()}:tag`, 'sh:cp:turn:t-1', 't-?']) {
-      expect(isMintedTurnId(bad), bad).toBe(false);
     }
   });
 });

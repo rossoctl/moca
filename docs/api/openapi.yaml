@@ -1724,8 +1724,10 @@ paths:
               properties:
                 turnId:
                   type: string
+                  pattern: '^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                   description: |
-                    the id the worker read off the queue, and the ONLY thing the queue carries.
+                    the id the worker read off the queue, and the ONLY thing the queue carries. The
+                    pattern is the one `submitTurn` mints, and it is enforced (400), not advisory.
       responses:
         '200':
           description: the credential this turn spends, resolved from its record
@@ -1788,7 +1790,15 @@ paths:
                       maxTokens: { type: integer }
                       reasoning: { type: boolean }
                       vision: { type: boolean }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400':
+          description: |
+            `invalid_request`: the body carries no `turnId`, or one outside the `t-<uuid>` shape
+            `submitTurn` mints. Refused before Redis is touched, so no caller input picks the key
+            shape this route reads. A worker seeing it should ack its entry and drop it — the id on
+            the queue is corrupt and no retry can fix it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
           description: |

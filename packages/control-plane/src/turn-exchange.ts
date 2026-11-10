@@ -158,7 +158,8 @@ export async function exchangeTurnCredential(
   // `PATCH /v1/sessions/{id}` between submission and dequeue moves an already-queued turn onto the new
   // model, which updateSession's own "a turn in flight keeps its model" does not cover because an async
   // turn's exchange can be an hour after its submission. Pinning them means adding both to the record
-  // (M2/#389), not reading them from a different place here.
+  // (M2/#388 -- the record is this issue's, so #389 cannot pin what it does not carry), not reading
+  // them from a different place here.
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,
