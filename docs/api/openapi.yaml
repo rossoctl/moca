@@ -580,21 +580,29 @@ paths:
       operationId: oidcCallback
       summary: The OIDC provider's browser redirect target
       description: |
-        Mounted for every deployment, but answers only when SH_IDENTITY_PROVIDER=oidc: the control
-        plane exchanges the authorization code server-side (it alone holds the client secret),
-        verifies the id_token against the provider's JWKS, and settles the login the `state` names.
-        The next /v1/auth/device/token poll picks it up. Answered as plain text -- the caller is a
-        person in a browser.
+        Mounted for every deployment, but answers only when SH_IDENTITY_PROVIDER=oidc. Two rounds
+        share the route, both answered as HTML -- the caller is a person in a browser.
+
+        First round (?code=): the provider's redirect. The control plane exchanges the code
+        server-side (it alone holds the client secret) and verifies the id_token against the
+        provider's JWKS -- but does NOT settle the login. It renders a confirmation form asking
+        for the user code shown in the terminal that started the login (the browser-to-terminal
+        binding: without it, the authorize URL alone would let an attacker walk a victim's live
+        SSO session into the attacker's login).
+
+        Second round (?confirm=): the typed code. A match (constant-time, at most 5 tries)
+        settles the login; the next /v1/auth/device/token poll picks it up.
       security: []
       parameters:
         - { name: code, in: query, required: false, schema: { type: string } }
         - { name: state, in: query, required: false, schema: { type: string } }
         - { name: error, in: query, required: false, schema: { type: string } }
+        - { name: confirm, in: query, required: false, schema: { type: string } }
       responses:
         '200':
-          description: the sign-in was received; return to the terminal
+          description: the confirmation form, the confirmed page, or the refusal page
           content:
-            text/plain: { schema: { type: string } }
+            text/html: { schema: { type: string } }
         '400':
           description: no oidc provider configured, or the callback is missing its parameters
           content:

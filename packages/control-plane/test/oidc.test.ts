@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import { MemoryPendingAuthStore, OidcProvider } from '../src/oidc.js';
 import type { FetchLike } from '../src/identity.js';
-import type { DeviceStart } from '../src/identity.js';
+import type { DeviceStart, OidcCallbackOutcome } from '../src/identity.js';
 import { makeDeps, ctx } from './helpers/deps.js';
 import { HANDLERS } from '../src/handlers.js';
 
@@ -116,8 +116,15 @@ const errOf = async (fn: () => Promise<unknown>): Promise<CpError> => {
   throw new Error('expected a throw');
 };
 
+/** Both callback rounds: the provider's redirect lands, then the terminal's code confirms. */
+async function signIn(r: Rig, start: DeviceStart): Promise<OidcCallbackOutcome> {
+  const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+  if (landed !== 'awaiting_confirmation') return landed;
+  return r.provider.handleCallback({ state: start.deviceCode, confirm: start.userCode });
+}
+
 describe('startDeviceAuth', () => {
-  it('returns the authorize URL with the state riding in it, and no user code', async () => {
+  it('returns the authorize URL with the state riding in it, and the terminal code not', async () => {
     const r = rig();
     const start: DeviceStart = await r.provider.startDeviceAuth();
     const url = new URL(start.verificationUri);
@@ -129,7 +136,10 @@ describe('startDeviceAuth', () => {
     expect(url.searchParams.get('state')).toBe(start.deviceCode);
     // 32 bytes base64url: unguessable, and the capability the client polls with.
     expect(start.deviceCode).toMatch(/^[\w-]{43}$/);
-    expect(start.userCode).toBeUndefined();
+    // The confirmation code: mocactl's user-code shape, and NEVER in the authorize URL -- the URL
+    // is what a victim can be handed, the code is the terminal's half of the binding.
+    expect(start.userCode).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+    expect(start.verificationUri).not.toContain(start.userCode!);
     expect(start.interval).toBeGreaterThan(0);
     expect(start.expiresIn).toBe(900);
   });
@@ -161,12 +171,23 @@ describe('the callback and the poll', () => {
     const r = rig();
     mint(r, { sub: 'user-1', name: 'Alice Example', email: 'alice@example.invalid' });
     const start = await r.provider.startDeviceAuth();
-    await r.provider.handleCallback({ code: 'auth-code-1', state: start.deviceCode });
+    const outcome = await r.provider.handleCallback({
+      code: 'auth-code-1',
+      state: start.deviceCode,
+    });
+    expect(outcome).toBe('awaiting_confirmation');
     // The exchange went out with the client secret and the registered redirect_uri.
     const token = r.seen.find((s) => s.url.includes('/token'))!;
     expect(token.body).toContain('grant_type=authorization_code');
     expect(token.body).toContain(`client_secret=${encodeURIComponent(CLIENT_SECRET)}`);
     expect(token.body).toContain(`redirect_uri=${encodeURIComponent(REDIRECT_URI)}`);
+    // A verified id_token is not a login yet: the poll still waits for the confirmation.
+    expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+      'authorization_pending',
+    );
+    expect(
+      await r.provider.handleCallback({ state: start.deviceCode, confirm: start.userCode }),
+    ).toBe('confirmed');
     const principal = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(principal).toEqual({
       subject: 'oidc:user-1',
@@ -183,7 +204,7 @@ describe('the callback and the poll', () => {
     const r = rig();
     mint(r, { sub: 'admin-sub', preferred_username: 'admin' });
     const start = await r.provider.startDeviceAuth();
-    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    await signIn(r, start);
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(p.roles).toEqual(['admin']);
     expect(p.displayName).toBe('admin');
@@ -277,7 +298,7 @@ describe('id_token verification', () => {
     const r = rig();
     mint(r, { sub: 'user-1', aud: ['other-client', CLIENT_ID] });
     const start = await r.provider.startDeviceAuth();
-    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    await signIn(r, start);
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(p.subject).toBe('oidc:user-1');
   });
@@ -286,7 +307,7 @@ describe('id_token verification', () => {
     const r = rig();
     mint(r, { sub: 'george@us.ibm.com', email: 'george@us.ibm.com', name: 'George Almasi' });
     const start = await r.provider.startDeviceAuth();
-    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    await signIn(r, start);
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(p.subject).toBe('oidc:george@us.ibm.com');
   });
@@ -303,7 +324,7 @@ describe('the callback route', () => {
     expect(res.body).toMatch(/SH_IDENTITY_PROVIDER=oidc/);
   });
 
-  it('hands the query to the provider and reports success', async () => {
+  it('renders the confirmation form when the provider redirect lands', async () => {
     const r = rig();
     mint(r, { sub: 'user-1', name: 'Alice Example' });
     const d = makeDeps({ identity: r.provider });
@@ -313,6 +334,117 @@ describe('the callback route', () => {
       d,
     );
     expect(res.status).toBe(200);
-    expect(res.body).toMatch(/return to your terminal/);
+    expect(res.contentType).toMatch(/text\/html/);
+    // The form posts back to this route with the state and the typed code; the code itself is
+    // nowhere on the page.
+    expect(String(res.body)).toContain('name="confirm"');
+    expect(String(res.body)).toContain(`value="${start.deviceCode}"`);
+    expect(String(res.body)).not.toContain(start.userCode!);
+  });
+
+  it('confirms and reports success', async () => {
+    const r = rig();
+    mint(r, { sub: 'user-1', name: 'Alice Example' });
+    const d = makeDeps({ identity: r.provider });
+    const start = await r.provider.startDeviceAuth();
+    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    const res = await HANDLERS.oidcCallback!(
+      ctx({ query: new URLSearchParams(`state=${start.deviceCode}&confirm=${start.userCode}`) }),
+      d,
+    );
+    expect(res.status).toBe(200);
+    expect(res.contentType).toMatch(/text\/html/);
+    expect(String(res.body)).toMatch(/return to your terminal/);
+  });
+
+  describe('the browser-to-terminal binding (review item 3)', () => {
+    it('defeats the walk-in attack: a victim-completed callback mints no login without the code', async () => {
+      // The attacker starts the login and holds the state; the victim's browser (a live SSO
+      // session) completes the provider redirect. The id_token is genuinely the victim's -- and
+      // the attacker's poll still gets authorization_pending, because the confirmation code is
+      // in the victim's... nowhere: only the terminal that started the login shows it.
+      const r = rig();
+      mint(r, { sub: 'victim@us.ibm.com', name: 'Victim Example' });
+      const start = await r.provider.startDeviceAuth();
+      const outcome = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      expect(outcome).toBe('awaiting_confirmation');
+      expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+        'authorization_pending',
+      );
+    });
+
+    it('accepts a lowercase or padded confirmation code, and is single-use', async () => {
+      const r = rig();
+      mint(r, { sub: 'user-1' });
+      const start = await r.provider.startDeviceAuth();
+      await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      expect(
+        await r.provider.handleCallback({
+          state: start.deviceCode,
+          confirm: ` ${start.userCode!.toLowerCase()} `,
+        }),
+      ).toBe('confirmed');
+      expect(await r.provider.completeDeviceAuth(start.deviceCode)).toMatchObject({
+        subject: 'oidc:user-1',
+      });
+    });
+
+    it('counts wrong codes and refuses the login at the limit', async () => {
+      const r = rig();
+      mint(r, { sub: 'user-1' });
+      const start = await r.provider.startDeviceAuth();
+      await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      for (let i = 0; i < 4; i++) {
+        expect(
+          await r.provider.handleCallback({ state: start.deviceCode, confirm: 'AAAA-AAAA' }),
+        ).toBe('wrong_code');
+        // Still pending between wrong tries.
+        expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+          'authorization_pending',
+        );
+      }
+      // The fifth wrong code exhausts the login: refused for the browser AND the poll.
+      expect(
+        await r.provider.handleCallback({ state: start.deviceCode, confirm: 'AAAA-AAAA' }),
+      ).toBe('refused');
+      const e = await errOf(() => r.provider.completeDeviceAuth(start.deviceCode));
+      expect(e.code).toBe('unauthorized');
+      expect(e.message).toContain('too many wrong');
+      // Even the RIGHT code no longer revives it.
+      expect(
+        (
+          await errOf(() =>
+            r.provider.handleCallback({ state: start.deviceCode, confirm: start.userCode }),
+          )
+        ).code,
+      ).toBe('unauthorized');
+    });
+
+    it('refuses a confirmation that arrives before the provider redirect', async () => {
+      const r = rig();
+      const start = await r.provider.startDeviceAuth();
+      expect(
+        (
+          await errOf(() =>
+            r.provider.handleCallback({ state: start.deviceCode, confirm: 'AAAA-AAAA' }),
+          )
+        ).code,
+      ).toBe('invalid_request');
+    });
+  });
+
+  it('never reflects a forged state, markup included', async () => {
+    // A state that is not live never reaches the confirmation form -- the refusal names nothing
+    // the caller sent -- and a live state is base64url by construction, so the form's value
+    // escaping is defense in depth on top of an unreachable path.
+    const r = rig();
+    const d = makeDeps({ identity: r.provider });
+    const res = await HANDLERS.oidcCallback!(
+      ctx({ query: new URLSearchParams('state=%3Cscript%3Ealert(1)%3C%2Fscript%3E&confirm=x') }),
+      d,
+    );
+    expect(res.status).toBe(401);
+    expect(String(res.body)).not.toContain('<script>');
+    expect(String(res.body)).not.toContain('alert(1)');
   });
 });

@@ -12,15 +12,16 @@ URL it gets back, and polls. What differs is who completes the login in the midd
 ```
 mocactl                    control plane                      w3id
   │ POST /v1/auth/device      │                                │
-  │──────────────────────────>│ mint state, park it (TTL 15 m) │
-  │<─── verificationUri ──────│                                │
+  │──────────────────────────>│ mint state + user code (15 m)  │
+  │<── verificationUri + code─│                                │
   │                           │                                │
   │ browser opens the authorize URL ─────────────────────────>│
   │                           │                        user signs in
   │                           │<─── redirect: ?code&state ────│
   │                           │ exchange code (server-side),   │
   │                           │ verify id_token vs JWKS,       │
-  │                           │ park the principal on the state│
+  │                           │ render "enter your code" page  │
+  │                           │<─── ?confirm=<user code> ──────│
   │ POST /v1/auth/device/token│                                │
   │──────────────────────────>│                                │
   │<─── api token + refresh ──│                                │
@@ -30,6 +31,14 @@ The state token mocactl polls with is the same capability a device code is: sing
 TTL-bound, and worthless until the control plane has verified a provider-signed `id_token`
 against it. mocactl never sees the client secret or the authorization code — the exchange
 happens entirely server-side, at the control plane's `GET /v1/auth/oidc/callback`.
+
+**The browser-to-terminal binding.** A verified `id_token` is still not a login: the callback
+page asks for a short code (`XXXX-XXXX`) that the control plane minted at login start and showed
+only in the terminal that started it, and the login settles only when that code is typed (at
+most five tries). Without this, the authorize URL alone would be a capability — an attacker who
+starts a login and gets a victim with a live w3id SSO session to open the URL would hand the
+attacker a fully verified login as the victim, one click and no code to type. With it, the
+victim lands on the confirmation page and is asked for a code they have never seen.
 
 Subjects minted this way are `oidc:<provider sub>` (the provider's stable `sub` claim), so
 `SH_ADMIN_SUBJECTS` and — on the sandbox profile — `SH_ALLOWED_SUBJECTS` take entries in that
@@ -78,10 +87,13 @@ session, usually) is what the user completes:
 
 ```
 $ mocactl login
-Open https://preprod.login.w3.ibm.com/oidc/endpoint/default/authorize?... to sign in
+Open https://preprod.login.w3.ibm.com/oidc/endpoint/default/authorize?... and enter the code XY7C-K2M9
   (valid for 15 minutes, Ctrl-C to cancel)
 logged in as george@us.ibm.com
 ```
+
+Sign in at w3id, then enter the terminal's code on the confirmation page the redirect lands
+on — the same paste-and-confirm rhythm as GitHub's device flow.
 
 Everything after the login — refresh rotation, API tokens, session ownership, `mocactl auth
 token` — is identical to the GitHub flow, because none of it knows which provider produced the

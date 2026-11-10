@@ -51,9 +51,24 @@ export interface IdentityProvider {
    * authorization-code flow, oidc.ts): the callback route hands the query parameters here. Absent
    * on providers that hold the whole flow themselves (GitHub's device flow), and the callback
    * route answers those deployments with a plain refusal.
+   *
+   * `code` is the provider's redirect (first round); `confirm` is the terminal's user code typed
+   * into the callback page (second round, the browser-to-terminal binding -- see oidc.ts).
    */
-  handleCallback?(q: { code?: string; state?: string; error?: string }): Promise<void>;
+  handleCallback?(q: {
+    code?: string;
+    state?: string;
+    error?: string;
+    confirm?: string;
+  }): Promise<OidcCallbackOutcome>;
 }
+
+/**
+ * What the OIDC callback route should show the browser next: the confirmation form (the provider's
+ * redirect landed, the terminal's code is still owed), a wrong code (re-render with a note), a
+ * completed sign-in, or a refusal the poll will report.
+ */
+export type OidcCallbackOutcome = 'awaiting_confirmation' | 'wrong_code' | 'confirmed' | 'refused';
 
 /** Structural subset of fetch, so tests inject a scripted transport and no test touches the network. */
 export type FetchLike = (
@@ -211,8 +226,7 @@ export class TestUserProvider implements IdentityProvider {
  * email address, hence `@` in the charset). One RE so enrollment (SH_ALLOWED_SUBJECTS) can
  * validate entries without knowing which provider the deployment runs.
  */
-export const SUBJECT_RE =
-  /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$/;
+export const SUBJECT_RE = /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$/;
 
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')

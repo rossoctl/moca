@@ -231,7 +231,10 @@ export interface RequestCtx {
   egressHost?: EgressHost;
 }
 
-export type Handler = (ctx: RequestCtx, deps: CpDeps) => Promise<{ status: number; body: unknown }>;
+export type Handler = (
+  ctx: RequestCtx,
+  deps: CpDeps,
+) => Promise<{ status: number; body: unknown; contentType?: string }>;
 
 export function requirePrincipal(ctx: RequestCtx): TokenClaims {
   if (!ctx.principal) throw new CpError('token_required', 'this route requires a token');
@@ -472,6 +475,40 @@ async function catalogFor(
   };
 }
 
+/**
+ * Escape everything HTML-significant in a value that came from a query string (the callback's
+ * `state`, an error message) before it is placed in the page: the page is served to a browser on
+ * the strength of a URL a forger can construct, so a `<script>` in a parameter must render as
+ * text, never execute.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+/** The callback page: one inline-styled HTML document, no external resources, no scripts. */
+function htmlPage(
+  title: string,
+  bodyHtml: string,
+  status = 200,
+): {
+  status: number;
+  body: string;
+  contentType: string;
+} {
+  const page =
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>moca — ${escapeHtml(title)}</title></head>` +
+    `<body style="font-family:system-ui,sans-serif;max-width:28em;margin:4em auto;padding:0 1em">` +
+    `<h2>moca</h2>${bodyHtml}</body></html>`;
+  return { status, body: page, contentType: 'text/html; charset=utf-8' };
+}
+
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
 
@@ -584,9 +621,12 @@ export const HANDLERS: Record<string, Handler> = {
     return { status: 200, body: loginBody(deps, principal, issued) };
   },
 
-  // The OIDC callback is the one route answered by a BROWSER, not by mocactl: plain text, so the
-  // person landing here reads a sentence instead of a JSON error body. The refusal for a provider
-  // that holds its own flow (GitHub) names the setting to change, as the device-flow refusals do.
+  // The OIDC callback is the one route answered by a BROWSER, not by mocactl, so it answers HTML
+  // (sanitizeCallbackText escapes everything a provider or a forger can put in a query). Two
+  // rounds share the route (oidc.ts): the provider's redirect (?code=) renders the confirmation
+  // form that asks for the terminal's user code -- the browser-to-terminal binding -- and the
+  // form's submission (?confirm=) completes the sign-in. The refusal for a provider that holds its
+  // own flow (GitHub) names the setting to change, as the device-flow refusals do.
   oidcCallback: async (ctx, deps) => {
     if (!deps.identity.handleCallback) {
       return {
@@ -594,17 +634,39 @@ export const HANDLERS: Record<string, Handler> = {
         body: 'this control plane has no oidc identity provider: set SH_IDENTITY_PROVIDER=oidc',
       };
     }
+    const state = ctx.query.get('state') ?? undefined;
     try {
-      await deps.identity.handleCallback({
+      const outcome = await deps.identity.handleCallback({
         code: ctx.query.get('code') ?? undefined,
-        state: ctx.query.get('state') ?? undefined,
+        state,
         error: ctx.query.get('error') ?? undefined,
+        confirm: ctx.query.get('confirm') ?? undefined,
       });
-      return { status: 200, body: 'Sign-in received — return to your terminal.' };
+      if (outcome === 'confirmed') {
+        return htmlPage('Sign-in confirmed', '<p>Sign-in confirmed — return to your terminal.</p>');
+      }
+      if (outcome === 'refused') {
+        return htmlPage(
+          'Sign-in refused',
+          '<p>The sign-in was refused. Return to your terminal for the reason, and start again there.</p>',
+        );
+      }
+      const wrong = outcome === 'wrong_code';
+      return htmlPage(
+        'Confirm your sign-in',
+        `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
+          '<p>Enter the code shown in your terminal to finish signing in.</p>' +
+          `<form method="GET" action="/v1/auth/oidc/callback">` +
+          `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
+          `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
+          `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
+          `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,
+      );
     } catch (err) {
       const status = err instanceof CpError ? statusFor(err.code) : 500;
-      const message = err instanceof CpError && err.message ? err.message : 'sign-in failed';
-      return { status, body: message };
+      const message =
+        err instanceof CpError && err.message ? err.message : 'the sign-in could not be completed';
+      return htmlPage('Sign-in failed', `<p>${escapeHtml(message)}</p>`, status);
     }
   },
 
