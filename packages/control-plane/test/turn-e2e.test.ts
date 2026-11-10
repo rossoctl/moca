@@ -7,6 +7,7 @@ import { OwnershipIndex, ownerKey, type CpRedisLike } from '../src/ownership.js'
 import { RedisTurnQueue, LEAF_QUEUE_GROUP, LEAF_QUEUE_STREAM } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
 import { turnKey } from '../src/turn-record.js';
+import { defaultNewId } from '../src/handler-util.js';
 import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
 
 /**
@@ -95,7 +96,10 @@ beforeEach(async () => {
     // constant is still what pins the production name (turn-queue.test.ts).
     turnQueue: new RedisTurnQueue(redis, stream),
     leafResults: client as unknown as { get(k: string): Promise<string | null> },
-    newId: () => randomUUID(),
+    // The PRODUCTION binding, not `() => randomUUID()`: this suite claims every turn it submits, so
+    // it only passes while the minter and `MINTED_TURN_ID_RE` agree. Restating the generator here
+    // would keep it green through a production switch to nanoid or a prefixed id.
+    newId: defaultNewId,
     // The dequeue exchange's shared bearer. makeDeps leaves it undefined, and checkStaticBearer
     // rejects every call when none is configured, so without this the new route 401s unconditionally.
     config: { exchangeToken: EXCHANGE_TOKEN },

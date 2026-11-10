@@ -32,6 +32,11 @@ import { isTerminalState, type TurnCaps } from './turn-record.js';
  * turn permanently uncancellable. `markRunning` re-checks terminality itself, so a `DELETE` landing
  * between this call and that one is still refused there; nothing is stranded.
  *
+ * `turnId` is trusted to be a string, not to be well-formed: the `isMintedTurnId` shape gate is the
+ * ROUTE's (handlers.exchangeTurnCredential), because what it bounds is caller input reaching a key on
+ * a shared-bearer route. A library caller reaching this export directly has already passed whatever
+ * gate it answers to, so repeating the check here would only turn its own 404 into a 400.
+ *
  * M1 INTERIM (§9.1): it returns the resolved credential, under `MOCA_TENANCY=single` only. M2 replaces
  * the return value with MI1 §6.1's two grants and lifts the tenancy gate. `turn_exp`,
  * `MOCA_TURN_MAX_S` and refresh belong to that slice and are deliberately absent here.
@@ -55,8 +60,9 @@ export async function exchangeTurnCredential(
 
   const turn = turnId ? await deps.turns.get(turnId) : null;
   if (!turn) {
-    // Shaped like every other not-found answer, and it is what tells a worker holding a stale entry
-    // to ack and drop rather than retry a turn whose record has expired.
+    // DISTINGUISHABLE from the other claim refusals, deliberately: it is what tells a worker holding
+    // a stale entry to ack and drop rather than retry a turn whose record has expired. Not the
+    // 404-not-403 of spec §8.1 -- openapi.yaml's 404 description argues why, in one place.
     throw new CpError('turn_not_found', 'no such turn');
   }
   // `cancelled` and terminal ONLY. `running` is admitted: the first claim writes it, so every
@@ -158,7 +164,8 @@ export async function exchangeTurnCredential(
   // `PATCH /v1/sessions/{id}` between submission and dequeue moves an already-queued turn onto the new
   // model, which updateSession's own "a turn in flight keeps its model" does not cover because an async
   // turn's exchange can be an hour after its submission. Pinning them means adding both to the record
-  // (M2/#389), not reading them from a different place here.
+  // (M2/#388 -- the record is this issue's, so #389 cannot pin what it does not carry), not reading
+  // them from a different place here.
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,

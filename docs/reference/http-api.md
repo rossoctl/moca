@@ -186,6 +186,9 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
+An async turn that is still **queued** is a next turn, not a running one: it picks up the new model when a worker claims
+it, however long ago it was submitted, because `/internal/turn-credentials` reads `model` from the session as it is at
+dequeue. Pinning the model a queued turn was submitted with is M2 ([#388](https://github.com/rossoctl/moca/issues/388)).
 The id is checked against the credential's catalog (400 `model_unavailable` when it is not listed); when the endpoint
 cannot list its models, the id is accepted unverified and the answer has `modelVerified: false`. Only the two list routes
 answer 503 `model_catalog_unavailable`. These routes came with API 1.1.0; see the [changelog](../api/CHANGELOG.md).
@@ -195,7 +198,8 @@ Another user's session returns 404, not 403. Control-plane error codes and statu
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
 `credential_not_found`, `turn_not_found`), 409 (`turn_not_cancellable`, `turn_not_claimable`), 410 `device_code_expired`, 428 `authorization_pending`, 429
-`bundle_quota_exceeded`, 500 `internal_error`, 502 `identity_provider_misconfigured`, 503
+(`bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
+(`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in
 `packages/control-plane/src/errors.ts`.
 

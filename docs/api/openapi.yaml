@@ -1724,8 +1724,10 @@ paths:
               properties:
                 turnId:
                   type: string
+                  pattern: '^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                   description: |
-                    the id the worker read off the queue, and the ONLY thing the queue carries.
+                    the id the worker read off the queue, and the ONLY thing the queue carries. The
+                    pattern is the one `submitTurn` mints, and it is enforced (400), not advisory.
       responses:
         '200':
           description: the credential this turn spends, resolved from its record
@@ -1788,15 +1790,29 @@ paths:
                       maxTokens: { type: integer }
                       reasoning: { type: boolean }
                       vision: { type: boolean }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400':
+          description: |
+            `invalid_request`: the body carries no `turnId`, or one outside the `t-<uuid>` shape
+            `submitTurn` mints. Refused before Redis is touched, so no caller input picks the key
+            shape this route reads. A worker seeing it should ack its entry and drop it — the id on
+            the queue is corrupt and no retry can fix it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
           description: |
             `turn_not_found` for an id with no record, and `session_not_found` when the turn's session
-            is gone, tombstoned, or owned by someone else. Both are 404 and deliberately
-            indistinguishable from each other in kind: a shared-bearer caller gets no existence
-            oracle either (spec §8.1). A worker seeing this should ack its queue entry and drop it —
-            retrying cannot help.
+            is gone, tombstoned, or owned by someone else. A worker seeing either should ack its queue
+            entry and drop it — retrying cannot help.
+
+            The two codes are distinguishable, deliberately: a worker needs `turn_not_found` apart from
+            `session_not_found` (and both apart from 409 `turn_not_claimable`, whose message names the
+            state) to record why it dropped an entry. That costs nothing here, because every caller on
+            this route authenticated with the deployment-wide `SH_EXCHANGE_TOKEN` and a successful call
+            hands back the credential itself — so no refusal reveals anything the same caller could not
+            already obtain. This is NOT the 404-rather-than-403 rule of spec §8.1, which governs the
+            owner-scoped `/v1` routes a session token reaches.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
