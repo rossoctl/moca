@@ -79,51 +79,119 @@ func leaseRunner(t *testing.T, vm VM) func(cmd string) string {
 	}
 }
 
-// leftoverProcs is a guest command that prints `none` when no process matches the
-// (bracketed) pgrep -f pattern, and otherwise each match's command line. Without pgrep it
-// prints MISSING-PGREP, and on a pgrep error (status > 1) PGREP-ERROR:<status>, so a
-// broken probe fails loudly rather than reading as "nothing left".
-func leftoverProcs(pattern string) string {
-	return `command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }
-pids=$(pgrep -f '` + pattern + `'); rc=$?
-if [ $rc -gt 1 ]; then echo PGREP-ERROR:$rc; exit 0; fi
-if [ -z "$pids" ]; then echo none; else for p in $pids; do tr '\0' ' ' </proc/$p/cmdline; echo; done; fi`
+// leaseProcScanScript scans /proc in the guest, which has no procps: argv is
+// <count|list> <any|orphan> <pattern>. It reads each pid's cmdline (NUL to space),
+// skipping pids that vanish or cannot be read, and matches with re.search. The patterns
+// are bracketed ([s]leep ...), so neither this scanner's argv nor the Exec's own bash
+// command line, which carry them as text, can match.
+//   - count prints the number of matches; with orphan, <matches>/<matches with PPid 1>.
+//   - list prints `none`, or `<pid> <cmdline>` for each match.
+//
+// Any unexpected exception prints SCAN-ERROR:<msg>, so a broken probe fails loudly
+// rather than reading as "nothing left".
+const leaseProcScanScript = `
+import os, re, sys
+try:
+    mode, want, pat = sys.argv[1], sys.argv[2], re.compile(sys.argv[3])
+    me, hits = os.getpid(), []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % d, "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            ppid = None
+            if want == "orphan":
+                with open("/proc/%s/status" % d) as f:
+                    for line in f:
+                        if line.startswith("PPid:"):
+                            ppid = int(line.split()[1])
+        except OSError:
+            continue
+        if cmd and pat.search(cmd):
+            hits.append((d, cmd, ppid))
+    if mode == "count":
+        if want == "orphan":
+            print("%d/%d" % (len(hits), sum(1 for h in hits if h[2] == 1)))
+        else:
+            print(len(hits))
+    elif hits:
+        for d, cmd, _ in hits:
+            print(d, cmd)
+    else:
+        print("none")
+except Exception as e:
+    print("SCAN-ERROR:%r" % (e,))
+`
+
+// scanProcs is the guest command that runs leaseProcScanScript. Its callers check for
+// python3 first.
+func scanProcs(mode, want, pattern string) string {
+	return "python3 -c " + shQuote(leaseProcScanScript) + " " + mode + " " + want + " " + shQuote(pattern)
 }
 
-// countProcs is the positive control: a guest command that, for each pattern in turn,
-// polls for up to 3 s until `pgrep -fc` reports exactly one match, then prints
+// leftoverProcs is a guest command that prints `none` when no process matches the
+// (bracketed) pattern, and otherwise each match's pid and command line.
+func leftoverProcs(pattern string) string {
+	return `command -v python3 >/dev/null || { echo MISSING-PYTHON3; exit 0; }
+` + scanProcs("list", "any", pattern)
+}
+
+// procWant is one process the positive control waits for. orphan additionally requires
+// it to have been reparented to PID 1, as a daemon's final process is: otherwise the
+// daemon's transient intermediate could satisfy the count on its own.
+type procWant struct {
+	pattern string
+	orphan  bool
+}
+
+// want is the count line procWant expects: exactly one match, and for an orphan that
+// one match with PPid 1.
+func (w procWant) want() string {
+	if w.orphan {
+		return "1/1"
+	}
+	return "1"
+}
+
+// countProcs is the positive control: a guest command that, for each process in turn,
+// polls for up to 3 s until the scanner reports exactly one match, then prints
 // started=<index>:<count>. Without it, a Run 1 whose processes never started would make
-// Run 2's `none` a pass for the wrong reason. Per pattern, not a total: a daemon's
+// Run 2's `none` a pass for the wrong reason. Per process, not a total: a daemon's
 // transient intermediate process could make a total right while one process never ran.
-func countProcs(patterns ...string) string {
+func countProcs(wants ...procWant) string {
 	var b strings.Builder
-	b.WriteString("command -v pgrep >/dev/null || { echo MISSING-PGREP; exit 0; }\n")
-	for i, p := range patterns {
-		fmt.Fprintf(&b, "i=0; while n=$(pgrep -fc '%s'); [ \"$n\" != 1 ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; echo started=%d:$n\n", p, i)
+	b.WriteString("command -v python3 >/dev/null || { echo MISSING-PYTHON3; exit 0; }\n")
+	for i, w := range wants {
+		mode := "any"
+		if w.orphan {
+			mode = "orphan"
+		}
+		fmt.Fprintf(&b, "i=0; while n=$(%s); [ \"$n\" != %s ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; echo \"started=%d:$n\"\n",
+			scanProcs("count", mode, w.pattern), w.want(), i)
 	}
 	return b.String()
 }
 
-// requireProbeWorked fails the gate when a pgrep probe could not run.
+// requireProbeWorked fails the gate when a /proc probe could not run.
 func requireProbeWorked(t *testing.T, out string) {
 	t.Helper()
-	if strings.Contains(out, "MISSING-PGREP") {
-		t.Fatalf("the snapshot has no pgrep (procps), so the gate cannot look")
+	if strings.Contains(out, "MISSING-PYTHON3") {
+		t.Fatalf("the snapshot has no python3, so the gate cannot scan /proc")
 	}
-	if strings.Contains(out, "PGREP-ERROR:") {
-		t.Fatalf("pgrep failed in the guest:\n%s", out)
+	if strings.Contains(out, "SCAN-ERROR:") {
+		t.Fatalf("the /proc scan failed in the guest:\n%s", out)
 	}
 }
 
-// requireStarted asserts countProcs reported exactly one live process for each of its
-// patterns.
-func requireStarted(t *testing.T, out string, patterns ...string) {
+// requireStarted asserts countProcs saw each wanted process.
+func requireStarted(t *testing.T, out string, wants ...procWant) {
 	t.Helper()
 	requireProbeWorked(t, out)
-	for i, p := range patterns {
-		m := regexp.MustCompile(`(?m)^started=` + strconv.Itoa(i) + `:(\d*)$`).FindStringSubmatch(out)
-		if m == nil || m[1] != "1" {
-			t.Errorf("Run 1: %v processes match %q, want 1 -- the gate would check for leftovers of nothing", m, p)
+	for i, w := range wants {
+		m := regexp.MustCompile(`(?m)^started=` + strconv.Itoa(i) + `:(.*)$`).FindStringSubmatch(out)
+		if m == nil || m[1] != w.want() {
+			t.Errorf("Run 1: %v for %q, want %s -- the gate would check for leftovers of nothing", m, w.pattern, w.want())
 		}
 	}
 	if t.Failed() {
@@ -153,11 +221,14 @@ func TestGateLeaseExecKillsProcesses(t *testing.T) {
 	requireKVM(t)
 	run := leaseRunner(t, leaseGateVM(t, "vm-lkill"))
 
-	// Built from variables so that the Exec's own bash command line, which pgrep -f also
-	// sees, never carries the literal "sleep 30N" or the marker: only the started
+	// Built from variables so that the Exec's own bash command line, which the /proc scan
+	// also sees, never carries the literal "sleep 30N" or the marker: only the started
 	// processes match, in Run 1's count and in Run 2's search.
 	const pattern = `[s]leep 30[0-3]|[l]ease-kill-marker`
-	started := []string{`[s]leep 300`, `[s]leep 301`, `[s]leep 302`, `[s]leep 303`, `[l]ease-kill-marker`}
+	started := []procWant{
+		{`[s]leep 300`, false}, {`[s]leep 301`, false}, {`[s]leep 302`, false}, {`[s]leep 303`, false},
+		{`[l]ease-kill-marker`, true},
+	}
 	out := run(`s=30; m=lease-kill
 sleep ${s}0 & setsid sleep ${s}1 & nohup sleep ${s}2 >/dev/null 2>&1 & (sleep ${s}3 &)
 python3 -c ` + shQuote(leaseDaemonScript) + ` "$m-marker"
@@ -246,18 +317,18 @@ e=$(mktemp); { echo $BASHPID > /sys/fs/cgroup/moca-execs/cgroup.procs; } 2>"$e";
 echo "execsprocserr=$(tr '\n' ' ' <"$e")"; rm -f "$e"
 u=$(mkdir /sys/fs/cgroup/moca-execs/x 2>&1); echo mkdir=$?; echo "mkdirerr=$(echo "$u" | tr '\n' ' ')"
 kill -0 1 2>/dev/null; echo kill=$?
-echo "capeff=$(awk '/^CapEff:/ {print $2}' /proc/self/status)"
+echo "capeff=$(awk '/^CapEff:/ {print $2}' /proc/$BASHPID/status)"
 python3 -c ` + shQuote(leaseMountScript) + `
 u=$(unshare -U true 2>&1); echo unshare=$?; echo "unshareerr=$(echo "$u" | tr '\n' ' ')"
 python3 -c ` + shQuote(leaseProcMemScript) + `
 python3 -c ` + shQuote(leasePtraceScript) + `
 command -v find >/dev/null || echo MISSING-FIND
 echo "suid=[$(find / -xdev -perm /6000 -type f 2>/dev/null | tr '\n' ' ')]"
-echo "nnp=$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
+echo "nnp=$(awk '/^NoNewPrivs:/ {print $2}' /proc/$BASHPID/status)"
 echo uid=$(id -u)
 m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2>&1 &
-` + countProcs(pattern))
-	requireStarted(t, out, pattern)
+` + countProcs(procWant{pattern, false}))
+	requireStarted(t, out, procWant{pattern, false})
 
 	// 127 is "command not found": the image lacks the tool, which proves nothing denied it.
 	for _, step := range []string{"procs", "execsprocs", "mkdir", "kill", "unshare"} {
