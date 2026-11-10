@@ -80,21 +80,13 @@ export class TurnStore {
   }
 
   /**
-   * Blind release: the caller already knows no one else can hold this claim (the enqueue-failure
-   * compensation in turn-handlers.ts, which releases a key its OWN candidate just won). `toTerminal`
-   * cannot use this -- a newer submission may have re-claimed the key by the time a turn goes
-   * terminal, and a blind `del` would delete that live claim out from under it. Kept for the
-   * compensation path and for the contract suite; see `releaseIdempotencyKeyIf` for the terminal one.
-   */
-  async releaseIdempotencyKey(owner: string, key: string): Promise<void> {
-    await this.guard(() => this.redis.del([idempotencyKeyKey(this.tag(owner), key)]));
-  }
-
-  /**
-   * Release `key` ONLY while `expected` still holds it, answering whether it was released. The
-   * compare is the point: a submission that steps over a terminal holder (turn-handlers.claimKey)
-   * must not remove a claim some OTHER submission made in between, or both would believe they were
-   * first and fan out two turns for one idempotency key (§4.3).
+   * Release `key` ONLY while `expected` still holds it, answering whether it was released. This is
+   * the ONLY release: there is no blind `del` of a claim, because no caller can know it still holds
+   * one. The compare is the point -- a submission that steps over a terminal holder
+   * (turn-handlers.claimKey), a turn going terminal (`toTerminal`) and the enqueue-failure
+   * compensation (turn-handlers.submitTurn) must none of them remove a claim some OTHER submission
+   * made in between, or both would believe they were first and fan out two turns for one
+   * idempotency key (§4.3).
    *
    * Compare-then-delete over two round trips, not one atomic op: `CpRedisLike` is deliberately a
    * handful of typed commands with no WATCH, no MULTI and no EVAL, and §5.1 rules out Lua here. The
@@ -128,7 +120,9 @@ export class TurnStore {
       }),
     );
     // The OPEN set, written after the hash: a member whose hash is missing reads as "already gone"
-    // (listByOwner's rule), while a hash with no member would be invisible to the quota.
+    // (listByOwner's rule), while a hash with no member would be invisible to the quota. Idempotent
+    // against `reserveOpenSlot`, which a submission calls with this same turn id before creating the
+    // record: ZADD on an existing member only rewrites its score, so the slot is taken once.
     await this.guard(() =>
       this.redis.zAdd(this.ownerKey(rec.owner), { score: rec.createdAt, value: rec.turnId }),
     );
@@ -167,6 +161,30 @@ export class TurnStore {
    */
   async countOpen(owner: string): Promise<number> {
     return this.guard(() => this.redis.zCard(this.ownerKey(owner)));
+  }
+
+  /**
+   * Take a quota slot for `turnId` and answer the owner's open count INCLUDING it (§4.3).
+   *
+   * The quota must be decided by a WRITE. Reading the count and then checking it lets every
+   * concurrent submission read the same under-limit number and all pass -- measured against real
+   * Redis, 100 parallel submissions were all accepted with the limit at 5, because each one's ZCARD
+   * ran before any other's record existed. The slot is therefore claimed first and counted second,
+   * so a submission that is over the limit sees itself in the count.
+   *
+   * The member is the turn id the caller is about to create, so a reservation that becomes a record
+   * costs no extra write -- `create`'s own zAdd re-adds the same member with the same score. A
+   * caller that does NOT go on to create it (refused here, or deduplicated onto an existing turn)
+   * must `releaseOpenSlot` it, or the slot stays burned for the deployment's lifetime.
+   */
+  async reserveOpenSlot(owner: string, turnId: string, now: number): Promise<number> {
+    await this.guard(() => this.redis.zAdd(this.ownerKey(owner), { score: now, value: turnId }));
+    return this.countOpen(owner);
+  }
+
+  /** Give back a slot `reserveOpenSlot` took for a turn that will never exist. */
+  async releaseOpenSlot(owner: string, turnId: string): Promise<void> {
+    await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
   }
 
   /**
@@ -245,9 +263,9 @@ export class TurnStore {
    * the record is terminal, though, a resubmission that wins the freed key is safe no matter when it
    * arrives -- `claimKey`'s stale-stepover already handles "key points at a terminal turn" for every
    * caller that loses this race, so putting the release any later only widens that window for no
-   * benefit. It uses the COMPARE release, not the blind one (TurnStore.releaseIdempotencyKey): by the
-   * time a turn goes terminal, a newer submission may already have re-claimed this key (F1), and a
-   * blind `del` would delete that live claim instead of the stale one that belongs to this turn.
+   * benefit. The release COMPARES, as every release here does: by the time a turn goes terminal, a
+   * newer submission may already have re-claimed this key (F1), and a blind `del` would delete that
+   * live claim instead of the stale one that belongs to this turn.
    */
   private async toTerminal(
     rec: TurnRecord,

@@ -166,6 +166,67 @@ describe('submitTurn (spec §4.1)', () => {
     expect(asyncCounters().async_quota_refusals).toBe(1);
   });
 
+  it('holds the quota against submissions that arrive at once (§4.3)', async () => {
+    const quota = 3;
+    const burst = 12;
+    const d = turnDeps({ config: { asyncQueuedPerOwner: quota } });
+    // One session each, because the idempotency key defaults to the session id: a fan-out of N
+    // leaves is N sessions (§4.3), so this is the shape the quota exists to contain.
+    const sessions = [];
+    for (let i = 0; i < burst; i += 1) sessions.push(await session(d));
+
+    // In flight TOGETHER, not one after another. Reading the count and then checking it holds
+    // sequentially and not here: every submission reads the same under-limit number before any
+    // other has written anything, so all 12 pass. Against real Redis the same read-then-check
+    // accepted 100 of 100 with the limit at 5 -- the unbounded fan-out the quota is the only
+    // containment for.
+    const answers = await Promise.all(
+      sessions.map((sid) => submit(d, sid, { item, async: true }).catch((err: Error) => err)),
+    );
+
+    const accepted = answers.filter((a) => !(a instanceof Error));
+    // NEVER more than the limit is the invariant; exactly the limit is not promised under a burst.
+    // A reserve-then-count check can refuse a whole batch -- all of them write, then all of them
+    // read the full count -- and that direction is the safe one: the refused caller retries and the
+    // next attempt is admitted, whereas an over-admitted turn is already fanned out.
+    expect(accepted.length).toBeLessThanOrEqual(quota);
+    expect(accepted.length).toBeLessThan(burst);
+    expect(d.turnQueue.depth()).toBe(accepted.length);
+    // Every refusal is the quota's, not some other error the race happened to produce.
+    for (const a of answers.filter((x) => x instanceof Error))
+      expect((a as { code?: string }).code).toBe('async_quota_exhausted');
+    // A refused submission leaves NOTHING behind (§4.3) -- in particular not the slot it reserved
+    // to make the check atomic. A leaked slot is permanent: no record exists for it, so no terminal
+    // transition will ever remove it, and the owner's quota is smaller forever.
+    expect(await d.turns.countOpen('github:1234')).toBe(accepted.length);
+    expect(recordedTurnIds(d)).toHaveLength(accepted.length);
+    // ...so the owner can still submit afterwards, up to the limit, one at a time.
+    for (let i = accepted.length; i < quota; i += 1) {
+      const sid = await session(d);
+      expect((await submit(d, sid, { item, async: true })).status).toBe(202);
+    }
+    const overflow = await session(d);
+    expect(await codeOf(() => submit(d, overflow, { item, async: true }))).toBe(
+      'async_quota_exhausted',
+    );
+  });
+
+  it('frees the slot it reserved when the submission is deduplicated', async () => {
+    const d = turnDeps({ config: { asyncQueuedPerOwner: 2 } });
+    const sid = await session(d);
+    const other = await session(d);
+    // The resubmission reserves a slot before it discovers the live key and returns the first turn.
+    // Leaking that slot would cost the owner a quota place for every retry of a 202 they already
+    // had -- so two retries alone would exhaust a quota of 2 holding ONE real turn.
+    const first = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    for (let i = 0; i < 5; i += 1) {
+      const again = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+      expect(again.turnId).toBe(first.turnId);
+    }
+    expect(await d.turns.countOpen('github:1234')).toBe(1);
+    expect((await submit(d, other, { item, async: true })).status).toBe(202);
+  });
+
   it('names the owner s current count in the refusal message', async () => {
     // The count (3) and the limit (1) are deliberately DIFFERENT numbers, which takes submitting
     // under a generous limit and then lowering it -- as an operator may. With count == limit a bare
@@ -290,6 +351,37 @@ describe('submitTurn (spec §4.1)', () => {
     expect(d.turnQueue.ids).toEqual([retry.turnId]);
   });
 
+  it('leaves a newer claim alone when the enqueue fails under it', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    d.turnQueue.failWith = new Error('redis gone');
+
+    // The interleave this compensates for. A's enqueue fails, so A finalizes its record -- which
+    // ALREADY releases the key (F1) -- and only then releases the key itself. B runs in that gap:
+    // it finds A's holder terminal, steps over it (claimKey's stepover) and claims the key for its
+    // own live turn. A's release must therefore COMPARE: a blind `del` deletes B's live claim, and
+    // the next submission then claims the freed key outright and fans out a SECOND turn for one key.
+    let bResult: { turnId: string } | null = null;
+    const realFinalize = d.turns.finalize.bind(d.turns);
+    d.turns.finalize = async (turnId, state, now) => {
+      const out = await realFinalize(turnId, state, now);
+      if (bResult === null) {
+        d.turnQueue.failWith = null;
+        bResult = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+      }
+      return out;
+    };
+
+    await expect(submit(d, sid, { item, async: true })).rejects.toThrow('redis gone');
+    expect(bResult).not.toBeNull();
+    // B's claim survived A's compensation, so B's turn still owns the key...
+    expect(d.fake.hashes.get(idempotencyKeyKey('github:1234', sid))?.turnId).toBe(bResult!.turnId);
+    // ...and a retry deduplicates onto B rather than fanning out a second live turn.
+    const retry = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    expect(retry.turnId).toBe(bResult!.turnId);
+    expect(d.turnQueue.ids).toEqual([bResult!.turnId]);
+  });
+
   it('audits the submission with the turn id and the credential name', async () => {
     const d = turnDeps();
     const sid = await session(d);
@@ -382,6 +474,26 @@ describe('getTurn (spec §4.4)', () => {
       state: 'done',
       result: { status: 'done', patch: 'stale' },
     });
+  });
+
+  it('reports no result for a cancelled turn, which never ran (§4.5)', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    // What an earlier INTERACTIVE turn on this session left in the shared per-session result key.
+    d.fake.strings.set(
+      `leaf:result:${sid}`,
+      JSON.stringify({ status: 'done', patch: 'stale-interactive' }),
+    );
+    await HANDLERS.cancelTurn!(ctx({ principal: alice, params: { id: sid, turnId } }), d);
+
+    // `cancelled` is terminal, but §4.5 defines it as withdrawing a turn that was still `queued`:
+    // no leaf ever started, so nothing was written for it. Keying the result off terminality alone
+    // hands back the PREVIOUS turn's patch as this turn's -- a caller that cancelled a turn and
+    // polled it would read a successful result for work that never happened.
+    const body = (await get(d, sid, turnId)).body as Record<string, unknown>;
+    expect(body).toEqual({ turnId, state: 'cancelled', attempts: 0 });
+    expect(body.result).toBeUndefined();
   });
 
   it('404s an unknown turn, and another subject s session before reading params.turnId', async () => {

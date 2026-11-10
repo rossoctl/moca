@@ -144,13 +144,13 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
     });
 
     it('claims an idempotency key for the first turn and returns the FIRST id to the second (§4.3)', async () => {
-      const { store, now, done } = await make();
+      const { store, done } = await make();
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-first')).toBe('t-first');
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-second')).toBe('t-first');
       // Owner-scoped: one owner's key cannot address another's turn.
       expect(await store.claimIdempotencyKey('github:9999', 's-1', 't-other')).toBe('t-other');
       // Released when the turn goes terminal, so the same session can submit again afterwards.
-      await store.releaseIdempotencyKey('github:1234', 's-1');
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-first')).toBe(true);
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-third')).toBe('t-third');
       await done();
     });
@@ -167,8 +167,51 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-first')).toBe(true);
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-third')).toBe('t-third');
       // An already-absent key reads as released: the caller's own next claim then wins it outright.
-      await store.releaseIdempotencyKey('github:1234', 's-1');
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-third')).toBe(true);
       expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-gone')).toBe(true);
+      await done();
+    });
+
+    it('reserves a quota slot with the count INCLUDING it, and gives it back (§4.3)', async () => {
+      const { store, now, done } = await make();
+      // The write is what decides the quota: a submission's own slot must be in the count it reads,
+      // or every member of a parallel batch reads the same under-limit number and all pass.
+      expect(await store.reserveOpenSlot('github:1234', 't-1', now)).toBe(1);
+      expect(await store.reserveOpenSlot('github:1234', 't-2', now)).toBe(2);
+      expect(await store.countOpen('github:1234')).toBe(2);
+      // Owner-scoped, like every other key here.
+      expect(await store.reserveOpenSlot('github:9999', 't-3', now)).toBe(1);
+
+      await store.releaseOpenSlot('github:1234', 't-2');
+      expect(await store.countOpen('github:1234')).toBe(1);
+      // `create` re-adds the same member, so a reservation that becomes a record costs no extra
+      // slot: a second slot here would halve the owner's effective quota.
+      await store.create(rec({ turnId: 't-1' }));
+      expect(await store.countOpen('github:1234')).toBe(1);
+      await done();
+    });
+
+    it('admits at most `limit` of a parallel batch, on this backing (§4.3)', async () => {
+      const { store, now, done } = await make();
+      const limit = 5;
+      // The whole point of reserving instead of counting, asserted where it has to hold: on REAL
+      // Redis, not only in a fake whose "concurrency" is one event loop. The same batch against a
+      // read-then-check quota was accepted 100 of 100 with the limit at 5, because every ZCARD ran
+      // before any other submission had written anything.
+      const admitted = await Promise.all(
+        Array.from({ length: 40 }, async (_unused, i) => {
+          const turnId = `t-par-${i}`;
+          const held = await store.reserveOpenSlot('github:1234', turnId, now);
+          if (held <= limit) return turnId;
+          await store.releaseOpenSlot('github:1234', turnId);
+          return null;
+        }),
+      );
+      const won = admitted.filter((id): id is string => id !== null);
+      expect(won.length).toBeLessThanOrEqual(limit);
+      // Every refused reservation gave its slot back, so the set holds exactly the winners -- a
+      // leaked one is permanent, since no record exists to ever go terminal and remove it.
+      expect(await store.countOpen('github:1234')).toBe(won.length);
       await done();
     });
 

@@ -115,23 +115,32 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
-    // Pre-enqueue, so a refusal leaves nothing behind (§4.3): no record, no entry, no key claimed.
-    const open = await turns.countOpen(rec.owner);
-    if (open >= deps.config.asyncQueuedPerOwner) {
+    // Pre-enqueue, so a refusal leaves nothing behind (§4.3): no record, no entry, no key claimed,
+    // no slot held. The slot is RESERVED rather than counted, because a read-then-check cannot hold
+    // a limit against parallel submitters -- they all read the same under-limit count and all pass.
+    // `reserveOpenSlot` writes first and counts after, so the count a submission sees includes
+    // itself and only one of any over-limit batch can be under the limit.
+    const candidate = `t-${deps.newId()}`;
+    const held = await turns.reserveOpenSlot(rec.owner, candidate, deps.now());
+    if (held > deps.config.asyncQueuedPerOwner) {
+      await turns.releaseOpenSlot(rec.owner, candidate);
       countAsync('async_quota_refusals');
       await refusal(deps, rec, 'async_quota_exhausted');
       throw new CpError(
         'async_quota_exhausted',
-        `you already have ${open} non-terminal async turns (limit ${deps.config.asyncQueuedPerOwner}); wait for one to finish`,
+        // The count WITHOUT this submission, which is what the caller already has.
+        `you already have ${held - 1} non-terminal async turns (limit ${deps.config.asyncQueuedPerOwner}); wait for one to finish`,
       );
     }
 
     const idempotencyKey = parsed.idempotencyKey ?? rec.sessionId;
-    const candidate = `t-${deps.newId()}`;
     const claim = await claimKey(turns, rec.owner, idempotencyKey, candidate);
     if (!claim.fresh) {
       // A resubmission on a live key returns the EXISTING turn and enqueues nothing (§4.3): a client
-      // retrying a 202 it already received must not fan out twice.
+      // retrying a 202 it already received must not fan out twice. The reservation belongs to a turn
+      // that will now never exist, so it goes back -- left behind it would burn a quota slot on a
+      // member with no record, and nothing else in this design removes one.
+      await turns.releaseOpenSlot(rec.owner, candidate);
       return { status: 202, body: { sessionId: rec.sessionId, turnId: claim.turnId } };
     }
 
@@ -158,8 +167,17 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       // ever claim it, so it would never go terminal and therefore never acquire a TTL (§5.1).
       // Finalize it and release the key, so the caller's retry is not deduplicated against a turn
       // that will never run.
+      //
+      // The release COMPARES, and must. `finalize`'s own terminal transition already releases the
+      // key (F1), so by the time this line runs the key may belong to SOMEBODY ELSE: a resubmission
+      // that arrived in between found this turn terminal, stepped over it (claimKey's stepover) and
+      // claimed the key for its own turn. An unconditional `del` would delete that live claim,
+      // leaving a live turn with no key -- so the next submission claims the key outright and fans
+      // out a second turn for one key, the duplicate §4.3 exists to prevent. The compare makes this
+      // a no-op in exactly that case, and still releases the key when it is in fact still ours
+      // (`finalize` refused because the record was never written).
       await turns.finalize(turn.turnId, 'failed', deps.now());
-      await turns.releaseIdempotencyKey(rec.owner, idempotencyKey);
+      await turns.releaseIdempotencyKeyIf(rec.owner, idempotencyKey, turn.turnId);
       throw err;
     }
     await auditBestEffort(deps, 'turn_submitted', turn.turnId, {
@@ -185,7 +203,14 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     // `queued` beside the PREVIOUS turn's result, and a caller polling for completion would read it
     // as this turn's. Nothing is written for an async turn until it finishes, so there is no partial
     // result being withheld here (§4.4).
-    const result = isTerminalState(turn.state)
+    //
+    // `cancelled` is terminal but NEVER RAN: §4.5 defines it as a caller's withdrawal of a turn that
+    // was still `queued`, so no leaf ever started and nothing was ever written for it. Terminality
+    // alone would therefore hand back whatever the session's PREVIOUS turn left in the shared result
+    // key -- the same stale-result conflation the paragraph above refuses for `queued`, reappearing
+    // on the one terminal state it does not apply to.
+    const ran = isTerminalState(turn.state) && turn.state !== 'cancelled';
+    const result = ran
       ? deps.leafResults
         ? await readLeafResult(deps.leafResults, turn.sessionId)
         : null
