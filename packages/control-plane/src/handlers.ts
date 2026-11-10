@@ -47,6 +47,7 @@ import {
   viewTier,
 } from './exchange.js';
 import { MODEL_ID_RE } from './models.js';
+import { exchangeTurnCredential } from './turn-exchange.js';
 import {
   catalogAllowList,
   chooseModel,
@@ -1096,6 +1097,22 @@ export const HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'token is required');
     }
     return { status: 200, body: await exchangeCredential(token, deps) };
+  },
+
+  exchangeTurnCredential: async (ctx, deps) => {
+    // The router performs the shared-bearer check (it is the only layer that sees headers) and marks
+    // the request. A handler reached without that mark is a routing bug, and 401 is the safe answer.
+    if (!ctx.exchangeAuthorized) {
+      throw new CpError('unauthorized', 'exchange authentication failed');
+    }
+    const turnId = asRecord(ctx.body).turnId;
+    if (typeof turnId !== 'string' || turnId.length === 0) {
+      throw new CpError('invalid_request', 'turnId is required');
+    }
+    // `turnId` ALONE. No deliveryCount, no caps, no envelope: everything else comes from the record
+    // the control plane wrote at the authenticated enqueue, which is what makes a queue entry
+    // carrying one id sufficient (§5.1) and a queue entry carrying a credential unnecessary (§6.5).
+    return { status: 200, body: await exchangeTurnCredential(turnId, deps) };
   },
 
   /**

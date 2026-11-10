@@ -33,6 +33,8 @@ describe('the route table', () => {
         'GET /v1/config-bundles',
         'DELETE /v1/config-bundles/{digest}',
         'POST /internal/credentials',
+        // The dequeue-time credential exchange (async fan-out spec §5.4).
+        'POST /internal/turn-credentials',
         'GET /healthz',
         'GET /readyz',
         'GET /v1/discovery',
@@ -68,6 +70,15 @@ describe('the route table', () => {
     expect(auth('POST', '/v1/auth/revoke')).toBe('none');
     expect(auth('POST', '/v1/auth/revoke-all')).toBe('api');
     expect(auth('POST', '/internal/credentials')).toBe('exchange');
+    expect(auth('POST', '/internal/turn-credentials')).toBe('exchange');
+    // Both internal routes, and ONLY those two, take the shared bearer. The list is pinned rather
+    // than counted: a third route that quietly joined this auth kind would be reachable by anything
+    // in the harness pod, which is the one property the exchange bearer cannot defend on its own.
+    expect(
+      ROUTES.filter((r) => r.auth === 'exchange')
+        .map((r) => r.operationId)
+        .sort(),
+    ).toEqual(['exchangeCredential', 'exchangeTurnCredential']);
     // A client reads it before it has logged in; it carries no per-subject data.
     expect(auth('GET', '/v1/discovery')).toBe('none');
     // The host janitor's read takes its own bearer and never a user's token (SBX0 §8.3).
