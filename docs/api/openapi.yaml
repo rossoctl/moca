@@ -1817,6 +1817,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: |
+            `internal_error`: the audit write failed with an untyped error, or the turn store is not
+            wired. Not retryable the way the 503s below are — this is a bug, not an outage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: |
             `redis_unavailable` when the record cannot be read, or `credential_unavailable` when the

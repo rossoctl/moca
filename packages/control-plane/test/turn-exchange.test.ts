@@ -281,7 +281,7 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(entries.filter((e) => e.decision === 'credential_issued')).toEqual([]);
   });
 
-  it('answers 503 and returns NO credential when the audit write fails', async () => {
+  it('answers 500 (internal_error) and returns NO credential when the audit write fails', async () => {
     const d = exDeps();
     const sid = await session(d);
     const turnId = await queuedTurn(d, sid);
@@ -295,7 +295,7 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('internal_error');
   });
 
-  it('503s when the store is not wired, rather than 500ing on undefined', async () => {
+  it('answers a named internal_error when the store is not wired, rather than throwing a TypeError on undefined', async () => {
     const d = exDeps();
     // depsFromEnv always builds the store, so this is a wiring bug and not a caller error -- the same
     // reading turn-handlers.service() applies, and it must not surface as a TypeError.

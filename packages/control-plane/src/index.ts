@@ -176,6 +176,7 @@ export {
   type ExchangeResponse,
   type ResolvedInference,
 } from './exchange.js';
+export { exchangeTurnCredential, type TurnExchangeResponse } from './turn-exchange.js';
 export { buildHandler, startControlPlane } from './server.js';
 export {
   CREDENTIAL_STORES,

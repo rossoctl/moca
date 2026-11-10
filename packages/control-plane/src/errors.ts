@@ -114,6 +114,8 @@ const STATUS: Record<CpErrorCode, number> = {
   // 404: the dequeue exchange was handed a turn id with no record. Shaped like every other
   // not-found answer -- a shared-bearer caller gets no existence oracle either (spec §8.1) -- and it
   // is what tells a worker holding a stale queue entry to ack and drop rather than retry.
+  // The harness emits a same-named `turn_not_found` of its own (knative-server server.ts); the two
+  // are distinct codes at distinct hops that happen to share a name, not one code reused.
   turn_not_found: 404,
   // 409: the record exists but is `cancelled` or already terminal, so no credential is minted
   // (async spec §5.4). NEVER returned for `running`: a redelivery is the case the claim exists for.
