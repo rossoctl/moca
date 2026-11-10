@@ -151,6 +151,14 @@ export async function exchangeTurnCredential(
     );
   }
 
+  // `sandboxTier` and `model` come from the LIVE session, while `credentialName` and `cfg` above come
+  // from the record. The split is deliberate, and it is where a turn record stops being authoritative:
+  // §5.1 copies onto the record only what a turn must spend unchanged, so the two it does not copy can
+  // only be read from the session as it is now. The consequence is real and worth knowing -- a
+  // `PATCH /v1/sessions/{id}` between submission and dequeue moves an already-queued turn onto the new
+  // model, which updateSession's own "a turn in flight keeps its model" does not cover because an async
+  // turn's exchange can be an hour after its submission. Pinning them means adding both to the record
+  // (M2/#389), not reading them from a different place here.
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,

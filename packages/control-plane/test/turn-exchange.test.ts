@@ -245,6 +245,43 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('credential_required');
   });
 
+  it('refuses a MISDIRECTED secret rather than handing the worker a key its endpoint cannot read', async () => {
+    const RAW_KEY = 'sk-ant-api03-not-a-real-key'; // notsecret
+    const d = exDeps();
+    // A raw Anthropic API key whose endpoint resolves to a gateway. Direct mode would send the key
+    // itself to a host that is not api.anthropic.com -- a misdirected secret (spec §6.2, #368), and
+    // the one failure on this path that costs a user their key rather than only failing the turn.
+    await seedCredential(d, 'github:1234', 'misdirected', {
+      kind: 'api-key',
+      destination: { hosts: ['api.anthropic.com'] },
+      endpoint: 'https://litellm.internal/v1',
+      secret: { key: RAW_KEY },
+    });
+    const res = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { credentials: { inference: 'misdirected' } } }),
+      d,
+    );
+    const sid = (res.body as { sessionId: string }).sessionId;
+    const turnId = await queuedTurn(d, sid);
+
+    // Asserted on the ASYNC path specifically. The check lives in exchange.ts and is SHARED, so the
+    // session-path tests (exchange-auth-header.test.ts) pass whether or not this function calls it:
+    // removing the call here leaves this file's other 16 tests and the whole suite green. This test is
+    // what fails if a future edit -- #389 is the first caller -- drops it.
+    let message = '';
+    try {
+      await exchangeTurnCredential(turnId, d);
+      throw new Error('the exchange returned a credential for a misdirected secret');
+    } catch (e) {
+      message = (e as Error).message;
+      expect((e as { code: string }).code).toBe('credential_required');
+    }
+    // The message names the credential and the endpoint it should have, never the key itself: this
+    // refusal is logged, and a secret in a log outlives the incident that produced it (§7.2).
+    expect(message).toContain("'misdirected'");
+    expect(message).not.toContain(RAW_KEY);
+  });
+
   it('audits the credential NAME, the turn and the subject — never the value (§7.2)', async () => {
     const d = exDeps();
     const sid = await session(d);
