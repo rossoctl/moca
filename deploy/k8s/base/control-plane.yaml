@@ -85,10 +85,7 @@ spec:
                 { configMapKeyRef: { name: moca-settings, key: SH_OIDC_ISSUER, optional: true } }
             - name: SH_OIDC_CLIENT_ID
               valueFrom:
-                {
-                  configMapKeyRef:
-                    { name: moca-settings, key: SH_OIDC_CLIENT_ID, optional: true },
-                }
+                { configMapKeyRef: { name: moca-settings, key: SH_OIDC_CLIENT_ID, optional: true } }
             - name: SH_OIDC_REDIRECT_URI
               valueFrom:
                 {

@@ -279,14 +279,14 @@ function testUserProvider(
  * settings, so none is required; the harness-only fields take inert values that no mounted route reads.
  */
 function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
-  // ADR-0045: the sandbox profile admits only ENROLLED GitHub subjects (SBX0 §4.2,
-  // SH_ALLOWED_SUBJECTS, which every entry must match GITHUB_SUBJECT_RE). A synthetic `test:N`
-  // subject can never be enrolled there, so rather than serve a route that always refuses, refuse
-  // to boot and say which two settings conflict.
+  // ADR-0045: the sandbox profile admits only ENROLLED subjects (SBX0 §4.2, SH_ALLOWED_SUBJECTS,
+  // whose entries match SUBJECT_RE -- github: or oidc:). A synthetic `test:N` subject can never be
+  // enrolled there, so rather than serve a route that always refuses, refuse to boot and say which
+  // two settings conflict.
   if (testUsersFromEnv(env.SH_TEST_USERS) > 0) {
     throw new Error(
       'SH_TEST_USERS cannot be used on the sandbox profile: it admits only enrolled ' +
-        'github: subjects (SH_ALLOWED_SUBJECTS)',
+        'github:/oidc: subjects (SH_ALLOWED_SUBJECTS)',
     );
   }
   const config: CpConfig = {
