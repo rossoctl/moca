@@ -61,6 +61,12 @@ type Request struct {
 	// Firecracker's API, and the guest is the only place that can call clock_settime —
 	// see Spec Deviation 5.
 	HostUnixNanos int64 `json:"host_unix_nanos"`
+	// Lease marks a request that keeps the VM for a later command rather than
+	// ending it. omitempty: a request without it stays byte-identical to today's.
+	Lease bool `json:"lease,omitempty"`
+	// NormaliseWorkspace asks the guest to normalise the workspace before the
+	// command runs. omitempty for the same compatibility reason as Lease.
+	NormaliseWorkspace bool `json:"normalise_workspace,omitempty"`
 }
 
 // End is the terminal success frame. Dropped counts are bytes the guest threw away at
@@ -70,6 +76,9 @@ type End struct {
 	ExitCode      int32 `json:"exit_code"`
 	DroppedStdout int64 `json:"dropped_stdout"`
 	DroppedStderr int64 `json:"dropped_stderr"`
+	// TeardownFailed reports that the guest could not tear down the command's state
+	// after it exited. omitempty: a clean teardown adds no key.
+	TeardownFailed bool `json:"teardown_failed,omitempty"`
 }
 
 func WriteFrame(w io.Writer, k Kind, payload []byte) error {

@@ -40,6 +40,9 @@ type Command struct {
 	// CapBytes bounds each stream. Applied in the GUEST, so 8 MiB is never moved
 	// across vsock and then discarded (spec §4.1).
 	CapBytes int64
+	// Lease and NormaliseWorkspace are forwarded to the guest's Request flags.
+	Lease              bool
+	NormaliseWorkspace bool
 
 	// ctxDone is TEST-ONLY plumbing: the fake launcher fills it so a run hook can
 	// block until the run context ends, which is how the timeout and abort tests
@@ -66,6 +69,8 @@ type Result struct {
 	ExitCode      int32
 	DroppedStdout int64
 	DroppedStderr int64
+	// TeardownFailed is the guest's End.TeardownFailed, passed through unchanged.
+	TeardownFailed bool
 }
 
 // TruncatedStdout is what maps to End.truncated (spec §4.1, and the proto's own note

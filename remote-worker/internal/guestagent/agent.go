@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,6 +24,17 @@ type AgentOptions struct {
 	Shell      string // default "bash"
 	WorkDir    string // the mounted workspace; every command's cwd
 	ScratchDir string // guest tmpfs, for staged command files. Discarded with the VM
+	Lease      LeaseOptions
+}
+
+// LeaseOptions configures lease mode, in which one VM serves many Execs and each
+// Exec runs in its own cgroup as an unprivileged user (lease_linux.go). An empty
+// CgroupRoot means lease mode is unavailable: a lease request is refused.
+type LeaseOptions struct {
+	CgroupRoot string // each Exec gets CgroupRoot/e<seq>
+	UID, GID   int    // the exec identity the shim drops to
+	Home       string // the exec identity's HOME
+	ShimPath   string // the binary that acts as the lease shim; default /proc/self/exe
 }
 
 // Agent serves one command per connection out of a bash that was forked BEFORE the
@@ -54,6 +66,14 @@ type Agent struct {
 	// every subsequent command: a host-side timeout destroys the VM anyway, so this
 	// is the Agent being honest about a fact rather than a limitation it imposes.
 	dead atomic.Bool
+	// deadMsg, when set, replaces the parked-shell timeout text in the dead-agent
+	// refusal: a lease teardown failure kills the agent for a different reason.
+	deadMsg atomic.Pointer[string]
+
+	// leaseOn is the lease latch: set by the first lease request, after which a
+	// per-Exec request is refused (lease_linux.go). A per-Exec request never touches it.
+	leaseOn atomic.Bool
+	lease   leaseRuntime
 }
 
 func NewAgent(opts AgentOptions) (*Agent, error) {
@@ -64,6 +84,11 @@ func NewAgent(opts AgentOptions) (*Agent, error) {
 		opts.ScratchDir = os.TempDir()
 	}
 	a := &Agent{opts: opts}
+	if opts.Lease.CgroupRoot != "" {
+		if err := a.leasePrepare(); err != nil {
+			return nil, err
+		}
+	}
 	if err := a.forkShell(); err != nil {
 		return nil, err
 	}
@@ -119,6 +144,9 @@ func (a *Agent) forkShell() error {
 }
 
 func (a *Agent) Close() error {
+	// Before shell.Wait below: the lease reaper's wait4(-1) could otherwise reap the
+	// parked shell first and leave Wait with ECHILD.
+	a.stopLease()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.stdin != nil {
@@ -241,7 +269,11 @@ func (a *Agent) ServeConn(rw io.ReadWriteCloser) error {
 	// about to be destroyed by the host. Fail explicitly, now that stdin has been
 	// drained, rather than dispatching into a shell that is no longer there.
 	if a.dead.Load() {
-		return WriteFrame(rw, KindError, []byte("guest-agent: a previous command timed out; the parked shell was killed and this agent is dead"))
+		msg := "guest-agent: a previous command timed out; the parked shell was killed and this agent is dead"
+		if m := a.deadMsg.Load(); m != nil {
+			msg = *m
+		}
+		return WriteFrame(rw, KindError, []byte(msg))
 	}
 
 	capBytes := req.CapBytes
@@ -251,7 +283,16 @@ func (a *Agent) ServeConn(rw io.ReadWriteCloser) error {
 	w := &frameWriter{rw: rw, cap: capBytes}
 
 	var end End
-	if req.HasStdin {
+	if req.Lease {
+		end, err = a.runLease(req, stdin, w, rw)
+	} else if a.leaseOn.Load() {
+		// The latch. A per-Exec request runs as root on the parked shell, which a lease
+		// VM must not offer once an Exec has run in it as the exec user. The latch alone
+		// does not exclude a per-Exec request already in flight when the first lease
+		// request arrives: that relies on the host serialising Execs per VM, and on a
+		// VM's mode being fixed for its life.
+		err = errors.New("guest-agent: this agent serves lease requests only")
+	} else if req.HasStdin {
 		// Spec §5.4's one thing the parked shell cannot do: `base64 -d > file` only
 		// terminates at EOF, and you cannot close a long-lived shell's stdin without
 		// killing it. So a stdin command gets a freshly forked child.

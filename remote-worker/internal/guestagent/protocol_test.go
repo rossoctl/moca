@@ -71,3 +71,57 @@ func TestWriteJSONRoundTrip(t *testing.T) {
 		t.Fatalf("req = %+v", req)
 	}
 }
+
+func TestRequestWithoutLeaseFieldsIsByteIdenticalToToday(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, KindRequest, Request{Command: "true", TimeoutS: 5, CapBytes: 1}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	_, p, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	// omitempty keeps a non-lease request on the wire exactly as it was before the
+	// lease fields existed, so an old guest and a new host stay compatible.
+	for _, key := range []string{`"lease"`, `"normalise_workspace"`} {
+		if strings.Contains(string(p), key) {
+			t.Fatalf("request JSON %s carries %s", p, key)
+		}
+	}
+}
+
+func TestRequestLeaseFieldsRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, KindRequest, Request{Command: "true", Lease: true, NormaliseWorkspace: true}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	_, p, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	var req Request
+	if err := DecodeJSON(p, &req); err != nil {
+		t.Fatalf("DecodeJSON: %v", err)
+	}
+	if !req.Lease || !req.NormaliseWorkspace {
+		t.Fatalf("req = %+v, want both lease flags set", req)
+	}
+}
+
+func TestEndTeardownFailedRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, KindEnd, End{ExitCode: 0, TeardownFailed: true}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	_, p, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	var e End
+	if err := DecodeJSON(p, &e); err != nil {
+		t.Fatalf("DecodeJSON: %v", err)
+	}
+	if !e.TeardownFailed {
+		t.Fatalf("end = %+v, want TeardownFailed", e)
+	}
+}

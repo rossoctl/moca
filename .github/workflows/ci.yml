@@ -230,6 +230,23 @@ jobs:
           cat "$log"
           exit $rc
 
+      - name: Run the guest agent's lease tests as root (cgroup v2, uid drop, seccomp)
+        working-directory: remote-worker
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" GOCACHE="$RUNNER_TEMP/gocache-root" go test -race -v -run 'TestShim|TestSeccomp|TestLease|TestNormalise' ./internal/guestagent/ 2>&1 | tee "$RUNNER_TEMP/lease.log"
+          grep -q '^--- PASS: TestShimDropsToTheExecUserWithNoPrivileges' "$RUNNER_TEMP/lease.log" || { echo '::error title=Lease root tests asserted nothing::'; exit 1; }
+
+      # -race needs cgo, and under cgo glibc's setxid broadcast does the shim's
+      # setgroups/setres[ug]id. The guest-agent binary is built CGO_ENABLED=0, where Go's
+      # own AllThreadsSyscall does them: this run covers that production path.
+      - name: Run the lease shim tests as root without cgo (the production setxid path)
+        working-directory: remote-worker
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" CGO_ENABLED=0 GOCACHE="$RUNNER_TEMP/gocache-root-nocgo" go test -v -run 'TestShim' ./internal/guestagent/ 2>&1 | tee "$RUNNER_TEMP/shim-nocgo.log"
+          grep -q '^--- PASS: TestShimDropsToTheExecUserWithNoPrivileges' "$RUNNER_TEMP/shim-nocgo.log" || { echo '::error title=Lease shim tests without cgo asserted nothing::'; exit 1; }
+
   proto:
     runs-on: ubuntu-latest
     timeout-minutes: 10

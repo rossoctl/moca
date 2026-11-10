@@ -23,6 +23,13 @@ import (
 )
 
 func main() {
+	// Lease mode re-executes this binary (/proc/self/exe) as the per-Exec shim that
+	// drops to the exec uid. That invocation is not the agent and carries no agent
+	// flags, so it is dispatched before flag.Parse; ShimMain never returns.
+	if len(os.Args) > 1 && os.Args[1] == guestagent.ShimArg {
+		guestagent.ShimMain(os.Args[2:])
+	}
+
 	var (
 		listenAddr = flag.String("listen", "vsock:1024", "vsock:<port>, or unix:<path> for local development")
 		workDir    = flag.String("workdir", "/workspace", "the mounted workspace; every command's cwd")
@@ -31,6 +38,11 @@ func main() {
 
 		egressListen = flag.String("egress-listen", "", "loopback host:port for the egress forwarder (e.g. 127.0.0.1:3128); empty disables")
 		egressPort   = flag.Uint("egress-vsock-port", 1025, "host vsock port (CID 2) the egress forwarder splices to")
+
+		leaseCgroupRoot = flag.String("lease-cgroup-root", "", "cgroup2 directory under which each lease Exec gets its own cgroup; empty disables lease mode")
+		leaseUID        = flag.Int("lease-uid", 7000, "uid a lease Exec runs as")
+		leaseGID        = flag.Int("lease-gid", 7000, "gid a lease Exec runs as")
+		leaseHome       = flag.String("lease-home", "/tmp/sbx-home", "HOME of the lease exec identity; created at startup")
 	)
 	flag.Parse()
 
@@ -39,6 +51,11 @@ func main() {
 	}
 	agent, err := guestagent.NewAgent(guestagent.AgentOptions{
 		Shell: *shell, WorkDir: *workDir, ScratchDir: *scratchDir,
+		// With a cgroup root set, NewAgent prepares lease mode (cgroup root, HOME) and
+		// fails here, at boot, if it cannot: the snapshot build then never sees an agent.
+		Lease: guestagent.LeaseOptions{
+			CgroupRoot: *leaseCgroupRoot, UID: *leaseUID, GID: *leaseGID, Home: *leaseHome,
+		},
 	})
 	if err != nil {
 		log.Fatalf("guest-agent: %v", err)

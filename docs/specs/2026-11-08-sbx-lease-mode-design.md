@@ -561,8 +561,10 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    `cgroup.kill` (kernel ≥ 5.14). The E15/E16 rig pins `vmlinux-6.18.44` (moca-experiments
    `e15/rig/pins.sh:46`). No kernel change is needed. What remains is mounting `cgroup2` in the guest
    init (`build-snapshot.sh:604-610`). That changes the rootfs and so the snapshot hash for per-`Exec`
-   too. Per-`Exec` behaviour does not change, but each host rebuilds its snapshot once.
-2. **The snapshot manifest's `kernel_release` is the host's, not the guest's.** `build-snapshot.sh:1803`
+   too. Per-`Exec` behaviour does not change, but each host rebuilds its snapshot once. User
+   namespaces are not disabled in init: the agent disables them at the first lease request, so a
+   per-`Exec` VM keeps them.
+2. **Done (plan 1).** **The snapshot manifest's `kernel_release` is the host's, not the guest's.** `build-snapshot.sh:1803`
    writes `$(uname -r)` of the build host (`6.8.0-1061-nvidia` on SBX0). The guest kernel is
    identified only by `kernel_sha256`. Recording the guest's release is a small fix that the image work
    in item 1 can carry.

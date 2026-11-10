@@ -51,7 +51,7 @@ func Listen(addr string) (net.Listener, error) {
 // poller, a net.Addr, a Conn adapter) is small enough that a new module dependency
 // buys little for code that only ever runs inside one throwaway VM per command.
 func listenVsock(port uint32) (net.Listener, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	fd, err := listenSocket(unix.AF_VSOCK)
 	if err != nil {
 		return nil, fmt.Errorf("guestagent: vsock socket: %w", err)
 	}
@@ -77,6 +77,15 @@ func listenVsock(port uint32) (net.Listener, error) {
 	// closes fd exactly once, and nothing else may close fd directly.
 	f := os.NewFile(uintptr(fd), fmt.Sprintf("vsock:%d", port))
 	return &vsockListener{f: f, addr: vsockAddr{cid: unix.VMADDR_CID_ANY, port: port}}, nil
+}
+
+// listenSocket creates the listening socket for listenVsock. SOCK_CLOEXEC, like every
+// fd the agent opens: a lease Exec is forked from the agent, and an inherited port-1024
+// listener would let uid 7000 accept the host's next connection in the agent's place.
+// The domain is a parameter so a test can check the flags on an AF_UNIX socket where
+// there is no vsock.
+func listenSocket(domain int) (int, error) {
+	return unix.Socket(domain, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 }
 
 // vsockAddr implements net.Addr for an AF_VSOCK endpoint.

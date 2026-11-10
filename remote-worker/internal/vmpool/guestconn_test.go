@@ -1,6 +1,7 @@
 package vmpool
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -172,5 +173,36 @@ func TestRunOverConnUnblocksOnContextCancel(t *testing.T) {
 		// stop anything, and Abort is GrpcRelayTransport's DECLARED truncation
 		// mechanism (transport.ts:57-73).
 		t.Fatal("runOverConn did not unblock on cancel")
+	}
+}
+
+func TestRunOverConnSurfacesTeardownFailed(t *testing.T) {
+	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{ExitCode: 0, TeardownFailed: true})
+	})
+	res, err := runOverConn(context.Background(), conn, Command{Command: "true", CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+	if err != nil {
+		t.Fatalf("runOverConn: %v", err)
+	}
+	if !res.TeardownFailed {
+		t.Fatalf("res = %+v, want TeardownFailed", res)
+	}
+}
+
+func TestSendRequestCarriesTheLeaseFlags(t *testing.T) {
+	var buf bytes.Buffer
+	if err := sendRequest(&buf, Command{Command: "true", Lease: true, NormaliseWorkspace: true}, OutputCapBytes, time.Now()); err != nil {
+		t.Fatalf("sendRequest: %v", err)
+	}
+	_, p, err := ga.ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	var req ga.Request
+	if err := ga.DecodeJSON(p, &req); err != nil {
+		t.Fatalf("DecodeJSON: %v", err)
+	}
+	if !req.Lease || !req.NormaliseWorkspace {
+		t.Fatalf("req = %+v, want both lease flags forwarded", req)
 	}
 }

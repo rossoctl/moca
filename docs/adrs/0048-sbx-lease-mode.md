@@ -136,9 +136,7 @@ Decisions taken during design, each recorded in the spec with its section:
   the fact. The guest image must mount `cgroup2`, add the Exec uid and strip setuid bits, which
   changes every host's snapshot once, per-`Exec` included. Lease workspaces are owned by the Exec uid.
 - **Follow-up owed:** E17 (a and b); a lease section and a level-2 section in the SBX security review;
-  the implementation plan; fixing the snapshot
-  manifest's `kernel_release` (it records the build host's kernel, not the guest's); a Firecracker
-  balloon if E17 shows lease VMs pinned near guest RAM.
+  the implementation plan; a Firecracker balloon if E17 shows lease VMs pinned near guest RAM.
 
 ---
 

@@ -97,6 +97,62 @@ func TestManifestRejectsATamperedHash(t *testing.T) {
 	}
 }
 
+// A manifest written before features existed has no "features" key. It must still
+// decode, and it must not claim lease-v1: plan 2's worker refuses lease mode on it.
+func TestManifestFeaturesAreOptional(t *testing.T) {
+	old := `{"image":"i","vmm":"firecracker","instance_type":"t","kernel_release":"6.1",` +
+		`"guest_ram_mb":256,"capabilities":["bash"],"built_at":"2026-10-01T00:00:00Z",` +
+		`"kernel_sha256":"sha256:k","rootfs_sha256":"sha256:r","agent_sha256":"sha256:a","hash":"sha256:h"}`
+	var m Manifest
+	if err := json.Unmarshal([]byte(old), &m); err != nil {
+		t.Fatalf("decode an old manifest: %v", err)
+	}
+	if m.HasFeature(FeatureLeaseV1) {
+		t.Fatal("an old manifest with no features claims lease-v1")
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "features") {
+		t.Fatalf("an empty Features is encoded: %s", b)
+	}
+}
+
+func TestManifestHasLeaseFeature(t *testing.T) {
+	var m Manifest
+	if err := json.Unmarshal([]byte(`{"features":["lease-v1"]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasFeature(FeatureLeaseV1) {
+		t.Fatalf("Features = %v, HasFeature(lease-v1) = false", m.Features)
+	}
+	if m.HasFeature("lease-v2") {
+		t.Fatal("HasFeature matched a feature the manifest does not list")
+	}
+}
+
+// Features is outside the hash, like egress_ca_sha256: ComputeHash covers kernel,
+// rootfs and agent only, so a snapshot that predates the field still verifies.
+func TestManifestHashIgnoresFeatures(t *testing.T) {
+	without := writeSnapshot(t, t.TempDir(), nil)
+	with := writeSnapshot(t, t.TempDir(), func(m *Manifest) { m.Features = []string{FeatureLeaseV1} })
+	a, err := LoadManifest(without)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LoadManifest(with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Hash != b.Hash || b.ComputeHash() != a.ComputeHash() {
+		t.Fatalf("hash changed with Features: %s vs %s", a.Hash, b.Hash)
+	}
+	if err := b.Verify(with); err != nil {
+		t.Fatalf("Verify with Features: %v", err)
+	}
+}
+
 func TestManifestRequiresTheSnapshotFilesToExist(t *testing.T) {
 	img := writeSnapshot(t, t.TempDir(), nil)
 	if err := os.Remove(filepath.Join(img, "memfile")); err != nil {

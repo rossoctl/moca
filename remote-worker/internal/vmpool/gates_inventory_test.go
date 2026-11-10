@@ -60,15 +60,18 @@ var partiallyCoveredGates = map[string]string{
 // manualOnlyGates do not run in CI at all. The value is the prerequisite, so a reader
 // knows what it would take to run one rather than only that it did not run.
 var manualOnlyGates = map[string]string{
-	"TestGateWriteDurability":        "a write in Exec N must survive into Exec N+1 — needs a real guest to have a page cache to lose; /dev/kvm + golden snapshot",
-	"TestGateNoCrossRunBleed":        "two interleaved keys against real guests; /dev/kvm + golden snapshot. THE property this tier exists for (spec §2.3)",
-	"TestGateSnapshotHoldsNoSecrets": "greps the golden memfile and reads the guest's env; needs the snapshot on disk, and SANDBOX_TOKEN forwarded for its live-token half",
-	"TestGateNoNetworkDevice":        "reads /sys/class/net, resolv.conf, a direct dial and the env of a restored guest (P4.1 T7); /dev/kvm + golden snapshot built with the egress init",
-	"TestGateEgressThroughVsock":     "real guest -> vsock 1025 -> in-process moca-egress -> host upstream; /dev/kvm + a snapshot built with Task 6's init",
-	"TestGateCredentialNeverInGuest": "real guest -> in-process moca-egress with a fake control plane; scans the guest's files, environ and memory for the fixture credential; /dev/kvm + a snapshot built with --egress-ca, SH_EGRESS_CA_CERT and SH_EGRESS_CA_KEY",
-	"TestGateLeakFreeTeardown":       "counts pids in the VM cgroup slice against a wall-clock bound; needs real VMMs under /sys/fs/cgroup",
-	"TestGateClock":                  "reads the guest's own `date +%s`; only a restored snapshot can have a stale clock to catch",
-	"TestGateOutputCapAtSource":      "16 MiB of guest stdout against the 8 MiB cap, including the wall-time signature of capping in the guest",
+	"TestGateWriteDurability":         "a write in Exec N must survive into Exec N+1 — needs a real guest to have a page cache to lose; /dev/kvm + golden snapshot",
+	"TestGateNoCrossRunBleed":         "two interleaved keys against real guests; /dev/kvm + golden snapshot. THE property this tier exists for (spec §2.3)",
+	"TestGateSnapshotHoldsNoSecrets":  "greps the golden memfile and reads the guest's env; needs the snapshot on disk, and SANDBOX_TOKEN forwarded for its live-token half",
+	"TestGateNoNetworkDevice":         "reads /sys/class/net, resolv.conf, a direct dial and the env of a restored guest (P4.1 T7); /dev/kvm + golden snapshot built with the egress init",
+	"TestGateEgressThroughVsock":      "real guest -> vsock 1025 -> in-process moca-egress -> host upstream; /dev/kvm + a snapshot built with Task 6's init",
+	"TestGateCredentialNeverInGuest":  "real guest -> in-process moca-egress with a fake control plane; scans the guest's files, environ and memory for the fixture credential; /dev/kvm + a snapshot built with --egress-ca, SH_EGRESS_CA_CERT and SH_EGRESS_CA_KEY",
+	"TestGateLeakFreeTeardown":        "counts pids in the VM cgroup slice against a wall-clock bound; needs real VMMs under /sys/fs/cgroup",
+	"TestGateClock":                   "reads the guest's own `date +%s`; only a restored snapshot can have a stale clock to catch",
+	"TestGateOutputCapAtSource":       "16 MiB of guest stdout against the 8 MiB cap, including the wall-time signature of capping in the guest",
+	"TestGateLeaseExecKillsProcesses": "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
+	"TestGateLeaseFreshShell":         "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
+	"TestGateLeasePrivilege":          "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
 }
 
 // gateCoverage is how a gate is gated, as the code says rather than as a map claims.
@@ -214,7 +217,7 @@ func TestTheCIWorkflowsRunTheGates(t *testing.T) {
 	}{
 		{
 			path:     filepath.Join(root, ".github", "workflows", "ci.yml"),
-			contains: []string{"microvm-gates:", "TestGate"},
+			contains: []string{"microvm-gates:", "TestGate", "TestShim"},
 			why:      "the job that runs the hardware-free §8 gates on every PR",
 		},
 		{
