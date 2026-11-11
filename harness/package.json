@@ -9,6 +9,7 @@
     "./run-turn": "./src/run-turn.ts",
     "./turn-stream": "./src/turn-stream.ts",
     "./run-leaf": "./src/run-leaf.ts",
+    "./leaf-job-runner": "./src/leaf-job-runner.ts",
     "./buffered-redis-backend": "./src/buffered-redis-backend.ts",
     "./budget-voter": "./src/budget-voter.ts",
     "./leaf-result-store": "./src/leaf-result-store.ts",
@@ -32,6 +33,7 @@
     "@moca/config-bundle": "workspace:*",
     "@moca/session-backend": "workspace:*",
     "@moca/k8s-sandbox": "workspace:*",
+    "@moca/work-queue": "workspace:*",
     "@earendil-works/pi-ai": "link:../pi-fork/packages/ai",
     "@earendil-works/pi-coding-agent": "link:../pi-fork/packages/coding-agent",
     "redis": "^6.3.1"
