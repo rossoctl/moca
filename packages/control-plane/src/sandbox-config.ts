@@ -1,7 +1,7 @@
 import { CpError } from './errors.js';
 import type { CpConfig } from './handlers.js';
 import type { RouteProfile } from './routes.js';
-import { GITHUB_SUBJECT_RE } from './identity.js';
+import { SUBJECT_RE } from './identity.js';
 import { DEFAULT_SANDBOX_ISSUER } from './sandbox-token.js';
 import { egressConfigFromEnv, type EgressConfig } from './egress-config.js';
 
@@ -126,8 +126,8 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
       'SH_ALLOWED_SUBJECTS is required on the sandbox profile: the enrolled subjects',
     );
   }
-  if (!allowedSubjects.every((s) => GITHUB_SUBJECT_RE.test(s))) {
-    throw new Error(`SH_ALLOWED_SUBJECTS: every entry must match ${GITHUB_SUBJECT_RE}`);
+  if (!allowedSubjects.every((s) => SUBJECT_RE.test(s))) {
+    throw new Error(`SH_ALLOWED_SUBJECTS: every entry must match ${SUBJECT_RE}`);
   }
   const execEndpoint = env.SH_SANDBOX_EXEC_ENDPOINT ?? '';
   const port = Number(execEndpoint.slice(execEndpoint.lastIndexOf(':') + 1));

@@ -256,7 +256,7 @@ describe('App', () => {
 
   it('opens login when the cached login is missing', async () => {
     const { frame, until } = mount(testRuntime({ auth: null }));
-    await until(() => frame().includes('Log in with GitHub'));
+    await until(() => frame().includes('Log in'));
   });
 
   it('a first message creates a session and streams the reply', async () => {
@@ -568,9 +568,9 @@ describe('App', () => {
     const { stdin, all, frame, until, ready } = mount(rt);
     await ready();
     await send(stdin, `/promote ${dir}`);
-    await until(() => all().includes('Log in with GitHub'));
+    await until(() => all().includes('Log in'));
     await until(() => all().includes('your login expired — log in, then run /promote again'));
-    await until(() => rt.auth?.apiToken === 'a2' && !frame().includes('Log in with GitHub'));
+    await until(() => rt.auth?.apiToken === 'a2' && !frame().includes('Log in'));
     await tick();
     expect(frame()).not.toContain('New session');
     expect(all()).not.toContain('config bundle sha256:');
@@ -730,7 +730,7 @@ describe('App', () => {
     await ready();
     await send(stdin, 'hi');
     await until(() => frame().includes('run /doctor'));
-    expect(frame()).not.toContain('Log in with GitHub');
+    expect(frame()).not.toContain('Log in');
   });
 
   it('opens login when the API token expires mid-session, then re-sends the prompt', async () => {
@@ -757,7 +757,7 @@ describe('App', () => {
     await ready();
     await send(stdin, 'hi');
     // The fake approves on the first poll, so Login can be gone by the next sample: check every frame.
-    await until(() => all().includes('Log in with GitHub'));
+    await until(() => all().includes('Log in'));
     expect(mints).toBe(1);
     // The device flow completes (pollDeviceAuth approves on the first poll).
     await until(() => all().includes('replayed'));
@@ -791,7 +791,7 @@ describe('App', () => {
     await tick();
     stdin.write('l');
     // Login is transient here (the fake approves on the first poll): check every frame, not the last.
-    await until(() => all().includes('Log in with GitHub'));
+    await until(() => all().includes('Log in'));
     // The device flow approves on the first poll; the Sessions overlay comes back and lists.
     await until(() => frame().includes('remote-1'));
     expect(frame()).toContain('Sessions');
@@ -820,7 +820,7 @@ describe('App', () => {
     const { stdin, all, frame, until } = mount(rt);
     await until(() => inputReady(stdin) && frame().includes('ABCD-1234'));
     stdin.write(KEY.escape);
-    await until(() => !frame().includes('Log in with GitHub'));
+    await until(() => !frame().includes('Log in'));
     await until(() => inputReady(stdin) && frame().includes('type a message'));
     approve = true;
     await send(stdin, 'hi'); // New Session lists credentials: token_required

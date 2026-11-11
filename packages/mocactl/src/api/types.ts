@@ -18,7 +18,11 @@ export interface ModelList {
 
 export interface DeviceStart {
   deviceCode: string;
-  userCode: string;
+  /**
+   * The code the user confirms the login with: typed at the provider (github) or on the control
+   * plane's confirmation page (oidc) -- see DeviceStart.userCode in the control plane.
+   */
+  userCode?: string;
   verificationUri: string;
   interval: number;
   expiresIn: number;

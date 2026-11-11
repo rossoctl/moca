@@ -126,10 +126,21 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
         const raw = await readBody(req, bodyLimitFor(matched.route));
         if (raw.length > 0) {
-          try {
-            ctx.body = JSON.parse(raw);
-          } catch {
-            throw new CpError('invalid_json', 'body is not valid JSON');
+          // Two body languages: JSON for every client, and urlencoded for the one HTML form a
+          // browser submits (the oidc confirmation, and only where the route opted in with
+          // formBody -- a JSON route that also parsed forms would be reachable by a plain
+          // cross-origin <form>, a CORS "simple" request, for no gain).
+          if (
+            matched.route.formBody === true &&
+            (req.headers['content-type'] ?? '').includes('application/x-www-form-urlencoded')
+          ) {
+            ctx.body = Object.fromEntries(new URLSearchParams(raw));
+          } else {
+            try {
+              ctx.body = JSON.parse(raw);
+            } catch {
+              throw new CpError('invalid_json', 'body is not valid JSON');
+            }
           }
         } else if (matched.route.bodyRequired !== false) {
           // A route whose handler never reads ctx.body (startDeviceAuth, mintSessionToken) sets
@@ -144,16 +155,21 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
       // and this is the runtime answer if one ever slips through.
       if (!handler) throw new CpError('internal_error', 'route has no handler');
 
-      const { status, body } = await handler(ctx, deps);
+      const { status, body, contentType, headers } = await handler(ctx, deps);
+      // A handler's extra response headers (the oidc page's no-store / frame denial); none by
+      // default, so nothing else on the wire changes.
+      const extra = headers ?? {};
       if (body === undefined) {
-        res.writeHead(status).end();
+        res.writeHead(status, extra).end();
         return;
       }
       if (typeof body === 'string') {
-        res.writeHead(status, { 'Content-Type': 'text/plain' }).end(body);
+        // A string body is plain text unless the handler says otherwise -- only the oidc callback
+        // page renders HTML, and it is the one route answered by a browser rather than a client.
+        res.writeHead(status, { 'Content-Type': contentType ?? 'text/plain', ...extra }).end(body);
         return;
       }
-      res.writeHead(status, JSON_HEADERS).end(JSON.stringify(body));
+      res.writeHead(status, { ...JSON_HEADERS, ...extra }).end(JSON.stringify(body));
     };
 
     route().catch((err) => {

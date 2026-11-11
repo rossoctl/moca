@@ -35,7 +35,7 @@ describe('LoginOverlay', () => {
     );
     expect(lastFrame()).toContain('ABCD-1234');
     expect(lastFrame()).toContain('https://github.com/login/device');
-    expect(lastFrame()).toContain('code expires in 15m00s');
+    expect(lastFrame()).toContain('sign-in window closes in 15m00s');
     stdin.write('c');
     await waitFor(() => copy.mock.calls.length > 0, 1000, lastFrame);
     expect(copy).toHaveBeenCalledWith('ABCD-1234');
@@ -134,7 +134,7 @@ describe('LoginOverlay', () => {
     await waitFor(() => (lastFrame() ?? '').includes('CODE-0002'), 1000, lastFrame);
     expect(lastFrame()).not.toContain('CODE-0001');
     expect(lastFrame()).toContain('that code expired');
-    expect(lastFrame()).toContain('code expires in 15m00s');
+    expect(lastFrame()).toContain('sign-in window closes in 15m00s');
     unmount();
   });
 

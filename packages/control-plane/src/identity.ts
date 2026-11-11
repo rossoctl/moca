@@ -22,7 +22,13 @@ export interface Principal {
 
 export interface DeviceStart {
   deviceCode: string;
-  userCode: string;
+  /**
+   * The code the user confirms the login with: typed at the provider (GitHub's device flow) or
+   * on the control plane's own confirmation page (the OIDC flow, where it doubles as the
+   * browser-to-terminal binding -- see oidc.ts). Every provider mints one; a client still must
+   * not assume it is present, only render it when it is.
+   */
+  userCode?: string;
   verificationUri: string;
   interval: number;
   expiresIn: number;
@@ -40,6 +46,43 @@ export interface IdentityProvider {
    * so an SH_ADMIN_SUBJECTS change reaches a long-lived login within one API-token lifetime (B14).
    */
   rolesFor(subject: string): string[];
+
+  /**
+   * A provider whose user completes login in a browser pointed BACK at the control plane (the OIDC
+   * authorization-code flow, oidc.ts): the callback route hands the query parameters here. Absent
+   * on providers that hold the whole flow themselves (GitHub's device flow), and the callback
+   * route answers those deployments with a plain refusal.
+   *
+   * `code` is the provider's redirect (first round); `confirm` is the terminal's user code typed
+   * into the callback page, with `token` the browser-bound half of the binding (second round --
+   * see oidc.ts).
+   */
+  handleCallback?(q: {
+    code?: string;
+    state?: string;
+    error?: string;
+    confirm?: string;
+    token?: string;
+  }): Promise<OidcCallbackResult>;
+}
+
+/**
+ * What the OIDC callback route should show the browser next: the confirmation form (the provider's
+ * redirect landed, the terminal's code is still owed), a wrong code (re-render with a note), a
+ * completed sign-in, or a refusal the poll will report.
+ */
+export type OidcCallbackOutcome = 'awaiting_confirmation' | 'wrong_code' | 'confirmed' | 'refused';
+
+/**
+ * The callback's answer, plus -- on the first round only -- the browser-bound confirmation token
+ * the route must deliver in THAT response (a hidden form field) and require back in the second.
+ * It is the piece the login's initiator never sees: their victim's browser received it, they did
+ * not, so state + user code + this token together prove the confirmation came from the browser
+ * that completed the provider's redirect.
+ */
+export interface OidcCallbackResult {
+  outcome: OidcCallbackOutcome;
+  confirmToken?: string;
 }
 
 /** Structural subset of fetch, so tests inject a scripted transport and no test touches the network. */
@@ -192,6 +235,23 @@ export class TestUserProvider implements IdentityProvider {
     return rolesFor(subject, this.adminSubjects);
   }
 }
+/**
+ * The charset an oidc provider's `sub` may carry, as a PATTERN (not a RegExp) so both users of
+ * the grammar build from this one string and cannot drift: oidc.ts's token check and the
+ * enrollment grammar below. It allows exactly what an enterprise IdP's sub carries (w3id's is an
+ * email address, hence `@`; AppID's a UUID) and nothing that would break a Redis key, an audit
+ * line or SH_ALLOWED_SUBJECTS: no whitespace, no control characters, and no colon -- that is the
+ * provider/subject separator.
+ */
+export const OIDC_SUB_PATTERN = '[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}';
+
+/**
+ * Every subject form the control plane mints, across providers: `github:<numeric id>`,
+ * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>`. Built from the same pattern
+ * oidc.ts verifies tokens against, so enrollment (SH_ALLOWED_SUBJECTS) and login can never
+ * disagree about what an oidc subject is.
+ */
+export const SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|test:[0-9]+|oidc:${OIDC_SUB_PATTERN})$`);
 
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')

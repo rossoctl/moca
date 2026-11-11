@@ -109,7 +109,7 @@ describe('the bundle', () => {
         '    os.execv(sys.argv[1], sys.argv[1:])',
         "out = b''",
         'end = time.time() + 8',
-        "while time.time() < end and b'Log in with GitHub' not in out:",
+        "while time.time() < end and b'Log in' not in out:",
         '    r, _, _ = select.select([fd], [], [], 0.2)',
         '    if r:',
         '        try: out += os.read(fd, 65536)',
@@ -133,7 +133,7 @@ describe('the bundle', () => {
         timeout: 15_000,
       });
       expect(r.stdout).not.toContain('Dynamic require');
-      expect(r.stdout).toContain('Log in with GitHub');
+      expect(r.stdout).toContain('Log in');
     },
     20_000,
   );
