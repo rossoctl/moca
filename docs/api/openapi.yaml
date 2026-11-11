@@ -621,6 +621,40 @@ paths:
           description: unknown or expired sign-in state
           content:
             text/plain: { schema: { type: string } }
+    post:
+      operationId: oidcCallbackSubmit
+      summary: The confirmation form's submission
+      description: |
+        The second round, as the browser's form submits it (urlencoded): state, the typed user
+        code (confirm) and the round-1 browser token (ct). POST, not GET, so the code and the
+        token stay out of URLs, access logs and browser history. Same outcomes and pages as the
+        GET round. Every response carries Cache-Control: no-store, X-Frame-Options: DENY, a
+        frame-ancestors 'none' CSP and Referrer-Policy: no-referrer.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [state, confirm, ct]
+              properties:
+                state: { type: string }
+                confirm: { type: string, description: the terminal's user code, XXXX-XXXX }
+                ct: { type: string, description: the browser-bound token from the round-1 response }
+      responses:
+        '200':
+          description: the confirmed page, the re-rendered form (wrong code), or the refusal page
+          content:
+            text/html: { schema: { type: string } }
+        '400':
+          description: no oidc provider configured, or the form is missing its fields
+          content:
+            text/html: { schema: { type: string } }
+        '401':
+          description: unknown or expired sign-in state
+          content:
+            text/html: { schema: { type: string } }
   /v1/auth/token:
     post:
       operationId: refreshAuth

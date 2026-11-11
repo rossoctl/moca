@@ -657,6 +657,22 @@ describe('the callback route', () => {
     });
   });
 
+  it('submits the confirmation over POST (urlencoded), keeping the code out of the URL', async () => {
+    const r = rig();
+    mint(r, { sub: 'user-1', name: 'Alice Example' });
+    const d = makeDeps({ identity: r.provider });
+    const start = await r.provider.startDeviceAuth();
+    const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    const res = await HANDLERS.oidcCallbackSubmit!(
+      ctx({ body: { state: start.deviceCode, confirm: start.userCode, ct: landed.confirmToken } }),
+      d,
+    );
+    expect(res.status).toBe(200);
+    expect(String(res.body)).toMatch(/return to your terminal/);
+    // The page's headers make it un-frameable and uncached.
+    expect(res.headers).toMatchObject({ 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' });
+  });
+
   it('never reflects a forged state, markup included', async () => {
     // A state that is not live never reaches the confirmation form -- the refusal names nothing
     // the caller sent -- and a live state is base64url by construction, so the form's value

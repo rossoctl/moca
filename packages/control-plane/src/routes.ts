@@ -132,6 +132,17 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'oidcCallback',
   },
+  // The confirmation form's submission: POST so the user code and the browser token stay out of
+  // URLs, access logs and browser history. Same path, same handler logic, urlencoded body.
+  {
+    method: 'POST',
+    path: '/v1/auth/oidc/callback',
+    auth: 'none',
+    sessionScoped: false,
+    bodyRequired: false,
+    profiles: BOTH,
+    operationId: 'oidcCallbackSubmit',
+  },
   // B14: the refresh token is the credential on the first two, so they take no API token.
   {
     method: 'POST',

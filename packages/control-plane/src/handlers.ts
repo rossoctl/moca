@@ -234,7 +234,13 @@ export interface RequestCtx {
 export type Handler = (
   ctx: RequestCtx,
   deps: CpDeps,
-) => Promise<{ status: number; body: unknown; contentType?: string }>;
+) => Promise<{
+  status: number;
+  body: unknown;
+  contentType?: string;
+  /** Extra response headers (the oidc page's cache/frame policy); nothing by default. */
+  headers?: Record<string, string>;
+}>;
 
 export function requirePrincipal(ctx: RequestCtx): TokenClaims {
   if (!ctx.principal) throw new CpError('token_required', 'this route requires a token');
@@ -490,7 +496,11 @@ function escapeHtml(s: string): string {
     .replaceAll("'", '&#39;');
 }
 
-/** The callback page: one inline-styled HTML document, no external resources, no scripts. */
+/**
+ * The callback page: one inline-styled HTML document, no external resources, no scripts. The
+ * headers make it un-frameable, uncached and referer-silent: a framed confirmation form is a
+ * clickjacking surface, and the page's URLs and tokens must not live in a cache or leak onward.
+ */
 function htmlPage(
   title: string,
   bodyHtml: string,
@@ -499,6 +509,7 @@ function htmlPage(
   status: number;
   body: string;
   contentType: string;
+  headers: Record<string, string>;
 } {
   const page =
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
@@ -506,12 +517,75 @@ function htmlPage(
     `<title>moca — ${escapeHtml(title)}</title></head>` +
     `<body style="font-family:system-ui,sans-serif;max-width:28em;margin:4em auto;padding:0 1em">` +
     `<h2>moca</h2>${bodyHtml}</body></html>`;
-  return { status, body: page, contentType: 'text/html; charset=utf-8' };
+  return {
+    status,
+    body: page,
+    contentType: 'text/html; charset=utf-8',
+    headers: {
+      'Cache-Control': 'no-store',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy':
+        "frame-ancestors 'none'; default-src 'none'; style-src 'unsafe-inline'",
+      'Referrer-Policy': 'no-referrer',
+    },
+  };
+}
+
+/** The OIDC callback's two rounds, shared by the GET (query) and POST (form) routes. */
+async function oidcCallbackImpl(
+  deps: CpDeps,
+  field: (k: string) => string | null,
+): Promise<{ status: number; body: string; contentType: string; headers: Record<string, string> }> {
+  if (!deps.identity.handleCallback) {
+    return {
+      status: 400,
+      body: 'this control plane has no oidc identity provider: set SH_IDENTITY_PROVIDER=oidc',
+      contentType: 'text/plain',
+      headers: {},
+    };
+  }
+  const state = field('state') ?? undefined;
+  try {
+    const { outcome, confirmToken } = await deps.identity.handleCallback({
+      code: field('code') ?? undefined,
+      state,
+      error: field('error') ?? undefined,
+      confirm: field('confirm') ?? undefined,
+      token: field('ct') ?? undefined,
+    });
+    if (outcome === 'confirmed') {
+      return htmlPage('Sign-in confirmed', '<p>Sign-in confirmed — return to your terminal.</p>');
+    }
+    if (outcome === 'refused') {
+      return htmlPage(
+        'Sign-in refused',
+        '<p>The sign-in was refused. Return to your terminal for the reason, and start again there.</p>',
+      );
+    }
+    const wrong = outcome === 'wrong_code';
+    return htmlPage(
+      'Confirm your sign-in',
+      `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
+        '<p>Enter the code shown in your terminal to finish signing in.</p>' +
+        `<form method="POST" action="/v1/auth/oidc/callback">` +
+        `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
+        // The browser-bound half of the binding (oidc.ts): minted in the round-1 response this
+        // browser received, invisible to whoever started the login, required in round 2.
+        `<input type="hidden" name="ct" value="${escapeHtml(confirmToken ?? '')}">` +
+        `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
+        `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
+        `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,
+    );
+  } catch (err) {
+    const status = err instanceof CpError ? statusFor(err.code) : 500;
+    const message =
+      err instanceof CpError && err.message ? err.message : 'the sign-in could not be completed';
+    return htmlPage('Sign-in failed', `<p>${escapeHtml(message)}</p>`, status);
+  }
 }
 
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
-
   // `null`, not a 404, when unset: the client can tell "this deployment advertises no harness" from
   // "this control plane predates discovery" and name the right fix for each.
   // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust
@@ -622,56 +696,20 @@ export const HANDLERS: Record<string, Handler> = {
   },
 
   // The OIDC callback is the one route answered by a BROWSER, not by mocactl, so it answers HTML
-  // (sanitizeCallbackText escapes everything a provider or a forger can put in a query). Two
-  // rounds share the route (oidc.ts): the provider's redirect (?code=) renders the confirmation
-  // form that asks for the terminal's user code -- the browser-to-terminal binding -- and the
-  // form's submission (?confirm=) completes the sign-in. The refusal for a provider that holds its
-  // own flow (GitHub) names the setting to change, as the device-flow refusals do.
-  oidcCallback: async (ctx, deps) => {
-    if (!deps.identity.handleCallback) {
-      return {
-        status: 400,
-        body: 'this control plane has no oidc identity provider: set SH_IDENTITY_PROVIDER=oidc',
-      };
-    }
-    const state = ctx.query.get('state') ?? undefined;
-    try {
-      const { outcome, confirmToken } = await deps.identity.handleCallback({
-        code: ctx.query.get('code') ?? undefined,
-        state,
-        error: ctx.query.get('error') ?? undefined,
-        confirm: ctx.query.get('confirm') ?? undefined,
-        token: ctx.query.get('ct') ?? undefined,
-      });
-      if (outcome === 'confirmed') {
-        return htmlPage('Sign-in confirmed', '<p>Sign-in confirmed — return to your terminal.</p>');
-      }
-      if (outcome === 'refused') {
-        return htmlPage(
-          'Sign-in refused',
-          '<p>The sign-in was refused. Return to your terminal for the reason, and start again there.</p>',
-        );
-      }
-      const wrong = outcome === 'wrong_code';
-      return htmlPage(
-        'Confirm your sign-in',
-        `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
-          '<p>Enter the code shown in your terminal to finish signing in.</p>' +
-          `<form method="GET" action="/v1/auth/oidc/callback">` +
-          `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
-          // The browser-bound half of the binding (oidc.ts): minted in the round-1 response this
-          // browser received, invisible to whoever started the login, required in round 2.
-          `<input type="hidden" name="ct" value="${escapeHtml(confirmToken ?? '')}">` +
-          `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
-          `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
-          `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,
-      );
-    } catch (err) {
-      const status = err instanceof CpError ? statusFor(err.code) : 500;
-      const message =
-        err instanceof CpError && err.message ? err.message : 'the sign-in could not be completed';
-      return htmlPage('Sign-in failed', `<p>${escapeHtml(message)}</p>`, status);
-    }
+  // (escapeHtml escapes everything a provider or a forger can put in a query or a form field).
+  // Two rounds share the path (oidc.ts): the provider's redirect (GET ?code=) renders the
+  // confirmation form that asks for the terminal's user code -- the browser-to-terminal binding
+  // -- and the form's submission (POST, urlencoded) completes the sign-in, keeping the code and
+  // the browser token out of URLs, access logs and browser history. The refusal for a provider
+  // that holds its own flow (GitHub) names the setting to change, as the device-flow refusals do.
+  oidcCallback: (ctx, deps) => oidcCallbackImpl(deps, (k) => ctx.query.get(k)),
+
+  oidcCallbackSubmit: (ctx, deps) => {
+    const form = asRecord(ctx.body);
+    return oidcCallbackImpl(deps, (k) => {
+      const v = form[k];
+      return typeof v === 'string' ? v : null;
+    });
   },
 
   refreshAuth: async (ctx, deps) => {
