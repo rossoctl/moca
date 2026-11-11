@@ -2,6 +2,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClient, type RedisClientType } from 'redis';
+import { RedisWorkQueue } from '@moca/work-queue';
 
 /**
  * S1: captures every client `armAsyncLeafWorker` builds, after the same wrapper
@@ -279,6 +280,40 @@ describe('armAsyncLeafWorker', () => {
       });
     } finally {
       await worker!.stop();
+      await raw.del(stream).catch(() => undefined);
+      await raw.quit().catch(() => undefined);
+    }
+  }, 15_000);
+
+  // Guards stop()'s depth-timer teardown: without `clearInterval(depthTimer)` the 10 s poll
+  // outlives stop() and, through the reconnecting Proxy's `!isOpen` re-arm, reopens the client
+  // stop() just destroyed -- inside the 20 s shutdown grace, not after it.
+  it('stop() cancels the depth poll: no further depth() call after stop, even past one interval', async () => {
+    const stream = `test-leaf-stream-${randomUUID()}`;
+    const depthSpy = vi.spyOn(RedisWorkQueue.prototype, 'depth');
+    const env = {
+      SH_ASYNC_DRAIN: '1',
+      SH_CONTROL_PLANE_URL: 'http://cp.example',
+      SH_EXCHANGE_TOKEN: 'tok',
+      REDIS_URL: 'redis://127.0.0.1:6379',
+      SH_WORKER_ID: '0', // slot 0: the only slot that polls
+    };
+    const worker = armAsyncLeafWorker({ counter: counter(), env, stream });
+    expect(worker).not.toBeNull();
+
+    try {
+      await vi.waitFor(() => expect(depthSpy.mock.calls.length).toBeGreaterThanOrEqual(1), {
+        timeout: 5_000,
+        interval: 50,
+      });
+      const callsAtStop = depthSpy.mock.calls.length;
+      await worker!.stop();
+      await new Promise((r) => setTimeout(r, ASYNC_DEPTH_INTERVAL_MS + 500));
+      expect(depthSpy.mock.calls.length).toBe(callsAtStop);
+    } finally {
+      depthSpy.mockRestore();
+      const raw = createClient({ url: 'redis://127.0.0.1:6379' }) as RedisClientType;
+      await raw.connect();
       await raw.del(stream).catch(() => undefined);
       await raw.quit().catch(() => undefined);
     }
