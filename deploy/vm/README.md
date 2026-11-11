@@ -72,6 +72,16 @@ wires. The drain shares `SH_TURNS_PER_WORKER` with sync `/turn` — there is no 
 a deep queue can occupy every slot. `async_claim_denied_full` on the admin `/metrics` counts the
 claims that were refused for that reason.
 
+The crash path has its own test, skipped unless you ask for it -- it waits out the production 90 s
+reclaim window, so it cannot run in CI:
+
+    SH_ASYNC_LIVE_CRASH=1 REDIS_URL=redis://127.0.0.1:6379 \
+      SH_CONTROL_PLANE_URL=http://127.0.0.1:8090 SH_EXCHANGE_TOKEN=... ANTHROPIC_API_KEY=... \
+      packages/supervisor/node_modules/.bin/vitest run test/real-worker.integration.test.ts
+
+It kills a worker mid-leaf and asserts the turn finishes exactly once -- not merely that it
+finishes, because a leaf that runs twice also ends with the turn done.
+
 A hand-written MU1 line from the previous `mocactl` README (for a control plane hosted elsewhere)
 makes the script stop and name it. `SH_EXCHANGE_TOKEN` in `supervisor.env` (or any of the three
 secrets in either env file) is now a systemd credential: move the value into its file under
