@@ -164,7 +164,7 @@ export function createWorkerRuntime(opts: {
     accept(socket: Socket, head?: Buffer): void {
       // The supervisor credits its estimate +1 for EVERY connection it hands off (§3.9's
       // optimistic increment), but `load` is only ever sent from the turn counter above, and a
-      // non-turn request -- GET /health, POST /runs, a monitoring probe, a port scan -- returns
+      // non-turn request -- GET /health, GET /v1/turn, a monitoring probe, a port scan -- returns
       // early there. So without a report here the estimate rose by one PERMANENTLY per non-turn
       // connection: after S of them every worker read as saturated, every later connection was
       // refused BEFORE hand-off, so no turn could arrive to reconcile, and the pool stayed
