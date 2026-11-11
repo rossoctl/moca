@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import { MemoryPendingAuthStore, OidcProvider } from '../src/oidc.js';
 import type { FetchLike } from '../src/identity.js';
-import type { DeviceStart, OidcCallbackOutcome } from '../src/identity.js';
+import type { DeviceStart, OidcCallbackResult } from '../src/identity.js';
 import { makeDeps, ctx } from './helpers/deps.js';
 import { HANDLERS } from '../src/handlers.js';
 
@@ -116,11 +116,16 @@ const errOf = async (fn: () => Promise<unknown>): Promise<CpError> => {
   throw new Error('expected a throw');
 };
 
-/** Both callback rounds: the provider's redirect lands, then the terminal's code confirms. */
-async function signIn(r: Rig, start: DeviceStart): Promise<OidcCallbackOutcome> {
+/** Both callback rounds, as the browser runs them: the redirect lands (handing back the
+ * browser-bound token), then the terminal's code confirms with that token carried along. */
+async function signIn(r: Rig, start: DeviceStart): Promise<OidcCallbackResult> {
   const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
-  if (landed !== 'awaiting_confirmation') return landed;
-  return r.provider.handleCallback({ state: start.deviceCode, confirm: start.userCode });
+  if (landed.outcome !== 'awaiting_confirmation') return landed;
+  return r.provider.handleCallback({
+    state: start.deviceCode,
+    confirm: start.userCode,
+    token: landed.confirmToken,
+  });
 }
 
 describe('startDeviceAuth', () => {
@@ -175,7 +180,9 @@ describe('the callback and the poll', () => {
       code: 'auth-code-1',
       state: start.deviceCode,
     });
-    expect(outcome).toBe('awaiting_confirmation');
+    expect(outcome.outcome).toBe('awaiting_confirmation');
+    // The browser-bound token: unguessable, and never handed out at login start.
+    expect(outcome.confirmToken).toMatch(/^[\w-]{43}$/);
     // The exchange went out with the client secret and the registered redirect_uri.
     const token = r.seen.find((s) => s.url.includes('/token'))!;
     expect(token.body).toContain('grant_type=authorization_code');
@@ -186,7 +193,13 @@ describe('the callback and the poll', () => {
       'authorization_pending',
     );
     expect(
-      await r.provider.handleCallback({ state: start.deviceCode, confirm: start.userCode }),
+      (
+        await r.provider.handleCallback({
+          state: start.deviceCode,
+          confirm: start.userCode,
+          token: outcome.confirmToken,
+        })
+      ).outcome,
     ).toBe('confirmed');
     const principal = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(principal).toEqual({
@@ -335,10 +348,11 @@ describe('the callback route', () => {
     );
     expect(res.status).toBe(200);
     expect(res.contentType).toMatch(/text\/html/);
-    // The form posts back to this route with the state and the typed code; the code itself is
-    // nowhere on the page.
+    // The form posts back with the state, the browser-bound token, and the typed code; the user
+    // code itself is nowhere on the page.
     expect(String(res.body)).toContain('name="confirm"');
     expect(String(res.body)).toContain(`value="${start.deviceCode}"`);
+    expect(String(res.body)).toContain('name="ct"');
     expect(String(res.body)).not.toContain(start.userCode!);
   });
 
@@ -347,9 +361,13 @@ describe('the callback route', () => {
     mint(r, { sub: 'user-1', name: 'Alice Example' });
     const d = makeDeps({ identity: r.provider });
     const start = await r.provider.startDeviceAuth();
-    await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
     const res = await HANDLERS.oidcCallback!(
-      ctx({ query: new URLSearchParams(`state=${start.deviceCode}&confirm=${start.userCode}`) }),
+      ctx({
+        query: new URLSearchParams(
+          `state=${start.deviceCode}&confirm=${start.userCode}&ct=${landed.confirmToken}`,
+        ),
+      }),
       d,
     );
     expect(res.status).toBe(200);
@@ -358,31 +376,54 @@ describe('the callback route', () => {
   });
 
   describe('the browser-to-terminal binding (review item 3)', () => {
-    it('defeats the walk-in attack: a victim-completed callback mints no login without the code', async () => {
-      // The attacker starts the login and holds the state; the victim's browser (a live SSO
-      // session) completes the provider redirect. The id_token is genuinely the victim's -- and
-      // the attacker's poll still gets authorization_pending, because the confirmation code is
-      // in the victim's... nowhere: only the terminal that started the login shows it.
+    it('defeats the walk-in attack end to end, the attacker holding state AND user code', async () => {
+      // The attacker starts the login, so their terminal shows BOTH the state and the user code.
+      // The victim's browser (a live SSO session) completes the provider redirect; the id_token is
+      // genuinely the victim's. The attacker then confirms directly, with everything their
+      // terminal showed -- and fails, for want of the browser-bound token that only the victim's
+      // round-1 response ever carried. (Review round 2: the user code alone binds nothing against
+      // a malicious initiator, who saw it first.)
       const r = rig();
       mint(r, { sub: 'victim@us.ibm.com', name: 'Victim Example' });
       const start = await r.provider.startDeviceAuth();
-      const outcome = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
-      expect(outcome).toBe('awaiting_confirmation');
+      const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      expect(landed.outcome).toBe('awaiting_confirmation');
       expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
         'authorization_pending',
       );
+      const attacker = await r.provider.handleCallback({
+        state: start.deviceCode,
+        confirm: start.userCode,
+      });
+      expect(attacker.outcome).toBe('wrong_code');
+      expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+        'authorization_pending',
+      );
+      // The victim's browser, carrying its token, still completes the login.
+      const victim = await r.provider.handleCallback({
+        state: start.deviceCode,
+        confirm: start.userCode,
+        token: landed.confirmToken,
+      });
+      expect(victim.outcome).toBe('confirmed');
+      expect(await r.provider.completeDeviceAuth(start.deviceCode)).toMatchObject({
+        subject: 'oidc:victim@us.ibm.com',
+      });
     });
 
     it('accepts a lowercase or padded confirmation code, and is single-use', async () => {
       const r = rig();
       mint(r, { sub: 'user-1' });
       const start = await r.provider.startDeviceAuth();
-      await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
       expect(
-        await r.provider.handleCallback({
-          state: start.deviceCode,
-          confirm: ` ${start.userCode!.toLowerCase()} `,
-        }),
+        (
+          await r.provider.handleCallback({
+            state: start.deviceCode,
+            confirm: ` ${start.userCode!.toLowerCase()} `,
+            token: landed.confirmToken,
+          })
+        ).outcome,
       ).toBe('confirmed');
       expect(await r.provider.completeDeviceAuth(start.deviceCode)).toMatchObject({
         subject: 'oidc:user-1',
@@ -393,10 +434,16 @@ describe('the callback route', () => {
       const r = rig();
       mint(r, { sub: 'user-1' });
       const start = await r.provider.startDeviceAuth();
-      await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
       for (let i = 0; i < 4; i++) {
         expect(
-          await r.provider.handleCallback({ state: start.deviceCode, confirm: 'AAAA-AAAA' }),
+          (
+            await r.provider.handleCallback({
+              state: start.deviceCode,
+              confirm: 'AAAA-AAAA',
+              token: landed.confirmToken,
+            })
+          ).outcome,
         ).toBe('wrong_code');
         // Still pending between wrong tries.
         expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
@@ -405,7 +452,13 @@ describe('the callback route', () => {
       }
       // The fifth wrong code exhausts the login: refused for the browser AND the poll.
       expect(
-        await r.provider.handleCallback({ state: start.deviceCode, confirm: 'AAAA-AAAA' }),
+        (
+          await r.provider.handleCallback({
+            state: start.deviceCode,
+            confirm: 'AAAA-AAAA',
+            token: landed.confirmToken,
+          })
+        ).outcome,
       ).toBe('refused');
       const e = await errOf(() => r.provider.completeDeviceAuth(start.deviceCode));
       expect(e.code).toBe('unauthorized');

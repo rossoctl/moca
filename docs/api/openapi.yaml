@@ -590,14 +590,24 @@ paths:
         binding: without it, the authorize URL alone would let an attacker walk a victim's live
         SSO session into the attacker's login).
 
-        Second round (?confirm=): the typed code. A match (constant-time, at most 5 tries)
-        settles the login; the next /v1/auth/device/token poll picks it up.
+        Second round (?confirm= plus the round-1 token as ct): the typed code and the
+        browser-bound token. Both matching (constant-time, at most 5 tries) settles the login;
+        the next /v1/auth/device/token poll picks it up. The token is what stops the login's
+        initiator from confirming a victim's parked principal with a bare request: they hold the
+        state and the user code, but never saw the victim's round-1 response.
       security: []
       parameters:
         - { name: code, in: query, required: false, schema: { type: string } }
         - { name: state, in: query, required: false, schema: { type: string } }
         - { name: error, in: query, required: false, schema: { type: string } }
         - { name: confirm, in: query, required: false, schema: { type: string } }
+        - name: ct
+          in: query
+          required: false
+          schema: { type: string }
+          description: >
+            the browser-bound token from the round-1 response (the confirmation form's hidden
+            field); required alongside confirm, and a missing or wrong one counts as a wrong try
       responses:
         '200':
           description: the confirmation form, the confirmed page, or the refusal page

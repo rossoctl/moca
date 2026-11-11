@@ -53,14 +53,16 @@ export interface IdentityProvider {
    * route answers those deployments with a plain refusal.
    *
    * `code` is the provider's redirect (first round); `confirm` is the terminal's user code typed
-   * into the callback page (second round, the browser-to-terminal binding -- see oidc.ts).
+   * into the callback page, with `token` the browser-bound half of the binding (second round --
+   * see oidc.ts).
    */
   handleCallback?(q: {
     code?: string;
     state?: string;
     error?: string;
     confirm?: string;
-  }): Promise<OidcCallbackOutcome>;
+    token?: string;
+  }): Promise<OidcCallbackResult>;
 }
 
 /**
@@ -69,6 +71,18 @@ export interface IdentityProvider {
  * completed sign-in, or a refusal the poll will report.
  */
 export type OidcCallbackOutcome = 'awaiting_confirmation' | 'wrong_code' | 'confirmed' | 'refused';
+
+/**
+ * The callback's answer, plus -- on the first round only -- the browser-bound confirmation token
+ * the route must deliver in THAT response (a hidden form field) and require back in the second.
+ * It is the piece the login's initiator never sees: their victim's browser received it, they did
+ * not, so state + user code + this token together prove the confirmation came from the browser
+ * that completed the provider's redirect.
+ */
+export interface OidcCallbackResult {
+  outcome: OidcCallbackOutcome;
+  confirmToken?: string;
+}
 
 /** Structural subset of fetch, so tests inject a scripted transport and no test touches the network. */
 export type FetchLike = (

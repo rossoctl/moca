@@ -636,11 +636,12 @@ export const HANDLERS: Record<string, Handler> = {
     }
     const state = ctx.query.get('state') ?? undefined;
     try {
-      const outcome = await deps.identity.handleCallback({
+      const { outcome, confirmToken } = await deps.identity.handleCallback({
         code: ctx.query.get('code') ?? undefined,
         state,
         error: ctx.query.get('error') ?? undefined,
         confirm: ctx.query.get('confirm') ?? undefined,
+        token: ctx.query.get('ct') ?? undefined,
       });
       if (outcome === 'confirmed') {
         return htmlPage('Sign-in confirmed', '<p>Sign-in confirmed — return to your terminal.</p>');
@@ -658,6 +659,9 @@ export const HANDLERS: Record<string, Handler> = {
           '<p>Enter the code shown in your terminal to finish signing in.</p>' +
           `<form method="GET" action="/v1/auth/oidc/callback">` +
           `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
+          // The browser-bound half of the binding (oidc.ts): minted in the round-1 response this
+          // browser received, invisible to whoever started the login, required in round 2.
+          `<input type="hidden" name="ct" value="${escapeHtml(confirmToken ?? '')}">` +
           `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
           `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
           `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,

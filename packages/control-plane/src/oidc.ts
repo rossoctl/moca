@@ -6,7 +6,7 @@ import {
   type DeviceStart,
   type FetchLike,
   type IdentityProvider,
-  type OidcCallbackOutcome,
+  type OidcCallbackResult,
   type Principal,
 } from './identity.js';
 
@@ -25,16 +25,18 @@ import {
  *   2. the user's browser authenticates at the provider, which redirects to the callback route.
  *   3. the control plane exchanges the code server-side (it alone holds the client secret) and
  *      verifies the id_token against the provider's JWKS -- but does NOT settle the login yet.
- *   4. the callback page asks for the terminal's `userCode`; only a matching confirmation parks
- *      the principal on the state.
+ *   4. the callback page asks for the terminal's `userCode` AND carries a fresh browser-bound
+ *      token minted in that response; only BOTH matching parks the principal on the state.
  *   5. mocactl's poll (POST /v1/auth/device/token) picks it up, exactly as with GitHub.
  *
  * Step 4 is the browser-to-terminal binding, without which the authorize URL is itself a
  * capability: an attacker who starts a login and gets a victim (with a live SSO session) to open
  * the URL would otherwise hand the attacker a fully verified login AS the victim, one click and
- * no code to type. The confirmation code restores the device flow's binding property exactly --
+ * no code to type. The confirmation code restores the device flow's binding property --
  * possession of the code is proof that the browser's human and the terminal's session are the
- * same party -- and it never rides in the URL, which is the piece the attacker holds.
+ * same party -- and it never rides in the URL, which is the piece the attacker holds. The code
+ * alone is not enough (the login's initiator saw it in their own terminal), so the round-1
+ * response also mints a token only the completing browser receives, and round 2 requires both.
  *
  * The STATE is the capability, on the device-code trust model: single-use, TTL-bound, and worth
  * nothing until the callback has verified a provider-signed id_token AND collected the terminal's
@@ -54,6 +56,14 @@ export interface PendingOidcAuth {
   principal?: Principal;
   /** Set when the confirmation was typed: the login is complete. */
   confirmed?: boolean;
+  /**
+   * The browser-bound half of the binding, minted in the provider-redirect round and delivered
+   * only in that response. The terminal's user code alone does not bind: the login's initiator
+   * holds it too (their terminal showed it), so they could confirm a victim's parked principal
+   * with a bare request. This token is what they cannot produce -- only the browser that received
+   * the round-1 response ever saw it.
+   */
+  confirmToken?: string;
   /** Wrong confirmation codes entered so far; at MAX_WRONG_CODES the login is refused. */
   wrongCodes?: number;
   /** Set when the provider or the user refused: the poll reports it. */
@@ -266,26 +276,29 @@ export class OidcProvider implements IdentityProvider {
 
   /**
    * The callback route's other half, in two rounds: `code` (the provider's redirect) exchanges and
-   * verifies but does NOT settle -- it returns 'awaiting_confirmation' so the route can ask for
-   * the terminal's code; `confirm` (the confirmation form) settles, if the code matches. The
-   * `error` path is the provider's `error` query parameter (access_denied and friends), recorded
-   * so the polling client hears it instead of waiting out the window.
+   * verifies but does NOT settle -- it returns 'awaiting_confirmation' plus a fresh browser-bound
+   * token, delivered only in that response, so the route can ask for the terminal's code AND
+   * carry the token as a hidden field; `confirm` (the confirmation form) settles only when BOTH
+   * the terminal's code and the browser's token match. The `error` path is the provider's
+   * `error` query parameter (access_denied and friends), recorded so the polling client hears it
+   * instead of waiting out the window.
    */
   async handleCallback(q: {
     code?: string;
     state?: string;
     error?: string;
     confirm?: string;
-  }): Promise<OidcCallbackOutcome> {
+    token?: string;
+  }): Promise<OidcCallbackResult> {
     if (typeof q.state !== 'string' || q.state.length === 0) {
       throw new CpError('invalid_request', 'the callback is missing its state parameter');
     }
     if (q.error) {
       const known = await this.store.settle(q.state, { denial: `provider refused: ${q.error}` });
       if (!known) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return 'refused';
+      return { outcome: 'refused' };
     }
-    if (q.confirm !== undefined) return this.confirmSignIn(q.state, q.confirm);
+    if (q.confirm !== undefined) return this.confirmSignIn(q.state, q.confirm, q.token);
     if (typeof q.code !== 'string' || q.code.length === 0) {
       throw new CpError('invalid_request', 'the callback is missing its code parameter');
     }
@@ -318,7 +331,7 @@ export class OidcProvider implements IdentityProvider {
         denial: `token exchange failed: ${body.error}`,
       });
       if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return 'refused';
+      return { outcome: 'refused' };
     }
     const idToken = body.id_token;
     if (typeof idToken !== 'string' || idToken.length === 0) {
@@ -334,25 +347,35 @@ export class OidcProvider implements IdentityProvider {
       if (!(err instanceof CpError) || err.code !== 'unauthorized') throw err;
       const ok = await this.store.settle(q.state, { denial: err.message });
       if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return 'refused';
+      return { outcome: 'refused' };
     }
     // Parked but NOT confirmed: the principal is real (a verified id_token named them), yet the
-    // login completes only when the browser's human proves they hold the terminal's code. This is
-    // the step that stops a victim's live SSO session from being walked into an attacker's login.
-    const ok = await this.store.settle(q.state, { principal, confirmed: false });
+    // login completes only when the browser's human proves they hold the terminal's code AND the
+    // browser holds the token minted here. The code alone does not bind -- the login's initiator
+    // saw it in their own terminal -- which is why the token is minted in THIS response, the one
+    // the victim's browser receives and the attacker never sees.
+    const confirmToken = randomBytes(32).toString('base64url');
+    const ok = await this.store.settle(q.state, { principal, confirmed: false, confirmToken });
     if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-    return 'awaiting_confirmation';
+    return { outcome: 'awaiting_confirmation', confirmToken };
   }
 
   /**
-   * The confirmation round. A wrong code returns 'wrong_code' (the route re-renders the form) and
-   * burns one of MAX_WRONG_CODES tries; exhausting them settles a denial, so the polling client
-   * hears the refusal instead of waiting out the window.
+   * The confirmation round. The browser's token is checked FIRST and a missing or wrong one burns
+   * a try exactly like a wrong code: the login's initiator holds the state and the user code (both
+   * were in their terminal) and must not be able to confirm a victim's parked principal with a
+   * bare request. A wrong code returns 'wrong_code' (the route re-renders the form) and burns one
+   * of MAX_WRONG_CODES tries; exhausting them settles a denial, so the polling client hears the
+   * refusal instead of waiting out the window.
    */
-  private async confirmSignIn(state: string, code: string): Promise<OidcCallbackOutcome> {
+  private async confirmSignIn(
+    state: string,
+    code: string,
+    token: string | undefined,
+  ): Promise<OidcCallbackResult> {
     const entry = await this.store.get(state);
     if (!entry) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-    if (entry.denial) return 'refused';
+    if (entry.denial) return { outcome: 'refused' };
     if (!entry.principal) {
       // The provider's redirect has not landed yet: nothing to confirm against.
       throw new CpError(
@@ -360,20 +383,23 @@ export class OidcProvider implements IdentityProvider {
         'there is no sign-in waiting for a code -- open the sign-in URL first',
       );
     }
-    if (entry.confirmed) return 'confirmed';
-    // Constant time (secretMatches hashes both sides to a fixed width first): the reply's latency
-    // must not become a per-character oracle on the code.
-    if (!secretMatches(code.trim().toUpperCase(), entry.confirmCode)) {
+    if (entry.confirmed) return { outcome: 'confirmed' };
+    // Both comparisons constant time (secretMatches hashes both sides to a fixed width first):
+    // the reply's latency must not become a per-character oracle on either secret.
+    const tokenOk =
+      entry.confirmToken !== undefined && secretMatches(token ?? '', entry.confirmToken);
+    const codeOk = secretMatches(code.trim().toUpperCase(), entry.confirmCode);
+    if (!tokenOk || !codeOk) {
       const wrong = (entry.wrongCodes ?? 0) + 1;
       if (wrong >= MAX_WRONG_CODES) {
         await this.store.settle(state, { denial: 'too many wrong confirmation codes' });
-        return 'refused';
+        return { outcome: 'refused' };
       }
       await this.store.settle(state, { wrongCodes: wrong });
-      return 'wrong_code';
+      return { outcome: 'wrong_code' };
     }
     await this.store.settle(state, { confirmed: true });
-    return 'confirmed';
+    return { outcome: 'confirmed' };
   }
 
   async completeDeviceAuth(deviceCode: string): Promise<Principal> {
