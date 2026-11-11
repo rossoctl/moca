@@ -79,6 +79,11 @@ control plane's memory, so a callback that load-balances to a different pod than
 issued the state will not find it. Run one replica, or contribute a Redis-backed
 `PendingAuthStore` (see `packages/control-plane/src/oidc.ts`) before scaling out.
 
+The pending store is also **capped, not fair**: 10,000 live states bound the control plane's
+memory, and the login-start route is unauthenticated, so one client looping starts can fill the
+cap and every real user then gets 429 for up to the state TTL (15 minutes). A per-source bound
+on outstanding starts is the follow-up.
+
 ## Logging in
 
 `mocactl login` is the same command, and the rhythm is the device flow's: the terminal shows a

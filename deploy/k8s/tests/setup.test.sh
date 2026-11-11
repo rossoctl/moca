@@ -449,6 +449,45 @@ grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || 
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
 
+# --- PR #701: the oidc settings are sticky, clearable, and validated -----------------------------
+reset_state
+(export SH_IDENTITY_PROVIDER=oidc SH_OIDC_ISSUER=https://id.example.invalid \
+  SH_OIDC_CLIENT_ID=fake-oidc-client SH_OIDC_REDIRECT_URI=https://cp.example.invalid/v1/auth/oidc/callback \
+  SH_GITHUB_CLIENT_ID=Iv1.gh; expect_ok --target ocp)
+[[ "$(setting SH_IDENTITY_PROVIDER)" == oidc ]] || fail 'the oidc provider did not land in moca-settings'
+[[ "$(setting SH_OIDC_ISSUER)" == https://id.example.invalid ]] || fail 'SH_OIDC_ISSUER did not land'
+[[ "$(setting SH_OIDC_CLIENT_ID)" == fake-oidc-client ]] || fail 'SH_OIDC_CLIENT_ID did not land'
+[[ "$(setting SH_OIDC_SCOPE)" == 'openid email profile' ]] || fail 'the default scope did not land'
+pass 'oidc: settings written, scope defaulted'
+
+# Sticky: a re-run WITHOUT reset_state and without the variables keeps the stored block, github
+# id and all -- the same stickiness every other moca-settings key has.
+(expect_ok --target ocp)
+[[ "$(setting SH_IDENTITY_PROVIDER)" == oidc && "$(setting SH_OIDC_ISSUER)" == https://id.example.invalid ]] ||
+  fail 'a re-run without the oidc variables dropped the stored block'
+[[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.gh ]] || fail 'a re-run dropped the stored github client id'
+pass 'oidc: sticky on re-run'
+
+# Set-but-empty SH_IDENTITY_PROVIDER clears back to github and empties the block.
+reset_state
+(export SH_IDENTITY_PROVIDER=; expect_ok --target ocp)
+[[ "$(setting SH_IDENTITY_PROVIDER)" == github ]] || fail 'set-but-empty did not clear to github'
+[[ -z "$(setting SH_OIDC_ISSUER)" && -z "$(setting SH_OIDC_CLIENT_ID)" ]] ||
+  fail 'clearing the provider left oidc values behind'
+pass 'oidc: set-but-empty clears back to github'
+
+# oidc without an issuer dies at setup, naming the variable.
+reset_state
+(export SH_IDENTITY_PROVIDER=oidc; expect_fail --target ocp)
+expect_out 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_ISSUER'
+pass 'oidc: no issuer refuses at setup'
+
+# A near-miss provider name dies too.
+reset_state
+(export SH_IDENTITY_PROVIDER=oidp; expect_fail --target ocp)
+expect_out "must be exactly 'github' or 'oidc'"
+pass 'oidc: a near-miss provider name refuses at setup'
+
 # ADR-0045: test users. The COUNT is a sticky setting; the SECRET is generated into moca-mu1 and
 # never rotated, like every other value there.
 reset_state
