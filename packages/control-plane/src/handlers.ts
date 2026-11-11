@@ -30,6 +30,7 @@ import {
   seconds,
 } from './handler-util.js';
 import { subjectHash } from './subject-document.js';
+import { asyncCounters } from './counters.js';
 import {
   resolveInferenceName,
   parseCredentialBody,
@@ -476,6 +477,18 @@ async function catalogFor(
 
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
+
+  /**
+   * §7's `async_quota_refusals`. Process-local and reset by a restart, like every count in the
+   * supervisor's own /metrics: with more than one replica a scraper sees one replica's share per
+   * request. That is the right trade for a rate signal -- a shared counter would put a Redis write
+   * on the refusal path, which is the one path already shedding load.
+   */
+  getMetrics: async (ctx) => {
+    const p = requirePrincipal(ctx);
+    if (!isAdmin(p)) throw new CpError('forbidden', '/metrics requires the admin role');
+    return { status: 200, body: { counters: asyncCounters() } };
+  },
 
   // `null`, not a 404, when unset: the client can tell "this deployment advertises no harness" from
   // "this control plane predates discovery" and name the right fix for each.

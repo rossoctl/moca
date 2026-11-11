@@ -344,6 +344,36 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Async counters (admin only)
+      security: [{ sessionToken: [] }]
+      description: |
+        Counters the control plane alone can report, because it answers the request that produces
+        them (async fan-out spec §7, §4.3). Process-local and reset by a restart: with more than one
+        replica, each request reports one replica's share. A rate signal, not a ledger.
+      responses:
+        '200':
+          description: counters
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [counters]
+                properties:
+                  counters:
+                    type: object
+                    required: [async_quota_refusals]
+                    properties:
+                      async_quota_refusals:
+                        type: integer
+                        description: Submissions refused with 429 async_quota_exhausted.
+        '403':
+          description: forbidden — the admin role is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/discovery:
     get:
       operationId: getDiscovery

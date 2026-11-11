@@ -24,6 +24,10 @@ Async turns: the owner-scoped submission API
   move the turn to `running`. The `turnId` must be the `t-<uuid>` shape the control plane mints;
   anything else is 400 `invalid_request`, refused before Redis is read. The response also carries
   the `envelope` the worker runs, with the turn's `sessionId` attached, so a claim is one round trip.
+- New GET /metrics, admin-only: `counters.async_quota_refusals`, the count of submissions refused
+  with 429 `async_quota_exhausted`. The control plane reports it because it is the side that refuses
+  them — a worker never sees a submission that was never enqueued (§7). Process-local and reset by a
+  restart; with more than one replica each request reports one replica's share.
 - New error codes `turn_not_cancellable` (409, cancelling a turn that is not queued),
   `turn_not_claimable` (409, claiming a cancelled or terminal turn), `turn_not_found` (404),
   `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held),
