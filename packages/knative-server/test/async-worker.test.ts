@@ -1,5 +1,7 @@
 import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createClient, type RedisClientType } from 'redis';
+import { LEAF_QUEUE_STREAM } from '@moca/control-plane';
 
 /**
  * S1: captures every client `armAsyncLeafWorker` builds, after the same wrapper
@@ -24,6 +26,7 @@ const {
   asyncConsumerId,
   asyncFinalizeState,
   ASYNC_REAP_INTERVAL_MS,
+  ASYNC_DEPTH_INTERVAL_MS,
   reconnecting,
   createAsyncTally,
 } = await import('../src/async-worker.js');
@@ -231,6 +234,52 @@ describe('armAsyncLeafWorker', () => {
     expect(created[0]).not.toBe(created[1]);
     await worker!.stop();
   });
+
+  // Against real Redis, not a fake: the only way to exercise pollDepth, since armAsyncLeafWorker
+  // builds its own queue/client internally with no injection seam, and every other test in this
+  // describe points REDIS_URL at a closed port so ensureGroup (and so pollDepth) never runs.
+  it('reaches pollDepth over real Redis: stats() carries the two gauges from one depth() call, and a failed poll leaves the previous reading in place', async () => {
+    const raw = createClient({ url: 'redis://127.0.0.1:6379' }) as RedisClientType;
+    await raw.connect();
+    await raw.del(LEAF_QUEUE_STREAM); // clean slate: drops any group left by a prior run too
+    await raw.xAdd(LEAF_QUEUE_STREAM, '*', { turnId: 'seed' });
+
+    const env = {
+      SH_ASYNC_DRAIN: '1',
+      SH_CONTROL_PLANE_URL: 'http://cp.example',
+      SH_EXCHANGE_TOKEN: 'tok',
+      REDIS_URL: 'redis://127.0.0.1:6379',
+      SH_WORKER_ID: '0', // slot 0: the only slot that polls
+    };
+    const worker = armAsyncLeafWorker({ counter: counter(), env });
+    expect(worker).not.toBeNull();
+
+    try {
+      // The immediate post-ensureGroup poll, well under the 10 s interval.
+      await vi.waitFor(
+        () => {
+          expect(worker!.stats().asyncQueueDepth).toBe(1);
+        },
+        { timeout: 5_000, interval: 50 },
+      );
+      const firstOldestAgeMs = worker!.stats().asyncOldestAgeMs;
+      expect(Number.isFinite(firstOldestAgeMs)).toBe(true);
+
+      // Break the NEXT poll: delete the stream (and its group) so depth()'s xInfoGroups
+      // rejects with "no such key" -- the .catch()'s contract under test.
+      await raw.del(LEAF_QUEUE_STREAM);
+      await new Promise((r) => setTimeout(r, ASYNC_DEPTH_INTERVAL_MS + 500));
+
+      expect(worker!.stats()).toMatchObject({
+        asyncQueueDepth: 1,
+        asyncOldestAgeMs: firstOldestAgeMs,
+      });
+    } finally {
+      await worker!.stop();
+      await raw.del(LEAF_QUEUE_STREAM).catch(() => undefined);
+      await raw.quit().catch(() => undefined);
+    }
+  }, 15_000);
 });
 
 describe('createAsyncTally', () => {

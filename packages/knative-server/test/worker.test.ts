@@ -371,6 +371,59 @@ describe('startStatsReporter', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(sent.length).toBe(n);
   });
+
+  it('carries all six async fields onto the stats message when asyncStats reports them', async () => {
+    const sent: WorkerToSupervisor[] = [];
+    const stop = startStatsReporter({
+      send: (m) => sent.push(m),
+      intervalMs: 5,
+      lag: () => 1,
+      rss: () => 1,
+      asyncStats: () => ({
+        asyncClaims: 3,
+        asyncReclaims: 1,
+        asyncDeadLetters: 0,
+        asyncClaimDeniedFull: 1,
+        asyncQueueDepth: 12,
+        asyncOldestAgeMs: 4_000,
+      }),
+    });
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    stop();
+    expect(sent[0]).toMatchObject({
+      type: 'stats',
+      asyncClaims: 3,
+      asyncReclaims: 1,
+      asyncDeadLetters: 0,
+      asyncClaimDeniedFull: 1,
+      asyncQueueDepth: 12,
+      asyncOldestAgeMs: 4_000,
+    });
+  });
+
+  it('carries none of the six async keys when asyncStats is omitted or reports undefined', async () => {
+    const sent: WorkerToSupervisor[] = [];
+    const stop = startStatsReporter({
+      send: (m) => sent.push(m),
+      intervalMs: 5,
+      lag: () => 1,
+      rss: () => 1,
+      asyncStats: () => undefined,
+    });
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    stop();
+    const keys = Object.keys(sent[0]!);
+    for (const k of [
+      'asyncClaims',
+      'asyncReclaims',
+      'asyncDeadLetters',
+      'asyncClaimDeniedFull',
+      'asyncQueueDepth',
+      'asyncOldestAgeMs',
+    ]) {
+      expect(keys).not.toContain(k);
+    }
+  });
 });
 
 describe('parseRole', () => {

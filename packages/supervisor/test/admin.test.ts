@@ -122,6 +122,18 @@ describe('metricsBody', () => {
     });
   });
 
+  it('sums the finite contribution when one slot has not reported (a restart reseeds to NaN)', () => {
+    const h = ready();
+    h.forked[0]!.stats({ asyncClaims: 412, asyncReclaims: 2, asyncDeadLetters: 1 });
+    // Slot 1 sends no stats at all -- it stays NaN, exactly as it would right after a restart.
+    const counters = metricsBody(h.pool, {}).counters;
+    // Pinned as a real number, not the string 'NaN': a NaN reaching a `number`-typed field would
+    // JSON.stringify to null and read as "no claims" rather than "412 claims, one slot restarting".
+    expect(counters.async_claims).toBe(412);
+    expect(typeof counters.async_claims).toBe('number');
+    expect(Number.isFinite(counters.async_claims)).toBe(true);
+  });
+
   it('reads 0 for a deployment where no worker drains the queue', () => {
     expect(metricsBody(ready().pool, {}).counters).toMatchObject({
       async_claims: 0,

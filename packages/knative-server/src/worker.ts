@@ -263,10 +263,12 @@ export function startStatsReporter(opts: {
     // reading would carry rung 1's and no rung would be attributable.
     h?.reset();
     opts.send({
+      // Spread first: a future AsyncWorkerStats member sharing a name must not be able to
+      // clobber the row's own fields, especially its `type` discriminant.
+      ...(opts.asyncStats?.() ?? {}),
       type: 'stats',
       loopLagP99Ms: lag,
       rssBytes: opts.rss ? opts.rss() : process.memoryUsage.rss(),
-      ...(opts.asyncStats?.() ?? {}),
     });
   }, opts.intervalMs);
   timer.unref(); // telemetry must never be the reason a worker refuses to exit
@@ -379,7 +381,9 @@ if (isMainModule) {
       // Stop claiming at once. The in-flight leaf is abandoned unacked on purpose (§6.3): its
       // heartbeat dies with this process, so another worker reclaims it after minIdleMs.
       // Waiting for it cannot work -- MOCA_TURN_MAX_S is 1800 s against a 20 s SHUTDOWN_GRACE_MS.
-      void asyncWorker?.stop();
+      // .catch(): a failed stop() must not become an unhandled rejection that kills a process
+      // still serving (or about to abort) sync turns.
+      void asyncWorker?.stop().catch(() => undefined);
       // Detached turns that finish within DETACHED_DRAIN_MS finish normally; the rest get their
       // terminal frame before the supervisor's grace runs out and SIGKILLs this process.
       drainTimer ??= armDetachedDrain(() =>
@@ -392,7 +396,10 @@ if (isMainModule) {
   // get a terminal frame first (turn-reattach spec §5.5); abortDetachedTurns bounds its own wait.
   process.on('disconnect', () => {
     // Stop claiming before aborting detached turns, so the dying worker makes no further claim.
-    void asyncWorker?.stop();
+    // .catch(): the IPC channel is already gone here, so a send inside stop() (via the counter's
+    // release) rejects with ERR_IPC_CHANNEL_CLOSED -- a failed stop() must not become an unhandled
+    // rejection that kills this process before abortDetachedTurns below can run.
+    void asyncWorker?.stop().catch(() => undefined);
     void abortDetachedTurns('restarting').finally(() => process.exit(0));
   });
 }
