@@ -24,6 +24,7 @@ const {
   asyncConsumerId,
   asyncFinalizeState,
   ASYNC_REAP_INTERVAL_MS,
+  reconnecting,
 } = await import('../src/async-worker.js');
 
 /** A port nothing listens on: a real socket target, with no real Redis needed. */
@@ -43,6 +44,36 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('reconnecting', () => {
+  it('M2: re-arms before the call when the client is !isOpen', async () => {
+    let isOpen = false;
+    const connect = vi.fn(async () => {
+      isOpen = true;
+    });
+    const client = {
+      get isOpen() {
+        return isOpen;
+      },
+      connect,
+    };
+    const target = { greet: async (name: string) => `hi ${name}` };
+    const wrapped = reconnecting(target, client as never);
+
+    await expect(wrapped.greet('a')).resolves.toBe('hi a');
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-arm when the client is already open', async () => {
+    const connect = vi.fn(async () => undefined);
+    const client = { isOpen: true, connect };
+    const target = { greet: async (name: string) => `hi ${name}` };
+    const wrapped = reconnecting(target, client as never);
+
+    await expect(wrapped.greet('a')).resolves.toBe('hi a');
+    expect(connect).not.toHaveBeenCalled();
+  });
 });
 
 describe('asyncConsumerId', () => {

@@ -143,8 +143,17 @@ function asyncRedisClient(url: string, label: string): RedisClientType {
  * A Proxy rather than a per-class wrapper: `RedisWorkQueue` and `TurnStore` share nothing but "every
  * method calls through to one injected client", so one generic wrapper covers both instead of two
  * hand-written ones.
+ *
+ * shortcut: this wraps every function property as async and types the result `T`, which is sound
+ * only because every CURRENT public method on `RedisWorkQueue` and `TurnStore` already returns a
+ * Promise (checked both classes; their sync private helpers are reached via `.apply(obj, args)` on
+ * the raw object, so they never go through this trap). A synchronous public method added to either
+ * class later would silently receive a Promise typed as its plain return value here, with no
+ * compile error -- the same unsound-cast shape `asyncFinalizeState`'s old `as TurnState` had.
+ * Upgrade to a per-class wrapper (or a compile-time check that every property is already async) if
+ * either class ever grows a synchronous public method.
  */
-function reconnecting<T extends object>(target: T, client: RedisClientType): T {
+export function reconnecting<T extends object>(target: T, client: RedisClientType): T {
   return new Proxy(target, {
     get(obj, prop, receiver) {
       const value = Reflect.get(obj, prop, receiver);
