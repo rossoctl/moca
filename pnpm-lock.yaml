@@ -131,6 +131,9 @@ importers:
       '@moca/harness':
         specifier: workspace:*
         version: link:../../harness
+      '@moca/work-queue':
+        specifier: workspace:*
+        version: link:../work-queue
       redis:
         specifier: ^6.3.1
         version: 6.3.1

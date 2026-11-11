@@ -32,6 +32,18 @@ export function isTerminalState(s: TurnState): boolean {
   return s !== 'queued' && s !== 'running';
 }
 
+/**
+ * How much longer the turn record lives than its result (§5.1). The record must OUTLIVE the
+ * result: a caller polling a finished turn whose record expired first would read `404 not
+ * submitted` for a turn that in fact succeeded. One hour, longer than any plausible gap between a
+ * result being read and the poll that follows it.
+ *
+ * Here rather than in `main.ts` because the WORKER finalizes turns too (#389), and a record
+ * finalized by a worker must get the same expiry as one finalized by the control plane. This module
+ * is pure, so a worker can import the number instead of re-typing it.
+ */
+export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
+
 /** Per-turn caps, resolved at submission and stored (§4.3). Enforcement is the worker's (#389). */
 export interface TurnCaps {
   tokens?: number;

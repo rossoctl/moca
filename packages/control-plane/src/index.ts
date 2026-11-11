@@ -183,6 +183,7 @@ export {
   TURN_STATES,
   isMintedTurnId,
   turnKey,
+  TURN_RECORD_TTL_MARGIN_SECONDS,
   type TurnCaps,
   type TurnRecord,
   type TurnState,

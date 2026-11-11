@@ -11,6 +11,8 @@ import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
 // call it itself because it never goes through startServer. See its use below.
 import { prepareServerProcess } from './server-process.js';
 import { attachTurnSlot } from './turn-slot.js';
+// #389: arm the async leaf drain on this worker, sharing its admission cap with sync /turn.
+import { armAsyncLeafWorker } from './async-worker.js';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -343,6 +345,10 @@ if (isMainModule) {
     sendToSupervisor.call(process, msg);
   };
   const runtime = createWorkerRuntime({ send });
+  // #389: drain the async leaf queue on this worker, sharing `runtime.counter` with sync /turn so
+  // one cap governs both (§5.3). Returns null unless SH_ASYNC_DRAIN and the control-plane settings
+  // are all present, so a deployment that never submits async turns pays nothing.
+  const asyncWorker = armAsyncLeafWorker({ counter: runtime.counter });
   const stopStats = startStatsReporter({
     send,
     intervalMs: statsIntervalMs(process.env),
@@ -358,6 +364,10 @@ if (isMainModule) {
       // longer taking.
       stopStats();
       runtime.drain();
+      // Stop claiming at once. The in-flight leaf is abandoned unacked on purpose (§6.3): its
+      // heartbeat dies with this process, so another worker reclaims it after minIdleMs.
+      // Waiting for it cannot work -- MOCA_TURN_MAX_S is 1800 s against a 20 s SHUTDOWN_GRACE_MS.
+      void asyncWorker?.stop();
       // Detached turns that finish within DETACHED_DRAIN_MS finish normally; the rest get their
       // terminal frame before the supervisor's grace runs out and SIGKILLs this process.
       drainTimer ??= armDetachedDrain(() =>
@@ -369,6 +379,8 @@ if (isMainModule) {
   // set rather than leaving orphaned workers holding sockets nobody routes to (§6). Detached turns
   // get a terminal frame first (turn-reattach spec §5.5); abortDetachedTurns bounds its own wait.
   process.on('disconnect', () => {
+    // Stop claiming before aborting detached turns, so the dying worker makes no further claim.
+    void asyncWorker?.stop();
     void abortDetachedTurns('restarting').finally(() => process.exit(0));
   });
 }

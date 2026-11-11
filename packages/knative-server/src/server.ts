@@ -46,7 +46,10 @@ const SSE_HEADERS = {
   Connection: 'keep-alive',
   'X-Accel-Buffering': 'no', // belt-and-suspenders for any nginx fronting Kourier (Envoy ignores it)
 };
-const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
+// Exported (#389): the async leaf worker writes results through the same store with the same
+// TTL, because two result stores in one process would be two connections and two TTLs for one
+// key space.
+export const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -962,7 +965,9 @@ function rejectInvalidConfigRef(body: any, res: ServerResponse): boolean {
 }
 
 let resultStore: RedisResultStore | undefined;
-function getResultStore(): RedisResultStore {
+// Exported (#389): the async leaf worker writes its results through this same store, so one
+// connection and one TTL serve both the sync and async leaf paths for one key space.
+export function getResultStore(): RedisResultStore {
   if (!resultStore) resultStore = new RedisResultStore(process.env.REDIS_URL);
   return resultStore;
 }
