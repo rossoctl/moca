@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import type { ProcessOutcome } from '@moca/harness/leaf-job-runner';
 import {
   asyncLeafCap,
   createLeafDrainLoop,
@@ -10,11 +11,13 @@ import {
 } from '../src/leaf-drain-loop.js';
 import { TurnCounter } from '../src/worker.js';
 
-/** A processOne stand-in. Each call resolves to the next scripted outcome. */
-function scripted(
-  outcomes: Array<({ kind: string } & Record<string, unknown>) | Error>,
-  onCall?: () => void,
-) {
+/**
+ * A processOne stand-in. Each call resolves to the next scripted outcome. Typed against the
+ * domain type -- not a widened `{ kind: string } & Record<string, unknown>` -- so a fixture with
+ * an impossible `status` or a misspelled field (e.g. `reclaimedd`) fails tsc instead of silently
+ * typechecking and passing.
+ */
+function scripted(outcomes: Array<ProcessOutcome | Error>, onCall?: () => void) {
   let i = 0;
   return vi.fn(async () => {
     onCall?.();
@@ -275,5 +278,82 @@ describe('createLeafDrainLoop', () => {
     await loop.stop();
     await loop.stop();
     expect(loop.running).toBe(false);
+  });
+
+  // §5.3's whole point: the cap check and counter.start() must be ONE synchronous tick. The test
+  // above ("takes a slot before processOne runs") checks the slot is held DURING the claim, which
+  // still passes even if an `await` were inserted between the check and the take -- it does not
+  // discriminate. This one does: with cap: 1 and a leaf that never settles, counter.inFlight must
+  // already read 1 the instant loop.start() returns, with NO await in this test in between. An
+  // `await Promise.resolve()` inserted between the check and counter.start() in the
+  // implementation makes this fail with "expected +0 to be 1".
+  it('takes the slot in the SAME synchronous tick as the cap check', async () => {
+    const counter = new TurnCounter(() => {});
+    const processOneImpl = vi.fn(() => new Promise(() => {})) as never; // never settles
+    const loop = createLeafDrainLoop(loopDeps({ counter, cap: 1, processOneImpl }));
+    loop.start();
+    // No await here, on purpose -- see comment above.
+    expect(counter.inFlight).toBe(1);
+    await loop.stop();
+  });
+
+  it('survives a throwing onCapDenied and resumes once a slot frees', async () => {
+    const counter = new TurnCounter(() => {});
+    const held = counter.start();
+    const onCapDenied = vi.fn(() => {
+      throw new Error('metrics sink closed');
+    });
+    const log = vi.fn();
+    const sleep = vi.fn(async () => {});
+    const processOneImpl = scripted([{ kind: 'idle' }]);
+    const loop = createLeafDrainLoop(
+      loopDeps({ counter, cap: 1, onCapDenied, log, sleep, processOneImpl }),
+    );
+    loop.start();
+    await tick();
+    await tick();
+    expect(onCapDenied).toHaveBeenCalled();
+    expect(processOneImpl).not.toHaveBeenCalled();
+    expect(loop.running).toBe(true); // a monitoring callback's bug must not kill the loop
+    held(); // a sync /turn finishes and frees the only slot
+    await tick();
+    await tick();
+    expect(processOneImpl).toHaveBeenCalled();
+    await loop.stop();
+  });
+
+  it('does not let a rejection escape run() as an unhandled rejection, and marks itself stopped', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const counter = new TurnCounter(() => {});
+      const held = counter.start();
+      // onCapDenied throws, is caught, and the catch's own backoff sleep ALSO rejects -- the
+      // double failure the per-iteration catch cannot absorb, so it must propagate out of run()
+      // and land on the start()-time .catch() fallback instead of taking the process down.
+      const onCapDenied = vi.fn(() => {
+        throw new Error('metrics sink closed');
+      });
+      const sleep = vi.fn(async () => {
+        throw new Error('backoff timer unavailable');
+      });
+      const loop = createLeafDrainLoop(
+        loopDeps({
+          counter,
+          cap: 1,
+          onCapDenied,
+          sleep,
+          processOneImpl: scripted([{ kind: 'idle' }]),
+        }),
+      );
+      loop.start();
+      await tick();
+      await tick();
+      expect(loop.running).toBe(false);
+      held();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+    expect(unhandled).not.toHaveBeenCalled();
   });
 });

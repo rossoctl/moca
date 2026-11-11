@@ -116,39 +116,60 @@ export function createLeafDrainLoop(deps: LeafDrainLoopDeps): LeafDrainLoop {
   // here and the finally below correct.
   let release: (() => void) | null = null;
 
-  // A bare macrotask yield, deliberately NOT routed through deps.sleep: deps.sleep is the thing
-  // tests assert call counts against ("does not sleep after an idle claim"), and in production
-  // the real queue.claim() always costs a real I/O turn, so this never fires there. Only an
-  // instantly-resolving test double can turn a pure-microtask `while` loop into one that never
-  // hands control back to the event loop; this one `setImmediate` per iteration is what keeps
-  // that loop live instead of starving every macrotask (including the test's own timers) forever.
+  // It always executes; in production it never *matters*, because every path through the loop
+  // body has already awaited either queue.claim's BLOCK or a real sleep. It is here for
+  // liveness: one guaranteed macrotask per iteration, so the loop can never become an unbroken
+  // microtask chain. Do not remove it -- the suite OOMs without it, and in production a
+  // microtask spin would wedge this process's HTTP hand-offs and IPC `drain` too, not just the
+  // drain. It is deliberately NOT routed through deps.sleep: deps.sleep is the thing tests assert
+  // call counts against ("does not sleep after an idle claim"), and this yield must never be
+  // confused for a backoff.
   const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
 
   async function run(): Promise<void> {
     while (!stopping) {
-      // CHECK AND TAKE IN ONE TICK (§5.3). Nothing may be awaited between these two statements:
-      // the first await inside runOne is queue.claim, which blocks for blockMs, and any await here
-      // would let a sync /turn land in the slot we just measured as free.
-      if (deps.counter.inFlight >= deps.cap) {
-        deps.onCapDenied?.();
-        await sleep(idleBackoffMs);
-      } else {
-        release = deps.counter.start();
-        try {
-          const outcome = await runOne(deps.job);
-          if (stopping) return; // drained mid-leaf: do not report, do not claim again
-          deps.onOutcome?.(outcome);
-          // No backoff on 'idle': claim already blocked for blockMs (5 s), so sleeping here would
-          // only add latency to the next submission.
-        } catch (err) {
-          // A claim that THREW left its entry pending, by design (turn-claim.ts). Back off so a
-          // control-plane outage is a slow retry rather than a hot loop against it.
-          log(`[async] claim failed: ${err instanceof Error ? err.message : String(err)}`);
-          if (!stopping) await sleep(errorBackoffMs);
-        } finally {
-          release?.();
-          release = null;
+      try {
+        // CHECK AND TAKE IN ONE TICK (§5.3). Nothing may be awaited between these two
+        // statements: the first await inside runOne is queue.claim, which blocks for blockMs,
+        // and any await here would let a sync /turn land in the slot we just measured as free.
+        // Everything in this branch -- the inFlight read, onCapDenied, the backoff sleep, and
+        // counter.start() -- sits inside this try on purpose: onCapDenied and counter.start()'s
+        // onChange are both injected (Task 8's metrics emitter; the real counter's process.send),
+        // and a throw from either must not end the loop. This process is also serving healthy
+        // sync /turn traffic, which shouldArmAsync's own doc forbids killing over an arming
+        // mistake -- an injected callback's bug must not be allowed to do worse.
+        if (deps.counter.inFlight >= deps.cap) {
+          deps.onCapDenied?.();
+          await sleep(idleBackoffMs);
+        } else {
+          release = deps.counter.start();
+          try {
+            const outcome = await runOne(deps.job);
+            if (stopping) return; // drained mid-leaf: do not report, do not claim again
+            deps.onOutcome?.(outcome);
+            // No backoff on 'idle': claim already blocked for blockMs (5 s), so sleeping here
+            // would only add latency to the next submission.
+          } catch (err) {
+            // A claim that THREW left its entry pending, by design (turn-claim.ts). Back off so
+            // a control-plane outage is a slow retry rather than a hot loop against it.
+            log(`[async] claim failed: ${err instanceof Error ? err.message : String(err)}`);
+            if (!stopping) await sleep(errorBackoffMs);
+          } finally {
+            release?.();
+            release = null;
+          }
         }
+      } catch (err) {
+        // A throwing onCapDenied, a throwing counter.start() (e.g. process.send on a closed IPC
+        // channel), or a rejecting sleep land here. Release whatever this iteration might have
+        // taken, log it, and back off -- then keep looping. The alternative, letting it escape
+        // run(), is the thing the fallback .catch() below exists to guard against if this handler
+        // itself is somehow insufficient; this one is the first line of defense and the one that
+        // keeps the loop alive rather than merely keeping the process alive.
+        release?.();
+        release = null;
+        log(`[async] drain iteration failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (!stopping) await sleep(errorBackoffMs);
       }
       if (!stopping) await yieldToEventLoop();
     }
@@ -158,7 +179,18 @@ export function createLeafDrainLoop(deps: LeafDrainLoopDeps): LeafDrainLoop {
     start(): void {
       if (started) return;
       started = true;
-      void run();
+      void run().catch((err) => {
+        // Last resort. Everything run() can throw is already caught inside its own loop above;
+        // this exists for the same reason packages/supervisor/src/main.ts's `route(socket)` gets
+        // one: a bare `void` on a rejecting promise ends the process under Node's default
+        // --unhandled-rejections=throw, taking down this worker's healthy sync /turn traffic
+        // along with the drain. Mark the loop dead rather than let `running` keep reporting
+        // true while nothing is happening.
+        stopping = true;
+        release?.();
+        release = null;
+        log(`[async] drain loop died: ${err instanceof Error ? err.message : String(err)}`);
+      });
     },
     async stop(): Promise<void> {
       stopping = true;
