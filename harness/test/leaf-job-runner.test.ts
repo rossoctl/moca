@@ -188,7 +188,7 @@ describe('processOne', () => {
 
   it('completes a non-retryable failure: result, finalize, ack', async () => {
     queue.next = entry();
-    const runLeaf = async () => ({ status: 'failed', reason: 'budget' }) as unknown as LeafResult;
+    const runLeaf = async () => ({ status: 'failed', reason: 'bad_inputs' }) as LeafResult;
     const out = await processOne(deps({ runLeaf }));
     expect(out).toMatchObject({ kind: 'completed', status: 'failed' });
     expect(finalized).toEqual([['t-1', 'failed']]);
