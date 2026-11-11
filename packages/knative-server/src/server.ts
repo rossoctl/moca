@@ -20,7 +20,7 @@ import {
   readResult,
 } from '@moca/harness/leaf-result-store';
 import { beginRunLease, reapOrphanedRuns } from '@moca/harness/run-lease';
-import { CpError, statusFor } from '@moca/control-plane';
+import { CpError, resultTtlSeconds, statusFor } from '@moca/control-plane';
 import {
   authorizeRunRead,
   resolveTurnAuth,
@@ -48,8 +48,10 @@ const SSE_HEADERS = {
 };
 // Exported (#389): the async leaf worker writes results through the same store with the same
 // TTL, because two result stores in one process would be two connections and two TTLs for one
-// key space.
-export const RESULT_TTL_SECONDS = parseInt(process.env.LEAF_RESULT_TTL_SECONDS ?? '86400', 10);
+// key space. `resultTtlSeconds` is the control plane's own parse of the variable, shared rather
+// than repeated: a local `parseInt` read a blank or typo'd value as NaN, which Redis rejects on
+// every `EX`, so a malformed TTL broke result writes here while refusing to boot there.
+export const RESULT_TTL_SECONDS = resultTtlSeconds(process.env);
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 

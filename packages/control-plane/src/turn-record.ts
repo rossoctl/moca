@@ -44,6 +44,25 @@ export function isTerminalState(s: TurnState): boolean {
  */
 export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
 
+/**
+ * `LEAF_RESULT_TTL_SECONDS`, the lifetime of a leaf result, read the SAME way in every process that
+ * writes one. Beside the margin above and for the same reason: the control plane and the async
+ * worker both write results, under the same keys, from the same variable, so a second parse of it
+ * is a second meaning. A malformed value refuses to boot rather than becoming `NaN` -- `writeResult`
+ * passes this straight to Redis as `EX`, and `EX NaN` is `ERR value is not an integer`, so a typo'd
+ * TTL would turn every result write into a runtime error instead of a startup one. Zero is refused
+ * too: Redis rejects `EX 0`, so "no retention" is not something this knob can express.
+ */
+export function resultTtlSeconds(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): number {
+  const v = env.LEAF_RESULT_TTL_SECONDS;
+  if (v === undefined || v === '') return 86_400;
+  if (!/^[1-9][0-9]*$/.test(v))
+    throw new Error(`LEAF_RESULT_TTL_SECONDS must be a positive integer (seconds), got "${v}"`);
+  return Number(v);
+}
+
 /** Per-turn caps, resolved at submission and stored (§4.3). Enforcement is the worker's (#389). */
 export interface TurnCaps {
   tokens?: number;

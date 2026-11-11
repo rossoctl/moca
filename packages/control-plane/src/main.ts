@@ -35,7 +35,7 @@ import { routeProfileFromEnv, sandboxConfigFromEnv } from './sandbox-config.js';
 import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 import { readTenancy } from './tenancy.js';
 import { TurnStore } from './turn-store.js';
-import { TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
+import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
 import type { ResultRedisLike } from './turn-result.js';
 
@@ -98,9 +98,9 @@ function countEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
 }
 
 function turnRecordTtlFromEnv(env: NodeJS.ProcessEnv): number {
-  // Matches server.ts:49's parseInt of the same variable: one deployment, one meaning.
-  const result = countEnv(env, 'LEAF_RESULT_TTL_SECONDS', 86_400);
-  return result + TURN_RECORD_TTL_MARGIN_SECONDS;
+  // `resultTtlSeconds` is the one parse of this variable, shared with the worker that writes the
+  // same results (`server.ts:52`): one deployment, one meaning.
+  return resultTtlSeconds(env) + TURN_RECORD_TTL_MARGIN_SECONDS;
 }
 
 /**
