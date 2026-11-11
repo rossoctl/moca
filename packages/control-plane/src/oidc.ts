@@ -74,11 +74,20 @@ export interface PendingOidcAuth {
  * Where pending logins live. Memory is the default and is correct for a single-replica control
  * plane; a deployment whose ingress load-balances across replicas must back it with the shared
  * store (Redis), or a callback landing on pod B never meets the state pod A issued.
+ *
+ * `put` refuses (returns false) once the store holds `maxEntries` live entries: the login-start
+ * route is unauthenticated, so nothing else bounds the memory a loop of anonymous POSTs can park.
+ * `settle` is write-once per outcome: a `principal` is never replaced (a second code exchange
+ * must not swap who a parked login belongs to), and a `denial` is terminal. A denial landing on a
+ * parked entry IS allowed -- that is the confirm path's designated transition (too many wrong
+ * codes) -- so the provider keeps provider-side failures from ever sending one onto a login that
+ * already succeeded past the provider (see settleProviderDenial).
  */
 export interface PendingAuthStore {
-  put(entry: PendingOidcAuth): Promise<void>;
+  /** False when the store is at its cap; the caller refuses the login start. */
+  put(entry: PendingOidcAuth): Promise<boolean>;
   get(state: string): Promise<PendingOidcAuth | undefined>;
-  /** Record the callback's outcome; false when no live entry holds that state. */
+  /** Record the callback's outcome; false when no live entry holds that state, or it is settled. */
   settle(
     state: string,
     patch: Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs'>>,
@@ -86,21 +95,32 @@ export interface PendingAuthStore {
   delete(state: string): Promise<void>;
 }
 
+/** Live pending logins one control plane holds; past this, login starts are refused (429). */
+export const MAX_PENDING_LOGINS = 10_000;
+
 export class MemoryPendingAuthStore implements PendingAuthStore {
   private readonly entries = new Map<string, PendingOidcAuth>();
-  constructor(private readonly now: () => number) {}
+  constructor(
+    private readonly now: () => number,
+    private readonly maxEntries: number = MAX_PENDING_LOGINS,
+  ) {}
 
-  /** Lazy sweep on every touch: a background timer would outlive a test's store. */
+  /**
+   * Sweep only on put, and only when the map is at the cap: `get` checks each entry's own expiry
+   * anyway, so the sweep exists to reclaim space, and reclaiming matters exactly when a put would
+   * otherwise be refused. That keeps the common path O(1) instead of walking the map per request.
+   */
   private sweep(): void {
     for (const [k, e] of this.entries) if (e.expiresAtMs <= this.now()) this.entries.delete(k);
   }
 
-  async put(entry: PendingOidcAuth): Promise<void> {
-    this.sweep();
+  async put(entry: PendingOidcAuth): Promise<boolean> {
+    if (this.entries.size >= this.maxEntries) this.sweep();
+    if (this.entries.size >= this.maxEntries) return false;
     this.entries.set(entry.state, entry);
+    return true;
   }
   async get(state: string): Promise<PendingOidcAuth | undefined> {
-    this.sweep();
     const e = this.entries.get(state);
     return e && e.expiresAtMs > this.now() ? e : undefined;
   }
@@ -110,6 +130,9 @@ export class MemoryPendingAuthStore implements PendingAuthStore {
   ): Promise<boolean> {
     const e = await this.get(state);
     if (!e) return false;
+    // Write-once per outcome (see the interface): terminal once denied, principal never replaced.
+    if (e.denial !== undefined) return false;
+    if (e.principal !== undefined && patch.principal !== undefined) return false;
     // A settled entry keeps its TTL: the polling client has the rest of the window to collect it.
     Object.assign(e, patch);
     return true;
@@ -250,11 +273,16 @@ export class OidcProvider implements IdentityProvider {
     // The terminal's half of the binding: short, human-typable, and NEVER in the authorize URL --
     // the URL is the piece a victim can be handed, the code is not.
     const confirmCode = mintConfirmCode();
-    await this.store.put({
+    const parked = await this.store.put({
       state,
       confirmCode,
       expiresAtMs: this.now() + this.stateTtlS * 1000,
     });
+    if (!parked) {
+      // The route is unauthenticated, so the cap is the only bound on anonymous memory; refusing
+      // the START (429) is the client's signal to back off, and expired entries were swept first.
+      throw new CpError('quota_exceeded', 'too many sign-ins are waiting; try again in a moment');
+    }
     const authorize = new URL(d.authorization_endpoint);
     // URLSearchParams encodes the state and redirect_uri; append so a provider whose endpoint
     // already carries query parameters keeps them.
@@ -294,9 +322,7 @@ export class OidcProvider implements IdentityProvider {
       throw new CpError('invalid_request', 'the callback is missing its state parameter');
     }
     if (q.error) {
-      const known = await this.store.settle(q.state, { denial: `provider refused: ${q.error}` });
-      if (!known) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return { outcome: 'refused' };
+      return this.settleProviderDenial(q.state, `provider refused: ${q.error}`);
     }
     if (q.confirm !== undefined) return this.confirmSignIn(q.state, q.confirm, q.token);
     if (typeof q.code !== 'string' || q.code.length === 0) {
@@ -307,35 +333,47 @@ export class OidcProvider implements IdentityProvider {
     if (!(await this.store.get(q.state))) {
       throw new CpError('unauthorized', 'unknown or expired sign-in state');
     }
-    const d = await this.discover();
-    const res = await this.fetchImpl(d.token_endpoint, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: q.code,
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        redirect_uri: this.redirectUri,
-      }).toString(),
-    });
-    const body = this.parseJson(await res.text(), res.status, d.token_endpoint);
+    // Discovery, the exchange and the parse can all fail for reasons that are nobody's fault here
+    // (the provider is down, a proxy ate the reply). Whatever the failure, the poll must hear
+    // "refused" now rather than hang in authorization_pending for the rest of the window -- the
+    // same discipline the verify failure below follows. The reason carries no secret: URLs and
+    // provider error codes, never the client secret.
+    let body: Record<string, unknown>;
+    try {
+      const d = await this.discover();
+      const res = await this.fetchImpl(d.token_endpoint, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: q.code,
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+          redirect_uri: this.redirectUri,
+        }).toString(),
+      });
+      body = this.parseJson(await res.text(), res.status, d.token_endpoint);
+    } catch (err) {
+      if (err instanceof CpError && err.code === 'identity_provider_misconfigured') {
+        console.error(`[control-plane] oidc provider misconfigured: ${err.message}`);
+      }
+      return this.settleProviderDenial(
+        q.state,
+        `the sign-in could not complete: ${(err as Error).message}`,
+      );
+    }
     if (typeof body.error === 'string') {
       // The operator's to fix, not the user's: a wrong client secret or an unregistered redirect
       // URI shows up here on every single login.
       console.error(`[control-plane] the oidc provider refused the token exchange: ${body.error}`);
-      const ok = await this.store.settle(q.state, {
-        denial: `token exchange failed: ${body.error}`,
-      });
-      if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return { outcome: 'refused' };
+      return this.settleProviderDenial(q.state, `token exchange failed: ${body.error}`);
     }
     const idToken = body.id_token;
     if (typeof idToken !== 'string' || idToken.length === 0) {
-      throw this.misconfigured('the token endpoint replied with no id_token');
+      return this.settleProviderDenial(q.state, 'the token endpoint replied with no id_token');
     }
     // A token that does not verify settles a DENIAL rather than throwing: the browser gets its
     // sentence either way, but the polling client must hear "refused" now, not hang in
@@ -345,9 +383,7 @@ export class OidcProvider implements IdentityProvider {
       principal = await this.verifyIdToken(idToken);
     } catch (err) {
       if (!(err instanceof CpError) || err.code !== 'unauthorized') throw err;
-      const ok = await this.store.settle(q.state, { denial: err.message });
-      if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
-      return { outcome: 'refused' };
+      return this.settleProviderDenial(q.state, err.message);
     }
     // Parked but NOT confirmed: the principal is real (a verified id_token named them), yet the
     // login completes only when the browser's human proves they hold the terminal's code AND the
@@ -356,8 +392,34 @@ export class OidcProvider implements IdentityProvider {
     // the victim's browser receives and the attacker never sees.
     const confirmToken = randomBytes(32).toString('base64url');
     const ok = await this.store.settle(q.state, { principal, confirmed: false, confirmToken });
-    if (!ok) throw new CpError('unauthorized', 'unknown or expired sign-in state');
+    if (!ok) return this.settleRefusedOutcome(q.state);
     return { outcome: 'awaiting_confirmation', confirmToken };
+  }
+
+  /**
+   * A provider-side refusal (the provider's error parameter, a failed exchange, an unusable
+   * reply). It must never flip a login that already succeeded past the provider -- a replayed
+   * `?error=` or a retried exchange on a parked entry changes nothing -- so a parked entry is
+   * left exactly as it stands.
+   */
+  private async settleProviderDenial(state: string, reason: string): Promise<OidcCallbackResult> {
+    const entry = await this.store.get(state);
+    if (!entry) throw new CpError('unauthorized', 'unknown or expired sign-in state');
+    if (entry.principal !== undefined) return { outcome: 'awaiting_confirmation' };
+    const ok = await this.store.settle(state, { denial: reason });
+    return ok ? { outcome: 'refused' } : this.settleRefusedOutcome(state);
+  }
+
+  /**
+   * A settle the store refused. The confirm token is deliberately NOT re-issued here: only a
+   * request that itself completed a provider redirect (the successful exchange above) may carry
+   * one away, or a second completer could harvest it and confirm a login that is not theirs.
+   */
+  private async settleRefusedOutcome(state: string): Promise<OidcCallbackResult> {
+    const entry = await this.store.get(state);
+    if (!entry) throw new CpError('unauthorized', 'unknown or expired sign-in state');
+    if (entry.denial !== undefined) return { outcome: 'refused' };
+    return { outcome: 'awaiting_confirmation' };
   }
 
   /**
@@ -384,11 +446,15 @@ export class OidcProvider implements IdentityProvider {
       );
     }
     if (entry.confirmed) return { outcome: 'confirmed' };
+    // A shape-wrong code is refused before it costs a try: the shape is public, so it separates
+    // typos and stray pastes from guesses at the secret, and only guesses must be scarce.
+    const typed = code.trim().toUpperCase();
+    if (!CONFIRM_CODE_RE.test(typed)) return { outcome: 'wrong_code' };
     // Both comparisons constant time (secretMatches hashes both sides to a fixed width first):
     // the reply's latency must not become a per-character oracle on either secret.
     const tokenOk =
       entry.confirmToken !== undefined && secretMatches(token ?? '', entry.confirmToken);
-    const codeOk = secretMatches(code.trim().toUpperCase(), entry.confirmCode);
+    const codeOk = secretMatches(typed, entry.confirmCode);
     if (!tokenOk || !codeOk) {
       const wrong = (entry.wrongCodes ?? 0) + 1;
       if (wrong >= MAX_WRONG_CODES) {

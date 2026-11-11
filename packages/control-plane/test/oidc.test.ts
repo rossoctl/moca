@@ -375,6 +375,151 @@ describe('the callback route', () => {
     expect(String(res.body)).toMatch(/return to your terminal/);
   });
 
+  describe('the pending-auth store under attack and accident (review round 2)', () => {
+    it('never flips a parked login: a replayed ?error= changes nothing', async () => {
+      const r = rig();
+      mint(r, { sub: 'user-1' });
+      const start = await r.provider.startDeviceAuth();
+      const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      expect(landed.outcome).toBe('awaiting_confirmation');
+      // The state is in the victim's browser history; anyone replaying the callback with an error
+      // parameter must not turn the parked login into a denial.
+      const flipped = await r.provider.handleCallback({
+        state: start.deviceCode,
+        error: 'access_denied',
+      });
+      expect(flipped.outcome).toBe('awaiting_confirmation');
+      expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+        'authorization_pending',
+      );
+      // The real browser still completes it.
+      expect(
+        (
+          await r.provider.handleCallback({
+            state: start.deviceCode,
+            confirm: start.userCode,
+            token: landed.confirmToken,
+          })
+        ).outcome,
+      ).toBe('confirmed');
+    });
+
+    it('never replaces a parked principal: a second exchange does not re-issue the confirm token', async () => {
+      const r = rig();
+      mint(r, { sub: 'user-1' });
+      const start = await r.provider.startDeviceAuth();
+      const first = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      mint(r, { sub: 'someone-else' });
+      const second = await r.provider.handleCallback({ code: 'c2', state: start.deviceCode });
+      // Second landing: no token handed out (only a completing redirect may carry one), and the
+      // poll still waits on the FIRST principal's confirmation.
+      expect(second.outcome).toBe('awaiting_confirmation');
+      expect(second.confirmToken).toBeUndefined();
+      expect(
+        (
+          await r.provider.handleCallback({
+            state: start.deviceCode,
+            confirm: start.userCode,
+            token: first.confirmToken,
+          })
+        ).outcome,
+      ).toBe('confirmed');
+      expect(await r.provider.completeDeviceAuth(start.deviceCode)).toMatchObject({
+        subject: 'oidc:user-1',
+      });
+    });
+
+    it('settles a denial when the exchange fails at the transport level, not a 15-minute hang', async () => {
+      // A token endpoint that rejects outright (provider down, network cut): the poll must hear
+      // the refusal, not authorization_pending for the rest of the window. Discovery and the JWKS
+      // still answer, so the failure is exactly at the exchange.
+      const keys = rsa();
+      const now = { ms: NOW_MS };
+      const fetch: FetchLike = async (url: string) => {
+        if (url.includes('/token')) throw new Error('connect ECONNREFUSED');
+        if (url.includes('openid-configuration'))
+          return { status: 200, text: async () => JSON.stringify(DISCOVERY) };
+        if (url.includes('/jwks'))
+          return { status: 200, text: async () => JSON.stringify(keys.jwks) };
+        throw new Error('unscripted ' + url);
+      };
+      const provider = new OidcProvider({
+        issuer: ISSUER,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        redirectUri: REDIRECT_URI,
+        fetch,
+        now: () => now.ms,
+        store: new MemoryPendingAuthStore(() => now.ms),
+      });
+      const start = await provider.startDeviceAuth();
+      const out = await provider.handleCallback({ code: 'c', state: start.deviceCode });
+      expect(out.outcome).toBe('refused');
+      const e = await errOf(() => provider.completeDeviceAuth(start.deviceCode));
+      expect(e.code).toBe('unauthorized');
+      expect(e.message).toContain('could not complete');
+      expect(e.message).toContain('ECONNREFUSED');
+    });
+
+    it('refuses login starts past the store cap (429), and recovers once entries expire', async () => {
+      const keys = rsa();
+      const now = { ms: NOW_MS };
+      const idToken = { value: '' };
+      const store = new MemoryPendingAuthStore(() => now.ms, 2);
+      const fetch: FetchLike = async (url: string) => {
+        if (url.includes('/token'))
+          return { status: 200, text: async () => JSON.stringify({ id_token: idToken.value }) };
+        if (url.includes('openid-configuration'))
+          return { status: 200, text: async () => JSON.stringify(DISCOVERY) };
+        if (url.includes('/jwks'))
+          return { status: 200, text: async () => JSON.stringify(keys.jwks) };
+        throw new Error('unscripted ' + url);
+      };
+      const provider = new OidcProvider({
+        issuer: ISSUER,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        redirectUri: REDIRECT_URI,
+        fetch,
+        now: () => now.ms,
+        store,
+      });
+      await provider.startDeviceAuth();
+      await provider.startDeviceAuth();
+      const capped = await errOf(() => provider.startDeviceAuth());
+      expect(capped.code).toBe('quota_exceeded');
+      // The cap is live entries, not all history: let them expire and a start works again.
+      now.ms += 901 * 1000;
+      const again = await provider.startDeviceAuth();
+      expect(again.deviceCode).toMatch(/^[\w-]+$/);
+    });
+
+    it('a malformed confirmation does not burn a try', async () => {
+      const r = rig();
+      mint(r, { sub: 'user-1' });
+      const start = await r.provider.startDeviceAuth();
+      const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+      for (let i = 0; i < 8; i++) {
+        const out = await r.provider.handleCallback({
+          state: start.deviceCode,
+          confirm: 'not a code',
+          token: landed.confirmToken,
+        });
+        expect(out.outcome).toBe('wrong_code');
+      }
+      // Still not exhausted (no try was burned), and the right code still confirms.
+      expect(
+        (
+          await r.provider.handleCallback({
+            state: start.deviceCode,
+            confirm: start.userCode,
+            token: landed.confirmToken,
+          })
+        ).outcome,
+      ).toBe('confirmed');
+    });
+  });
+
   describe('the browser-to-terminal binding (review item 3)', () => {
     it('defeats the walk-in attack end to end, the attacker holding state AND user code', async () => {
       // The attacker starts the login, so their terminal shows BOTH the state and the user code.
