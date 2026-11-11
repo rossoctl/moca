@@ -1,14 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CpError } from '@moca/control-plane';
 import { claimTurn, deadLetterTurn, type TurnClaimDeps } from '../src/turn-claim.js';
 
 const SID = 'c0ffee00-0000-4000-8000-000000000001';
 const TURN = 't-11111111-2222-4333-8444-555555555555';
+// Distinctive, so a substring assertion against console/error output is unambiguous.
+const SECRET = 'sk-ant-SENTINEL-DO-NOT-LEAK';
 
 const ok = (over: Record<string, unknown> = {}) => ({
   turnId: TURN,
   mode: 'direct',
-  anthropicAuthToken: 'sk-secret',
+  anthropicAuthToken: SECRET,
   anthropicBaseUrl: 'https://gw.example/v1',
   sessionId: SID,
   subject: 'github:1234',
@@ -33,8 +35,29 @@ function deps(over: Partial<TurnClaimDeps> = {}): TurnClaimDeps {
   };
 }
 
+// Suite-wide guard against item 5's regressions: `console.error(raw)` after `res.text()`, or any
+// other console call, printing the live credential. Spying on all five levels and asserting no
+// call argument -- stringified -- ever contains the secret catches a leak regardless of which
+// console method a future change used.
+const consoleSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+
 beforeEach(() => {
   markRunning = vi.fn(async () => 'ok');
+  for (const level of ['error', 'warn', 'log', 'info', 'debug'] as const) {
+    consoleSpies.push(vi.spyOn(console, level).mockImplementation(() => undefined));
+  }
+});
+
+afterEach(() => {
+  for (const spy of consoleSpies) {
+    for (const call of spy.mock.calls) {
+      for (const arg of call) {
+        expect(String(arg)).not.toContain(SECRET);
+      }
+    }
+    spy.mockRestore();
+  }
+  consoleSpies.length = 0;
 });
 
 describe('claimTurn', () => {
@@ -58,7 +81,7 @@ describe('claimTurn', () => {
 
   it('puts the resolved credential on the config it hands to runLeaf', async () => {
     const claimed = await claimTurn(TURN, 1, deps());
-    expect(claimed!.config.upstreamCredential).toEqual({ mode: 'direct', value: 'sk-secret' });
+    expect(claimed!.config.upstreamCredential).toEqual({ mode: 'direct', value: SECRET });
     expect(claimed!.config.anthropicBaseUrl).toBe('https://gw.example/v1');
     expect(claimed!.config.serverMode).toBe(true);
   });
@@ -72,6 +95,18 @@ describe('claimTurn', () => {
   it('flips the record to running with the delivery count as attempts', async () => {
     await claimTurn(TURN, 3, deps());
     expect(markRunning).toHaveBeenCalledWith(TURN, 3);
+    // Pinned exactly, not just "called with at least these": a stray extra argument (e.g. a
+    // credential or the body) would pass toHaveBeenCalledWith but fail this.
+    expect(markRunning.mock.calls[0]).toEqual([TURN, 3]);
+  });
+
+  it('merges the exchange response configRef into the claimed envelope (R13)', async () => {
+    // A realistic 64-hex digest, not a short placeholder: validateExchangeBody's configRef check
+    // is a regex over the full shape.
+    const configRef = `sha256:${'a1b2'.repeat(16)}`;
+    const d = deps({ fetchImpl: reply(200, ok({ configRef })) });
+    const claimed = await claimTurn(TURN, 1, d);
+    expect((claimed!.envelope as unknown as Record<string, unknown>).configRef).toBe(configRef);
   });
 
   it('exchanges BEFORE it marks running', async () => {
@@ -93,9 +128,19 @@ describe('claimTurn', () => {
     expect(await claimTurn(TURN, 1, deps())).toBeNull();
   });
 
+  it('throws (does not resolve to null) when markRunning itself fails (R16)', async () => {
+    // The whole point of null vs throw: a swallowed markRunning failure that resolved to `null`
+    // would ack and permanently drop a turn that was never actually refused.
+    markRunning = vi.fn(async () => {
+      throw new CpError('redis_unavailable', 'redis down');
+    });
+    await expect(claimTurn(TURN, 1, deps())).rejects.toBeInstanceOf(CpError);
+  });
+
   it.each([
     [404, 'turn_not_found'],
     [409, 'turn_not_claimable'],
+    [404, 'session_not_found'],
   ])('returns null on %i %s, without marking running', async (status, error) => {
     const d = deps({ fetchImpl: reply(status, { error }) });
     expect(await claimTurn(TURN, 1, d)).toBeNull();
@@ -112,6 +157,8 @@ describe('claimTurn', () => {
     expect(markRunning).not.toHaveBeenCalled();
   });
 
+  // Genuinely NOT in NOT_CLAIMABLE (turn_not_found / turn_not_claimable / session_not_found):
+  // 'internal_error' must stay a call failure, not a claim refusal.
   it.each([500, 503, 501])('throws on an unexpected %i, leaving the entry pending', async (s) => {
     const d = deps({ fetchImpl: reply(s, { error: 'internal_error' }) });
     await expect(claimTurn(TURN, 1, d)).rejects.toBeInstanceOf(CpError);
@@ -120,7 +167,9 @@ describe('claimTurn', () => {
 
   it('refuses a response echoing a different turn id', async () => {
     const d = deps({ fetchImpl: reply(200, ok({ turnId: 't-other' })) });
-    await expect(claimTurn(TURN, 1, d)).rejects.toMatchObject({ code: 'credential_unavailable' });
+    const err = await claimTurn(TURN, 1, d).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'credential_unavailable' });
+    expect(JSON.stringify(err)).not.toContain(SECRET);
   });
 
   it.each([
@@ -136,19 +185,23 @@ describe('claimTurn', () => {
       (body as Record<string, unknown>).envelope = envelope;
     }
     const d = deps({ fetchImpl: reply(200, body) });
-    await expect(claimTurn(TURN, 1, d)).rejects.toMatchObject({ code: 'credential_unavailable' });
+    const err = await claimTurn(TURN, 1, d).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'credential_unavailable' });
     expect(markRunning).not.toHaveBeenCalled();
+    expect(JSON.stringify(err)).not.toContain(SECRET);
   });
 
   it('refuses a response with an unknown credential mode (shared validation)', async () => {
     const d = deps({ fetchImpl: reply(200, ok({ mode: 'sideways' })) });
-    await expect(claimTurn(TURN, 1, d)).rejects.toMatchObject({ code: 'credential_unavailable' });
+    const err = await claimTurn(TURN, 1, d).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'credential_unavailable' });
+    expect(JSON.stringify(err)).not.toContain(SECRET);
   });
 
   it('never puts the credential value in a thrown message', async () => {
     const d = deps({ fetchImpl: reply(200, ok({ turnId: 't-other' })) });
     const err = await claimTurn(TURN, 1, d).catch((e: Error) => e);
-    expect(String((err as Error).message)).not.toContain('sk-secret');
+    expect(String((err as Error).message)).not.toContain(SECRET);
   });
 });
 
@@ -157,7 +210,7 @@ describe('deadLetterTurn', () => {
     const store = new Map<string, string>();
     const finalize = vi.fn(async () => 'ok');
     await deadLetterTurn(TURN, {
-      turns: { get: async () => ({ sessionId: SID }), finalize } as never,
+      turns: { get: async () => ({ sessionId: SID, state: 'queued' }), finalize } as never,
       resultStore: {
         set: async (k: string, v: string) => void store.set(k, v),
         get: async () => null,
@@ -183,11 +236,28 @@ describe('deadLetterTurn', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
+  it('is a no-op for a record that is already terminal (R14): never overwrites a done result', async () => {
+    // Last delivery, leaf succeeded, worker killed before ack: the entry is reclaimed and
+    // dead-lettered even though the record already says 'done'. Must not stomp the real result.
+    const set = vi.fn(async () => undefined);
+    const finalize = vi.fn(async () => 'ok');
+    await deadLetterTurn(TURN, {
+      turns: { get: async () => ({ sessionId: SID, state: 'done' }), finalize } as never,
+      resultStore: { set, get: async () => null },
+      ttlSeconds: 60,
+    });
+    expect(set).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
   it('mints no credential: it never calls the control plane', async () => {
     const fetchImpl = vi.fn();
     globalThis.fetch = fetchImpl as never;
     await deadLetterTurn(TURN, {
-      turns: { get: async () => ({ sessionId: SID }), finalize: async () => 'ok' } as never,
+      turns: {
+        get: async () => ({ sessionId: SID, state: 'queued' }),
+        finalize: async () => 'ok',
+      } as never,
       resultStore: { set: async () => undefined, get: async () => null },
       ttlSeconds: 60,
     });

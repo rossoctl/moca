@@ -1,4 +1,4 @@
-import { CpError, type TurnState, type TurnStore } from '@moca/control-plane';
+import { CpError, isTerminalState, type TurnState, type TurnStore } from '@moca/control-plane';
 import type { ClaimedTurn } from '@moca/harness/leaf-job-runner';
 import type { LeafEnvelope } from '@moca/harness/run-leaf';
 import { toResultRecord, writeResult, type RedisLike } from '@moca/harness/leaf-result-store';
@@ -24,8 +24,15 @@ export interface DeadLetterDeps {
   now?: () => string;
 }
 
-/** Codes that mean "this turn must not run", as opposed to "this call failed" (§5.4). */
-const NOT_CLAIMABLE = new Set(['turn_not_found', 'turn_not_claimable']);
+/**
+ * Codes that mean "this turn must not run", as opposed to "this call failed" (§5.4).
+ *
+ * `session_not_found` belongs here too: `turn-exchange.ts` throws it for an unknown session, an
+ * owner mismatch, or a tombstoned session, and all three are permanent -- a transient Redis outage
+ * throws `redis_unavailable` instead. Treating it as a call failure burns three deliveries
+ * (~4.5 min) before dead-lettering a turn whose answer could never have changed.
+ */
+const NOT_CLAIMABLE = new Set(['turn_not_found', 'turn_not_claimable', 'session_not_found']);
 
 /**
  * §5.4's claim handshake. Returns `null` when the turn must not run -- cancelled, already terminal,
@@ -115,8 +122,18 @@ export async function claimTurn(
       : {}),
     ...(resolved.model ? { model: resolved.model } : {}),
   };
+  // `buildConfig` never reads `auth.configRef` -- the sync path merges it into the envelope
+  // (`server.ts:612`, `:743`) and `runLeaf` reads `configRef` off the envelope, not off `TurnConfig`
+  // (`run-leaf.ts:639`, `:830`; `LeafEnvelope.configRef`). Without this merge an async leaf would
+  // run without the session's promoted CLAUDE.md / MCP / agent config while a sync `/turn` on the
+  // same session gets all of it. Control-plane value last, same spread shape as the sync path, so
+  // the record's digest wins over anything a stored envelope happened to carry.
+  const envelopeWithConfig = {
+    ...(envelope as Record<string, unknown>),
+    ...(resolved.configRef ? { configRef: resolved.configRef } : {}),
+  };
   return {
-    envelope: envelope as unknown as LeafEnvelope,
+    envelope: envelopeWithConfig as unknown as LeafEnvelope,
     sessionId: body.sessionId,
     attempts: deliveryCount,
     // The SAME builder the sync `/turn` path uses, so an async leaf and a sync one differ in how
@@ -136,7 +153,14 @@ export async function deadLetterTurn(turnId: string, deps: DeadLetterDeps): Prom
   const rec = await deps.turns.get(turnId);
   // Already expired: there is nothing to answer and nothing to finalize. Acking the entry (the
   // caller's job) is the whole remaining action.
-  if (!rec) return;
+  //
+  // Already terminal is the SAME refusal, not a special case: a terminal record outlives its
+  // result (turn-store.ts's own TTL margin), so `rec` is still truthy on, say, a `done` turn whose
+  // worker was killed before the ack. Without this check the write below would overwrite a correct
+  // `done` result with `failed/error`, and `finalize` would then silently refuse (terminal states
+  // compare-and-set) while this function reports success either way. Guarding here also protects
+  // the periodic reaper, which calls this same path.
+  if (!rec || isTerminalState(rec.state)) return;
   const now = deps.now ?? (() => new Date().toISOString());
   await writeResult(
     deps.resultStore,
