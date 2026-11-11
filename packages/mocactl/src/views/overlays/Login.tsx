@@ -87,7 +87,13 @@ export function LoginOverlay({
   const secondsLeft = start
     ? Math.max(0, Math.ceil((shownAt + start.expiresIn * 1000 - now) / 1000))
     : 0;
-  const hints = [copy && 'c copy code', openUrl && 'o open browser', 'esc cancel']
+  // The copy hint only makes sense when there is a code to copy (GitHub's device flow); the
+  // oidc flow has one only until its confirmation step, so hint at what exists.
+  const hints = [
+    copy && start?.userCode !== undefined && 'c copy code',
+    openUrl && 'o open browser',
+    'esc cancel',
+  ]
     .filter(Boolean)
     .join(' · ');
 
@@ -125,7 +131,7 @@ export function LoginOverlay({
             </Box>
           ) : null}
           <Spinner
-            label={`waiting for approval · code expires in ${formatDuration(secondsLeft * 1000)}`}
+            label={`waiting for approval · sign-in window closes in ${formatDuration(secondsLeft * 1000)}`}
           />
           <Text color={t.muted}>{hints}</Text>
           {note ? <Text color={t.success}>{note}</Text> : null}
