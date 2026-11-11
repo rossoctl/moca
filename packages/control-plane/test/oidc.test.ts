@@ -157,6 +157,30 @@ describe('startDeviceAuth', () => {
     );
   });
 
+  it('accepts an issuer that legitimately ends in a slash, matching it exactly', async () => {
+    // Auth0-style: the slash is part of the identity. The provider is configured verbatim and
+    // the discovery document agrees, so both exact-match comparisons pass.
+    const slash = 'https://tenant.example.invalid/';
+    const provider = new OidcProvider({
+      issuer: slash,
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      redirectUri: REDIRECT_URI,
+      fetch: async (url: string) => ({
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            issuer: slash,
+            authorization_endpoint: `${slash}authorize`,
+            token_endpoint: `${slash}token`,
+            jwks_uri: `${slash}jwks`,
+          }),
+      }),
+    });
+    const start = await provider.startDeviceAuth();
+    expect(start.verificationUri.startsWith(`${slash}authorize?`)).toBe(true);
+  });
+
   it('refuses a discovery document whose issuer is not the configured one', async () => {
     const r = rig({
       script: {
@@ -296,6 +320,8 @@ describe('id_token verification', () => {
       // An hour stale, not a second: the 60 s clock-skew allowance must accept a just-lapsed token,
       // so the fixture has to be outside the allowance to test the refusal.
       ['exp', { sub: 'user-1', exp: Math.floor(NOW_MS / 1000) - 3600 }],
+      // Symmetrically, an nbf an hour in the future is outside the skew allowance.
+      ['nbf', { sub: 'user-1', nbf: Math.floor(NOW_MS / 1000) + 3600 }],
       ['sub', { sub: 'not a valid sub!' }],
     ];
     for (const [what, claims] of cases) {

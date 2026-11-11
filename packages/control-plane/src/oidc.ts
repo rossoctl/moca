@@ -183,6 +183,10 @@ function mintConfirmCode(): string {
   const bytes = randomBytes(8);
   let code = '';
   for (let i = 0; i < 8; i++) {
+    // The modulo is UNBIASED because 256 % CONFIRM_ALPHABET.length === 0 (32 chars): every byte
+    // value maps to exactly 8 alphabet entries. CodeQL flags any modulo on crypto randomness, so
+    // this note is the justification -- and the guard: change the alphabet to a length that does
+    // not divide 256 (31 or 33) and this becomes biased; use rejection sampling then.
     if (i === 4) code += '-';
     code += CONFIRM_ALPHABET[bytes[i]! % CONFIRM_ALPHABET.length];
   }
@@ -222,7 +226,11 @@ export class OidcProvider implements IdentityProvider {
     for (const k of ['issuer', 'clientId', 'clientSecret', 'redirectUri'] as const) {
       if (!opts[k]) throw new Error(`the oidc identity provider requires ${k}`);
     }
-    this.issuer = opts.issuer.replace(/\/+$/, '');
+    // VERBATIM, not slash-trimmed: OIDC Discovery §4.3 and Core §3.1.3.7 compare the issuer by
+    // exact match, and providers whose issuer legitimately ends in '/' (Auth0, for one) would
+    // fail discovery against a trimmed value. The operator configures the issuer exactly as the
+    // provider's discovery document states it.
+    this.issuer = opts.issuer;
     this.clientId = opts.clientId;
     this.clientSecret = opts.clientSecret;
     this.redirectUri = opts.redirectUri;
@@ -511,6 +519,11 @@ export class OidcProvider implements IdentityProvider {
     }
     if (typeof claims.exp !== 'number' || claims.exp + this.clockSkewS <= nowS) {
       throw new CpError('unauthorized', 'the id_token has expired');
+    }
+    // Not strictly required with a server-side exchange, but cheap and OIDC Core §3.1.3.7: a
+    // token whose validity has not begun (beyond skew) is refused rather than trusted.
+    if (typeof claims.nbf === 'number' && claims.nbf - this.clockSkewS > nowS) {
+      throw new CpError('unauthorized', 'the id_token is not yet valid');
     }
     if (typeof claims.sub !== 'string' || !SUB_RE.test(claims.sub)) {
       // The sub becomes part of subjects -- Redis keys, audit lines, SH_ALLOWED_SUBJECTS -- so an
