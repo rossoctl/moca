@@ -21,8 +21,6 @@ EnvironmentFile=/etc/serverless-harness/control-plane.env
 LoadCredential=SH_SESSION_TOKEN_PRIVATE_KEY:/etc/serverless-harness/credentials/session-token-private-key
 LoadCredential=SH_CREDENTIAL_KEK:/etc/serverless-harness/credentials/credential-kek
 LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token
-# Optional: the oidc client secret. The '-' prefix keeps a github VM booting without it.
-LoadCredential=SH_OIDC_CLIENT_SECRET:-/etc/serverless-harness/credentials/oidc-client-secret
 ExecStart=/usr/bin/node --import tsx src/main.ts
 Restart=always
 RestartSec=2

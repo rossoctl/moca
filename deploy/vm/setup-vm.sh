@@ -868,6 +868,8 @@ operator_fallback_value() {
 # default endpoint agree is the control plane's own boot check (main.ts checkInferenceConfig).
 OPERATOR_TOKEN_FILE=operator-inference-token
 OPERATOR_DROPIN=50-operator-inference-token.conf
+OIDC_SECRET_FILE=oidc-client-secret
+OIDC_DROPIN=50-oidc-client-secret.conf
 ensure_operator_fallback() {
   local cp="$SH_ENV_DIR/control-plane.env" f dropin_dir other allow
   f="$(cred_dir)/$OPERATOR_TOKEN_FILE"
@@ -930,6 +932,51 @@ ensure_operator_fallback() {
     return 1
   fi
   rm -f "$dropin_dir/$OPERATOR_DROPIN"
+  rmdir "$dropin_dir" 2>/dev/null || true
+}
+
+# The oidc client secret (PR #701), the same drop-in discipline as the operator token: the main
+# unit stays at the MU1 credential count, and the LoadCredential= line exists exactly while the
+# file does -- LoadCredential= on a missing file fails the unit before ExecStart, and there is no
+# 'optional' spelling for it.
+ensure_oidc_credential() {
+  local cp="$SH_ENV_DIR/control-plane.env" f dropin_dir idp
+  f="$(cred_dir)/$OIDC_SECRET_FILE"
+  dropin_dir="$SH_UNIT_DIR/sh-control-plane.service.d"
+  idp="$(env_file_value SH_IDENTITY_PROVIDER "$cp")"
+  if grep -qE '^[[:space:]]*SH_OIDC_CLIENT_SECRET[[:space:]]*=' "$cp" 2>/dev/null; then
+    echo "$cp sets SH_OIDC_CLIENT_SECRET, which on this VM is a systemd credential ($f): with" \
+      "both, the control plane refuses to boot. Move the value into that file (mode 0600), delete" \
+      "the line, then re-run." >&2
+    return 1
+  fi
+  if [[ "$idp" == oidc && ! -e "$f" ]]; then
+    echo "$cp sets SH_IDENTITY_PROVIDER=oidc, but $f does not exist. Put the provider's client" \
+      "secret there (sudo install -m 0600 /dev/null $f && sudoedit $f), then re-run." >&2
+    return 1
+  fi
+  if [[ -e "$f" ]]; then
+    if [[ ! -s "$f" ]]; then
+      echo "$f is empty. Put the provider's client secret in it, or delete it, then re-run." >&2
+      return 1
+    fi
+    if [[ ! "$(file_mode "$f")" =~ ^[46]00$ ]]; then
+      echo "$f is mode $(file_mode "$f"): it is the provider's client secret, so it must be 0600" \
+        "or 0400 (root only). sudo chmod 0600 $f, then re-run." >&2
+      return 1
+    fi
+    install -d -m 0755 "$dropin_dir"
+    printf '%s
+' '# Written by deploy/vm/setup-vm.sh because the oidc client secret exists (PR #701).' \
+      '# Removed by it when the file goes: LoadCredential= on a missing file fails the unit.' \
+      '[Service]' \
+      "LoadCredential=SH_OIDC_CLIENT_SECRET:/etc/serverless-harness/credentials/$OIDC_SECRET_FILE" \
+      >"$dropin_dir/$OIDC_DROPIN"
+    chmod 0644 "$dropin_dir/$OIDC_DROPIN"
+    [[ "$idp" == oidc ]] || log "oidc client secret loaded, but logins stay on GitHub (SH_IDENTITY_PROVIDER unset in $cp)"
+    return 0
+  fi
+  rm -f "$dropin_dir/$OIDC_DROPIN"
   rmdir "$dropin_dir" 2>/dev/null || true
 }
 
@@ -1215,6 +1262,7 @@ main() {
   wire_supervisor_mu1
   # Before install_units, whose daemon-reload picks up (or drops) the token's drop-in.
   ensure_operator_fallback
+  ensure_oidc_credential
   install_units
   # Before the containers, so a `podman run` that lands between the two is already covered.
   enable_container_restart
