@@ -1,7 +1,7 @@
 import { createServer, type AddressInfo } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClient, type RedisClientType } from 'redis';
-import { LEAF_QUEUE_STREAM } from '@moca/control-plane';
 
 /**
  * S1: captures every client `armAsyncLeafWorker` builds, after the same wrapper
@@ -239,10 +239,13 @@ describe('armAsyncLeafWorker', () => {
   // builds its own queue/client internally with no injection seam, and every other test in this
   // describe points REDIS_URL at a closed port so ensureGroup (and so pollDepth) never runs.
   it('reaches pollDepth over real Redis: stats() carries the two gauges from one depth() call, and a failed poll leaves the previous reading in place', async () => {
+    // A per-run stream, never the production LEAF_QUEUE_STREAM: this test deletes its stream mid-run
+    // to force a poll failure, and doing that to the production name would drop its consumer group
+    // and every other in-flight entry on a real Redis (e.g. deploy/compose's).
+    const stream = `test-leaf-stream-${randomUUID()}`;
     const raw = createClient({ url: 'redis://127.0.0.1:6379' }) as RedisClientType;
     await raw.connect();
-    await raw.del(LEAF_QUEUE_STREAM); // clean slate: drops any group left by a prior run too
-    await raw.xAdd(LEAF_QUEUE_STREAM, '*', { turnId: 'seed' });
+    await raw.xAdd(stream, '*', { turnId: 'seed' });
 
     const env = {
       SH_ASYNC_DRAIN: '1',
@@ -251,7 +254,7 @@ describe('armAsyncLeafWorker', () => {
       REDIS_URL: 'redis://127.0.0.1:6379',
       SH_WORKER_ID: '0', // slot 0: the only slot that polls
     };
-    const worker = armAsyncLeafWorker({ counter: counter(), env });
+    const worker = armAsyncLeafWorker({ counter: counter(), env, stream });
     expect(worker).not.toBeNull();
 
     try {
@@ -267,7 +270,7 @@ describe('armAsyncLeafWorker', () => {
 
       // Break the NEXT poll: delete the stream (and its group) so depth()'s xInfoGroups
       // rejects with "no such key" -- the .catch()'s contract under test.
-      await raw.del(LEAF_QUEUE_STREAM);
+      await raw.del(stream);
       await new Promise((r) => setTimeout(r, ASYNC_DEPTH_INTERVAL_MS + 500));
 
       expect(worker!.stats()).toMatchObject({
@@ -276,7 +279,7 @@ describe('armAsyncLeafWorker', () => {
       });
     } finally {
       await worker!.stop();
-      await raw.del(LEAF_QUEUE_STREAM).catch(() => undefined);
+      await raw.del(stream).catch(() => undefined);
       await raw.quit().catch(() => undefined);
     }
   }, 15_000);

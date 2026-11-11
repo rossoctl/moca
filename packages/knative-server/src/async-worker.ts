@@ -224,6 +224,12 @@ export function reconnecting<T extends object>(target: T, client: RedisClientTyp
 export function armAsyncLeafWorker(opts: {
   counter: SlotCounter;
   env?: NodeJS.ProcessEnv;
+  /**
+   * The stream name, defaulting to LEAF_QUEUE_STREAM. Overridable for the same reason
+   * `turn-queue.ts`'s `RedisTurnQueue` makes its stream a parameter: a test run against real Redis
+   * needs its own stream so it cannot delete production's.
+   */
+  stream?: string;
 }): AsyncLeafWorker | null {
   const env = opts.env ?? process.env;
   if (!shouldArmAsync(env)) return null;
@@ -239,7 +245,7 @@ export function armAsyncLeafWorker(opts: {
   const connected = Promise.all([queueClient.connect(), cpClient.connect()]);
 
   const queue = reconnecting(
-    new RedisWorkQueue(queueClient, LEAF_QUEUE_STREAM, LEAF_QUEUE_GROUP),
+    new RedisWorkQueue(queueClient, opts.stream ?? LEAF_QUEUE_STREAM, LEAF_QUEUE_GROUP),
     queueClient,
   );
   const turns = reconnecting(
