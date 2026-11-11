@@ -36,14 +36,24 @@ export type WorkerToSupervisor =
  */
 export type SupervisorToWorker = { type: 'conn'; head?: string } | { type: 'drain' };
 
-/** The two turn routes `server.ts:641` matches, by exact URL equality as it does. */
-const TURN_PATHS = new Set(['/turn', '/v1/turn']);
+/**
+ * Every route that runs a leaf, matched by exact URL equality as `server.ts` does: the two turn
+ * routes (`server.ts:1348`) and the three sync leaf routes (`server.ts:1277`), including the
+ * deprecated `/run-leaf`, which is still served and so still consumes a worker.
+ *
+ * All five reach `runLeaf` (`server.ts:1105`), so all five must take an admission slot. Before
+ * #389 only the first two did, which meant a sync leaf ran outside the count the supervisor
+ * balances on -- and, now that the async drain loop decides whether to claim from that same count
+ * (§5.3), a missing route would silently over-admit rather than merely under-report.
+ */
+const TURN_PATHS = new Set(['/turn', '/v1/turn', '/runs', '/run-leaf', '/v1/runs']);
 
 /**
- * Does this request consume a turn slot? Mirrors `server.ts:641` exactly — including that
- * it compares the *raw* target, so `/turn?sid=x` is not a turn there and must not be one
- * here either. Divergence would make the worker's in-flight count describe a different set
- * of requests than the ones it actually runs.
+ * Does this request consume a turn slot? Mirrors `server.ts` exactly — including that it compares
+ * the *raw* target, so `/turn?sid=x` is not a turn there and must not be one here either.
+ * Divergence would make the worker's in-flight count describe a different set of requests than the
+ * ones it actually runs. The POST guard keeps `GET /v1/turn` (`server.ts:1337`), a status read, out
+ * of the count.
  */
 export function isTurnRequest(method: string | undefined, url: string | undefined): boolean {
   return method === 'POST' && TURN_PATHS.has(url ?? '');

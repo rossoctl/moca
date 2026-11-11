@@ -56,6 +56,28 @@ describe('isTurnRequest', () => {
     expect(isTurnRequest('POST', '/health')).toBe(false);
     expect(isTurnRequest(undefined, undefined)).toBe(false);
   });
+
+  it.each(['/turn', '/v1/turn', '/runs', '/run-leaf', '/v1/runs'])(
+    'counts POST %s as a turn: every one of them reaches runLeaf',
+    (url) => {
+      expect(isTurnRequest('POST', url)).toBe(true);
+    },
+  );
+
+  it('counts the deprecated /run-leaf, which is still served and still runs a leaf', () => {
+    expect(isTurnRequest('POST', '/run-leaf')).toBe(true);
+  });
+
+  it.each(['/runs', '/v1/runs'])('does not count GET %s: only POST runs a leaf', (url) => {
+    expect(isTurnRequest('GET', url)).toBe(false);
+  });
+
+  it.each(['/runs?x=1', '/v1/runs/', '/runs/extra'])(
+    'does not count %o: server.ts matches the RAW target by equality',
+    (url) => {
+      expect(isTurnRequest('POST', url)).toBe(false);
+    },
+  );
 });
 
 describe('TurnCounter', () => {
