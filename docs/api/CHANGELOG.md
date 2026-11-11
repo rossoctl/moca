@@ -22,7 +22,8 @@ Async turns: the owner-scoped submission API
   the turn id it read off the queue and gets back the credential resolved from the turn record. No
   credential and no bearer token ever travels in the work queue (MI1 §6.5). A pure read — it does not
   move the turn to `running`. The `turnId` must be the `t-<uuid>` shape the control plane mints;
-  anything else is 400 `invalid_request`, refused before Redis is read.
+  anything else is 400 `invalid_request`, refused before Redis is read. The response also carries
+  the `envelope` the worker runs, with the turn's `sessionId` attached, so a claim is one round trip.
 - New error codes `turn_not_cancellable` (409, cancelling a turn that is not queued),
   `turn_not_claimable` (409, claiming a cancelled or terminal turn), `turn_not_found` (404),
   `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held),

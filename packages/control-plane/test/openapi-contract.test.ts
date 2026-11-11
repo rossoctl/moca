@@ -170,6 +170,14 @@ describe('§9.3 test 3 — contract drift', () => {
     expect(post.responses['400'].description).toContain('ack');
   });
 
+  it('documents the envelope as a required field of the turn exchange response', () => {
+    const schema =
+      doc().paths['/internal/turn-credentials'].post.responses['200'].content['application/json']
+        .schema;
+    expect(schema.required).toContain('envelope');
+    expect(schema.properties.envelope.required).toEqual(['sessionId']);
+  });
+
   it('never describes a RESPONSE that returns a credential value', () => {
     // GET /v1/credentials is metadata only and there is no read-back path anywhere in /v1 (spec §4.2).
     // Scoped to responses on purpose: `PUT /v1/credentials/{name}` legitimately documents `secret` in

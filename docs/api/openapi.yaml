@@ -1498,7 +1498,7 @@ paths:
                 properties:
                   token: { type: string, description: 'JWT, typ moca-sandbox+jwt' }
                   expiresAt: { type: integer, description: epoch seconds }
-                  execEndpoint: { type: string, description: host:port of the exec Route }
+                  execEndpoint: { type: string, description: 'host:port of the exec Route' }
                   wrk:
                     type: string
                     description: the worker sandbox_id serving the template (ExecRequest.sandbox_id)
@@ -1736,7 +1736,16 @@ paths:
               schema:
                 type: object
                 required:
-                  [turnId, mode, anthropicAuthToken, anthropicBaseUrl, sessionId, subject, caps]
+                  [
+                    turnId,
+                    mode,
+                    anthropicAuthToken,
+                    anthropicBaseUrl,
+                    sessionId,
+                    subject,
+                    caps,
+                    envelope,
+                  ]
                 properties:
                   turnId:
                     type: string
@@ -1765,6 +1774,17 @@ paths:
                       tokens: { type: integer }
                       costUsd: { type: number }
                       wallClock: { type: integer, description: seconds }
+                  envelope:
+                    type: object
+                    description: |
+                      the leaf the worker runs, exactly as recorded at submission, with the turn's
+                      `sessionId` attached. Returned here rather than from a second internal route
+                      because this handler has already read the record. It carries no credential and
+                      no bearer token: the record stores a credential NAME, and not in the envelope.
+                    required: [sessionId]
+                    properties:
+                      sessionId: { type: string }
+                    additionalProperties: true
                   authHeader:
                     type: string
                     enum: [x-api-key]
