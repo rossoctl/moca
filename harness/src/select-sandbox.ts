@@ -376,6 +376,12 @@ export class WorkloadSandboxMisconfiguredError extends Error {
 }
 
 /**
+ * The only sandbox tier workload sandboxes are provisioned in. /workloads and the provisioner
+ * hardcode the same restriction; there is no shared constant today.
+ */
+const WORKLOAD_SANDBOX_TIER = 'container';
+
+/**
  * Thrown when a server-mode turn has no sandbox to run tools in (MI1 §5 R3). Without it, a `null`
  * sandbox config leaves Pi's built-in tools running locally in the worker process. Deliberately NOT
  * in turnErrorStatus's NO_CAPACITY set: this is a deployment that has no sandbox configured at all,
@@ -680,6 +686,16 @@ async function select(
   const tiers = parseSandboxTiers(env);
   // `||`, not `??`: a session stored with '' (created before tiers were declared) gets the default.
   const tier = tiers ? opts.tier || tiers.default : '';
+  // Workload sandboxes are container-only: /workloads and the provisioner refuse any other
+  // tier (packages/knative-server/src/workloads.ts sandboxesSpec, packages/provisioner).
+  // An incompatible session tier can never be served, so fail as a misconfiguration rather
+  // than WorkloadSandboxUnavailableError (a 503 with Retry-After).
+  if (workload && tier && tier !== WORKLOAD_SANDBOX_TIER) {
+    throw new WorkloadSandboxMisconfiguredError(
+      workload,
+      `workload sandboxes do not support sandbox tier '${forLog(tier)}' (they are container-only)`,
+    );
+  }
 
   // Inertness: when the flag is off, never construct a RedisRecordStore or call .list() —
   // a deployment without the remote flag keeps today's no-extra-Redis-connection behaviour.

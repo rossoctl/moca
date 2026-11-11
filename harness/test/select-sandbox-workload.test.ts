@@ -158,6 +158,37 @@ describe('selectPoolSandbox: workload filter (spec §3.3)', () => {
     expect(sel?.sandboxId).toBe(`${WL}-0`);
   });
 
+  it('composes with tiers: an explicit container-tier workload run still selects its sandbox', async () => {
+    const { lease } = fakeLease();
+    const recs = [wlRec(`${WL}-0`, WL, 'container'), rec('c-1', { 'moca.dev/tier': 'container' })];
+    const sel = await selectPoolSandbox(
+      env(TIERS),
+      '/h',
+      's-1',
+      opts({ workload: WL, ownerScope: OWN, tier: 'container' }),
+      deps(recs, lease),
+    );
+    expect(sel?.sandboxId).toBe(`${WL}-0`);
+  });
+
+  it('a microvm-tier workload run is misconfigured, not unavailable, even if a workload sandbox is attached', async () => {
+    // Workload sandboxes are container-only, so this combination can never be served. Failing as
+    // WorkloadSandboxMisconfiguredError keeps the client from retrying a 503 indefinitely.
+    const { lease, acquired } = fakeLease();
+    const recs = [wlRec(`${WL}-0`, WL, 'container')];
+    const p = selectPoolSandbox(
+      env(TIERS),
+      '/h',
+      's-1',
+      opts({ workload: WL, ownerScope: OWN, tier: 'microvm' }),
+      deps(recs, lease),
+    );
+    await expect(p).rejects.toBeInstanceOf(WorkloadSandboxMisconfiguredError);
+    await expect(p).rejects.not.toBeInstanceOf(WorkloadSandboxUnavailableError);
+    await expect(p).rejects.toThrow(/container-only|microvm/);
+    expect(acquired).toEqual([]);
+  });
+
   it('sends the workload on the Exec, and nothing for a shared-pool run', async () => {
     const seen: Array<{ workspaceKey?: string; workload?: string } | undefined> = [];
     const recs = [wlRec(`${WL}-0`, WL), rec('shared-0')];
