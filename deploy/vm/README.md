@@ -64,6 +64,14 @@ Since #366 a re-run also installs the control plane. It writes `control-plane.en
 **From then on, `/turn` without a session token is refused.** A driver that calls it bare, such as an E8 rung, needs
 `SH_REQUIRE_AUTH=false` set back in `supervisor.env`; later re-runs keep that choice.
 
+**Async turns (optional).** Uncomment `SH_ASYNC_DRAIN=1` in `supervisor.env` and restart
+`sh-supervisor`. Every worker then also drains the queue that the control plane's
+`POST /v1/sessions/{id}/turns` writes to, so a turn survives the caller disconnecting. No other
+setting changes: the claim reuses the `SH_CONTROL_PLANE_URL` and `SH_EXCHANGE_TOKEN` this VM already
+wires. The drain shares `SH_TURNS_PER_WORKER` with sync `/turn` — there is no reserved headroom, so
+a deep queue can occupy every slot. `async_claim_denied_full` on the admin `/metrics` counts the
+claims that were refused for that reason.
+
 A hand-written MU1 line from the previous `mocactl` README (for a control plane hosted elsewhere)
 makes the script stop and name it. `SH_EXCHANGE_TOKEN` in `supervisor.env` (or any of the three
 secrets in either env file) is now a systemd credential: move the value into its file under

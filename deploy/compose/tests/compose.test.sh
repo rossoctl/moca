@@ -344,6 +344,15 @@ OUT_RA="$(render require-auth "${CP_ENV[@]}" 'SH_REQUIRE_AUTH=true')" || fail "c
   fail "unset MU1 settings reach the supervisor as empty strings"
 pass "the supervisor verifies against the control plane's keys and dials it by service name"
 
+# #389: the drain knob passes through from .env and is OFF when .env is silent. Empty, not absent:
+# the bare `SH_ASYNC_DRAIN:` form is how compose carries the other opt-in keys, and truthy('') is
+# false in the worker, so an unset .env key cannot arm a drain.
+[[ "$(svc_env supervisor SH_ASYNC_DRAIN)" != '<absent>' ]] ||
+  fail "the supervisor service does not carry SH_ASYNC_DRAIN: .env cannot enable the drain"
+[[ -z "$(svc_env supervisor SH_ASYNC_DRAIN)" ]] ||
+  fail "SH_ASYNC_DRAIN reaches the supervisor as '$(svc_env supervisor SH_ASYNC_DRAIN)' when .env does not set it"
+pass "the async drain is off unless .env asks for it"
+
 # Discovery: the control plane advertises the harness at the port the HOST reaches it on.
 [[ "$(cp_env control-plane SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] ||
   fail "SH_PUBLIC_HARNESS_URL must be the supervisor as the user reaches it, got $(cp_env control-plane SH_PUBLIC_HARNESS_URL)"

@@ -376,6 +376,14 @@ grep -qE '^SH_CONTROL_PLANE_URL=http://127\.0\.0\.1:8090$' "$ENV_SRC_DIR/supervi
   fail "supervisor.env.example must dial the control plane on loopback :8090"
 pass "credentials: the units load exactly the files setup-vm.sh writes; no secret in any env template"
 
+# #389: the async drain knob ships COMMENTED. Uncommented, compose's check_mirror would demand an
+# identical value in docker-compose.yml, and an operator would inherit a drain they did not ask for.
+grep -qE '^#SH_ASYNC_DRAIN=1$' "$ENV_SRC_DIR/supervisor.env.example" ||
+  fail "supervisor.env.example must offer #SH_ASYNC_DRAIN=1, commented: the drain is opt-in"
+grep -qE '^SH_ASYNC_DRAIN=' "$ENV_SRC_DIR/supervisor.env.example" &&
+  fail "supervisor.env.example sets SH_ASYNC_DRAIN uncommented: the default must be off"
+pass "the async drain knob is present and opt-in"
+
 # --- the supervisor dials the relay's EXEC listener, and the two ports agree (F3, MI1 R5) ---------
 # R46 (same as above): both assignments below can abort the pipeline on no-match under
 # `set -euo pipefail`, before their `[[ -n ... ]] || fail ...` guards run -- `|| true` on the
