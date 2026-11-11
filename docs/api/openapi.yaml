@@ -413,8 +413,8 @@ paths:
         device flow ENABLED -- it is off by default (spec §5.1.1).
 
         With the oidc identity provider (SH_IDENTITY_PROVIDER=oidc), the same reply carries the
-        provider's authorize URL in verificationUri and a state token in deviceCode, with NO
-        userCode: the browser session at the provider is what the person completes.
+        provider's authorize URL in verificationUri, a state token in deviceCode, and a user
+        code confirmed on the callback page rather than at the provider.
       security: []
       responses:
         '200':
@@ -429,7 +429,7 @@ paths:
                   userCode:
                     {
                       type: string,
-                      description: absent when the provider needs no typed code (oidc),
+                      description: the code the user confirms the login with -- typed at the provider (github) or on the callback's confirmation page (oidc),
                     }
                   verificationUri: { type: string }
                   interval: { type: integer }

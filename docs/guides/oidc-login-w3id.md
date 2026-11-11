@@ -81,15 +81,15 @@ issued the state will not find it. Run one replica, or contribute a Redis-backed
 
 ## Logging in
 
-`mocactl login` is the same command. With the oidc provider there is no code to type — the
-prompt shows only the URL, and the browser session at the provider (an existing w3id SSO
-session, usually) is what the user completes:
+`mocactl login` is the same command, and the rhythm is the device flow's: the terminal shows a
+code, the browser asks for it. The user signs in at the provider (an existing w3id SSO session,
+usually), lands on the moca confirmation page, and enters the terminal's code there:
 
 ```
 $ mocactl login
 Open https://preprod.login.w3.ibm.com/oidc/endpoint/default/authorize?... and enter the code XY7C-K2M9
   (valid for 15 minutes, Ctrl-C to cancel)
-logged in as george@us.ibm.com
+logged in as alex@us.ibm.com
 ```
 
 Sign in at w3id, then enter the terminal's code on the confirmation page the redirect lands

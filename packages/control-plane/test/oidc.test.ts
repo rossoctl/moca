@@ -344,11 +344,11 @@ describe('id_token verification', () => {
 
   it('accepts an email sub (w3id mints the intranet address), refusing only exotic values', async () => {
     const r = rig();
-    mint(r, { sub: 'george@us.ibm.com', email: 'george@us.ibm.com', name: 'George Almasi' });
+    mint(r, { sub: 'alex@us.ibm.com', email: 'alex@us.ibm.com', name: 'Alex Example' });
     const start = await r.provider.startDeviceAuth();
     await signIn(r, start);
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
-    expect(p.subject).toBe('oidc:george@us.ibm.com');
+    expect(p.subject).toBe('oidc:alex@us.ibm.com');
   });
 });
 

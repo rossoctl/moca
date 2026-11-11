@@ -23,9 +23,10 @@ export interface Principal {
 export interface DeviceStart {
   deviceCode: string;
   /**
-   * The code the user reads and types at the verification URI. Absent when the provider needs no
-   * typed code (the OIDC authorization-code flow: the browser session is what the person completes,
-   * and the state rides in the URL) -- a client must not assume it is present.
+   * The code the user confirms the login with: typed at the provider (GitHub's device flow) or
+   * on the control plane's own confirmation page (the OIDC flow, where it doubles as the
+   * browser-to-terminal binding -- see oidc.ts). Every provider mints one; a client still must
+   * not assume it is present, only render it when it is.
    */
   userCode?: string;
   verificationUri: string;
