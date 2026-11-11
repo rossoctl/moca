@@ -361,9 +361,14 @@ for pair in "${MU1_CREDENTIALS[@]}"; do
   grep -qxF "LoadCredential=${pair%%:*}:/etc/serverless-harness/credentials/${pair#*:}" "$UNIT_CP" ||
     fail "$UNIT_CP must LoadCredential=${pair%%:*} from /etc/serverless-harness/credentials/${pair#*:}"
 done
-[[ "$(grep -c '^LoadCredential=' "$UNIT_CP")" == "${#MU1_CREDENTIALS[@]}" ]] ||
+# ...plus the OPTIONAL oidc client secret: its '-' prefix keeps the unit booting when the file
+# does not exist (a plain LoadCredential= naming an unwritten file fails the unit before
+# ExecStart), so it is the one sanctioned extra.
+[[ "$(grep -c '^LoadCredential=' "$UNIT_CP")" == $(( ${#MU1_CREDENTIALS[@]} + 1 )) ]] ||
   fail "$UNIT_CP must load exactly the ${#MU1_CREDENTIALS[@]} credentials setup-vm.sh writes, found" \
     "$(grep -c '^LoadCredential=' "$UNIT_CP")"
+grep -qxF 'LoadCredential=SH_OIDC_CLIENT_SECRET:-/etc/serverless-harness/credentials/oidc-client-secret' "$UNIT_CP" ||
+  fail 'the one extra LoadCredential must be the optional SH_OIDC_CLIENT_SECRET (with the - prefix)'
 if [[ "$(grep -c '^LoadCredential=' "$UNIT_SUPERVISOR")" != 1 ]] ||
   ! grep -qxF 'LoadCredential=SH_EXCHANGE_TOKEN:/etc/serverless-harness/credentials/exchange-token' "$UNIT_SUPERVISOR"; then
   fail "$UNIT_SUPERVISOR must load exactly one credential, the exchange token the control plane loads"
