@@ -333,13 +333,20 @@ describe('id_token verification', () => {
     }
   });
 
-  it('accepts an audience that is a list containing this client', async () => {
+  it('accepts a multi-value audience only when azp names this client (OIDC Core §3.1.3.7)', async () => {
     const r = rig();
-    mint(r, { sub: 'user-1', aud: ['other-client', CLIENT_ID] });
+    mint(r, { sub: 'user-1', aud: ['other-client', CLIENT_ID], azp: CLIENT_ID });
     const start = await r.provider.startDeviceAuth();
     await signIn(r, start);
     const p = await r.provider.completeDeviceAuth(start.deviceCode);
     expect(p.subject).toBe('oidc:user-1');
+    // The same token with azp naming the other client is refused.
+    mint(r, { sub: 'user-1', aud: ['other-client', CLIENT_ID], azp: 'other-client' });
+    const start2 = await r.provider.startDeviceAuth();
+    await r.provider.handleCallback({ code: 'c', state: start2.deviceCode });
+    const e = await errOf(() => r.provider.completeDeviceAuth(start2.deviceCode));
+    expect(e.code).toBe('unauthorized');
+    expect(e.message).toContain('azp');
   });
 
   it('accepts an email sub (w3id mints the intranet address), refusing only exotic values', async () => {
@@ -388,12 +395,8 @@ describe('the callback route', () => {
     const d = makeDeps({ identity: r.provider });
     const start = await r.provider.startDeviceAuth();
     const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
-    const res = await HANDLERS.oidcCallback!(
-      ctx({
-        query: new URLSearchParams(
-          `state=${start.deviceCode}&confirm=${start.userCode}&ct=${landed.confirmToken}`,
-        ),
-      }),
+    const res = await HANDLERS.oidcCallbackSubmit!(
+      ctx({ body: { state: start.deviceCode, confirm: start.userCode, ct: landed.confirmToken } }),
       d,
     );
     expect(res.status).toBe(200);
@@ -702,11 +705,15 @@ describe('the callback route', () => {
     // escaping is defense in depth on top of an unreachable path.
     const r = rig();
     const d = makeDeps({ identity: r.provider });
+    // GET no longer runs the confirm round at all: the confirmation submits by POST, so a
+    // confirm-carrying GET (an old bookmarked form, a hand-built link) is refused up front and
+    // nothing from the query is reflected.
     const res = await HANDLERS.oidcCallback!(
       ctx({ query: new URLSearchParams('state=%3Cscript%3Ealert(1)%3C%2Fscript%3E&confirm=x') }),
       d,
     );
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400);
+    expect(String(res.body)).toContain('form on the sign-in page');
     expect(String(res.body)).not.toContain('<script>');
     expect(String(res.body)).not.toContain('alert(1)');
   });

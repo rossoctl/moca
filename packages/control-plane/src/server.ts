@@ -127,9 +127,13 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         const raw = await readBody(req, bodyLimitFor(matched.route));
         if (raw.length > 0) {
           // Two body languages: JSON for every client, and urlencoded for the one HTML form a
-          // browser submits (the oidc confirmation). Anything else a browser's <form> can send is
-          // refused, rather than half-parsed.
-          if ((req.headers['content-type'] ?? '').includes('application/x-www-form-urlencoded')) {
+          // browser submits (the oidc confirmation, and only where the route opted in with
+          // formBody -- a JSON route that also parsed forms would be reachable by a plain
+          // cross-origin <form>, a CORS "simple" request, for no gain).
+          if (
+            matched.route.formBody === true &&
+            (req.headers['content-type'] ?? '').includes('application/x-www-form-urlencoded')
+          ) {
             ctx.body = Object.fromEntries(new URLSearchParams(raw));
           } else {
             try {

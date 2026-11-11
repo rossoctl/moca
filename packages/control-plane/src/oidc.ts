@@ -178,16 +178,19 @@ const CONFIRM_CODE_RE = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 /** Wrong confirmations one login tolerates before it is refused outright. */
 export const MAX_WRONG_CODES = 5;
 
+// A mask, not a modulo: `byte & 31` is uniform for a 32-entry alphabet with no bias at all (a
+// modulo would be biased for any length not dividing 256). The length is enforced at load, so the
+// mask and the alphabet cannot silently disagree.
+if (CONFIRM_ALPHABET.length !== 32) {
+  throw new Error(`CONFIRM_ALPHABET must hold exactly 32 entries (has ${CONFIRM_ALPHABET.length})`);
+}
+
 function mintConfirmCode(): string {
   const bytes = randomBytes(8);
   let code = '';
   for (let i = 0; i < 8; i++) {
-    // The modulo is UNBIASED because 256 % CONFIRM_ALPHABET.length === 0 (32 chars): every byte
-    // value maps to exactly 8 alphabet entries. CodeQL flags any modulo on crypto randomness, so
-    // this note is the justification -- and the guard: change the alphabet to a length that does
-    // not divide 256 (31 or 33) and this becomes biased; use rejection sampling then.
     if (i === 4) code += '-';
-    code += CONFIRM_ALPHABET[bytes[i]! % CONFIRM_ALPHABET.length];
+    code += CONFIRM_ALPHABET[bytes[i]! & 31];
   }
   return code;
 }
@@ -245,7 +248,11 @@ export class OidcProvider implements IdentityProvider {
   /** Discovery is fetched on first use, so a provider briefly down at boot does not wedge boot. */
   private async discover(): Promise<Discovery> {
     if (this.discovery) return this.discovery;
-    const url = `${this.issuer}/.well-known/openid-configuration`;
+    // Discovery §4: remove a trailing '/' before appending the well-known path -- a verbatim
+    // slash issuer would build `…//.well-known/…`, which some servers 404. ONE slash, here only:
+    // the issuer itself is still compared verbatim everywhere.
+    const base = this.issuer.endsWith('/') ? this.issuer.slice(0, -1) : this.issuer;
+    const url = `${base}/.well-known/openid-configuration`;
     const res = await this.fetchImpl(url, {
       method: 'GET',
       headers: { Accept: 'application/json' },
@@ -515,6 +522,11 @@ export class OidcProvider implements IdentityProvider {
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (!aud.includes(this.clientId)) {
       throw new CpError('unauthorized', 'the id_token audience is not this client');
+    }
+    // OIDC Core §3.1.3.7: with several audiences, azp must name this client. Low risk (the token
+    // comes straight from the token endpoint), but cheap and correct.
+    if (aud.length > 1 && claims.azp !== this.clientId) {
+      throw new CpError('unauthorized', 'the id_token is not authorized for this client (azp)');
     }
     if (typeof claims.exp !== 'number' || claims.exp + this.clockSkewS <= nowS) {
       throw new CpError('unauthorized', 'the id_token has expired');

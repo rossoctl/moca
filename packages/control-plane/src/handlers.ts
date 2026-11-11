@@ -707,7 +707,20 @@ export const HANDLERS: Record<string, Handler> = {
   // -- and the form's submission (POST, urlencoded) completes the sign-in, keeping the code and
   // the browser token out of URLs, access logs and browser history. The refusal for a provider
   // that holds its own flow (GitHub) names the setting to change, as the device-flow refusals do.
-  oidcCallback: (ctx, deps) => oidcCallbackImpl(deps, (k) => ctx.query.get(k)),
+  // GET is the provider's redirect target only; the confirmation submits by POST, so a confirm
+  // attempt over GET (an old bookmarked form, a hand-built link) is refused rather than run --
+  // the code and the browser token must never ride a URL, an access log, or browser history.
+  oidcCallback: async (ctx, deps) => {
+    if (ctx.query.get('confirm') !== null || ctx.query.get('ct') !== null) {
+      return htmlPage(
+        'Confirm your sign-in',
+        '<p>This link only receives the sign-in redirect. Use the form on the sign-in page to' +
+          ' enter your code.</p>',
+        400,
+      );
+    }
+    return oidcCallbackImpl(deps, (k) => ctx.query.get(k));
+  },
 
   oidcCallbackSubmit: (ctx, deps) => {
     const form = asRecord(ctx.body);

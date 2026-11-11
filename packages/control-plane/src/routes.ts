@@ -48,6 +48,12 @@ export interface RouteSpec {
   bodyRequired?: boolean;
   /** Request body cap in bytes; absent means DEFAULT_MAX_BODY_BYTES. Raise it per route, never globally. */
   maxBodyBytes?: number;
+  /**
+   * This route accepts an `application/x-www-form-urlencoded` body (an HTML form a browser
+   * submits). Off everywhere else: a JSON route that also parsed forms would be reachable by a
+   * plain cross-origin <form> (a CORS "simple" request), for no gain.
+   */
+  formBody?: boolean;
   /** Stable key the router and the OpenAPI drift test both use to name the operation. */
   operationId: string;
   /**
@@ -140,6 +146,7 @@ export const ROUTES: readonly RouteSpec[] = [
     auth: 'none',
     sessionScoped: false,
     bodyRequired: false,
+    formBody: true,
     profiles: BOTH,
     operationId: 'oidcCallbackSubmit',
   },
