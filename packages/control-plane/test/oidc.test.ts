@@ -673,6 +673,29 @@ describe('the callback route', () => {
     expect(res.headers).toMatchObject({ 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' });
   });
 
+  it('a wrong-code page still carries the ct, so the retry can succeed (review round 3)', async () => {
+    // The exact shape the reviewer described: land, submit a wrong code, take the ct from the
+    // RE-RENDERED page (not from round 1 by hand), submit the right code, expect confirmed.
+    const r = rig();
+    mint(r, { sub: 'user-1', name: 'Alice Example' });
+    const d = makeDeps({ identity: r.provider });
+    const start = await r.provider.startDeviceAuth();
+    const landed = await r.provider.handleCallback({ code: 'c', state: start.deviceCode });
+    const wrong = await HANDLERS.oidcCallbackSubmit!(
+      ctx({ body: { state: start.deviceCode, confirm: 'AAAA-AAAA', ct: landed.confirmToken } }),
+      d,
+    );
+    expect(String(wrong.body)).toContain('not right');
+    // The re-rendered form's hidden ct, scraped like a browser would.
+    const ct = /name="ct" value="([^"]*)"/.exec(String(wrong.body))![1]!;
+    expect(ct).toBe(landed.confirmToken);
+    const right = await HANDLERS.oidcCallbackSubmit!(
+      ctx({ body: { state: start.deviceCode, confirm: start.userCode, ct } }),
+      d,
+    );
+    expect(String(right.body)).toMatch(/return to your terminal/);
+  });
+
   it('never reflects a forged state, markup included', async () => {
     // A state that is not live never reaches the confirmation form -- the refusal names nothing
     // the caller sent -- and a live state is base64url by construction, so the form's value

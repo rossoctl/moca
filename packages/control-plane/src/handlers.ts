@@ -563,6 +563,11 @@ async function oidcCallbackImpl(
       );
     }
     const wrong = outcome === 'wrong_code';
+    // A wrong-code re-render echoes back the ct THIS request carried: the sender already holds
+    // it, so echoing exposes nothing, while omitting it would ship ct="" and make every retry
+    // fail the token check -- four more submits and the login is refused even with the right
+    // code (review round 3). Only round 1 ever introduces a NEW token.
+    const ct = confirmToken ?? field('ct') ?? '';
     return htmlPage(
       'Confirm your sign-in',
       `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
@@ -571,7 +576,7 @@ async function oidcCallbackImpl(
         `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
         // The browser-bound half of the binding (oidc.ts): minted in the round-1 response this
         // browser received, invisible to whoever started the login, required in round 2.
-        `<input type="hidden" name="ct" value="${escapeHtml(confirmToken ?? '')}">` +
+        `<input type="hidden" name="ct" value="${escapeHtml(ct)}">` +
         `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
         `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
         `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,
