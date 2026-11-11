@@ -81,10 +81,23 @@ export class TurnCounter {
     return this.n;
   }
 
+  // Swallowed, not propagated: onChange sends the ABSOLUTE count, never a delta, and the
+  // supervisor's copy is an estimate it reconciles from `load` (above) -- so one dropped send
+  // self-heals on the very next one. A throw here (process.send on a closed IPC channel is the
+  // real one) must not leak the slot start() is about to hand out, nor become an unhandled
+  // rejection on the releaser's sync path (attachTurnSlot's `finish` handler).
+  private notify(n: number): void {
+    try {
+      this.onChange(n);
+    } catch {
+      // see above
+    }
+  }
+
   /** Marks a turn started; returns an **idempotent** end function. */
   start(): () => void {
     this.n += 1;
-    this.onChange(this.n);
+    this.notify(this.n);
     let ended = false;
     return () => {
       // One-shot on purpose. A second decrement (an abort path that also calls end) would
@@ -92,7 +105,7 @@ export class TurnCounter {
       if (ended) return;
       ended = true;
       this.n -= 1;
-      this.onChange(this.n);
+      this.notify(this.n);
     };
   }
 }

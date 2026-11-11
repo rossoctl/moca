@@ -104,6 +104,20 @@ describe('TurnCounter', () => {
     expect(c.inFlight).toBe(0);
     expect(seen).toEqual([1, 0]);
   });
+
+  it('swallows a throwing onChange: the slot is still released and the count still correct', () => {
+    // The real onChange is process.send, which throws ERR_IPC_CHANNEL_CLOSED on a closed
+    // channel; a throw here must not strand start()'s releaser or corrupt the count.
+    const onChange = vi.fn(() => {
+      throw new Error('ERR_IPC_CHANNEL_CLOSED');
+    });
+    const c = new TurnCounter(onChange);
+    const end = c.start();
+    expect(c.inFlight).toBe(1);
+    expect(() => end()).not.toThrow();
+    expect(c.inFlight).toBe(0);
+    expect(onChange).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('createWorkerRuntime', () => {
