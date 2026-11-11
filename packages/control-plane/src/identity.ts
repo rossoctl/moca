@@ -235,12 +235,22 @@ export class TestUserProvider implements IdentityProvider {
   }
 }
 /**
- * Every subject form the control plane mints, across providers: `github:<numeric id>`,
- * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>` (oidc.ts; w3id's sub is an
- * email address, hence `@` in the charset). One RE so enrollment (SH_ALLOWED_SUBJECTS) can
- * validate entries without knowing which provider the deployment runs.
+ * The charset an oidc provider's `sub` may carry, as a PATTERN (not a RegExp) so both users of
+ * the grammar build from this one string and cannot drift: oidc.ts's token check and the
+ * enrollment grammar below. It allows exactly what an enterprise IdP's sub carries (w3id's is an
+ * email address, hence `@`; AppID's a UUID) and nothing that would break a Redis key, an audit
+ * line or SH_ALLOWED_SUBJECTS: no whitespace, no control characters, and no colon -- that is the
+ * provider/subject separator.
  */
-export const SUBJECT_RE = /^(?:github:[0-9]+|test:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$/;
+export const OIDC_SUB_PATTERN = '[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}';
+
+/**
+ * Every subject form the control plane mints, across providers: `github:<numeric id>`,
+ * `test:<index>` (SH_TEST_USERS, above) or `oidc:<provider sub>`. Built from the same pattern
+ * oidc.ts verifies tokens against, so enrollment (SH_ALLOWED_SUBJECTS) and login can never
+ * disagree about what an oidc subject is.
+ */
+export const SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|test:[0-9]+|oidc:${OIDC_SUB_PATTERN})$`);
 
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')

@@ -1,6 +1,7 @@
 import { createPublicKey, createVerify, randomBytes, type JsonWebKey } from 'node:crypto';
 import { CpError } from './errors.js';
 import {
+  OIDC_SUB_PATTERN,
   rolesFor,
   secretMatches,
   type DeviceStart,
@@ -161,11 +162,9 @@ interface Jwk {
 /** RS256 only: it is what w3id (and every enterprise IdP this targets) signs with. */
 const SUPPORTED_ALG = 'RS256';
 
-// The sub becomes part of the control plane's subject (`oidc:<sub>`), so it allows exactly the
-// characters an enterprise IdP's sub carries (w3id's is an email address; AppID's a UUID) and
-// nothing that would break a Redis key, an audit line or SH_ALLOWED_SUBJECTS: no whitespace, no
-// control characters, and no colon -- that is the provider/subject separator.
-const SUB_RE = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/;
+// The id_token sub, checked against the ONE pattern (identity.ts) that enrollment also builds
+// its grammar from, so the two can never drift apart.
+const SUB_RE = new RegExp(`^${OIDC_SUB_PATTERN}$`);
 
 export const OIDC_SUBJECT_PREFIX = 'oidc:';
 
