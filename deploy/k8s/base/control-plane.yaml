@@ -67,6 +67,34 @@ spec:
             - name: SH_TEST_USERS
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: SH_TEST_USERS, optional: true } }
+            # The oidc identity provider (docs/guides/oidc-login-w3id.md): all optional, so a
+            # GitHub stack renders exactly as before -- an empty SH_IDENTITY_PROVIDER is the
+            # control plane's `github` default. The client secret is NOT an env var (MI1 §6.7:
+            # every kubectl child inherits the environment): it is a FILE under
+            # CREDENTIALS_DIRECTORY, projected from the moca-oidc Secret the operator creates
+            # (see the credentials volume below), which withCredentials reads like every other
+            # CONTROL_PLANE_SECRETS entry.
+            - name: SH_IDENTITY_PROVIDER
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: SH_IDENTITY_PROVIDER, optional: true },
+                }
+            - name: SH_OIDC_ISSUER
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: SH_OIDC_ISSUER, optional: true } }
+            - name: SH_OIDC_CLIENT_ID
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: SH_OIDC_CLIENT_ID, optional: true } }
+            - name: SH_OIDC_REDIRECT_URI
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: SH_OIDC_REDIRECT_URI, optional: true },
+                }
+            - name: SH_OIDC_SCOPE
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: SH_OIDC_SCOPE, optional: true } }
             # P6.3 sandbox tiers: written to moca-settings by setup.sh ONLY on a stack with both
             # tiers; optional, so a stack without them renders exactly as before (untiered).
             # Must match the supervisor's: one list validates a session, the other places its turns.
@@ -166,6 +194,15 @@ spec:
                   optional: true
                   items:
                     - { key: SH_TEST_USER_SECRET, path: SH_TEST_USER_SECRET }
+              # The oidc client secret, same file-not-env discipline (MI1 §6.7): an optional
+              # source of its own, so a GitHub stack with no moca-oidc Secret renders exactly
+              # as before (ENOENT -> unset), and an oidc stack without it crash-loops at boot
+              # naming SH_OIDC_CLIENT_SECRET -- the same failure mode moca-test-users has.
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
 ---
 apiVersion: v1
 kind: Service

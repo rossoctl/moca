@@ -48,6 +48,12 @@ export interface RouteSpec {
   bodyRequired?: boolean;
   /** Request body cap in bytes; absent means DEFAULT_MAX_BODY_BYTES. Raise it per route, never globally. */
   maxBodyBytes?: number;
+  /**
+   * This route accepts an `application/x-www-form-urlencoded` body (an HTML form a browser
+   * submits). Off everywhere else: a JSON route that also parsed forms would be reachable by a
+   * plain cross-origin <form> (a CORS "simple" request), for no gain.
+   */
+  formBody?: boolean;
   /** Stable key the router and the OpenAPI drift test both use to name the operation. */
   operationId: string;
   /**
@@ -116,10 +122,33 @@ export const ROUTES: readonly RouteSpec[] = [
     // off -- not merely 404'd by the handler after the body has already been validated.
     feature: 'testUsers',
     // HARNESS, not BOTH: main.ts refuses to boot test users on the sandbox profile (it admits only
-    // enrolled github: subjects, SBX0 §4.2), so the route is not mounted there at all. One fewer
+    // enrolled subjects, SBX0 §4.2), so the route is not mounted there at all. One fewer
     // place for the invariant to be broken later.
     profiles: HARNESS,
     operationId: 'testUserToken',
+  },
+  // The OIDC provider's browser redirect target (oidc.ts): the URL registered with the provider,
+  // typically this control plane's own Route. Unauthenticated by design, like the device-flow
+  // routes -- the `state` in the query is the capability, and it is single-use and TTL-bound.
+  {
+    method: 'GET',
+    path: '/v1/auth/oidc/callback',
+    auth: 'none',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'oidcCallback',
+  },
+  // The confirmation form's submission: POST so the user code and the browser token stay out of
+  // URLs, access logs and browser history. Same path, same handler logic, urlencoded body.
+  {
+    method: 'POST',
+    path: '/v1/auth/oidc/callback',
+    auth: 'none',
+    sessionScoped: false,
+    bodyRequired: false,
+    formBody: true,
+    profiles: BOTH,
+    operationId: 'oidcCallbackSubmit',
   },
   // B14: the refresh token is the credential on the first two, so they take no API token.
   {

@@ -47,6 +47,16 @@ describe('portFromEnv', () => {
 });
 
 describe('configFromEnv', () => {
+  it('boots an oidc deployment without SH_GITHUB_CLIENT_ID', () => {
+    // The github client id belongs to the github provider; an oidc deployment carries
+    // SH_OIDC_CLIENT_ID instead, and requiring the github one would CrashLoop it at boot
+    // (found on a real deployment: configFromEnv checked before identityProviderFromEnv ran).
+    const { SH_GITHUB_CLIENT_ID: _gh, ...oidcEnv } = baseEnv;
+    expect(() =>
+      configFromEnv({ ...oidcEnv, SH_IDENTITY_PROVIDER: 'oidc' } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
   it('uses the spec`s defaults', () => {
     const c = configFromEnv(baseEnv);
     expect(c.apiTokenTtlSeconds).toBe(900); // B14: 15 minutes bounds revocation latency
@@ -422,6 +432,7 @@ describe('the control plane`s secrets as systemd credentials (deploy/vm)', () =>
       'SH_CREDENTIAL_KEK',
       'SH_EXCHANGE_TOKEN',
       'SH_JANITOR_TOKEN',
+      'SH_OIDC_CLIENT_SECRET',
       'SH_OPERATOR_INFERENCE_TOKEN',
       'SH_SESSION_TOKEN_PRIVATE_KEY',
       // ADR-0045: a password on a login path, so it travels as a credential FILE like the rest --

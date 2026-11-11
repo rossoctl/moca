@@ -7,7 +7,11 @@
 #                       [--delete-workload-sandboxes]
 #
 # Environment: KIND_CLUSTER (kind only: the cluster name, default moca), SH_GITHUB_CLIENT_ID,
-# SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false),
+# SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false), SH_IDENTITY_PROVIDER (github, the
+# default, or oidc; with oidc: SH_OIDC_ISSUER, SH_OIDC_CLIENT_ID, SH_OIDC_REDIRECT_URI and optional
+# SH_OIDC_SCOPE are written to moca-settings, and the client secret must already sit in a Secret
+# named moca-oidc, key SH_OIDC_CLIENT_SECRET -- setup.sh never touches it; see
+# docs/guides/oidc-login-w3id.md),
 # SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
 # (default 120), SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; with SH_SANDBOX_COUNT>0 too, the stack is tiered
@@ -1008,6 +1012,12 @@ CLIENT_ID=''
 CI_CLIENT_ID='Iv1.k8s-smoke-unused'
 client_id() { printf '%s' "$CLIENT_ID"; }
 
+# The oidc issuer as resolved by write_settings, same stickiness. A login is possible when EITHER
+# provider is configured, so write_overlay consults both -- a stack switched from github to oidc
+# keeps its replicas even as SH_GITHUB_CLIENT_ID goes empty.
+OIDC_ISSUER=''
+oidc_issuer() { printf '%s' "$OIDC_ISSUER"; }
+
 # Memoised across the write_settings + print_access callers so the stored-URL lookup only
 # issues one kubectl get per run. Cleared on each public_harness_url call that resolves
 # fresh, which only happens the first time per setup.
@@ -1069,6 +1079,7 @@ hand_patched_catalog_hosts() {
 # allow-list its own.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
+  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then
     CLIENT_ID="$SH_GITHUB_CLIENT_ID"
@@ -1080,6 +1091,27 @@ write_settings() {
     # Dropped here, then re-derived (same string, so the hash does not move) on kind-ci itself.
     if [[ "$CLIENT_ID" == "$CI_CLIENT_ID" && "$TARGET" != kind-ci ]]; then CLIENT_ID=''; fi
   fi
+  # The oidc block, same sticky convention: a re-run without the variables keeps the stored
+  # values; a set-but-empty one clears it. SH_IDENTITY_PROVIDER='' means github (the control
+  # plane's default), never a third state.
+  if [[ -n "${SH_IDENTITY_PROVIDER+x}" ]]; then idp="$SH_IDENTITY_PROVIDER"; else idp="$(cm_value "$before" SH_IDENTITY_PROVIDER)"; fi
+  if [[ -n "${SH_OIDC_ISSUER+x}" ]]; then oidc_issuer="$SH_OIDC_ISSUER"; else oidc_issuer="$(cm_value "$before" SH_OIDC_ISSUER)"; fi
+  if [[ -n "${SH_OIDC_CLIENT_ID+x}" ]]; then oidc_client_id="$SH_OIDC_CLIENT_ID"; else oidc_client_id="$(cm_value "$before" SH_OIDC_CLIENT_ID)"; fi
+  if [[ -n "${SH_OIDC_REDIRECT_URI+x}" ]]; then oidc_redirect="$SH_OIDC_REDIRECT_URI"; else oidc_redirect="$(cm_value "$before" SH_OIDC_REDIRECT_URI)"; fi
+  if [[ -n "${SH_OIDC_SCOPE+x}" ]]; then oidc_scope="$SH_OIDC_SCOPE"; else oidc_scope="$(cm_value "$before" SH_OIDC_SCOPE)"; fi
+  idp="${idp:-github}"
+  [[ "$idp" == github || "$idp" == oidc ]] ||
+    die "SH_IDENTITY_PROVIDER must be exactly 'github' or 'oidc' (got '$idp')"
+  if [[ "$idp" == oidc ]]; then
+    [[ -n "$oidc_issuer" ]] || die 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_ISSUER (the provider issuer URL)'
+    [[ -n "$oidc_client_id" ]] || die 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_CLIENT_ID'
+    [[ -n "$oidc_redirect" ]] || die 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_REDIRECT_URI (the control plane callback URL registered with the provider)'
+    [[ -n "$oidc_scope" ]] || oidc_scope='openid email profile'
+    # The five keys travel together; OIDC_ISSUER feeds write_overlay's replica decision.
+  else
+    oidc_issuer='' oidc_client_id='' oidc_redirect='' oidc_scope=''
+  fi
+  OIDC_ISSUER="$oidc_issuer"
   if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
     # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
     CLIENT_ID="$CI_CLIENT_ID"
@@ -1122,10 +1154,14 @@ write_settings() {
   after="$(jq -ncS --arg id "$CLIENT_ID" --arg admins "$admins" --arg url "$url" \
     --arg fb "$fb" --arg tiers "$TIERS" --arg dtier "$DEFAULT_TIER" --arg api_ttl "$api_ttl" --arg session_ttl "$session_ttl" \
     --arg catalog_hosts "$catalog_hosts" --arg test_users "$TEST_USERS" \
+    --arg idp "$idp" --arg oidc_issuer "$oidc_issuer" --arg oidc_client_id "$oidc_client_id" \
+    --arg oidc_redirect "$oidc_redirect" --arg oidc_scope "$oidc_scope" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
       SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
       SH_API_TOKEN_TTL_SECONDS: $api_ttl, SH_SESSION_TOKEN_TTL_SECONDS: $session_ttl,
-      SH_MODEL_CATALOG_HOSTS: $catalog_hosts, SH_TEST_USERS: $test_users}')"
+      SH_MODEL_CATALOG_HOSTS: $catalog_hosts, SH_TEST_USERS: $test_users,
+      SH_IDENTITY_PROVIDER: $idp, SH_OIDC_ISSUER: $oidc_issuer, SH_OIDC_CLIENT_ID: $oidc_client_id,
+      SH_OIDC_REDIRECT_URI: $oidc_redirect, SH_OIDC_SCOPE: $oidc_scope}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
@@ -1398,9 +1434,9 @@ image_entry() {
 # same depth (.generated/test-ocp) to render this function's real output through kubectl kustomize.
 write_overlay() {
   local cp_replicas=1
-  if [[ -z "$(client_id)" ]]; then
+  if [[ -z "$(client_id)" && -z "$(oidc_issuer)" ]]; then
     cp_replicas=0
-    log 'no SH_GITHUB_CLIENT_ID (given or stored): the control plane is installed with 0 replicas (nobody can log in without one); re-run with it set'
+    log 'no SH_GITHUB_CLIENT_ID and no SH_OIDC_ISSUER (given or stored): the control plane is installed with 0 replicas (nobody can log in without one); re-run with either set'
   fi
   GEN_DIR="$1"
   mkdir -p "$GEN_DIR"
@@ -1605,7 +1641,7 @@ wait_ready() {
   for w in statefulset/redis deployment/sandbox-relay deployment/moca-supervisor; do
     kc rollout status "$w" -n "$NS" --timeout=300s
   done
-  [[ -z "$(client_id)" ]] || kc rollout status deployment/moca-control-plane -n "$NS" --timeout=300s
+  { [[ -z "$(client_id)" ]] && [[ -z "$(oidc_issuer)" ]]; } || kc rollout status deployment/moca-control-plane -n "$NS" --timeout=300s
   [[ "$SH_SANDBOX_COUNT" == 0 ]] || kc rollout status statefulset/moca-sandbox -n "$SBX_NS" --timeout=300s
   [[ "$WORKLOAD_SANDBOXES" != 1 ]] || kc rollout status deployment/moca-provisioner -n "$NS" --timeout=300s
 }

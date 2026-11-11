@@ -73,7 +73,8 @@ export function LoginOverlay({
     if (key.ctrl) return; // Ctrl+C is the App's quit, not "copy the code"
     if (error && input === 'r') return setAttempt((a) => a + 1);
     if (!start) return;
-    if (input === 'c' && copy)
+    // With no user code (the oidc flow) there is nothing to copy; 'o' still opens the browser.
+    if (input === 'c' && copy && start.userCode !== undefined)
       void Promise.resolve(copy(sanitizeRemote(start.userCode))).then(() => setNote('code copied'));
     if (input === 'o' && openUrl) {
       // openUrl already restricts to http/https, so it gets the raw value; the sanitized form is
@@ -86,7 +87,13 @@ export function LoginOverlay({
   const secondsLeft = start
     ? Math.max(0, Math.ceil((shownAt + start.expiresIn * 1000 - now) / 1000))
     : 0;
-  const hints = [copy && 'c copy code', openUrl && 'o open browser', 'esc cancel']
+  // The copy hint only makes sense when there is a code to copy (GitHub's device flow); the
+  // oidc flow has one only until its confirmation step, so hint at what exists.
+  const hints = [
+    copy && start?.userCode !== undefined && 'c copy code',
+    openUrl && 'o open browser',
+    'esc cancel',
+  ]
     .filter(Boolean)
     .join(' · ');
 
@@ -98,7 +105,7 @@ export function LoginOverlay({
       paddingX={2}
       paddingY={1}
     >
-      <Text bold>Log in with GitHub</Text>
+      <Text bold>Log in</Text>
       {error ? (
         <>
           <Text color={t.error}>{error}</Text>
@@ -112,17 +119,19 @@ export function LoginOverlay({
             Open{' '}
             <Text color={t.info} underline>
               {sanitizeRemote(start.verificationUri)}
-            </Text>{' '}
-            and enter:
-          </Text>
-          <Box marginY={1}>
-            <Text bold color={t.primary}>
-              {'  '}
-              {sanitizeRemote(start.userCode)}
             </Text>
-          </Box>
+            {start.userCode !== undefined ? ' and enter:' : ' to sign in.'}
+          </Text>
+          {start.userCode !== undefined ? (
+            <Box marginY={1}>
+              <Text bold color={t.primary}>
+                {'  '}
+                {sanitizeRemote(start.userCode)}
+              </Text>
+            </Box>
+          ) : null}
           <Spinner
-            label={`waiting for approval · code expires in ${formatDuration(secondsLeft * 1000)}`}
+            label={`waiting for approval · sign-in window closes in ${formatDuration(secondsLeft * 1000)}`}
           />
           <Text color={t.muted}>{hints}</Text>
           {note ? <Text color={t.success}>{note}</Text> : null}

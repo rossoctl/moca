@@ -9,6 +9,8 @@ describe('the route table', () => {
         'POST /v1/auth/device',
         'POST /v1/auth/device/token',
         'POST /v1/auth/test-token',
+        'GET /v1/auth/oidc/callback',
+        'POST /v1/auth/oidc/callback',
         'POST /v1/auth/token',
         'POST /v1/auth/revoke',
         'POST /v1/auth/revoke-all',

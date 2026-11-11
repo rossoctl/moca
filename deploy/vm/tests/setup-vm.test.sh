@@ -343,7 +343,15 @@ mapfile -t cp_required < <(grep -oE "required\(env, '[A-Z_]+'\)" "$CP_MAIN" | gr
 for name in "${cp_required[@]}"; do
   [[ "$name" == VAULT_ADDR ]] && continue
   if printf '%s\n' "${cp_secrets[@]}" | grep -qx "$name"; then
-    grep -qE "^LoadCredential=$name:" "$UNIT_CP" || fail "$UNIT_CP does not load the required secret $name"
+    # The main unit, or a drop-in: one checked in beside it, or one setup-vm.sh writes while the
+    # file exists (the operator token and the oidc client secret both load that way --
+    # LoadCredential= cannot be optional, so the line exists exactly when the file does).
+    if ! grep -qE "^LoadCredential=$name:" "$UNIT_CP" &&
+      ! { ls "$VM_DIR"/systemd/sh-control-plane.service.d/*.conf >/dev/null 2>&1 &&
+          grep -qhE "^LoadCredential=$name:" "$VM_DIR"/systemd/sh-control-plane.service.d/*.conf; } &&
+      ! grep -qE "LoadCredential=$name:" "$VM_DIR/setup-vm.sh"; then
+      fail "neither $UNIT_CP, its drop-ins, nor setup-vm.sh's drop-in writer load the required secret $name"
+    fi
   else
     grep -qE "^$name=" "$ENV_SRC_DIR/control-plane.env.example" ||
       fail "control-plane.env.example has no $name, which main.ts requires"
@@ -1691,6 +1699,50 @@ rm "$OP/credentials/operator-inference-token"
 op_run || fail "removing the token with the fallback off was refused"
 [[ ! -e "$OP_DROPIN" ]] || fail "the drop-in outlived its token file: LoadCredential= would fail the unit"
 pass "operator fallback: removing the token removes the drop-in"
+
+# --- PR #701: the oidc client secret is the same drop-in discipline -----------------------------
+OD="$(mu1_dir)"
+OD_UNITS="$(mktemp -d)"
+OD_DROPIN="$OD_UNITS/sh-control-plane.service.d/50-oidc-client-secret.conf"
+od_run() { SH_ENV_DIR="$OD" SH_UNIT_DIR="$OD_UNITS" ensure_oidc_credential; }
+od_secret() { install -d -m 0700 "$OD/credentials"; (umask 077 && printf '%s\n' "$1" >"$OD/credentials/oidc-client-secret"); }
+OD_SECRET='fabricated-oidc-client-secret' # notsecret
+
+# Default: no secret, provider unset -> nothing installed, nothing refused.
+od_run || fail "ensure_oidc_credential refused a default install"
+[[ ! -e "$OD_DROPIN" ]] || fail "an oidc drop-in was installed with no secret file"
+pass "oidc credential: a default install installs no drop-in"
+
+# Provider oidc, secret file forgotten -> refused, naming the file.
+echo 'SH_IDENTITY_PROVIDER=oidc' >>"$OD/control-plane.env"
+if od_err=$(od_run 2>&1); then fail "SH_IDENTITY_PROVIDER=oidc with no secret file was accepted"; fi
+grep -qF "$OD/credentials/oidc-client-secret" <<<"$od_err" || fail "the refusal must name the secret file: $od_err"
+pass "oidc credential: provider oidc with no secret file refuses, naming the file"
+
+# Secret present -> the drop-in; the value never leaves its file; a re-run is stable.
+od_secret "$OD_SECRET"
+od_run || fail "ensure_oidc_credential refused a present secret"
+grep -qxF 'LoadCredential=SH_OIDC_CLIENT_SECRET:/etc/serverless-harness/credentials/oidc-client-secret' "$OD_DROPIN" ||
+  fail "the drop-in does not load the secret: $(cat "$OD_DROPIN" 2>/dev/null)"
+grep -qxF '[Service]' "$OD_DROPIN" || fail "the drop-in has no [Service] section"
+grep -rqF -- "$OD_SECRET" "$OD_UNITS" "$OD"/*.env && fail "the oidc secret's value was copied out of its file"
+before="$(cksum <"$OD_DROPIN")"
+od_run || fail "re-run failed"
+[[ "$(cksum <"$OD_DROPIN")" == "$before" ]] || fail "a re-run changed the drop-in"
+pass "oidc credential: a present secret gets a LoadCredential= drop-in; the value never leaves its file"
+
+# The secret as an env line is refused (credentialValue refuses both at once).
+echo 'SH_OIDC_CLIENT_SECRET=envline' >>"$OD/control-plane.env"
+if od_err=$(od_run 2>&1); then fail "an env-line SH_OIDC_CLIENT_SECRET was accepted"; fi
+sed -i '/^SH_OIDC_CLIENT_SECRET=/d' "$OD/control-plane.env"
+pass "oidc credential: the secret as an env line refuses"
+
+# Secret gone, provider back to the default -> the drop-in is removed.
+rm "$OD/credentials/oidc-client-secret"
+sed -i '/^SH_IDENTITY_PROVIDER=/d' "$OD/control-plane.env"
+od_run || fail "ensure_oidc_credential refused after the secret went"
+[[ ! -e "$OD_DROPIN" ]] || fail "the drop-in outlived the secret file"
+pass "oidc credential: the drop-in is removed when the secret goes"
 rm -rf "$OP" "$OP_UNITS"
 
 # seed_control_plane_env: SH_GITHUB_CLIENT_ID and SH_PUBLIC_HARNESS_URL from the environment fill

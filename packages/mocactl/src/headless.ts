@@ -99,8 +99,12 @@ export const COPY_TIMEOUT_MS = 1000;
 const USER_CODE = /^[A-Z0-9-]{4,16}$/;
 
 /**
- * The device flow's prompt, on stderr: where to go and the code to enter, sanitized (both come from
- * the server). Shared by `mocactl login` and `mocactl sbx login`.
+ * The device flow's prompt, on stderr: where to go and, when the provider uses one, the code to
+ * enter — both sanitized, as both come from the server. Shared by `mocactl login` and
+ * `mocactl sbx login`.
+ *
+ * A provider without a user code (the oidc flow) shows only the URL: the browser session is what
+ * the person completes, so there is nothing to type.
  *
  * With `helpers` (a terminal on this machine, no --no-browser) the code is also copied to the
  * clipboard and then the page is opened, so the user only pastes and approves. GitHub's device
@@ -113,21 +117,22 @@ export function devicePrompt(
   helpers?: LoginHelpers,
 ): (s: DeviceStart, attempt: number) => void {
   return (s, attempt) => {
+    const code = s.userCode ? ` and enter the code ${sanitizeRemote(s.userCode)}` : ' to sign in';
     io.err(
-      `${attempt > 1 ? 'That code expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)} ` +
-        `and enter the code ${sanitizeRemote(s.userCode)} (valid for ${codeValidity(s.expiresIn)})`,
+      `${attempt > 1 ? 'That sign-in window expired. ' : ''}Open ${sanitizeRemote(s.verificationUri)}${code} (valid for ${codeValidity(s.expiresIn)})`,
     );
     if (!helpers) return;
     let timer: NodeJS.Timeout | undefined;
-    const copied = USER_CODE.test(s.userCode)
-      ? Promise.race([
-          helpers.copy(s.userCode).then(() => true),
-          new Promise<boolean>((resolve) => {
-            timer = setTimeout(() => resolve(false), COPY_TIMEOUT_MS);
-            timer.unref();
-          }),
-        ])
-      : Promise.resolve(false);
+    const copied =
+      s.userCode !== undefined && USER_CODE.test(s.userCode)
+        ? Promise.race([
+            helpers.copy(s.userCode).then(() => true),
+            new Promise<boolean>((resolve) => {
+              timer = setTimeout(() => resolve(false), COPY_TIMEOUT_MS);
+              timer.unref();
+            }),
+          ])
+        : Promise.resolve(false);
     void copied
       .catch(() => false)
       .then((ok) => {
@@ -159,7 +164,9 @@ export function deviceLoginEnd(
 ): number | undefined {
   if (err instanceof LoginCancelledError) return 130;
   if (err instanceof LoginExpiredError) {
-    io.err(`${o.prefix}: the code expired before it was approved — run \`${o.again}\` again`);
+    io.err(
+      `${o.prefix}: the sign-in window expired before it was approved — run \`${o.again}\` again`,
+    );
     return 1;
   }
   return undefined;

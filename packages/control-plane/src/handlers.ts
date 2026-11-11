@@ -21,7 +21,7 @@ import {
   type BundleBudgetRedisLike,
 } from './bundle-budget.js';
 import { type AuditLog, defaultAuditLog } from './audit-log.js';
-import { CpError } from './errors.js';
+import { CpError, statusFor } from './errors.js';
 import {
   asRecord,
   auditBestEffort,
@@ -233,7 +233,16 @@ export interface RequestCtx {
   egressHost?: EgressHost;
 }
 
-export type Handler = (ctx: RequestCtx, deps: CpDeps) => Promise<{ status: number; body: unknown }>;
+export type Handler = (
+  ctx: RequestCtx,
+  deps: CpDeps,
+) => Promise<{
+  status: number;
+  body: unknown;
+  contentType?: string;
+  /** Extra response headers (the oidc page's cache/frame policy); nothing by default. */
+  headers?: Record<string, string>;
+}>;
 
 export function requirePrincipal(ctx: RequestCtx): TokenClaims {
   if (!ctx.principal) throw new CpError('token_required', 'this route requires a token');
@@ -474,9 +483,127 @@ async function catalogFor(
   };
 }
 
+/**
+ * Escape everything HTML-significant in a value that came from a query string (the callback's
+ * `state`, an error message) before it is placed in the page: the page is served to a browser on
+ * the strength of a URL a forger can construct, so a `<script>` in a parameter must render as
+ * text, never execute.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+/**
+ * The callback page: one inline-styled HTML document, no external resources, no scripts. The
+ * headers make it un-frameable, uncached and referer-silent: a framed confirmation form is a
+ * clickjacking surface, and the page's URLs and tokens must not live in a cache or leak onward.
+ */
+function htmlPage(
+  title: string,
+  bodyHtml: string,
+  status = 200,
+): {
+  status: number;
+  body: string;
+  contentType: string;
+  headers: Record<string, string>;
+} {
+  const page =
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>moca — ${escapeHtml(title)}</title></head>` +
+    `<body style="font-family:system-ui,sans-serif;max-width:28em;margin:4em auto;padding:0 1em">` +
+    `<h2>moca</h2>${bodyHtml}</body></html>`;
+  return {
+    status,
+    body: page,
+    contentType: 'text/html; charset=utf-8',
+    headers: {
+      'Cache-Control': 'no-store',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy':
+        "frame-ancestors 'none'; default-src 'none'; style-src 'unsafe-inline'",
+      'Referrer-Policy': 'no-referrer',
+    },
+  };
+}
+
+/** The OIDC callback's two rounds, shared by the GET (query) and POST (form) routes. */
+async function oidcCallbackImpl(
+  deps: CpDeps,
+  field: (k: string) => string | null,
+): Promise<{ status: number; body: string; contentType: string; headers: Record<string, string> }> {
+  if (!deps.identity.handleCallback) {
+    return {
+      status: 400,
+      body: 'this control plane has no oidc identity provider: set SH_IDENTITY_PROVIDER=oidc',
+      contentType: 'text/plain',
+      headers: {},
+    };
+  }
+  const state = field('state') ?? undefined;
+  try {
+    const { outcome, confirmToken } = await deps.identity.handleCallback({
+      code: field('code') ?? undefined,
+      state,
+      error: field('error') ?? undefined,
+      confirm: field('confirm') ?? undefined,
+      token: field('ct') ?? undefined,
+    });
+    if (outcome === 'confirmed') {
+      return htmlPage('Sign-in confirmed', '<p>Sign-in confirmed — return to your terminal.</p>');
+    }
+    if (outcome === 'refused') {
+      return htmlPage(
+        'Sign-in refused',
+        '<p>The sign-in was refused. Return to your terminal for the reason, and start again there.</p>',
+      );
+    }
+    const wrong = outcome === 'wrong_code';
+    // A wrong-code re-render echoes back the ct THIS request carried: the sender already holds
+    // it, so echoing exposes nothing, while omitting it would ship ct="" and make every retry
+    // fail the token check -- four more submits and the login is refused even with the right
+    // code (review round 3). Only round 1 ever introduces a NEW token.
+    const ct = confirmToken ?? field('ct') ?? '';
+    // The one case neither source covers: a reload of, or Back to, the round-1 page. That re-GETs
+    // the provider's redirect; the spent code is refused, the login is left parked, and there is
+    // no token to put in a form. Rendering a form with ct="" would burn a try per submit until
+    // the login is denied -- so render an explanation instead, and never a form that cannot work.
+    if (ct === '') {
+      return htmlPage(
+        'Sign-in page expired',
+        '<p>This page is no longer valid — use the tab that opened from the sign-in, or start' +
+          ' again in your terminal.</p>',
+      );
+    }
+    return htmlPage(
+      'Confirm your sign-in',
+      `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
+        '<p>Enter the code shown in your terminal to finish signing in.</p>' +
+        `<form method="POST" action="/v1/auth/oidc/callback">` +
+        `<input type="hidden" name="state" value="${escapeHtml(state ?? '')}">` +
+        // The browser-bound half of the binding (oidc.ts): minted in the round-1 response this
+        // browser received, invisible to whoever started the login, required in round 2.
+        `<input type="hidden" name="ct" value="${escapeHtml(ct)}">` +
+        `<input name="confirm" autocomplete="off" autofocus required maxlength="9" ` +
+        `placeholder="XXXX-XXXX" style="font-size:1.2em;padding:.4em;letter-spacing:.15em">` +
+        `<button style="font-size:1.1em;padding:.4em .8em">Confirm</button></form>`,
+    );
+  } catch (err) {
+    const status = err instanceof CpError ? statusFor(err.code) : 500;
+    const message =
+      err instanceof CpError && err.message ? err.message : 'the sign-in could not be completed';
+    return htmlPage('Sign-in failed', `<p>${escapeHtml(message)}</p>`, status);
+  }
+}
+
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
-
   // `null`, not a 404, when unset: the client can tell "this deployment advertises no harness" from
   // "this control plane predates discovery" and name the right fix for each.
   // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust
@@ -584,6 +711,36 @@ export const HANDLERS: Record<string, Handler> = {
       nowMs: deps.now(),
     });
     return { status: 200, body: loginBody(deps, principal, issued) };
+  },
+
+  // The OIDC callback is the one route answered by a BROWSER, not by mocactl, so it answers HTML
+  // (escapeHtml escapes everything a provider or a forger can put in a query or a form field).
+  // Two rounds share the path (oidc.ts): the provider's redirect (GET ?code=) renders the
+  // confirmation form that asks for the terminal's user code -- the browser-to-terminal binding
+  // -- and the form's submission (POST, urlencoded) completes the sign-in, keeping the code and
+  // the browser token out of URLs, access logs and browser history. The refusal for a provider
+  // that holds its own flow (GitHub) names the setting to change, as the device-flow refusals do.
+  // GET is the provider's redirect target only; the confirmation submits by POST, so a confirm
+  // attempt over GET (an old bookmarked form, a hand-built link) is refused rather than run --
+  // the code and the browser token must never ride a URL, an access log, or browser history.
+  oidcCallback: async (ctx, deps) => {
+    if (ctx.query.get('confirm') !== null || ctx.query.get('ct') !== null) {
+      return htmlPage(
+        'Confirm your sign-in',
+        '<p>This link only receives the sign-in redirect. Use the form on the sign-in page to' +
+          ' enter your code.</p>',
+        400,
+      );
+    }
+    return oidcCallbackImpl(deps, (k) => ctx.query.get(k));
+  },
+
+  oidcCallbackSubmit: (ctx, deps) => {
+    const form = asRecord(ctx.body);
+    return oidcCallbackImpl(deps, (k) => {
+      const v = form[k];
+      return typeof v === 'string' ? v : null;
+    });
   },
 
   refreshAuth: async (ctx, deps) => {

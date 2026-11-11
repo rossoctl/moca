@@ -408,11 +408,15 @@ paths:
   /v1/auth/device:
     post:
       operationId: startDeviceAuth
-      summary: Start a GitHub OAuth device-flow login
+      summary: Start a login (GitHub device flow, or the OIDC provider's authorize URL)
       description: |
         GitHub's user-login flow is plain OAuth 2.0, not OIDC (spec §5.1). The device flow is what a
         shell script can complete, and it needs no client secret. The GitHub OAuth app must have
         device flow ENABLED -- it is off by default (spec §5.1.1).
+
+        With the oidc identity provider (SH_IDENTITY_PROVIDER=oidc), the same reply carries the
+        provider's authorize URL in verificationUri, a state token in deviceCode, and a user
+        code confirmed on the callback page rather than at the provider.
       security: []
       responses:
         '200':
@@ -421,10 +425,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [deviceCode, userCode, verificationUri, interval, expiresIn]
+                required: [deviceCode, verificationUri, interval, expiresIn]
                 properties:
                   deviceCode: { type: string }
-                  userCode: { type: string }
+                  userCode:
+                    {
+                      type: string,
+                      description: the code the user confirms the login with -- typed at the provider (github) or on the callback's confirmation page (oidc),
+                    }
                   verificationUri: { type: string }
                   interval: { type: integer }
                   expiresIn: { type: integer }
@@ -569,6 +577,86 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      summary: The OIDC provider's browser redirect target
+      description: |
+        Mounted for every deployment, but answers only when SH_IDENTITY_PROVIDER=oidc. Two rounds
+        share the route, both answered as HTML -- the caller is a person in a browser.
+
+        First round (?code=): the provider's redirect. The control plane exchanges the code
+        server-side (it alone holds the client secret) and verifies the id_token against the
+        provider's JWKS -- but does NOT settle the login. It renders a confirmation form asking
+        for the user code shown in the terminal that started the login (the browser-to-terminal
+        binding: without it, the authorize URL alone would let an attacker walk a victim's live
+        SSO session into the attacker's login).
+
+        Second round (?confirm= plus the round-1 token as ct): the typed code and the
+        browser-bound token. Both matching (constant-time, at most 5 tries) settles the login;
+        the next /v1/auth/device/token poll picks it up. The token is what stops the login's
+        initiator from confirming a victim's parked principal with a bare request: they hold the
+        state and the user code, but never saw the victim's round-1 response.
+      security: []
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: error, in: query, required: false, schema: { type: string } }
+        - { name: confirm, in: query, required: false, schema: { type: string } }
+        - name: ct
+          in: query
+          required: false
+          schema: { type: string }
+          description: >
+            the browser-bound token from the round-1 response (the confirmation form's hidden
+            field); required alongside confirm, and a missing or wrong one counts as a wrong try
+      responses:
+        '200':
+          description: the confirmation form, the confirmed page, or the refusal page
+          content:
+            text/html: { schema: { type: string } }
+        '400':
+          description: no oidc provider configured, or the callback is missing its parameters
+          content:
+            text/plain: { schema: { type: string } }
+        '401':
+          description: unknown or expired sign-in state
+          content:
+            text/plain: { schema: { type: string } }
+    post:
+      operationId: oidcCallbackSubmit
+      summary: The confirmation form's submission
+      description: |
+        The second round, as the browser's form submits it (urlencoded): state, the typed user
+        code (confirm) and the round-1 browser token (ct). POST, not GET, so the code and the
+        token stay out of URLs, access logs and browser history. Same outcomes and pages as the
+        GET round. Every response carries Cache-Control: no-store, X-Frame-Options: DENY, a
+        frame-ancestors 'none' CSP and Referrer-Policy: no-referrer.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [state, confirm, ct]
+              properties:
+                state: { type: string }
+                confirm: { type: string, description: the terminal's user code, XXXX-XXXX }
+                ct: { type: string, description: the browser-bound token from the round-1 response }
+      responses:
+        '200':
+          description: the confirmed page, the re-rendered form (wrong code), or the refusal page
+          content:
+            text/html: { schema: { type: string } }
+        '400':
+          description: no oidc provider configured, or the form is missing its fields
+          content:
+            text/html: { schema: { type: string } }
+        '401':
+          description: unknown or expired sign-in state
+          content:
+            text/html: { schema: { type: string } }
   /v1/auth/token:
     post:
       operationId: refreshAuth
