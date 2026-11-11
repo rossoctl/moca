@@ -9,7 +9,7 @@ import {
   type CpRedisLike,
   type TurnState,
 } from '@moca/control-plane';
-import type { LeafJobDeps } from '@moca/harness/leaf-job-runner';
+import type { LeafJobDeps, ProcessOutcome } from '@moca/harness/leaf-job-runner';
 import { runLeaf, type LeafResult } from '@moca/harness/run-leaf';
 import { RedisWorkQueue, type WorkQueue } from '@moca/work-queue';
 import { createLeafDrainLoop, asyncLeafCap, shouldArmAsync } from './leaf-drain-loop.js';
@@ -115,7 +115,58 @@ export interface AsyncLeafWorker {
   /** Stop claiming and release the slot; see leaf-drain-loop's stop() for why it does not wait. */
   stop(): Promise<void>;
   readonly consumerId: string;
+  stats(): AsyncWorkerStats;
 }
+
+/** What one worker contributes to §7's async metrics. Camel on the IPC row, snake at the port. */
+export interface AsyncWorkerStats {
+  asyncClaims: number;
+  asyncReclaims: number;
+  asyncDeadLetters: number;
+  asyncClaimDeniedFull: number;
+  /** Slot 0 only (§9.2): properties of Redis, wanted once per deployment, not once per worker. */
+  asyncQueueDepth?: number;
+  asyncOldestAgeMs?: number;
+}
+
+export interface AsyncTally {
+  onOutcome(outcome: ProcessOutcome): void;
+  onCapDenied(): void;
+  /** One entry the PERIODIC reaper dead-lettered. The loop's own branch arrives via onOutcome. */
+  onReaped(): void;
+  snapshot(): Omit<AsyncWorkerStats, 'asyncQueueDepth' | 'asyncOldestAgeMs'>;
+}
+
+/**
+ * §7's four worker-side counts. Cumulative per process: the supervisor sums across slots and a
+ * restart resets this worker's contribution, which is visible in the same body as `restarts`.
+ */
+export function createAsyncTally(): AsyncTally {
+  const t = { asyncClaims: 0, asyncReclaims: 0, asyncDeadLetters: 0, asyncClaimDeniedFull: 0 };
+  return {
+    onOutcome(outcome: ProcessOutcome): void {
+      if (outcome.kind === 'idle') return; // an empty poll is not throughput
+      t.asyncClaims += 1;
+      if (outcome.reclaimed) t.asyncReclaims += 1;
+      if (outcome.kind === 'dead_lettered') t.asyncDeadLetters += 1;
+    },
+    onCapDenied(): void {
+      t.asyncClaimDeniedFull += 1;
+    },
+    onReaped(): void {
+      t.asyncDeadLetters += 1;
+    },
+    snapshot: () => ({ ...t }),
+  };
+}
+
+/**
+ * How often slot 0 re-reads the queue's depth and oldest age. On its own timer rather than inside
+ * the stats interval, which defaults to 1000 ms: `depth()` is two Redis round trips and the stats
+ * callback is synchronous, so it could not await one anyway. Ten seconds of staleness on a gauge
+ * nothing routes on costs nothing.
+ */
+export const ASYNC_DEPTH_INTERVAL_MS = 10_000;
 
 /**
  * A client with the listener-plus-bounded-reconnect pair, via the canonical helpers rather than a
@@ -226,15 +277,53 @@ export function armAsyncLeafWorker(opts: {
     maxAttempts: MAX_ATTEMPTS,
   };
 
-  const loop = createLeafDrainLoop({ job, counter: opts.counter, cap: asyncLeafCap(env) });
-  const stopReaper = armAsyncReaper({ queue, consumerId, deadLetter: job.deadLetter });
+  const tally = createAsyncTally();
+  // One depth() call for both gauges: fetched separately they would describe two different
+  // instants, and the pair is the point -- depth alone cannot tell a deep fast queue from a
+  // stalled shallow one (§7).
+  let gauges: { depth: number; oldestAgeMs: number } | undefined;
+  const isSlotZero = (env.SH_WORKER_ID || '0') === '0';
+  const pollDepth = () =>
+    void queue
+      .depth()
+      .then((d) => {
+        gauges = d;
+      })
+      .catch(() => {
+        // Leave the last reading in place rather than blanking it: a single failed poll is not
+        // evidence the queue drained.
+      });
+  let depthTimer: ReturnType<typeof setInterval> | undefined;
+  if (isSlotZero) {
+    depthTimer = setInterval(pollDepth, ASYNC_DEPTH_INTERVAL_MS);
+    depthTimer.unref();
+  }
+
+  const loop = createLeafDrainLoop({
+    job,
+    counter: opts.counter,
+    cap: asyncLeafCap(env),
+    onOutcome: tally.onOutcome,
+    onCapDenied: tally.onCapDenied,
+  });
+  const stopReaper = armAsyncReaper({
+    queue,
+    consumerId,
+    deadLetter: async (turnId) => {
+      tally.onReaped();
+      await job.deadLetter(turnId);
+    },
+  });
 
   // ensureGroup BEFORE the first claim, and the loop only after it: XREADGROUP against a missing
   // group is an error, not an empty read, so starting the loop first would log NOGROUP until the
   // submitter happened to create it.
   void connected
     .then(() => queue.ensureGroup())
-    .then(() => loop.start())
+    .then(() => {
+      if (isSlotZero) pollDepth(); // the first reading, so it does not wait ten seconds
+      loop.start();
+    })
     .catch((err: unknown) => {
       console.error(
         `[async] leaf queue unavailable, not draining: ${err instanceof Error ? err.message : String(err)}`,
@@ -243,7 +332,14 @@ export function armAsyncLeafWorker(opts: {
 
   return {
     consumerId,
+    stats(): AsyncWorkerStats {
+      return {
+        ...tally.snapshot(),
+        ...(gauges ? { asyncQueueDepth: gauges.depth, asyncOldestAgeMs: gauges.oldestAgeMs } : {}),
+      };
+    },
     async stop(): Promise<void> {
+      if (depthTimer) clearInterval(depthTimer);
       stopReaper();
       await loop.stop();
       // Destroy, not close: close() waits on queued commands, which never drain while a blocking

@@ -25,6 +25,7 @@ const {
   asyncFinalizeState,
   ASYNC_REAP_INTERVAL_MS,
   reconnecting,
+  createAsyncTally,
 } = await import('../src/async-worker.js');
 
 /** A port nothing listens on: a real socket target, with no real Redis needed. */
@@ -229,5 +230,61 @@ describe('armAsyncLeafWorker', () => {
     expect(created).toHaveLength(3);
     expect(created[0]).not.toBe(created[1]);
     await worker!.stop();
+  });
+});
+
+describe('createAsyncTally', () => {
+  it('starts at zero', () => {
+    expect(createAsyncTally().snapshot()).toEqual({
+      asyncClaims: 0,
+      asyncReclaims: 0,
+      asyncDeadLetters: 0,
+      asyncClaimDeniedFull: 0,
+    });
+  });
+
+  it('counts every claimed entry, whatever became of it', () => {
+    const t = createAsyncTally();
+    t.onOutcome({ kind: 'completed', turnId: 'a', status: 'done', reclaimed: false });
+    t.onOutcome({ kind: 'redelivered', turnId: 'b', reclaimed: false });
+    t.onOutcome({ kind: 'refused', turnId: 'c', reclaimed: false });
+    t.onOutcome({ kind: 'dead_lettered', turnId: 'd', reclaimed: false });
+    expect(t.snapshot().asyncClaims).toBe(4);
+  });
+
+  it('does not count an idle poll as a claim', () => {
+    const t = createAsyncTally();
+    t.onOutcome({ kind: 'idle' });
+    t.onOutcome({ kind: 'idle' });
+    expect(t.snapshot().asyncClaims).toBe(0);
+  });
+
+  it('counts a reclaim on any outcome, not only a completion', () => {
+    const t = createAsyncTally();
+    t.onOutcome({ kind: 'completed', turnId: 'a', status: 'done', reclaimed: true });
+    t.onOutcome({ kind: 'dead_lettered', turnId: 'b', reclaimed: true });
+    t.onOutcome({ kind: 'refused', turnId: 'c', reclaimed: false });
+    expect(t.snapshot().asyncReclaims).toBe(2);
+  });
+
+  it('counts dead letters from the loop and from the reaper, without double counting', () => {
+    const t = createAsyncTally();
+    t.onOutcome({ kind: 'dead_lettered', turnId: 'a', reclaimed: false }); // the loop's branch
+    t.onReaped(); // the periodic reaper's
+    expect(t.snapshot().asyncDeadLetters).toBe(2);
+  });
+
+  it('counts claims not attempted because the worker was full', () => {
+    const t = createAsyncTally();
+    t.onCapDenied();
+    t.onCapDenied();
+    expect(t.snapshot().asyncClaimDeniedFull).toBe(2);
+  });
+
+  it('snapshots a copy: a later increment does not mutate an earlier reading', () => {
+    const t = createAsyncTally();
+    const first = t.snapshot();
+    t.onCapDenied();
+    expect(first.asyncClaimDeniedFull).toBe(0);
   });
 });

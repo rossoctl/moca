@@ -12,7 +12,7 @@ import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
 import { prepareServerProcess } from './server-process.js';
 import { attachTurnSlot } from './turn-slot.js';
 // #389: arm the async leaf drain on this worker, sharing its admission cap with sync /turn.
-import { armAsyncLeafWorker } from './async-worker.js';
+import { armAsyncLeafWorker, type AsyncWorkerStats } from './async-worker.js';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -30,6 +30,14 @@ export type WorkerToSupervisor =
       leasesHeld?: number;
       leasePoolSize?: number;
       fileOpP95Ms?: number;
+      /** §7's async metrics. Advisory on the same terms as the rest of this row. The two gauge
+       * fields are sent by slot 0 only (§9.2). */
+      asyncClaims?: number;
+      asyncReclaims?: number;
+      asyncDeadLetters?: number;
+      asyncClaimDeniedFull?: number;
+      asyncQueueDepth?: number;
+      asyncOldestAgeMs?: number;
     };
 
 /**
@@ -244,6 +252,8 @@ export function startStatsReporter(opts: {
   intervalMs: number;
   lag?: () => number;
   rss?: () => number;
+  /** §7's async metrics, or undefined on a worker that is not draining the queue. */
+  asyncStats?: () => AsyncWorkerStats | undefined;
 }): () => void {
   const h = opts.lag ? undefined : monitorEventLoopDelay({ resolution: 10 });
   h?.enable();
@@ -256,6 +266,7 @@ export function startStatsReporter(opts: {
       type: 'stats',
       loopLagP99Ms: lag,
       rssBytes: opts.rss ? opts.rss() : process.memoryUsage.rss(),
+      ...(opts.asyncStats?.() ?? {}),
     });
   }, opts.intervalMs);
   timer.unref(); // telemetry must never be the reason a worker refuses to exit
@@ -352,6 +363,7 @@ if (isMainModule) {
   const stopStats = startStatsReporter({
     send,
     intervalMs: statsIntervalMs(process.env),
+    asyncStats: () => asyncWorker?.stats(),
   });
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   process.on('message', (msg: SupervisorToWorker, handle) => {
