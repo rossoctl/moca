@@ -699,6 +699,38 @@ describe('the callback route', () => {
     expect(String(right.body)).toMatch(/return to your terminal/);
   });
 
+  it('a reload of the round-1 page gets an explanation, never a form with an empty ct (round 4)', async () => {
+    // Back/reload re-sends the provider's redirect; the spent code is refused by the provider,
+    // the login stays parked, and the re-render has no token to carry. The page must say so
+    // rather than ship ct="" -- a form that burns a try per submit until the login is denied.
+    // A mutable reply queue: the id_token only exists after mint(), so the entries are filled
+    // in below -- first exchange succeeds, the replayed code is refused.
+    const tokenReplies: { status: number; body: unknown }[] = [];
+    const r = rig({ script: { '/token': tokenReplies } });
+    mint(r, { sub: 'user-1', name: 'Alice Example' });
+    tokenReplies.push({ status: 200, body: { id_token: r.idToken.value } });
+    tokenReplies.push({ status: 400, body: { error: 'invalid_grant' } });
+    const d = makeDeps({ identity: r.provider });
+    const start = await r.provider.startDeviceAuth();
+    // Round 1 through the route, so the scripted queue is consumed in order.
+    const first = await HANDLERS.oidcCallback!(
+      ctx({ query: new URLSearchParams(`code=c&state=${start.deviceCode}`) }),
+      d,
+    );
+    expect(String(first.body)).toContain('<form');
+    // The reload: same code, same state, no ct anywhere.
+    const reload = await HANDLERS.oidcCallback!(
+      ctx({ query: new URLSearchParams(`code=c&state=${start.deviceCode}`) }),
+      d,
+    );
+    expect(String(reload.body)).not.toContain('<form');
+    expect(String(reload.body)).toContain('no longer valid');
+    // And the login is still parked, not denied: the original tab can still confirm.
+    expect((await errOf(() => r.provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+      'authorization_pending',
+    );
+  });
+
   it('never reflects a forged state, markup included', async () => {
     // A state that is not live never reaches the confirmation form -- the refusal names nothing
     // the caller sent -- and a live state is base64url by construction, so the form's value

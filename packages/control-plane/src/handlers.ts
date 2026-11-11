@@ -568,6 +568,17 @@ async function oidcCallbackImpl(
     // fail the token check -- four more submits and the login is refused even with the right
     // code (review round 3). Only round 1 ever introduces a NEW token.
     const ct = confirmToken ?? field('ct') ?? '';
+    // The one case neither source covers: a reload of, or Back to, the round-1 page. That re-GETs
+    // the provider's redirect; the spent code is refused, the login is left parked, and there is
+    // no token to put in a form. Rendering a form with ct="" would burn a try per submit until
+    // the login is denied -- so render an explanation instead, and never a form that cannot work.
+    if (ct === '') {
+      return htmlPage(
+        'Sign-in page expired',
+        '<p>This page is no longer valid — use the tab that opened from the sign-in, or start' +
+          ' again in your terminal.</p>',
+      );
+    }
     return htmlPage(
       'Confirm your sign-in',
       `${wrong ? '<p style="color:#b00">That code is not right — try again.</p>' : ''}` +
