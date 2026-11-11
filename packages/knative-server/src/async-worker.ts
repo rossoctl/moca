@@ -77,13 +77,13 @@ export function asyncFinalizeState(status: LeafResult['status']): TurnState {
  * (`server.ts:183-194`): sweep once now, then on an interval, with the timer unref'd so this is
  * never the reason a worker refuses to exit.
  *
- * Armed by EVERY worker. Redundant but safe -- XCLAIM-then-XACK is per-entry atomic and
- * `deadLetterTurn`'s finalize compare-and-sets -- and the immediate sweep matters for the same
+ * Armed by EVERY worker. Redundant but safe -- the reap's XCLAIM hands one entry to one consumer
+ * and `deadLetterTurn`'s finalize compare-and-sets -- and the immediate sweep matters for the same
  * reason armRunReaper's does: a worker restarted seconds after a crash would otherwise find the
  * orphan's heartbeat not yet stale and never look again.
  */
 export function armAsyncReaper(opts: {
-  queue: Pick<WorkQueue, 'reapDeadLetters' | 'gcIdleConsumers'>;
+  queue: Pick<WorkQueue, 'reapDeadLetters' | 'gcIdleConsumers' | 'ack'>;
   consumerId: string;
   deadLetter: (turnId: string) => Promise<void>;
   intervalMs?: number;
@@ -97,9 +97,13 @@ export function armAsyncReaper(opts: {
         maxAttempts: MAX_ATTEMPTS,
       });
       for (const entry of dead) {
-        // An entry whose turnId field is missing or malformed is already acked by the reap; there
-        // is no record to finalize, so there is nothing further to do with it.
+        // Ack AFTER the write, the order `leaf-job-runner.ts:139` uses for its own branch: an ack
+        // removes the entry from the PEL for good, so acking first would turn a failed
+        // `deadLetterTurn` into a turn stuck `running` that nothing can ever redeliver. An entry
+        // whose turnId field is missing or malformed has no record to finalize, so it is only
+        // acked.
         if (entry.turnId) await opts.deadLetter(entry.turnId);
+        await opts.queue.ack(entry.entryId);
       }
       await opts.queue.gcIdleConsumers(CONSUMER_GC_IDLE_MS);
     })().catch((err: unknown) =>

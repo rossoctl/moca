@@ -41,7 +41,6 @@ class FakeQueue implements WorkQueue {
   async reapDeadLetters() {
     return [];
   }
-  async purge() {}
 }
 
 let queue: FakeQueue;

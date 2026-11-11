@@ -41,11 +41,15 @@ export interface WorkQueue {
   depth(): Promise<QueueDepth>;
   deleteConsumer(consumerId: string): Promise<void>;
   gcIdleConsumers(minIdleMs: number): Promise<number>;
+  /**
+   * Claim every over-attempted stale entry for this consumer and return it. The caller ACKs each
+   * one through `ack` after its terminal write lands: an acked entry is gone from the PEL forever,
+   * so acking here would make a failed dead-letter write unrecoverable.
+   */
   reapDeadLetters(
     consumerId: string,
     opts: { minIdleMs: number; maxAttempts: number },
   ): Promise<Array<{ entryId: string; turnId: string }>>;
-  purge(): Promise<void>;
 }
 
 export class RedisWorkQueue implements WorkQueue {
@@ -215,24 +219,12 @@ export class RedisWorkQueue implements WorkQueue {
         );
         const msg = claimed?.[0];
         if (!msg) continue; // reclaimed by another consumer between inspect and claim
-        await this.client.xAck(this.stream, this.group, entry.id);
+        // No XACK here: the caller acks after the dead-letter write, the order `leaf-job-runner`'s
+        // own branch already uses. XCLAIM reset the idle timer, so a re-reap is minIdleMs away and
+        // `deadLetterTurn`'s terminal-state guard makes the repeat a no-op.
         deadLettered.push({ entryId: entry.id, turnId: this.turnIdOf(msg.message) });
       }
     }
     return deadLettered;
-  }
-
-  /** Tests only: drop the group and the stream. */
-  async purge(): Promise<void> {
-    try {
-      await this.client.xGroupDestroy(this.stream, this.group);
-    } catch {
-      /* ignore */
-    }
-    try {
-      await this.client.del(this.stream);
-    } catch {
-      /* ignore */
-    }
   }
 }

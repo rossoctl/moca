@@ -65,7 +65,7 @@ describe('RedisWorkQueue', () => {
     expect(await queue.claim('other', { minIdleMs: 80, blockMs: 50 })).toBeNull();
   });
 
-  it('reapDeadLetters acks only entries past maxAttempts and idle past minIdleMs', async () => {
+  it('reapDeadLetters returns only entries past maxAttempts and idle past minIdleMs', async () => {
     await put('t-dead');
     for (let i = 0; i < 4; i += 1) {
       await queue.claim(`c${i}`, { minIdleMs: 10, blockMs: 20 });
@@ -73,7 +73,26 @@ describe('RedisWorkQueue', () => {
     }
     const reaped = await queue.reapDeadLetters('reaper', { minIdleMs: 10, maxAttempts: 3 });
     expect(reaped).toEqual([expect.objectContaining({ turnId: 't-dead' })]);
+    // Still pending: the reap does NOT ack. The caller acks after the dead-letter write lands, so
+    // an entry whose write fails is re-reaped instead of vanishing from the PEL.
+    expect(await queue.pending()).toBe(1);
+    await queue.ack(reaped[0]!.entryId);
     expect(await queue.pending()).toBe(0);
+  });
+
+  it('reapDeadLetters leaves a reaped entry claimable again when the caller never acks', async () => {
+    await put('t-dead');
+    for (let i = 0; i < 4; i += 1) {
+      await queue.claim(`c${i}`, { minIdleMs: 10, blockMs: 20 });
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    expect(await queue.reapDeadLetters('reaper', { minIdleMs: 10, maxAttempts: 3 })).toHaveLength(
+      1,
+    );
+    await new Promise((r) => setTimeout(r, 15));
+    // The second sweep sees it again: this is what makes a failed dead-letter write recoverable.
+    const again = await queue.reapDeadLetters('reaper', { minIdleMs: 10, maxAttempts: 3 });
+    expect(again).toEqual([expect.objectContaining({ turnId: 't-dead' })]);
   });
 
   it('gcIdleConsumers removes only consumers with no pending entries', async () => {

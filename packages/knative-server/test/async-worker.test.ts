@@ -114,6 +114,7 @@ describe('armAsyncReaper', () => {
   const queue = () => ({
     reapDeadLetters: vi.fn(async () => [{ entryId: '1-1', turnId: 't-1' }]),
     gcIdleConsumers: vi.fn(async () => 0),
+    ack: vi.fn(async () => {}),
   });
 
   it('sweeps once immediately, before any interval elapses', async () => {
@@ -136,8 +137,38 @@ describe('armAsyncReaper', () => {
     q.reapDeadLetters = vi.fn(async () => [{ entryId: '1-1', turnId: '' }]);
     const deadLetter = vi.fn(async () => {});
     const stop = armAsyncReaper({ queue: q as never, consumerId: 'c', deadLetter });
-    await vi.waitFor(() => expect(q.reapDeadLetters).toHaveBeenCalled());
+    await vi.waitFor(() => expect(q.ack).toHaveBeenCalledWith('1-1'));
     expect(deadLetter).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('acks only AFTER the dead-letter write: a failed write leaves the entry pending', async () => {
+    const q = queue();
+    const order: string[] = [];
+    q.ack = vi.fn(async () => {
+      order.push('ack');
+    });
+    const deadLetter = vi.fn(async () => {
+      order.push('write');
+    });
+    const stop = armAsyncReaper({ queue: q as never, consumerId: 'c', deadLetter });
+    await vi.waitFor(() => expect(order).toEqual(['write', 'ack']));
+    stop();
+  });
+
+  it('does not ack an entry whose dead-letter write threw: it is re-reaped, not lost', async () => {
+    const q = queue();
+    const log = vi.fn();
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(async () => {
+        throw new Error('redis write failed');
+      }),
+      log,
+    });
+    await vi.waitFor(() => expect(log).toHaveBeenCalled());
+    expect(q.ack).not.toHaveBeenCalled();
     stop();
   });
 
