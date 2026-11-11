@@ -1,10 +1,45 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
+import { createServer, type AddressInfo } from 'node:net';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * S1: captures every client `armAsyncLeafWorker` builds, after the same wrapper
+ * `runtime-reporter-redis-errors.test.ts` uses, so the test can assert the queue and the turn store
+ * each got their own connection without reaching into the module's private state.
+ */
+const created = vi.hoisted(() => [] as { isOpen: boolean; destroy: () => void }[]);
+vi.mock('redis', async (importOriginal) => {
+  const real = await importOriginal<typeof import('redis')>();
+  return {
+    ...real,
+    createClient: (...args: Parameters<typeof real.createClient>) => {
+      const c = real.createClient(...args);
+      created.push(c as never);
+      return c;
+    },
+  };
+});
+const {
   armAsyncReaper,
+  armAsyncLeafWorker,
   asyncConsumerId,
   asyncFinalizeState,
   ASYNC_REAP_INTERVAL_MS,
-} from '../src/async-worker.js';
+} = await import('../src/async-worker.js');
+
+/** A port nothing listens on: a real socket target, with no real Redis needed. */
+async function closedPort(): Promise<number> {
+  const s = createServer();
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+  const { port } = s.address() as AddressInfo;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 50));
+
+beforeEach(() => {
+  created.length = 0;
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -116,11 +151,52 @@ describe('armAsyncReaper', () => {
   });
 
   it('unrefs its timer: the reaper must never hold the process open', async () => {
+    const setIntervalSpy = vi.spyOn(global, 'setInterval');
     const q = queue();
     const stop = armAsyncReaper({ queue: q as never, consumerId: 'c', deadLetter: vi.fn() });
-    // No handle is exposed, so assert the property that matters indirectly: the default interval
-    // is a minute, and a test file that finished proves nothing was keeping the loop alive.
-    expect(ASYNC_REAP_INTERVAL_MS).toBe(60_000);
+    const handle = setIntervalSpy.mock.results.at(-1)?.value as ReturnType<typeof setInterval>;
+    expect(handle.hasRef()).toBe(false);
+    setIntervalSpy.mockRestore();
     stop();
+  });
+});
+
+describe('armAsyncLeafWorker', () => {
+  let errorLog: ReturnType<typeof vi.spyOn>;
+  let warnLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    warnLog = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(async () => {
+    await settle();
+    errorLog.mockRestore();
+    warnLog.mockRestore();
+  });
+
+  const counter = () => ({ inFlight: 0, start: () => () => undefined });
+
+  it('returns null and opens no client when SH_ASYNC_DRAIN is not set', () => {
+    const worker = armAsyncLeafWorker({ counter: counter(), env: {} });
+    expect(worker).toBeNull();
+    expect(created).toHaveLength(0);
+  });
+
+  it('gives the queue and the turn store their OWN Redis connection (S1): a blocking XREADGROUP on a shared client would starve the turn store', async () => {
+    const env = {
+      SH_ASYNC_DRAIN: '1',
+      SH_CONTROL_PLANE_URL: 'http://cp.example',
+      SH_EXCHANGE_TOKEN: 'tok',
+      REDIS_URL: `redis://127.0.0.1:${await closedPort()}`,
+    };
+    const worker = armAsyncLeafWorker({ counter: counter(), env });
+    expect(worker).not.toBeNull();
+    // Exactly three clients: the queue's, the turn store's, and getResultStore's own (unrelated)
+    // one -- so a shared queue/turns client (the regression this guards) collapses this to two.
+    expect(created).toHaveLength(3);
+    expect(created[0]).not.toBe(created[1]);
+    await worker!.stop();
   });
 });

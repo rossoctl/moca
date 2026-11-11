@@ -221,6 +221,32 @@ describe('processOne', () => {
     expect(queue.touched).toEqual(['1-0']);
   });
 
+  it('swallows a touch rejection on a heartbeat tick: a destroyed-client heartbeat must not kill the process', async () => {
+    // Reproduces stop() racing an in-flight leaf: the queue client can be destroyed while this
+    // leaf's heartbeat is still armed, so the next tick's touch() rejects ClientClosedError. The
+    // tick is a bare `void`, so an unguarded rejection here becomes an unhandled rejection, which
+    // ends the process under Node's default --unhandled-rejections=throw -- taking down healthy
+    // sync traffic with it. A missed touch is safe to swallow: the entry simply becomes
+    // reclaimable after minIdleMs.
+    queue.next = entry();
+    queue.touch = async () => {
+      throw new Error('ClientClosedError: The client is closed');
+    };
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      await processOne(deps());
+      expect(heartbeats).toHaveLength(1);
+      heartbeats[0]!();
+      // Flush several microtask turns: an unguarded rejection surfaces as 'unhandledRejection'
+      // once nothing has attached a handler by the end of the current tick.
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
   it('clears the heartbeat and rethrows when the leaf throws, leaving the entry pending', async () => {
     queue.next = entry();
     const clearHeartbeat = vi.fn();

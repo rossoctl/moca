@@ -123,7 +123,12 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   }
 
   const hb = setHb(() => {
-    void deps.queue.touch(claimed.entryId, deps.consumerId);
+    // Fire-and-forget, so a rejection here (e.g. the client was destroyed by a stop() racing this
+    // leaf's shutdown, or a transient Redis blip) must not become an unhandled rejection that kills
+    // a process also serving healthy sync traffic. A missed touch is already non-fatal by design:
+    // the entry simply becomes reclaimable after minIdleMs, which is the same outcome a dropped
+    // heartbeat produces on purpose.
+    void deps.queue.touch(claimed.entryId, deps.consumerId).catch(() => undefined);
   }, heartbeatMs);
   let result: LeafResult;
   try {

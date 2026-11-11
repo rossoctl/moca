@@ -131,6 +131,9 @@ importers:
       '@moca/harness':
         specifier: workspace:*
         version: link:../../harness
+      '@moca/session-backend':
+        specifier: workspace:*
+        version: link:../session-backend
       '@moca/work-queue':
         specifier: workspace:*
         version: link:../work-queue
