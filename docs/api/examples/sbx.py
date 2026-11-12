@@ -95,9 +95,12 @@ def run(command: str, stdin: bytes = b"", op: str = "run", sleep=time.sleep) -> 
         print(f"sbx: {e}", file=sys.stderr)
         return 2
     waited, attempt, attempt_start = 0.0, 1, started
+    sb = None  # one Sandbox (one channel, one TokenSource) for every attempt: a retry needs only a new req_id
     while True:
         try:
-            r = sandbox().exec(command, stdin=stdin, timeout_s=int(os.environ.get("SBX_TIMEOUT", "600")))
+            if sb is None:
+                sb = sandbox()  # inside the try, so a failed token command is reported as before
+            r = sb.exec(command, stdin=stdin, timeout_s=int(os.environ.get("SBX_TIMEOUT", "600")))
             break
         except RefusedAtCapacity as e:
             nxt = min(jitter(backoff(attempt)), budget - waited)
