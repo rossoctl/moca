@@ -2072,7 +2072,7 @@ check "usage names --vcpus" "$(printf '%s' "$usage_text" | grep -c -- '--vcpus')
 check "by default the guest has 1 vCPU" "$(grep -c '^VCPUS=1$' "$SCRIPT")" "1"
 check "firecracker's machine-config takes the count" "$(grep -c 'vcpu_count\\":\$VCPUS' "$SCRIPT")" "1"
 check "no hardcoded vcpu_count is left" "$(grep -c 'vcpu_count\\":1' "$SCRIPT")" "0"
-check "cloud-hypervisor's --cpus takes the count" "$(grep -c -- '--cpus boot=\$VCPUS' "$SCRIPT")" "1"
+check "cloud-hypervisor's --cpus takes the count" "$(grep -c -- '--cpus "boot=\$VCPUS"' "$SCRIPT")" "1"
 check "the manifest records it" "$(grep -c '"vcpus": \$VCPUS,' "$SCRIPT")" "1"
 for bad in 0 33 two -1; do
   rc=0

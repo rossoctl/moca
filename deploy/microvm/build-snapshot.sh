@@ -2023,7 +2023,7 @@ boot_quiesce_snapshot_cloud_hypervisor() {
     --vsock "cid=3,socket=/vsock.sock" \
     --fs "tag=workspace,socket=/fs.sock" \
     --memory "size=${GUEST_RAM_MB}M,shared=on" \
-    --cpus boot=$VCPUS \
+    --cpus "boot=$VCPUS" \
     --console "file=/console.log" \
     --serial off \
     </dev/null >/dev/null 2>&1 &
@@ -2197,6 +2197,8 @@ verify_guest_command() {
     cloud-hypervisor) printf '%s\n' 'mountpoint -q /workspace || mount -t virtiofs workspace /workspace || exit 97' ;;
   esac
   printf 'cd /workspace || exit 97\n(\n%s\n) >/tmp/.verify-command.log 2>&1\n' "$VERIFY_COMMAND"
+  # Literal: the guest's shell expands these, not this one.
+  # shellcheck disable=SC2016
   printf '%s\n' 'rc=$?; tail -c 16384 /tmp/.verify-command.log; exit $rc'
 }
 
@@ -2215,6 +2217,8 @@ run_verify_command() {
 }
 
 verify_what() {
+  # Backticks as text: the log names the default command.
+  # shellcheck disable=SC2016
   if [ -n "$VERIFY_COMMAND" ]; then printf 'the --verify-command'; else printf '`true`'; fi
 }
 
