@@ -127,6 +127,22 @@ jail_dir() {
   printf '%s/jail/j%s' "$SBX_SRV" "$h"
 }
 
+# remove_legacy_jail ID: before jail_dir, a worker's jail was $SBX_SRV/jail/<id>. A reinstall or an
+# uninstall removes that worker's own old jail, only that exact path, once the worker that used it is
+# stopped: it holds the jailer's per-VM chroots, whose snapshot and workspace files are hard links
+# (the files themselves stay). An id shaped like a new jail's name (j + 12 hex) could name another
+# worker's jail, so that one is left, and so is a symlink.
+remove_legacy_jail() {
+  local old="$SBX_SRV/jail/$1"
+  [[ -d "$old" && ! -L "$old" ]] || return 0
+  if [[ "$1" =~ ^j[0-9a-f]{12}$ ]]; then
+    log "left in place: $old (named like a current jail; remove it by hand if it is $1's old one)"
+    return 0
+  fi
+  rm -rf -- "$old"
+  log "removed $old (this worker's jail from before the jail path was keyed by a digest of the id)"
+}
+
 # check_jail_path ID: the worst-case API socket path under the worker's jail fits a Unix socket
 # (microvm-worker refuses at start otherwise; here it is refused before anything is written).
 check_jail_path() {
@@ -478,6 +494,7 @@ install_worker() {
   # operator brings it back (as deploy/microvm/setup-microvm.sh does).
   systemctl reset-failed "sbx-worker@$id.service" || true
   systemctl restart "sbx-worker@$id.service"
+  remove_legacy_jail "$id"
   wait_attached "$id"
 }
 
@@ -694,6 +711,7 @@ uninstall_worker() {
   # substrings of `@ba ` and `/ba-relay-ca.crt`.
   [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -e "worker sbx-worker@$id " -e "/$id-relay-ca.crt"
   log "removed sbx-worker@$id"
+  remove_legacy_jail "$id"
   remove_shared_units
   systemctl daemon-reload
   log "left in place: $SBX_SRV/workspaces/$id and $(jail_dir "$id") (workspace data; remove by hand when no sandbox needs it)"
