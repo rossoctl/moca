@@ -8,7 +8,9 @@ Description=SBX0 sandbox worker %i (microvm-worker)
 # moca-egress.service is the host's guest-egress proxy (install-host.sh installs it, or reuses the
 # P6 one). Wants= + After=, not Requires=: a moca-egress restart must not stop the workers. Why:
 # deploy/microvm/moca-egress.service. A --no-egress host has no such unit, and Wants= ignores that.
-After=network-online.target moca-egress.service
+# sbx-read-ahead.service (install-host.sh, when SBX_READ_AHEAD_KB is not 0) sets the snapshot
+# device's read-ahead at boot; After= alone, so a host without it starts its workers all the same.
+After=network-online.target moca-egress.service sbx-read-ahead.service
 Wants=network-online.target moca-egress.service
 # As deploy/microvm/microvm-worker.service: fail loudly without KVM, and stop restarting a broken worker after 5 tries in 5 minutes.
 AssertPathExists=/dev/kvm

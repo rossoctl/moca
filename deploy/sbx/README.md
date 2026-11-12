@@ -148,6 +148,13 @@ a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace 
 `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
 it.
 
+A worker install also sets the kernel read-ahead of the block device holding `/srv/sbx` to
+`SBX_READ_AHEAD_KB` (default 512 KiB; `0` leaves the device alone), so a worker's cold start reads its
+snapshot's memory file faster, and installs `sbx-read-ahead.service` to set it again at each boot. The
+setting is device-wide: anything else on that volume (another Moca tier, other sandboxes) reads ahead
+as much. The last uninstall writes the device's earlier value back:
+[the runbook](RUNBOOK.md#snapshot-read-ahead).
+
 **The janitor** frees the workspaces of ended sandboxes (spec §8.3). Install it once per host, from
 the bundle `setup.sh` writes to `deploy/sbx/.generated/janitor`:
 
