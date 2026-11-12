@@ -15,6 +15,8 @@ import {
   cmdLogout,
   cmdLs,
   cmdRm,
+  cmdSubjectChange,
+  cmdSubjects,
   cmdTemplates,
   cmdToken,
   failRefresh,
@@ -50,6 +52,17 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates show ID [--build BUILD] [--json]
                                                  a template and its builds (status, readiness, tags),
                                                  or one build with its spec (--json)
+  mocactl sbx admin subjects [--json]            every enrolled subject and its roles (admins only)
+  mocactl sbx admin subjects enroll|unenroll SUBJECT [--json]
+                                                 enroll SUBJECT (github:<id> or oidc:<sub>) or unenroll
+                                                 one enrolled through the API (the settings' lists
+                                                 stay; an admin named in the settings only)
+  mocactl sbx admin subjects grant SUBJECT [--until DURATION|EPOCH] [--json]
+  mocactl sbx admin subjects revoke SUBJECT [--json]
+                                                 grant or revoke the admin role; --until (e.g. 30m, 2h,
+                                                 1d, or epoch seconds) makes it lapse by itself (each
+                                                 change prints old -> new, and fails if the value
+                                                 changed between its read and its write)
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -366,6 +379,7 @@ export async function sbxMain(
         host: { type: 'string', multiple: true },
         kind: { type: 'string' },
         preset: { type: 'string' },
+        until: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -402,6 +416,7 @@ export async function sbxMain(
     'pull',
     'doctor',
     'credentials',
+    'admin',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -467,6 +482,22 @@ export async function sbxMain(
     io.err(`sbx: --build needs a build id (see mocactl sbx templates show ID)\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  const subjectAction =
+    command === 'admin' && arg === 'subjects' && extra.length > 0 ? extra[0] : undefined;
+  if (values.until !== undefined && subjectAction !== 'grant') {
+    io.err(`sbx: --until only applies to admin subjects grant\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  let until: number | undefined;
+  if (values.until !== undefined) {
+    until = parseUntil(values.until, Math.floor(Date.now() / 1000));
+    if (until === undefined) {
+      io.err(
+        `sbx: --until must be a duration (30m, 2h, 1d) or epoch seconds in the future (got '${sanitizeRemote(values.until)}')\n${SBX_USAGE}`,
+      );
+      return SBX_EXIT.usage;
+    }
+  }
   let maxPush: number | undefined;
   if (values['max-push'] !== undefined) {
     const raw = values['max-push'].trim();
@@ -487,16 +518,20 @@ export async function sbxMain(
     (command === 'templates' && arg === 'show') ||
     command === 'claude' ||
     command === 'codex' ||
-    (command === 'credentials'
-      ? arg === undefined ||
-        (arg === 'presets'
-          ? extra.length === 0
-          : arg === 'list'
+    (command === 'admin'
+      ? arg === 'subjects' &&
+        (extra.length === 0 ||
+          (['enroll', 'unenroll', 'grant', 'revoke'].includes(extra[0]!) && extra.length === 2))
+      : command === 'credentials'
+        ? arg === undefined ||
+          (arg === 'presets'
             ? extra.length === 0
-            : ['add', 'delete'].includes(arg) && extra.length === 1)
-      : command === 'put'
-        ? arg !== undefined && extra.length === 0
-        : extra.length === 0 && (arg === undefined || TAKES_ID_ARG.has(command)));
+            : arg === 'list'
+              ? extra.length === 0
+              : ['add', 'delete'].includes(arg) && extra.length === 1)
+        : command === 'put'
+          ? arg !== undefined && extra.length === 0
+          : extra.length === 0 && (arg === undefined || TAKES_ID_ARG.has(command)));
   if (!argsOk) {
     io.err(
       `sbx: ${command === 'put' ? 'put takes exactly one PATH' : `too many arguments for ${command}`}\n${SBX_USAGE}`,
@@ -666,6 +701,14 @@ export async function sbxMain(
     case 'templates':
       if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
       return cmdTemplates(ctx);
+    case 'admin':
+      if (extra.length === 0) return cmdSubjects(ctx);
+      return cmdSubjectChange(
+        ctx,
+        extra[0] as 'enroll' | 'unenroll' | 'grant' | 'revoke',
+        extra[1]!,
+        until,
+      );
     case 'create':
       return cmdCreate(
         ctx,
@@ -787,4 +830,16 @@ export async function sbxMain(
     default:
       return cmdEnv(ctx, id!);
   }
+}
+
+/**
+ * `--until` for `admin subjects grant`: a duration from now (`30m`, `2h`, `1d`) or
+ * epoch seconds, in the future either way; undefined when it is neither.
+ */
+export function parseUntil(raw: string, nowS: number): number | undefined {
+  const d = /^([1-9][0-9]*)([mhd])$/.exec(raw);
+  if (d) return nowS + Number(d[1]) * { m: 60, h: 3600, d: 86_400 }[d[2] as 'm' | 'h' | 'd'];
+  if (!/^[1-9][0-9]*$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > nowS ? n : undefined;
 }

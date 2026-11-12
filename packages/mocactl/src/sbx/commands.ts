@@ -6,10 +6,10 @@ import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import { saveConfig, storedLoginUrl } from '../config.js';
+import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
-import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
+import type { SandboxApiClient, SbxDiscovery, SbxSandbox, SbxSubject } from './api.js';
 import { sandboxFailureText, type ExecFactory } from './exec.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -351,6 +351,162 @@ export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
       lines.push(['SBX_CA_FILE', writeCa(dir, `${id}-exec-ca.crt`, t.execCa)]);
     }
     for (const [k, v] of lines) c.io.out(`export ${k}=${q(v)}\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** The API token issuer each profile's control plane mints under (control-plane token.ts). */
+const ISSUER_BY_PROFILE: Record<string, string> = {
+  sandbox: 'sbx-control-plane-api',
+};
+
+/** A JWT's `iss`, read WITHOUT verifying it: only to compare. */
+function jwtIssuer(token: string): string | undefined {
+  try {
+    const c = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as {
+      iss?: unknown;
+    };
+    return typeof c.iss === 'string' ? c.iss : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Before an admin write: the login must be for this control plane, and its token minted under the
+ * issuer this control plane's profile mints under -- a login for one deployment pointed at another
+ * is refused here, before the read and the write. A token whose `iss` cannot be read (not a JWT) is
+ * left to the control plane to judge. Returns the refusal line.
+ */
+export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
+  const auth = c.rt.auth;
+  if (!auth) return undefined;
+  if (!sameControlPlane(auth.controlPlaneUrl, c.url))
+    return `the login is for ${sanitizeRemote(auth.controlPlaneUrl)}, not ${sanitizeRemote(c.url)}`;
+  const iss = jwtIssuer(auth.apiToken);
+  if (iss === undefined) return undefined;
+  const d: SbxDiscovery = await c.api.sandboxDiscovery();
+  const want = ISSUER_BY_PROFILE[d.profile ?? ''];
+  if (want !== undefined && iss !== want)
+    return `the login was issued by '${sanitizeRemote(iss)}', but ${sanitizeRemote(c.url)} (profile ${sanitizeRemote(d.profile ?? 'harness')}) issues '${want}': it is another deployment's login`;
+  return undefined;
+}
+
+/** The loud failure of an admin write: the value changed between this command's read and its write. */
+function raced(c: SbxCtx, what: string, read: string, before: string, now: string): number {
+  c.io.err(
+    `sbx: ${what} was changed by someone else between read and write: ${read} / ${before} / ${now} ` +
+      '(read / before this write / now): check it, and write again if need be',
+  );
+  return SBX_EXIT.failed;
+}
+
+/** One subject, for a person: `github:9  enrolled (api)  admin (api, until 2026-11-08T12:00:00Z)`. */
+function subjectLine(s: SbxSubject): string {
+  const roles = s.roles.map(
+    (r) =>
+      `${sanitizeRemote(r.role)} (${r.source}${r.until !== null ? `, until ${new Date(r.until * 1000).toISOString().replace('.000Z', 'Z')}` : ''})`,
+  );
+  return [
+    sanitizeRemote(s.subject),
+    `${s.enrolled ? 'enrolled' : 'not enrolled'} (${s.source})`,
+    ...roles,
+  ].join('  ');
+}
+
+/** `sbx admin subjects`: every enrolled subject and its roles (admins). */
+export async function cmdSubjects(c: SbxCtx): Promise<number> {
+  try {
+    const subjects = await c.api.listSubjects();
+    if (c.json) c.io.out(JSON.stringify(subjects) + '\n');
+    else for (const s of subjects) c.io.out(subjectLine(s) + '\n');
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** An API-granted admin role's state: `none`, or `admin` with its `until` (null: no expiry). */
+const roleOf = (s: SbxSubject | undefined) => {
+  const r = s?.roles.find((x) => x.role === 'admin' && x.source === 'api');
+  return r ? `admin until ${r.until ?? 'no expiry'}` : 'none';
+};
+
+/**
+ * Whether the subject read is already in the state the action asks for, so the write should change
+ * nothing (`record: null`); undefined where the list cannot tell (an unenroll of a subject that is
+ * also an admin, whose own enrollment the list folds into its role).
+ */
+function alreadyThere(
+  action: 'enroll' | 'unenroll' | 'grant' | 'revoke',
+  s: SbxSubject | undefined,
+  until?: number,
+): boolean | undefined {
+  switch (action) {
+    case 'enroll':
+      return s?.enrolled === true;
+    case 'unenroll':
+      return s?.roles.length ? undefined : !(s?.enrolled === true && s.source === 'api');
+    case 'grant':
+      return roleOf(s) === `admin until ${until ?? 'no expiry'}`;
+    case 'revoke':
+      // A lapsed grant is listed as none, yet a revoke still records its removal: "none" tells nothing.
+      return roleOf(s) === 'none' ? undefined : false;
+  }
+}
+
+/**
+ * `sbx admin subjects enroll|unenroll|grant|revoke SUBJECT` (an admin named in the
+ * settings). The subjects are read first, the change written, and the answer compared with the
+ * read. These answers name no `before`; their `record` does the same work (null when nothing
+ * changed), so a read that says "already so" with a record written, or "to change" with none, is a
+ * concurrent write, reported loudly (exit 1). Prints old -> new and the record's digest.
+ */
+export async function cmdSubjectChange(
+  c: SbxCtx,
+  action: 'enroll' | 'unenroll' | 'grant' | 'revoke',
+  subject: string,
+  until?: number,
+): Promise<number> {
+  try {
+    const mismatch = await loginMismatch(c);
+    if (mismatch) {
+      c.io.err(`sbx: refused: ${mismatch}`);
+      return SBX_EXIT.failed;
+    }
+    c.io.err(`sbx: admin write to ${sanitizeRemote(c.url)}`);
+    const read = (await c.api.listSubjects()).find((s) => s.subject === subject);
+    const r =
+      action === 'enroll'
+        ? await c.api.enrollSubject(subject)
+        : action === 'unenroll'
+          ? await c.api.unenrollSubject(subject)
+          : action === 'grant'
+            ? await c.api.grantAdmin(subject, until)
+            : await c.api.revokeAdmin(subject);
+    const state = (s: SbxSubject | undefined) =>
+      action === 'enroll' || action === 'unenroll'
+        ? s?.enrolled
+          ? `enrolled (${s.source})`
+          : 'not enrolled'
+        : roleOf(s);
+    if (c.json) c.io.out(JSON.stringify({ ...r, read: read ?? null }) + '\n');
+    else
+      c.io.out(
+        `${subjectLine(r)}${r.record ? '' : '  (unchanged)'}\n` +
+          `${sanitizeRemote(subject)}: ${state(read)} -> ${state(r)}${r.record ? ` (record ${sanitizeRemote(r.record)})` : ''}\n`,
+      );
+    const there = alreadyThere(action, read, until);
+    if (there !== undefined && there !== (r.record === null))
+      return raced(
+        c,
+        `${subject}'s ${action === 'enroll' || action === 'unenroll' ? 'enrollment' : 'admin role'}`,
+        state(read),
+        r.record === null ? 'already so' : 'changed by this write',
+        state(r),
+      );
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
