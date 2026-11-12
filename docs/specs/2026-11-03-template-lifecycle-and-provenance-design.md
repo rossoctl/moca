@@ -386,8 +386,10 @@ The profile exists; M7 (the id rule and every spec field, including a spec `id` 
 differs from the create's: `M7.spec_id`, `M7.spec_image`), M8, M9; the image pinned by digest (M1)
 **from an allowed registry** (`allowedRegistries`; a reference with no host is the build host's
 default registry, `<default>`); the profile's size envelope; for `benchmark`, X1, X10-X12, X14 and
-X15 from the spec and the gate record; X10 and X12 whenever the spec names a gate record or skips
-the git identity check, whatever the profile; and the caller's quota (§6.2). A refusal is
+X15 from the spec and the gate record; whatever the profile, X10 whenever the spec names a gate
+record (with X1's check of that record, or of any gate record sent: it passed, and is for this
+image; only `X1.trusted` is the profile's) and X12 whenever the spec skips the git identity check
+(a skip with no gate record showing commits refused is refused); and the caller's quota (§6.2). A refusal is
 `422 policy_refused {rule, message}` and a `check` record listing every rule and its result; nothing
 is queued. The control plane refuses early, so a refused create costs no host time; the build host
 still applies its own checks, since a host is never trusted to have been asked only valid builds.

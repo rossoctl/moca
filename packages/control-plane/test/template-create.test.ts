@@ -187,6 +187,30 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     expect((await d.provenance!.chain('template/fresh-id')).map((r) => r.kind)).toEqual(['check']);
   });
 
+  it.each([
+    [
+      'a gate record that failed',
+      { gateRecord: GATE.replace('"passed": true', '"passed": false') },
+      'X1',
+    ],
+    [
+      'a gate record for another image',
+      { gateRecord: GATE.replace(IMAGE.split('@')[1], `sha256:${'e'.repeat(64)}`) },
+      'X1.image',
+    ],
+    [
+      'skip_git_identity_check with no gate record',
+      { gateRecord: undefined, spec: { ...spec, source_record_digest: undefined } },
+      'X12',
+    ],
+  ])('applies X10 and X12 under base too: refuses %s', async (_n, over, rule) => {
+    const d = stored();
+    expect(await refusal(d, body({ profile: 'base', ...over }))).toEqual({
+      code: 'policy_refused',
+      rule,
+    });
+  });
+
   it('lets a base-profile template through with no gate record', async () => {
     const d = stored();
     const r = await create(

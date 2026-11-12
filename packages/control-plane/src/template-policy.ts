@@ -292,8 +292,12 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
   const digest = IMAGE_RE.test(input.image ?? '')
     ? input.image.slice(input.image.indexOf('@') + 1)
     : '';
-  // X10 applies whenever the spec names a gate record, whatever the profile.
-  if (s.source_record_digest !== undefined) {
+  // X10 applies whenever the spec names a gate record, whatever the profile, and so does X1's
+  // check of that record (it passed, and is for this image): the build tool's --gate-record
+  // refuses both, so the control plane refuses them first. A gate record sent at all is checked
+  // the same way, since it is stored with the template's records.
+  const named = s.source_record_digest !== undefined;
+  if (named) {
     rule(
       'X10',
       s.source_record_digest === digest,
@@ -307,17 +311,24 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
   }
   const req = new Set(profile?.requires ?? []);
   const trusted = gateSha !== undefined && policy.trustedGateRecords.includes(gateSha);
-  if (req.has('X1')) {
+  const checkGate = req.has('X1') || named || input.gateRecordBytes !== undefined;
+  if (checkGate) {
     rule(
       'X1',
       gate !== null && gate.gate?.passed === true,
-      'the benchmark profile needs a gate record whose gate passed (X1)',
+      req.has('X1')
+        ? `the ${profileName} profile needs a gate record whose gate passed (X1)`
+        : 'the gate record did not pass its gate (X1)',
     );
+  }
+  if (req.has('X1')) {
     rule(
       'X1.trusted',
       trusted,
       'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
     );
+  }
+  if (checkGate) {
     rule(
       'X1.image',
       gate !== null && gate.image?.digest === digest,
@@ -333,15 +344,19 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
       s.egress === false,
       'a benchmark template has no network: spec.egress must be false (X11)',
     );
-  if (s.skip_git_identity_check === true && gate !== null) {
+  // X12, whatever the profile: a skip of the git identity check is backed by a gate record
+  // showing commits refused, or refused. The build host checks the skip only when given a gate
+  // record, so an unbacked skip would be checked by neither side.
+  if (s.skip_git_identity_check === true) {
     rule(
       'X12',
-      gate.observed?.testbed?.agent_can_commit === 'no' &&
+      gate !== null &&
+        gate.observed?.testbed?.agent_can_commit === 'no' &&
         gate.observed?.guest?.git_identity === 'none',
-      'skip_git_identity_check, but the gate record does not show commits refused (X5: agent_can_commit no, git_identity none, both measured) (X12)',
+      gate === null
+        ? 'skip_git_identity_check needs a gate record showing commits refused (X5) (X12)'
+        : 'skip_git_identity_check, but the gate record does not show commits refused (X5: agent_can_commit no, git_identity none, both measured) (X12)',
     );
-  } else if (req.has('X12') && s.skip_git_identity_check === true) {
-    rule('X12', false, 'skip_git_identity_check needs a gate record showing commits refused (X12)');
   }
   if (req.has('X14')) {
     rule(
