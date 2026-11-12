@@ -150,7 +150,7 @@ write_file() {
   local path="$1" tmp
   tmp="$(mktemp "$path.XXXXXX")"
   cat >"$tmp"
-  chmod "$(stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path")" "$tmp"
+  chmod "$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")" "$tmp"
   mv "$tmp" "$path"
 }
 jq . <<<"$NEW_TEMPLATES" | write_file "$TEMPLATES"
