@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,6 +234,248 @@ func TestConfig(t *testing.T) {
 	env["SBX_TOKEN_FILE"] = "/missing"
 	if _, err := configFrom(func(k string) string { return env[k] }, func(string) ([]byte, error) { return nil, errors.New("nope") }); err == nil {
 		t.Fatal("unreadable token file: want an error")
+	}
+}
+
+// scriptedClient answers each Exec with the next script (an Exec-call error, or a stream), and records every req_id.
+type scriptedClient struct {
+	scripts []*fakeClient
+	ids     []uint64
+}
+
+func (s *scriptedClient) Exec(ctx context.Context, in *pb.ExecRequest, o ...grpc.CallOption) (grpc.ServerStreamingClient[pb.ExecEvent], error) {
+	s.ids = append(s.ids, in.GetExec().GetReqId())
+	next := s.scripts[0]
+	if len(s.scripts) > 1 {
+		s.scripts = s.scripts[1:]
+	}
+	if next.execErr != nil {
+		return nil, next.execErr
+	}
+	// a fresh copy, so a script reused for every attempt replays its events each time
+	return &fakeStream{events: append([]*pb.ExecEvent(nil), next.stream.events...), final: next.stream.final}, nil
+}
+
+func (s *scriptedClient) Abort(context.Context, *pb.AbortRequest, ...grpc.CallOption) (*pb.AbortResponse, error) {
+	return &pb.AbortResponse{}, nil
+}
+
+const budgetRefusal = "memory-budget: promoting a standby would re-price it from 33554432 to 4328521728 committed bytes"
+
+// retryRun runs one call with a fake clock that the fake sleep advances, so retries take no real time.
+func retryRun(t *testing.T, c pb.SandboxExecClient, cfg config, sleep func(context.Context, time.Duration) error) (int, string, []time.Duration) {
+	t.Helper()
+	clock := time.Unix(100, 0)
+	var slept []time.Duration
+	if sleep == nil {
+		sleep = func(_ context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			clock = clock.Add(d)
+			return nil
+		}
+	}
+	next := uint64(100)
+	var cur atomic.Uint64
+	env := callEnv{
+		now:    func() time.Time { return clock },
+		sleep:  sleep,
+		newID:  func() uint64 { next++; return next },
+		jitter: func(d time.Duration) time.Duration { return d },
+		cur:    &cur,
+	}
+	var out, errw bytes.Buffer
+	code := call(context.Background(), c, cfg, 7, "run", "true", nil, &out, &errw, env)
+	return code, errw.String(), slept
+}
+
+func busyCfg(t *testing.T) config {
+	cfg := testCfg
+	cfg.busyRetry = defaultBusyRetry
+	cfg.logPath = filepath.Join(t.TempDir(), "calls.jsonl")
+	return cfg
+}
+
+func logRecords(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recs []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(b), []byte("\n")) {
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		recs = append(recs, m)
+	}
+	return recs
+}
+
+func TestRefusalClasses(t *testing.T) {
+	for _, tc := range []struct {
+		code  codes.Code
+		msg   string
+		class string
+	}{
+		{codes.OK, budgetRefusal, "memory_budget"},
+		{codes.Unknown, "max-runs: 64 runs live", "max_runs"},
+		{codes.OK, "busy: queue full", "queue_full"},
+		{codes.ResourceExhausted, "sandbox busy: 2 Execs already in flight", "relay_busy"},
+		{codes.ResourceExhausted, "grpc: received message larger than max", ""},
+		{codes.Unknown, "sandbox busy: 2 Execs already in flight", ""},
+		{codes.OK, "vm boot failed", ""},
+		{codes.PermissionDenied, "key outside prefix", ""},
+	} {
+		if got := refusalClass(tc.code, tc.msg); got != tc.class {
+			t.Errorf("refusalClass(%v, %q) = %q, want %q", tc.code, tc.msg, got, tc.class)
+		}
+	}
+}
+
+func TestRefusedThenOKRetriesWithANewReqID(t *testing.T) {
+	c := &scriptedClient{scripts: []*fakeClient{
+		{stream: &fakeStream{events: []*pb.ExecEvent{execErr(budgetRefusal)}}},
+		{execErr: status.Error(codes.ResourceExhausted, "sandbox busy: 2 Execs already in flight")},
+		{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDOUT, "ok"), end(0, false)}}},
+	}}
+	cfg := busyCfg(t)
+	code, errw, slept := retryRun(t, c, cfg, nil)
+	if code != 0 || len(c.ids) != 3 {
+		t.Fatalf("code=%d attempts=%d err=%q", code, len(c.ids), errw)
+	}
+	if c.ids[0] != 7 || c.ids[1] == c.ids[0] || c.ids[2] == c.ids[1] {
+		t.Fatalf("every retry must be a new req_id: %v", c.ids)
+	}
+	if len(slept) != 2 || slept[0] != time.Second || slept[1] != 2*time.Second {
+		t.Fatalf("backoff: %v", slept)
+	}
+	if !strings.Contains(errw, "memory_budget: nothing ran; retrying") || !strings.Contains(errw, "relay_busy: nothing ran; retrying") {
+		t.Fatalf("stderr: %q", errw)
+	}
+	recs := logRecords(t, cfg.logPath)
+	if len(recs) != 3 || recs[0]["refused"] != "memory_budget" || recs[1]["refused"] != "relay_busy" {
+		t.Fatalf("records: %v", recs)
+	}
+	if _, ok := recs[0]["busy_wait_ms"]; ok {
+		t.Fatalf("a refused attempt's record carries no busy_wait_ms: %v", recs[0])
+	}
+	if !strings.HasPrefix(recs[0]["reason"].(string), "memory-budget: promoting") || recs[0]["exit"] != float64(75) {
+		t.Fatalf("refused record: %v", recs[0])
+	}
+	last := recs[2]
+	if last["exit"] != float64(0) || last["busy_wait_ms"] != float64(3000) || last["attempt"] != float64(3) || last["ms"] != float64(3000) {
+		t.Fatalf("final record: %v", last)
+	}
+}
+
+func TestRefusalsExhaustTheBudgetAndExit75(t *testing.T) {
+	c := &scriptedClient{scripts: []*fakeClient{{stream: &fakeStream{events: []*pb.ExecEvent{execErr(budgetRefusal)}}}}}
+	cfg := busyCfg(t)
+	code, errw, slept := retryRun(t, c, cfg, nil)
+	var total time.Duration
+	for _, d := range slept {
+		total += d
+	}
+	// 1 + 2 + 4 + 8 + 8 + 7 (cut to what is left of 30 s)
+	if code != 75 || total != 30*time.Second || len(c.ids) != len(slept)+1 {
+		t.Fatalf("code=%d slept=%v attempts=%d", code, slept, len(c.ids))
+	}
+	if !strings.Contains(errw, "sbx: memory_budget: nothing ran; gave up after 7 attempts / 30s") {
+		t.Fatalf("stderr: %q", errw)
+	}
+	recs := logRecords(t, cfg.logPath)
+	last := recs[len(recs)-1]
+	if last["exit"] != float64(75) || last["busy_wait_ms"] != float64(30000) || last["refused"] != "memory_budget" {
+		t.Fatalf("final record: %v", last)
+	}
+}
+
+func TestNoRetryForFailuresThatMayHaveRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    *fakeClient
+	}{
+		{"a refusal after a chunk", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDOUT, "x"), execErr(budgetRefusal)}}}},
+		{"a relay busy status after a chunk", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDOUT, "x")}, final: status.Error(codes.ResourceExhausted, "sandbox busy: 2")}}},
+		{"machinery", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{execErr("vm boot failed")}}}},
+		{"RESOURCE_EXHAUSTED that is not sandbox busy", &fakeClient{execErr: status.Error(codes.ResourceExhausted, "grpc: received message larger than max")}},
+		{"a refused token", &fakeClient{execErr: status.Error(codes.PermissionDenied, "key outside prefix")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &scriptedClient{scripts: []*fakeClient{tc.c}}
+			code, _, slept := retryRun(t, c, busyCfg(t), nil)
+			if code != 125 || len(c.ids) != 1 || len(slept) != 0 {
+				t.Fatalf("code=%d attempts=%d slept=%v", code, len(c.ids), slept)
+			}
+		})
+	}
+}
+
+func TestBusyRetryZeroIsTheOldBehaviourExit125NoRetry(t *testing.T) {
+	c := &scriptedClient{scripts: []*fakeClient{{stream: &fakeStream{events: []*pb.ExecEvent{execErr(budgetRefusal)}}}}}
+	cfg := busyCfg(t)
+	cfg.busyRetry = 0
+	code, errw, slept := retryRun(t, c, cfg, nil)
+	if code != 125 || len(c.ids) != 1 || len(slept) != 0 || !strings.Contains(errw, "exec failed: memory-budget:") {
+		t.Fatalf("code=%d attempts=%d slept=%v err=%q", code, len(c.ids), slept, errw)
+	}
+}
+
+func TestCancelledDuringBackoffExits130(t *testing.T) {
+	c := &scriptedClient{scripts: []*fakeClient{{stream: &fakeStream{events: []*pb.ExecEvent{execErr("busy: queue full")}}}}}
+	cfg := busyCfg(t)
+	code, errw, _ := retryRun(t, c, cfg, func(context.Context, time.Duration) error { return context.Canceled })
+	if code != 130 || len(c.ids) != 1 || !strings.Contains(errw, "interrupted while waiting to retry") {
+		t.Fatalf("code=%d attempts=%d err=%q", code, len(c.ids), errw)
+	}
+	recs := logRecords(t, cfg.logPath)
+	if last := recs[len(recs)-1]; last["exit"] != float64(130) || last["busy_wait_ms"] != float64(0) {
+		t.Fatalf("final record: %v", last)
+	}
+}
+
+func TestSleepCtxReturnsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sleepCtx(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleepCtx on a cancelled context: %v", err)
+	}
+}
+
+func TestBusyRetryFromEnv(t *testing.T) {
+	base := map[string]string{"SBX_ADDR": "a", "SBX_SANDBOX_ID": "s", "SBX_WORKSPACE_KEY": "k", "SBX_TOKEN": "t"}
+	get := func(extra map[string]string) func(string) string {
+		return func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		}
+	}
+	read := func(string) ([]byte, error) { return nil, errors.New("unused") }
+	if c, err := configFrom(get(nil), read); err != nil || c.busyRetry != 30*time.Second {
+		t.Fatalf("default: %v %v", c.busyRetry, err)
+	}
+	if c, err := configFrom(get(map[string]string{"SBX_BUSY_RETRY_S": "0"}), read); err != nil || c.busyRetry != 0 {
+		t.Fatalf("0: %v %v", c.busyRetry, err)
+	}
+	if c, err := configFrom(get(map[string]string{"SBX_BUSY_RETRY_S": "90"}), read); err != nil || c.busyRetry != 90*time.Second {
+		t.Fatalf("90: %v %v", c.busyRetry, err)
+	}
+	for _, bad := range []string{"-1", "x", "1.5", "3601"} {
+		if _, err := configFrom(get(map[string]string{"SBX_BUSY_RETRY_S": bad}), read); err == nil || !strings.Contains(err.Error(), "SBX_BUSY_RETRY_S") {
+			t.Fatalf("%q: want a refusal, got %v", bad, err)
+		}
+	}
+}
+
+func TestSanitizeReason(t *testing.T) {
+	if got := sanitizeReason("a\nb\x1bc"); got != "a b c" {
+		t.Fatalf("%q", got)
+	}
+	if got := []rune(sanitizeReason(strings.Repeat("x", 400))); len(got) != 301 {
+		t.Fatalf("cut to 300 plus an ellipsis: %d", len(got))
 	}
 }
 
