@@ -9,8 +9,8 @@ import type { SandboxTemplate } from './sandbox-config.js';
 /**
  * The template catalog (template lifecycle spec §3.1-§3.3): templates are declared in the control
  * plane's store, each a name over its builds, with tags naming builds. This holds what the read API
- * (§4), the self-serve create (§4, §8.1) and the host agents' builds and registration (§6.1, §8.2,
- * host-handlers.ts) need; activation comes later.
+ * (§4), the self-serve create (§4, §8.1), the host agents' builds and registration (§6.1, §8.2,
+ * host-handlers.ts) and activation (§6.2-§6.4, activation.ts: each build's leases) need.
  *
  * Two implementations:
  *   MemoryTemplateCatalog  built from SH_SANDBOX_TEMPLATES at every start: today's behaviour, no
@@ -67,6 +67,13 @@ export interface TemplateBuild {
   claim?: { host: string; at: number };
   /** On `failed` or `rejected`: why, and at which step or rule. */
   reason?: { message: string; step?: string; rule?: string };
+  /**
+   * Activation leases (§6.3): each subject's hold on this build, until (epoch seconds). The build is
+   * wanted active while any lease is unexpired; aging is a lease running out. `since` is when the
+   * subject's hold began (renewals keep it: first leased, first placed); `record` is the digest of
+   * the `activate` record that granted the lease, which a sandbox under it cites (§7.1).
+   */
+  leases?: { subject: string; until: number; since?: number; record?: string }[];
   /** The host agent's build log, newest last, at most LOG_MAX entries (§4 logs). */
   log?: { at: number; level: 'info' | 'warn' | 'error'; step: string; message: string }[];
 }

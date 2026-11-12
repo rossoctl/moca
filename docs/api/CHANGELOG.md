@@ -3,6 +3,45 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.7.0
+
+Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
+per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§6.2-§6.4. Every change is additive; the template routes mount on both route profiles and need
+`SH_PROVENANCE_DIR` (else `400 invalid_request`).
+
+- New POST /v1/templates/{id}/activate `{tag?, build?, leaseSeconds?}`: takes or renews the caller's
+  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` its
+  hosts report, else 3600; renewed by calling again, without limit) and answers
+  `{templateId, buildId, leaseUntil, host}`. A build is wanted running only while a lease stands; a
+  leased build is never evicted. Each grant is an `activate` record; the lease stores its digest. Refusals keep
+  no lease: `409 template_unavailable` (no registered build under that reference, or no reporting
+  host holds it), `409 no_active_slot` with `Retry-After` (every holder at its `activeLimit` with
+  leased builds), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
+  record and the lease write run one activation at a time across all templates.
+- New POST /v1/templates/{id}/deactivate `{all?}`: drops the caller's leases on the template (an
+  admin with `all: true`, everyone's), answering `{templateId, released}`, with a `deactivate`
+  record when any is dropped.
+- New GET /v1/hosts/{host}/wanted (host bearer): `run`, the leased builds placed on this host within
+  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox; new
+  `WantedWorker` schema.
+- New POST /v1/hosts/{host}/workers/report `{buildId, event, reason?}` (host bearer): `attached`,
+  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>`;
+  readiness still comes from the relay.
+- POST /v1/sandboxes: activation on first use. With `SH_TEMPLATE_HOSTS` set, a create on a
+  registered build that is not `active` takes the caller's lease (`reason: first_use` on its record;
+  refused as activate would be) and answers `409 template_not_active` with `readiness` and
+  `Retry-After: 30`. New body field `activate` (default true; false starts nothing). No sandbox
+  record is kept while waiting. Without template hosts, nothing changes. The `sandbox` record's
+  `lease` is now the digest of the caller's `activate` record (null without a lease).
+- Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
+  any host reports it is the presence alone, as before.
+- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}`, `idleLimitSeconds`
+  and `disk {freeGb, floorGb}`.
+- GET /v1/quota: `active.used` counts the builds the caller holds a live lease on.
+- New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
+  Error schema gains `readiness`, and `quota` the value `active`.
+
 ## 1.6.0
 
 Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the

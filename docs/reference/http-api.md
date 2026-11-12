@@ -188,6 +188,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Templates      | `GET /v1/templates`, `GET /v1/templates/{id}`, `GET /v1/templates/{id}/builds[/{build}]`, `GET /v1/templates/{id}/tags`: both route profiles (API 1.4.0)                                                |
 | Self-serve     | `POST /v1/templates`, `POST /v1/templates/{id}/builds`, `POST /v1/templates/{id}/builds/{build}/cancel`, `GET` and `PUT /v1/policy`, `GET /v1/quota`: both route profiles (API 1.5.0)                   |
 | Host agents    | `POST /v1/hosts/{host}/inventory`, `/builds/claim`, `/builds/{build}/log` and `/report`, `GET /v1/hosts/{host}/blobs/{digest}`: a host's own bearer, both route profiles (API 1.6.0)                    |
+| Activation     | `POST /v1/templates/{id}/activate` and `/deactivate` (both route profiles); `GET /v1/hosts/{host}/wanted`, `POST /v1/hosts/{host}/workers/report` (a host's own bearer) (API 1.7.0)                     |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -219,11 +220,18 @@ with `template-build.sh` and reports them, with its own bearer (`SH_TEMPLATE_HOS
 plane registers a built build or rejects it, by policy, naming the rule. A client follows its build by the create's handle
 through `queued`, `building`, `probing` and `registered` (or `failed` with `reason.step`, `rejected` with `reason.rule`).
 
+Activation came with API 1.7.0. A client takes or renews a lease on a registered build (`activate`, 60 s to a day a
+grant, renewals unlimited); a build is wanted running only while a lease stands, and the host agents start and stop the
+installed workers by each host's wanted state. A build no host holds is 409 `template_unavailable`; one whose holders are
+all at their active limit with leased builds is 409 `no_active_slot` with `Retry-After`; over the subject's `active` quota
+is 429 `quota_exceeded`. With template hosts configured, a sandbox create on a build that is not active takes the
+caller's lease and answers 409 `template_not_active` with `Retry-After` (`activate: false` starts nothing).
+
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
-`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`turn_not_cancellable`, `turn_not_claimable`), 410 `device_code_expired`, 428 `authorization_pending`, 429
+`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`), 410 `device_code_expired`, 428 `authorization_pending`, 429
 (`bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
 (`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in
