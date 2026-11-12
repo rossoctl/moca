@@ -125,7 +125,7 @@ two cluster writes for one API call.
 ## 8. As built
 
 - **The store:** `members.json` in `SH_PROVENANCE_DIR` (`packages/control-plane/src/members.ts`),
-  read through an in-memory copy refreshed when the file's mtime changes, so the per-request
+  read through an in-memory copy refreshed when the file's inode, size or mtime changes, so the per-request
   evaluation costs one `open` and `fstat` of the file (a parse only when it changed), and none for
   an admin named in the settings. A change appends its record before the file is replaced: a
   crash between the two leaves a record for a change the store does not hold, never the reverse.

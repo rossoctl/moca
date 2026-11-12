@@ -10,10 +10,10 @@ import type { ProvenanceStore } from './provenance.js';
  * control plane's template store directory (SH_PROVENANCE_DIR) beside the catalog, and each change is
  * a record on the `members` provenance stream.
  *
- * Roles are evaluated PER REQUEST from the bootstrap lists and this store (`rolesNow`), not taken
- * from a token's claims, so a grant, a revoke or a lapsed `until` takes effect at the subject's next
- * request. Reads come from an in-memory copy, re-read only when the file's mtime changes, so the
- * per-request evaluation (`membershipNow`) costs one open and fstat of the file, none for an admin
+ * Roles are evaluated PER REQUEST from the bootstrap lists and this store (`membershipNow`), not
+ * taken from a token's claims, so a grant, a revoke or a lapsed `until` takes effect at the subject's
+ * next request. Reads come from an in-memory copy, re-read only when the file's inode, size or mtime
+ * changes, so the per-request evaluation costs one open and fstat of the file, none for an admin
  * named in the settings. A subject the settings name is still answered when the file can't be read
  * (the settings stay the recovery path); anyone else fails closed.
  */
@@ -72,12 +72,20 @@ export interface Bootstrap {
   admins: readonly string[];
 }
 
+/**
+ * A file version's identity for the cache: an out-of-process edit within the mtime's granularity
+ * still moves the inode (a replace) or, mostly, the size.
+ */
+const statKey = (st: { ino: number; size: number; mtimeMs: number }): string =>
+  `${st.ino}:${st.size}:${st.mtimeMs}`;
+
 export class MembersStore {
   private readonly path: string;
   private readonly provenance: ProvenanceStore;
   private pending: Promise<unknown> = Promise.resolve();
   private cache: MembersDoc = { members: {} };
-  private cacheMtimeMs = -1;
+  /** The cached version's inode, size and mtime: any one moving means another file. */
+  private cacheKey = '';
   readonly bootstrap: Bootstrap;
 
   constructor(opts: { dir: string; provenance: ProvenanceStore; bootstrap: Bootstrap }) {
@@ -93,9 +101,9 @@ export class MembersStore {
   }
 
   /**
-   * The store as on disk, through the cache (re-read when the file's mtime moved). The mtime and the
-   * bytes come from ONE open file: the file is replaced by rename, so the handle always reads the
-   * version whose mtime it reported, never a newer one swapped in between a check and a read.
+   * The store as on disk, through the cache (re-read when the file's inode, size or mtime moved). The
+   * stat and the bytes come from ONE open file: the file is replaced by rename, so the handle always
+   * reads the version whose stat it reported, never a newer one swapped in between a check and a read.
    */
   async doc(): Promise<MembersDoc> {
     let fh;
@@ -104,19 +112,19 @@ export class MembersStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.cache = { members: {} };
-        this.cacheMtimeMs = -1;
+        this.cacheKey = '';
         return this.cache;
       }
       throw err;
     }
     try {
-      const { mtimeMs } = await fh.stat();
-      if (mtimeMs !== this.cacheMtimeMs) {
+      const key = statKey(await fh.stat());
+      if (key !== this.cacheKey) {
         const parsed = JSON.parse(await fh.readFile('utf8')) as MembersDoc;
         if (!parsed || typeof parsed.members !== 'object')
           throw new Error('members.json is invalid');
         this.cache = parsed;
-        this.cacheMtimeMs = mtimeMs;
+        this.cacheKey = key;
       }
     } finally {
       await fh.close();
@@ -126,14 +134,15 @@ export class MembersStore {
 
   private async write(doc: MembersDoc): Promise<void> {
     const tmp = `${this.path}.${randomUUID()}.tmp`;
-    let mtimeMs: number;
+    let key: string;
     try {
       const fh = await openFile(tmp, 'wx', 0o600);
       try {
         await fh.writeFile(JSON.stringify(doc));
         await fh.sync();
-        // The file's own mtime, from its handle: rename keeps it, so it is the mtime doc() will see.
-        mtimeMs = (await fh.stat()).mtimeMs;
+        // The file's own inode, size and mtime, from its handle: rename keeps them, so they are what
+        // doc() will see.
+        key = statKey(await fh.stat());
       } finally {
         await fh.close();
       }
@@ -143,7 +152,7 @@ export class MembersStore {
       throw err;
     }
     this.cache = doc;
-    this.cacheMtimeMs = mtimeMs;
+    this.cacheKey = key;
   }
 
   /**
