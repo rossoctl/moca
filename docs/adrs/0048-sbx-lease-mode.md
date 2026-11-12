@@ -122,7 +122,7 @@ revision changes four decisions and adds two:
 
 - **Decision 7 is replaced.** Lease VMs run with virtio-balloon free-page reporting in v1, so the guest
   returns memory it has freed and the measured charge (decision 6) follows the working set. A
-  target-driven balloon stays out of v1. _(E17a: without it, measured charge equals the full charge on
+  target-driven balloon stays out of v1. The balloon is in the one golden snapshot, so per-`Exec` VMs report too (user, 2026-11-12). _(E17a: without it, measured charge equals the full charge on
   the target workload)_
 - **Decision 14 is narrowed.** Level 1 serves short and import-bound commands and capacity at mid duty
   (E15). It is not a page-cache accelerator for long compute, and it gains little where per-`Exec`

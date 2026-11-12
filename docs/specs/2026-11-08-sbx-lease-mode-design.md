@@ -646,8 +646,7 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    - **It can only be enabled before boot.** A restored VM has the devices of its snapshot, so the
      balloon has to be in the golden snapshot. That changes `vmstate` for every VM, per-`Exec` included.
      Per-`Exec` VMs would then report too: that frees their memory sooner, and a reused free page faults
-     back in from the memory file. The plan chooses one of two options: one snapshot with the balloon
-     (per-`Exec` latency re-gated), or a lease-only snapshot (a second memory file to keep resident).
+     back in from the memory file. **Decided (user, 2026-11-12): one golden snapshot with the balloon,** for every mode. Per-`Exec` VMs report too, and their latency is checked against a snapshot without the balloon before plan 3 ships it.
    - **Restore backend.** VMs restore with the `File` backend (`build-snapshot.sh:2092`): a
      `MAP_PRIVATE` mapping of the memory file, with written pages copy-on-write anonymous memory. A
      reported range then drops its private copy and falls back to the shared memory file. The host gets
@@ -668,7 +667,7 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
 
      The guest saw the balloon (`virtio_balloon` bound, `page_reporting_order` 9, that is 2 MiB
      blocks). Both guests showed about 890 MB free afterwards, so only the host side differed. Nothing
-     is open for plan 3 here, apart from the one-snapshot-or-two choice above.
+     is open for plan 3 here.
 6. **Level 2 is the latency case, and E17 does not measure it (v0.2).** E17a shows what a warm guest
    saves without process state: VM start and interpreter start-up, not the work. The large saving is a
    process that keeps its state: an interpreter with the stack imported and the dataset loaded, a
