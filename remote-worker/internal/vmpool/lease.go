@@ -240,8 +240,8 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 }
 
 // execLease is ExecPhased in a lease mode. runCtx carries the Exec's timeout (armed by
-// ExecPhased); ctx is the caller's, for classify. The caller (routeExec) pinned key's
-// run; execLease releases the pin.
+// ExecPhased, at the budget's end until runLease calls extend); ctx is the caller's, for
+// classify. The caller (routeExec) pinned key's run; execLease releases the pin.
 //
 // With a live lease it runs in the lease VM. Without one it acquires a VM priced at
 // LeaseStartBytes, raises its cgroup to PerVMBytes + LeasePageCacheBytes, resumes it --
@@ -252,7 +252,7 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // timeout included (runLease), its lastEnd moves to now and its footprint is sampled,
 // both before the gate is released. deadline is when the Exec's budget ends.
 func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode Mode, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
 	p.mu.Lock()
 	rp := p.runs[key] // pinned by routeExec, so neither the sweep nor Reclaim removed it
 	p.mu.Unlock()
@@ -351,7 +351,7 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 			return Result{}, err
 		}
 	}
-	return p.runLease(ctx, runCtx, rp, vm, e, out, ph, timedOut, timeoutS, deadline)
+	return p.runLease(ctx, runCtx, rp, vm, e, out, ph, timedOut, timeoutS, deadline, extend)
 }
 
 // startLease acquires, raises the cgroup of, resumes and installs a new lease VM. Caller
@@ -470,7 +470,8 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 }
 
 // runLease runs one command in rp's lease VM. Caller holds rp's gate. deadline is when
-// the Exec's budget ends; the host's own deadline (runCtx) is LeaseTimeoutSlack later.
+// the Exec's budget ends, and the host's timer (runCtx) fires there until extend, called
+// just before Run, moves it LeaseTimeoutSlack later.
 //
 // The guest's report that its own timeout fired (guestTimedOut) keeps the lease (ruling
 // R8b): the guest killed the Exec's cgroup and emptied it before answering, as after an
@@ -478,7 +479,7 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 // ends the lease is a guest that did not answer by the host's deadline, a transport
 // error, teardown_failed, or an abort (agent_dead in v1).
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
 	p.mu.Lock()
 	l := rp.lease
 	if cut := l.cut; cut != "" {
@@ -494,6 +495,30 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 			ph.Destroy = p.clk.Now().Sub(t1)
 		}
 		return Result{}, &LeaseEndedError{Reason: cut}
+	}
+	// The budget, checked under the gate immediately before Run (PR #763 second review,
+	// G1): the gate wait, a cold start's restore, Resume and normalise step may have spent
+	// it. A spent budget, or a timer that fired before extend could move it, fails the
+	// Exec with the usual timeout; an abort before Run fails it ErrAborted. Nothing reaches
+	// the guest, so the lease is kept. Only here does the host's timer move to the budget
+	// plus LeaseTimeoutSlack.
+	var notRun error
+	switch {
+	case !p.clk.Now().Before(deadline), !extend():
+		notRun = fmt.Errorf("%w:%d", ErrTimeout, timeoutS)
+	case runCtx.Err() != nil:
+		notRun = p.cancelled(ctx, timedOut, timeoutS)
+	}
+	if notRun != nil {
+		var v *leaseVictim
+		if p.closed {
+			v = p.detachLeaseLocked(rp) // Close skipped this lease: its gate is held here
+		}
+		p.mu.Unlock()
+		if v != nil {
+			p.destroyLeaseVM(v.key, v.vm)
+		}
+		return Result{}, notRun
 	}
 	// cancel lets the lease sweep, or endLeaseWaiting, cut this Exec once it is inside
 	// Run (sweepLeasesLocked). A cut that lands after the unlock below but before vm.Run

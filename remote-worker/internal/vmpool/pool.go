@@ -338,7 +338,7 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	}
 	deadline := p.clk.Now().Add(time.Duration(timeoutS) * time.Second)
 	tm := p.clk.AfterFunc(time.Duration(timeoutS)*time.Second, fire)
-	defer func() { tm.Stop() }() // the timer live at return: a lease Exec re-arms it
+	defer func() { tm.Stop() }() // the timer live at return: a lease Exec extends it
 
 	if p.cfg.LeaseEnabled {
 		// Lease mode (lease.go). With LeaseEnabled false -- every worker without the
@@ -349,26 +349,26 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 		}
 		switch {
 		case mode != ModePerExec:
-			// The host's deadline moves LeaseTimeoutSlack past the budget, so the guest's
-			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). A timer
-			// that has already fired stays fired: the Exec is timed out either way.
-			if tm.Stop() {
+			// The host's timer stays at the budget's end through the gate wait, the
+			// acquire, Resume and the normalise step. runLease calls extend immediately
+			// before Run, which moves it LeaseTimeoutSlack past the budget, so the guest's
+			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). extend
+			// reports false when the timer has already fired: the Exec is timed out, and
+			// runLease does not run it (PR #763 second review, G1).
+			extend := func() bool {
+				if !tm.Stop() {
+					return false
+				}
 				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
+				return true
 			}
-			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline)
+			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline, extend)
 			if !errors.Is(err, errServePerExec) {
 				return res, err
 			}
 			// A same-epoch downgrade to per-exec landed while the Exec queued (execLease
-			// ended the lease, mode_change): it runs per-Exec below, on the per-Exec
-			// budget, without the slack.
-			if tm.Stop() {
-				if left := deadline.Sub(p.clk.Now()); left > 0 {
-					tm = p.clk.AfterFunc(left, fire)
-				} else {
-					fire()
-				}
-			}
+			// ended the lease, mode_change): it runs per-Exec below. The timer was never
+			// extended, so the per-Exec budget has no slack.
 		case endFirst:
 			// A per-Exec Exec on a key that holds a lease: the lease ends (mode_change)
 			// under the gate BEFORE this Exec acquires, so its VM is never restored

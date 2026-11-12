@@ -265,3 +265,120 @@ func TestPerExecFallbackTimesOutAtTheBudgetNotTheSlack(t *testing.T) {
 		t.Fatalf("SetMode: %v", err)
 	}
 }
+
+// PR #763 second review (G1): in lease mode the host's timer stays at the budget's end
+// until Run is about to start, so a lease Exec whose budget ran out while it queued never
+// reaches the guest. It fails with the usual timeout and the lease is kept.
+func TestLeaseExecSpentWhileQueuedNeverRuns(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	entered, release := blockRuns(lc)
+	first := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLease, ModeEpoch: 1})
+	recvWithin(t, entered, "the first Exec's Run")
+	before := liveLease(p, "k")
+	queued := execAsync(p, "k", Exec{Command: "queued", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 1})
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // queued on the gate, its timer armed
+	clk.Advance(12 * time.Second)
+	close(release)
+	if err := recvWithin(t, first, "the first Exec"); err != nil {
+		t.Fatalf("the first Exec: %v", err)
+	}
+	err := recvWithin(t, queued, "the queued Exec")
+	if !errors.Is(err, ErrTimeout) || err.Error() != ErrTimeout.Error()+":10" {
+		t.Fatalf("the queued Exec: err = %v, want %s:10", err, ErrTimeout)
+	}
+	for _, c := range lc.commands() {
+		if c.Command == "queued" {
+			t.Fatalf("Commands = %+v: the queued Exec ran on a spent budget", lc.commands())
+		}
+	}
+	if l := liveLease(p, "k"); l == nil || l != before {
+		t.Fatalf("the lease after the queued Exec's timeout = %p, want the same lease %p", l, before)
+	}
+	lc.setRunFn(nil)
+	mustExec(t, p, "k", leaseExec("next", 1))
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want 1: the next Exec runs in the same VM", n)
+	}
+	if s := p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none", s.LeaseEnds)
+	}
+}
+
+// A lease Exec with 3 s of its budget left at the gate: the guest gets 3 s, and the host
+// gives up 3 s + LeaseTimeoutSlack after Run starts if the guest never answers.
+func TestLeaseGuestGetsWhatIsLeftAndTheHostWaitsTheSlack(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	entered := make(chan Command, 2)
+	release := make(chan struct{})
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		entered <- c
+		if c.Command == "long" {
+			<-release
+			return Result{}, nil
+		}
+		<-c.ctxDone // the guest never answers
+		return Result{}, ErrAborted
+	})
+	first := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLease, ModeEpoch: 1})
+	recvWithin(t, entered, "the first Exec's Run")
+	queued := execAsync(p, "k", Exec{Command: "queued", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 1})
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	clk.Advance(7 * time.Second)
+	close(release)
+	if err := recvWithin(t, first, "the first Exec"); err != nil {
+		t.Fatalf("the first Exec: %v", err)
+	}
+	if c := recvWithin(t, entered, "the queued Exec's Run"); c.TimeoutS != 3 {
+		t.Fatalf("the queued Exec's guest timeout_s = %d, want 3 (10 s less 7 s at the gate)", c.TimeoutS)
+	}
+	clk.Advance(3*time.Second + LeaseTimeoutSlack - time.Millisecond)
+	select {
+	case err := <-queued:
+		t.Fatalf("the queued Exec ended before 3 s + slack: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	clk.Advance(time.Millisecond)
+	if err := recvWithin(t, queued, "the queued Exec"); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the queued Exec: err = %v, want ErrTimeout", err)
+	}
+	assertEnded(t, p, lc, LeaseEndAgentDead)
+}
+
+// A cold lease start whose Resume outlasts the budget but succeeds: the lease is started
+// and kept, and the Exec fails with the timeout without its command reaching the guest.
+func TestLeaseExecSpentDuringAColdStartNeverRuns(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	inResume, resume := make(chan struct{}, 1), make(chan struct{})
+	lc.setResumeFn(func(*fakeVM, context.Context) error {
+		inResume <- struct{}{}
+		<-resume
+		return nil
+	})
+	errc := execAsync(p, "k", Exec{Command: "slow-start", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 1})
+	recvWithin(t, inResume, "the lease start's Resume")
+	clk.Advance(12 * time.Second)
+	close(resume)
+	err := recvWithin(t, errc, "the Exec")
+	if !errors.Is(err, ErrTimeout) || err.Error() != ErrTimeout.Error()+":10" {
+		t.Fatalf("err = %v, want %s:10", err, ErrTimeout)
+	}
+	for _, c := range lc.commands() {
+		if c.Command == "slow-start" {
+			t.Fatalf("Commands = %+v: the Exec ran on a spent budget", lc.commands())
+		}
+	}
+	if liveLease(p, "k") == nil {
+		t.Fatal("no lease after the timed-out start: a started lease is kept")
+	}
+	lc.setResumeFn(nil)
+	mustExec(t, p, "k", leaseExec("next", 1))
+	if n := lc.count("resume "); n != 1 {
+		t.Fatalf("Resume calls = %d, want 1: the next Exec runs in the started lease", n)
+	}
+	if s := p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none", s.LeaseEnds)
+	}
+}

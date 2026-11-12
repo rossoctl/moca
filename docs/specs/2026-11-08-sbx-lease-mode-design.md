@@ -312,6 +312,9 @@ Like every SBX record, it has no command text.
 A lease Exec's timeout keeps the lease: the guest kills the Exec's cgroup and reports the timeout,
 and the next Exec runs in the same guest. In v1 an abort (the caller cancels the Exec) ends the lease
 with `agent_dead`, as does a guest that has not answered a few seconds after the Exec's timeout.
+The budget counts from the Exec's arrival, so a wait behind another Exec of the sandbox and a lease
+start are charged to it. An Exec whose budget is spent before its command starts fails with the
+timeout without running, and the lease is kept.
 
 ## 5. Notices
 
