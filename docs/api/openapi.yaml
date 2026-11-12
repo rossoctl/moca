@@ -462,7 +462,9 @@ components:
           properties:
             message: { type: string }
             step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
-            rule: { type: string, description: the gating rule, on a rejection }
+            rule:
+              type: string
+              description: the gating rule, on a rejection; `admin` for a reject after the fact (§5.2)
         spec:
           type: object
           description: on GET /v1/templates/{id} and the builds routes only
@@ -2010,6 +2012,76 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}/reject:
+    post:
+      operationId: rejectTemplateBuild
+      summary: Reject a registered build after the fact (an admin)
+      description: |
+        Template lifecycle spec §5.2: an admin rejects a registered build, named by its build id or
+        its handle, when a rule is found broken after registration, with the reason. The build
+        becomes `rejected` (`reason.rule` `admin`), its activation leases go, a host holding it
+        stops its worker (`GET /v1/hosts/{host}/wanted` `stop`, as for a retired build), and a
+        create naming it answers `400 unknown_template`, as for a build policy rejected at
+        registration. A `reject` record names the admin, `from` (the status before),
+        `buildRecord` (the digest of the build's `build` record) and the reason. Refused
+        `409 build_in_use` while a live sandbox runs on it. Idempotent: an already rejected build
+        is answered with `record: null`. Not reversible: a new build is the way back. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                  description: the rule found broken, and why; kept in the reject record
+      responses:
+        '200':
+          description: rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, build, buildId, record, status]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: the admin }
+                  build: { type: string, description: the build's handle }
+                  buildId: { type: [string, 'null'] }
+                  record:
+                    type: [string, 'null']
+                    description: the reject record written; null if the build was already rejected
+                  status: { type: string, enum: [rejected] }
+        '400':
+          description: '`invalid_request`: no reason, a build that is not registered, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`build_in_use`: a live sandbox runs on the build'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds/{build}/cancel:
     post:
       operationId: cancelTemplateBuild
@@ -2602,7 +2674,8 @@ paths:
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
         holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
         placement an activation is judged by). `stop`: the ones it holds with no live lease and no
-        live sandbox on their worker, and the retired ones it holds (§5.1) with no live sandbox; a
+        live sandbox on their worker, and the retired ones it holds (§5.1), or ones an admin
+        rejected after the fact (§5.2), with no live sandbox; a
         worker with a live sandbox is in neither list (it drains first). The agent starts only
         workers already installed on the host.
       security: [{ hostToken: [] }]
@@ -2632,8 +2705,8 @@ paths:
       description: |
         Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
         worker unit started) and `refused` (not started, with why: not installed, or the start
-        failed) write an `activate` record, `detached` (stopped; also for a retired build, whose
-        worker `stop` lists) a `deactivate` record, each with the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
+        failed) write an `activate` record, `detached` (stopped; also for a retired build, or one
+        an admin rejected after the fact, whose worker `stop` lists) a `deactivate` record, each with the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
         attached record.
       security: [{ hostToken: [] }]
       parameters:

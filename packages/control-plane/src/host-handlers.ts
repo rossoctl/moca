@@ -201,7 +201,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
-   * live lease, and the retired ones it holds (§5.1: no longer wanted, never run again). A worker
+   * live lease, and the retired ones it holds (§5.1: no longer wanted, never run again), and the
+   * ones an admin rejected after the fact (§5.2), which are ended as retired ones are. A worker
    * is never stopped under a live sandbox: it drains first, so a build with one is in neither list.
    * Removing a retired build's worker and snapshot from the host is not asked here.
    */
@@ -222,8 +223,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       for (const b of d.builds) {
         if (!mine || mine.holds[b.buildId] === undefined) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
-        // A retired build has no lease and is never placed: its worker stops once it is idle.
-        if (b.status === 'retired') {
+        // A retired build has no lease and is never placed: its worker stops once it is idle. A
+        // build an admin rejected after the fact (§5.2) is ended as a retired one is.
+        if (b.status === 'retired' || (b.status === 'rejected' && b.reason?.rule === 'admin')) {
           if (b.worker && !busy.has(b.worker)) stop.push(entry);
           continue;
         }
@@ -238,7 +240,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
-   * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
+   * holds (`detached` also for a retired or admin-rejected one, whose worker `stop` lists): an `activate` or
    * `deactivate` record by the host. Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
@@ -250,9 +252,12 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'event must be attached, refused or detached');
     }
     const buildId = typeof b.buildId === 'string' ? b.buildId : '';
-    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too.
-    const ok = (x: { status: string }) =>
-      x.status === 'registered' || (event === 'detached' && x.status === 'retired');
+    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too; and for a
+    // build an admin rejected after the fact (§5.2), whose worker is stopped as a retired one's.
+    const ok = (x: { status: string; reason?: { rule?: string } }) =>
+      x.status === 'registered' ||
+      (event === 'detached' &&
+        (x.status === 'retired' || (x.status === 'rejected' && x.reason?.rule === 'admin')));
     const doc = (await cat.list()).find((d) =>
       d.builds.some((x) => x.buildId === buildId && ok(x)),
     );
@@ -260,7 +265,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError(
         'not_found',
         event === 'detached'
-          ? 'no registered or retired build this host holds'
+          ? 'no registered, retired or rejected build this host holds'
           : 'no registered build this host holds',
       );
     }

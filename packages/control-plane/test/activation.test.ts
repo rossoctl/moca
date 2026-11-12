@@ -859,6 +859,141 @@ describe('retire (§5.1)', () => {
   });
 });
 
+describe('reject after the fact (§5.2)', () => {
+  const refusal = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+    return 'none';
+  };
+  const admin = { ...bob, roles: ['admin'] };
+  const reject = (d: TestDeps, id: string, build: string, body: unknown, principal = admin) =>
+    HANDLERS.rejectTemplateBuild!(ctx({ principal, params: { id, build }, body }), d);
+  const sandbox = (d: TestDeps, template: string) =>
+    HANDLERS.createSandbox!(ctx({ principal: alice, body: { template } }), d);
+  const wanted = async (d: TestDeps, host: string) =>
+    (await HANDLERS.hostWanted!(asHost(host), d)).body as Body;
+
+  it('rejects a registered build: rejected by rule admin, leases gone, 400 on use, a reject record', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    expect((await wanted(d, 'host-1')).run).toHaveLength(1);
+    const r = await reject(d, 't1', hash('1'), { reason: 'rule M1 found broken' });
+    expect(r.status).toBe(200);
+    const body = r.body as Body;
+    expect(body).toMatchObject({
+      templateId: 't1',
+      subject: admin.sub,
+      build: expect.stringMatching(/^b-[0-9a-f]{26}$/),
+      buildId: hash('1'),
+      status: 'rejected',
+    });
+    expect(body.record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'rejected',
+      leases: [],
+      reason: { message: 'rule M1 found broken', rule: 'admin' },
+    });
+    // The record names the admin, the reason and the build record it ends, by digest.
+    const chain = await d.provenance!.chain('template/t1');
+    const rec = chain.at(-1)!;
+    expect(recordDigestOf(rec)).toBe(body.record);
+    const buildRec = chain.find((x) => x.kind === 'build' && (x.body as Body).outcome === 'built')!;
+    expect(rec).toMatchObject({
+      kind: 'reject',
+      subject: admin.sub,
+      body: {
+        build: body.build,
+        buildId: hash('1'),
+        buildRecord: recordDigestOf(buildRec),
+        from: 'registered',
+        reason: 'rule M1 found broken',
+      },
+    });
+    // Its use is refused as for a build policy rejected at registration; an activation too.
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('unknown_template');
+    expect(await refusal(() => sandbox(d, `t1@${hash('1')}`))).toBe('unknown_template');
+    expect(await refusal(() => activate(d, 't1'))).toBe('template_unavailable');
+    // A host holding it stops its worker, as for a retired build, and its stop is taken.
+    const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [entry] });
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'detached' }),
+      d,
+    );
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'deactivate',
+      subject: 'host:host-1',
+    });
+    // Idempotent: a second reject answers rejected, with no second record.
+    const n = (await d.provenance!.chain('template/t1')).length;
+    expect((await reject(d, 't1', hash('1'), { reason: 'again' })).body).toMatchObject({
+      status: 'rejected',
+      record: null,
+    });
+    expect((await d.provenance!.chain('template/t1')).length).toBe(n);
+  });
+
+  it('never rejects under a live sandbox (409 build_in_use)', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const sb = (await sandbox(d, 't1')).body as Body;
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'broken' }))).toBe(
+      'build_in_use',
+    );
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
+  });
+
+  it('refuses a non-admin (the owner too), no reason, an unknown build and one not registered', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x' }, alice))).toBe(
+      'forbidden',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), {}))).toBe('invalid_request');
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: '  ' }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x'.repeat(1025) }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('9'), { reason: 'x' }))).toBe(
+      'template_not_found',
+    );
+    // A queued build is cancelled, a registered one retired: neither is rejected.
+    const q = (
+      await HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id: 't1' },
+          body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: 4 }, profile: 'base' },
+        }),
+        d,
+      )
+    ).body as Body;
+    const handle = String(q.build).split('/').at(-1)!;
+    expect(await refusal(() => reject(d, 't1', handle, { reason: 'x' }))).toBe('invalid_request');
+    await HANDLERS.retireTemplateBuild!(
+      ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+      d,
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x' }))).toBe(
+      'invalid_request',
+    );
+  });
+});
+
 describe('admin quotas (§5.2)', () => {
   const refusal = async (f: () => Promise<unknown>) => {
     try {

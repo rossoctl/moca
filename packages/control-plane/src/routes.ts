@@ -478,6 +478,15 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     operationId: 'retireTemplateBuild',
   },
+  // Template lifecycle spec §5.2: an admin rejects a registered build after the fact.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds/{build}/reject',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'rejectTemplateBuild',
+  },
   // Template lifecycle spec §6.3: take, renew or release the caller's activation lease.
   {
     method: 'POST',
