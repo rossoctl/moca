@@ -88,6 +88,41 @@ func (a *Agent) leaseHarden() error {
 	return nil
 }
 
+// enableExecControllers enables the pids and memory controllers for the cgroup root's
+// children, the e<seq> cgroups, so each can be capped (lease_caps.go). The root's parent
+// must enable them first; in the guest that parent is the cgroup2 root, which the
+// no-internal-processes rule exempts, and the cgroup root holds no process of its own.
+// One of the first lease request's one-time steps, not leasePrepare's: a per-Exec VM
+// restored from the same snapshot keeps its cgroup tree as it was. Idempotent.
+func enableExecControllers(root string) error {
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if err := os.WriteFile(filepath.Join(dir, "cgroup.subtree_control"), []byte("+pids +memory"), 0); err != nil {
+			return fmt.Errorf("guest-agent: lease: enable pids and memory in %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// agentOomScoreAdjPath and memInfoPath are package variables so the lease tests can
+// point them at scratch files, as userNamespacesSysctl is: the real ones are the test
+// host's.
+var (
+	agentOomScoreAdjPath = "/proc/self/oom_score_adj"
+	memInfoPath          = "/proc/meminfo"
+)
+
+// protectAgentFromOOM sets the agent's oom_score_adj to -1000, so the OOM killer never
+// picks it: in a lease guest the agent is PID 1, and its death panics the guest and
+// ends the lease. A fork inherits the value, so the shim puts each Exec's back to 0
+// (ShimMain), or an OOM would find nothing it may kill. Best effort: on a failure the
+// agent stays a candidate, and memory.max still confines an Exec's own OOM to its
+// cgroup, so the failure is logged and the lease goes on.
+func protectAgentFromOOM() {
+	if err := os.WriteFile(agentOomScoreAdjPath, []byte("-1000"), 0); err != nil {
+		log.Printf("guest-agent: lease: oom_score_adj -1000: %v; the agent stays an OOM candidate", err)
+	}
+}
+
 // mountFlagsKept maps the statfs flags of a mount to the mount(2) flags that keep them
 // across a bind remount, which otherwise resets every per-mount flag it is not given
 // (rw,noatime from Resume's mount would become rw,relatime). Only RELATIME's value
@@ -159,6 +194,11 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 		if err := a.leaseHarden(); err != nil {
 			return End{}, err
 		}
+		// Refuse lease service rather than run an Exec uncapped (#706).
+		if err := enableExecControllers(lo.CgroupRoot); err != nil {
+			return End{}, err
+		}
+		protectAgentFromOOM()
 	}
 	// The host sets the flag when root has written to the workspace since the last
 	// lease Exec (spec §3.3).
@@ -350,16 +390,31 @@ func drainPipe(f *os.File, emit func([]byte)) {
 }
 
 // execCgroup is one Exec's cgroup, CgroupRoot/e<seq>. The tree is never delegated: it
-// is root-owned, so the exec uid can neither move itself out nor create cgroups.
+// is root-owned, so the exec uid can neither move itself out nor create cgroups. Its
+// memory.max and pids.max (lease_caps.go) are written before anything runs in it; an
+// Exec whose caps cannot be written is refused, never run uncapped.
 type execCgroup struct {
 	path string
 	dir  *os.File // O_PATH|O_DIRECTORY, for CLONE_INTO_CGROUP
 }
 
 func newExecCgroup(root string, seq uint64) (*execCgroup, error) {
+	memMax, err := execMemoryMax()
+	if err != nil {
+		return nil, err
+	}
 	path := filepath.Join(root, "e"+strconv.FormatUint(seq, 10))
 	if err := os.Mkdir(path, 0o755); err != nil {
 		return nil, fmt.Errorf("guest-agent: lease: cgroup: %w", err)
+	}
+	for _, w := range []struct{ file, val string }{
+		{"memory.max", strconv.FormatInt(memMax, 10)},
+		{"pids.max", strconv.Itoa(execCgroupPidsMax)},
+	} {
+		if err := os.WriteFile(filepath.Join(path, w.file), []byte(w.val), 0); err != nil {
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("guest-agent: lease: cgroup caps: %w", err)
+		}
 	}
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -367,6 +422,24 @@ func newExecCgroup(root string, seq uint64) (*execCgroup, error) {
 		return nil, fmt.Errorf("guest-agent: lease: cgroup: %w", err)
 	}
 	return &execCgroup{path: path, dir: os.NewFile(uintptr(fd), path)}, nil
+}
+
+// execMemoryMax reads MemTotal on every Exec rather than once: a virtio balloon can
+// change it during the VM's life.
+func execMemoryMax() (int64, error) {
+	raw, err := os.ReadFile(memInfoPath)
+	if err != nil {
+		return 0, fmt.Errorf("guest-agent: lease: cgroup caps: %w", err)
+	}
+	total, err := parseMemTotal(raw)
+	if err != nil {
+		return 0, fmt.Errorf("guest-agent: lease: cgroup caps: %w", err)
+	}
+	m := execCgroupMemoryMax(total)
+	if m <= 0 {
+		return 0, fmt.Errorf("guest-agent: lease: cgroup caps: MemTotal %d bytes leaves an Exec nothing", total)
+	}
+	return m, nil
 }
 
 func (c *execCgroup) fd() int { return int(c.dir.Fd()) }
