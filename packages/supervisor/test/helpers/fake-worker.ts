@@ -59,6 +59,12 @@ export class FakeWorker extends EventEmitter implements WorkerHandle {
     leasesHeld?: number;
     leasePoolSize?: number;
     fileOpP95Ms?: number;
+    asyncClaims?: number;
+    asyncReclaims?: number;
+    asyncDeadLetters?: number;
+    asyncClaimDeniedFull?: number;
+    asyncQueueDepth?: number;
+    asyncOldestAgeMs?: number;
   }): void {
     this.emit('message', { type: 'stats', ...s });
   }

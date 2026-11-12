@@ -3,10 +3,9 @@
  * async counter that cannot ride the worker's `stats` IPC row: §4.3 enforces the quota HERE, and a
  * worker never sees a refused submission.
  *
- * Counters only -- never an input to a decision. The control plane has no telemetry route today
- * (`server.ts` serves `/healthz` and `/readyz`), so the surface that exposes these is the §7 task's;
- * this module is where the number accumulates in the meantime, and `asyncCounters()` is what that
- * task will read.
+ * Counters only -- never an input to a decision. Read by `GET /metrics` (admin-only; see routes.ts),
+ * which is the whole reason `asyncCounters()` returns a copy: a caller must not be able to reset the
+ * process's own telemetry by mutating what it was handed.
  */
 export type AsyncCounter = 'async_quota_refusals';
 

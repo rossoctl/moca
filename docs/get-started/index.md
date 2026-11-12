@@ -34,11 +34,13 @@ Each linked README is the authority on its own prerequisites, verification and t
   attaches to the relay over TLS. Kata and gVisor arms are deferred.
 - **MicroVM or P6 on macOS or Windows.** On a dev machine use Docker Compose or Kind, which use
   container sandboxes.
-- **Async fan-out (`async: true`) and the scheduled CronJob.** Both were removed with the
-  Knative/KEDA path and neither runs on P6 yet. Async fan-out is designed but not implemented
+- **The scheduled CronJob on-ramp.** Removed with the Knative/KEDA path, with no P6 equivalent and
+  no design yet ([#536](https://github.com/rossoctl/moca/issues/536)). Async fan-out, removed with
+  it, **does run on P6 again** — opt-in behind `SH_ASYNC_DRAIN` under `MOCA_TENANCY=single`
   ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md),
-  [#686](https://github.com/rossoctl/moca/issues/686)); the schedule on-ramp has no design yet
-  ([#536](https://github.com/rossoctl/moca/issues/536)).
+  [#686](https://github.com/rossoctl/moca/issues/686)) — but through the control plane's
+  `POST /v1/sessions/{id}/turns`, not the data plane's `async: true`, which stays removed. See
+  [dispatch archetypes](../concepts/dispatch-archetypes.md).
 
 ## After the install
 

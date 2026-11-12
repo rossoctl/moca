@@ -1,6 +1,6 @@
 # Leaf envelope and result
 
-> **Preview.** Describes `POST /v1/runs` on `main` as of 2026-10-12 (`harness/src/run-leaf.ts`). A
+> **Preview.** Describes `POST /v1/runs` on `main` as of 2026-11-12 (`harness/src/run-leaf.ts`). A
 > **leaf** is one unit of agent work an orchestrator dispatches ([glossary](../glossary.md#leaf)). This
 > page replaces the file-based "volume envelope" of the early specs, which no longer exists in the code.
 
@@ -122,8 +122,12 @@ from the envelope type. Async dispatch has a replacement on the **control plane*
 `POST /v1/sessions/{id}/turns` with `async: true` (ADR-0047), authenticated and owner-scoped, which
 records a turn and queues its id. The queue carries a turn id and nothing else — no envelope, no
 credential, no bearer token — and the worker rebuilds the envelope from the record at dequeue. The
-drain loop that does so is [#389](https://github.com/rossoctl/moca/issues/389). Cron still has no P6
-equivalent ([#536](https://github.com/rossoctl/moca/issues/536)).
+drain loop that does so **runs on P6 today**, opt-in behind `SH_ASYNC_DRAIN` and
+`MOCA_TENANCY=single`; see [dispatch archetypes](../concepts/dispatch-archetypes.md). Its result is
+written per turn and read back with `GET /v1/sessions/{id}/turns/{turnId}`, so `/runs/status` — this
+route's own status endpoint — never reports an async turn: it answers `queued` forever, or returns
+the session's last synchronous result as if it were the answer. Cron still has no P6 equivalent
+([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ## Spec drift
 
