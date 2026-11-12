@@ -49,7 +49,9 @@ Upgrade note (the policy fails closed):
 - A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
   check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
   numbers, is refused when it is read: every create and every read of the policy or the quota fails
-  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing.
+  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing. So read
+  `GET /v1/policy` and fix it **before** upgrading: afterwards only `PUT /v1/policy` succeeds (the
+  file itself stays readable on the volume).
 
 ## 1.4.0
 
