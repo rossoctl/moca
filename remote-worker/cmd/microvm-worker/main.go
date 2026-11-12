@@ -250,17 +250,30 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 // WORKER_MAX_CONCURRENT posture, since a lease's lifetime or reclaim target that came
 // from a typo must not look like one that was chosen. Read on every worker, lease-capable
 // or not, so a bad value fails at start rather than when the snapshot gains lease-v1.
+//
+// A value whose conversion would overflow is refused too: a wrapped Duration is negative,
+// and Normalize would then put the default back in its place.
 func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	var err error
+	// read is envInt64 bounded above by limit, recording the first refusal in err.
+	read := func(k string, limit int64) (int64, bool) {
+		v, e := envInt64(get, k, 0)
+		if e == nil && v > limit {
+			e = fmt.Errorf("%s=%q is too large (at most %d)", k, get(k), limit)
+		}
+		if e != nil {
+			if err == nil {
+				err = e
+			}
+			return 0, false
+		}
+		return v, true
+	}
 	seconds := func(k string, dst *time.Duration) {
 		if get(k) == "" {
 			return
 		}
-		if v, e := envInt64(get, k, 0); e != nil {
-			if err == nil {
-				err = e
-			}
-		} else {
+		if v, ok := read(k, math.MaxInt64/int64(time.Second)); ok {
 			*dst = time.Duration(v) * time.Second
 		}
 	}
@@ -268,11 +281,7 @@ func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 		if get(k) == "" {
 			return
 		}
-		if v, e := envInt64(get, k, 0); e != nil {
-			if err == nil {
-				err = e
-			}
-		} else {
+		if v, ok := read(k, math.MaxInt64>>20); ok {
 			*dst = v << 20
 		}
 	}

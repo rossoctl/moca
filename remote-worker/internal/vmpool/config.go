@@ -71,6 +71,10 @@ const (
 	DefaultLeaseHeadroom             = 1.25
 	DefaultLeasePageCacheBytes       = 256 << 20
 	DefaultLeaseScanInterval         = 5 * time.Second
+	// mcpKeepalivePeriod is how often the MCP server sends a lease keepalive (spec §8.3).
+	// LeaseKeepaliveLoss may not be shorter than two of them (minLeaseKeepaliveLoss).
+	mcpKeepalivePeriod    = 30 * time.Second
+	minLeaseKeepaliveLoss = 2 * mcpKeepalivePeriod
 	// leaseReclaimFloorBytes is the 2 GiB term in LeaseReclaimFreeBytes' derivation.
 	leaseReclaimFloorBytes = 2 << 30
 )
@@ -278,6 +282,18 @@ func (c *Config) normalizeLease() error {
 		c.LeaseIdleDefault < c.LeaseIdleMin || c.LeaseIdleDefault > c.LeaseIdleCeiling {
 		return fmt.Errorf("vmpool: LeaseIdleDefault (%v) must lie within [LeaseIdleMin (%v), LeaseIdleCeiling (%v)]",
 			c.LeaseIdleDefault, c.LeaseIdleMin, c.LeaseIdleCeiling)
+	}
+	if c.LeaseKeepaliveLoss < minLeaseKeepaliveLoss {
+		// Spec §8.3: with less than two keepalive periods, every opted-in lease would end
+		// keepalive_lost between two keepalives the harness sent on time.
+		return fmt.Errorf("vmpool: LeaseKeepaliveLoss (%v) must be >= %v, two of the MCP server's %v keepalive periods",
+			c.LeaseKeepaliveLoss, minLeaseKeepaliveLoss, mcpKeepalivePeriod)
+	}
+	if c.LeaseScanInterval > c.LeaseIdleMin/4 {
+		// The lease ticker is what ends an idle lease: slower than this, the shortest idle
+		// timeout an owner can set would be overrun by most of itself.
+		return fmt.Errorf("vmpool: LeaseScanInterval (%v) must be <= LeaseIdleMin/4 (%v)",
+			c.LeaseScanInterval, c.LeaseIdleMin/4)
 	}
 	if c.LeaseReclaimFreeBytes <= 0 {
 		perVM := PerVMBytes(*c)

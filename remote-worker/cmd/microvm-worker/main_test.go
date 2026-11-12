@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -607,6 +608,50 @@ func TestPoolConfigLeaseEnv(t *testing.T) {
 	}
 	if _, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_HEADROOM": "NaN"})); err == nil {
 		t.Error("SH_LEASE_HEADROOM=NaN was accepted")
+	}
+}
+
+// PR #763 review (F5): a value that would overflow its conversion is refused, never
+// wrapped: SH_LEASE_GRACE_S=10000000000 once wrapped to a negative Duration that
+// Normalize then silently replaced with the default. The largest values that convert
+// exactly are accepted.
+func TestPoolConfigLeaseEnvRefusesOverflow(t *testing.T) {
+	maxS := math.MaxInt64 / int64(time.Second)
+	maxMB := int64(math.MaxInt64 >> 20)
+	seconds := []string{"SH_LEASE_IDLE_DEFAULT_S", "SH_LEASE_IDLE_CEILING_S", "SH_LEASE_MAX_DURATION_S",
+		"SH_LEASE_MAX_DURATION_L2_S", "SH_LEASE_GRACE_S", "SH_LEASE_KEEPALIVE_LOSS_S"}
+	mib := []string{"SH_LEASE_START_MB", "SH_LEASE_PAGECACHE_MB", "SH_LEASE_RECLAIM_FREE_MB"}
+	for _, tc := range []struct {
+		keys []string
+		over string
+	}{
+		{seconds, strconv.FormatInt(maxS+1, 10)},
+		{seconds, "10000000000"},
+		{mib, strconv.FormatInt(maxMB+1, 10)},
+	} {
+		for _, k := range tc.keys {
+			_, err := poolConfig(baseEnv(map[string]string{k: tc.over}))
+			if err == nil || !strings.Contains(err.Error(), k) {
+				t.Errorf("%s=%s: err = %v, want a refusal naming the variable", k, tc.over, err)
+			}
+		}
+	}
+	env := map[string]string{}
+	for _, k := range seconds {
+		env[k] = strconv.FormatInt(maxS, 10)
+	}
+	for _, k := range mib {
+		env[k] = strconv.FormatInt(maxMB, 10)
+	}
+	var cfg vmpool.Config
+	if err := leaseConfig(baseEnv(env), &cfg); err != nil {
+		t.Fatalf("the largest exact values: leaseConfig = %v, want accepted", err)
+	}
+	if want := time.Duration(maxS) * time.Second; cfg.LeaseGraceLimit != want || cfg.LeaseKeepaliveLoss != want {
+		t.Errorf("LeaseGraceLimit %v, LeaseKeepaliveLoss %v, want %v", cfg.LeaseGraceLimit, cfg.LeaseKeepaliveLoss, want)
+	}
+	if want := maxMB << 20; cfg.LeaseStartBytes != want || cfg.LeaseReclaimFreeBytes != want {
+		t.Errorf("LeaseStartBytes %d, LeaseReclaimFreeBytes %d, want %d", cfg.LeaseStartBytes, cfg.LeaseReclaimFreeBytes, want)
 	}
 }
 

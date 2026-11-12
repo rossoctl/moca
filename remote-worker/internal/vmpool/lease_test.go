@@ -875,7 +875,12 @@ func TestGraceLimitEndsMidExec(t *testing.T) {
 // An Exec that arrives past the grace limit, before the lease sweep has run, ends the
 // lease (grace_limit) and runs in a fresh VM rather than in one the next tick would cut.
 func TestExecPastTheGraceLimitStartsAFreshLease(t *testing.T) {
-	p, lc, clk := leasePool(t, func(c *Config) { c.LeaseScanInterval = time.Hour })
+	// A slow ticker, so that only the Exec can see the grace limit pass; Normalize holds
+	// LeaseScanInterval to LeaseIdleMin/4, so the idle bounds rise with it.
+	p, lc, clk := leasePool(t, func(c *Config) {
+		c.LeaseScanInterval = time.Hour
+		c.LeaseIdleMin, c.LeaseIdleDefault, c.LeaseIdleCeiling = 4*time.Hour, 4*time.Hour, 4*time.Hour
+	})
 	mustSetMode(t, p, "k", ModeLease, 1)
 	e := leaseExec("work", 1)
 	mustExec(t, p, "k", e)

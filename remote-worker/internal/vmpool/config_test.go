@@ -167,3 +167,36 @@ func TestLeaseConfigRefusesWhatItCannotHonour(t *testing.T) {
 		}
 	}
 }
+
+// PR #763 review (F6): two lease timings that cannot work are refused. A keepalive loss
+// under two MCP keepalive periods (2 x 30 s, spec §8.3) ends every opted-in lease between
+// two keepalives; a lease ticker slower than a quarter of LeaseIdleMin ends idle leases
+// late. The bounds themselves are accepted.
+func TestLeaseTimingCrossChecks(t *testing.T) {
+	for name, mut := range map[string]func(*Config){
+		"keepalive loss under two keepalive periods": func(c *Config) { c.LeaseKeepaliveLoss = 59 * time.Second },
+		"scan interval above a quarter of idle min":  func(c *Config) { c.LeaseScanInterval = 7*time.Second + 500*time.Millisecond + 1 },
+		"scan interval above idle min": func(c *Config) {
+			c.LeaseScanInterval = time.Minute
+		},
+	} {
+		c := good()
+		mut(&c)
+		if err := c.Normalize(); err == nil || !strings.Contains(err.Error(), "Lease") {
+			t.Errorf("%s: Normalize = %v, want a Lease* refusal", name, err)
+		}
+	}
+	c := good()
+	c.LeaseKeepaliveLoss = 60 * time.Second
+	c.LeaseScanInterval = 7*time.Second + 500*time.Millisecond // LeaseIdleMin 30 s / 4
+	if err := c.Normalize(); err != nil {
+		t.Errorf("keepalive loss 60 s, scan interval 7.5 s: Normalize = %v, want accepted", err)
+	}
+	// The scan bound follows a configured LeaseIdleMin.
+	c = good()
+	c.LeaseIdleMin, c.LeaseIdleDefault, c.LeaseIdleCeiling = 4*time.Hour, 4*time.Hour, 4*time.Hour
+	c.LeaseScanInterval = time.Hour
+	if err := c.Normalize(); err != nil {
+		t.Errorf("scan interval 1 h with LeaseIdleMin 4 h: Normalize = %v, want accepted", err)
+	}
+}

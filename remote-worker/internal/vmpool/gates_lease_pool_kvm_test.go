@@ -382,7 +382,8 @@ func leaseEndDrivers() []leaseEndDriver {
 			return g
 		}},
 		{reason: LeaseEndKeepaliveLost, first: Exec{Keepalive: true},
-			tweak: func(c *Config) { c.LeaseKeepaliveLoss = 4 * time.Second },
+			// The shortest loss Normalize accepts: two of the MCP server's 30 s periods.
+			tweak: func(c *Config) { c.LeaseKeepaliveLoss = minLeaseKeepaliveLoss },
 			end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 				t.Helper()
 				g.waitLeaseGone(t, key, g.p.cfg.LeaseKeepaliveLoss+2*g.p.cfg.LeaseScanInterval+10*time.Second)
@@ -709,7 +710,11 @@ func TestGateLeaseOwnership(t *testing.T) {
 // it. The lease ticker is slowed to 10 min so no re-sample moves the charges meanwhile.
 func TestGateLeaseReclaim(t *testing.T) {
 	requireKVM(t)
-	g := newLeaseGate(t, func(c *Config) { c.LeaseScanInterval = 10 * time.Minute })
+	g := newLeaseGate(t, func(c *Config) {
+		// Normalize holds LeaseScanInterval to LeaseIdleMin/4, so the idle bounds rise with it.
+		c.LeaseScanInterval = 10 * time.Minute
+		c.LeaseIdleMin, c.LeaseIdleDefault, c.LeaseIdleCeiling = 40*time.Minute, 40*time.Minute, 40*time.Minute
+	})
 	const busy, old, recent, next = "lease-reclaim-busy", "lease-reclaim-old", "lease-reclaim-recent", "lease-reclaim-next"
 	// busy's last Exec ends first, so by its clocks it is the idle-longest.
 	for _, k := range []string{busy, old, recent} {
