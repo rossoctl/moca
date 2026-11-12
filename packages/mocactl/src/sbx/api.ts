@@ -5,6 +5,10 @@ export interface SbxTemplate {
   id: string;
   description: string;
   tools: string[];
+  /** The default build's readiness (template lifecycle spec §3.3); absent from an older control plane. */
+  readiness?: string | null;
+  /** tag -> build id; absent from an older control plane. */
+  tags?: Record<string, string>;
 }
 
 export interface SbxSandbox {
@@ -37,6 +41,37 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
+export interface SbxBuild {
+  buildId: string;
+  status: string;
+  profile: string;
+  readiness: string | null;
+  capacity: { running: number; inUse: number | null } | null;
+  lastUsedAt: number | null;
+  tags: string[];
+  createdAt: number;
+  provenance: string | null;
+  /** On GET /v1/templates/{id} and the builds routes. */
+  spec?: {
+    guest_mb?: number;
+    vcpus?: number;
+    workspace_mb?: number;
+    seed?: string;
+    tools?: string[];
+  };
+}
+
+/** A template with its builds (openapi Template). */
+export interface SbxTemplateFull extends SbxTemplate {
+  owner: string | null;
+  visibility: 'private' | 'deployment';
+  onboarding: string | null;
+  readiness: string | null;
+  tags: Record<string, string>;
+  builds: SbxBuild[];
+}
+
 export class SandboxApiClient extends ControlPlaneClient {
   sandboxDiscovery(): Promise<SbxDiscovery> {
     return this.json('GET', '/v1/discovery', { auth: false });
@@ -46,11 +81,24 @@ export class SandboxApiClient extends ControlPlaneClient {
     return (await this.json<{ templates: SbxTemplate[] }>('GET', '/v1/templates')).templates;
   }
 
+  /** One template with its builds and their specs (`GET /v1/templates/{id}`). */
+  getTemplate(id: string): Promise<SbxTemplateFull> {
+    return this.json('GET', `/v1/templates/${encodeURIComponent(id)}`);
+  }
+
+  /** One build, by its build id (`GET /v1/templates/{id}/builds/{build}`). */
+  getTemplateBuild(id: string, build: string): Promise<SbxBuild> {
+    return this.json(
+      'GET',
+      `/v1/templates/${encodeURIComponent(id)}/builds/${encodeURIComponent(build)}`,
+    );
+  }
+
   createSandbox(body: {
     template: string;
     name?: string;
     labels?: Record<string, string>;
-  }): Promise<SbxSandbox> {
+  }): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
     return this.json('POST', '/v1/sandboxes', { body });
   }
 

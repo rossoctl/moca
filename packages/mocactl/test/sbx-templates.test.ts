@@ -1,0 +1,246 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { sbxMain } from '../src/sbx/cli.js';
+import {
+  cleanupTmp,
+  fakeCp,
+  sandbox,
+  SBX,
+  setup,
+  TOKEN,
+  workspaces,
+  type Handler,
+} from './helpers/sbx.js';
+
+// The template reads from mocactl (template lifecycle spec §4): `sbx templates` with readiness and
+// tags, `templates show`, and `create --template ID[@BUILD] --seed`. example.com hosts only.
+
+afterEach(cleanupTmp);
+
+const BUILD_ID = `sha256:${'b'.repeat(64)}`;
+const IMPORTED = 'imported:0123456789ab';
+const build = (over: Record<string, unknown> = {}) => ({
+  buildId: BUILD_ID,
+  status: 'registered',
+  profile: 'base',
+  readiness: 'inactive',
+  capacity: null,
+  lastUsedAt: null,
+  tags: ['default'],
+  createdAt: 1_800_000_000,
+  provenance: `sha256:${'c'.repeat(64)}`,
+  ...over,
+});
+const template = (over: Record<string, unknown> = {}) => ({
+  id: 'my-python',
+  description: 'Python 3.12',
+  tools: ['bash'],
+  owner: 'github:1',
+  visibility: 'private',
+  onboarding: 'registered',
+  readiness: 'inactive',
+  tags: { default: BUILD_ID },
+  builds: [build()],
+  ...over,
+});
+
+function world(routes: Record<string, Handler>) {
+  const s = setup();
+  const cp = fakeCp(routes);
+  const run = (argv: string[], over: Record<string, unknown> = {}) => {
+    s.io.outs.length = 0;
+    s.io.errs.length = 0;
+    return sbxMain(argv, s.env, s.io, { home: s.home, fetchImpl: cp.fetchImpl, ...over });
+  };
+  return {
+    ...s,
+    cp,
+    run,
+    out: () => s.io.outs.join(''),
+    err: () => s.io.errs.join('\n'),
+  };
+}
+
+describe('sbx templates: readiness and tags', () => {
+  it('shows each template with its readiness and tags', async () => {
+    const w = world({
+      'GET /v1/templates': () => ({
+        status: 200,
+        body: {
+          templates: [
+            template({ readiness: 'active', tags: { default: BUILD_ID, stable: BUILD_ID } }),
+            template({ id: 'node22', description: 'Node 22', readiness: 'unknown' }),
+          ],
+          hosts: [],
+        },
+      }),
+    });
+    expect(await w.run(['templates'])).toBe(0);
+    expect(w.out()).toContain('my-python        active    Python 3.12  tags default,stable\n');
+    expect(w.out()).toContain('node22           unknown   Node 22  tags default\n');
+  });
+});
+
+describe('templates show', () => {
+  it('a template and its builds, or one build, with readiness, capacity and tags', async () => {
+    const w = world({
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({
+          owner: null,
+          visibility: 'deployment',
+          readiness: 'active',
+          builds: [
+            build({ readiness: 'active', capacity: { running: 3, inUse: 1 } }),
+            build({ buildId: IMPORTED, status: 'failed', readiness: null, tags: [] }),
+          ],
+        }),
+      }),
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ spec: { seed: 'true', tools: ['bash'] } }),
+      }),
+    });
+    expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    expect(w.out()).toContain('my-python  owner the deployment  deployment  registered  active\n');
+    expect(w.out()).toContain(
+      `  ${BUILD_ID}  registered  active (running 3, in use 1)  tags default\n`,
+    );
+    expect(w.out()).toContain(`  ${IMPORTED}  failed\n`);
+    expect(await w.run(['templates', 'show', 'my-python', '--build', BUILD_ID])).toBe(0);
+    expect(w.out()).toBe(`${BUILD_ID}  registered  inactive  tags default\n`);
+    expect(await w.run(['templates', 'show', 'my-python', '--build', BUILD_ID, '--json'])).toBe(0);
+    expect(JSON.parse(w.out())).toMatchObject({ spec: { seed: 'true' } });
+  });
+
+  it('reports 404 template_not_found as itself, not as a control plane without sandbox routes', async () => {
+    const w = world({
+      'GET /v1/templates/nope': () => ({
+        status: 404,
+        body: { error: 'template_not_found', message: 'no such template' },
+      }),
+    });
+    expect(await w.run(['templates', 'show', 'nope'])).toBe(1);
+    expect(w.err()).toContain('no such template');
+    expect(w.err()).not.toContain('no sandbox routes');
+  });
+
+  it('refuses bad usage locally, before any request', async () => {
+    const w = world({});
+    for (const argv of [
+      ['templates', 'show'],
+      ['templates', 'show', 'a', 'b'],
+      ['templates', 'nope'],
+      ['templates', '--build', BUILD_ID],
+      ['ls', '--build', BUILD_ID],
+      ['templates', 'show', 'a', '--build', ' '],
+      ['ls', '--seed'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toEqual([]);
+  });
+});
+
+describe('create --template id@build, --seed', () => {
+  it('passes create --template id@build through as given', async () => {
+    const w = world({
+      'POST /v1/sandboxes': (req) => ({
+        status: 201,
+        body: sandbox({ template: (req.body as { template: string }).template }),
+      }),
+    });
+    expect(await w.run(['create', '--template', `my-python@${BUILD_ID}`])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ template: `my-python@${BUILD_ID}` });
+  });
+
+  const seeded = (
+    seed: string | undefined,
+    more: Parameters<typeof world>[0] = {},
+    served = BUILD_ID,
+  ) => {
+    const ws = workspaces();
+    const w = world({
+      ...more,
+      'POST /v1/sandboxes': () => ({
+        status: 201,
+        body: {
+          ...sandbox({ template: 'my-python' }),
+          buildId: served,
+          templateManifestHash: served.startsWith('sha256:') ? served : null,
+        },
+      }),
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({
+          builds: [
+            build({ spec: { ...(seed !== undefined ? { seed } : {}), tools: ['bash'] } }),
+            build({
+              buildId: IMPORTED,
+              tags: [],
+              spec: { seed: 'echo the other build; exit 9', tools: ['bash'] },
+            }),
+          ],
+        }),
+      }),
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+    });
+    return { w, ws, run: (argv: string[]) => w.run(argv, { execFactory: ws.factory }) };
+  };
+  const GIT_SEED =
+    'git init -q /workspace && cd /workspace && echo hi > a && git add a && ' +
+    'git -c user.email=t@example.invalid -c user.name=t -c commit.gpgSign=false commit -qm base';
+
+  it('--seed: runs the seed first, then finds a clean tree and its HEAD', async () => {
+    const s = seeded(GIT_SEED);
+    expect(await s.run(['create', '--template', 'my-python', '--seed', '--json'])).toBe(0);
+    const out = JSON.parse(s.w.out()) as { seed: { clean: boolean; head: string } };
+    expect(out.seed).toMatchObject({ seed: GIT_SEED, exitCode: 0, clean: true });
+    expect(out.seed.head).toMatch(/^[0-9a-f]{40}$/);
+    expect(s.ws.get(SBX).sent[0]!.command).toBe(GIT_SEED);
+    expect(s.w.err()).toContain(`seeded ${SBX}: a clean tree at ${out.seed.head}`);
+  });
+
+  it('--seed: runs the seed of the build the create was served, not the default one', async () => {
+    const s = seeded(GIT_SEED, {}, IMPORTED);
+    expect(await s.run(['create', '--template', `my-python@${IMPORTED}`, '--seed'])).toBe(1);
+    expect(s.ws.get(SBX).sent[0]!.command).toBe('echo the other build; exit 9');
+    expect(s.w.err()).toContain('the seed exited 9');
+  });
+
+  it("--seed: the seed's clean tree becomes the baseline, so a plain rm deletes it (no unpulled changes)", async () => {
+    let deleted = 0;
+    const s = seeded(GIT_SEED, {
+      [`DELETE /v1/sandboxes/${SBX}`]: () => {
+        deleted++;
+        return {
+          status: 200,
+          body: { ...sandbox({ template: 'my-python' }), state: 'terminated' },
+        };
+      },
+    });
+    expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(0);
+    expect(await s.run(['rm', SBX])).toBe(0);
+    expect(deleted).toBe(1);
+    expect(s.w.err()).not.toContain('not yet pulled');
+  });
+
+  it('--seed: a failing seed, a dirty tree, or a build with no seed is exit 1; an empty seed runs nothing', async () => {
+    let s = seeded('exit 3');
+    expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(1);
+    expect(s.w.err()).toContain('the seed exited 3');
+    expect(s.w.out()).toBe(`${SBX}\n`);
+    s = seeded(`${GIT_SEED} && echo x > b`);
+    expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(1);
+    expect(s.w.err()).toContain('has 1 changed or untracked paths: not a clean tree');
+    s = seeded(undefined);
+    expect(await s.run(['create', '--template', 'my-python', '--seed', '--json'])).toBe(1);
+    expect(JSON.parse(s.w.out())).toMatchObject({
+      id: SBX,
+      seed: { error: 'the build of my-python names no seed' },
+    });
+    s = seeded('');
+    expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(0);
+    expect(s.w.err()).toContain('the template has no seed');
+    expect(s.ws.get(SBX).sent).toEqual([]);
+  });
+});

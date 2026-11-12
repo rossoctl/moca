@@ -37,6 +37,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
+import { cmdShowTemplate } from './templates.js';
 import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
@@ -44,9 +45,16 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  log in with the GitHub device flow (the URL is remembered;
                                                  in a local terminal: copies the code, opens the browser)
   mocactl sbx logout                             end the sandbox-service login (deletes sbx-auth.json)
-  mocactl sbx templates [--json]                 the templates a sandbox can be created from
-  mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
-                                                 create a sandbox (template: default); prints its id
+  mocactl sbx templates [--json]                 the templates a sandbox can be created from, with
+                                                 their readiness and tags
+  mocactl sbx templates show ID [--build BUILD] [--json]
+                                                 a template and its builds (status, readiness, tags),
+                                                 or one build with its spec (--json)
+  mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
+                                                 create a sandbox (template: default); prints its id;
+                                                 --seed: run the served build's seed, then check
+                                                 /workspace is a clean tree (its HEAD becomes the
+                                                 baseline pull and rm measure changes from)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx rm [ID] [--keep-config] [--force] [--json]
                                                  delete a sandbox; for the bound one, also take
@@ -290,10 +298,12 @@ const SYNC_FLAGS: [
     | 'cortex'
     | 'keep-config'
     | 'no-browser'
+    | 'seed'
   ),
   string[],
 ][] = [
   ['force', ['push', 'rm']],
+  ['seed', ['create']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
   ['apply', ['pull']],
@@ -336,6 +346,8 @@ export async function sbxMain(
       options: {
         'control-plane-url': { type: 'string' },
         template: { type: 'string' },
+        build: { type: 'string' },
+        seed: { type: 'boolean' },
         name: { type: 'string' },
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
@@ -438,6 +450,23 @@ export async function sbxMain(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  // `templates show ID [--build BUILD]` (template lifecycle spec §4); bare `templates` lists them.
+  if (command === 'templates' && arg !== undefined && arg !== 'show') {
+    io.err(`sbx: unknown templates command '${sanitizeRemote(arg)}'\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (command === 'templates' && arg === 'show' && (extra.length !== 1 || !extra[0]!.trim())) {
+    io.err(`sbx: templates show takes one template ID\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.build !== undefined && !(command === 'templates' && arg === 'show')) {
+    io.err(`sbx: --build only applies to templates show\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.build !== undefined && !values.build.trim()) {
+    io.err(`sbx: --build needs a build id (see mocactl sbx templates show ID)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
   let maxPush: number | undefined;
   if (values['max-push'] !== undefined) {
     const raw = values['max-push'].trim();
@@ -455,6 +484,7 @@ export async function sbxMain(
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
+    (command === 'templates' && arg === 'show') ||
     command === 'claude' ||
     command === 'codex' ||
     (command === 'credentials'
@@ -634,9 +664,14 @@ export async function sbxMain(
     case 'logout':
       return cmdLogout(ctx);
     case 'templates':
+      if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
       return cmdTemplates(ctx);
     case 'create':
-      return cmdCreate(ctx, createBody!);
+      return cmdCreate(
+        ctx,
+        createBody!,
+        values.seed ? { ...(deps.execFactory ? { factory: deps.execFactory } : {}) } : undefined,
+      );
     case 'ls':
       return cmdLs(ctx, values.all === true);
     case 'rm': {
