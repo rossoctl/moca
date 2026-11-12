@@ -23,6 +23,12 @@ import (
 // selfIssued returns a CA's PEM and a server certificate for 127.0.0.1 signed by it: the shape of SBX0's exec
 // Route when its certificate is self-issued (the token grant's execCa).
 func selfIssued(t *testing.T) (caPEM []byte, server tls.Certificate) {
+	return selfIssuedFor(t, "")
+}
+
+// selfIssuedFor, with a dnsName, issues the server certificate to that name only (no IP SAN): a client must then
+// verify against the name, whatever address it connected to.
+func selfIssuedFor(t *testing.T, dnsName string) (caPEM []byte, server tls.Certificate) {
 	t.Helper()
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	caTpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test exec CA"},
@@ -37,6 +43,9 @@ func selfIssued(t *testing.T) (caPEM []byte, server tls.Certificate) {
 	srvTpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "127.0.0.1"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	if dnsName != "" {
+		srvTpl.Subject.CommonName, srvTpl.IPAddresses, srvTpl.DNSNames = dnsName, nil, []string{dnsName}
+	}
 	srvDER, err := x509.CreateCertificate(rand.Reader, srvTpl, ca, &srvKey.PublicKey, caKey)
 	if err != nil {
 		t.Fatal(err)
@@ -144,5 +153,42 @@ func TestTLSConfigFromEnv(t *testing.T) {
 		if _, err := configFrom(get(extra), read); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+// G30: with SBX_DIAL_ADDR the client connects to the given ip:port with no lookup, and still verifies the server as
+// SBX_ADDR's host. The host here does not resolve at all, so a lookup would fail the call.
+func TestDialAddrSkipsTheLookupAndVerifiesTheName(t *testing.T) {
+	const name = "exec.sbx0.invalid"
+	caPEM, cert := selfIssuedFor(t, name)
+	addr := serveTLS(t, cert)
+	_, port, _ := net.SplitHostPort(addr)
+	out, err := overTLS(t, config{addr: name + ":" + port, dialAddr: addr, tls: true, caPEM: caPEM})
+	if err != nil || out != "over tls\n" {
+		t.Fatalf("got %q, %v", out, err)
+	}
+}
+
+func TestDialAddrDoesNotTrustTheIP(t *testing.T) {
+	caPEM, cert := selfIssuedFor(t, "exec.sbx0.invalid")
+	addr := serveTLS(t, cert)
+	_, port, _ := net.SplitHostPort(addr)
+	if _, err := overTLS(t, config{addr: "other.sbx0.invalid:" + port, dialAddr: addr, tls: true, caPEM: caPEM}); err == nil {
+		t.Fatal("a certificate for another name was accepted")
+	}
+}
+
+func TestDialAddrFromEnv(t *testing.T) {
+	env := map[string]string{"SBX_ADDR": "h:443", "SBX_SANDBOX_ID": "s", "SBX_WORKSPACE_KEY": "k", "SBX_TOKEN": "t"}
+	get := func(k string) string { return env[k] }
+	for _, bad := range []string{"h:443", "10.0.0.1", "nope"} {
+		env["SBX_DIAL_ADDR"] = bad
+		if _, err := configFrom(get, nil); err == nil {
+			t.Errorf("SBX_DIAL_ADDR=%q accepted", bad)
+		}
+	}
+	env["SBX_DIAL_ADDR"] = "10.0.0.1:443"
+	if c, err := configFrom(get, nil); err != nil || c.dialAddr != "10.0.0.1:443" {
+		t.Fatalf("got %+v, %v", c, err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -34,6 +35,8 @@ microVM over the workspace, and nothing runs on the local machine. See docs/api/
 
 Environment: SBX_ADDR, SBX_SANDBOX_ID, SBX_WORKSPACE_KEY, and SBX_TOKEN or SBX_TOKEN_FILE.
 Optional: SBX_TIMEOUT (seconds per command, default 600), SBX_LOG (append one JSON line per call),
+SBX_DIAL_ADDR (ip:port to connect to instead of looking up SBX_ADDR's host: the caller resolved it once; TLS still
+verifies, and requests still name, SBX_ADDR's host),
 SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (with SBX_TLS: an extra CA, PEM,
 added to the system roots, e.g. a sandbox token grant's execCa).
 ` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed.
@@ -53,6 +56,9 @@ type config struct {
 	// system roots, never replacing them -- as sandbox-client's caBundle does.
 	tls   bool
 	caPEM []byte
+	// dialAddr (SBX_DIAL_ADDR), when set, is an ip:port the caller resolved SBX_ADDR's host to once, so a run of
+	// many calls does not look the name up per call (validation window 3, G30: every ~20 s stall was that lookup)
+	dialAddr string
 }
 
 func configFrom(getenv func(string) string, readFile func(string) ([]byte, error)) (config, error) {
@@ -99,6 +105,13 @@ func configFrom(getenv func(string) string, readFile func(string) ([]byte, error
 			return c, errors.New("SBX_CA_FILE holds no PEM certificate")
 		}
 		c.caPEM = b
+	}
+	if a := getenv("SBX_DIAL_ADDR"); a != "" {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil || net.ParseIP(host) == nil || port == "" {
+			return c, fmt.Errorf("SBX_DIAL_ADDR must be ip:port, got %q", a)
+		}
+		c.dialAddr = a
 	}
 	if s := getenv("SBX_TIMEOUT"); s != "" {
 		var n uint32
@@ -276,13 +289,27 @@ func parse(args []string) (op, command string, mode int, exit int, ok bool) {
 
 // dial keeps the Python client's 16 MiB receive limit; the worker cuts stdout at 8 MiB. Plaintext unless the
 // config asks for TLS (SBX0's exec Route); with TLS, the server is verified against the system roots plus the
-// config's extra CA, and its name against the address's host.
+// config's extra CA, and its name against the address's host. With a dial address the connection goes to that
+// ip:port with no lookup, while the TLS server name and the :authority stay SBX_ADDR's.
 func dial(c config) (*grpc.ClientConn, error) {
 	creds, err := transportCreds(c)
 	if err != nil {
 		return nil, err
 	}
-	return grpc.NewClient(c.addr, append(grpcOpts(), grpc.WithTransportCredentials(creds))...)
+	opts := append(grpcOpts(), grpc.WithTransportCredentials(creds))
+	if c.dialAddr == "" {
+		return grpc.NewClient(c.addr, opts...)
+	}
+	// grpc-go refuses an authority that differs from the TLS server name, which is the host without its port
+	return grpc.NewClient("passthrough:///"+c.dialAddr, append(opts, grpc.WithAuthority(serverName(c.addr)))...)
+}
+
+// serverName is the address's host, the name a TLS server certificate is verified against.
+func serverName(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
 
 func transportCreds(c config) (credentials.TransportCredentials, error) {
@@ -296,5 +323,5 @@ func transportCreds(c config) (credentials.TransportCredentials, error) {
 	if len(c.caPEM) > 0 && !roots.AppendCertsFromPEM(c.caPEM) {
 		return nil, errors.New("SBX_CA_FILE holds no PEM certificate")
 	}
-	return credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}), nil
+	return credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12, ServerName: serverName(c.addr)}), nil
 }
