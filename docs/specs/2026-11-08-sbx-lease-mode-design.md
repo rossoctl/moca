@@ -659,6 +659,8 @@ over the venv, two to five short commands and `analyze.py` again, at 9.5% duty.
   workload's VMs stay near 150 MiB; on cache-heavy workloads without free-page reporting, a lease is
   charged about its full guest RAM.
 
-E17a's sealed prediction is that criterion 2 fails on the import and the grep (§10). One more rung
-(`pycache` N = 128) checks whether host load changes that. The revisions in v0.2 follow from these
-findings and are tested in E17b.
+**At N = 128 (2026-11-12) the picture holds:** short commands 0.91, import 0.42, grep 0.01, `analyze.py`
+0.09, `pytest` 0.02. Neither arm's rung holds: heavy calls ran 10–20% slower than at N = 1 in both
+modes at about 15% host CPU. 79% of lease VMs peaked above 900 MiB. Criterion 2 therefore fails at
+both N, as E17a predicted, and E17a misses (moca-experiments `e17/results/E17A-REPORT.md`). The
+revisions in v0.2 follow from these findings and are tested in E17b.
