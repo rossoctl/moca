@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, constants, mkdirSync } from 'node:fs';
-import { open as openFile, readFile, rename, unlink } from 'node:fs/promises';
+import { link, open as openFile, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SubjectQueue } from './subject-document.js';
 
@@ -308,23 +308,40 @@ function checkStream(stream: string): void {
     throw new Error(`provenance stream must be policy or template/<id>, got ${stream}`);
 }
 
-/** Creates the file exclusively; an existing file with the same bytes is the same record. */
+/**
+ * Creates the file exactly once; an existing file with the same bytes is the same record. The bytes go
+ * to a temp file first (fsync'd), and `link` puts it at `path` atomically or fails with EEXIST, so a
+ * crash never leaves a torn file under a record's name. An existing file is read through its own
+ * handle (O_RDONLY | O_NOFOLLOW), never by a second lookup of the path.
+ */
 async function writeOnce(path: string, bytes: string | Buffer): Promise<void> {
-  let fh;
+  const want = Buffer.from(bytes);
+  const tmp = `${path}.${randomUUID()}.tmp`;
   try {
-    fh = await openFile(path, 'wx', 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    const have = await readFile(path);
-    if (!have.equals(Buffer.from(bytes)))
+    const fh = await openFile(tmp, 'wx', 0o600);
+    try {
+      await fh.writeFile(want);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    try {
+      await link(tmp, path);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    const rh = await openFile(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let have: Buffer;
+    try {
+      have = await rh.readFile();
+    } finally {
+      await rh.close();
+    }
+    if (!have.equals(want))
       throw new Error(`${path} exists with other bytes: refusing to overwrite`);
-    return;
-  }
-  try {
-    await fh.writeFile(bytes);
-    await fh.sync();
   } finally {
-    await fh.close();
+    await unlink(tmp).catch(() => undefined);
   }
 }
 

@@ -154,6 +154,21 @@ describe('ProvenanceStore', () => {
     expect(await s.putBlob(GATE)).toBe(d); // idempotent
   });
 
+  it('writes a file once, refuses other bytes under its name, and leaves no temp file', async () => {
+    const dir = freshDir();
+    const s = store(dir);
+    const d = await s.putBlob(GATE);
+    const blob = join(dir, 'blobs', d.slice('sha256:'.length));
+    // A file under the name with other bytes (not one the store wrote) is never overwritten.
+    writeFileSync(blob, 'other bytes');
+    await expect(s.putBlob(GATE)).rejects.toThrow(/exists with other bytes/);
+    expect(readFileSync(blob, 'utf8')).toBe('other bytes');
+    expect(readdirSync(join(dir, 'blobs')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    const dir2 = freshDir();
+    await onboard(store(dir2));
+    expect(readdirSync(join(dir2, 'records')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('survives a restart: a new store on the same directory continues the chain', async () => {
     const dir = freshDir();
     const { head } = await onboard(store(dir));
