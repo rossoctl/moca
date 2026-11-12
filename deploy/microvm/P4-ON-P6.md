@@ -120,11 +120,14 @@ manifest is refused at worker start. The worker re-hashes the kernel, rootfs, ag
 every start, and the memory file only with `SH_VERIFY_MEMFILE=1` (a full read of the guest's RAM).
 The verify cache (on by default; `SH_VERIFY_CACHE=0` turns it off, `SH_VERIFY_CACHE_PATH`
 or `SH_VERIFY_CACHE_DIR` moves it; SBX0 keeps it under `/srv/sbx/verify-cache`) spares the re-read:
-a file is hashed in full once on this host, and while its device, inode, size, mtime and ctime are
+a file is hashed in full once on this host, and while its device, inode, size and mtime are
 unchanged a later start trusts that hash. The trust point is a full check on this host: an entry is
 written only after a full hash matched the manifest, and a cached digest is still compared with the
-manifest at every start. ctime is in the identity because a tool can set mtime back (`touch -d`)
-but not ctime; a device number that changes across a reboot only means a re-hash.
+manifest at every start. ctime is not in the identity: every VM restore hardlinks the snapshot's
+files into its jail and chowns the links, and the teardown removes them, so ctime moves at every
+restore. The cost is that a same-size rewrite whose mtime is then set back (`touch -d`) is trusted;
+only the snapshot's owner (root) can write those files, and it can rewrite the cache as well. A
+device number that changes across a reboot only means a re-hash.
 `build-snapshot.sh` seeds the cache after it publishes, with the worker's own
 `microvm-worker -verify-snapshot OUT` (`--worker-bin`, default `/usr/local/bin/microvm-worker`;
 best-effort, it never fails a build), while the files are still in the page cache, so a fresh

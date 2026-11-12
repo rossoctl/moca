@@ -16,9 +16,14 @@ import (
 //
 //   - The trust point is a full check on this host: an entry is written only after a full
 //     hash matched the manifest's wanted digest. A mismatch is never recorded.
-//   - Identity is (dev, ino, size, mtime_ns, ctime_ns). ctime is there because userspace can
-//     set mtime (utimes, touch -d) but not ctime: any write, chmod, chown or rename-over
-//     moves ctime to "now". A file replaced at the same path has a new inode.
+//   - Identity is (dev, ino, size, mtime_ns). Any write moves mtime, and a file replaced at
+//     the same path has a new inode. ctime is deliberately not in it: every VM restore
+//     hardlinks the snapshot's files into its jail and chowns the links, and the teardown
+//     removes them; link, chown and unlink each move the shared inode's ctime, so a ctime
+//     check would miss on every start after the first restore. The cost: a writer who
+//     changes a file without changing its size and then sets its mtime back (utimes,
+//     touch -d) is trusted. Snapshot files are written only by the snapshot's owner (root
+//     on a worker host), who can rewrite this cache file just as well.
 //   - A cached entry is used only if its identity matches the file AND its sha256 equals
 //     the manifest's wanted digest, so a forged or stale entry cannot make a drifted
 //     manifest pass: the comparison against the manifest is still made, every start.
@@ -33,7 +38,8 @@ import (
 // file because writes are a temp file + fsync + rename in the cache's own directory.
 
 // verifyCacheSchema is the cache file's "schema"; any other value reads as an empty cache.
-const verifyCacheSchema = 1
+// Schema 1 also keyed on ctime; a schema 1 file therefore means one full check.
+const verifyCacheSchema = 2
 
 // fileIdentity is what must be unchanged for a recorded hash to be trusted.
 type fileIdentity struct {
@@ -41,7 +47,6 @@ type fileIdentity struct {
 	Ino     uint64 `json:"ino"`
 	Size    int64  `json:"size"`
 	MtimeNs int64  `json:"mtime_ns"`
-	CtimeNs int64  `json:"ctime_ns"`
 }
 
 type verifyCacheEntry struct {
@@ -58,7 +63,7 @@ type verifyCacheFile struct {
 // (and interfere with) the full hashes.
 var verifyHashFile = fileSHA256
 
-// verifyCacheRacyWindow: a file whose ctime is this close to now is not recorded. File
+// verifyCacheRacyWindow: a file whose mtime is this close to now is not recorded. File
 // timestamps come from a coarse clock (a kernel tick), so a write landing in the same tick
 // as the hash could leave the identity unchanged; git's "racy index" problem, avoided the
 // same way. Tests set it to 0.
@@ -149,7 +154,7 @@ func (c *verifyCache) check(path, want string) (got string, cached bool, err err
 			return want, true, nil
 		}
 		if c.settle {
-			if wait := verifyCacheRacyWindow - time.Since(time.Unix(0, before.CtimeNs)); wait > 0 {
+			if wait := verifyCacheRacyWindow - time.Since(time.Unix(0, before.MtimeNs)); wait > 0 {
 				time.Sleep(wait + 10*time.Millisecond)
 				before, ok = identityOf(path)
 			}
@@ -166,7 +171,7 @@ func (c *verifyCache) check(path, want string) (got string, cached bool, err err
 		c.forget(path) // never record a mismatch, nor keep an entry for a drifted file
 	case !ok || !okAfter || before != after:
 		c.forget(path) // changed (or unstat-able) across the hash: hashed, but not recorded
-	case time.Since(time.Unix(0, after.CtimeNs)) < verifyCacheRacyWindow:
+	case time.Since(time.Unix(0, after.MtimeNs)) < verifyCacheRacyWindow:
 		c.forget(path) // too recent to tell a later same-tick write apart
 	default:
 		if e, hit := c.entries[path]; !hit || e.fileIdentity != after || e.SHA256 != got {

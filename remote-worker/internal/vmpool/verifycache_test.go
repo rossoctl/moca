@@ -134,7 +134,7 @@ func TestVerifyCacheFirstVerifyHashesAndRecords(t *testing.T) {
 			t.Errorf("%s hashed %d times on the first verify, want 1", f, got[f])
 		}
 		e, ok := s.entryFor(t, f)
-		if !ok || e.SHA256 == "" || e.Ino == 0 || e.Size == 0 || e.CtimeNs == 0 || e.MtimeNs == 0 {
+		if !ok || e.SHA256 == "" || e.Ino == 0 || e.Size == 0 || e.MtimeNs == 0 {
 			t.Errorf("%s: entry %+v (present %v)", f, e, ok)
 		}
 	}
@@ -222,17 +222,9 @@ func TestVerifyCacheSameInodeRewrittenIsRehashed(t *testing.T) {
 			p := filepath.Join(s.img, "rootfs")
 			before, _ := identityOf(p)
 			rewrite(t, p, tc.body)
-			// Set mtime back to what it was (touch -d): ctime still moves.
-			old := time.Unix(0, before.MtimeNs)
-			if err := os.Chtimes(p, old, old); err != nil {
-				t.Fatal(err)
-			}
 			after, _ := identityOf(p)
-			if after.Ino != before.Ino || after.MtimeNs != before.MtimeNs {
+			if after.Ino != before.Ino || after.MtimeNs == before.MtimeNs {
 				t.Fatalf("setup: ino %d→%d mtime %d→%d", before.Ino, after.Ino, before.MtimeNs, after.MtimeNs)
-			}
-			if after.CtimeNs == before.CtimeNs {
-				t.Fatalf("setup: ctime did not move")
 			}
 			err := s.verify()
 			if tc.wantErr != (err != nil) {
@@ -255,6 +247,75 @@ func TestVerifyCacheSameInodeRewrittenIsRehashed(t *testing.T) {
 	}
 }
 
+// A VM restore hardlinks each snapshot file into the VM's jail and chowns the link, and
+// the teardown removes it: none of that changes the file's content, and the next start
+// must still find every file unchanged.
+func TestVerifyCacheJailLinkChownAndUnlinkKeepEntries(t *testing.T) {
+	h := installCountingHasher(t)
+	s := newCachedSnapshot(t)
+	if err := s.verify(); err != nil {
+		t.Fatal(err)
+	}
+	jail := t.TempDir()
+	for _, f := range []string{"kernel", "rootfs", "agent", "vmstate", "memfile"} {
+		dst := filepath.Join(jail, f)
+		if err := os.Link(filepath.Join(s.img, f), dst); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(dst, os.Getuid(), os.Getgid()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.take()
+	s.logs = nil
+	if err := s.verify(); err != nil {
+		t.Fatalf("verify with the jail links in place: %v", err)
+	}
+	for _, f := range []string{"kernel", "rootfs", "agent", "vmstate", "memfile"} {
+		if err := os.Remove(filepath.Join(jail, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.verify(); err != nil {
+		t.Fatalf("verify after the teardown: %v", err)
+	}
+	if got := h.take(); len(got) != 0 {
+		t.Errorf("hashed %v across a restore and its teardown, want nothing", got)
+	}
+	for _, l := range s.logs {
+		if !strings.Contains(l, "4 of 4 snapshot files unchanged") {
+			t.Errorf("log %q, want 4 of 4 unchanged", l)
+		}
+	}
+}
+
+// The identity's stated limit (verifycache.go): a same-size rewrite whose mtime is then set
+// back is trusted. Pinned here so that a change to it is a decision, not an accident.
+func TestVerifyCacheSameSizeRewriteWithMtimeSetBackIsTrusted(t *testing.T) {
+	h := installCountingHasher(t)
+	s := newCachedSnapshot(t)
+	if err := s.verify(); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(s.img, "rootfs")
+	before, _ := identityOf(p)
+	rewrite(t, p, "ROOTFS-BYTES")
+	old := time.Unix(0, before.MtimeNs)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := identityOf(p); after != before {
+		t.Fatalf("setup: identity %+v, want %+v", after, before)
+	}
+	h.take()
+	if err := s.verify(); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got := h.take(); got["rootfs"] != 0 {
+		t.Errorf("rootfs hashed %d times; the limit changed, update verifycache.go's comment", got["rootfs"])
+	}
+}
+
 func TestVerifyCacheForgedEntryIsNotTrusted(t *testing.T) {
 	h := installCountingHasher(t)
 	s := newCachedSnapshot(t)
@@ -268,7 +329,7 @@ func TestVerifyCacheForgedEntryIsNotTrusted(t *testing.T) {
 	// on a stale identity (fails the identity match), and a wrong digest on the right
 	// identity (fails the manifest comparison).
 	for _, forged := range []verifyCacheEntry{
-		{fileIdentity: fileIdentity{Dev: id.Dev, Ino: id.Ino, Size: id.Size, MtimeNs: id.MtimeNs, CtimeNs: id.CtimeNs - 1}, SHA256: s.m.RootfsSHA256},
+		{fileIdentity: fileIdentity{Dev: id.Dev, Ino: id.Ino, Size: id.Size, MtimeNs: id.MtimeNs - 1}, SHA256: s.m.RootfsSHA256},
 		{fileIdentity: id, SHA256: "sha256:0000"},
 	} {
 		if err := writeVerifyCache(s.cache, map[string]verifyCacheEntry{filepath.Join(real, "rootfs"): forged}); err != nil {
@@ -317,8 +378,8 @@ func TestVerifyCacheUnusableCacheMeansFullCheck(t *testing.T) {
 		{"corrupt", func(t *testing.T, p string) { mustWrite(t, p, "{not json", 0o600) }, "unparsable"},
 		{"wrong schema", func(t *testing.T, p string) {
 			b, _ := os.ReadFile(p)
-			mustWrite(t, p, strings.Replace(string(b), `"schema": 1`, `"schema": 2`, 1), 0o600)
-		}, "schema 2"},
+			mustWrite(t, p, strings.Replace(string(b), `"schema": 2`, `"schema": 3`, 1), 0o600)
+		}, "schema 3"},
 		{"mode 0644", func(t *testing.T, p string) {
 			if err := os.Chmod(p, 0o644); err != nil {
 				t.Fatal(err)
@@ -489,14 +550,14 @@ func TestVerifyCacheFileFormat(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw.Schema != 1 || len(raw.Entries) != 4 {
+	if raw.Schema != 2 || len(raw.Entries) != 4 {
 		t.Fatalf("schema %d, %d entries", raw.Schema, len(raw.Entries))
 	}
 	for p, e := range raw.Entries {
 		if !filepath.IsAbs(p) {
 			t.Errorf("key %q is not absolute", p)
 		}
-		for _, k := range []string{"dev", "ino", "size", "mtime_ns", "ctime_ns", "sha256"} {
+		for _, k := range []string{"dev", "ino", "size", "mtime_ns", "sha256"} {
 			if _, ok := e[k]; !ok {
 				t.Errorf("%s: no %s", p, k)
 			}

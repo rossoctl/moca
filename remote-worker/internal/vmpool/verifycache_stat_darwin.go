@@ -8,7 +8,7 @@ import (
 )
 
 // statIdentity reads a file's identity for the verify cache (verifycache.go). Darwin names
-// the timestamps Mtimespec and Ctimespec.
+// the timestamp Mtimespec.
 func statIdentity(fi os.FileInfo) (fileIdentity, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -19,7 +19,6 @@ func statIdentity(fi os.FileInfo) (fileIdentity, bool) {
 		Ino:     st.Ino,
 		Size:    fi.Size(),
 		MtimeNs: st.Mtimespec.Nano(),
-		CtimeNs: st.Ctimespec.Nano(),
 	}, true
 }
 

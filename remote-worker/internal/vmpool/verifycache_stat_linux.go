@@ -8,7 +8,7 @@ import (
 )
 
 // statIdentity reads a file's identity for the verify cache (verifycache.go). Linux names
-// the timestamps Mtim and Ctim.
+// the timestamp Mtim.
 func statIdentity(fi os.FileInfo) (fileIdentity, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -19,7 +19,6 @@ func statIdentity(fi os.FileInfo) (fileIdentity, bool) {
 		Ino:     uint64(st.Ino), // uint32 on some arches
 		Size:    fi.Size(),
 		MtimeNs: st.Mtim.Nano(),
-		CtimeNs: st.Ctim.Nano(),
 	}, true
 }
 
