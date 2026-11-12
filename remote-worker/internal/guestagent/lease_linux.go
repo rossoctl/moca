@@ -111,12 +111,15 @@ var (
 	memInfoPath          = "/proc/meminfo"
 )
 
-// protectAgentFromOOM sets the agent's oom_score_adj to -1000, so the OOM killer never
-// picks it: in a lease guest the agent is PID 1, and its death panics the guest and
-// ends the lease. A fork inherits the value, so the shim puts each Exec's back to 0
-// (ShimMain), or an OOM would find nothing it may kill. Best effort: on a failure the
-// agent stays a candidate, and memory.max still confines an Exec's own OOM to its
-// cgroup, so the failure is logged and the lease goes on.
+// protectAgentFromOOM sets the agent's oom_score_adj to -1000. It is defence in depth,
+// not what keeps the agent alive: in a lease guest the agent is PID 1, and the kernel
+// never OOM-kills global init (is_global_init) whatever its score. The value's real
+// effect is through inheritance: every process the agent forks starts at -1000, and so
+// would never be picked either. That is why the shim puts each Exec's back to 0
+// (ShimMain) while it still holds CAP_SYS_RESOURCE; without that reset an OOM would
+// find nothing it may kill. Do not drop the shim's reset on the strength of this
+// value: the reset is load-bearing, this is not. Best effort: a failure is logged and
+// the lease goes on, since memory.max still confines an Exec's own OOM to its cgroup.
 func protectAgentFromOOM() {
 	if err := os.WriteFile(agentOomScoreAdjPath, []byte("-1000"), 0); err != nil {
 		log.Printf("guest-agent: lease: oom_score_adj -1000: %v; the agent stays an OOM candidate", err)

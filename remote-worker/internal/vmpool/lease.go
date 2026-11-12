@@ -440,7 +440,12 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		return Result{}, &LeaseEndedError{Reason: cut}
 	}
 	// cancel lets the lease sweep, or endLeaseWaiting, cut this Exec once it is inside
-	// Run (sweepLeasesLocked).
+	// Run (sweepLeasesLocked). A cut that lands after the unlock below but before vm.Run
+	// starts is the in-flight case, not R12's: running is already true, so the cutter
+	// cancels execCtx, and Run starts on a cancelled context. The request may still
+	// reach the guest before the connection closes, which is what spec §4 allows for an
+	// Exec in flight when its lease is cut; the unwind below then ends the lease with the
+	// cut's reason. Only a cut set before this point is kept off Run (the check above).
 	execCtx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 	l.running, l.cancel = true, cancel
@@ -727,6 +732,10 @@ func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) Leas
 // reads again, which is how the reclaim repeats until the target is met. An unreadable
 // MemAvailable drives no reclaim: ending a user's lease on "cannot tell" is the wrong
 // way to fail, and the host floor (hostFloorLocked) fails closed for that case instead.
+//
+// The cap is per call, not per sweep: a lease tick ends the leases sweepLeasesLocked
+// finds due, uncapped, and this call then ends up to MaxReclaimsPerScan more; each
+// admission's call (evictForAdmissionLocked) may end up to MaxReclaimsPerScan again.
 //
 // A LEASE WITH AN EXEC IN FLIGHT IS NEVER RECLAIMED FOR MEMORY. A lease is taken only
 // after a non-blocking send on its run's gate succeeds, as the lease sweep does: a held

@@ -305,13 +305,6 @@ func (p *pool) admitLocked(newRun bool) error {
 	return p.admitAtLocked(newRun, p.perVMBytes())
 }
 
-// admitLeaseLocked is admitLocked for a new lease VM: the same two ceilings, with the VM
-// priced at LeaseStartBytes rather than PerVMBytes (spec §6: a lease VM is charged its
-// starting estimate until it is measured). Caller holds p.mu.
-func (p *pool) admitLeaseLocked(newRun bool) error {
-	return p.admitAtLocked(newRun, p.cfg.LeaseStartBytes)
-}
-
 // admitAtLocked is admitLocked for one VM priced at price. Caller holds p.mu.
 func (p *pool) admitAtLocked(newRun bool, price int64) error {
 	if unparked := p.unparkedRunsLocked(); newRun && unparked >= p.cfg.MaxRuns {

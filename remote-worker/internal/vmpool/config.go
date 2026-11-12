@@ -118,7 +118,12 @@ type Config struct {
 	WorkspaceIdle       time.Duration // no Exec for this long -> delete the workspace too
 	ReplenishDelay      time.Duration // grace before refilling a popped slot
 	ReclaimScanInterval time.Duration // idle-host sweep tick
-	MaxReclaimsPerScan  int           // VMs destroyed per sweep; rate-limits munmap
+	// MaxReclaimsPerScan rate-limits munmap. It caps the standbys one per-Exec sweep
+	// destroys, and, separately, the leases one reclaimLeasesLocked call ends for memory
+	// (per lease tick, and per admission). It does not cap a lease tick's total: the
+	// leases due for their own clocks (idle, max_duration, grace_limit, ...) end
+	// uncapped, and memory reclaim adds up to this many on top.
+	MaxReclaimsPerScan int
 
 	// ManifestFeatures is the loaded snapshot manifest's Features, passed by the
 	// caller. LeaseEnabled is NOT a setting: New computes it (LeaseSupported) from VMM

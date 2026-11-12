@@ -1380,7 +1380,8 @@ func (v *firecrackerVM) Reap() error {
 		// whether reuse is safe, and cmd.Wait above should already have emptied it -- measured at
 		// 0.04-0.07 ms, i.e. it never fires. The phase names are kept so a run's aggregate tooling
 		// is unchanged: cgroupwait_us still means the same thing, and cgrouprmdir_us now measures
-		// the RELEASE, which is expected to be ~0 because it is a slice append.
+		// the RELEASE, which is expected to be ~0 because it is a slice append -- except for a
+		// lease VM, whose cgroup is retired below: for it cgrouprmdir_us is a real rmdir again.
 		cgWaitStart := time.Now()
 		waitForCgroupEmpty(v.cgroups.abs(v.cgroupRel))
 		phCgroupWait = time.Since(cgWaitStart)
