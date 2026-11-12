@@ -2,6 +2,7 @@ package vmpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -346,16 +347,29 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 		if err != nil {
 			return Result{}, err
 		}
-		if mode != ModePerExec {
+		switch {
+		case mode != ModePerExec:
 			// The host's deadline moves LeaseTimeoutSlack past the budget, so the guest's
 			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). A timer
 			// that has already fired stays fired: the Exec is timed out either way.
 			if tm.Stop() {
 				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
 			}
-			return p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline)
-		}
-		if endFirst {
+			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline)
+			if !errors.Is(err, errServePerExec) {
+				return res, err
+			}
+			// A same-epoch downgrade to per-exec landed while the Exec queued (execLease
+			// ended the lease, mode_change): it runs per-Exec below, on the per-Exec
+			// budget, without the slack.
+			if tm.Stop() {
+				if left := deadline.Sub(p.clk.Now()); left > 0 {
+					tm = p.clk.AfterFunc(left, fire)
+				} else {
+					fire()
+				}
+			}
+		case endFirst:
 			// A per-Exec Exec on a key that holds a lease: the lease ends (mode_change)
 			// under the gate BEFORE this Exec acquires, so its VM is never restored
 			// beside a live lease VM (Review Focus 2).

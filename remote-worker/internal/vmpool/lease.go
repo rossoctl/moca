@@ -30,8 +30,10 @@ import (
 // lease Exec (PR #763 review, ruling R8b). The guest's own timeout, armed from what is left
 // of the budget when Run starts (leaseGuestTimeoutS), fires first: the guest kills the
 // Exec's cgroup and answers, and the lease is kept. Only a guest that has not answered
-// within the slack too is taken for dead. Per-Exec Execs get no slack.
-const LeaseTimeoutSlack = 5 * time.Second
+// within the slack too is taken for dead. 8 s (ruling R21): the guest's timeout is rounded
+// up by up to 1 s, and its teardown may take up to its 5 s bound before it answers. Per-Exec
+// Execs get no slack.
+const LeaseTimeoutSlack = 8 * time.Second
 
 // leaseGuestTimeoutS is the timeout_s a lease Exec's guest gets when Run starts at now:
 // what is left of the budget until deadline, rounded up to whole seconds, and at least 1 s.
@@ -43,6 +45,11 @@ func leaseGuestTimeoutS(deadline, now time.Time) uint32 {
 	}
 	return uint32((left + time.Second - 1) / time.Second)
 }
+
+// errServePerExec is execLease's answer when, under the gate, the Exec's served mode is
+// per-exec: a same-epoch SetMode(per-exec) landed while it queued. The lease, if any, has
+// ended (mode_change) and the gate is released; ExecPhased runs the Exec per-Exec.
+var errServePerExec = errors.New("vmpool: serve per-Exec")
 
 // vmLease is a run's held VM in lease mode. Every field is guarded by pool.mu, but
 // only the holder of the run's execGate may detach it (endLeaseLocked).
@@ -267,8 +274,17 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		return Result{}, p.refuse(RefuseStaleMode, "workspace_key %q: Exec mode_epoch %d is below the stored %d",
 			key, e.ModeEpoch, s.Epoch)
 	}
+	// The served mode, recomputed under the gate (review M1): a same-epoch SetMode that
+	// landed while this Exec queued lowers it, as effectiveModeLocked would have, so the
+	// Exec neither re-levels the lease back up nor runs in a lease after a downgrade to
+	// per-exec.
+	served := mode
+	if s := rp.state; s.Known && e.ModeEpoch == s.Epoch {
+		served = min(e.Mode, s.Mode)
+	}
 	var v *leaseVictim
 	var cut LeaseEndReason
+	perExec := false
 	if closed {
 		// Close cannot take a gate this Exec holds, so this lease VM is this Exec's to
 		// destroy, or it would outlive the pool.
@@ -281,11 +297,16 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		// spec §11), and not in a fresh one.
 		cut = l.cut
 		v = p.endLeaseLocked(rp, cut)
+	} else if served == ModePerExec {
+		// Downgraded to per-exec at this Exec's epoch while it queued: the lease ends
+		// (mode_change) under this gate, before the Exec runs per-Exec (ExecPhased).
+		perExec = true
+		v = p.endLeaseLocked(rp, LeaseEndModeChange) // nil without a lease
 	} else if l != nil {
 		// A level change carried by this Exec's epoch applies first, under the gate and
 		// before Run, so the grace check below and the sweep from now on use the new
 		// level's maximum duration (ruling R18).
-		p.relevelLeaseForExecLocked(rp, l, mode)
+		p.relevelLeaseForExecLocked(rp, l, served)
 		if !p.clk.Now().Before(p.leaseGraceDeadline(l)) {
 			// Past the grace limit, and the lease sweep has not run since: this Exec would
 			// run only to be cut at the next tick. The lease ends here, and the Exec starts
@@ -310,6 +331,9 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 	if cut != "" {
 		return Result{}, &LeaseEndedError{Reason: cut}
 	}
+	if perExec {
+		return Result{}, errServePerExec // the deferred receive releases the gate
+	}
 
 	var vm VM
 	if l != nil {
@@ -323,7 +347,7 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		}
 	} else {
 		var err error
-		if vm, err = p.startLease(ctx, runCtx, key, rp, e, mode, ph, timedOut, timeoutS); err != nil {
+		if vm, err = p.startLease(ctx, runCtx, key, rp, e, served, ph, timedOut, timeoutS); err != nil {
 			return Result{}, err
 		}
 	}

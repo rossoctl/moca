@@ -1022,3 +1022,69 @@ func TestSameEpochDowngradeIsNotUndoneByAnExec(t *testing.T) {
 		t.Fatalf("fresh lease mode = %s, want %s", l.mode, ModeLease)
 	}
 }
+
+// Review M1 (F10's race): a same-epoch SetMode that lands while a lease Exec is queued on
+// the gate is not undone by that Exec. Its served mode is recomputed under the gate as
+// the lower of its own and the stored one, and that mode drives the re-level and the
+// per-Exec/lease decision.
+func TestSameEpochDowngradeWhileQueued(t *testing.T) {
+	t.Run("to lease: no re-level up", func(t *testing.T) {
+		p, lc, _ := leasePool(t, nil)
+		mustSetMode(t, p, "k", ModeLeaseProcesses, 3)
+		l2 := Exec{Command: "l2", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 3}
+		entered, release := blockRuns(lc)
+		first := execAsync(p, "k", l2)
+		recvWithin(t, entered, "the first Exec's Run")
+		queued := execAsync(p, "k", l2)
+		waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // routed at lease+processes, on the gate
+		mustSetMode(t, p, "k", ModeLease, 3)
+		if l := leaseAlive(t, p, "after the downgrade"); l.mode != ModeLease {
+			t.Fatalf("lease mode after SetMode(lease) = %s, want %s", l.mode, ModeLease)
+		}
+		close(release)
+		for _, errc := range []<-chan error{first, queued} {
+			if err := recvWithin(t, errc, "an Exec"); err != nil {
+				t.Fatalf("Exec: %v", err)
+			}
+		}
+		if l := leaseAlive(t, p, "after the queued Exec"); l.mode != ModeLease {
+			t.Fatalf("lease mode after the queued Exec = %s, want %s: it undid the downgrade", l.mode, ModeLease)
+		}
+		if n := lc.count("run vm-1"); n != 2 {
+			t.Fatalf("Runs in vm-1 = %d, want 2: the queued Exec runs in the same lease", n)
+		}
+	})
+	t.Run("to per-exec: the lease ends and the Exec runs per-Exec", func(t *testing.T) {
+		p, lc, _ := leasePool(t, nil)
+		mustSetMode(t, p, "k", ModeLease, 3)
+		e := Exec{Command: "lease", TimeoutS: 30, Mode: ModeLease, ModeEpoch: 3}
+		entered, release := blockRuns(lc)
+		first := execAsync(p, "k", e)
+		recvWithin(t, entered, "the first Exec's Run")
+		queued := execAsync(p, "k", e)
+		waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+		setMode := make(chan error, 1)
+		go func() { setMode <- p.SetMode("k", ModePerExec, 3) }() // waits for the gate
+		waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
+		close(release)
+		for _, errc := range []<-chan error{first, queued, setMode} {
+			if err := recvWithin(t, errc, "an Exec or the SetMode"); err != nil {
+				t.Fatalf("%v", err)
+			}
+		}
+		cmds := lc.commands()
+		if len(cmds) != 2 || !cmds[0].Lease || cmds[1].Lease {
+			t.Fatalf("Commands = %+v, want the first as a lease Exec and the queued one per-Exec", cmds)
+		}
+		if liveLease(p, "k") != nil {
+			t.Fatal("a lease is live after a downgrade to per-exec")
+		}
+		if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending == nil || s.Pending.Reason != LeaseEndModeChange {
+			t.Fatalf("state = %+v, want the lease's end pending as mode_change", s)
+		}
+		if st := p.Stats(); st.LeaseEnds[LeaseEndModeChange] != 1 || leaseEndTotal(st) != 1 {
+			t.Fatalf("LeaseEnds = %v, want exactly one mode_change", st.LeaseEnds)
+		}
+		waitFor(t, func() bool { return lc.liveCount() == 0 })
+	})
+}

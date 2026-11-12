@@ -167,7 +167,9 @@ later with cgroup v2 enabled, and a `cgroup2` mount in init. The current init mo
 
 The guest agent runs each Exec in its own cgroup v2 inside the guest. At the end of the Exec, whether
 it exits, times out or is aborted, the agent writes `cgroup.kill` for that cgroup and waits until it is
-empty before it sends `End`. `setsid`, double forks and re-parenting to init cannot escape a cgroup,
+empty before it sends `End`. On a timeout the agent kills the Exec's cgroup and reports the timeout
+as a `timeout:<n>` error frame instead of `End`; the host keeps the lease only for that frame (§4.1).
+`setsid`, double forks and re-parenting to init cannot escape a cgroup,
 which is why a process group is not enough. This holds only for an Exec that cannot write the cgroup
 tree or reach the agent, so it depends on the privilege model in §3.3. A `process_start` process gets its own cgroup under a
 `tracked/` parent that the end-of-Exec kill does not touch.
