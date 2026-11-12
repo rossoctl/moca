@@ -1734,12 +1734,12 @@ pass "oidc credential: a present secret gets a LoadCredential= drop-in; the valu
 # The secret as an env line is refused (credentialValue refuses both at once).
 echo 'SH_OIDC_CLIENT_SECRET=envline' >>"$OD/control-plane.env"
 if od_err=$(od_run 2>&1); then fail "an env-line SH_OIDC_CLIENT_SECRET was accepted"; fi
-sed -i '/^SH_OIDC_CLIENT_SECRET=/d' "$OD/control-plane.env"
+sed -i.bak '/^SH_OIDC_CLIENT_SECRET=/d' "$OD/control-plane.env" && rm -f "$OD/control-plane.env.bak"
 pass "oidc credential: the secret as an env line refuses"
 
 # Secret gone, provider back to the default -> the drop-in is removed.
 rm "$OD/credentials/oidc-client-secret"
-sed -i '/^SH_IDENTITY_PROVIDER=/d' "$OD/control-plane.env"
+sed -i.bak '/^SH_IDENTITY_PROVIDER=/d' "$OD/control-plane.env" && rm -f "$OD/control-plane.env.bak"
 od_run || fail "ensure_oidc_credential refused after the secret went"
 [[ ! -e "$OD_DROPIN" ]] || fail "the drop-in outlived the secret file"
 pass "oidc credential: the drop-in is removed when the secret goes"
