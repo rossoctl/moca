@@ -1,5 +1,9 @@
+import { mkdtempSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
+import { ProvenanceStore, recordDigest, verifyExport } from '../src/provenance.js';
 import { publicKeyFromBase64 } from '../src/token.js';
 import { verifySandboxToken } from '../src/sandbox-token.js';
 import { admin, alice, bob, codeOf, ctx, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
@@ -326,5 +330,94 @@ describe('sandbox handlers (SBX0 §5)', () => {
       console.error = orig;
     }
     expect(errors).toHaveLength(1);
+  });
+});
+
+describe('every link of a sandbox is a record digest (template lifecycle §7.1)', () => {
+  type Body = Record<string, unknown>;
+  const withStore = () => {
+    let nowMs = NOW_MS;
+    const dir = mkdtempSync(join(tmpdir(), 'cp-sbx-provenance-'));
+    const provenance = new ProvenanceStore({ dir, now: () => nowMs });
+    const d = sbxDeps({ provenance, now: () => nowMs });
+    return { d, dir, provenance, advance: (ms: number) => (nowMs += ms) };
+  };
+  const janitor = (d: TestDeps) => HANDLERS.janitorSandboxes!(ctx({ janitorAuthorized: true }), d);
+
+  it('records nothing and changes nothing without a provenance store', async () => {
+    const d = sbxDeps();
+    expect(d.provenance).toBeUndefined();
+    const { id } = await create(d);
+    await HANDLERS.deleteSandbox!(on(alice, id), d);
+    expect((await janitor(d)).status).toBe(200);
+  });
+
+  it("puts a sandbox's create and delete on its template's chain, each prev the record before", async () => {
+    const { d, provenance } = withStore();
+    const sb = await create(d);
+    const other = await create(d, bob, { template: 'node22' });
+    await HANDLERS.deleteSandbox!(on(alice, sb.id), d);
+    await HANDLERS.deleteSandbox!(on(alice, sb.id), d); // idempotent: recorded once
+    const chain = await provenance.chain('template/default');
+    expect(chain.map((r) => [r.kind, r.subject, (r.body as Body).state])).toEqual([
+      ['sandbox', alice.sub, 'created'],
+      ['sandbox', alice.sub, 'terminated'],
+    ]);
+    expect(chain[0].body).toEqual({
+      sandboxId: sb.id,
+      buildId: null,
+      templateManifestHash: null,
+      // No activation lease exists for a fixed template; a lease, when one does, is a digest.
+      lease: null,
+      state: 'created',
+      expiresAt: sb.expiresAt,
+    });
+    expect(chain[1].body).toEqual({
+      sandboxId: sb.id,
+      buildId: null,
+      state: 'terminated',
+      reason: 'deleted',
+      expiresAt: sb.expiresAt,
+      endedAt: NOW,
+    });
+    expect(chain[1].prev).toBe(recordDigest(chain[0]));
+    // Another template's sandbox is on its own chain.
+    expect((await provenance.chain('template/node22')).map((r) => r.body.sandboxId)).toEqual([
+      other.id,
+    ]);
+    const doc = JSON.parse(
+      JSON.stringify(await provenance.export(['template/default', 'template/node22'])),
+    );
+    expect(verifyExport(doc)).toMatchObject({ ok: true, errors: [] });
+  });
+
+  it("records an expired sandbox's end once, from the janitor's sweep, with its true end", async () => {
+    const { d, provenance, advance } = withStore();
+    const sb = await create(d);
+    const ends = async () =>
+      (await provenance.chain('template/default')).filter(
+        (r) => (r.body as Body).state === 'terminated',
+      );
+    await janitor(d);
+    expect(await ends()).toHaveLength(0);
+    advance(8 * DAY_MS);
+    await janitor(d);
+    await janitor(d);
+    // A delete after the expiry reports it expired and writes no second end.
+    await HANDLERS.deleteSandbox!(on(alice, sb.id), d);
+    const e = await ends();
+    expect(e).toHaveLength(1);
+    expect(e[0]).toMatchObject({
+      subject: 'janitor',
+      body: { sandboxId: sb.id, reason: 'expired', expiresAt: sb.expiresAt },
+    });
+    expect(e[0].body).not.toHaveProperty('endedAt');
+  });
+
+  it('leaves the sandbox store as it was: the records live only in the provenance directory', async () => {
+    const { d, dir } = withStore();
+    await create(d);
+    expect(readdirSync(join(dir, 'records'))).toHaveLength(1);
+    expect(readdirSync(join(dir, 'heads'))).toHaveLength(1);
   });
 });

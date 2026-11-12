@@ -65,6 +65,7 @@ import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
+import type { ProvenanceStore } from './provenance.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
@@ -206,6 +207,12 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /**
+   * The template provenance store (template lifecycle spec §7). Absent, nothing is recorded and no
+   * handler's behavior changes; when present, a sandbox's create and end are recorded on its
+   * template's chain.
+   */
+  provenance?: ProvenanceStore;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */

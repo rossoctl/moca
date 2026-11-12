@@ -124,6 +124,80 @@ function parseLabels(raw: unknown): Record<string, string> {
 const audit = (deps: CpDeps, subject: string, sandboxId: string, decision: string) =>
   auditBestEffort(deps, decision, sandboxId, { subject, sandboxId, decision });
 
+/**
+ * A sandbox's start on its template's chain (template lifecycle spec §7.1). Templates here are the
+ * fixed SH_SANDBOX_TEMPLATES list, with no builds and no activation leases, so `buildId`,
+ * `templateManifestHash` and `lease` are null; the template store and activation fill them in, the
+ * lease as the digest of the `activate` record it came from. A no-op without a provenance store.
+ */
+async function sandboxCreated(deps: CpDeps, rec: SandboxRecord, subject: string): Promise<void> {
+  if (!deps.provenance) return;
+  await deps.provenance.append({
+    stream: `template/${rec.template}`,
+    kind: 'sandbox',
+    subject,
+    body: {
+      sandboxId: rec.id,
+      buildId: null,
+      templateManifestHash: null,
+      lease: null,
+      state: 'created',
+      expiresAt: rec.expiresAt,
+    },
+  });
+}
+
+/**
+ * A sandbox's end on its template's chain (§7.1): `deleted` when DELETE ends it, `expired` when it
+ * is first seen past its expiresAt (expiry is computed, not an event, so that record comes when it
+ * is noticed; its body's expiresAt is the true end).
+ */
+async function sandboxEnded(
+  deps: CpDeps,
+  rec: SandboxRecord,
+  subject: string,
+  reason: 'deleted' | 'expired',
+  nowS: number,
+): Promise<void> {
+  if (!deps.provenance) return;
+  await deps.provenance.append({
+    stream: `template/${rec.template}`,
+    kind: 'sandbox',
+    subject,
+    body: {
+      sandboxId: rec.id,
+      buildId: null,
+      state: 'terminated',
+      reason,
+      expiresAt: rec.expiresAt,
+      ...(reason === 'deleted' ? { endedAt: nowS } : {}),
+    },
+  });
+}
+
+/**
+ * The `expired` end records (§7.1), written when expiry is first noticed: the janitor's sweep reads
+ * every sandbox, so it is where an expired one is seen. Once per sandbox: a template chain already
+ * holding this sandbox's terminated record is skipped (the chain is the marker, no store field).
+ */
+async function recordExpiries(deps: CpDeps, recs: SandboxRecord[], nowS: number): Promise<void> {
+  if (!deps.provenance) return;
+  const expired = recs.filter((r) => r.deletedAt === undefined && nowS >= r.expiresAt);
+  const byTemplate = new Map<string, SandboxRecord[]>();
+  for (const r of expired) byTemplate.set(r.template, [...(byTemplate.get(r.template) ?? []), r]);
+  for (const [template, rs] of byTemplate) {
+    const ended = new Set(
+      (await deps.provenance.chain(`template/${template}`))
+        .filter(
+          (x) => x.kind === 'sandbox' && (x.body as { state?: string }).state === 'terminated',
+        )
+        .map((x) => (x.body as { sandboxId?: string }).sandboxId),
+    );
+    for (const r of rs)
+      if (!ended.has(r.id)) await sandboxEnded(deps, r, 'janitor', 'expired', nowS);
+  }
+}
+
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
   listTemplates: async (ctx, deps) => {
     requireEnrolled(ctx, deps);
@@ -182,6 +256,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       throw new CpError('name_conflict', `you already have a live sandbox named '${rec.name}'`);
     }
     await audit(deps, p.sub, id, 'sandbox_created');
+    await sandboxCreated(deps, rec, p.sub);
     return { status: 201, body: sandboxBody(viewOf(rec, now)) };
   },
 
@@ -218,7 +293,10 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const outcome = await store.markDeleted(rec.id, now, cfg.retentionS);
     // Retention ran out between the read and the delete: it is gone, as it would read now.
     if (outcome === 'not_found') throw new CpError('sandbox_not_found', 'no such sandbox');
-    if (outcome === 'deleted') await audit(deps, ctx.principal!.sub, rec.id, 'sandbox_deleted');
+    if (outcome === 'deleted') {
+      await audit(deps, ctx.principal!.sub, rec.id, 'sandbox_deleted');
+      await sandboxEnded(deps, rec, ctx.principal!.sub, 'deleted', now);
+    }
     // Idempotent: a second delete, or a delete after expiry, reports how it actually ended.
     const ended = viewOf(outcome === 'deleted' ? { ...rec, deletedAt: now } : rec, now);
     return {
@@ -273,11 +351,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const now = seconds(deps);
     const live: { wsk: string; wrk: string }[] = [];
     const terminated: { wsk: string; wrk: string; terminatedAt: number }[] = [];
-    for (const rec of await store.listAll(now)) {
+    const all = await store.listAll(now);
+    for (const rec of all) {
       const v = viewOf(rec, now);
       if (v.state === 'ready') live.push({ wsk: v.wsk, wrk: v.worker });
       else terminated.push({ wsk: v.wsk, wrk: v.worker, terminatedAt: v.terminatedAt! });
     }
+    await recordExpiries(deps, all, now);
     return { status: 200, body: { live, terminated } };
   },
 };

@@ -197,3 +197,18 @@ export {
   verifyKeysFromEnv,
   type CredentialStoreKind,
 } from './main.js';
+export {
+  EXPORT_SCHEMA,
+  RECORD_KINDS,
+  RECORD_SCHEMA,
+  ProvenanceStore,
+  canonicalJson,
+  recordDigest,
+  verifyExport,
+  type AppendInput,
+  type ProvenanceExport,
+  type ProvenanceRecord,
+  type RecordKind,
+  type StreamHead,
+  type VerifyResult,
+} from './provenance.js';
