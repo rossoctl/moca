@@ -412,15 +412,25 @@ type SweepResult struct {
 	// ["microvm-worker.service"] — the worker's own cgroup — and an operator seeing
 	// anything else in it is seeing something new placed in the slice.
 	Skipped []string
+
+	// Stuck names pool-named VM cgroups whose processes were SIGKILLed and had still not
+	// exited sweepExitWait later (#797). Not counted in Swept and not removed: a VMM
+	// that is still tearing down can still hold its VM id's API socket, and the pool's
+	// cgroup names are reused from pool-0 on every start, so the next VM would be
+	// placed in a cgroup that still holds the old one. The caller decides what that
+	// means for its start; microvm-worker refuses to start.
+	Stuck []string
 }
 
 // SweepOrphans walks slicePath's immediate subdirectories, and for each one that THIS
 // POOL named (isPoolVMCgroupDirName; everything else is skipped and reported — see the
 // H1 block at the top of this file): reads cgroup.procs, SIGKILLs every
 // pid listed (ignoring ESRCH: a pid that has already exited is a swept orphan, not an
-// error), waits briefly for the kernel to empty the cgroup, then rmdirs the directory
+// error), waits up to sweepExitWait for those processes to exit, then rmdirs the directory
 // (D5: rmdir, never rm -rf — cgroup directories are kernel-backed pseudo-files and rm -rf
-// fails on them; rmdir on an emptied cgroup is the supported removal). SweepResult.Swept
+// fails on them; rmdir on an emptied cgroup is the supported removal). A directory whose
+// processes are still running when that wait ends is reported in SweepResult.Stuck and
+// left in place, not counted (#797). SweepResult.Swept
 // counts VM cgroup DIRECTORIES swept — not the number of processes actually killed by
 // this call. A cgroup whose sole occupant already exited (nothing left to signal) counts
 // exactly the same as one whose occupant this call actually SIGKILLed, by design (the
@@ -468,46 +478,87 @@ func SweepOrphans(slicePath string) (SweepResult, error) {
 			res.Skipped = append(res.Skipped, name)
 			continue
 		}
-		swept, err := sweepOneCgroup(dir)
+		outcome, err := sweepOneCgroup(dir)
 		if err != nil {
 			return res, fmt.Errorf("vmpool: SweepOrphans: %s: %w", dir, err)
 		}
-		if !swept {
+		switch outcome {
+		case cgroupRefused:
 			// Guard 3 fired from inside: this cgroup holds a pid nothing may signal
 			// (the caller itself, or its process group). Refuse the whole directory
 			// rather than kill its other members and rmdir around the survivor.
 			res.Skipped = append(res.Skipped, name)
-			continue
+		case cgroupStuck:
+			res.Stuck = append(res.Stuck, name)
+		default:
+			res.Swept++
 		}
-		res.Swept++
 	}
 	return res, nil
 }
 
-// sweepOneCgroup kills every pid in dir/cgroup.procs and removes dir once empty. It
-// reports swept=false, with no error, when the cgroup holds a pid unsafeToSignal refuses
-// — that is not a failure, it is the third guard declining a directory the first two let
-// through, and the caller records it as skipped.
-func sweepOneCgroup(dir string) (swept bool, err error) {
+// sweepOutcome is what sweepOneCgroup did with one directory.
+type sweepOutcome int
+
+const (
+	// cgroupSwept: every pid was signalled, none was still running by the end of the
+	// wait, and the directory was removed.
+	cgroupSwept sweepOutcome = iota
+	// cgroupRefused: guard 3 declined the directory before any signal was sent.
+	cgroupRefused
+	// cgroupStuck: every pid was signalled, and at least one was still running when
+	// sweepExitWait ran out. The directory is left in place.
+	cgroupStuck
+)
+
+// defaultSweepExitWait bounds how long sweepOneCgroup waits for the processes it has just
+// SIGKILLed to exit (#797). SIGKILL is not instant for a VMM: the kernel unmaps the guest's
+// memory and closes its descriptors, the API socket among them, before the process leaves
+// the cgroup, and that teardown grows with guest RAM. The 200 ms waitForCgroupEmpty allows
+// Destroy (whose VMM is already reaped) was observed to be too short here: the cgroup was
+// counted as swept while its VMM still answered on its API socket, and the startup probe
+// collided with it. A few seconds covers the teardown with margin, and a start that has
+// just killed a VM can afford them.
+const defaultSweepExitWait = 5 * time.Second
+
+// sweepExitWait is defaultSweepExitWait, a variable so a test can shorten the bound it
+// would otherwise sit out in full.
+var sweepExitWait = defaultSweepExitWait
+
+// sweepKill is how sweepOneCgroup signals a pid: killPidIgnoringAbsent, a variable so a test
+// can stage a process that outlives its SIGKILL, which no real process can be made to do.
+var sweepKill = killPidIgnoringAbsent
+
+// sweepOneCgroup kills every pid in dir/cgroup.procs and removes dir once they have exited.
+// It reports cgroupRefused, with no error, when the cgroup holds a pid unsafeToSignal
+// refuses — that is not a failure, it is the third guard declining a directory the first
+// two let through, and the caller records it as skipped. It reports cgroupStuck, also with
+// no error, when a signalled pid is still running sweepExitWait later: the directory is
+// logged and left, never counted as swept (#797).
+func sweepOneCgroup(dir string) (sweepOutcome, error) {
 	pids, err := readCgroupProcs(filepath.Join(dir, "cgroup.procs"))
 	if err != nil {
-		return false, err
+		return cgroupRefused, err
 	}
 	// Checked as a whole BEFORE any signal is sent: a cgroup containing one pid that
 	// must not be signalled is not a cgroup to half-sweep.
 	for _, pid := range pids {
 		if reason, unsafe := unsafeToSignal(pid); unsafe {
 			log.Printf("vmpool: SweepOrphans: refusing %s: cgroup.procs lists pid %d and %s", dir, pid, reason)
-			return false, nil
+			return cgroupRefused, nil
 		}
 	}
 	for _, pid := range pids {
-		if err := killPidIgnoringAbsent(pid); err != nil {
-			return false, fmt.Errorf("kill pid %d: %w", pid, err)
+		if err := sweepKill(pid); err != nil {
+			return cgroupRefused, fmt.Errorf("kill pid %d: %w", pid, err)
 		}
 	}
-	waitForCgroupEmpty(dir)
-	return true, removeCgroupDir(dir)
+	if running := waitForSweptPidsToExit(dir, sweepExitWait); len(running) > 0 {
+		log.Printf("vmpool: SweepOrphans: not swept %s: pid(s) %v still running %s after SIGKILL; "+
+			"left in place", dir, running, sweepExitWait)
+		return cgroupStuck, nil
+	}
+	return cgroupSwept, removeCgroupDir(dir)
 }
 
 // removeCgroupDir rmdirs dir (D5: rmdir, never rm -rf). On REAL cgroupfs this is the
@@ -596,6 +647,39 @@ func waitForCgroupEmpty(dir string) {
 		pids, err := readCgroupProcs(filepath.Join(dir, "cgroup.procs"))
 		if err != nil || len(pids) == 0 {
 			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForSweptPidsToExit polls dir's cgroup.procs until no pid it lists is still running, or
+// until timeout, and returns the pids still running at that point (none: the cgroup has
+// emptied). It is the sweep's wait, separate from waitForCgroupEmpty because the two waits
+// differ in what they may assume: Destroy has already reaped its VMM, while the sweep has
+// only signalled a stranger's, and must say so when it is still there.
+//
+// A listed pid counts only while it is still running (pidStillRunning). On cgroupfs that
+// changes nothing — the kernel removes an exiting process from cgroup.procs, and a zombie is
+// not listed there — but it is what lets the synthetic tree this package's tests build,
+// where cgroup.procs is an ordinary file that never changes, reach "emptied" at all.
+//
+// A cgroup.procs that cannot be read ends the wait with nothing reported: removeCgroupDir's
+// rmdir is then what surfaces a cgroup that did not empty, as it did before #797.
+func waitForSweptPidsToExit(dir string, timeout time.Duration) []int {
+	deadline := time.Now().Add(timeout)
+	for {
+		pids, err := readCgroupProcs(filepath.Join(dir, "cgroup.procs"))
+		if err != nil {
+			return nil
+		}
+		var running []int
+		for _, pid := range pids {
+			if pidStillRunning(pid) {
+				running = append(running, pid)
+			}
+		}
+		if len(running) == 0 || !time.Now().Before(deadline) {
+			return running
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
