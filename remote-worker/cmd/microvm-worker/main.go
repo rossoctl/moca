@@ -754,7 +754,7 @@ func main() {
 	// from the golden snapshot's manifest loaded above instead, which the build script
 	// fills by probing INSIDE the guest before snapshotting; an empty manifest field
 	// advertises nothing rather than lying.
-	labels := session.TierLabels(os.LookupEnv, "microvm")
+	labels := session.Labels(os.LookupEnv, "microvm")
 	sess := session.New(session.Config{
 		SandboxID:     env(get, "SANDBOX_ID", "sbx-microvm-1"),
 		Image:         env(get, "SANDBOX_IMAGE", ""),

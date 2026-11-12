@@ -288,6 +288,27 @@ describe('relay trusted workload labels: attach keys configured', () => {
     expect(r.relay.parked()).toEqual([]);
   });
 
+  it('drops a template label from a workload sandbox (a binding has no template)', async () => {
+    const { signer, keysEnv } = attachSigner();
+    const r = relayWith(keysEnv);
+    const { rec } = await attach(r, `${WL}-0`, mint(signer), {
+      ...SPOOFED,
+      'moca.dev/template': 'py312',
+    });
+    expect(rec?.labels['moca.dev/template']).toBeUndefined();
+    expect(rec?.labels['moca.dev/workload']).toBe(WL);
+  });
+
+  it('keeps a template label on a shared-token Hello, as it keeps the tier', async () => {
+    const { keysEnv } = attachSigner();
+    const r = relayWith(keysEnv);
+    const { rec } = await attach(r, 'moca-sandbox-0', SHARED, {
+      'moca.dev/tier': 'microvm',
+      'moca.dev/template': 'py312',
+    });
+    expect(rec?.labels).toEqual({ 'moca.dev/tier': 'microvm', 'moca.dev/template': 'py312' });
+  });
+
   it('strips workload and owner from a shared-token Hello, keeping its other labels', async () => {
     const { keysEnv } = attachSigner();
     const r = relayWith(keysEnv);
