@@ -5,7 +5,7 @@ changes, the major only with a `/v2` ([change policy](../reference/change-policy
 
 ## 1.6.0
 
-A subject's own gate record, trusted for its own templates
+A subject's own gate record, trusted for its own templates, and repositories allowed per registry
 ([#738](https://github.com/rossoctl/moca/issues/738)), per the
 [subject trust spec](../specs/2026-11-08-subject-trust-gate-records-design.md). Trust is decided by
 who submits a gate record, never by anything inside it. Every change is additive.
@@ -36,6 +36,12 @@ who submits a gate record, never by anything inside it. Every change is additive
 - PUT /v1/policy: a removal from `trustedGateRecords` that makes builds of deployment-visible
   templates self-attested names them as `narrowed: [{template, buildId}]` in its answer and in its
   `policy` record; those templates read as private from then on, and their owners keep using them.
+- `Policy` adds the optional `allowedRepositories`: per registry host (as the policy reads it,
+  Docker Hub as `docker.io`), the repositories a create may name there, each an exact path
+  (`library/python`) or a prefix (`library/*`), matched on whole path segments; a Docker Hub
+  official name reads as `library/<name>`. New create rule `registry.repository`. A registry with
+  no list allows every repository, as before; a registry listed there must also be in
+  `allowedRegistries`.
 
 ## 1.5.0
 

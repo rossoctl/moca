@@ -237,6 +237,8 @@ export {
   policyDigest,
   policyProblems,
   registryOf,
+  repositoryAllowed,
+  repositoryOf,
   type CheckOptions,
   type CheckResult,
   type CreateInput,

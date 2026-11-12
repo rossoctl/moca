@@ -565,6 +565,18 @@ components:
           description: |
             registry hosts. `<default>` is a reference with no host, which the build host pulls from
             its own configured registry; Docker Hub is `docker.io` (`index.docker.io` reads as it)
+        allowedRepositories:
+          type: object
+          additionalProperties:
+            type: array
+            minItems: 1
+            items: { type: string }
+          description: |
+            Optional, per registry (a key of `allowedRegistries`): the repositories an image may come
+            from there, each an exact path (`library/python`) or a prefix (`library/*`), matched on
+            whole path segments. A registry with no entry allows every repository it serves. A Docker
+            Hub official name (`python`) reads as `library/python`. A refusal is rule
+            `registry.repository`.
         trustedGateRecords:
           type: array
           items: { type: string }
