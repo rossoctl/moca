@@ -255,8 +255,8 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // first lease Exec -- takes the normalise step when root wrote the workspace
 // (normaliseLease), and installs the lease. The Run carries Lease. A TeardownFailed
 // result, a Run error, the host's deadline or an abort ends the lease; otherwise, the
-// guest's own timeout included (runLease), its lastEnd moves to now and its footprint is
-// sampled, both before the gate is released. deadline is when the Exec's budget ends.
+// guest's own timeout and ErrCommandTooLarge included (runLease), its lastEnd moves to
+// now and its footprint is sampled, both before the gate is released. deadline is when the Exec's budget ends.
 func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode Mode, out Sink, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
 	p.mu.Lock()
@@ -558,7 +558,8 @@ func (p *pool) normaliseLease(ctx context.Context, rp *runPool, vm VM, ph *Phase
 //
 // The guest's report that its own timeout fired (guestTimedOut) keeps the lease (ruling
 // R8b): the guest killed the Exec's cgroup and emptied it before answering, as after an
-// exit, so the Exec fails with the timeout and the next one runs in the same VM. What
+// exit, so the Exec fails with the timeout and the next one runs in the same VM. So does
+// ErrCommandTooLarge: the command was refused before anything reached the guest. What
 // ends the lease is a guest that did not answer by the host's deadline, a transport
 // error, teardown_failed, or an abort (agent_dead in v1).
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
@@ -631,12 +632,15 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	cErr := p.classify(ctx, timedOut, timeoutS)
 	// The guest answered with its own timeout: the command is dead, its cgroup empty.
 	guestTimeout := guestTimedOut(runErr)
+	// The command was refused as larger than the guest's one request frame: nothing was
+	// sent, so the guest ran nothing and its VM is as fit for the next Exec as before.
+	tooLarge := errors.Is(runErr, ErrCommandTooLarge)
 
 	var reason LeaseEndReason
 	switch {
 	case res.TeardownFailed:
 		reason = LeaseEndTeardownFailed
-	case timedOut.Load(), runErr != nil && !guestTimeout:
+	case timedOut.Load(), runErr != nil && !guestTimeout && !tooLarge:
 		// The host's deadline (the guest did not answer within the budget and the slack),
 		// a transport error, an abort, or a guest error: the agent may have survived, but
 		// a VM whose last Exec ended without its answer is not one to run the next in.
