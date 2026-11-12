@@ -1732,7 +1732,8 @@ paths:
         refusal is `422 policy_refused` with `rule`, the gating rule's id
         (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
         template's stream when the template exists and is the caller's (an admin's, adding a
-        build); a refusal on a new id or another subject's is only answered. Ids are unique per deployment: another subject's id is
+        build); a refusal on a new id writes an audit-log line instead, and one on another subject's
+        id is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
         `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for

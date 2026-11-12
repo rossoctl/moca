@@ -484,14 +484,26 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   if (!result.passed) {
     // A refusal is recorded on its template's stream only when the template exists and the caller
     // may write its stream: its own, or (adding a build) any as an admin. A refusal on an id no
-    // template holds is only answered: recording it would let any enrolled subject open
-    // provenance streams without bound, which no quota counts. A refusal on someone else's id is
-    // only answered too, so no subject grows another's stream; and an id the rule refuses has no
-    // stream to record on.
+    // template holds writes one audit line instead (the capped audit stream), naming the subject,
+    // the id and the failed rules: a provenance record would let any enrolled subject open
+    // streams without bound, which no quota counts. A refusal on someone else's id is only
+    // answered, so no subject grows another's stream; and an id the rule refuses has no stream
+    // to record on.
     if (TEMPLATE_ID_RE.test(id)) {
       const cur = await cat.get(id);
       if (cur && (cur.owner === p.sub || (existing && isAdmin(p))))
         await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+      else if (!cur)
+        await auditBestEffort(deps, 'template_create_refused', id, {
+          subject: p.sub,
+          templateId: id,
+          decision: 'template_create_refused',
+          reason: 'policy_refused',
+          rules: result.results
+            .filter((r) => !r.passed)
+            .map((r) => r.rule)
+            .join(','),
+        });
     }
     const f = result.failed!;
     throw new CpError('policy_refused', f.message ?? f.rule, undefined, { rule: f.rule });

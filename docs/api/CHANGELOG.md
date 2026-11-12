@@ -35,6 +35,21 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
 - `TemplateBuild` adds `handle` (the create's handle; equal to `buildId` for an imported build) and
   `reason` (why a build failed or was rejected), and GET /v1/templates/{id}/builds/{build} also
   finds a build by its handle.
+- A refused create is recorded as a `check` provenance record only on an existing template's stream
+  the caller may write; a refusal on an id no template holds writes one audit line instead
+  (`template_create_refused`, with the subject, `templateId` and the failed `rules`).
+
+Upgrade note (the policy fails closed):
+
+- X12 applies under every profile, `base` included: a `skip_git_identity_check: true` that no gate
+  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client whose image refuses
+  commits on purpose sends a gate record showing it (X5: `agent_can_commit: "no"`,
+  `git_identity: "none"`); otherwise it drops the skip, and the build host then runs its git
+  identity check, which needs git in the image with an identity configured.
+- A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
+  check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
+  numbers, is refused when it is read: every create and every read of the policy or the quota fails
+  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing.
 
 ## 1.4.0
 

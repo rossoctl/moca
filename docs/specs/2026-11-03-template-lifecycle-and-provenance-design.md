@@ -183,8 +183,9 @@ the handle still finds it.
 The create is checked against the deployment's policy before anything is queued (§8.1): a refusal
 is `422 policy_refused {rule, message}` and a `check` record (written only on the stream of a
 template that exists and whose stream the caller may write: its own, or as an admin adding a build;
-a refusal on another subject's id, or on an id no template holds, is only answered, so no subject
-opens streams without bound), and nothing is queued. Over a quota
+a refusal on another subject's id is only answered, and one on an id no template holds writes one
+line to the capped audit log instead, naming the subject, the id and the failed rules, so no subject
+opens provenance streams without bound), and nothing is queued. Over a quota
 (§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
 or were cancelled holds no slot; builds queued, building or probing at once, charged to the
 template's owner even when an admin adds the build) is `429 quota_exceeded` naming which

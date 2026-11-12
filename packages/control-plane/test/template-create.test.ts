@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -190,11 +190,21 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       kind: 'check',
       body: { outcome: 'refused' },
     });
-    // A refusal on an id no template holds yet is only answered: no stream is opened for it.
+    // A refusal on an id no template holds yet opens no stream: one audit line names it instead.
+    const audited = () =>
+      (d.streams.get('sh:cp:audit') ?? []).filter((r) => r.decision === 'template_create_refused');
+    expect(audited()).toEqual([]);
     await expect(create(d, { ...bad, id: 'fresh-id' }, bob)).rejects.toMatchObject({
       code: 'policy_refused',
     });
     expect(await d.provenance!.chain('template/fresh-id')).toEqual([]);
+    expect(audited()).toHaveLength(1);
+    expect(audited()[0]).toMatchObject({
+      subject: bob.sub,
+      templateId: 'fresh-id',
+      reason: 'policy_refused',
+      rules: 'M1,registry,X10,X1.image',
+    });
   });
 
   it.each([
@@ -523,6 +533,23 @@ describe('policy and quota routes', () => {
         policyProblems(withBench({ ...bench, envelope: { ...bench.envelope, exact } })).join(),
       ).toMatch(/exact/);
     expect(PROFILE_RULES).toEqual(DEFAULT_POLICY.profiles.benchmark!.requires);
+  });
+
+  it('fails closed on a stored policy naming an unknown rule id, until an admin sets a valid one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cp-policy-'));
+    const provenance = new ProvenanceStore({ dir, now: () => NOW_MS });
+    const bad = {
+      ...DEFAULT_POLICY,
+      profiles: {
+        ...DEFAULT_POLICY.profiles,
+        benchmark: { ...DEFAULT_POLICY.profiles.benchmark!, requires: ['X13'] },
+      },
+    };
+    writeFileSync(join(dir, 'policy.json'), JSON.stringify({ policy: bad, record: 'sha256:x' }));
+    const store = new FilePolicyStore({ dir, provenance });
+    await expect(store.current()).rejects.toThrow(/policy.json is invalid: .*requires/);
+    await store.set(DEFAULT_POLICY, admin.sub);
+    expect((await store.current()).policy).toEqual(DEFAULT_POLICY);
   });
 
   it("GET /v1/quota shows the limits and the caller's use", async () => {
