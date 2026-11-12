@@ -109,6 +109,16 @@ type Pool interface {
 	// applies until the lease ends. It never resets the idle clock, and without a live
 	// lease it is a no-op. Spec §4.
 	Keepalive(key string) error
+	// LeaseStatus reports key's stored mode, whether its epoch is known, the live lease
+	// (none, active or expiring, its age and idle timeout) and the unacknowledged lease
+	// event. Spec §5, §8.3's LeaseControl status.
+	LeaseStatus(key string) LeaseInfo
+	// AckLeaseEvent clears key's pending lease event whose At equals at; a newer one
+	// stays. Spec §5: the worker keeps the last end event until a client has seen it.
+	AckLeaseEvent(key string, at time.Time)
+	// EndLease ends key's lease for reset or sandbox_deleted, and refuses any other
+	// reason. It waits for an Exec in flight, up to LeaseGraceLimit. Spec §8.3.
+	EndLease(key string, reason LeaseEndReason) error
 	// Close stops the sweep and destroys everything. Beyond spec §4.1's listing:
 	// §6 requires a shutdown that leaves no orphan VMs.
 	Close() error
@@ -195,6 +205,8 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
 	p.reaper = newReaper(cfg.DeferReapWorkers)
+	// Before anything is served: the previous process's open leases ended with it.
+	p.endLeasesOpenAtStart()
 	// Sized so a full host's worth of sweeps queues rather than blocking; a full
 	// queue falls back to an inline destroy (see sweep).
 	p.reclaimQ = make(chan reclaimBatch, 64)
@@ -780,7 +792,7 @@ func (p *pool) Reclaim(ctx context.Context, key string) error {
 	if !busy {
 		if tomb, detachErr = detachWorkspace(rp.dir); detachErr == nil {
 			delete(p.runs, key)
-			removeLeaseState(p.cfg.WorkspaceRoot, key) // as the sweep does: see sweepOnce
+			retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp)) // as the sweep does: see sweepOnce
 		}
 	}
 	p.mu.Unlock()
@@ -817,8 +829,15 @@ func (p *pool) Stats() Stats {
 		if rp.idleFor(now) > half {
 			s.IdleStandbyResidency += len(rp.ready)
 		}
+		if rp.lease != nil {
+			s.LeaseVMs++
+			if rp.lease.running {
+				s.LeaseExecuting++
+			}
+		}
 	}
 	s.CommittedBytes = p.committedLocked()
+	s.LeaseCommittedBytes = p.leaseCommittedLocked()
 	s.StandbyCommittedBytes = p.standbyCommittedLocked()
 	p.mu.Unlock()
 	p.counters.snapshot(&s)

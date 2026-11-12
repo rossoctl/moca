@@ -94,8 +94,9 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 			delete(p.runs, key)
 			// The key's lease state goes with its workspace, in the same critical
 			// section: a re-created run starts with an unknown epoch, which only SetMode
-			// restores (spec §8.2), never with the old tree's mode.
-			removeLeaseState(p.cfg.WorkspaceRoot, key)
+			// restores (spec §8.2), never with the old tree's mode. An unacknowledged
+			// event stays (retireLeaseState).
+			retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
 			continue
 		}
 		// RunActive -> RunParked: drop the standbys, KEEP the workspace. RAM is

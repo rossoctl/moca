@@ -562,8 +562,9 @@ func TestLeaseExecDestroysItsVMWhenThePoolClosed(t *testing.T) {
 	if lc.liveCount() != 0 {
 		t.Fatalf("live VMs after Close and the Exec's return = %d, want 0", lc.liveCount())
 	}
-	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Open == nil || s.Pending != nil {
-		t.Fatalf("state = %+v, want the open lease kept for the next process and nothing pending", s)
+	// The lease start is pending (Task 5); no end is recorded in-process.
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Open == nil || s.Pending == nil || s.Pending.State != "start" {
+		t.Fatalf("state = %+v, want the open lease kept for the next process and no end pending", s)
 	}
 }
 
@@ -909,7 +910,6 @@ func TestWorkspaceIdleNeverReclaimsALeasedRun(t *testing.T) {
 	p.mu.Lock()
 	dir := p.runs["k"].dir
 	p.mu.Unlock()
-	statePath := leaseStatePath(p.cfg.WorkspaceRoot, "k")
 
 	clk.Advance(590 * time.Second) // nearly 5 x WorkspaceIdle
 	leaseAlive(t, p, "+590s")
@@ -927,8 +927,9 @@ func TestWorkspaceIdleNeverReclaimsALeasedRun(t *testing.T) {
 		_, err := os.Stat(dir)
 		return errors.Is(err, os.ErrNotExist)
 	})
-	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("state file after the workspace reclaim: %v, want it gone", err)
+	// Ruling R9: the unacknowledged idle end outlives the tree; nothing else does.
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Known || s.Open != nil || s.Pending == nil || s.Pending.Reason != LeaseEndIdle {
+		t.Fatalf("state file after the workspace reclaim = %+v, want only the pending idle end", s)
 	}
 }
 
@@ -1045,8 +1046,8 @@ func TestCloseEndsEveryLease(t *testing.T) {
 	}
 	for _, k := range keys {
 		s := loadLeaseState(p.cfg.WorkspaceRoot, k)
-		if s.Open == nil || s.Pending != nil {
-			t.Fatalf("%s: state = %+v, want the open lease kept and nothing pending", k, s)
+		if s.Open == nil || s.Pending == nil || s.Pending.State != "start" {
+			t.Fatalf("%s: state = %+v, want the open lease kept and no end pending (the start is)", k, s)
 		}
 	}
 }

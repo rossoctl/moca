@@ -627,3 +627,39 @@ func TestLeaseBannerReportsResolvedValues(t *testing.T) {
 		}
 	}
 }
+
+// The lease fields are omitempty: a worker that never served a lease (every per-Exec
+// worker) serves /stats with exactly the keys it served before lease mode existed, and a
+// lease worker reports its lease VMs, their commitment and its ends by reason.
+func TestDiagStatsLeaseFieldsOnlyWhenLeasesExist(t *testing.T) {
+	leaseKeys := []string{"leaseVMs", "leaseExecuting", "leaseCommittedBytes", "leaseEnds"}
+	b, err := json.Marshal(toDiagStats(vmpool.Stats{LeaseEnds: map[vmpool.LeaseEndReason]uint64{}}, 4))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, k := range leaseKeys {
+		if strings.Contains(string(b), `"`+k+`"`) {
+			t.Errorf("per-Exec /stats carries %q: %s", k, b)
+		}
+	}
+
+	b, err = json.Marshal(toDiagStats(vmpool.Stats{
+		LeaseVMs: 2, LeaseExecuting: 1, LeaseCommittedBytes: 384 << 20,
+		LeaseEnds: map[vmpool.LeaseEndReason]uint64{vmpool.LeaseEndIdle: 3},
+	}, 4))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		LeaseVMs            int               `json:"leaseVMs"`
+		LeaseExecuting      int               `json:"leaseExecuting"`
+		LeaseCommittedBytes int64             `json:"leaseCommittedBytes"`
+		LeaseEnds           map[string]uint64 `json:"leaseEnds"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.LeaseVMs != 2 || got.LeaseExecuting != 1 || got.LeaseCommittedBytes != 384<<20 || got.LeaseEnds["idle"] != 3 {
+		t.Fatalf("lease /stats = %+v, want 2, 1, %d, idle 3", got, 384<<20)
+	}
+}

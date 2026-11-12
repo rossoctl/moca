@@ -111,6 +111,32 @@ func saveLeaseState(root, key string, s leaseState) error {
 	return nil
 }
 
+// loadLeaseStateIfAny is loadLeaseState for a caller that may look at a key with no
+// file: a missing file is unknown, with no log line. Callers that only read (status, an
+// acknowledgement) must not log once per call for every per-Exec key.
+func loadLeaseStateIfAny(root, key string) leaseState {
+	if _, err := os.Stat(leaseStatePath(root, key)); errors.Is(err, os.ErrNotExist) {
+		return leaseState{}
+	}
+	return loadLeaseState(root, key)
+}
+
+// retireLeaseState is what removing key's workspace does to its state file. With an
+// event pending, the file is rewritten to hold that event only (ruling R9: spec §5 keeps
+// the last end event until a client has seen it): Known false, so the mode is per-exec
+// and the epoch unknown until SetMode, exactly as for a deleted file, and RootWrote false,
+// which unknown state already treats as true (ruling R7). With nothing pending it is
+// deleted.
+func retireLeaseState(root, key string, s leaseState) {
+	if s.Pending == nil {
+		removeLeaseState(root, key)
+		return
+	}
+	if err := saveLeaseState(root, key, leaseState{Pending: s.Pending}); err != nil {
+		log.Printf("vmpool: keep the pending lease event for %q: %v", key, err)
+	}
+}
+
 // removeLeaseState deletes key's state file. A missing file is not an error; any other
 // failure is logged, because the caller is removing the workspace and has nothing to do
 // with an error but report it.

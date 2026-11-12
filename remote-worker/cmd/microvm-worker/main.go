@@ -596,6 +596,12 @@ type diagStats struct {
 	// and the budget is genuinely too small" (#452). Stats.BudgetEvictions has the
 	// reading instructions.
 	BudgetEvictions uint64 `json:"budgetEvictions"`
+	// Lease mode (vmpool.Stats' lease fields). omitempty, so a worker that never served a
+	// lease -- every per-Exec worker -- serves exactly the /stats it served before.
+	LeaseVMs            int               `json:"leaseVMs,omitempty"`
+	LeaseExecuting      int               `json:"leaseExecuting,omitempty"`
+	LeaseCommittedBytes int64             `json:"leaseCommittedBytes,omitempty"`
+	LeaseEnds           map[string]uint64 `json:"leaseEnds,omitempty"`
 }
 
 func toDiagStats(st vmpool.Stats, maxConcurrent int) diagStats {
@@ -618,6 +624,15 @@ func toDiagStats(st vmpool.Stats, maxConcurrent int) diagStats {
 		BarrierUnobserved:     st.BarrierUnobserved,
 		TimeoutsClamped:       st.TimeoutsClamped,
 		BudgetEvictions:       st.BudgetEvictions,
+		LeaseVMs:              st.LeaseVMs,
+		LeaseExecuting:        st.LeaseExecuting,
+		LeaseCommittedBytes:   st.LeaseCommittedBytes,
+	}
+	if len(st.LeaseEnds) > 0 {
+		out.LeaseEnds = make(map[string]uint64, len(st.LeaseEnds))
+		for k, v := range st.LeaseEnds {
+			out.LeaseEnds[string(k)] = v
+		}
 	}
 	for k, v := range st.ColdAcquires {
 		out.ColdAcquires[string(k)] = v

@@ -231,6 +231,13 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 
 	p.mu.Lock()
 	l, closed := rp.lease, p.closed
+	if s := rp.state; !closed && s.Known && e.ModeEpoch < s.Epoch {
+		// A downgrade (SetMode) stored a newer epoch while this Exec waited on the gate:
+		// its mode is no longer the sandbox's, so it neither starts nor reuses a lease.
+		p.mu.Unlock()
+		return Result{}, p.refuse(RefuseStaleMode, "workspace_key %q: Exec mode_epoch %d is below the stored %d",
+			key, e.ModeEpoch, s.Epoch)
+	}
 	var v *leaseVictim
 	if closed {
 		// Close cannot take a gate this Exec holds, so this lease VM is this Exec's to
@@ -355,6 +362,11 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 	}
 	s := p.leaseStateLocked(rp)
 	s.Open = &openLease{VMID: vmID(vm), Mode: mode, Started: now}
+	if s.Pending == nil || s.Pending.State != leaseEventEnd {
+		// The start is the notice only when no end is pending: "guest restarted" already
+		// tells the client the next Exec runs in a fresh guest (spec §5).
+		s.Pending = &LeaseEvent{State: leaseEventStart, At: now, Mode: mode}
+	}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
 		// Not fatal: the open record only lets the next process report this lease's
 		// end as worker_restart. Serving without it loses that notice, not safety.
@@ -503,11 +515,12 @@ func (p *pool) endLeaseLocked(rp *runPool, reason LeaseEndReason) *leaseVictim {
 	age := now.Sub(l.started)
 	s := p.leaseStateLocked(rp)
 	s.Open = nil
-	s.Pending = &LeaseEvent{State: "end", Reason: reason, At: now, Mode: l.mode, Age: age}
+	s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: reason, At: now, Mode: l.mode, Age: age}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
 		log.Printf("vmpool: lease end for %q: %v", rp.key, err)
 	}
 	rp.state = s
+	p.counters.leaseEnded(reason)
 	// Idle clocks (StandbyIdle, WorkspaceIdle) run from the lease's end, not its last
 	// Exec's start (Review Focus 5).
 	rp.lastExec = now

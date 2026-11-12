@@ -157,8 +157,8 @@ func (p *pool) effectiveModeLocked(rp *runPool, e Exec) (Mode, error) {
 }
 
 // leaseStateLocked returns rp's state, reading the file on the run's first use. A run
-// lives exactly as long as its workspace, and the file is removed with the workspace,
-// so the cache can never outlive what it caches. Caller holds p.mu.
+// lives exactly as long as its workspace, and the file is reset with the workspace
+// (retireLeaseState), so the cache can never outlive what it caches. Caller holds p.mu.
 func (p *pool) leaseStateLocked(rp *runPool) leaseState {
 	if !rp.stateLoaded {
 		rp.state = loadLeaseState(p.cfg.WorkspaceRoot, rp.key)
@@ -172,7 +172,12 @@ func (p *pool) leaseStateLocked(rp *runPool) leaseState {
 // file was lost (spec §8.2). An epoch below a known one is refused. Equal is accepted,
 // because mocactl re-sends the current epoch when the worker reports it unknown.
 //
-// This records the change only; ending or downgrading a live lease is Task 5's.
+// A downgrade takes effect at once (spec §8.2). To per-exec, a live lease ends
+// (mode_change) after the Exec in flight, bounded by LeaseGraceLimit (endLeaseWaiting);
+// the new epoch is stored first, so a lease Exec queued on the gate is refused
+// stale-mode (execLease). From lease+processes to lease the lease is kept, at level 1
+// from now on; stopping its tracked processes is plan 5's. An upgrade applies from the
+// next Exec that carries the new epoch.
 func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 	// Refusals here are returned, not counted: Stats' refusal counts are Exec errors by
 	// cause, and a LeaseControl call is not an Exec.
@@ -186,9 +191,19 @@ func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 		return refusal(RefuseLeaseUnsupported, "SetMode %s for %q: %s", m, key, leaseUnsupportedDetail)
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	endLease, err := p.setModeLocked(key, m, epoch)
+	p.mu.Unlock()
+	if err != nil || !endLease {
+		return err
+	}
+	return p.endLeaseWaiting(key, LeaseEndModeChange)
+}
+
+// setModeLocked is SetMode under p.mu: it stores the mode and reports whether a lease
+// must end (mode_change) because of it. Caller holds p.mu.
+func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, err error) {
 	if p.closed {
-		return ErrClosed
+		return false, ErrClosed
 	}
 	rp := p.runs[key]
 	var s leaseState
@@ -200,7 +215,7 @@ func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 		s = loadLeaseState(p.cfg.WorkspaceRoot, key)
 	}
 	if s.Known && epoch < s.Epoch {
-		return refusal(RefuseStaleMode, "SetMode for %q: epoch %d is below the stored %d", key, epoch, s.Epoch)
+		return false, refusal(RefuseStaleMode, "SetMode for %q: epoch %d is below the stored %d", key, epoch, s.Epoch)
 	}
 	if !s.Known {
 		// No readable state means an unknown history (ruling R7): unversioned per-Exec
@@ -209,13 +224,30 @@ func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 		s.RootWrote = true
 	}
 	s.Mode, s.Epoch, s.Known = m, epoch, true
-	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
-		return fmt.Errorf("vmpool: SetMode for %q: %w", key, err)
-	}
+	var l *vmLease
 	if rp != nil {
-		rp.state = s
+		l = rp.lease
 	}
-	return nil
+	toLevel1 := l != nil && m == ModeLease && l.mode == ModeLeaseProcesses
+	if toLevel1 && s.Open != nil {
+		// The open record names the level the lease now runs at, so that a
+		// worker_restart end reports it.
+		o := *s.Open
+		o.Mode = m
+		s.Open = &o
+	}
+	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
+		return false, fmt.Errorf("vmpool: SetMode for %q: %w", key, err)
+	}
+	if rp == nil {
+		return false, nil
+	}
+	rp.state = s
+	if toLevel1 {
+		l.mode = m // level 1's maximum duration from now on
+	}
+	// A pin without a lease may be a lease Exec about to install one.
+	return m == ModePerExec && (l != nil || rp.pinned > 0), nil
 }
 
 const leaseUnsupportedDetail = "lease mode needs the Firecracker arm and a snapshot with the lease-v1 feature"
