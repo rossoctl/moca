@@ -10,13 +10,17 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
 import {
   cmdCreate,
+  cmdEditTemplate,
   cmdEnv,
   cmdLogin,
   cmdLogout,
   cmdLs,
   cmdRm,
+  cmdTagTemplate,
   cmdTemplates,
   cmdToken,
+  cmdTransferTemplate,
+  cmdUntagTemplate,
   failRefresh,
   SBX_EXIT,
   type SbxCtx,
@@ -50,6 +54,15 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates show ID [--build BUILD] [--json]
                                                  a template and its builds (status, readiness, tags),
                                                  or one build with its spec (--json)
+  mocactl sbx templates tag ID TAG... --build BUILD [--json]
+                                                 move tags onto a registered build of a template you
+                                                 own; sandboxes made earlier keep their build
+  mocactl sbx templates untag ID TAG [--json]    remove a tag; its build stays (never default)
+  mocactl sbx templates edit ID [--visibility private|deployment] [--description TEXT] [--json]
+                                                 change who sees it, or its description
+  mocactl sbx templates transfer ID SUBJECT [--json]
+                                                 make SUBJECT (github:<id> or oidc:<sub>) its owner
+                                                 (admins only)
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -284,6 +297,8 @@ const TAKES_SANDBOX_FLAG = new Set([
   'doctor',
   ...TAKES_ID_ARG,
 ]);
+/** `sbx templates` subcommands; their arguments are checked one by one in sbxMain. */
+const TEMPLATE_COMMANDS = new Set(['show', 'tag', 'untag', 'edit', 'transfer']);
 /** The commands that work on the git repository around the current directory. */
 const IN_REPO = new Set(['up', 'push', 'pull', 'doctor']);
 /** Flags that belong to some commands only: refused elsewhere rather than silently ignored. */
@@ -347,6 +362,8 @@ export async function sbxMain(
         'control-plane-url': { type: 'string' },
         template: { type: 'string' },
         build: { type: 'string' },
+        description: { type: 'string' },
+        visibility: { type: 'string' },
         seed: { type: 'boolean' },
         name: { type: 'string' },
         label: { type: 'string', multiple: true },
@@ -450,17 +467,54 @@ export async function sbxMain(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates show ID [--build BUILD]` (template lifecycle spec §4); bare `templates` lists them.
-  if (command === 'templates' && arg !== undefined && arg !== 'show') {
-    io.err(`sbx: unknown templates command '${sanitizeRemote(arg)}'\n${SBX_USAGE}`);
+  // `templates show ID [--build BUILD]` (template lifecycle spec §4) and the owner's and admin's
+  // actions (§5.1-§5.2); bare `templates` lists them.
+  const sub = command === 'templates' ? arg : undefined;
+  if (sub !== undefined && !TEMPLATE_COMMANDS.has(sub)) {
+    io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (command === 'templates' && arg === 'show' && (extra.length !== 1 || !extra[0]!.trim())) {
-    io.err(`sbx: templates show takes one template ID\n${SBX_USAGE}`);
+  if (sub !== undefined && extra.some((x) => !x.trim())) {
+    io.err(`sbx: templates ${sub} takes no empty argument\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.build !== undefined && !(command === 'templates' && arg === 'show')) {
-    io.err(`sbx: --build only applies to templates show\n${SBX_USAGE}`);
+  if ((sub === 'show' || sub === 'edit') && extra.length !== 1) {
+    io.err(`sbx: templates ${sub} takes one template ID\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if ((sub === 'untag' || sub === 'transfer') && extra.length !== 2) {
+    io.err(
+      `sbx: templates ${sub} takes a template ID and ${sub === 'untag' ? 'a TAG' : 'a SUBJECT'}\n${SBX_USAGE}`,
+    );
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && extra.length < 2) {
+    io.err(`sbx: templates tag takes a template ID and at least one TAG\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.build !== undefined && !(sub === 'show' || sub === 'tag')) {
+    io.err(`sbx: --build only applies to templates show and tag\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && values.build === undefined) {
+    io.err(`sbx: templates tag needs --build BUILD\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  for (const f of ['description', 'visibility'] as const)
+    if (values[f] !== undefined && sub !== 'edit') {
+      io.err(`sbx: --${f} only applies to templates edit\n${SBX_USAGE}`);
+      return SBX_EXIT.usage;
+    }
+  if (sub === 'edit' && values.visibility === undefined && values.description === undefined) {
+    io.err(`sbx: templates edit needs --visibility or --description\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (
+    values.visibility !== undefined &&
+    values.visibility !== 'private' &&
+    values.visibility !== 'deployment'
+  ) {
+    io.err(`sbx: --visibility must be private or deployment\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.build !== undefined && !values.build.trim()) {
@@ -484,7 +538,7 @@ export async function sbxMain(
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
-    (command === 'templates' && arg === 'show') ||
+    sub !== undefined ||
     command === 'claude' ||
     command === 'codex' ||
     (command === 'credentials'
@@ -665,6 +719,14 @@ export async function sbxMain(
       return cmdLogout(ctx);
     case 'templates':
       if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
+      if (arg === 'tag') return cmdTagTemplate(ctx, extra[0]!, extra.slice(1), values.build!);
+      if (arg === 'untag') return cmdUntagTemplate(ctx, extra[0]!, extra[1]!);
+      if (arg === 'edit')
+        return cmdEditTemplate(ctx, extra[0]!, {
+          ...(values.visibility !== undefined ? { visibility: values.visibility } : {}),
+          ...(values.description !== undefined ? { description: values.description } : {}),
+        });
+      if (arg === 'transfer') return cmdTransferTemplate(ctx, extra[0]!, extra[1]!);
       return cmdTemplates(ctx);
     case 'create':
       return cmdCreate(

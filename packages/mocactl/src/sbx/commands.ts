@@ -194,6 +194,82 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
   }
 }
 
+/** `sbx templates tag ID TAG... --build B` (lifecycle spec §5.1): move tags onto a build. */
+export async function cmdTagTemplate(
+  c: SbxCtx,
+  id: string,
+  tags: string[],
+  build: string,
+): Promise<number> {
+  try {
+    const r = await c.api.moveTemplateTags(id, tags, build);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      for (const t of r.tags) {
+        const was = !t.record
+          ? ' (unchanged)'
+          : t.before
+            ? ` (was ${sanitizeRemote(t.before)})`
+            : ' (new)';
+        c.io.out(
+          `${sanitizeRemote(r.templateId)}:${sanitizeRemote(t.tag)} -> ${sanitizeRemote(t.buildId)}${was}\n`,
+        );
+      }
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates untag ID TAG` (lifecycle spec §5.1): remove a tag; its build stays. */
+export async function cmdUntagTemplate(c: SbxCtx, id: string, tag: string): Promise<number> {
+  try {
+    const r = await c.api.removeTemplateTag(id, tag);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      c.io.out(
+        `removed ${sanitizeRemote(r.templateId)}:${sanitizeRemote(r.tag)} (was ${sanitizeRemote(r.before)})\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates edit ID [--visibility V] [--description D]` (lifecycle spec §5.1). */
+export async function cmdEditTemplate(
+  c: SbxCtx,
+  id: string,
+  body: { visibility?: string; description?: string },
+): Promise<number> {
+  try {
+    const r = await c.api.updateTemplate(id, body);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else if (r.changes.length === 0) c.io.out(`${sanitizeRemote(r.templateId)}: unchanged\n`);
+    else
+      for (const ch of r.changes)
+        c.io.out(`${sanitizeRemote(r.templateId)}: ${sanitizeRemote(ch.field)} changed\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates transfer ID SUBJECT` (lifecycle spec §5.2; admins only). */
+export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string): Promise<number> {
+  try {
+    const r = await c.api.transferTemplateOwner(id, owner);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.templateId)}: owner ${sanitizeRemote(r.owner)}${r.record ? ` (was ${sanitizeRemote(r.before ?? 'none')})` : ' (unchanged)'}\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
 /**
  * `sbx create [--template ID[:TAG|@BUILD]] [--seed]`. With --seed, the served build's seed runs as
  * the new sandbox's first command and the workspace is checked (seedSandbox): a failure there is
