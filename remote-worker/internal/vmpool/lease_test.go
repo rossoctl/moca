@@ -570,3 +570,29 @@ func TestLeaseExecStaleEpochRefused(t *testing.T) {
 		t.Fatalf("a stale-mode Exec restored %d VMs", n)
 	}
 }
+
+// A run created by routeExec still counts its first cold acquire as first-exec, for a lease
+// Exec and for a versioned per-Exec Exec alike; an unversioned per-Exec Exec is unchanged.
+func TestFirstExecOnANewKeyCountsFirstExec(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*pool)
+		e     Exec
+	}{
+		{"lease", func(p *pool) { _ = p.SetMode("k", ModeLease, 1) }, leaseExec("one", 1)},
+		{"per-exec with epoch", nil, Exec{Command: "one", TimeoutS: 30, Mode: ModePerExec, ModeEpoch: 1}},
+		{"per-exec epoch 0", nil, Exec{Command: "one", TimeoutS: 30}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, _ := leasePool(t, nil)
+			if tc.setup != nil {
+				tc.setup(p)
+			}
+			mustExec(t, p, "k", tc.e)
+			cold := p.Stats().ColdAcquires
+			if cold[ColdFirstExec] != 1 || cold[ColdExhausted] != 0 {
+				t.Fatalf("ColdAcquires = %v, want first-exec 1 and exhausted 0", cold)
+			}
+		})
+	}
+}

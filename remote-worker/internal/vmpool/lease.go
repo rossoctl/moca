@@ -80,9 +80,12 @@ func (p *pool) routeExec(key string, e Exec) (mode Mode, endFirst bool, err erro
 	if e.Mode != ModePerExec {
 		price = p.cfg.LeaseStartBytes
 	}
-	rp, _, err := p.runAtLocked(key, price)
+	rp, fresh, err := p.runAtLocked(key, price)
 	if err != nil {
 		return 0, false, p.countRefusal(err)
+	}
+	if fresh {
+		rp.unacquired = true // acquire's runLocked will find it, not create it
 	}
 	if mode, err = p.effectiveModeLocked(rp, e); err != nil {
 		return 0, false, err

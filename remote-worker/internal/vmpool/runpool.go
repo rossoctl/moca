@@ -72,6 +72,9 @@ type runPool struct {
 	lease        *vmLease
 	warmingLease int
 	pinned       int
+	// unacquired marks a run created by routeExec (lease.go) that no acquire has seen
+	// yet, so acquire still counts its first cold acquire as ColdFirstExec.
+	unacquired bool
 }
 
 func (rp *runPool) signalSettledLocked() {

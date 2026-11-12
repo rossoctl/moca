@@ -482,6 +482,10 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 			return nil, nil, "", p.countRefusal(err)
 		}
 		rp.lastExec = p.clk.Now()
+		// A run routeExec created (lease.go) is not fresh here, but its first acquire is
+		// still a first Exec's.
+		fresh = fresh || rp.unacquired
+		rp.unacquired = false
 
 		if n := len(rp.ready); n > 0 {
 			vm := rp.ready[n-1]
