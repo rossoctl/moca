@@ -16,6 +16,26 @@ export const POLICY_SCHEMA = 'moca-template-policy/1';
 export interface Profile {
   /** Rule ids beyond the base rules; the benchmark profile's are the X rules. */
   requires: string[];
+  /**
+   * Self-attestation: a gate record the policy does not trust still passes X1.trusted when the
+   * creating subject submitted it, for that subject's own templates only. The build is then
+   * self-attested: shown as such, private, never deployment-visible until an admin adds the
+   * record's sha256 to trustedGateRecords. Absent: false.
+   */
+  selfAttest?: boolean;
+  /**
+   * On a self-attested record only: whether spec.egress may be true (the KVM host's allowlisted
+   * egress, never unrestricted). Absent: false. `benchmark-self` keeps it false (benchmark
+   * integrity, X11); `general-self` sets it, for general users whose sandboxes need the host's
+   * allowlisted network.
+   */
+  selfAttestEgress?: boolean;
+  /**
+   * Whether the gate's test floor must have been checked offline (X1.offline,
+   * gateFloorCheckedOffline). Absent: true on any profile that requires X1, so `benchmark` and
+   * `benchmark-self` refuse a record whose floor needed the network; `general-self` sets it false.
+   */
+  requireOfflineGate?: boolean;
   /** The size envelope: a spec outside it is refused (X15 for benchmark). */
   envelope: {
     maxGuestMb: number;
@@ -67,12 +87,60 @@ export const DEFAULT_POLICY: Policy = {
         exact: { guestMb: 4096, vcpus: 2 },
       },
     },
+    // Self-attestation: a subject's own gate record, for its own templates; offline (benchmark integrity).
+    'benchmark-self': {
+      requires: ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'],
+      selfAttest: true,
+      selfAttestEgress: false,
+      envelope: {
+        maxGuestMb: 4096,
+        maxVcpus: 2,
+        maxWorkspaceMb: 8192,
+        exact: { guestMb: 4096, vcpus: 2 },
+      },
+    },
+    // Self-attestation: the same without X11, for general users whose sandboxes need the host's
+    // allowlisted egress.
+    'general-self': {
+      requires: ['X1', 'X10', 'X12', 'X14', 'X15'],
+      selfAttest: true,
+      selfAttestEgress: true,
+      requireOfflineGate: false,
+      envelope: {
+        maxGuestMb: 4096,
+        maxVcpus: 2,
+        maxWorkspaceMb: 8192,
+        exact: { guestMb: 4096, vcpus: 2 },
+      },
+    },
   },
   defaultProfile: 'base',
   allowedRegistries: ['<default>'],
   trustedGateRecords: [],
   quota: { templates: 100, buildsQueued: 10, active: 8 },
 };
+
+/**
+ * The default general-gate record schema (`SH_GATE_RECORD_SCHEMA`): the format an image builder
+ * writes for Moca. A deployment that consumes another builder's records sets the setting to that
+ * builder's schema string.
+ */
+export const DEFAULT_GATE_RECORD_SCHEMA = 'moca-gate-record/1';
+
+/**
+ * Whether a gate record's test floor was checked offline: a general-gate record (schema
+ * `gateRecordSchema`, `SH_GATE_RECORD_SCHEMA`) always carries `gate.floor_checked_offline`, false
+ * only from a contract with `network_needed`; fail closed, so absent or false is not offline. Any
+ * other schema (the curated family records) predates the field, and their gates ran offline: absent
+ * is offline.
+ */
+export function gateFloorCheckedOffline(
+  gate: Record<string, unknown>,
+  gateRecordSchema: string = DEFAULT_GATE_RECORD_SCHEMA,
+): boolean {
+  const v = (gate.gate as Record<string, unknown> | undefined)?.floor_checked_offline;
+  return gate.schema === gateRecordSchema ? v === true : v !== false;
+}
 
 /** The template id rule (M7); refused past 31 characters, never truncated. */
 export const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
@@ -85,6 +153,18 @@ export interface CreateInput {
   profile?: string;
   /** The gate record, as the exact bytes the client sent (its sha256 is what is trusted). */
   gateRecordBytes?: Buffer;
+  /**
+   * The creating subject (self-attestation): on a `selfAttest` profile, a gate record it submits is
+   * trusted for its own template. Who submits is the control plane's to know; nothing in the record
+   * counts.
+   */
+  subject?: string;
+  /**
+   * The other subjects that already self-attested this gate record's sha256 (keyed by subject and
+   * sha256): a self-attested record belongs to its first submitter, so another subject's create on
+   * it is refused rather than riding on someone else's attestation.
+   */
+  gateSelfSubmitters?: string[];
 }
 
 export interface RuleResult {
@@ -100,8 +180,13 @@ export interface CheckResult {
   /** The first failed rule, for the 422. */
   failed?: RuleResult;
   gateRecordSha256?: string;
-  /** Whether the gate record's sha256 is in trustedGateRecords. Absent with no gate record. */
-  gateTrusted?: boolean;
+  /**
+   * How the gate record is trusted: `trusted`, its sha256 is in trustedGateRecords; `self`, not
+   * listed (on a `selfAttest` profile, trusted only by its submitter). Absent with no gate record.
+   */
+  gateTrust?: 'trusted' | 'self';
+  /** The gate record's offline facts (gate.floor_checked_offline, gate.floor_met_offline). */
+  gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
 }
 
 export function policyDigest(p: Policy): string {
@@ -145,7 +230,17 @@ const int = (v: unknown): v is number => typeof v === 'number' && Number.isSafeI
  * Every create-time rule, in order. Returns all results (for the `check` record) and the first
  * failure (for the 422). Never throws on bad input: a malformed field is a failed rule.
  */
-export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
+export interface CheckOptions {
+  /** The general-gate record schema (`SH_GATE_RECORD_SCHEMA`); absent: DEFAULT_GATE_RECORD_SCHEMA. */
+  gateRecordSchema?: string;
+}
+
+export function checkCreate(
+  input: CreateInput,
+  policy: Policy,
+  opts: CheckOptions = {},
+): CheckResult {
+  const gateSchema = opts.gateRecordSchema ?? DEFAULT_GATE_RECORD_SCHEMA;
   const results: RuleResult[] = [];
   const rule = (id: string, passed: boolean, message: string) =>
     results.push(passed ? { rule: id, passed } : { rule: id, passed, message });
@@ -300,7 +395,11 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     );
   }
   const req = new Set(profile?.requires ?? []);
+  // Self-attestation: a record the policy does not trust, accepted only because its submitter is
+  // the one creating.
+  const selfAttest = profile?.selfAttest === true;
   const trusted = gateSha !== undefined && policy.trustedGateRecords.includes(gateSha);
+  const selfAttested = selfAttest && gateSha !== undefined && !trusted;
   if (req.has('X1')) {
     rule(
       'X1',
@@ -309,14 +408,22 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     );
     rule(
       'X1.trusted',
-      trusted,
-      'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
+      trusted || (selfAttested && !!input.subject),
+      selfAttest
+        ? 'a self-attested profile needs the gate record sent with the create, by the subject who owns the template'
+        : 'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
     );
     rule(
       'X1.image',
       gate !== null && gate.image?.digest === digest,
       'the gate record is for another image',
     );
+    if (profile?.requireOfflineGate !== false)
+      rule(
+        'X1.offline',
+        gate === null || gateFloorCheckedOffline(gate, gateSchema),
+        `the ${profileName} profile needs the gate's floor checked offline (the record's run needed the network)`,
+      );
   }
   if (req.has('X10') && s.source_record_digest === undefined) {
     rule('X10', false, 'the benchmark profile needs spec.source_record_digest (X10)');
@@ -327,6 +434,28 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
       s.egress === false,
       'a benchmark template has no network: spec.egress must be false (X11)',
     );
+  if (selfAttested) {
+    const others = (input.gateSelfSubmitters ?? []).filter((x) => x !== input.subject);
+    rule(
+      'X1.self.scope',
+      others.length === 0,
+      'this gate record is self-attested by another subject; a self-attested record counts only for its submitter',
+    );
+    // A self-run gate is reviewed by no one but its submitter: commits refused always (X12 strict),
+    // and egress only where the profile allows it (the host's allowlist, never the template's).
+    rule(
+      'X12.self',
+      gate !== null &&
+        gate.observed?.testbed?.agent_can_commit === 'no' &&
+        gate.observed?.guest?.git_identity === 'none',
+      'a self-attested gate record must show commits refused (agent_can_commit no, git_identity none), whatever the spec (X12)',
+    );
+    rule(
+      'X1.self.egress',
+      profile?.selfAttestEgress === true || s.egress === false,
+      `the ${profileName} profile allows no egress for a self-attested template: spec.egress must be false`,
+    );
+  }
   if (s.skip_git_identity_check === true && gate !== null) {
     rule(
       'X12',
@@ -358,7 +487,17 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     results,
     passed: failed === undefined,
     ...(failed ? { failed } : {}),
-    ...(gateSha ? { gateRecordSha256: gateSha, gateTrusted: trusted } : {}),
+    ...(gateSha ? { gateRecordSha256: gateSha, gateTrust: trusted ? 'trusted' : 'self' } : {}),
+    ...(gate !== null
+      ? {
+          gateFloor: {
+            checkedOffline: gateFloorCheckedOffline(gate, gateSchema),
+            ...(typeof gate.gate?.floor_met_offline === 'boolean'
+              ? { metOffline: gate.gate.floor_met_offline as boolean }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -379,6 +518,13 @@ export function policyProblems(p: unknown): string[] {
         out.push(`${n}.requires must be a list of rule ids`);
       if (!e || ![e.maxGuestMb, e.maxVcpus, e.maxWorkspaceMb].every((x) => int(x) && x > 0))
         out.push(`${n}.envelope must hold positive maxGuestMb, maxVcpus, maxWorkspaceMb`);
+      for (const f of ['selfAttest', 'selfAttestEgress', 'requireOfflineGate'] as const)
+        if (pr?.[f] !== undefined && typeof pr[f] !== 'boolean')
+          out.push(`${n}.${f} must be true or false`);
+      if (pr?.selfAttestEgress === true && pr.selfAttest !== true)
+        out.push(`${n}.selfAttestEgress needs selfAttest`);
+      if (pr?.selfAttest === true && !pr.requires?.includes?.('X1'))
+        out.push(`${n}.selfAttest needs X1 in requires (a gate record to attest)`);
     }
   }
   if (typeof o.defaultProfile !== 'string' || !o.profiles?.[o.defaultProfile])
@@ -407,6 +553,13 @@ export function policyProblems(p: unknown): string[] {
  */
 export interface PolicyStore {
   current(): Promise<{ policy: Policy; record: string }>;
-  /** Store a new policy, and record it. */
-  set(policy: Policy, subject: string): Promise<{ policy: Policy; record: string }>;
+  /**
+   * Store a new policy, and record it. `extra` is added to the `policy` record's body beside the
+   * policy (self-attestation: the builds a trust removal narrows), never into the policy itself.
+   */
+  set(
+    policy: Policy,
+    subject: string,
+    extra?: Record<string, unknown>,
+  ): Promise<{ policy: Policy; record: string }>;
 }

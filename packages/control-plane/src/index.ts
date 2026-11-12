@@ -229,6 +229,7 @@ export {
   type TemplateDoc,
 } from './template-catalog.js';
 export {
+  DEFAULT_GATE_RECORD_SCHEMA,
   DEFAULT_POLICY,
   POLICY_SCHEMA,
   TEMPLATE_ID_RE,
@@ -236,6 +237,7 @@ export {
   policyDigest,
   policyProblems,
   registryOf,
+  type CheckOptions,
   type CheckResult,
   type CreateInput,
   type Policy,

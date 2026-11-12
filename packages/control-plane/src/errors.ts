@@ -34,6 +34,7 @@ export const CP_ERROR_CODES = [
   'template_not_found',
   'template_exists',
   'policy_refused',
+  'self_attested',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -96,6 +97,9 @@ const STATUS: Record<CpErrorCode, number> = {
   template_exists: 409,
   // 422: a create the policy refuses at create (spec §8.1); `rule` names the gating rule.
   policy_refused: 422,
+  // 409: deployment visibility for a template with a self-attested build, until an admin trusts its
+  // gate record (trustedGateRecords).
+  self_attested: 409,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.

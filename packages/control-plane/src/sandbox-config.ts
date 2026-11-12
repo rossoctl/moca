@@ -43,7 +43,15 @@ export interface SandboxConfig {
   janitorToken?: string;
   /** `SH_EGRESS_HOSTS` + `SH_CREDENTIAL_KEK`: user-scoped egress credentials (SBX0.2b); absent = off. */
   egress?: EgressConfig;
+  /**
+   * `SH_GATE_RECORD_SCHEMA`: the schema of the general-gate records this deployment reads (the
+   * records that must carry `gate.floor_checked_offline`); absent: DEFAULT_GATE_RECORD_SCHEMA.
+   */
+  gateRecordSchema?: string;
 }
+
+/** A schema string: path segments of letters, digits, `.`, `_`, `-`, joined by `/`. */
+const SCHEMA_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 
 const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
 /** The relay looks a worker up by this name (sandbox-relay main.ts SANDBOX_ID_RE). */
@@ -150,6 +158,12 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
       `SH_SANDBOX_TOKEN_TTL_SECONDS must be at most ${MAX_SANDBOX_TOKEN_TTL_S}: a delete takes effect only within one token lifetime`,
     );
   }
+  const gateRecordSchema = env.SH_GATE_RECORD_SCHEMA || undefined;
+  if (gateRecordSchema !== undefined && !SCHEMA_RE.test(gateRecordSchema)) {
+    throw new Error(
+      'SH_GATE_RECORD_SCHEMA must be a schema string such as moca-gate-record/1 (no spaces)',
+    );
+  }
   const templates = parseTemplates(env.SH_SANDBOX_TEMPLATES);
   const egress = egressConfigFromEnv(env, templates);
   return {
@@ -165,6 +179,7 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
     ...(execCa ? { execCa } : {}),
     ...(janitorToken ? { janitorToken } : {}),
     ...(egress ? { egress } : {}),
+    ...(gateRecordSchema ? { gateRecordSchema } : {}),
   };
 }
 
