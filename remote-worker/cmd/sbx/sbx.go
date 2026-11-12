@@ -57,7 +57,7 @@ type config struct {
 	tls   bool
 	caPEM []byte
 	// dialAddr (SBX_DIAL_ADDR), when set, is an ip:port the caller resolved SBX_ADDR's host to once, so a run of
-	// many calls does not look the name up per call (validation window 3, G30: every ~20 s stall was that lookup)
+	// many calls does not look the name up per call (behind a slow resolver, a lookup per call cost about 20 s)
 	dialAddr string
 }
 
