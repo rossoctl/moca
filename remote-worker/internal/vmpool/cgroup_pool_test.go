@@ -317,3 +317,63 @@ func TestCgroupPoolCountsALeakWhenTheBoundCannotBeWritten(t *testing.T) {
 		t.Fatalf("an unbounded cgroup must not reach the free list (idle=%d)", p.idle())
 	}
 }
+
+// Lease mode (spec §6, "Not from the cgroup pool"): a lease VM's cgroup has had its memory.max
+// raised past the pool's bound, so it must never be handed to a per-Exec VM. retire removes it
+// and never puts it on the free list; the name allocator is monotonic, so the next acquire
+// mints a new name rather than recreating the retired one.
+func TestRetireRemovesAndNeverReissues(t *testing.T) {
+	p, root := newTestPool(t)
+	a, err := p.acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	p.retire(a)
+
+	if _, err := os.Stat(filepath.Join(root, a)); !os.IsNotExist(err) {
+		t.Fatalf("retired cgroup %q still exists (stat err=%v)", a, err)
+	}
+	if p.idle() != 0 {
+		t.Fatalf("idle=%d after retire, want 0 -- a retired cgroup must never reach the free list", p.idle())
+	}
+	next, err := p.acquire()
+	if err != nil {
+		t.Fatalf("acquire after retire: %v", err)
+	}
+	if next == a {
+		t.Fatalf("acquire after retire reissued the retired name %q", a)
+	}
+	if p.idle() != 0 {
+		t.Fatalf("idle=%d, want 0", p.idle())
+	}
+	if p.leaks() != 0 {
+		t.Fatalf("leaks=%d, want 0 -- a clean retire is not a leak", p.leaks())
+	}
+}
+
+// The same guard as release: a cgroup with a live member is not removed (something is running
+// in it), and the refusal is counted rather than silent.
+func TestRetireWithProcsLeaks(t *testing.T) {
+	p, root := newTestPool(t)
+	a, err := p.acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Pid 1 only as a value that parses -- retire must not signal anything.
+	if err := os.WriteFile(filepath.Join(root, a, "cgroup.procs"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p.retire(a)
+
+	if _, err := os.Stat(filepath.Join(root, a)); err != nil {
+		t.Fatalf("retire removed a cgroup with a live member: %v", err)
+	}
+	if p.leaks() != 1 {
+		t.Fatalf("leaks=%d, want 1", p.leaks())
+	}
+	if p.idle() != 0 {
+		t.Fatalf("idle=%d, want 0 -- a leaked lease cgroup must not reach the free list", p.idle())
+	}
+}

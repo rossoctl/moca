@@ -38,6 +38,13 @@ func ShimMain(args []string) {
 	if err != nil {
 		shimFail("args", err)
 	}
+	// The agent runs at oom_score_adj -1000 once it serves leases, and a fork inherits
+	// it. An Exec must stay an OOM candidate, or an OOM in it finds nothing it may kill:
+	// put it back to the default while still root, which (with CAP_SYS_RESOURCE) also
+	// raises oom_score_adj_min to 0, so the exec uid cannot lower it again.
+	if err := os.WriteFile("/proc/self/oom_score_adj", []byte("0"), 0); err != nil {
+		shimFail("oom_score_adj", err)
+	}
 	for c := 0; c <= unix.CAP_LAST_CAP; c++ {
 		if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(c), 0, 0, 0); err != nil {
 			// EINVAL: a kernel older than x/sys does not know this cap, so nothing can
