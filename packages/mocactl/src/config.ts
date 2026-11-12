@@ -243,14 +243,24 @@ export function normalizeUrl(u?: string): string | undefined {
   return t ? trimTrailingSlashes(t) : undefined;
 }
 
+/**
+ * The endpoints by precedence: the flag, the environment, config.json, and for the control plane,
+ * last, the URL of the login on this machine (`loginUrl`, the `auth.json` that `mocactl login
+ * --control-plane-url URL` wrote, which remembers no URL in config.json). So a command run right
+ * after such a login (`mocactl credentials add`) reaches the control plane it logged in to.
+ */
 export function resolveEndpoints(
   flags: Endpoints,
   env: NodeJS.ProcessEnv,
   config: TuiConfig,
+  loginUrl?: string,
 ): Endpoints {
   return {
     controlPlaneUrl: normalizeUrl(
-      flags.controlPlaneUrl || env.SH_CONTROL_PLANE_URL || config.controlPlaneUrl,
+      flags.controlPlaneUrl ||
+        env.SH_CONTROL_PLANE_URL ||
+        config.controlPlaneUrl ||
+        (loginUrl && /^https?:\/\//.test(loginUrl) ? loginUrl : undefined),
     ),
     harnessUrl: normalizeUrl(flags.harnessUrl || env.SH_HARNESS_URL || config.harnessUrl),
   };

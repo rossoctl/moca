@@ -62,9 +62,18 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
   });
 
   it('needs a control plane URL, and says how to give one', async () => {
-    const { home, io } = setup();
+    // No login either: a login's own controlPlaneUrl is the last fallback (a login file alone).
+    const { home, io } = setup({ loggedIn: false });
     expect(await sbxMain(['ls'], { HOME: home }, io, { home })).toBe(2);
     expect(io.errs.join('\n')).toMatch(/--control-plane-url|MOCACTL_SBX_URL/);
+  });
+
+  it("falls back to the login's own control plane when nothing else names one", async () => {
+    // sbx-auth.json alone, no MOCACTL_SBX_URL, no config (a login file copied without config.json).
+    const { home, io } = setup();
+    const cp = fakeCp({ 'GET /v1/sandboxes': () => ({ status: 200, body: { sandboxes: [] } }) });
+    expect(await sbxMain(['ls'], { HOME: home }, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(cp.calls.map((c) => `${c.method} ${c.path}`)).toContain('GET /v1/sandboxes');
   });
 
   it('asks for a login first (exit 3)', async () => {
