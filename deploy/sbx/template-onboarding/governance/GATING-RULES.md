@@ -56,7 +56,7 @@ cat`), which most third-party images, and every benchmark image, do not carry; a
 ### 1.2 The image builder's image extensions
 
 These apply to every image built by the image builder. The image builder enforces them, so a gate record
-that passed is the evidence. A general gate record (a self-serve user's, #738) proves X1, X4 as its stated floor
+that passed is the evidence. A general gate record (§2.3) proves X1, X4 as its stated floor
 (`gate.floor`; `gate.floor_checked_offline` says whether it was proved offline), X5, X7, X8 and X9, and
 X6 when the contract lists files that must be absent. X2 and X3 do not apply: a general gate builds
 nothing, so its record has no base digest and no recipe. A template built from such an image must carry the record's digest
@@ -114,8 +114,11 @@ rules above apply unchanged, plus: commits always refused, whatever the spec say
 egress only where the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for
 benchmark integrity) and, like `benchmark`, needs a general-gate record's floor checked offline
 (X1.offline: `gate.floor_checked_offline`, on a record of the schema `SH_GATE_RECORD_SCHEMA` names,
-default `moca-gate-record/1`; fail closed); `general-self` allows the KVM host's allowlisted egress
-and either floor. Moca's spec:
+default `moca-gate-record/1`; fail closed: a record of any other schema, such as a builder's family
+records, which predate the field, passes unless it says `floor_checked_offline: false`, so a
+deployment that takes another builder's general-gate records sets `SH_GATE_RECORD_SCHEMA` to that
+builder's schema and holds them fail-closed too); `general-self` allows the KVM host's allowlisted
+egress and either floor. All of §2.3's rules are tier `vm` and are checked at create. Moca's spec:
 [subject trust for gate records](../../../../docs/specs/2026-11-08-subject-trust-gate-records-design.md).
 
 | #                   | Rule                                                                                                              | Evidence                                         | Status                  |
