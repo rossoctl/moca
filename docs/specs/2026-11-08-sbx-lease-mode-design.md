@@ -361,15 +361,16 @@ event for each sandbox until a client has seen it.
     `PerVMBytes`. Reclaim covers it, and the headroom target below is sized against it.
   - **Not from the cgroup pool.** Per-`Exec` VMs reuse cgroups from a free list written once with
     `memMax` = `PerVMBytes` (`remote-worker/internal/vmpool/cgroup_pool.go`). That is safe because a
-    reused per-`Exec` cgroup inherits about 1 MiB of charge. A lease cgroup has a different `memory.max`,
-    and host page cache charged to it stays charged after its VM exits, so handing it back would give a
-    per-`Exec` VM up to about 256 MiB of inherited charge under a `PerVMBytes` bound. Lease cgroups are
-    therefore never taken from or returned to the pool: the worker creates one for each lease and
-    removes it when the lease ends. After removal, page cache still charged to it counts only against
-    the parent slice until the host reclaims it, never against another VM's cgroup. Leases are few and
-    long-lived (the pool exists for per-`Exec`'s create/destroy rate), so the cost is one `mkdir` and
-    one `rmdir` per lease. The plan that builds lease VMs (plan 3) carries this, with a test that a
-    per-`Exec` VM after a lease starts with the pool's usual charge.
+    reused per-`Exec` cgroup inherits about 1 MiB of charge. A lease cgroup has a different
+    `memory.max`, and host page cache charged to it stays charged after its VM exits, so handing it
+    back would give a per-`Exec` VM up to about 256 MiB of inherited charge under a `PerVMBytes`
+    bound. A lease VM therefore takes its cgroup out of the pool. It starts as a pooled standby, so
+    when it becomes a lease VM the worker raises its `memory.max`, and when the lease ends the worker
+    removes the cgroup instead of returning it. After removal, page cache still charged to it counts
+    only against the parent slice until the host reclaims it, never against another VM's cgroup.
+    Leases are few and long-lived (the pool exists for per-`Exec`'s create/destroy rate), so the cost
+    is one `rmdir` and one fresh `mkdir` per lease. The plan that builds lease VMs (plan 2) carries
+    this, with a test that a per-`Exec` VM after a lease starts with the pool's usual charge.
 - **Headroom target.** `SH_LEASE_RECLAIM_FREE_MB` (default, v0.2: 2 × `PerVMBytes` + max(2 GiB,
   2 × (the lease charge bound above − `SH_LEASE_START_MB`)); about 4.9 GiB at 1 GiB guests
   (2 × 1056 MiB + 2 × (1640 − 192) MiB) and about 2.6 GiB at 256 MiB guests). Two per-`Exec` VMs always
@@ -667,7 +668,7 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
 
      The guest saw the balloon (`virtio_balloon` bound, `page_reporting_order` 9, that is 2 MiB
      blocks). Both guests showed about 890 MB free afterwards, so only the host side differed. Nothing
-     is open for plan 3 here.
+     is open for plan 2 here.
 6. **Level 2 is the latency case (v0.2; sized 2026-11-12).** E17a shows what a warm guest saves without
    process state: the VM start and the interpreter start-up, not the work. A spike on the E15 rig
    sized level 2 with one persistent Python server, standing in for `process_start` because the
