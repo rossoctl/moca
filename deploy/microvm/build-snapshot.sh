@@ -126,12 +126,32 @@ VMM="firecracker"
 GUEST_RAM_MB=256
 OUT=""
 EGRESS_CA=""
+# Both opt-in, both off by default (the defaults keep the build exactly as before):
+# SKIP_GIT_IDENTITY_CHECK for images that deliberately refuse agent commits (no git identity,
+# e.g. benchmark testbeds whose patch must stay a diff against an untouched baseline);
+# GUEST_HOME for a writable HOME, since init otherwise leaves the kernel's HOME=/ on a
+# read-only rootfs. See check_git_identity and assemble_rootfs.
+SKIP_GIT_IDENTITY_CHECK=0
+# GUEST_HOME_GITCONFIG: opt-in, with --guest-home: copy the image's root git config into the new HOME.
+GUEST_HOME_GITCONFIG=0
+GUEST_HOME=""
+# VCPUS: the guest's vCPU count, recorded in the manifest. Default 1, exactly as before; a
+# benchmark comparing this tier with containers of N CPUs builds with --vcpus N so the comparison
+# measures the tier, not the CPU count. Restore takes the count from the snapshot itself.
+VCPUS=1
+# VERIFY_COMMAND: opt-in, what verify_restore runs in the restored VM instead of `true` (a template's
+# seed and probe, so a snapshot whose image cannot do its job is never published). See
+# verify_guest_command. VERIFY_TIMEOUT_S bounds it in the guest.
+VERIFY_COMMAND=""
+VERIFY_TIMEOUT_S=600
 
 usage() {
   cat >&2 <<'USAGE'
 build-snapshot.sh --kernel PATH --rootfs PATH --agent PATH --image NAME
                   [--instance-type TYPE] [--vmm firecracker|cloud-hypervisor]
                   [--guest-ram-mb 256] [--out DIR] [--egress-ca PATH]
+                  [--skip-git-identity-check] [--guest-home /tmp/DIR [--guest-home-gitconfig]] [--vcpus 1]
+                  [--verify-command CMD [--verify-timeout-s 600]]
 
 Builds one golden snapshot, ON THE INSTANCE TYPE THAT WILL RUN IT (spec §2.4:
 restore requires identical hardware and software). --instance-type is an OVERRIDE:
@@ -147,6 +167,25 @@ only; a file holding any PRIVATE KEY block is refused) into the rootfs trust sto
 and records "egress_ca_sha256" (sha256 of the DER) in manifest.json, outside "hash". Writes vmstate, memfile and a
 manifest.json the worker verifies at start, then restores one VM to prove the
 artifact works.
+
+--skip-git-identity-check  do not require a usable git identity in the guest (for images
+                           that refuse agent commits on purpose; default: required, #415).
+--guest-home /tmp/DIR      export HOME=DIR to guest commands, created by init on the /tmp
+                           tmpfs (default: unset, so commands see the kernel's HOME=/ on a
+                           read-only rootfs). Must be a path under /tmp.
+--guest-home-gitconfig     with --guest-home: copy the image's /root/.gitconfig and
+                           /root/.config/git into that HOME, so an identity the image set with
+                           `git config --global` applies (default: off, so an image whose root
+                           identity must NOT reach the agent, e.g. a benchmark testbed whose
+                           commits are refused on purpose, keeps refusing).
+--vcpus N                  the guest's vCPU count, 1-32 (default 1, as before), recorded in the
+                           manifest; every VM restored from the snapshot has it.
+--verify-command CMD       what the verify step runs in the restored VM, in place of `true`: a
+                           bash command, run in /workspace once it is mounted as a worker mounts
+                           it (an empty workspace), so it can seed and probe a template. Nonzero
+                           exit fails the build and publishes nothing. The last 16 KiB of its
+                           output are logged. Default: unset, so the check is `true` as before.
+--verify-timeout-s N       the guest-side timeout for --verify-command, 1-86400 s (default 600).
 USAGE
   exit 2
 }
@@ -187,6 +226,31 @@ while [ $# -gt 0 ]; do
       ;;
     --egress-ca)
       EGRESS_CA="${2:-}"
+      shift 2
+      ;;
+    --skip-git-identity-check)
+      SKIP_GIT_IDENTITY_CHECK=1
+      shift
+      ;;
+    --guest-home)
+      GUEST_HOME="${2:-}"
+      shift 2
+      ;;
+    --guest-home-gitconfig)
+      GUEST_HOME_GITCONFIG=1
+      shift
+      ;;
+    --vcpus)
+      VCPUS="${2:-}"
+      shift 2
+      ;;
+    --verify-command)
+      VERIFY_COMMAND="${2:-}"
+      [ -n "$VERIFY_COMMAND" ] || usage
+      shift 2
+      ;;
+    --verify-timeout-s)
+      VERIFY_TIMEOUT_S="${2:-}"
       shift 2
       ;;
     -h | --help)
@@ -236,6 +300,23 @@ case "$VMM" in
     exit 2
     ;;
 esac
+
+# /tmp is the only writable tmpfs init mounts for every run (see assemble_rootfs), so a HOME
+# anywhere else would be read-only or vanish; the pattern keeps it one plain directory path.
+if [ -n "$GUEST_HOME" ] && ! printf '%s' "$GUEST_HOME" | grep -Eq '^/tmp(/[A-Za-z0-9._-]+)+$'; then
+  echo "build-snapshot.sh: --guest-home must be a path under /tmp (e.g. /tmp/home), got '$GUEST_HOME'" >&2
+  exit 2
+fi
+
+if ! printf '%s' "$VCPUS" | grep -Eq '^([1-9]|[12][0-9]|3[0-2])$'; then
+  echo "build-snapshot.sh: --vcpus must be an integer from 1 to 32, got '$VCPUS'" >&2
+  exit 2
+fi
+
+if ! printf '%s' "$VERIFY_TIMEOUT_S" | grep -Eq '^[1-9][0-9]{0,4}$' || [ "$VERIFY_TIMEOUT_S" -gt 86400 ]; then
+  echo "build-snapshot.sh: --verify-timeout-s must be an integer from 1 to 86400, got '$VERIFY_TIMEOUT_S'" >&2
+  exit 2
+fi
 
 OUT="${OUT:-$REPO_ROOT/.build/microvm-snapshots/$IMAGE}"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/build-snapshot.XXXXXX")"
@@ -631,14 +712,39 @@ assemble_rootfs() {
   # so a failed build never corrupts the caller's base image.
   cp -a "$ROOTFS/." "$STAGE/rootfs-tree/"
   mkdir -p "$STAGE/rootfs-tree/usr/local/bin" "$STAGE/rootfs-tree/sbin" \
-    "$STAGE/rootfs-tree/tmp" "$STAGE/rootfs-tree/var" "$STAGE/rootfs-tree/workspace"
+    "$STAGE/rootfs-tree/tmp" "$STAGE/rootfs-tree/var" "$STAGE/rootfs-tree/workspace" \
+    "$STAGE/rootfs-tree/.moca-var"
+  # NEVER WRITE THROUGH THE IMAGE'S SYMLINKS. The tree is an image's filesystem, and paths in it
+  # resolve on THIS host: Ubuntu-based images ship /sbin/init -> /lib/systemd/systemd (absolute), so
+  # writing "$tree/sbin/init" opened the BUILD HOST's systemd (seen on an Ubuntu-based image:
+  # "Text file busy" stopped it only because that file was running; a host file that was not
+  # running would have been overwritten as root). So: the directories we write into must resolve
+  # inside the tree, and the files we write are unlinked first, which replaces a symlink rather than
+  # following it.
+  local tree_real d
+  tree_real="$(realpath -e "$STAGE/rootfs-tree")"
+  for d in sbin usr/local/bin .moca-var; do
+    case "$(realpath -e "$STAGE/rootfs-tree/$d")/" in
+      "$tree_real"/*) ;;
+      *)
+        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($(realpath -e "$STAGE/rootfs-tree/$d")); refusing to write through it" >&2
+        exit 1
+        ;;
+    esac
+  done
+  # check_var's probe: one regular file the image has under /var, a plain name (quoted into a
+  # guest command), smallest path first so it is stable between builds. None: the check only writes.
+  VAR_PROBE="$(cd "$STAGE/rootfs-tree/var" && find . -xdev -type f 2>/dev/null |
+    sed 's|^\./||' | grep -E '^[A-Za-z0-9._/+-]+$' | LC_ALL=C sort | head -1 || true)"
+  rm -f "$STAGE/rootfs-tree/sbin/init" "$STAGE/rootfs-tree/usr/local/bin/agent"
   install -m 0555 "$STAGE/agent" "$STAGE/rootfs-tree/usr/local/bin/agent"
   add_sbx_identity
 
   # A minimal init: mount the ephemeral filesystems every run needs writable, then
   # EXEC (not fork) the agent as PID 1 so the agent's own exit tears the VM down
-  # instead of leaving an orphaned init for the next restore. /tmp and /var are
-  # tmpfs so nothing a run writes there survives past this VM's destruction.
+  # instead of leaving an orphaned init for the next restore. /tmp is a tmpfs, and /var
+  # an overlay with a tmpfs on top, so nothing a run writes there survives past this
+  # VM's destruction.
   cat >"$STAGE/rootfs-tree/sbin/init" <<'INIT'
 #!/bin/sh
 set -e
@@ -648,7 +754,30 @@ mount -t sysfs sysfs /sys
 # the whole cgroup when the Exec ends; the agent creates that directory itself.
 mount -t cgroup2 cgroup2 /sys/fs/cgroup || { echo "init: cgroup2 mount failed (guest kernel lacks cgroup v2?)" >&2; exit 1; }
 mount -t tmpfs -o mode=1777 tmpfs /tmp
-mount -t tmpfs tmpfs /var
+# /var is writable and fresh in every VM, but keeps what the image put there: an overlay with the
+# image's own /var (on the read-only rootfs) underneath and a tmpfs on top. A plain tmpfs here hid
+# it all (for example a prebuilt TeX format under /var/lib/texmf). The tmpfs for the
+# overlay's upper and work dirs is /.moca-var, a mount point the build makes, outside /var. If the
+# kernel has no overlayfs, the image's /var is copied into that tmpfs and bound over /var; if even
+# that fails, an empty tmpfs as before. Never fatal: check_var fails the build instead.
+mount -t tmpfs -o mode=0700 tmpfs /.moca-var || true
+mkdir -p /.moca-var/upper /.moca-var/work || true
+if mount -t overlay overlay -o lowerdir=/var,upperdir=/.moca-var/upper,workdir=/.moca-var/work /var; then
+  :
+elif mkdir -p /.moca-var/copy && cp -a /var/. /.moca-var/copy/ && mount --bind /.moca-var/copy /var; then
+  :
+else
+  mount -t tmpfs tmpfs /var
+fi
+# The links a userspace /dev normally has and the kernel's devtmpfs does not: without /dev/fd,
+# bash's process substitution (<(...), >(...)) expands to /dev/fd/63 and fails "No such file or
+# directory", and tools reading /dev/stdin fail the same way.
+# Never fatal: a /dev that cannot take them must not stop the guest booting;
+# check_dev_fd fails the build instead.
+[ -e /dev/fd ] || ln -s /proc/self/fd /dev/fd || true
+[ -e /dev/stdin ] || ln -s /proc/self/fd/0 /dev/stdin || true
+[ -e /dev/stdout ] || ln -s /proc/self/fd/1 /dev/stdout || true
+[ -e /dev/stderr ] || ln -s /proc/self/fd/2 /dev/stderr || true
 
 # Fix-round-4 item 1: the kernel hands init an essentially empty environment --
 # no PATH at all. This script never needed one (every command above is called
@@ -698,6 +827,27 @@ fi
 
 exec /usr/local/bin/agent --listen vsock:1024 --workdir /workspace --egress-listen 127.0.0.1:3128 --egress-vsock-port 1025 --lease-cgroup-root /sys/fs/cgroup/moca-execs
 INIT
+  # --guest-home: give guest commands a writable HOME. Inserted right after the PATH line, so
+  # /tmp is already mounted; the agent inherits init's environment, and so does every command.
+  # --guest-home-gitconfig: the image's own HOME (root's, /root) may carry the user-level git
+  # config (its identity): the new HOME starts empty, so without the copy a `git commit` that works
+  # in the image fails in the guest with no identity. OPT-IN, because an image can carry a root
+  # identity that must not reach the agent: a benchmark base image can have one while its testbed
+  # refuses commits by design.
+  # Only git's files, and only if present.
+  if [ -n "$GUEST_HOME" ] && [ "$GUEST_HOME_GITCONFIG" = 1 ]; then
+    sed -i "/^export PATH=/a mkdir -p $GUEST_HOME\\
+[ ! -f /root/.gitconfig ] || cp /root/.gitconfig $GUEST_HOME/.gitconfig || true\\
+[ ! -d /root/.config/git ] || { mkdir -p $GUEST_HOME/.config \\&\\& cp -R /root/.config/git $GUEST_HOME/.config/git; } || true\\
+export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
+  elif [ -n "$GUEST_HOME" ]; then
+    sed -i "/^export PATH=/a mkdir -p $GUEST_HOME\\
+export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
+    grep -qx "export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init" || {
+      echo "build-snapshot.sh: could not add HOME=$GUEST_HOME to init" >&2
+      exit 1
+    }
+  fi
   chmod 0555 "$STAGE/rootfs-tree/sbin/init"
 
   # P4.1 egress: git over the proxy needs a credential to attempt. It is an inert
@@ -1075,9 +1225,20 @@ check_lease_support() {
 check_git_identity() {
   local uds="$1"
   local out rc
+  if [ "$SKIP_GIT_IDENTITY_CHECK" = 1 ]; then
+    log "skipping the git identity check (--skip-git-identity-check): this image refuses agent commits on purpose"
+    return 0
+  fi
+  # An image with no git at all has no commit to fail, so the check passes: the guest
+  # prints `no-git` and exits 0. An image whose template needs git is refused earlier, by
+  # build-rootfs.sh's required tools (--require names them for a template image).
   out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 30 \
-    -command 'git init -q /tmp/id-check && cd /tmp/id-check && git -c user.useConfigOnly=true commit --allow-empty -m x 2>&1; rc=$?; cd / && rm -rf /tmp/id-check; exit $rc' \
+    -command 'command -v git >/dev/null 2>&1 || { echo no-git; exit 0; }; git init -q /tmp/id-check && cd /tmp/id-check && git -c user.useConfigOnly=true commit --allow-empty -m x 2>&1; rc=$?; cd / && rm -rf /tmp/id-check; exit $rc' \
     2>&1)" && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "no-git" ]; then
+    log "the guest has no git: no commit to fail, so no identity is needed"
+    return 0
+  fi
   if [ "$rc" -ne 0 ]; then
     echo "build-snapshot.sh: the guest git has no usable identity (exit $rc). An agent's" >&2
     echo "  first \`git commit\` in this sandbox will fail with exit 128 until it configures" >&2
@@ -1107,6 +1268,45 @@ check_egress_listener() {
     echo "  pointing at nothing (P4.1). The init must exec the agent with" >&2
     echo "  --egress-listen 127.0.0.1:3128 --egress-vsock-port 1025 -- or guest_client could" >&2
     echo "  not reach the guest at all, in which case its diagnostics follow. Output: $out" >&2
+    exit 1
+  fi
+}
+
+# check_dev_fd: the guest must have /dev/fd and /dev/std* (init links them), or every agent
+# command using bash process substitution fails in the sandbox. Same failure style as
+# check_egress_listener: loud, at build time.
+check_dev_fd() {
+  local uds="$1"
+  local out rc
+  out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 30 \
+    -command 'cat <(echo fd-ok) && echo stdin-ok | cat /dev/stdin' \
+    2>&1)" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(printf '%s' "$out" | tr -d '[:space:]')" != "fd-okstdin-ok" ]; then
+    echo "build-snapshot.sh: the guest has no working /dev/fd or /dev/stdin (exit $rc)." >&2
+    echo "  bash's <(...) and >(...) would fail in every sandbox restored from this snapshot." >&2
+    echo "  The init links /dev/fd -> /proc/self/fd; its /dev must be writable (devtmpfs) --" >&2
+    echo "  or guest_client could not reach the guest at all. Output: $out" >&2
+    exit 1
+  fi
+}
+
+# check_var: the restored guest's /var shows the image's own files and takes writes (init's overlay).
+# VAR_PROBE is a file the image has under /var (found by assemble_rootfs's caller), or empty for an
+# image with an empty /var. The written file is removed in the same command: the snapshot captures
+# guest RAM, the tmpfs under /var included.
+VAR_PROBE=""
+check_var() {
+  local uds="$1"
+  local out rc cmd
+  cmd='echo x >/var/.moca-var-check && rm -f /var/.moca-var-check && echo var-writable'
+  [ -z "$VAR_PROBE" ] || cmd="test -r '/var/$VAR_PROBE' && echo var-kept && $cmd"
+  out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 30 -command "$cmd" 2>&1)" && rc=0 || rc=$?
+  local want=var-writable
+  [ -z "$VAR_PROBE" ] || want=var-keptvar-writable
+  if [ "$rc" -ne 0 ] || [ "$(printf '%s' "$out" | tr -d '[:space:]')" != "$want" ]; then
+    echo "build-snapshot.sh: the guest's /var is not the image's /var made writable (exit $rc)." >&2
+    echo "  init mounts an overlay (the image's /var under a tmpfs) on /var; probed /var/$VAR_PROBE" >&2
+    echo "  and a write. Output: $out" >&2
     exit 1
   fi
 }
@@ -1648,8 +1848,8 @@ boot_quiesce_snapshot_firecracker() {
   # which is how this was found, and vmpoolctl (which had no such check until this change)
   # went on measuring against a mutating image.
   #
-  # Nothing legitimate is lost. sbin/init mounts tmpfs on /tmp and /var (see assemble_
-  # rootfs) so everything a run writes there is ephemeral by design, and /workspace is a
+  # Nothing legitimate is lost. sbin/init mounts a tmpfs on /tmp and a tmpfs-backed overlay on
+  # /var (see assemble_rootfs), so everything a run writes there is ephemeral by design, and /workspace is a
   # SEPARATE rw drive. The Cloud Hypervisor path in this same script already passed
   # `readonly=on` for its rootfs -- this makes the Firecracker arm agree with it.
   api_put "$api_sock" /drives/rootfs \
@@ -1659,7 +1859,7 @@ boot_quiesce_snapshot_firecracker() {
   api_put "$api_sock" /vsock \
     "{\"vsock_id\":\"vsock0\",\"guest_cid\":3,\"uds_path\":\"/vsock.sock\"}"
   api_put "$api_sock" /machine-config \
-    "{\"mem_size_mib\":$GUEST_RAM_MB,\"vcpu_count\":1}"
+    "{\"mem_size_mib\":$GUEST_RAM_MB,\"vcpu_count\":$VCPUS}"
   api_put "$api_sock" /actions '{"action_type":"InstanceStart"}'
 
   wait_for_agent "$vsock_uds" "$console_log"
@@ -1667,6 +1867,8 @@ boot_quiesce_snapshot_firecracker() {
   MANIFEST_GUEST_KERNEL="$(probe_guest_kernel "$vsock_uds")"
   check_git_identity "$vsock_uds"
   check_egress_listener "$vsock_uds"
+  check_dev_fd "$vsock_uds"
+  check_var "$vsock_uds"
   check_lease_support "$vsock_uds"
   quiesce_guest "$vsock_uds"
 
@@ -1821,7 +2023,7 @@ boot_quiesce_snapshot_cloud_hypervisor() {
     --vsock "cid=3,socket=/vsock.sock" \
     --fs "tag=workspace,socket=/fs.sock" \
     --memory "size=${GUEST_RAM_MB}M,shared=on" \
-    --cpus boot=1 \
+    --cpus boot=$VCPUS \
     --console "file=/console.log" \
     --serial off \
     </dev/null >/dev/null 2>&1 &
@@ -1843,6 +2045,8 @@ boot_quiesce_snapshot_cloud_hypervisor() {
   MANIFEST_GUEST_KERNEL="$(probe_guest_kernel "$vsock_uds")"
   check_git_identity "$vsock_uds"
   check_egress_listener "$vsock_uds"
+  check_dev_fd "$vsock_uds"
+  check_var "$vsock_uds"
   check_lease_support "$vsock_uds"
   quiesce_guest "$vsock_uds"
 
@@ -1925,6 +2129,7 @@ write_manifest() {
   "instance_type": "$INSTANCE_TYPE",
   "kernel_release": "$MANIFEST_GUEST_KERNEL",
   "guest_ram_mb": $GUEST_RAM_MB,
+  "vcpus": $VCPUS,
   "capabilities": [$caps_json],
   "features": [$features_json],
   "built_at": "$built_at",
@@ -1976,8 +2181,49 @@ lock_down() {
 # ---------------------------------------------------------------------------
 # 7. verify_restore
 # ---------------------------------------------------------------------------
+# verify_guest_command VMM: the command verify_restore runs in the restored VM. Without
+# --verify-command it is `true`, exactly as before. With it, the workspace is mounted first the way
+# the worker's launcher mounts it (launcher_firecracker.go's Resume: the ext4 drive /dev/vdb;
+# launcher_chv.go's chvWrapCommand: virtio-fs tag `workspace`), then the command runs in /workspace
+# with its output in /tmp (the guest agent caps each stream at 32 KiB), and only the log's tail is
+# returned, with the command's exit code.
+verify_guest_command() {
+  if [ -z "$VERIFY_COMMAND" ]; then
+    printf 'true'
+    return
+  fi
+  case "$1" in
+    firecracker) printf '%s\n' 'mountpoint -q /workspace || mount -o rw,noatime /dev/vdb /workspace || exit 97' ;;
+    cloud-hypervisor) printf '%s\n' 'mountpoint -q /workspace || mount -t virtiofs workspace /workspace || exit 97' ;;
+  esac
+  printf 'cd /workspace || exit 97\n(\n%s\n) >/tmp/.verify-command.log 2>&1\n' "$VERIFY_COMMAND"
+  printf '%s\n' 'rc=$?; tail -c 16384 /tmp/.verify-command.log; exit $rc'
+}
+
+# run_verify_command VSOCK_UDS: run verify_guest_command in the restored VM; its exit code is the
+# command's. The output goes to the log, so a failed probe shows why.
+run_verify_command() {
+  local uds="$1" out rc timeout_s=30
+  [ -z "$VERIFY_COMMAND" ] || timeout_s="$VERIFY_TIMEOUT_S"
+  out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s "$timeout_s" \
+    -command "$(verify_guest_command "$VMM")" 2>&1)" && rc=0 || rc=$?
+  if [ -n "$VERIFY_COMMAND" ]; then
+    log "verify command exited $rc; the last of its output:"
+    printf '%s\n' "$out" >&2
+  fi
+  return "$rc"
+}
+
+verify_what() {
+  if [ -n "$VERIFY_COMMAND" ]; then printf 'the --verify-command'; else printf '`true`'; fi
+}
+
 verify_restore() {
-  log "verifying: restoring one VM from $PENDING and running \`true\` in it"
+  if [ -n "$VERIFY_COMMAND" ]; then
+    log "verifying: restoring one VM from $PENDING and running the --verify-command in it"
+  else
+    log "verifying: restoring one VM from $PENDING and running \`true\` in it"
+  fi
   case "$VMM" in
     firecracker) verify_restore_firecracker ;;
     cloud-hypervisor) verify_restore_cloud_hypervisor ;;
@@ -2092,12 +2338,12 @@ verify_restore_firecracker() {
     "{\"snapshot_path\":\"/vmstate\",\"mem_backend\":{\"backend_path\":\"/memfile\",\"backend_type\":\"File\"},\"vsock_override\":{\"uds_path\":\"/vsock.sock\"},\"resume_vm\":true}"
 
   local exit_code=0
-  "$STAGE/guest_client" -uds "$vsock_uds" -port 1024 -timeout-s 30 -command true || exit_code=$?
+  run_verify_command "$vsock_uds" || exit_code=$?
   teardown_jail "$jail"
   rm_rf_jail "$verify_root"
   CLEANUP_EXTRA_DIR=""
   if [ "$exit_code" -ne 0 ]; then
-    echo "build-snapshot.sh: the fresh snapshot restored but \`true\` exited $exit_code" >&2
+    echo "build-snapshot.sh: the fresh snapshot restored but $(verify_what) exited $exit_code" >&2
     exit 1
   fi
 }
@@ -2183,7 +2429,7 @@ verify_restore_cloud_hypervisor() {
     '{"source_url":"file:///ch-snapshot","resume":true}'
 
   local exit_code=0
-  "$STAGE/guest_client" -uds "$vsock_uds" -port 1024 -timeout-s 30 -command true || exit_code=$?
+  run_verify_command "$vsock_uds" || exit_code=$?
   teardown_jail "$jail"
   # Fix-round-12: VMM first (teardown_jail above), then virtiofsd -- see
   # teardown_virtiofsd's own comment. Must run before rm_rf_jail: virtiofsd
@@ -2192,7 +2438,7 @@ verify_restore_cloud_hypervisor() {
   rm_rf_jail "$verify_root"
   CLEANUP_EXTRA_DIR=""
   if [ "$exit_code" -ne 0 ]; then
-    echo "build-snapshot.sh: the fresh snapshot restored but \`true\` exited $exit_code" >&2
+    echo "build-snapshot.sh: the fresh snapshot restored but $(verify_what) exited $exit_code" >&2
     exit 1
   fi
 }
