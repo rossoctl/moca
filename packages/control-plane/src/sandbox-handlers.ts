@@ -33,6 +33,7 @@ import {
   type SandboxView,
 } from './sandbox-store.js';
 import { mintSandboxToken } from './sandbox-token.js';
+import { SubjectQueue } from './subject-document.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -419,6 +420,19 @@ async function usage(
 }
 
 /**
+ * One quota check and write at a time per subject (§6.2), per catalog. The catalog serializes
+ * per template id only, and the quota counts across every id a subject owns: without this, two
+ * creates for different ids would both read the same use and both pass. Taken outside the
+ * catalog's id lock, always in that order.
+ */
+const quotaLocks = new WeakMap<TemplateCatalog, SubjectQueue>();
+function quotaLock(cat: TemplateCatalog): SubjectQueue {
+  let q = quotaLocks.get(cat);
+  if (!q) quotaLocks.set(cat, (q = new SubjectQueue()));
+  return q;
+}
+
+/**
  * The shared body of both create routes. `existing`: true for POST /v1/templates/{id}/builds (the
  * template must exist and be the caller's), false for POST /v1/templates (a new id, or the
  * caller's own existing one).
@@ -479,92 +493,95 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   const quota = pol.quota;
   const want = reuseKey(b.image as string, spec, result.profile, result.gateRecordSha256);
   let reused: TemplateBuild | undefined;
-  const doc = await cat.update(id, async (cur) => {
-    if (existing && !cur) throw new CpError('template_not_found', 'no such template');
-    if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
-      // 404 for a private template, 409 for a visible one: never an existence oracle for private.
-      throw cur.visibility === 'private' && !isAdmin(p)
-        ? new CpError('template_not_found', 'no such template')
-        : new CpError('template_exists', `template '${id}' belongs to another subject`);
-    }
-    // §3.2: the same inputs are the same build. One registered, or still on its way there, is
-    // answered instead of a second build (two creates would otherwise queue two builds that
-    // register under one manifest hash).
-    reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
-    if (reused) return cur!;
-    const u = await usage(cat, p.sub);
-    if (!cur && u.templates >= quota.templates) {
-      throw new CpError(
-        'quota_exceeded',
-        `at most ${quota.templates} templates per subject`,
-        undefined,
-        { quota: 'templates' },
-      );
-    }
-    if (u.buildsQueued >= quota.buildsQueued) {
-      throw new CpError(
-        'quota_exceeded',
-        `at most ${quota.buildsQueued} builds queued per subject`,
-        undefined,
-        { quota: 'buildsQueued' },
-      );
-    }
-    if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
-    const created = await prov.append({
-      stream,
-      kind: 'create',
-      subject: p.sub,
-      body: {
-        image: b.image as string,
-        // A round trip through JSON: what the client sent, as the wire carries it (no undefined).
-        spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
-        profile: result.profile,
-        handle,
-        ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
-      },
-    });
-    if (result.gateRecordSha256) {
-      await prov.append({
+  // The caller's quota check and write run under the caller's lock (quotaLock).
+  const doc = await quotaLock(cat).run(p.sub, () =>
+    cat.update(id, async (cur) => {
+      if (existing && !cur) throw new CpError('template_not_found', 'no such template');
+      if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
+        // 404 for a private template, 409 for a visible one: never an existence oracle for private.
+        throw cur.visibility === 'private' && !isAdmin(p)
+          ? new CpError('template_not_found', 'no such template')
+          : new CpError('template_exists', `template '${id}' belongs to another subject`);
+      }
+      // §3.2: the same inputs are the same build. One registered, or still on its way there, is
+      // answered instead of a second build (two creates would otherwise queue two builds that
+      // register under one manifest hash).
+      reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
+      if (reused) return cur!;
+      const u = await usage(cat, p.sub);
+      if (!cur && u.templates >= quota.templates) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${quota.templates} templates per subject`,
+          undefined,
+          { quota: 'templates' },
+        );
+      }
+      if (u.buildsQueued >= quota.buildsQueued) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${quota.buildsQueued} builds queued per subject`,
+          undefined,
+          { quota: 'buildsQueued' },
+        );
+      }
+      if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
+      const created = await prov.append({
         stream,
-        kind: 'gate',
+        kind: 'create',
         subject: p.sub,
         body: {
-          record_sha256: result.gateRecordSha256,
-          // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
-          // X1). The policy record in force names what the trust was at create, after any change.
-          source: result.gateTrusted ? 'trusted' : 'client',
-          policy: policyRecord,
+          image: b.image as string,
+          // A round trip through JSON: what the client sent, as the wire carries it (no undefined).
+          spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
+          profile: result.profile,
+          handle,
+          ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
         },
       });
-    }
-    await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
-    const build: TemplateBuild = {
-      buildId: handle,
-      handle,
-      status: 'queued',
-      profile: result.profile,
-      worker: '',
-      spec: buildSpec(spec),
-      createdAt: now,
-      provenance: created.digest,
-      request: {
-        image: b.image as string,
-        spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
-        ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
-      },
-    };
-    const base: TemplateDoc = cur ?? {
-      schema: TEMPLATE_DOC_SCHEMA,
-      id,
-      owner: p.sub,
-      visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
-      description: String(spec.description ?? ''),
-      tags: {},
-      builds: [],
-      createdAt: now,
-    };
-    return { ...base, builds: [build, ...base.builds] };
-  });
+      if (result.gateRecordSha256) {
+        await prov.append({
+          stream,
+          kind: 'gate',
+          subject: p.sub,
+          body: {
+            record_sha256: result.gateRecordSha256,
+            // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
+            // X1). The policy record in force names what the trust was at create, after any change.
+            source: result.gateTrusted ? 'trusted' : 'client',
+            policy: policyRecord,
+          },
+        });
+      }
+      await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+      const build: TemplateBuild = {
+        buildId: handle,
+        handle,
+        status: 'queued',
+        profile: result.profile,
+        worker: '',
+        spec: buildSpec(spec),
+        createdAt: now,
+        provenance: created.digest,
+        request: {
+          image: b.image as string,
+          spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
+          ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
+        },
+      };
+      const base: TemplateDoc = cur ?? {
+        schema: TEMPLATE_DOC_SCHEMA,
+        id,
+        owner: p.sub,
+        visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
+        description: String(spec.description ?? ''),
+        tags: {},
+        builds: [],
+        createdAt: now,
+      };
+      return { ...base, builds: [build, ...base.builds] };
+    }),
+  );
   if (reused) {
     await auditBestEffort(deps, 'template_build_reused', id, {
       subject: p.sub,

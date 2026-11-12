@@ -184,7 +184,8 @@ may write: an id no template holds yet, its own, or as an admin adding a build; 
 subject's id is only answered), and nothing is queued. Refusals on the caller's own and on new ids are
 bounded only by the request rate. Over a quota
 (§6.2: templates owned, builds queued or building at once) is `429 quota_exceeded` naming which
-(`quota`). Another subject's id is `409 template_exists` (`404 template_not_found` when that
+(`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
+for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
 record) and `check` records (§7.1) and queues the build for a build host (§6.1, a later issue).
 

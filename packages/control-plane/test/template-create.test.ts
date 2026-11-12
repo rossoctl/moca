@@ -308,6 +308,36 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     expect(other.extra).toEqual({ quota: 'templates' });
   });
 
+  it('holds the quotas under concurrent creates for different ids', async () => {
+    const d = stored({ ...benchmarkPolicy, quota: { templates: 1, buildsQueued: 10, active: 1 } });
+    const ids = ['par-a', 'par-b', 'par-c'];
+    const rs = await Promise.allSettled(ids.map((id) => create(d, body({ id }))));
+    expect(rs.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const codes = rs.flatMap((r) => (r.status === 'rejected' ? [r.reason.code] : []));
+    expect(codes).toEqual(['quota_exceeded', 'quota_exceeded']);
+    const listed = (await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body;
+    expect(listed.templates).toHaveLength(1);
+
+    // buildsQueued, with two new builds of two of one's own templates at once.
+    const d2 = stored({ ...benchmarkPolicy, quota: { templates: 10, buildsQueued: 3, active: 1 } });
+    await create(d2, body({ id: 'own-a' }));
+    await create(d2, body({ id: 'own-b' }));
+    const more = (id: string) =>
+      HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id },
+          body: body({ spec: { ...spec, description: `more of ${id}` } }),
+        }),
+        d2,
+      );
+    const rs2 = await Promise.allSettled([more('own-a'), more('own-b')]);
+    expect(rs2.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(rs2.flatMap((r) => (r.status === 'rejected' ? [r.reason.extra] : []))).toEqual([
+      { quota: 'buildsQueued' },
+    ]);
+  });
+
   it('answers that a deployment without SH_PROVENANCE_DIR stores no templates', async () => {
     const d = makeDeps({ config: { routeProfile: 'sandbox' } });
     expect(await codeOf(() => create(d))).toBe('invalid_request');
