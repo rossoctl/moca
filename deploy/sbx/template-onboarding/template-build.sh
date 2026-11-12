@@ -73,7 +73,9 @@
 # rebuilt; --force rebuilds it.
 #
 # It touches nothing else: no worker, no unit, no cluster. Installing the worker is
-# deploy/sbx/install-host.sh, after template-register.sh and setup.sh.
+# deploy/sbx/install-host.sh, after template-register.sh and setup.sh; it finds the record beside the
+# snapshot and sets the worker's SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so the worker checks the
+# record against its snapshot at every start.
 #
 # Exit: 0 built (or already built); 1 a step failed; 2 a usage or spec error.
 set -euo pipefail
@@ -353,3 +355,4 @@ egress_flag=''
 log "built template $ID: snapshot $NAME, worker $WORKER"
 log "record: $RECORD (copy it to the operator's machine for deploy/sbx/template-onboarding/template-register.sh)"
 log "then, after setup.sh: sudo deploy/sbx/install-host.sh <bundle of $WORKER> --snapshot $NAME --budget-mb <at least $BUDGET_MIN>$egress_flag"
+log "install-host.sh wires $RECORD into the worker (SH_TEMPLATE_RECORD, SANDBOX_TEMPLATE=$ID), so the worker checks it at every start"

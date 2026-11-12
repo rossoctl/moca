@@ -50,6 +50,10 @@ gitignored).
    ```
 
    It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`).
+   When `<image>` was built by `deploy/sbx/template-onboarding/template-build.sh`, its template record
+   (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
+   `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
+   for another worker is refused before anything is written.
 
 6. **The janitor,** once per KVM host:
 
