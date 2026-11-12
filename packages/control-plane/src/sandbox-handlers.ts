@@ -236,7 +236,8 @@ function catalog(deps: CpDeps): TemplateCatalog {
 /**
  * The trust a build's gate record has NOW (self-attestation): `deployment` when its sha256 is in the
  * current policy's trustedGateRecords, or the build names no gate record; `self` when it was
- * created on a selfAttest profile with a record the policy does not (or no longer) trust.
+ * created on a selfAttest profile with a record the policy does not (or no longer) trust, whether
+ * or not the record was trusted at create (`selfAttestProfile`; `selfAttested` implies it).
  * Recomputed on every read, never stored, so an admin's promotion or removal needs no rewrite.
  */
 export function attestationOf(
@@ -244,7 +245,8 @@ export function attestationOf(
   trusted: ReadonlySet<string>,
 ): 'deployment' | 'self' {
   const g = b.request?.gateRecordSha256;
-  return b.selfAttested === true && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
+  const onSelfProfile = b.selfAttestProfile === true || b.selfAttested === true;
+  return onSelfProfile && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
 }
 
 /**
@@ -655,6 +657,10 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
         ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
       },
       ...(selfAttestedCreate ? { selfAttested: true } : {}),
+      // On a selfAttest profile, the record's trust is the policy's at each read, not at create.
+      ...(result.gateRecordSha256 && pol.profiles[result.profile]?.selfAttest === true
+        ? { selfAttestProfile: true }
+        : {}),
       ...(result.gateFloor ? { gateFloor: result.gateFloor } : {}),
     };
     const base: TemplateDoc = cur ?? {

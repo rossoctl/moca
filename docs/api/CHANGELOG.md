@@ -27,7 +27,8 @@ who submits a gate record, never by anything inside it. Every change is additive
   deployment does (an older control plane without the field reads as the default).
 - The `gate` provenance record's `source` adds `self`, with `scope` (the submitter).
 - `Template` and `TemplateBuild` add `attestation` (`deployment | self`), recomputed on every read
-  from the current policy. `TemplateBuild` adds `gateFloorCheckedOffline`, and
+  from the current policy: `self` for a build made on a `selfAttest` profile whose record is not
+  trusted now, whatever its trust at create. `TemplateBuild` adds `gateFloorCheckedOffline`, and
   `gateFloorMetOffline` for a gate from a `network_needed` contract. A template with a registered
   self-attested build reads `visibility: private`, whatever is stored.
 - New error code `self_attested` (409): a self-attested create asking for `deployment`

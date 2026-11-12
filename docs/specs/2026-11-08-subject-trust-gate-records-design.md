@@ -80,9 +80,14 @@ shows `gateFloorCheckedOffline`, and, from a `network_needed` gate, `gateFloorMe
   `source` (`trusted`, `self`, or `client` on a profile that doesn't require X1), `scope` (the
   submitter, for `self`), and `policy` (the policy record in force at create). The submitted bytes are
   a blob, so an admin promoting a record sees exactly what was trusted and by whom.
-- **The build** keeps `selfAttested: true` as a fact of its create.
+- **The build** keeps two facts of its create: `selfAttested: true` when its record was untrusted
+  then (a self-attestation), and `selfAttestProfile: true` whenever it was made on a `selfAttest`
+  profile with a gate record, trusted or not.
 - **`attestation`** (`deployment | self`) on each build and on its template is **recomputed on every
-  read** from the current policy: an admin's promotion or removal of the record rewrites nothing.
+  read** from the current policy: `self` for a build made on a `selfAttest` profile whose record is
+  not trusted now, so a build made while its record was trusted reads as self-attested once an admin
+  removes the record, whatever the order of events. An admin's promotion or removal rewrites
+  nothing.
 
 ## 6. Visibility
 
@@ -95,7 +100,8 @@ shows `gateFloorCheckedOffline`, and, from a `network_needed` gate, `gateFloorMe
   self-attested now, whatever is stored, so every list, read and use follows the current policy.
 - **Decision (i):** when an admin removes a record's sha256 from `trustedGateRecords`, a
   deployment-visible template whose registered builds become self-attested falls back to **private on
-  read**. Other subjects no longer see it in the list, can't read it, and can't use it (a sandbox or a
+  read**: a build self-attested at create, and a build made on a `selfAttest` profile while the record
+  was trusted, by its submitter or by another subject. Other subjects no longer see it in the list, can't read it, and can't use it (a sandbox or a
   session create answers as for an unknown template). Its owner keeps using it.
 - So that nothing is silent, `PUT /v1/policy` names the narrowed builds (`narrowed: [{template,
 buildId}]`) in its answer and in its `policy` record.

@@ -108,7 +108,9 @@ nothing, so its record has no base digest and no recipe. A template built from s
 
 A subject may submit its own gate record (made with the image builder's general gate) on a profile
 with `selfAttest`. It counts only for that subject's own templates, which stay private and are shown
-as self-attested until an admin adds the record's sha256 to `trustedGateRecords`. A record counts for
+as self-attested until an admin adds the record's sha256 to `trustedGateRecords`; a build made on a
+`selfAttest` profile while its record was trusted reads as self-attested again (and its template as
+private) once an admin removes it. A record counts for
 one subject only: the same sha256 submitted by a second subject is refused (X1.self.scope). The X
 rules above apply unchanged, plus: commits always refused, whatever the spec says (X12.self), and
 egress only where the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for

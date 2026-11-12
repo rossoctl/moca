@@ -427,6 +427,26 @@ describe('promotion and removal of trust (self-attestation)', () => {
     expect(await use(d, alice)).toBe(HASH);
   });
 
+  it("narrows on removal another subject's build made on a selfAttest profile while the record was trusted", async () => {
+    const d = await setup();
+    const promoted = { ...(await d.policy!.current()).policy, trustedGateRecords: [SHA] };
+    await putPolicy(d, promoted);
+    // Trusted at create: no self-attestation, and the requested (default) deployment visibility.
+    expect((await create(d, body({ id: 't-bob' }), bob)).status).toBe(202);
+    await register(d, 't-bob', HASH);
+    expect((await view(d, 't-bob', alice)).visibility).toBe('deployment');
+    expect(await use(d, alice, 't-bob')).toBe(HASH);
+    const r = (await putPolicy(d, { ...promoted, trustedGateRecords: [] })).body as Body;
+    expect(r.narrowed).toEqual([{ template: 't-bob', buildId: HASH }]);
+    const t = await view(d, 't-bob', bob);
+    expect(t).toMatchObject({ visibility: 'private', attestation: 'self' });
+    expect(t.builds[0].attestation).toBe('self');
+    expect(await codeOf(() => view(d, 't-bob', alice))).toBe('template_not_found');
+    expect(await codeOf(() => use(d, alice, 't-bob'))).toBe('unknown_template');
+    // Its owner keeps using it, as decision (i) says.
+    expect(await use(d, bob, 't-bob')).toBe(HASH);
+  });
+
   it('keeps every other policy field across a policy write, and names nothing when nothing narrows', async () => {
     const d = await setup();
     const changed: Policy = {
