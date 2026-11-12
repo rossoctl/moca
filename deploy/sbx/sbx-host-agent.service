@@ -18,6 +18,9 @@ Environment=SBX_HOST_TOKEN_FILE=/etc/sbx/host-agent.token
 # Installed outside the source tree (/usr/local/libexec), the agent cannot find template-build.sh
 # from its own path: point it at the checkout. Overridable in host-agent.env.
 Environment=SBX_TEMPLATE_BUILD=/srv/sbx/src/deploy/sbx/template-onboarding/template-build.sh
+# The removal of retired builds (§6.1 step 7) runs install-host.sh --uninstall; installed outside the
+# tree, the agent cannot find it from /usr/local/libexec, as with template-build.sh.
+Environment=SBX_INSTALL_HOST=/srv/sbx/src/deploy/sbx/install-host.sh
 # ProtectHome hides root's home, where a podman login may land; use root podman's /run auth file
 # (log in with `podman login --authfile /run/containers/0/auth.json <host>`).
 Environment=REGISTRY_AUTH_FILE=/run/containers/0/auth.json

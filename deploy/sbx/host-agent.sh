@@ -2,8 +2,10 @@
 # deploy/sbx/host-agent.sh -- sbx-host-agent, a KVM host's template agent
 # (docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md §6.1). One run is one poll:
 # report the inventory, claim queued builds, build each with template-build.sh, report the outcome;
-# then start and stop installed workers as the control plane wants (§6.3). The control plane
-# registers or rejects a built build by policy (§8.2) and decides what runs; nothing here does.
+# then start and stop installed workers as the control plane wants (§6.3), and remove the retired
+# builds it names (§6.1 step 7: the worker uninstalled, the snapshot and its record deleted). The
+# control plane registers or rejects a built build by policy (§8.2) and decides what runs; nothing
+# here does.
 #
 # It installs no worker: a registered build's worker is installed by an operator (install-host.sh,
 # from the template record template-build.sh wrote, with its relay token from setup.sh). A wanted
@@ -18,7 +20,9 @@
 # `stop` the ones it holds with no lease and no live sandbox. The agent starts each `run` worker whose
 # sbx-worker@<id> unit is installed and not active, and stops each `stop` worker whose unit is active,
 # reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
-# /v1/hosts/<id>/workers/report. Readiness is the relay's attached record, never these reports. A
+# /v1/hosts/<id>/workers/report. `remove` lists the retired builds it holds with no live sandbox
+# (each also in `stop`, so a running worker is stopped first): see removal(), reported `removed`.
+# Readiness is the relay's attached record, never these reports. A
 # lock ($SBX_SRV/.activation.lock, flock) keeps a build poll and a --wanted-only run from applying
 # the wanted state at once: the one that does not get it skips, saying so.
 #
@@ -41,6 +45,8 @@
 #   SBX_ACTIVE_LIMIT, SBX_IDLE_LIMIT_S   reported to the control plane in the inventory's limits;
 #                            default 0 (none set)
 #   SBX_TEMPLATE_BUILD       default <repo>/deploy/sbx/template-onboarding/template-build.sh (a test seam)
+#   SBX_INSTALL_HOST         default <repo>/deploy/sbx/install-host.sh: the retired builds' removal runs
+#                            its --uninstall (the units set it to /srv/sbx/src/..., as SBX_TEMPLATE_BUILD)
 #   SBX_REGISTRY             optional; template-build.sh --registry. With it set, no build is claimed
 #                            until REGISTRY_AUTH_FILE (default /run/containers/0/auth.json) holds a
 #                            login for it
@@ -53,12 +59,13 @@
 #
 # The token never reaches argv or a log: curl reads it from a 0600 header file. Output: one JSON line
 # per action, then one summary line {"agent":"summary","claimed","built","failed","started","stopped",
-# "errors"}. A refusal of its own settings is exit 2.
+# "removed","errors"}. A refusal of its own settings is exit 2.
 set -euo pipefail
 export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${SBX_TEMPLATE_BUILD:=$REPO_ROOT/deploy/sbx/template-onboarding/template-build.sh}"
+: "${SBX_INSTALL_HOST:=$REPO_ROOT/deploy/sbx/install-host.sh}"
 HOST_ID_RE='^[a-z0-9][a-z0-9-]{0,30}$'
 HANDLE_RE='^b-[0-9a-f]{26}$'
 WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
@@ -67,7 +74,7 @@ DIGEST_RE='^sha256:[0-9a-f]{64}$'
 
 say() { printf '%s\n' "$*"; }
 refuse() { echo "sbx-host-agent: $*" >&2; exit 2; }
-CLAIMED=0 BUILT=0 FAILED=0 ERRORS=0 STARTED=0 STOPPED=0
+CLAIMED=0 BUILT=0 FAILED=0 ERRORS=0 STARTED=0 STOPPED=0 REMOVED=0
 error() { ERRORS=$((ERRORS + 1)); say "{\"agent\":\"error\",\"why\":$(jq -Rn --arg w "$1" '$w')}"; }
 
 check_settings() {
@@ -287,11 +294,47 @@ activation() {
       error "stop $unit failed"
     fi
   done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
+  # A control plane older than API 1.9.0 sends no `remove`.
+  [[ "$(jq -r '.remove | type' <<<"$wanted")" != array ]] || removal "$wanted"
   exec 9>&-
 }
 
+# The retired builds the control plane names for removal (§6.1 step 7), after `stop` in the same run.
+# The snapshot is found from this host's own template record whose manifest hash is the build id AND
+# whose worker is the one named, never from a path the control plane sends; nothing else is deleted,
+# and a name no record matches deletes nothing. A running worker is not removed (the control plane
+# leaves out one with a live sandbox, and this checks again): it is skipped until it is stopped. The
+# worker is uninstalled first (install-host.sh --uninstall, which keeps its workspace data for the
+# janitor), then the snapshot directory and its record go. Each removal is reported `removed`.
+removal() {
+  local w b f rec snap
+  while IFS=$'\t' read -r w b; do
+    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to remove is malformed'; continue; }
+    [[ "$b" =~ $DIGEST_RE ]] || { error 'a build id to remove is malformed'; continue; }
+    rec=''
+    for f in "$SBX_SRV"/templates/*.json; do
+      [[ -f "$f" ]] || continue
+      jq -e --arg b "$b" --arg w "$w" '.schema == "moca-sbx-template/1" and .manifest_hash == $b and .worker == $w' "$f" >/dev/null 2>&1 &&
+        { rec="$f"; break; }
+    done
+    [[ -n "$rec" ]] || { error "no template record here for build $b of worker $w"; continue; }
+    snap="$(jq -r .snapshot "$rec")"
+    [[ "$snap" =~ ^[A-Za-z0-9._-]+$ && "$snap" != . && "$snap" != .. ]] || { error 'a template record names a bad snapshot'; continue; }
+    if systemctl is-active --quiet "sbx-worker@$w.service"; then
+      say "{\"agent\":\"skipped\",\"worker\":\"$w\",\"why\":\"still running: removed once it is stopped\"}"
+      continue
+    fi
+    if [[ -f "$SBX_ENV_DIR/workers/$w.env" ]]; then
+      "$SBX_INSTALL_HOST" --uninstall "$w" >"$WORK/uninstall-$w.log" 2>&1 || { error "install-host.sh --uninstall $w failed"; continue; }
+    fi
+    rm -rf -- "${SBX_SRV:?}/snapshots/$snap"
+    rm -f -- "$rec"
+    REMOVED=$((REMOVED + 1)); worker_report "$b" removed; say "{\"agent\":\"removed\",\"worker\":\"$w\"}"
+  done < <(jq -r '.remove[] | [.worker, .buildId] | @tsv' <<<"$1")
+}
+
 summary() {
-  say "{\"agent\":\"summary\",\"claimed\":$CLAIMED,\"built\":$BUILT,\"failed\":$FAILED,\"started\":$STARTED,\"stopped\":$STOPPED,\"errors\":$ERRORS}"
+  say "{\"agent\":\"summary\",\"claimed\":$CLAIMED,\"built\":$BUILT,\"failed\":$FAILED,\"started\":$STARTED,\"stopped\":$STOPPED,\"removed\":$REMOVED,\"errors\":$ERRORS}"
 }
 
 main() {

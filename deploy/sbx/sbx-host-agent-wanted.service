@@ -1,7 +1,7 @@
 # deploy/sbx/sbx-host-agent-wanted.service -- apply the control plane's wanted state on this KVM host
-# often, apart from builds (template lifecycle spec §6.3): one run reports the inventory and starts or
-# stops installed workers, and claims and builds nothing, so an activation waits for this timer
-# (15 s), not for a build poll that may take minutes. Same settings as sbx-host-agent.service; the
+# often, apart from builds (template lifecycle spec §6.3): one run reports the inventory, starts or
+# stops installed workers and removes retired builds (§6.1 step 7), and claims and builds nothing,
+# so an activation waits for this timer (15 s), not for a build poll that may take minutes. Same settings as sbx-host-agent.service; the
 # two never apply the wanted state at once (a lock in host-agent.sh).
 [Unit]
 Description=SBX0 template host agent: start and stop workers as the control plane wants
@@ -16,6 +16,9 @@ Environment=SBX_SRV=/srv/sbx
 Environment=SBX_HOST_TOKEN_FILE=/etc/sbx/host-agent.token
 # The agent checks its settings at every run, template-build.sh's path among them.
 Environment=SBX_TEMPLATE_BUILD=/srv/sbx/src/deploy/sbx/template-onboarding/template-build.sh
+# The removal of retired builds (§6.1 step 7) runs install-host.sh --uninstall; installed outside the
+# tree, the agent cannot find it from /usr/local/libexec, as with template-build.sh.
+Environment=SBX_INSTALL_HOST=/srv/sbx/src/deploy/sbx/install-host.sh
 ExecStart=/usr/local/libexec/sbx-host-agent.sh --wanted-only
 TimeoutStartSec=5min
 NoNewPrivileges=no

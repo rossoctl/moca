@@ -8,7 +8,9 @@
 # floor or without a registry login; nothing that names where an image lives leaves the host (a
 # failure's reason and log redacted, a record naming SBX_REGISTRY not sent); the wanted state starts
 # installed workers and stops unwanted ones (systemctl mocked), each reported, under a lock that
-# --wanted-only runs share; and the agent refuses its own bad settings before it calls anything.
+# --wanted-only runs share; a retired build is removed only when named and matched by this host's own
+# record, never under a running worker; and the agent refuses its own bad settings before it calls
+# anything.
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP="$(mktemp -d)"
@@ -75,7 +77,13 @@ cat >"$TMP/bin/flock" <<'MOCK'
 #!/usr/bin/env bash
 [[ ! -e "$MOCK_STATE/locked" ]]
 MOCK
-chmod +x "$TMP/bin/curl" "$TMP/bin/template-build" "$TMP/bin/systemctl" "$TMP/bin/flock"
+# install-host.sh: logs its argv; --uninstall removes the worker's env file, as the real one does.
+cat >"$TMP/bin/install-host" <<'MOCK'
+#!/usr/bin/env bash
+printf 'install-host %s\n' "$*" >>"$MOCK_LOG"
+[[ "$1" == --uninstall ]] && rm -f "$SBX_ENV_DIR/workers/$2.env"
+MOCK
+chmod +x "$TMP/bin/curl" "$TMP/bin/template-build" "$TMP/bin/systemctl" "$TMP/bin/flock" "$TMP/bin/install-host"
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 mkdir -p "$TMP/workers"
 : >"$TMP/kernel"
@@ -83,6 +91,7 @@ mkdir -p "$TMP/workers"
 export PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/log" MOCK_STATE="$TMP/state" MOCK_TOKEN_FILE="$TMP/token" MOCK_GATE="$GATE"
 export SBX_API_URL=https://cp.example.invalid SBX_HOST_ID=host-1 SBX_HOST_TOKEN_FILE="$TMP/token" SBX_KERNEL="$TMP/kernel"
 export SBX_SRV="$TMP/srv" SBX_ENV_DIR="$TMP" SBX_TEMPLATE_BUILD="$TMP/bin/template-build" SBX_DISK_FLOOR_GB=0
+export SBX_INSTALL_HOST="$TMP/bin/install-host"
 
 job() { # job [GATE_SHA]: the claim answer, one build of the worked example
   jq -n --arg d "$DIGEST" --arg g "${1:-}" '{builds: [{template: "django-django-11133", build: "b-0123456789abcdef0123456789",
@@ -95,7 +104,7 @@ run() { : >"$MOCK_LOG"; rm -f "$TMP/state/POST_"*; bash "$A" --once >"$TMP/out" 
 # 1. A good build: claimed, built, reported with both files; the token only in a header file.
 job "$GATE_SHA"
 run || fail 'a good poll failed'
-grep -q '"agent":"summary","claimed":1,"built":1,"failed":0,"started":0,"stopped":0,"errors":0' "$TMP/out" || fail 'summary'
+grep -q '"agent":"summary","claimed":1,"built":1,"failed":0,"started":0,"stopped":0,"removed":0,"errors":0' "$TMP/out" || fail 'summary'
 R="$TMP/state/POST_v1_hosts_host-1_builds_b-0123456789abcdef0123456789_report"
 jq -e '.event == "built" and (.templateRecord | fromjson | .manifest_hash == "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
   and (.manifest | fromjson | .hash_version == 2)' "$R" >/dev/null || fail 'the built report does not carry T and S as files'
@@ -279,7 +288,7 @@ grep -q 'builds/claim' "$MOCK_LOG" && fail 'the wanted-only run claimed a build'
 grep -q '^build ' "$MOCK_LOG" && fail 'the wanted-only run built'
 grep -q 'hosts/host-1/inventory' "$MOCK_LOG" || fail 'the wanted-only run did not report the inventory'
 grep -q 'systemctl start sbx-worker@sbx_t2.service' "$MOCK_LOG" || fail 'the wanted-only run did not start the wanted worker'
-grep -q '"agent":"summary","claimed":0,"built":0,"failed":0,"started":1,"stopped":0,"errors":0' "$TMP/out" || fail 'the wanted-only summary'
+grep -q '"agent":"summary","claimed":0,"built":0,"failed":0,"started":1,"stopped":0,"removed":0,"errors":0' "$TMP/out" || fail 'the wanted-only summary'
 rm -f "$TMP/state/active-sbx-worker@sbx_t2.service"; touch "$TMP/state/locked"; : >"$MOCK_LOG"
 bash "$A" --wanted-only >"$TMP/out" 2>&1 || fail 'the locked run failed'
 grep -q 'systemctl start' "$MOCK_LOG" && fail 'started a worker while another run held the lock'
@@ -288,5 +297,47 @@ rm -f "$TMP/state/locked"
 ! bash "$A" --once --wanted-only >"$TMP/out" 2>&1 || fail 'accepted two modes'
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 pass 'with --wanted-only, applies the wanted state and claims nothing; one run at a time applies it'
+
+# 13. Removal of retired builds (§6.1 step 7): only a build the control plane names AND this host's
+#     own record matches (manifest hash and worker), never a running worker, nothing else deleted;
+#     a worker in `stop` beside `remove` is stopped, then removed, in one run.
+H="sha256:$(printf 'e%.0s' {1..64})" W=sbx_ret_1 OTHER="sha256:$(printf 'f%.0s' {1..64})"
+mkdir -p "$TMP/srv/snapshots/ret-1" "$TMP/srv/snapshots/keep-1"
+: >"$TMP/srv/snapshots/ret-1/manifest.json"; : >"$TMP/srv/snapshots/keep-1/manifest.json"
+jq -n --arg h "$H" --arg w "$W" '{schema: "moca-sbx-template/1", id: "ret", worker: $w, snapshot: "ret-1", manifest_hash: $h}' >"$TMP/srv/templates/ret-1.json"
+jq -n --arg h "$OTHER" '{schema: "moca-sbx-template/1", id: "keep", worker: "sbx_keep_1", snapshot: "keep-1", manifest_hash: $h}' >"$TMP/srv/templates/keep-1.json"
+: >"$TMP/workers/$W.env"
+wo() { : >"$MOCK_LOG"; rm -f "$TMP/state/POST_"*; bash "$A" --wanted-only >"$TMP/out" 2>&1; }
+# A running worker the control plane names only in `remove` is not removed.
+touch "$TMP/state/active-sbx-worker@$W.service"
+jq -n --arg h "$H" --arg w "$W" '{run: [], stop: [], remove: [{template: "ret", buildId: $h, worker: $w}]}' >"$TMP/state/wanted-answer"
+wo || fail 'the removal run failed'
+grep -q 'still running' "$TMP/out" || fail 'a running worker was not skipped'
+[[ -d "$TMP/srv/snapshots/ret-1" ]] || fail 'removed the snapshot of a running worker'
+grep -q 'install-host --uninstall' "$MOCK_LOG" && fail 'uninstalled a running worker'
+# In `stop` too: stopped, uninstalled, its snapshot and record gone, reported removed; the other untouched.
+jq -n --arg h "$H" --arg w "$W" '{run: [], stop: [{template: "ret", buildId: $h, worker: $w}],
+  remove: [{template: "ret", buildId: $h, worker: $w}]}' >"$TMP/state/wanted-answer"
+wo || fail 'the removal run failed'
+grep -q "\"agent\":\"stopped\",\"worker\":\"$W\"" "$TMP/out" || fail 'a retired worker was not stopped before its removal'
+grep -q "\"agent\":\"removed\",\"worker\":\"$W\"" "$TMP/out" || fail 'a retired worker was not removed in the run that stopped it'
+grep -q "install-host --uninstall $W" "$MOCK_LOG" || fail 'the worker was not uninstalled'
+[[ ! -e "$TMP/srv/snapshots/ret-1" && ! -e "$TMP/srv/templates/ret-1.json" ]] || fail 'the snapshot or its record is still there'
+[[ -d "$TMP/srv/snapshots/keep-1" && -f "$TMP/srv/templates/keep-1.json" ]] || fail 'removed a build it was not asked to'
+jq -e --arg h "$H" '.buildId == $h and .event == "removed"' "$TMP/state/POST_v1_hosts_host-1_workers_report" >/dev/null || fail 'the removal was not reported'
+grep -q '"stopped":1,"removed":1,"errors":0' "$TMP/out" || fail 'the summary does not count the removal'
+# A name this host's records do not match (a held build, another worker) deletes nothing; nor a malformed one.
+jq -n --arg h "$OTHER" '{run: [], stop: [], remove: [{template: "keep", buildId: $h, worker: "sbx_wrong_1"}]}' >"$TMP/state/wanted-answer"
+wo || fail 'the mismatched removal run failed'
+[[ -d "$TMP/srv/snapshots/keep-1" && -f "$TMP/srv/templates/keep-1.json" ]] || fail 'removed a build whose worker did not match'
+grep -q 'no template record here' "$TMP/out" || fail 'a mismatched removal does not say why'
+grep -q 'workers/report' "$MOCK_LOG" && fail 'a mismatched removal was reported'
+jq -n '{run: [], stop: [], remove: [{template: "x", buildId: "../../etc", worker: "sbx_x"}]}' >"$TMP/state/wanted-answer"
+wo || fail 'the malformed removal run failed'
+grep -q 'build id to remove is malformed' "$TMP/out" || fail 'a malformed build id was not refused'
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+wo || fail 'a wanted state without remove failed'
+grep -q '"removed":0,"errors":0' "$TMP/out" || fail 'a wanted state without remove (an older control plane) is not taken'
+pass 'removes a retired build only when named and matched by its own record, never a running worker, and reports it'
 
 echo 'all host-agent.sh tests passed'
