@@ -32,6 +32,8 @@ export const CP_ERROR_CODES = [
   'quota_exceeded',
   'unknown_template',
   'template_not_found',
+  'template_exists',
+  'policy_refused',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -90,6 +92,10 @@ const STATUS: Record<CpErrorCode, number> = {
   unknown_template: 400,
   // 404: GET /v1/templates/{id} names no template the caller can see (template lifecycle spec §4).
   template_not_found: 404,
+  // 409: another subject owns this template id (ids are unique per deployment, spec §3.2).
+  template_exists: 409,
+  // 422: a create the policy refuses at create (spec §8.1); `rule` names the gating rule.
+  policy_refused: 422,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.

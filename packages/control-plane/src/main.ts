@@ -1,4 +1,6 @@
 import { ProvenanceStore } from './provenance.js';
+import { FilePolicyStore } from './template-policy-store.js';
+import type { PolicyStore } from './template-policy.js';
 import {
   FileTemplateCatalog,
   redisPresenceReader,
@@ -490,8 +492,8 @@ export function redisClientOptions(url: string) {
 
 /**
  * `SH_PROVENANCE_DIR` (template lifecycle spec §3.1, §7.2), either profile: a directory on the
- * control plane's persistent volume holding the provenance store and the template catalog, opened
- * together. Set, the catalog is the store (SH_SANDBOX_TEMPLATES imported into it once, each import
+ * control plane's persistent volume holding the provenance store, the template catalog and the
+ * template policy (policy.json), opened together. Set, the catalog is the store (SH_SANDBOX_TEMPLATES imported into it once, each import
  * a provenance `create` record); unset, templates come from SH_SANDBOX_TEMPLATES at every start, as
  * before, and nothing is recorded. Each store checks its directory writable here, so a missing or
  * read-only volume fails the start, not the first write.
@@ -499,7 +501,7 @@ export function redisClientOptions(url: string) {
 export function templateCatalogFromEnv(
   env: NodeJS.ProcessEnv,
   config: CpConfig,
-): { templates?: TemplateCatalog; provenance?: ProvenanceStore } {
+): { templates?: TemplateCatalog; policy?: PolicyStore; provenance?: ProvenanceStore } {
   const dir = env.SH_PROVENANCE_DIR;
   if (!dir) return {};
   if (!dir.startsWith('/')) throw new Error('SH_PROVENANCE_DIR must be an absolute path');
@@ -510,6 +512,7 @@ export function templateCatalogFromEnv(
       declared: config.sandbox?.templates ?? [],
       provenance,
     }),
+    policy: new FilePolicyStore({ dir, provenance }),
     provenance,
   };
 }
