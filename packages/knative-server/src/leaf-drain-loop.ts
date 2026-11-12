@@ -46,6 +46,22 @@ export interface LeafDrainLoop {
   readonly running: boolean;
 }
 
+/**
+ * How long an armed-but-idle loop waits before claiming again. It buys pickup latency with a steady
+ * trickle of Redis traffic on an EMPTY queue: the claim is non-blocking (§5.3), and each one is an
+ * XAUTOCLAIM plus an XREADGROUP, so 250 ms comes to about 8 commands/s per turn worker -- times
+ * `SH_WORKERS` (`availableParallelism()` by default), times replicas. On M1's two deployments (one
+ * VM, one compose stack, a single Redis) that is a fraction of one percent of one Redis core, which
+ * is why it stays a flat poll rather than a curve.
+ *
+ * shortcut: a flat interval, upgrade to an exponential idle backoff (doubling to a few seconds,
+ * reset on any claim) when a deployment's idle drain load is actually measurable -- many replicas
+ * against a usually-empty queue. That upgrade is not free either: it delays pickup for a submission
+ * landing on an idle fleet, and delays the reclaim scan that leads every claim by the same amount
+ * (harmless against MIN_IDLE_MS, which is 90 s). Before adding a knob for it, note that
+ * `idleBackoffMs` is already injectable -- `armAsyncLeafWorker` just passes nothing, and §9.2 keeps
+ * `SH_ASYNC_DRAIN` as this slice's only operator knob.
+ */
 const DEFAULT_IDLE_BACKOFF_MS = 250;
 const DEFAULT_ERROR_BACKOFF_MS = 1_000;
 
