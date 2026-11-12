@@ -167,6 +167,7 @@ export async function deadLetterTurn(turnId: string, deps: DeadLetterDeps): Prom
     rec.sessionId,
     toResultRecord({ status: 'failed', reason: 'error' }, rec.sessionId, now()),
     deps.ttlSeconds,
+    turnId,
   );
   // 'lost' is the state for a turn that was delivered and never finished (§5.1). finalize
   // compare-and-sets, so a `done` that landed first wins -- which is what makes this safe to call

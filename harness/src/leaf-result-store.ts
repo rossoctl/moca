@@ -21,8 +21,16 @@ export interface RedisLike {
   get(key: string): Promise<string | null>;
 }
 
-export function resultKey(leafSessionId: string): string {
-  return `leaf:result:${leafSessionId}`;
+/**
+ * With `turnId`, THIS TURN's result; without it, the session's — the shape the synchronous `/runs`
+ * path has always used, where one session has one leaf at a time.
+ *
+ * An async session does not: §4.3 lets one session hold several queued turns at once, as long as
+ * their `idempotencyKey`s differ. Under one key per session those siblings overwrite each other, so
+ * `GET …/turns/A` could answer `done` with B's body. The turn id is what makes each answer its own.
+ */
+export function resultKey(leafSessionId: string, turnId?: string): string {
+  return turnId ? `leaf:result:${leafSessionId}:${turnId}` : `leaf:result:${leafSessionId}`;
 }
 
 /** Map a terminal LeafResult to the persisted record. `rawSessionId` is the un-sanitized envelope id. */
@@ -67,15 +75,17 @@ export async function writeResult(
   leafSessionId: string,
   record: LeafResultRecord,
   ttlSeconds: number,
+  turnId?: string,
 ): Promise<void> {
-  await redis.set(resultKey(leafSessionId), JSON.stringify(record), { EX: ttlSeconds });
+  await redis.set(resultKey(leafSessionId, turnId), JSON.stringify(record), { EX: ttlSeconds });
 }
 
 export async function readResult(
   redis: RedisLike,
   leafSessionId: string,
+  turnId?: string,
 ): Promise<LeafResultRecord | null> {
-  const raw = await redis.get(resultKey(leafSessionId));
+  const raw = await redis.get(resultKey(leafSessionId, turnId));
   if (!raw) return null;
   try {
     return JSON.parse(raw) as LeafResultRecord;

@@ -86,29 +86,59 @@ export function armAsyncReaper(opts: {
   queue: Pick<WorkQueue, 'reapDeadLetters' | 'gcIdleConsumers' | 'ack'>;
   consumerId: string;
   deadLetter: (turnId: string) => Promise<void>;
+  /**
+   * One entry this sweep DID dead-letter: the terminal write landed and the entry is acked. Called
+   * from here rather than wrapped around `deadLetter` so that it fires after the work, not before
+   * it -- a count taken first turns a Redis outage into a rising `async_dead_letters` with no turn
+   * finalized anywhere -- and so that an entry with no turn id, which has no record to write and is
+   * only acked, is counted the same way `processOne` counts its own (`dead_lettered`, turnId '').
+   */
+  onReaped?: () => void;
   intervalMs?: number;
   log?: (msg: string) => void;
 }): () => void {
   const log = opts.log ?? console.warn;
+  const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
   const sweep = () =>
     void (async () => {
-      const dead = await opts.queue.reapDeadLetters(opts.consumerId, {
-        minIdleMs: MIN_IDLE_MS,
-        maxAttempts: MAX_ATTEMPTS,
-      });
-      for (const entry of dead) {
-        // Ack AFTER the write, the order `leaf-job-runner.ts:139` uses for its own branch: an ack
-        // removes the entry from the PEL for good, so acking first would turn a failed
-        // `deadLetterTurn` into a turn stuck `running` that nothing can ever redeliver. An entry
-        // whose turnId field is missing or malformed has no record to finalize, so it is only
-        // acked.
-        if (entry.turnId) await opts.deadLetter(entry.turnId);
-        await opts.queue.ack(entry.entryId);
+      try {
+        const dead = await opts.queue.reapDeadLetters(opts.consumerId, {
+          minIdleMs: MIN_IDLE_MS,
+          maxAttempts: MAX_ATTEMPTS,
+        });
+        for (const entry of dead) {
+          // PER ENTRY, so one unwritable record does not strand the rest of the batch unacked --
+          // every entry after it would keep its stale PEL slot and be re-reaped on the next sweep,
+          // turning one bad turn into a permanently stalled reap.
+          try {
+            // Ack AFTER the write, the order `leaf-job-runner.ts:139` uses for its own branch: an
+            // ack removes the entry from the PEL for good, so acking first would turn a failed
+            // `deadLetterTurn` into a turn stuck `running` that nothing can ever redeliver. An
+            // entry whose turnId field is missing or malformed has no record to finalize, so it is
+            // only acked.
+            if (entry.turnId) await opts.deadLetter(entry.turnId);
+            await opts.queue.ack(entry.entryId);
+            opts.onReaped?.();
+          } catch (err) {
+            // Left pending on purpose: XCLAIM reset its idle timer, so the next sweep after
+            // minIdleMs retries it, and `deadLetterTurn`'s terminal guard makes a repeat harmless.
+            log(
+              `[async-reaper] entry ${entry.entryId} (turn ${entry.turnId || 'none'}) not dead-lettered: ${why(err)}`,
+            );
+          }
+        }
+      } catch (err) {
+        log(`[async-reaper] reap failed: ${why(err)}`);
       }
-      await opts.queue.gcIdleConsumers(CONSUMER_GC_IDLE_MS);
-    })().catch((err: unknown) =>
-      log(`[async-reaper] sweep failed: ${err instanceof Error ? err.message : String(err)}`),
-    );
+      // Attempted even when the reap above failed outright: the two halves of a sweep are
+      // independent, and consumer names accumulate once per worker restart whether or not any
+      // entry is reapable.
+      try {
+        await opts.queue.gcIdleConsumers(CONSUMER_GC_IDLE_MS);
+      } catch (err) {
+        log(`[async-reaper] consumer gc failed: ${why(err)}`);
+      }
+    })().catch((err: unknown) => log(`[async-reaper] sweep failed: ${why(err)}`));
   sweep();
   const timer = setInterval(sweep, opts.intervalMs ?? ASYNC_REAP_INTERVAL_MS);
   timer.unref();
@@ -242,8 +272,11 @@ export function armAsyncLeafWorker(opts: {
   // records all live in REDIS_URL's keyspace. A deployment that split them would need a second
   // variable; that is M2's.
   const url = env.REDIS_URL ?? 'redis://127.0.0.1:6379';
-  // The queue gets its OWN client: claim ends in XREADGROUP BLOCK 5000, and node-redis sends every
-  // command for a client over one socket, so a TurnStore write sharing it would wait out the poll.
+  // The queue gets its OWN client. node-redis sends every command for a client over one socket, and
+  // the drain's claim is a burst of stream commands (XAUTOCLAIM, XREADGROUP, XPENDING) issued on a
+  // loop; keeping the turn-record writes off that socket means a claim in flight never delays a
+  // finalize, and either client can reconnect without stalling the other. (`reconnecting` below
+  // wraps each with its own retry, which only works because the two are separate.)
   const queueClient = asyncRedisClient(url, 'leaf queue');
   const cpClient = asyncRedisClient(url, 'turn records');
   const connected = Promise.all([queueClient.connect(), cpClient.connect()]);
@@ -319,10 +352,8 @@ export function armAsyncLeafWorker(opts: {
   const stopReaper = armAsyncReaper({
     queue,
     consumerId,
-    deadLetter: async (turnId) => {
-      tally.onReaped();
-      await job.deadLetter(turnId);
-    },
+    deadLetter: job.deadLetter,
+    onReaped: tally.onReaped,
   });
 
   // ensureGroup BEFORE the first claim, and the loop only after it: XREADGROUP against a missing

@@ -48,8 +48,15 @@ export interface LeafJobDeps {
   ttlSeconds: number;
   maxAttempts?: number;
   minIdleMs?: number;
+  /**
+   * XREADGROUP's BLOCK, in ms. Defaults to 0 = non-blocking, because the caller holds an admission
+   * slot across this whole function (§5.3): a blocking claim reserves that slot for the wait, so an
+   * armed-but-idle drain would look permanently saturated to an interactive `/turn`. The loop waits
+   * for work with its own sleep instead, after the slot is released.
+   */
   blockMs?: number;
   heartbeatMs?: number;
+  log?: (msg: string) => void;
   now?: () => string;
   setHeartbeat?: (fn: () => void, ms: number) => unknown;
   clearHeartbeat?: (handle: unknown) => void;
@@ -58,7 +65,7 @@ export interface LeafJobDeps {
 /**
  * One claim's outcome, as the drain loop needs to see it.
  *
- * - `idle`: nothing to claim. The loop's BLOCK has already slept; it does not sleep again.
+ * - `idle`: nothing to claim. The loop sleeps its idle backoff -- AFTER releasing its slot.
  * - `completed`: a terminal result is written, the record is final, the entry is acked.
  * - `redelivered`: retryable. No result, no finalize, NO ack -- the entry stays pending and another
  *   worker reclaims it after `minIdleMs`.
@@ -82,9 +89,10 @@ export type ProcessOutcome =
 /**
  * Claim and process at most one queue entry.
  *
- * The CALLER must already hold an admission slot before calling this (§5.3): the first thing here is
- * `queue.claim`, which BLOCKs, so taking the slot afterwards would leave a window in which the cap
- * is checked against a count that does not include this claim.
+ * The CALLER must already hold an admission slot before calling this (§5.3): taking it afterwards
+ * would leave a window in which the cap is checked against a count that does not include this
+ * claim. The claim is non-blocking by default (`blockMs`) precisely because the slot is held across
+ * it -- so the slot is reserved for about two Redis round trips, not for a 5 s wait.
  *
  * A `runLeaf` throw propagates. That is deliberate and is the retry path: the heartbeat is cleared,
  * nothing is written, nothing is acked, so the entry is reclaimed. The loop catches it.
@@ -92,10 +100,11 @@ export type ProcessOutcome =
 export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   const maxAttempts = deps.maxAttempts ?? 3;
   const minIdleMs = deps.minIdleMs ?? 90_000;
-  const blockMs = deps.blockMs ?? 5_000;
+  const blockMs = deps.blockMs ?? 0;
   // A third of minIdleMs: two consecutive misses still leave the entry un-reclaimable.
   const heartbeatMs = deps.heartbeatMs ?? 30_000;
   const now = deps.now ?? (() => new Date().toISOString());
+  const log = deps.log ?? console.warn;
   const setHb = deps.setHeartbeat ?? ((fn, ms) => setInterval(fn, ms));
   const clearHb =
     deps.clearHeartbeat ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
@@ -128,7 +137,21 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     // a process also serving healthy sync traffic. A missed touch is already non-fatal by design:
     // the entry simply becomes reclaimable after minIdleMs, which is the same outcome a dropped
     // heartbeat produces on purpose.
-    void deps.queue.touch(claimed.entryId, deps.consumerId).catch(() => undefined);
+    void deps.queue
+      .touch(claimed.entryId, deps.consumerId)
+      .then((held) => {
+        // `touch` refuses to steal the entry back (see its doc), so a false here means another
+        // worker is already running this turn. There is no cancellation path into `runLeaf`, so
+        // this run continues to completion and the two results race -- logged loudly because that
+        // is the only trace the duplicate leaves, and because it means this worker stalled past
+        // minIdleMs, which is a condition worth seeing.
+        if (!held) {
+          log(
+            `[async] lost entry ${claimed.entryId} for turn ${claimed.turnId}: reclaimed elsewhere or already acked`,
+          );
+        }
+      })
+      .catch(() => undefined);
   }, heartbeatMs);
   let result: LeafResult;
   try {
@@ -142,11 +165,13 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     return { kind: 'redelivered', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
   }
 
-  // Written under the TURN RECORD's session id, not `leafSessionId(envelope)`. The latter
-  // tenant-prefixes before sanitising (run-leaf.ts:183-185) while the control plane reads
-  // `leaf:result:${turn.sessionId}` raw (turn-result.ts:13), and a record's tenant is never empty
-  // (ownership.ts:208) -- so the prefixed key is one no reader ever looks at. The envelope's own
-  // session id still travels INSIDE the record, for caller correlation.
+  // Written under the TURN RECORD's session id AND this turn's id, not `leafSessionId(envelope)`.
+  // The latter tenant-prefixes before sanitising (run-leaf.ts:183-185) while the control plane reads
+  // the record's session id raw (turn-result.ts), and a record's tenant is never empty
+  // (ownership.ts:208) -- so the prefixed key is one no reader ever looks at. The turn id is in the
+  // key because §4.3 lets one session hold several queued turns at once: under a per-session key the
+  // second to finish would overwrite the first's answer. The envelope's own session id still travels
+  // INSIDE the record, for caller correlation.
   //
   // Result first, then finalize, then ack, and the order is load-bearing: a reader that sees a
   // terminal record must be able to fetch its result. A crash between the first two leaves a result
@@ -157,6 +182,7 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     turn.sessionId,
     toResultRecord(result, turn.envelope.sessionId, now()),
     deps.ttlSeconds,
+    claimed.turnId,
   );
   await deps.finalize(claimed.turnId, result.status);
   await deps.queue.ack(claimed.entryId);

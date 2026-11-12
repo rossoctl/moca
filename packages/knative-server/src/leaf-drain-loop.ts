@@ -25,7 +25,11 @@ export interface LeafDrainLoopDeps {
    * leaves no trace.
    */
   onCapDenied?: () => void;
-  /** Slept only when at cap, or after a thrown claim. Never after an idle claim. */
+  /**
+   * How long the loop waits before claiming again when there was nothing to claim, or when every
+   * slot was busy. Always slept with NO admission slot held -- the claim is non-blocking, so this
+   * is the only thing keeping an idle worker from spinning on Redis.
+   */
   idleBackoffMs?: number;
   errorBackoffMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -130,8 +134,8 @@ export function createLeafDrainLoop(deps: LeafDrainLoopDeps): LeafDrainLoop {
     while (!stopping) {
       try {
         // CHECK AND TAKE IN ONE TICK (§5.3). Nothing may be awaited between these two
-        // statements: the first await inside runOne is queue.claim, which blocks for blockMs,
-        // and any await here would let a sync /turn land in the slot we just measured as free.
+        // statements: the first await inside runOne is queue.claim, and any await here would let a
+        // sync /turn land in the slot we just measured as free.
         // Everything in this branch -- the inFlight read, onCapDenied, the backoff sleep, and
         // counter.start() -- sits inside this try on purpose: onCapDenied and counter.start()'s
         // onChange are both injected (Task 8's metrics emitter; the real counter's process.send),
@@ -143,21 +147,30 @@ export function createLeafDrainLoop(deps: LeafDrainLoopDeps): LeafDrainLoop {
           await sleep(idleBackoffMs);
         } else {
           release = deps.counter.start();
+          // Decided inside the slot, SLEPT outside it -- see below.
+          let backoffMs = 0;
           try {
             const outcome = await runOne(deps.job);
             if (stopping) return; // drained mid-leaf: do not report, do not claim again
             deps.onOutcome?.(outcome);
-            // No backoff on 'idle': claim already blocked for blockMs (5 s), so sleeping here
-            // would only add latency to the next submission.
+            if (outcome.kind === 'idle') backoffMs = idleBackoffMs;
           } catch (err) {
             // A claim that THREW left its entry pending, by design (turn-claim.ts). Back off so
             // a control-plane outage is a slow retry rather than a hot loop against it.
             log(`[async] claim failed: ${err instanceof Error ? err.message : String(err)}`);
-            if (!stopping) await sleep(errorBackoffMs);
+            backoffMs = errorBackoffMs;
           } finally {
             release?.();
             release = null;
           }
+          // WAITING HAPPENS WITHOUT A SLOT. The claim is non-blocking (leaf-job-runner's `blockMs`
+          // defaults to 0), so the slot is held for about two Redis round trips and then given
+          // back; the wait for work -- and the wait after a failed claim -- happens here, with
+          // nothing reserved. Sleeping inside the slot instead is what made an armed-but-idle drain
+          // report inFlight >= 1 essentially always, so a one-slot worker 429'd every interactive
+          // /turn while the async queue was empty. §5.3's never-over-admit invariant is untouched:
+          // the slot is still taken before the claim and in the same tick as the cap check.
+          if (backoffMs > 0 && !stopping) await sleep(backoffMs);
         }
       } catch (err) {
         // A throwing onCapDenied, a throwing counter.start() (e.g. process.send on a closed IPC

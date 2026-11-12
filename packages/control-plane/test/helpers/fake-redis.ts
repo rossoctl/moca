@@ -1,6 +1,7 @@
 import type { BundleRedisLike } from '@moca/config-bundle';
 import type { BundleBudgetRedisLike } from '../../src/bundle-budget.js';
 import type { CpRedisLike } from '../../src/ownership.js';
+import { CAS_STATE_LUA } from '../../src/turn-store.js';
 import type { ResultRedisLike } from '../../src/turn-result.js';
 
 /**
@@ -11,8 +12,9 @@ import type { ResultRedisLike } from '../../src/turn-result.js';
  */
 export function fakeRedis() {
   const hashes = new Map<string, Record<string, string>>();
-  // Plain string keys. Only `leaf:result:<sid>` lives here today -- the leaf result the async status
-  // route reads (async spec §4.4), which a test seeds as the worker would have written it.
+  // Plain string keys. Only `leaf:result:<sid>:<turnId>` lives here today -- the leaf result the
+  // async status route reads (async spec §4.4), which a test seeds as the worker would have
+  // written it.
   const strings = new Map<string, string>();
   const zsets = new Map<string, { score: number; value: string }[]>();
   const streams = new Map<string, Record<string, string>[]>();
@@ -104,6 +106,24 @@ export function fakeRedis() {
     },
     async get(key) {
       return strings.get(key) ?? null;
+    },
+    // Dispatch on the script's IDENTITY, not on its text: this fake interprets no Lua, and
+    // `CpRedisLike.eval` is documented to carry only this package's own exported constants, so an
+    // unrecognised one is a programming error rather than something to guess at. The body mirrors
+    // CAS_STATE_LUA exactly -- ARGV is [allowedCount, ...allowedStates, ...field, value].
+    async eval(script, { keys, arguments: argv }) {
+      if (script !== CAS_STATE_LUA) throw new Error(`this fake does not know this script`);
+      ops.push(`eval cas ${keys[0]}`);
+      const n = Number(argv[0]);
+      const h = hashes.get(keys[0]!);
+      const state = h?.state;
+      if (state === undefined) return 0;
+      if (!argv.slice(1, n + 1).includes(state)) return 0;
+      const flat = argv.slice(n + 1);
+      const next = { ...h };
+      for (let i = 0; i < flat.length; i += 2) next[flat[i]!] = flat[i + 1]!;
+      hashes.set(keys[0]!, next);
+      return 1;
     },
   };
   return { redis, hashes, strings, zsets, streams, ops, expires };

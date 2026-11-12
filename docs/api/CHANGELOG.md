@@ -38,6 +38,13 @@ Async turns: the owner-scoped submission API
 - `async: true` on the harness's own turn route stays removed and still answers 400 `async_removed`;
   these routes are its replacement.
 
+Upgrade note: `LEAF_RESULT_TTL_SECONDS` is now read by the harness tier through the control plane's
+own strict parse, because both write the same result keys and a drained turn's result must outlive
+nothing less than its record. A value that is not a positive integer refuses to BOOT there, where a
+lenient `parseInt` used to read it as `NaN` and fail every result write instead. Surrounding
+whitespace is trimmed, so an env file's trailing space or CRLF still boots; blank still means the
+default (86400).
+
 Interim, and named as such: /internal/turn-credentials returns a resolved credential rather than the
 MI1 S2 grants, there is no `turn_exp`, and `MOCA_TENANCY=multi` refuses async at both the submission
 and the claim. M2 mints grants for both audiences with a `turn_exp` and lifts that gate.

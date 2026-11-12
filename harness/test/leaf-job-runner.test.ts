@@ -16,6 +16,8 @@ class FakeQueue implements WorkQueue {
   next: ClaimedEntry | null = null;
   acked: string[] = [];
   touched: string[] = [];
+  /** Set false to play a heartbeat that finds the entry reclaimed by another worker. */
+  stillOwned = true;
   async ensureGroup() {}
   async claim() {
     const n = this.next;
@@ -27,6 +29,7 @@ class FakeQueue implements WorkQueue {
   }
   async touch(id: string) {
     this.touched.push(id);
+    return this.stillOwned;
   }
   async pending() {
     return 0;
@@ -97,19 +100,27 @@ describe('processOne', () => {
     expect(await processOne(deps())).toEqual({ kind: 'idle' });
   });
 
-  it('runs the leaf, writes the result under the TURN session id, finalizes, acks', async () => {
+  it('runs the leaf, writes the result under the TURN session id and turn id, finalizes, acks', async () => {
     queue.next = entry();
     const out = await processOne(deps());
     expect(out).toEqual({ kind: 'completed', turnId: 't-1', status: 'done', reclaimed: false });
-    expect([...store.keys()]).toEqual(['leaf:result:sess-1']);
+    expect([...store.keys()]).toEqual(['leaf:result:sess-1:t-1']);
     expect(finalized).toEqual([['t-1', 'done']]);
     expect(queue.acked).toEqual(['1-0']);
+  });
+
+  it('keys two turns on one session apart, so neither overwrites the other (§4.3)', async () => {
+    queue.next = entry({ entryId: '1-0', turnId: 't-1' });
+    await processOne(deps());
+    queue.next = entry({ entryId: '2-0', turnId: 't-2' });
+    await processOne(deps());
+    expect([...store.keys()].sort()).toEqual(['leaf:result:sess-1:t-1', 'leaf:result:sess-1:t-2']);
   });
 
   it('records the envelope session id on the result for caller correlation', async () => {
     queue.next = entry();
     await processOne(deps());
-    const rec = JSON.parse(store.get('leaf:result:sess-1')!);
+    const rec = JSON.parse(store.get('leaf:result:sess-1:t-1')!);
     expect(rec.sessionId).toBe(ENV.sessionId);
     expect(rec.status).toBe('done');
   });
@@ -218,6 +229,27 @@ describe('processOne', () => {
     heartbeats[0]!();
     await Promise.resolve();
     expect(queue.touched).toEqual(['1-0']);
+  });
+
+  // `touch` refuses to steal an entry back once another worker has reclaimed it, so a false return
+  // means this leaf is a duplicate. Nothing can abort runLeaf, so the log is the only trace.
+  it('logs loudly when a heartbeat finds the entry no longer this worker s', async () => {
+    queue.next = entry();
+    queue.stillOwned = false;
+    const log = vi.fn();
+    await processOne(deps({ log }));
+    heartbeats[0]!();
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+    expect(log.mock.calls.flat().join(' ')).toContain('1-0');
+  });
+
+  it('says nothing on a heartbeat that still owns the entry', async () => {
+    queue.next = entry();
+    const log = vi.fn();
+    await processOne(deps({ log }));
+    heartbeats[0]!();
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('swallows a touch rejection on a heartbeat tick: a destroyed-client heartbeat must not kill the process', async () => {

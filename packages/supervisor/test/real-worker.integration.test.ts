@@ -371,13 +371,16 @@ describe.skipIf(!liveCrash)('async crash recovery, live (SH_ASYNC_LIVE_CRASH=1)'
       expect(agg.asyncReclaims).toBe(1);
       expect(agg.asyncDeadLetters).toBe(0);
       expect(await queue.pending()).toBe(0); // acked, so no third delivery is coming
-      // Under the RECORD's session id -- Task 4's fix for the leafResultKey divergence. On a live
-      // rig this is also the assertion that a poller would have been able to read.
-      expect(JSON.parse((await client.get(resultKey(sessionId)))!)).toMatchObject({ sessionId });
+      // Under the RECORD's session id AND this turn's id -- Task 4's fix for the leafResultKey
+      // divergence, plus the per-turn key §4.3 needs. On a live rig this is also the assertion that
+      // a poller would have been able to read.
+      expect(JSON.parse((await client.get(resultKey(sessionId, turnId)))!)).toMatchObject({
+        sessionId,
+      });
     } finally {
       // No `queue.close()`: RedisWorkQueue takes an injected client and has none (Task 1). The
       // opener closes, which is this block.
-      await client.del([turnKey(turnId), resultKey(sessionId)]).catch(() => {});
+      await client.del([turnKey(turnId), resultKey(sessionId, turnId)]).catch(() => {});
       if (client.isOpen) await client.close();
     }
   }, 420_000);

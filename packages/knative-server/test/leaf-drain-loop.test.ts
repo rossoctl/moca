@@ -186,15 +186,38 @@ describe('createLeafDrainLoop', () => {
     );
   });
 
-  it('does not sleep after an idle claim: the BLOCK in claim is the backoff', async () => {
-    const sleep = vi.fn(async () => {});
+  // The claim is non-blocking, so the idle wait is the loop's own sleep -- and it must happen with
+  // NO slot held. Sleeping inside the slot is what made an armed-but-idle worker report inFlight
+  // >= 1 essentially always, which 429'd interactive /turn traffic against an empty queue.
+  it('waits out an idle claim with the admission slot RELEASED', async () => {
+    const counter = new TurnCounter(() => {});
+    const duringSleep: number[] = [];
+    const sleep = vi.fn(async () => {
+      duringSleep.push(counter.inFlight);
+    });
     const loop = createLeafDrainLoop(
-      loopDeps({ processOneImpl: scripted([{ kind: 'idle' }]), sleep }),
+      loopDeps({ counter, processOneImpl: scripted([{ kind: 'idle' }]), sleep }),
     );
     loop.start();
     await tick();
     await loop.stop();
-    expect(sleep).not.toHaveBeenCalled();
+    expect(sleep).toHaveBeenCalledWith(expect.any(Number));
+    expect(duringSleep[0]).toBe(0);
+  });
+
+  it('waits out a thrown claim with the slot released too', async () => {
+    const counter = new TurnCounter(() => {});
+    const duringSleep: number[] = [];
+    const sleep = vi.fn(async () => {
+      duringSleep.push(counter.inFlight);
+    });
+    const loop = createLeafDrainLoop(
+      loopDeps({ counter, processOneImpl: scripted([new Error('boom')]), sleep }),
+    );
+    loop.start();
+    await tick();
+    await loop.stop();
+    expect(duringSleep[0]).toBe(0);
   });
 
   it('survives a thrown processOne, backs off, and keeps looping', async () => {

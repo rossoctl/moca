@@ -56,7 +56,11 @@ export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
 export function resultTtlSeconds(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
 ): number {
-  const v = env.LEAF_RESULT_TTL_SECONDS;
+  // TRIMMED first. The value reaches a worker from a systemd EnvironmentFile or a ConfigMap, where
+  // `LEAF_RESULT_TTL_SECONDS=86400 ` and a CRLF line ending are both ordinary operator slips -- and
+  // this parse runs at module load, so refusing one takes down a tier that was serving sync traffic
+  // happily before the knob was ever set. Whitespace-only is therefore the same as unset.
+  const v = env.LEAF_RESULT_TTL_SECONDS?.trim();
   if (v === undefined || v === '') return 86_400;
   if (!/^[1-9][0-9]*$/.test(v))
     throw new Error(`LEAF_RESULT_TTL_SECONDS must be a positive integer (seconds), got "${v}"`);
@@ -160,8 +164,8 @@ const str = (v: unknown): boolean => typeof v === 'string' && v.length > 0;
  * Validate a submission body (§4.1) into the envelope to store. The three kinds mirror the data
  * plane's `isLeafEnvelope` / `isPromptEnvelope` / `isSolveEnvelope` (knative-server server.ts) so one
  * body is accepted by both paths. `sessionId` is NOT read from the body: the handler supplies the
- * path's session id, which is what keeps the leaf's result under the key `cascadeDelete` already
- * cleans up (`leaf:result:<sid>`, ownership.ts dataKeys).
+ * path's session id, which is what keeps the leaf's result under a key this session's delete can
+ * reach (`leaf:result:<sid>:<turnId>`, TurnStore.deleteSessionTurns).
  */
 export function parseTurnSubmission(body: unknown): ParsedSubmission {
   const b = asRecord(body);

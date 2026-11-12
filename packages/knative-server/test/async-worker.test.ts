@@ -172,6 +172,124 @@ describe('armAsyncReaper', () => {
     stop();
   });
 
+  // A count taken before the write turns a Redis outage into a rising async_dead_letters with
+  // nothing finalized anywhere -- the opposite of what the counter is read for (§7).
+  it('counts a reap only after the write AND the ack land', async () => {
+    const q = queue();
+    const order: string[] = [];
+    q.ack = vi.fn(async () => {
+      order.push('ack');
+    });
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(async () => {
+        order.push('write');
+      }),
+      onReaped: () => order.push('count'),
+    });
+    await vi.waitFor(() => expect(order).toEqual(['write', 'ack', 'count']));
+    stop();
+  });
+
+  it('does not count an entry whose write threw', async () => {
+    const q = queue();
+    const onReaped = vi.fn();
+    const log = vi.fn();
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(async () => {
+        throw new Error('redis write failed');
+      }),
+      onReaped,
+      log,
+    });
+    await vi.waitFor(() => expect(log).toHaveBeenCalled());
+    expect(onReaped).not.toHaveBeenCalled();
+    stop();
+  });
+
+  // The loop's own branch counts a turnId-less entry as dead_lettered too (`processOne`), so the
+  // two paths must not disagree about what a dead letter is.
+  it('counts an entry with no turn id, which is acked and nothing else', async () => {
+    const q = queue();
+    q.reapDeadLetters = vi.fn(async () => [{ entryId: '1-1', turnId: '' }]);
+    const onReaped = vi.fn();
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(),
+      onReaped,
+    });
+    await vi.waitFor(() => expect(onReaped).toHaveBeenCalledTimes(1));
+    stop();
+  });
+
+  // One unwritable record must not strand the whole batch unacked: every entry behind it would keep
+  // its PEL slot and be re-reaped forever, so one bad turn would stall the reap permanently.
+  it('keeps going after one entry fails, and still acks the rest of the batch', async () => {
+    const q = queue();
+    q.reapDeadLetters = vi.fn(async () => [
+      { entryId: '1-1', turnId: 'bad' },
+      { entryId: '1-2', turnId: 'good' },
+    ]);
+    const log = vi.fn();
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(async (turnId: string) => {
+        if (turnId === 'bad') throw new Error('redis write failed');
+      }),
+      log,
+    });
+    await vi.waitFor(() => expect(q.ack).toHaveBeenCalledWith('1-2'));
+    expect(q.ack).not.toHaveBeenCalledWith('1-1');
+    expect(log.mock.calls.flat().join(' ')).toContain('1-1');
+    stop();
+  });
+
+  it('collects idle consumers even when the reap itself failed', async () => {
+    const q = queue();
+    q.reapDeadLetters = vi.fn(async () => {
+      throw new Error('redis down');
+    });
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(),
+      log: vi.fn(),
+    });
+    await vi.waitFor(() => expect(q.gcIdleConsumers).toHaveBeenCalled());
+    stop();
+  });
+
+  it('collects idle consumers even when an entry failed', async () => {
+    const q = queue();
+    const stop = armAsyncReaper({
+      queue: q as never,
+      consumerId: 'c',
+      deadLetter: vi.fn(async () => {
+        throw new Error('redis write failed');
+      }),
+      log: vi.fn(),
+    });
+    await vi.waitFor(() => expect(q.gcIdleConsumers).toHaveBeenCalled());
+    stop();
+  });
+
+  it('logs a failed consumer gc without failing the sweep', async () => {
+    const q = queue();
+    q.gcIdleConsumers = vi.fn(async () => {
+      throw new Error('gc exploded');
+    });
+    const log = vi.fn();
+    const stop = armAsyncReaper({ queue: q as never, consumerId: 'c', deadLetter: vi.fn(), log });
+    await vi.waitFor(() => expect(log.mock.calls.flat().join(' ')).toContain('gc exploded'));
+    expect(q.ack).toHaveBeenCalledWith('1-1');
+    stop();
+  });
+
   it('collects idle consumers in the same sweep', async () => {
     const q = queue();
     const stop = armAsyncReaper({ queue: q as never, consumerId: 'c', deadLetter: vi.fn() });
@@ -251,7 +369,7 @@ describe('armAsyncLeafWorker', () => {
     expect(created).toHaveLength(0);
   });
 
-  it('gives the queue and the turn store their OWN Redis connection (S1): a blocking XREADGROUP on a shared client would starve the turn store', async () => {
+  it('gives the queue and the turn store their OWN Redis connection (S1): node-redis multiplexes one socket, so the claim loop would sit in front of every turn-record write', async () => {
     const env = {
       SH_ASYNC_DRAIN: '1',
       SH_CONTROL_PLANE_URL: 'http://cp.example',

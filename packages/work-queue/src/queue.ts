@@ -31,12 +31,23 @@ export interface QueueDepth {
  */
 export interface WorkQueue {
   ensureGroup(): Promise<void>;
+  /**
+   * `blockMs` omitted (or 0) means a NON-BLOCKING read: the call costs two round trips and returns
+   * null on an empty queue. That is what the drain loop wants -- it holds an admission slot across
+   * this call (§5.3), so blocking here would reserve a slot for the whole wait on an idle
+   * deployment. A caller that wants XREADGROUP's own wait passes a positive value.
+   */
   claim(
     consumerId: string,
-    opts: { minIdleMs: number; blockMs: number },
+    opts: { minIdleMs: number; blockMs?: number },
   ): Promise<ClaimedEntry | null>;
   ack(entryId: string): Promise<void>;
-  touch(entryId: string, consumerId: string): Promise<void>;
+  /**
+   * Reset the entry's idle timer so a healthy long run is not reclaimed. Returns false when the
+   * entry is NO LONGER this consumer's — reclaimed by someone else, or already acked — in which
+   * case nothing was touched. Callers treat false as "stop pretending to own this".
+   */
+  touch(entryId: string, consumerId: string): Promise<boolean>;
   pending(): Promise<number>;
   depth(): Promise<QueueDepth>;
   deleteConsumer(consumerId: string): Promise<void>;
@@ -51,6 +62,54 @@ export interface WorkQueue {
     opts: { minIdleMs: number; maxAttempts: number },
   ): Promise<Array<{ entryId: string; turnId: string }>>;
 }
+
+/**
+ * Idle-consumer GC, as ONE server-side step. The `pending == 0` test and the DELCONSUMER that
+ * acts on it must not be two round trips: XGROUP DELCONSUMER DISCARDS the named consumer's pending
+ * entries, so a consumer that claims an entry in the gap between the two is deleted along with the
+ * entry it is holding — the turn's one redelivery is gone, and it sits `running` until nothing
+ * redelivers it. Inside a script, nothing else runs between the read and the delete.
+ *
+ * XINFO CONSUMERS answers RESP2 inside a script, so each consumer arrives as a FLAT field/value
+ * array rather than a map — hence the stride-2 walk. Fields are read by name, not by position: the
+ * order is not contractual and Redis has added fields (`inactive` in 7.2) between the ones we want.
+ */
+const GC_IDLE_CONSUMERS_LUA = `
+local min_idle = tonumber(ARGV[2])
+local removed = 0
+for _, c in ipairs(redis.call('XINFO', 'CONSUMERS', KEYS[1], ARGV[1])) do
+  local name, pending, idle
+  for i = 1, #c, 2 do
+    if c[i] == 'name' then name = c[i + 1]
+    elseif c[i] == 'pending' then pending = tonumber(c[i + 1])
+    elseif c[i] == 'idle' then idle = tonumber(c[i + 1]) end
+  end
+  if name and pending == 0 and idle and idle >= min_idle then
+    redis.call('XGROUP', 'DELCONSUMER', KEYS[1], ARGV[1], name)
+    removed = removed + 1
+  end
+end
+return removed
+`;
+
+/**
+ * The heartbeat's idle reset, CONDITIONAL on still owning the entry. A bare `XCLAIM ... 0 JUSTID`
+ * transfers ownership whatever the current state is, because min-idle 0 matches everything — so a
+ * worker that stalled past `minIdleMs`, had its entry legitimately reclaimed by another worker, and
+ * then woke up would STEAL IT BACK on its next beat. Both workers would then be running the same
+ * turn, both would write a result, and the loser's ack would retire an entry the winner still
+ * believed it owned. Checking the owner first and claiming in the same script closes that.
+ *
+ * XPENDING's per-entry reply is a flat four-element array (id, consumer, idle, deliveries); only
+ * the consumer is read here. 0 entries means the entry is gone from the PEL — acked, or trimmed —
+ * which is the other case where touching would be a lie.
+ */
+const TOUCH_IF_OWNED_LUA = `
+local p = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if #p == 0 or p[1][2] ~= ARGV[2] then return 0 end
+redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+return 1
+`;
 
 export class RedisWorkQueue implements WorkQueue {
   /**
@@ -69,6 +128,9 @@ export class RedisWorkQueue implements WorkQueue {
     private readonly group: string,
   ) {}
 
+  /** Where the next XAUTOCLAIM scan resumes; see `claim`. '0-0' is the start of the PEL. */
+  private autoClaimCursor = '0-0';
+
   async ensureGroup(): Promise<void> {
     try {
       // "0" = deliver from the start of the stream; MKSTREAM creates it if absent.
@@ -80,19 +142,26 @@ export class RedisWorkQueue implements WorkQueue {
 
   async claim(
     consumerId: string,
-    opts: { minIdleMs: number; blockMs: number },
+    opts: { minIdleMs: number; blockMs?: number },
   ): Promise<ClaimedEntry | null> {
     // 1. Prefer reclaiming a stale (delivered-but-unacked) entry — crash recovery (§6.2). This is
-    // XAUTOCLAIM over the group's WHOLE PEL from '0', not this consumer's own: nobody reclaims
-    // faster for being the original owner, which is the behaviour §6.2 specifies.
+    // XAUTOCLAIM over the group's WHOLE PEL, not this consumer's own: nobody reclaims faster for
+    // being the original owner, which is the behaviour §6.2 specifies.
     const auto = await this.client.xAutoClaim(
       this.stream,
       this.group,
       consumerId,
       opts.minIdleMs,
-      '0',
+      this.autoClaimCursor,
       { COUNT: 1 },
     );
+    // RESUME WHERE THE LAST SCAN STOPPED. XAUTOCLAIM examines at most COUNT*10 PEL entries per
+    // call, so restarting from '0' every time confines the scan to the ~10 oldest entries: a
+    // genuinely stale entry sitting behind ten fresh, heartbeating ones would never be examined,
+    // and so never reclaimed, for as long as those ten keep running. Redis answers '0-0' when the
+    // scan reached the end of the PEL, which is also a valid start, so this walks the whole PEL in
+    // ceil(pending/10) claims and then wraps on its own.
+    this.autoClaimCursor = String(auto.nextId ?? '0-0');
     const reclaimed = auto.messages?.find((m) => m && m.message);
     if (reclaimed) {
       return {
@@ -102,13 +171,14 @@ export class RedisWorkQueue implements WorkQueue {
         reclaimed: true,
       };
     }
-    // 2. Otherwise read a brand-new entry. This is the call that BLOCKs, and the reason §5.3 takes
-    // the admission slot before calling claim() rather than after.
+    // 2. Otherwise read a brand-new entry. BLOCK is OMITTED unless the caller asked for it, and 0
+    // counts as not asking: to Redis, `BLOCK 0` means block FOREVER, which would pin the drain
+    // loop's admission slot for the life of the process on an idle queue.
     const res = await this.client.xReadGroup(
       this.group,
       consumerId,
       [{ key: this.stream, id: '>' }],
-      { COUNT: 1, BLOCK: opts.blockMs },
+      { COUNT: 1, ...(opts.blockMs ? { BLOCK: opts.blockMs } : {}) },
     );
     const msg = res?.[0]?.messages?.[0];
     if (!msg) return null;
@@ -135,9 +205,12 @@ export class RedisWorkQueue implements WorkQueue {
     await this.client.xAck(this.stream, this.group, entryId);
   }
 
-  async touch(entryId: string, consumerId: string): Promise<void> {
-    // Reset idle time without re-fetching the payload, so a healthy long run is not reclaimed.
-    await this.client.xClaimJustId(this.stream, this.group, consumerId, 0, [entryId]);
+  async touch(entryId: string, consumerId: string): Promise<boolean> {
+    const held = await this.client.eval(TOUCH_IF_OWNED_LUA, {
+      keys: [this.stream],
+      arguments: [this.group, consumerId, entryId],
+    });
+    return Number(held ?? 0) === 1;
   }
 
   async pending(): Promise<number> {
@@ -177,17 +250,11 @@ export class RedisWorkQueue implements WorkQueue {
   }
 
   async gcIdleConsumers(minIdleMs: number): Promise<number> {
-    const info = await this.client.xInfoConsumers(this.stream, this.group);
-    let removed = 0;
-    for (const c of info) {
-      // `pending === 0` is the whole safety property: a consumer still holding entries must keep
-      // its name, or the entries leave the PEL with it.
-      if (c.pending === 0 && c.idle >= minIdleMs) {
-        await this.client.xGroupDelConsumer(this.stream, this.group, c.name);
-        removed += 1;
-      }
-    }
-    return removed;
+    const removed = await this.client.eval(GC_IDLE_CONSUMERS_LUA, {
+      keys: [this.stream],
+      arguments: [this.group, String(minIdleMs)],
+    });
+    return Number(removed ?? 0);
   }
 
   // Bounded per sweep; a backlog deeper than this drains across successive sweeps.

@@ -1,6 +1,3 @@
 packages:
   - 'packages/*'
   - 'harness'
-allowBuilds:
-  esbuild: true
-  protobufjs: true

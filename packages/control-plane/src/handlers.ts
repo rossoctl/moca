@@ -213,7 +213,7 @@ export interface CpDeps {
   turns?: TurnStore;
   /** The leaf queue, holding turn ids and nothing else (§5.1). */
   turnQueue?: TurnQueue;
-  /** Reads `leaf:result:<sid>` for the status route (§4.4); absent means a turn reports no result. */
+  /** Reads `leaf:result:<sid>:<turnId>` for the status route (§4.4); absent means no result. */
   leafResults?: ResultRedisLike;
 }
 

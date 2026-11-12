@@ -406,32 +406,42 @@ asking for it. The consequence is stated rather than hidden: a full queue can oc
 an interactive `/turn` arriving then is refused with `429` exactly as it would be behind other
 interactive turns. §12 records per-class caps as the knob to reach for if that proves wrong.
 
-**The slot is taken before the claim, not after it.** `claim()` ends in an `XREADGROUP` with
-`BLOCK: blockMs`, so "check the cap, then await a claim, then `start()`" leaves a window the length
-of `blockMs` in which the worker looks free. The supervisor goes on handing it `/turn` sockets
-against that estimate — `handOff` increments its own copy optimistically and `reconcile` corrects
-from the next `load` (`pool.ts:219`, `:442`) — so a handler can fill the slot the loop was about to
-use, and the loop's `start()` then lands at `inFlight == cap`, one above it. So:
+**The slot is taken before the claim, not after it.** "Check the cap, then await a claim, then
+`start()`" leaves a window the length of the claim in which the worker looks free. The supervisor
+goes on handing it `/turn` sockets against that estimate — `handOff` increments its own copy
+optimistically and `reconcile` corrects from the next `load` (`pool.ts:219`, `:442`) — so a handler
+can fill the slot the loop was about to use, and the loop's `start()` then lands at
+`inFlight == cap`, one above it. So:
 
 ```ts
 if (counter.inFlight >= cap) { await sleep(idleBackoffMs); continue; }
 const end = counter.start();            // same tick as the check; nothing can interleave
+let backoffMs = 0;
 try {
-  const claimed = await queue.claim(consumerId, { minIdleMs, blockMs });
-  if (!claimed) { end(); continue; }    // idempotent; see `start()`'s own comment
-  ...
-} finally { end(); }
+  const claimed = await queue.claim(consumerId, { minIdleMs });   // NON-blocking
+  if (!claimed) { backoffMs = idleBackoffMs; }
+  else { ... }
+} finally { end(); }                    // idempotent; see `start()`'s own comment
+if (backoffMs > 0) await sleep(backoffMs);   // waiting happens WITHOUT a slot
 ```
 
 The check and the take are one synchronous tick, so **the loop never takes a slot it has not just
 observed free** — which is what makes §8's "never observed above the cap" an invariant rather than a
-hope. The cost is paid in the other direction and is real: for up to `blockMs` the worker reports a
-slot busy that is running nothing, so an interactive turn arriving in that window can be refused by
-a supervisor that did in fact have capacity. That is already a measured condition rather than a
-silent one — `reconcile` stamps it `spurious_refusals` on the next `load` (`pool.ts:454-465`) — and
-it is the safer direction to err in, because the opposite error is a worker running `cap + 1` turns.
-`blockMs` is the knob that bounds it, and a shorter block trades Redis round-trips for a tighter
-window.
+hope. The cost is paid in the other direction: while the claim is in flight the worker reports a slot
+busy that is running nothing, so an interactive turn arriving in that window can be refused by a
+supervisor that did in fact have capacity. That is already a measured condition rather than a silent
+one — `reconcile` stamps it `spurious_refusals` on the next `load` (`pool.ts:454-465`) — and it is
+the safer direction to err in, because the opposite error is a worker running `cap + 1` turns.
+
+**The claim does not block, and the wait for work holds no slot.** Those two together are what bound
+that window to roughly two Redis round trips. A blocking `XREADGROUP` would hold the slot for the
+whole `BLOCK` interval, and because an `idle` claim is the common case on an idle deployment the
+worker would then report itself saturated essentially all the time — a one-slot worker refusing every
+interactive `/turn` while its queue sat empty. So `claim()` omits `BLOCK` (`BLOCK 0` means block
+_forever_ in Redis, so omitting is the only non-blocking spelling), and the loop does its own waiting
+after the slot is released: `idleBackoffMs` on `idle`, `errorBackoffMs` after a throw. The price is
+up to `idleBackoffMs` of extra pickup latency on a newly submitted turn, and a few Redis commands a
+second per idle worker.
 
 Pull-when-ready, rather than claim-then-queue-internally: an entry claimed but not started is an
 entry no other worker can take, and it is also the window in which a crash costs a reclaim cycle.

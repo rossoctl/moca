@@ -293,8 +293,9 @@ describe('§8 — crash recovery, with timings injected', () => {
     expect((await turns.get(turnId))?.state).toBe('lost');
     expect(await queue.pending()).toBe(0);
     // Under the RECORD's session id, not `leafSessionId(env)` -- that divergence is the defect
-    // Task 4 fixes, and this is the assertion that pins the fix.
-    expect(JSON.parse((await client.get(resultKey(sessionId)))!)).toMatchObject({
+    // Task 4 fixes -- AND under this turn's id, so a sibling turn on the same session cannot
+    // overwrite it (§4.3). This is the assertion that pins both.
+    expect(JSON.parse((await client.get(resultKey(sessionId, turnId)))!)).toMatchObject({
       status: 'failed',
     });
   });
@@ -362,7 +363,7 @@ describe('§8 — record TTL ordering (§5.1)', () => {
     await processOne(jobFor(queue, 'w-ttl', async () => ({ status: 'done' }) as LeafResult));
 
     const recordTtl = await client.ttl(recordKey(turnId));
-    const resultTtl = await client.ttl(resultKey(sessionId));
+    const resultTtl = await client.ttl(resultKey(sessionId, turnId));
     expect(recordTtl).toBeGreaterThan(resultTtl);
   });
 });

@@ -206,7 +206,7 @@ describe('claimTurn', () => {
 });
 
 describe('deadLetterTurn', () => {
-  it('writes a failed result under the record session id and finalizes lost', async () => {
+  it('writes a failed result under the record session id AND turn id, finalizes lost', async () => {
     const store = new Map<string, string>();
     const finalize = vi.fn(async () => 'ok');
     await deadLetterTurn(TURN, {
@@ -218,8 +218,8 @@ describe('deadLetterTurn', () => {
       ttlSeconds: 60,
       now: () => '2026-11-10T00:00:00.000Z',
     });
-    expect([...store.keys()]).toEqual([`leaf:result:${SID}`]);
-    expect(JSON.parse(store.get(`leaf:result:${SID}`)!)).toMatchObject({
+    expect([...store.keys()]).toEqual([`leaf:result:${SID}:${TURN}`]);
+    expect(JSON.parse(store.get(`leaf:result:${SID}:${TURN}`)!)).toMatchObject({
       status: 'failed',
       reason: 'error',
     });

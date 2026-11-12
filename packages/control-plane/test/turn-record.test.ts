@@ -192,15 +192,22 @@ describe('resultTtlSeconds', () => {
   it('defaults when unset or blank', () => {
     expect(resultTtlSeconds({})).toBe(86_400);
     expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '' })).toBe(86_400);
+    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '  ' })).toBe(86_400);
   });
 
   it('reads a positive integer', () => {
     expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '600' })).toBe(600);
   });
 
+  // An env file's trailing space, or a CRLF one's \r. This parse runs at module load in the worker
+  // too, so taking the value literally would crash a tier over whitespace nobody can see.
+  it.each([' 600', '600 ', '\t600\r\n'])('trims %j', (v) => {
+    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: v })).toBe(600);
+  });
+
   // The whole point of the shared parse: `writeResult` hands this to Redis as `EX`, and `EX NaN`
   // (or `EX 0`) is an error on every single write. A bad TTL must stop the boot, not the writes.
-  it.each(['abc', '12x', '1.5', '-1', '0', ' 600'])('refuses %j rather than returning NaN', (v) => {
+  it.each(['abc', '12x', '1.5', '-1', '0', '6 00'])('refuses %j rather than returning NaN', (v) => {
     expect(() => resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: v })).toThrow(
       'LEAF_RESULT_TTL_SECONDS',
     );
