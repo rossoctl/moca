@@ -338,14 +338,14 @@ event for each sandbox until a client has seen it.
     growth during a long Exec is caught by the next sample and by reclaim, not by a reservation.
   - Per-`Exec` VMs keep the full `PerVMBytes` charge.
 - **Free-page reporting (v0.2).** Lease VMs run with the virtio-balloon device in free-page reporting
-  mode only (Cloud Hypervisor: `free_page_reporting=on`; Firecracker: to be confirmed for the pinned
-  version, §16 item 5): the guest reports pages it has freed, and the host drops them. Nothing inflates
+  mode only (Firecracker v1.17.0: `"free_page_reporting": true`; Cloud Hypervisor:
+  `free_page_reporting=on`; §16 item 5): the guest reports pages it has freed, and the host drops them. Nothing inflates
   the balloon. Without it, E17a's lease VMs stayed at their 1024 MiB ceiling for the whole lease after
   one `analyze.py` (pandas frames and a KMeans fit that the guest had already freed), so measured charge
   came out equal to the full charge on the workload this mode targets. Reported pages leave
   `memory.current`, so the measured charge above follows the working set. Free page _hinting_ and a
-  deflate-on-OOM policy are not needed. Check before plan 3: the pinned Firecracker version's balloon
-  API and the guest kernel's `CONFIG_PAGE_REPORTING` (§16).
+  deflate-on-OOM policy are not needed. Firecracker and both guest kernels support it (§16 item 5); one
+  restore test remains before plan 3.
 - **Page-cache headroom in the lease cgroup (v0.2).** Each VM's cgroup has `memory.max` =
   `PerVMBytes` (guest RAM + VMM overhead, `remote-worker/internal/vmpool/cgroup.go` `writeMemoryMax`).
   Host page cache for a VM's own disk reads is charged to that cgroup. A lease VM whose guest is full
@@ -634,9 +634,29 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    both sizes (E17 §6).
 4. **Per-`Exec` under the same unprivileged uid.** §3.3 keeps per-`Exec` as root in v1. Moving it to
    the Exec uid would give one guest model and one workspace ownership. The security review decides.
-5. **Free-page reporting support (v0.2).** Confirm the pinned Firecracker version's balloon device
-   with `free_page_reporting`, the guest kernel's `CONFIG_PAGE_REPORTING` and `CONFIG_VIRTIO_BALLOON`,
-   and that a snapshot restored with the device keeps it. Plan 3 depends on it.
+5. **Free-page reporting support (v0.2; checked 2026-11-12).**
+   - **Firecracker v1.17.0** (pinned by P4 and by the E15 rig; also what the SBX0 host runs) has it:
+     `"free_page_reporting": true` on `PUT /balloon`. Reported ranges are `madvise(MADV_DONTNEED)`d.
+     It carries no preview label. Free-page _hinting_ is a developer preview with a documented
+     memory-corruption race, and v1 does not use it (`docs/ballooning.md` at v1.17.0).
+   - **Guest kernels:** the SBX0 kernel (6.18.51, the `default-p41-ca-gh` snapshot) and the E15 rig's
+     (`vmlinux-6.18.44`) both build in `CONFIG_VIRTIO_BALLOON`, `CONFIG_MEMORY_BALLOON`,
+     `CONFIG_PAGE_REPORTING` and `CONFIG_BALLOON_COMPACTION` (embedded config read on both hosts). No
+     kernel change.
+   - **It can only be enabled before boot.** A restored VM has the devices of its snapshot, so the
+     balloon has to be in the golden snapshot. That changes `vmstate` for every VM, per-`Exec` included.
+     Per-`Exec` VMs would then report too: that frees their memory sooner, and a reused free page faults
+     back in from the memory file. The plan chooses one of two options: one snapshot with the balloon
+     (per-`Exec` latency re-gated), or a lease-only snapshot (a second memory file to keep resident).
+   - **Restore backend.** VMs restore with the `File` backend (`build-snapshot.sh:2092`): a
+     `MAP_PRIVATE` mapping of the memory file, with written pages copy-on-write anonymous memory. A
+     reported range then drops its private copy and falls back to the shared memory file. The host gets
+     the memory back, and the free page's contents are of no concern to the guest (no page poisoning:
+     `CONFIG_INIT_ON_FREE_DEFAULT_ON` is not set).
+   - **Open:** Firecracker's documentation does not say whether a restored balloon keeps reporting. One
+     empirical test settles it before plan 3: build a snapshot with the balloon, restore it with the
+     `File` backend, allocate and free about 600 MiB in the guest, and check that the VM's
+     `memory.current` falls back.
 6. **Level 2 is the latency case, and E17 does not measure it (v0.2).** E17a shows what a warm guest
    saves without process state: VM start and interpreter start-up, not the work. The large saving is a
    process that keeps its state: an interpreter with the stack imported and the dataset loaded, a
