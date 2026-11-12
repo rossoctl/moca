@@ -85,6 +85,18 @@ for d in dev proc sys; do
 done
 check "the temporary container is removed" "$(grep -c '^podman rm -f cid-42$' "$MOCK_LOG")" "1"
 
+echo "== --source-name: the recorded image is the caller's host-free name, never the pull reference"
+make_fixture "${ALL_TOOLS[@]}"
+: >"$MOCK_LOG"
+bash "$SCRIPT" --out "$TMP/out-src" --image registry.example.com/team/img@sha256:0123abcd \
+  --source-name team/img@sha256:0123abcd >"$TMP/run-src.log" 2>&1
+check "exit 0" "$?" "0"
+check "pulled the pull reference" "$(grep -c '^podman pull registry.example.com/team/img@sha256:0123abcd$' "$MOCK_LOG")" "1"
+check "records the source name" "$(grep -c '^image=team/img@sha256:0123abcd$' "$TMP/out-src/etc/moca-rootfs-source")" "1"
+check "no registry host in the guest's file" "$(grep -c 'registry.example.com' "$TMP/out-src/etc/moca-rootfs-source")" "0"
+bash "$SCRIPT" --out "$TMP/out-src2" --image example/img:1 --source-name "" >"$TMP/run-src2.log" 2>&1
+check "an empty --source-name is refused" "$?" "1"
+
 echo "== the image is re-resolved on every build, not reused because a copy is present (#414)"
 # `podman image exists || podman pull` pulled only on a host with NO copy, so a :latest pulled once
 # was exported into every later snapshot -- and a snapshot is built once and run for a long time.

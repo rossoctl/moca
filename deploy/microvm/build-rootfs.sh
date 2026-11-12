@@ -9,7 +9,12 @@
 # on top; nothing here adds either.
 #
 # Usage:
-#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF] [--require "T1 T2 ..."]
+#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF] [--source-name NAME] [--require "T1 T2 ..."]
+#
+# --source-name is the reference /etc/moca-rootfs-source records as `image=` (default: --image). A
+# guest's agent can read that file, so a caller pulling from a private registry (template-build.sh
+# with --registry) passes the spec's own host-free reference, never the pull reference: the
+# registry host never reaches the guest. The `digest=` line is the pulled image's.
 #
 # --require replaces REQUIRED_TOOLS below with the caller's list, for an image that is not Moca's
 # own sandbox image: a sandbox template's image needs the tools its template lists plus the guest
@@ -29,13 +34,14 @@ set -euo pipefail
 
 IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}"
 OUT=""
+SOURCE_NAME=""
 # The container tier's Hello.capabilities (cmd/worker's `probed`) plus the two coreutils the
 # harness's own file ops call. A tree missing one of these would boot, snapshot, advertise less,
 # and then fail the first tool call that needs it -- so refuse here instead.
 REQUIRED_TOOLS=(bash git rg gh python3 base64 file ls cat)
 
 usage() {
-  echo "usage: $0 --out DIR [--image REF] [--require \"T1 T2 ...\"]   (default image: $IMAGE)" >&2
+  echo "usage: $0 --out DIR [--image REF] [--source-name NAME] [--require \"T1 T2 ...\"]   (default image: $IMAGE)" >&2
   exit 1
 }
 
@@ -43,6 +49,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
   --out) OUT="${2:-}"; shift 2 ;;
   --image) IMAGE="${2:-}"; shift 2 ;;
+  --source-name)
+    [ -n "${2:-}" ] || { echo "build-rootfs.sh: --source-name needs a name" >&2; usage; }
+    SOURCE_NAME="$2"; shift 2 ;;
   --require)
     [ -n "${2:-}" ] || { echo "build-rootfs.sh: --require needs a list of tools" >&2; usage; }
     read -r -a REQUIRED_TOOLS <<<"$2"
@@ -121,6 +130,6 @@ fi
 rm -f "$OUT/usr/local/bin/remote-worker"
 # Mount points init and the kernel need; an exported container tree may lack them.
 mkdir -p "$OUT/dev" "$OUT/proc" "$OUT/sys"
-printf 'image=%s\ndigest=%s\n' "$IMAGE" "$digest" >"$OUT/etc/moca-rootfs-source"
+printf 'image=%s\ndigest=%s\n' "${SOURCE_NAME:-$IMAGE}" "$digest" >"$OUT/etc/moca-rootfs-source"
 
-echo "build-rootfs.sh: $OUT is ready (from $IMAGE @ $digest)"
+echo "build-rootfs.sh: $OUT is ready (from ${SOURCE_NAME:-$IMAGE} @ $digest)"
