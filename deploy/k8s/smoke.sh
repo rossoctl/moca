@@ -227,15 +227,22 @@ claim 6 "an unauthenticated /turn is refused"
 code="$(curl -s -o "$OUT/unauth.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"prompt":"hi"}' "$HARNESS/turn" || true)"
 if [[ "$code" == 4* ]] && grep -q token_required "$OUT/unauth.json"; then ok "$code token_required"; else ko "$code: $(head -c 300 "$OUT/unauth.json")"; fi
 
-# The api token a device-flow login would return, minted INSIDE the control-plane pod with its own
-# signing key (the key never leaves the pod). Tokens travel in header files, never argv.
-api="$(kc -n "$NS" exec deploy/moca-control-plane -c control-plane -- \
-  node --import tsx --input-type=module -e \
-  "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
-   const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
-   process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" || true)"
-[[ -n "$api" ]] || { ko "could not mint an api token in the control-plane pod"; printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; exit 1; }
-(umask 077; printf 'Authorization: Bearer %s\n' "$api" >"$OUT/api.hdr")
+# mint_api -> $OUT/api.hdr: the api token a device-flow login would return, minted INSIDE the
+# control-plane pod with its own signing key (the key never leaves the pod). Tokens travel in header
+# files, never argv. A function because the ttl is 900 s, which the async claims below outlast: they
+# re-mint rather than inherit a token that expires mid-poll.
+mint_api() {
+  local api
+  api="$(kc -n "$NS" exec deploy/moca-control-plane -c control-plane -- \
+    node --import tsx --input-type=module -e \
+    "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
+     const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
+     process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" || true)"
+  [[ -n "$api" ]] || { ko "could not mint an api token in the control-plane pod"; return 1; }
+  (umask 077; printf 'Authorization: Bearer %s\n' "$api" >"$OUT/api.hdr")
+}
+# Nothing below this line works without a token, so the FIRST mint ends the run.
+mint_api || { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; exit 1; }
 field=token
 [[ "$SMOKE_MODEL_KIND" == bearer ]] || field=key
 host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$SMOKE_MODEL_URL")"
@@ -275,6 +282,34 @@ has_session() {
   [[ -n "$1" && "$(kc -n "$NS" exec redis-0 -- sh -c "redis-cli EXISTS 'session:$1'" 2>/dev/null)" == 1 ]]
 }
 ask() { printf 'Use the bash tool to run exactly this command, then reply with its output: %s  [%s]' "$2" "$1"; }
+# submit_async TAG SID PROMPT -> prints the turn id, '' on failure; the 202 body stays at $OUT/TAG.sub.
+# An api token, not a session token: all three async turn routes are auth: 'api' (routes.ts). No
+# idempotencyKey, which defaults to the session id -- so each submission needs its OWN session, or
+# the second would be deduplicated onto the first turn (spec §4.3).
+submit_async() {
+  curl -s --max-time 20 -o "$OUT/$1.sub" -X POST -H @"$OUT/api.hdr" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg p "$3" '{async: true, kind: "prompt", prompt: $p}')" "$CP/v1/sessions/$2/turns" || true
+  jq -r '.turnId // empty' "$OUT/$1.sub" 2>/dev/null || true
+}
+# turn_state SID TURNID -> prints "<state> <attempts>", '' when the read failed. The record's state
+# is the source of truth; `result` appears only once it is terminal (turn-handlers.ts).
+turn_state() {
+  curl -s --max-time 20 -H @"$OUT/api.hdr" "$CP/v1/sessions/$1/turns/$2" |
+    jq -r 'select(.state) | "\(.state) \(.attempts // 0)"' 2>/dev/null || true
+}
+# A prompt leaf ends `responded`; the rest are the other terminal states a failure would land in.
+is_terminal() { case "$1" in responded | done | solved | failed | cancelled | lost) return 0 ;; *) return 1 ;; esac; }
+# await_turn SID TURNID SECONDS -> prints the final "<state> <attempts>"; false on timeout.
+await_turn() {
+  local st=''
+  for _ in $(seq "$3"); do
+    st="$(turn_state "$1" "$2")"
+    if [[ -n "$st" ]] && is_terminal "${st%% *}"; then echo "$st"; return 0; fi
+    sleep 1
+  done
+  echo "${st:-unreadable}"
+  return 1
+}
 
 if [[ "$TIER" == p4 ]]; then
   claim P3 "an authenticated turn runs in a P4 microVM: a kernel that is no node's, and a file written"
@@ -598,5 +633,128 @@ elif ((aff_ok)); then ok "4 sessions, each on one sandbox for both turns"; else 
 spread="$(printf '%s\n' ${aff_first[@]+"${aff_first[@]}"} | sort -u | grep -c . || true)"
 ((!aff_ok)) || [[ "$spread" -ge 2 ]] ||
   note "the first turns all landed on one sandbox, so this run could not tell affinity from luck"
+
+# The async leaf consumer (#688, ADR-0047, README §14). Opt-in: setup.sh writes SH_ASYNC_DRAIN to
+# moca-settings only when it was asked for, so an absent key means this stack runs no drain and both
+# claims below are SKIPPED rather than failed. A failed read is not an absent key (the tiers read
+# above is the same rule): an unreadable moca-settings cannot say "the drain is off".
+async_drain="$(kc -n "$NS" get configmap moca-settings -o jsonpath='{.data.SH_ASYNC_DRAIN}' 2>"$OUT/async.err")" ||
+  async_drain=unreadable
+async_n=5
+
+claim 13 "five async leaves, on a stack that runs two at a time, all reach a result"
+if [[ "$async_drain" == unreadable ]]; then
+  ko "could not read configmap moca-settings (SH_ASYNC_DRAIN): $(head -c 300 "$OUT/async.err" 2>/dev/null)"
+elif [[ "$async_drain" != 1 ]]; then
+  note "SH_ASYNC_DRAIN is unset on this stack, so no worker drains the queue: skipped (README §14.1)"
+else
+  # Five SESSIONS, not five turns on one: idempotencyKey defaults to the session id, so siblings on
+  # one session would all be deduplicated onto the first turn (spec §4.3).
+  async_sids=() async_tids=() async_states=()
+  async_ok=1
+  still_queued=0
+  mint_api || async_ok=0
+  if ((async_ok)); then
+    # quiet: one ko for the claim, not one per session that could not be opened.
+    for _ in $(seq "$async_n"); do new_session quiet && async_sids+=("$SID") || async_ok=0; done
+    ((async_ok)) || echo "  could not open $async_n sessions: $SESSION_ERR"
+  fi
+  if ((async_ok)); then
+    for i in ${async_sids[@]+"${!async_sids[@]}"}; do
+      t="$(submit_async "async-$i" "${async_sids[$i]}" "$(ask K8S-SMOKE-ASYNC 'echo async-leaf-ok')")"
+      if [[ -z "$t" ]]; then
+        async_ok=0
+        echo "  POST .../turns on ${async_sids[$i]} returned no turnId: $(head -c 300 "$OUT/async-$i.sub" 2>/dev/null)"
+        break
+      fi
+      async_tids+=("$t")
+    done
+  fi
+  # The wiring proof, and the one honest arming check: both gauges read "NaN" until worker slot 0
+  # reports them, and only an ARMED worker reports at all. So a NUMBER -- 0 included -- is positive
+  # evidence that SH_ASYNC_DRAIN=1 reached a worker process, where a bare 0 would be ambiguous.
+  depth="$(curl -s "$ADMIN/metrics" | jq -r '.async_queue_depth' 2>/dev/null || true)"
+  if ((async_ok)); then
+    # How many were still waiting when the last 202 landed. A note, not an assertion: with W=2 the
+    # queue should be backed up here, but a stack fast enough to drain it as it fills is not a bug.
+    for i in ${async_tids[@]+"${!async_tids[@]}"}; do
+      if [[ "$(turn_state "${async_sids[$i]}" "${async_tids[$i]}")" == queued* ]]; then
+        still_queued=$((still_queued + 1))
+      fi
+    done
+    note "$still_queued of $async_n still queued when the last 202 landed (fan-out is replicas x SH_WORKERS wide, 2 by default)"
+    # All five on ONE deadline, not 240 s each: the leaves run concurrently, so a sequential
+    # per-turn budget would multiply one stall into a 20-minute claim.
+    deadline=$((SECONDS + 240))
+    while :; do
+      pending=0
+      for i in ${async_tids[@]+"${!async_tids[@]}"}; do
+        async_states[i]="$(turn_state "${async_sids[$i]}" "${async_tids[$i]}")"
+        is_terminal "${async_states[$i]%% *}" || pending=$((pending + 1))
+      done
+      ((pending)) || break
+      [[ "$SECONDS" -lt "$deadline" ]] || break
+      sleep 3
+    done
+    bad=''
+    for i in ${async_tids[@]+"${!async_tids[@]}"}; do
+      [[ "${async_states[$i]%% *}" == responded ]] ||
+        bad="$bad ${async_tids[$i]}=${async_states[$i]:-unreadable}"
+    done
+    # One result read in full: `responded` says the agent loop finished, the text says the leaf's
+    # tool actually ran. /runs/status would answer `queued` here forever -- this is the turn route.
+    text="$(curl -s --max-time 20 -H @"$OUT/api.hdr" "$CP/v1/sessions/${async_sids[0]}/turns/${async_tids[0]}" |
+      jq -r '.result.text // empty' 2>/dev/null || true)"
+    grep -q async-leaf-ok <<<"$text" ||
+      bad="$bad (${async_tids[0]} returned no tool output: '${text:0:200}')"
+  fi
+  if [[ "$depth" == NaN || -z "$depth" ]]; then
+    ko "the admin port reports async_queue_depth=\"${depth:-unreadable}\": no worker ever reported the gauge, so SH_ASYNC_DRAIN=1 reached none of them (README §14.1)"
+  elif ((!async_ok)); then
+    ko "could not submit $async_n async leaves (above)"
+  elif [[ -n "$bad" ]]; then
+    ko "not every async leaf reached a result:$bad"
+  else
+    ok "$async_n leaves, all responded (async_queue_depth was $depth at the last 202)"
+  fi
+fi
+
+claim 14 "an async leaf whose supervisor pod is deleted mid-run is redelivered and finishes"
+# #389's crash-redelivery acceptance, on deploy/k8s. Deleting the pod is the cluster's kill -9: the
+# drain abandons its in-flight leaf UNACKED (it does not kill it, and does not DELCONSUMER), so the
+# entry sits in the PEL until XAUTOCLAIM reclaims it past MIN_IDLE_MS. Last claim of the run: it
+# costs a rollout, and claim 11's restart count must not see it.
+if [[ "$async_drain" != 1 ]]; then
+  note "no drain on this stack (claim 13 says why): skipped"
+else
+  SID='' pod='' tid=''
+  if new_session quiet; then
+    # Not one already terminating from claim 9: deleting it again would prove nothing.
+    pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o json 2>/dev/null |
+      jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name // empty' 2>/dev/null || true)"
+    tid="$(submit_async async-crash "$SID" "$(ask K8S-SMOKE-ASYNC-SLOW 'sleep 40; echo async-slow-ok')")"
+  fi
+  is_running() { [[ "$(turn_state "$1" "$2")" == running* ]]; }
+  if [[ -z "$pod" || -z "$tid" ]]; then
+    ko "could not start a slow async leaf on a live supervisor pod: pod='${pod:-none}' turn='${tid:-none}' ${SESSION_ERR:-}"
+  elif ! wait_for 60 is_running "$SID" "$tid"; then
+    ko "the leaf never reached running within 60s, so the delete below would prove nothing: $(turn_state "$SID" "$tid")"
+  else
+    kc -n "$NS" delete pod "$pod" --wait=false >/dev/null || true
+    kc -n "$NS" rollout status deployment/moca-supervisor --timeout=300s >/dev/null || true
+    forward || ko "port-forward did not come back after the async pod delete"
+    mint_api || true
+    # 240 s covers MIN_IDLE_MS (90 s, the floor before any reclaim), the rollout, and a second run
+    # of the 40 s leaf.
+    st="$(await_turn "$SID" "$tid" 240)" || true
+    if [[ "${st%% *}" != responded ]]; then
+      ko "the leaf did not finish after its pod was deleted: $st"
+    elif [[ "${st##* }" -lt 2 ]]; then
+      ko "the leaf finished on attempt ${st##* }: it was never redelivered, so the delete did not interrupt it"
+    else
+      ok "pod $pod deleted mid-leaf; turn $tid finished on delivery ${st##* }"
+    fi
+  fi
+fi
 
 summary

@@ -121,6 +121,9 @@ case " $* " in
 *"SH_SANDBOX_TIERS"*)
   [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_TIERS-}" ;;
+*"SH_ASYNC_DRAIN"*)
+  [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
+  printf '%s' "${MOCK_ASYNC_DRAIN-}" ;;
 *" get configmap moca-setup "*)
   [[ -z "${MOCK_SETUP_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-setup" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_P4_IDS-moca_microvm_0}" ;;
@@ -324,13 +327,13 @@ pass 'claim 12: each first turn holds its lease (sleep 2; echo ...), each second
 
 # The live run's model is deploy/microvm/mock-anthropic.mjs: its steps must be the commands smoke.sh asks for.
 MOCK_MJS="$(cd "$(dirname "$SMOKE")/../microvm" && pwd)/mock-anthropic.mjs"
-for m in WHERE-1 WHERE-2; do
+for m in WHERE-1 WHERE-2 ASYNC ASYNC-SLOW; do
   asked="$(sed -n "s/.*ask K8S-SMOKE-$m '\([^']*\)'.*/\1/p" "$SMOKE")"
   scripted="$(sed -n "s/.*'K8S-SMOKE-$m': { steps: \['\([^']*\)'\].*/\1/p" "$MOCK_MJS")"
   [[ -n "$asked" && "$asked" == "$scripted" ]] ||
     fail "K8S-SMOKE-$m: smoke.sh asks for '$asked', mock-anthropic.mjs runs '$scripted'"
 done
-pass "claim 12: mock-anthropic.mjs scripts exactly the commands smoke.sh asks for"
+pass "claims 12-14: mock-anthropic.mjs scripts exactly the commands smoke.sh asks for"
 
 # Claim 10 restarts Redis; claim 12 must not start until the stack takes a session again.
 (export MOCK_SESSIONS=1 MOCK_ENVELOPE=1 MOCK_WHERE="$SPREAD" MOCK_SESSIONS_DOWN=3
@@ -419,8 +422,28 @@ pass 'tiered p4: a P4 record without moca.dev/tier fails P2, naming the id and w
   grep -qF '  FAIL could not tell whether this stack is tiered' "$TMP/out" ||
     fail "P2 judged a stack whose tiers it could not read: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)"
   ! grep -qE '^  ok attached' "$TMP/out" || fail 'P2 passed without knowing whether the stack is tiered'
-  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] || fail 'an unreadable moca-settings did not fall back to {} sessions')
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] || fail 'an unreadable moca-settings did not fall back to {} sessions'
+  ! grep -q 'Claim 13' "$TMP/out" || fail 'the p4 tier run reached the container-tier async claims')
 pass 'an unreadable moca-settings is a FAIL (quoted), P2 does not judge it, sessions post {}'
+
+# The drain knob follows the same rule as the tiers above, but claim 13 only exists on the container
+# path (--tier p4 ends at the summary): an unreadable ConfigMap cannot say "SH_ASYNC_DRAIN is unset",
+# so claim 13 must FAIL rather than skip itself as though the consumer were off on purpose.
+(export MOCK_SETTINGS_CM_FAIL=1
+  run_smoke
+  grep -qE '^  FAIL could not read configmap moca-settings \(SH_ASYNC_DRAIN\)' "$TMP/out" ||
+    fail "an unreadable moca-settings let claim 13 skip as though the drain were off: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  grep -qF '  note no drain on this stack (claim 13 says why): skipped' "$TMP/out" ||
+    fail "claim 14 did not defer to claim 13's verdict: $(grep -A1 'Claim 14' "$TMP/out" | tail -1)")
+pass 'an unreadable moca-settings FAILs claim 13 rather than skipping it, and claim 14 defers to it'
+
+# Opt-in: no SH_ASYNC_DRAIN key means the stack runs no drain, which is a SKIP, not a FAIL.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD"
+  run_smoke
+  grep -qF '  note SH_ASYNC_DRAIN is unset on this stack' "$TMP/out" ||
+    fail "an absent SH_ASYNC_DRAIN did not skip claim 13: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  ! grep -qE '^  (FAIL|ok).*async' "$TMP/out" || fail 'claim 13 judged a stack that runs no drain')
+pass 'a stack without SH_ASYNC_DRAIN skips claims 13 and 14 instead of failing them'
 
 echo "== P7 keeps the sticky sandbox count (#425)"
 # P7 runs the setup.sh beside smoke.sh, so the copy here runs a stand-in that records its env.
