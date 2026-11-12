@@ -120,6 +120,35 @@ describe('SessionsOverlay', () => {
     expect(f).toMatch(/3h ago · 1 turn\s*$/m);
   });
 
+  it('shows the sandbox template beside the tier (session-templates spec §6)', async () => {
+    const cp = fakeControlPlane({
+      listSessions: async () => ({
+        sessions: [
+          summary('aaaaaaaa-1', { sandboxTier: 'microvm', sandboxTemplate: 'django-django-11133' }),
+          summary('bbbbbbbb-2', { turns: 1, sandboxTier: 'microvm', sandboxTemplate: null }),
+        ],
+        nextCursor: null,
+      }),
+    });
+    const { lastFrame } = render(
+      withTheme(
+        <SessionsOverlay
+          cp={cp}
+          now={() => NOW}
+          remove={vi.fn()}
+          onResume={vi.fn()}
+          onNew={vi.fn()}
+          onDeleted={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('bbbbbbbb'), 1000, lastFrame);
+    const f = lastFrame()!;
+    expect(f).toContain('4 turns · microvm · django-django-11133');
+    expect(f).toMatch(/1 turn · microvm\s*$/m);
+  });
+
   it('resumes the highlighted session on Enter', async () => {
     const { stdin, onResume, lastFrame } = setup();
     await waitFor(

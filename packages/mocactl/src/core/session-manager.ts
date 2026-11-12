@@ -55,7 +55,7 @@ export type SessionEvent =
   | { kind: 'attach-none'; missed: boolean }
   | { kind: 'frame'; frame: TurnFrame }
   | { kind: 'notice'; text: string; tone: 'info' | 'warning' | 'error' }
-  | { kind: 'retrying'; seconds: number }
+  | { kind: 'retrying'; seconds: number; reason?: string }
   | { kind: 'turn-end'; outcome: 'done' | 'error' | 'cancelled'; error?: Error }
   | { kind: 'queue'; size: number };
 
@@ -74,7 +74,21 @@ export interface SessionDeps {
   cancelTimeoutMs?: number;
   /** How long an Esc before the first frame waits for it (default PENDING_CANCEL_MS). */
   pendingCancelMs?: number;
+  /**
+   * The most a turn waits, in total, on the harness's "no capacity, retry after N s" before it fails
+   * with that refusal (default: no bound, as the TUI, where a person can press Esc). Headless sets
+   * one: a script cannot, and a tier with no worker never gains capacity by waiting.
+   */
+  maxCapacityWaitMs?: number;
+  /**
+   * Told each time a session create waits for its template to become active: a control plane that
+   * activates templates on first use started the activation and answered 409 template_not_active.
+   */
+  onActivationWait?: (seconds: number) => void;
 }
+
+/** How long a session create waits for its template to become active before giving up. */
+export const SESSION_ACTIVATION_WAIT_MS = 10 * 60_000;
 
 type PromptJob = { kind: 'prompt'; prompt: string; resend: boolean; conflicts: number };
 type Job =
@@ -630,6 +644,7 @@ export class ActiveSession {
     this.emit({ kind: 'turn-start', prompt });
     let reminted = false;
     let streamed = false;
+    let waitedMs = 0;
     const ids: Cursor = { frames: 0 };
     try {
       for (;;) {
@@ -714,7 +729,14 @@ export class ActiveSession {
             throw err.code === 'session_mismatch' ? err : new HarnessUntrustedError();
           }
           if (err.status === 503 && err.retryAfterS !== undefined) {
-            this.emit({ kind: 'retrying', seconds: err.retryAfterS });
+            const max = this.deps.maxCapacityWaitMs;
+            if (max !== undefined && waitedMs + err.retryAfterS * 1000 > max) throw err;
+            this.emit({
+              kind: 'retrying',
+              seconds: err.retryAfterS,
+              ...(err.message && err.message !== err.code ? { reason: err.message } : {}),
+            });
+            waitedMs += err.retryAfterS * 1000;
             await this.deps.sleep(err.retryAfterS * 1000, controller.signal);
             if (controller.signal.aborted) throw new TurnCancelledError();
             continue;
@@ -810,12 +832,33 @@ export class SessionManager {
   constructor(private readonly deps: SessionDeps) {}
 
   async create(req: CreateSessionRequest): Promise<ActiveSession> {
-    const created = await this.deps.cp.createSession(req);
+    const created = await this.createWaitingForActivation(req);
     this.deps.transcripts?.ensure(created.sessionId);
     return new ActiveSession(this.deps, created.sessionId, {
       token: created.token,
       expiresAt: created.expiresAt,
     });
+  }
+
+  /**
+   * The create, retried while its template activates: a 409 template_not_active means the control
+   * plane started the activation, so wait its Retry-After, up to SESSION_ACTIVATION_WAIT_MS.
+   */
+  private async createWaitingForActivation(req: CreateSessionRequest) {
+    const start = this.deps.now();
+    for (;;) {
+      try {
+        return await this.deps.cp.createSession(req);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 409 && err.code === 'template_not_active'))
+          throw err;
+        const left = SESSION_ACTIVATION_WAIT_MS - (this.deps.now() - start);
+        if (left <= 0) throw err;
+        const waitMs = Math.min(Math.max(1, err.retryAfterS ?? 30) * 1000, left);
+        this.deps.onActivationWait?.(Math.ceil(waitMs / 1000));
+        await this.deps.sleep(waitMs);
+      }
+    }
   }
 
   async resume(sessionId: string): Promise<ActiveSession> {
