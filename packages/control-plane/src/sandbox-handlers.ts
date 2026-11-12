@@ -36,6 +36,13 @@ import {
   type SandboxView,
 } from './sandbox-store.js';
 import { mintSandboxToken } from './sandbox-token.js';
+import {
+  allLines,
+  EGRESS_GRACE_S,
+  ENTRY_ID_RE,
+  summarize,
+  type EgressStore,
+} from './egress-log.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -204,8 +211,63 @@ async function sandboxEnded(
       reason,
       expiresAt: rec.expiresAt,
       ...(reason === 'deleted' ? { endedAt: nowS } : {}),
+      ...(deps.egress ? { egress: await egressDigest(deps.egress, rec.id) } : {}),
     },
   });
+}
+
+/**
+ * What a `sandbox` record names of the egress log: its digest, and its completeness
+ * with the reasons (`droppedBy`: proxy, cap, budget, invalid).
+ */
+async function egressDigest(store: EgressStore, id: string) {
+  const s = await summarize(store, id);
+  return {
+    events: s.total,
+    sha256: s.sha256,
+    dropped: s.dropped,
+    droppedBy: s.droppedBy,
+    complete: s.complete,
+  };
+}
+
+/**
+ * Seals each ended sandbox's egress log once its grace has passed (egress-log.ts EGRESS_GRACE_S),
+ * in the janitor's sweep after recordExpiries. A log that changed after its end record named it
+ * (events that arrived in the grace) gets one more `sandbox` record, `state: 'egress'`, naming the
+ * final log: the newest `sandbox` record of a sandbox that carries `egress` is its log's digest.
+ */
+async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Promise<void> {
+  const store = deps.egress;
+  const retentionS = deps.config.sandbox?.retentionS ?? 0;
+  if (!store) return;
+  const due = recs.filter(
+    (r) => !isLive(r, nowS) && nowS >= (r.deletedAt ?? r.expiresAt) + EGRESS_GRACE_S,
+  );
+  const chains = new Map<string, Awaited<ReturnType<ProvenanceStore['chain']>>>();
+  for (const r of due) {
+    if (!(await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS))) continue;
+    if (!deps.provenance) continue;
+    const stream = `template/${r.template}`;
+    if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
+    const named = chains
+      .get(stream)!
+      .filter(
+        (x) =>
+          x.kind === 'sandbox' &&
+          (x.body as { sandboxId?: string }).sandboxId === r.id &&
+          (x.body as { egress?: unknown }).egress !== undefined,
+      )
+      .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
+    const now = await egressDigest(store, r.id);
+    if (named && named.sha256 === now.sha256 && named.dropped === now.dropped) continue;
+    await deps.provenance.append({
+      stream,
+      kind: 'sandbox',
+      subject: 'janitor',
+      body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
+    });
+  }
 }
 
 /**
@@ -1179,6 +1241,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     if (outcome === 'not_found') throw new CpError('sandbox_not_found', 'no such sandbox');
     if (outcome === 'deleted') {
       await audit(deps, ctx.principal!.sub, rec.id, 'sandbox_deleted');
+      // The egress log is kept as long as the record, whose retention now runs from the delete.
+      await deps.egress?.expireAt(rec.id, now + cfg.retentionS);
       await sandboxEnded(deps, rec, ctx.principal!.sub, 'deleted', now);
     }
     // Idempotent: a second delete, or a delete after expiry, reports how it actually ended.
@@ -1186,6 +1250,40 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     return {
       status: 200,
       body: { id: rec.id, state: 'terminated', reason: ended.reason ?? 'deleted' },
+    };
+  },
+
+  /**
+   * A sandbox's egress log, for whoever may read the sandbox (GET /v1/sandboxes/{id}):
+   * `{events, next, summary}` a page at a time (`after` is the last page's `next`), or with
+   * `format=ndjson` the whole log, whose sha256 is `summary.sha256` and the end record's.
+   */
+  getSandboxEgress: async (ctx, deps) => {
+    const rec = await assertSandboxOwner(ctx, deps, { admin: true });
+    if (!deps.egress) throw new CpError('internal_error', 'the egress log is not configured');
+    const format = ctx.query.get('format');
+    if (format !== null && format !== 'json' && format !== 'ndjson')
+      throw new CpError('invalid_request', "format must be 'json' or 'ndjson'");
+    if (format === 'ndjson') {
+      let out = '';
+      for await (const line of allLines(deps.egress, rec.id)) out += `${line}\n`;
+      return { status: 200, body: out, contentType: 'application/x-ndjson' };
+    }
+    const after = ctx.query.get('after');
+    if (after !== null && !ENTRY_ID_RE.test(after))
+      throw new CpError('invalid_request', "after must be a page's next");
+    const rawLimit = ctx.query.get('limit');
+    const limit = rawLimit === null ? 100 : Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new CpError('invalid_request', 'limit must be 1-1000');
+    const page = await deps.egress.page(rec.id, after, limit);
+    return {
+      status: 200,
+      body: {
+        events: page.map((e) => JSON.parse(e.line) as unknown),
+        next: page.length === limit ? page[page.length - 1]!.id : null,
+        summary: await summarize(deps.egress, rec.id),
+      },
     };
   },
 
@@ -1242,6 +1340,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       else terminated.push({ wsk: v.wsk, wrk: v.worker, terminatedAt: v.terminatedAt! });
     }
     await recordExpiries(deps, all, now);
+    await sealEgress(deps, all, now);
     return { status: 200, body: { live, terminated } };
   },
 };
