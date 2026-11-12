@@ -110,12 +110,13 @@ A subject may submit its own gate record (made with the image builder's general 
 with `selfAttest`. It counts only for that subject's own templates, which stay private and are shown
 as self-attested until an admin adds the record's sha256 to `trustedGateRecords`; a build made on a
 `selfAttest` profile while its record was trusted reads as self-attested again (and its template as
-private) once an admin removes it. A record counts for one subject only, its first submitter,
-whatever that build later becomes: the same sha256 submitted by a second subject is refused
-(X1.self.scope); a build made while the record was trusted claims nothing. The X rules above apply
-unchanged, plus: commits always refused, whatever the spec says (X12.self), and egress only where
-the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for benchmark
-integrity) and, like `benchmark`, needs a general-gate record's floor checked offline (X1.offline:
+private) once an admin removes it. A record counts for one subject only, its first submitter, unless
+its build failed (a failed build never admitted a template, so it releases the record; rejected and
+retired builds keep it): the same sha256 submitted by a second subject is refused (X1.self.scope); a
+build made while the record was trusted claims nothing. The X rules above apply unchanged, plus:
+commits always refused, whatever the spec says (X12.self), and egress only where the profile allows
+it (X1.self.egress). `benchmark-self` keeps X11 (offline, for benchmark integrity) and, like
+`benchmark`, needs a general-gate record's floor checked offline (X1.offline:
 `gate.floor_checked_offline`, on a record of the schema `SH_GATE_RECORD_SCHEMA` names, default
 `moca-gate-record/1`; fail closed: a record of any other schema, such as a builder's family records,
 which predate the field, passes unless it says `floor_checked_offline: false`, so a deployment that

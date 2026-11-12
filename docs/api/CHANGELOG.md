@@ -17,7 +17,8 @@ who submits a gate record, never by anything inside it. Every change is additive
 - On a `selfAttest` profile, a record not in `trustedGateRecords` passes `X1.trusted` for the
   creating subject's own templates. New create rules, each in the `check` record and named by a
   `422 policy_refused`: `X1.self.scope` (another subject already self-attested the same sha256;
-  a build made while the record was trusted claims nothing),
+  a build made while the record was trusted claims nothing, and a build that failed releases its
+  claim),
   `X12.self` (the record must show commits refused, whatever the spec), `X1.self.egress`
   (`spec.egress` false unless the profile allows it) and `X1.offline`.
 - `X1.offline`: on a profile that requires X1 (unless `requireOfflineGate: false`, as on

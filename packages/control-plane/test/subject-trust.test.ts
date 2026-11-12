@@ -203,15 +203,31 @@ describe('a subject self-attests its own gate record (self-attestation)', () => 
     expect(await rule(() => create(d, body({ id: 't-b2' }), bob))).toBe('X1.self.scope');
   });
 
-  it('holds a claim whatever its build becomes (a failed build still claims)', async () => {
+  /** Sets every build of a template to one status, as a host's report or an admin would. */
+  const endAs = (d: TestDeps, id: string, status: 'failed' | 'retired' | 'rejected') =>
+    d.templates!.update!(id, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status })),
+    }));
+
+  it('releases a claim whose build failed: another subject then self-attests the record', async () => {
     const d = await setup();
     await create(d);
-    await d.templates!.update!('t-self', async (cur) => ({
-      ...cur!,
-      builds: cur!.builds.map((x) => ({ ...x, status: 'failed' as const })),
-    }));
-    expect(await rule(() => create(d, body({ id: 't-bob' }), bob))).toBe('X1.self.scope');
+    await endAs(d, 't-self', 'failed');
+    expect((await create(d, body({ id: 't-bob' }), bob)).status).toBe(202);
+    // The record is bob's now: alice's next self-attested create is refused.
+    expect(await rule(() => create(d, body({ id: 't-a2' })))).toBe('X1.self.scope');
   });
+
+  it.each(['retired', 'rejected'] as const)(
+    'holds a claim whose build is %s: another subject is still refused',
+    async (status) => {
+      const d = await setup();
+      await create(d);
+      await endAs(d, 't-self', status);
+      expect(await rule(() => create(d, body({ id: 't-bob' }), bob))).toBe('X1.self.scope');
+    },
+  );
 
   it("attests an admin's build on another subject's template for that template's owner", async () => {
     const d = await setup();

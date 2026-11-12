@@ -61,9 +61,10 @@ On a `selfAttest` profile, when the record's sha256 is not in `trustedGateRecord
   is (subject, sha256), found from the catalog: a build self-attested at create (`selfAttested`)
   names its record's sha256, and its template the owner the record counts for, as the `gate`
   record's `scope` does. A build made while the record was trusted claims nothing. The claim is
-  made by an admitted self-attested create and is held whatever its build becomes (failed, rejected
-  or retired), so a failure never hands a record to another subject; a refused create claims
-  nothing. The lookup and the create's write run as one step per sha256 (in the control plane's
+  made by an admitted self-attested create and is held while its build is queued, building,
+  probing, built, registered, rejected or retired (a real use, or an admin's decision). It is
+  released when the build ends `failed`, which never admitted a template, so no subject holds a
+  published record for good with a build that fails. A refused create claims nothing. The lookup and the create's write run as one step per sha256 (in the control plane's
   process), so two subjects sending one record at once can't both claim it.
 - **X12.self:** commits are always refused (`observed.testbed.agent_can_commit == "no"` and
   `observed.guest.git_identity == "none"`), whether or not the spec skips the identity check.
@@ -110,7 +111,8 @@ shows `gateFloorCheckedOffline`, and, from a `network_needed` gate, `gateFloorMe
 - **Decision (i):** when an admin removes a record's sha256 from `trustedGateRecords`, a
   deployment-visible template whose registered builds become self-attested falls back to **private on
   read**: a build self-attested at create, and a build made on a `selfAttest` profile while the record
-  was trusted, by its submitter or by another subject. Other subjects no longer see it in the list, can't read it, and can't use it (a sandbox or a
+  was trusted, by its submitter or by another subject. Whose record it is stays X1.self.scope's (§4):
+  a self-attested claim is held unless its build failed. Other subjects no longer see it in the list, can't read it, and can't use it (a sandbox or a
   session create answers as for an unknown template). Its owner keeps using it.
 - So that nothing is silent, `PUT /v1/policy` names the narrowed builds (`narrowed: [{template,
 buildId}]`) in its answer and in its `policy` record.

@@ -484,6 +484,9 @@ async function usage(
  * subjects sending the same untrusted record at once can't both claim it. The catalog serializes
  * its own writes per id the same way, in this process; a deployment runs one control plane.
  */
+/** The build statuses that release a self-attested claim (X1.self.scope): ended without a template. */
+const CLAIM_RELEASED = new Set<TemplateBuild['status']>(['failed']);
+
 const gateClaimQueues = new WeakMap<TemplateCatalog, SubjectQueue>();
 function gateClaimQueue(cat: TemplateCatalog): SubjectQueue {
   let q = gateClaimQueues.get(cat);
@@ -541,8 +544,10 @@ async function admitBuild(
   const attester = prior && prior.owner !== p.sub ? prior.owner : p.sub;
   // Who already self-attested this record (keyed by subject and sha256), from the catalog: a build
   // self-attested at create (selfAttested) names its record's sha256, and its template the owner it
-  // counts for. A claim is made by an admitted self-attested create and held whatever its build
-  // becomes (failed, rejected or retired); a refused create claims nothing.
+  // counts for. A claim is made by an admitted self-attested create and held while its build is
+  // queued, building, probing, built, registered, rejected or retired (a real use, or an admin's
+  // decision). It is released when the build ends `failed`, which never admitted a template, so no
+  // one holds a published record with a build that fails. A refused create claims nothing.
   const gateSelfSubmitters =
     gateSha && !pol.trustedGateRecords.includes(gateSha)
       ? [
@@ -552,7 +557,10 @@ async function admitBuild(
                 (d) =>
                   d.owner !== null &&
                   d.builds.some(
-                    (x) => x.selfAttested === true && x.request?.gateRecordSha256 === gateSha,
+                    (x) =>
+                      x.selfAttested === true &&
+                      x.request?.gateRecordSha256 === gateSha &&
+                      !CLAIM_RELEASED.has(x.status),
                   ),
               )
               .map((d) => d.owner as string),
