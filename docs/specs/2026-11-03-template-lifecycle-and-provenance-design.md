@@ -179,7 +179,10 @@ provisional handle (`b-<26 hex>`) until it is built; then its `buildId` is its m
 the handle still finds it.
 
 The create is checked against the deployment's policy before anything is queued (§8.1): a refusal
-is `422 policy_refused {rule, message}` and a `check` record, and nothing is queued. Over a quota
+is `422 policy_refused {rule, message}` and a `check` record (written only on a stream the caller
+may write: an id no template holds yet, its own, or as an admin adding a build; a refusal on another
+subject's id is only answered), and nothing is queued. Refusals on the caller's own and on new ids are
+bounded only by the request rate. Over a quota
 (§6.2: templates owned, builds queued or building at once) is `429 quota_exceeded` naming which
 (`quota`). Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate

@@ -462,10 +462,15 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
     results: result.results as unknown as Record<string, unknown>[],
   };
   if (!result.passed) {
-    // A refusal of a well-formed id is recorded on its template's stream; an id the rule refuses
-    // has no stream to record on, and is only answered.
-    if (TEMPLATE_ID_RE.test(id))
-      await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+    // A refusal of a well-formed id is recorded on its template's stream, but only on a stream the
+    // caller may write: an id no template holds yet, the caller's own, or (adding a build) any as an
+    // admin. A refusal on someone else's id is only answered, so no subject grows another's stream.
+    // An id the rule refuses has no stream to record on, and is only answered too.
+    if (TEMPLATE_ID_RE.test(id)) {
+      const cur = await cat.get(id);
+      if (!cur || cur.owner === p.sub || (existing && isAdmin(p)))
+        await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+    }
     const f = result.failed!;
     throw new CpError('policy_refused', f.message ?? f.rule, undefined, { rule: f.rule });
   }

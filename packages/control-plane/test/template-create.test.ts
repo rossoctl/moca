@@ -159,6 +159,28 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     });
   });
 
+  it("records a refusal on a new id or the caller's own, never on another subject's", async () => {
+    const d = stored();
+    await create(d); // alice owns ID now
+    const len = async () => (await d.provenance!.chain(`template/${ID}`)).length;
+    const before = await len();
+    const bad = body({ image: 'docker.io/library/python:3.12' }); // refused: an unpinned image
+    // bob's refused create on alice's id answers as a refusal, and writes nothing to her stream.
+    await expect(create(d, bad, bob)).rejects.toMatchObject({ code: 'policy_refused' });
+    expect(await len()).toBe(before);
+    // alice's own refused create is recorded on her stream.
+    await expect(create(d, bad)).rejects.toMatchObject({ code: 'policy_refused' });
+    expect((await d.provenance!.chain(`template/${ID}`)).at(-1)).toMatchObject({
+      kind: 'check',
+      body: { outcome: 'refused' },
+    });
+    // A refusal on an id no template holds yet is recorded too.
+    await expect(create(d, { ...bad, id: 'fresh-id' }, bob)).rejects.toMatchObject({
+      code: 'policy_refused',
+    });
+    expect((await d.provenance!.chain('template/fresh-id')).map((r) => r.kind)).toEqual(['check']);
+  });
+
   it('lets a base-profile template through with no gate record', async () => {
     const d = stored();
     const r = await create(
