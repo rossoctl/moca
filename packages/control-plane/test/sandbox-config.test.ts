@@ -93,6 +93,15 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     }
   });
 
+  it('refuses an idle ceiling below the 30 s floor of an owner idle timeout (ruling R6)', () => {
+    expect(configFromEnv(env({ SH_SANDBOX_IDLE_CEILING_S: '30' })).sandbox!.idleCeilingS).toBe(30);
+    for (const v of ['1', '29']) {
+      expect(() => configFromEnv(env({ SH_SANDBOX_IDLE_CEILING_S: v })), v).toThrow(
+        /^SH_SANDBOX_IDLE_CEILING_S must be at least 30/,
+      );
+    }
+  });
+
   it('refuses to boot without an allow list, templates or an exec endpoint', () => {
     expect(() => configFromEnv(env({ SH_ALLOWED_SUBJECTS: '' }))).toThrow(/SH_ALLOWED_SUBJECTS/);
     expect(() => configFromEnv(env({ SH_SANDBOX_TEMPLATES: undefined }))).toThrow(

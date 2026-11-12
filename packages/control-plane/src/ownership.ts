@@ -354,6 +354,10 @@ export class OwnershipIndex {
     reason?: string;
     model?: string;
     fromModel?: string;
+    /** A sandbox mode change (lease-mode spec §8.1): the old and new mode, and the new epoch. */
+    fromMode?: string;
+    toMode?: string;
+    modeEpoch?: number;
   }): Promise<void> {
     await this.guard(() =>
       this.redis.xAdd(
@@ -377,6 +381,9 @@ export class OwnershipIndex {
           ...(entry.reason ? { reason: entry.reason } : {}),
           ...(entry.model ? { model: entry.model } : {}),
           ...(entry.fromModel ? { fromModel: entry.fromModel } : {}),
+          ...(entry.fromMode ? { fromMode: entry.fromMode } : {}),
+          ...(entry.toMode ? { toMode: entry.toMode } : {}),
+          ...(entry.modeEpoch !== undefined ? { modeEpoch: String(entry.modeEpoch) } : {}),
         },
         { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: AUDIT_MAXLEN } },
       ),

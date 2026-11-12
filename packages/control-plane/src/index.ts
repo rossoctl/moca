@@ -18,13 +18,19 @@ export {
 export {
   DEFAULT_SANDBOX_ISSUER,
   SANDBOX_CLOCK_LEEWAY_S,
+  SANDBOX_MODE_TOKEN_TTL_S,
+  SANDBOX_MODE_TOKEN_TYP,
   SANDBOX_SCOPE_EXEC,
   SANDBOX_TOKEN_AUDIENCE,
   SANDBOX_TOKEN_TYP,
   mintSandboxToken,
+  mintSetModeToken,
   verifySandboxToken,
+  verifySetModeToken,
   type SandboxMintInput,
   type SandboxTokenClaims,
+  type SetModeClaims,
+  type SetModeMintInput,
 } from './sandbox-token.js';
 export {
   ATTACH_CLOCK_LEEWAY_S,

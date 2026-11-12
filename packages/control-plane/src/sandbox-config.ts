@@ -74,6 +74,9 @@ export function routeProfileFromEnv(env: NodeJS.ProcessEnv): RouteProfile {
  */
 export const MAX_SANDBOX_TOKEN_TTL_S = 3600;
 
+/** The shortest lease idle timeout an owner may set (`idleTimeoutS`); 0 means the worker's default. */
+export const MIN_IDLE_TIMEOUT_S = 30;
+
 function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
   const v = env[name];
   if (v === undefined || v === '') return def;
@@ -173,6 +176,12 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
       `SH_SANDBOX_TOKEN_TTL_SECONDS must be at most ${MAX_SANDBOX_TOKEN_TTL_S}: a delete takes effect only within one token lifetime`,
     );
   }
+  const idleCeilingS = positive(env, 'SH_SANDBOX_IDLE_CEILING_S', 1800);
+  if (idleCeilingS < MIN_IDLE_TIMEOUT_S) {
+    throw new Error(
+      `SH_SANDBOX_IDLE_CEILING_S must be at least ${MIN_IDLE_TIMEOUT_S}: the smallest idle timeout an owner may set`,
+    );
+  }
   const templates = parseTemplates(env.SH_SANDBOX_TEMPLATES);
   const egress = egressConfigFromEnv(env, templates);
   return {
@@ -186,7 +195,7 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
     issuer: env.SH_SANDBOX_TOKEN_ISSUER || DEFAULT_SANDBOX_ISSUER,
     execEndpoint,
     modesAllowed: modesAllowedFromEnv(env),
-    idleCeilingS: positive(env, 'SH_SANDBOX_IDLE_CEILING_S', 1800),
+    idleCeilingS,
     ...(execCa ? { execCa } : {}),
     ...(janitorToken ? { janitorToken } : {}),
     ...(egress ? { egress } : {}),
