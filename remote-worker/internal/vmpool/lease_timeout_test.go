@@ -178,3 +178,90 @@ func TestPerExecTimeoutUnchangedOnALeasePool(t *testing.T) {
 		})
 	}
 }
+
+// downgradedWhileQueued sets up review M1's fallback: a lease Exec with a 10 s budget is
+// queued behind a running one, and a same-epoch SetMode(per-exec) is waiting on the gate,
+// so the queued Exec is served per-Exec once it gets the gate (execLease's
+// errServePerExec). Lease Runs block until release; the per-Exec Run blocks until the
+// host's timer cancels it. It returns the first Exec's, the queued Exec's and the
+// SetMode's results.
+func downgradedWhileQueued(t *testing.T) (lc *leaseLauncher, clk *fakeClock, release chan struct{}, first, queued, setMode <-chan error) {
+	t.Helper()
+	p, lc, clk := leasePool(t, func(c *Config) { c.LeaseGraceLimit, c.LeaseMaxDuration = time.Hour, 2*time.Hour })
+	mustSetMode(t, p, "k", ModeLease, 3)
+	entered := make(chan struct{}, 8)
+	release = make(chan struct{})
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		entered <- struct{}{}
+		if c.Lease {
+			select {
+			case <-release:
+				return Result{}, nil
+			case <-c.ctxDone:
+				return Result{}, ErrAborted
+			}
+		}
+		<-c.ctxDone
+		return Result{}, ErrAborted
+	})
+	e := Exec{Command: "x", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 3}
+	first = execAsync(p, "k", e)
+	recvWithin(t, entered, "the first Exec's Run")
+	queued = execAsync(p, "k", e)
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	sm := make(chan error, 1)
+	go func() { sm <- p.SetMode("k", ModePerExec, 3) }()
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
+	return lc, clk, release, first, queued, sm
+}
+
+// A lease Exec served per-Exec after a same-epoch downgrade whose budget was spent at the
+// gate times out at once: the per-Exec budget has no slack to run on, so it never runs.
+func TestPerExecFallbackWithItsBudgetSpentTimesOutAtOnce(t *testing.T) {
+	lc, clk, release, first, queued, setMode := downgradedWhileQueued(t)
+	clk.Advance(11 * time.Second) // past the 10 s budget, inside budget + slack
+	close(release)
+	if err := recvWithin(t, first, "the first Exec"); err != nil && !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the first Exec: %v", err)
+	}
+	if err := recvWithin(t, queued, "the queued Exec"); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the queued Exec: err = %v, want ErrTimeout", err)
+	}
+	if err := recvWithin(t, setMode, "the SetMode"); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	for _, c := range lc.commands()[1:] {
+		if !c.Lease {
+			t.Fatalf("Commands = %+v: the queued Exec ran per-Exec on a spent budget", lc.commands())
+		}
+	}
+}
+
+// A lease Exec served per-Exec after a same-epoch downgrade runs on the rest of its
+// per-Exec budget: with 6 s of 10 s left when it falls back, it is killed at 10 s, not at
+// budget + slack (18 s).
+func TestPerExecFallbackTimesOutAtTheBudgetNotTheSlack(t *testing.T) {
+	lc, clk, release, first, queued, setMode := downgradedWhileQueued(t)
+	clk.Advance(4 * time.Second)
+	close(release)
+	if err := recvWithin(t, first, "the first Exec"); err != nil {
+		t.Fatalf("the first Exec: %v", err)
+	}
+	waitFor(t, func() bool { return len(lc.commands()) == 2 }) // the queued Exec is in its per-Exec Run
+	if c := lc.commands()[1]; c.Lease || c.TimeoutS != 10 {
+		t.Fatalf("the queued Exec's Command = %+v, want per-Exec with timeout_s 10", c)
+	}
+	clk.Advance(6*time.Second - time.Millisecond)
+	select {
+	case err := <-queued:
+		t.Fatalf("the queued Exec ended before its budget: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	clk.Advance(time.Millisecond) // the budget's end, 10 s after the Exec arrived
+	if err := recvWithin(t, queued, "the queued Exec"); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the queued Exec: err = %v, want ErrTimeout at the budget", err)
+	}
+	if err := recvWithin(t, setMode, "the SetMode"); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+}

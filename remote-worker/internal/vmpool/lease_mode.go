@@ -184,11 +184,14 @@ func (p *pool) leaseStateLocked(rp *runPool) leaseState {
 // because mocactl re-sends the current epoch when the worker reports it unknown.
 //
 // A downgrade takes effect at once (spec §8.2). To per-exec, a live lease ends
-// (mode_change) after the Exec in flight, bounded by LeaseGraceLimit (endLeaseWaiting);
-// the new epoch is stored first, so a lease Exec queued on the gate is refused
-// stale-mode (execLease). From lease+processes to lease the lease is kept, at level 1
-// from now on; stopping its tracked processes is plan 5's. An upgrade applies from the
-// next Exec that carries the new epoch.
+// (mode_change) after the Exec in flight, bounded by LeaseGraceLimit (endLeaseWaiting).
+// The new mode and epoch are stored first, so a lease Exec queued on the gate does not
+// keep the old mode (execLease): below the new epoch it is refused stale-mode, and at the
+// same epoch it is served at the lower of its mode and the new one -- per-Exec after a
+// downgrade to per-exec, which ends the lease if that Exec gets the gate first. From
+// lease+processes to lease the lease is kept, at level 1 from now on; stopping its
+// tracked processes is plan 5's. An upgrade applies from the next Exec that carries the
+// new epoch.
 func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 	// Refusals here are returned, not counted: Stats' refusal counts are Exec errors by
 	// cause, and a LeaseControl call is not an Exec.
@@ -261,12 +264,13 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 // Exec about to run in l, rather than through SetMode (spec §8.2, ruling R18): an upgrade
 // lease -> lease+processes "takes effect from the next Exec that carries the new epoch",
 // and a downgrade whose LeaseControl was lost "lands at the next Exec". m is the mode
-// routeExec served (effectiveModeLocked): the Exec's own when its epoch was newer, which
-// routeExec stored, and the lower of the Exec's and the stored one at an equal epoch, so
-// an Exec never re-levels a lease above a same-epoch downgrade. execLease's stale-mode
-// check has passed. A no-op when l already runs at m. A change to per-exec never
-// gets here: routeExec sends that Exec down the per-Exec path, which ends the lease
-// (mode_change). Caller holds p.mu and rp's gate, with l live and started.
+// execLease serves, recomputed under the gate: the Exec's own when its epoch was newer
+// (routeExec stored it), and the lower of the Exec's and the stored one at an equal epoch,
+// so an Exec never re-levels a lease above a same-epoch downgrade, including one that
+// landed while it queued. execLease's stale-mode check has passed. A no-op when l already
+// runs at m. m is never per-exec: a newer epoch at per-exec goes down the per-Exec path
+// in routeExec, and a per-exec served under the gate ends the lease (mode_change) in
+// execLease instead. Caller holds p.mu and rp's gate, with l live and started.
 func (p *pool) relevelLeaseForExecLocked(rp *runPool, l *vmLease, m Mode) {
 	if l.mode == m {
 		return
