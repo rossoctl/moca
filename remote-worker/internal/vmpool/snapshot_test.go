@@ -133,6 +133,21 @@ func TestManifestHasLeaseFeature(t *testing.T) {
 	}
 }
 
+// balloon-fpr-v1 is the name build-snapshot.sh writes when the golden snapshot carries the
+// reporting-only balloon; the worker's start-up warning keys on this exact string.
+func TestBalloonFeatureConstant(t *testing.T) {
+	if FeatureBalloonFPRV1 != "balloon-fpr-v1" {
+		t.Fatalf("FeatureBalloonFPRV1 = %q, want balloon-fpr-v1", FeatureBalloonFPRV1)
+	}
+	var m Manifest
+	if err := json.Unmarshal([]byte(`{"features":["lease-v1","balloon-fpr-v1"]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasFeature(FeatureBalloonFPRV1) {
+		t.Fatalf("Features = %v, HasFeature(balloon-fpr-v1) = false", m.Features)
+	}
+}
+
 // Features is outside the hash in both hash versions: a snapshot that predates the
 // field still verifies.
 func TestManifestHashIgnoresFeatures(t *testing.T) {

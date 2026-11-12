@@ -57,6 +57,28 @@ const (
 	DefaultStandbyHeadroom = 4.0
 )
 
+// Lease defaults, from spec §4 and §6. LeaseReclaimFreeBytes has no constant: it is
+// derived from PerVMBytes (see Normalize), so it tracks a tuned guest size.
+const (
+	DefaultLeaseIdle                 = 300 * time.Second
+	DefaultLeaseIdleCeiling          = 1800 * time.Second
+	DefaultLeaseIdleMin              = 30 * time.Second // the floor an owner's value is raised to
+	DefaultLeaseMaxDuration          = 8 * time.Hour
+	DefaultLeaseMaxDurationProcesses = 4 * time.Hour
+	DefaultLeaseGraceLimit           = 30 * time.Minute
+	DefaultLeaseKeepaliveLoss        = 120 * time.Second
+	DefaultLeaseStartBytes           = 192 << 20
+	DefaultLeaseHeadroom             = 1.25
+	DefaultLeasePageCacheBytes       = 256 << 20
+	DefaultLeaseScanInterval         = 5 * time.Second
+	// mcpKeepalivePeriod is how often the MCP server sends a lease keepalive (spec §8.3).
+	// LeaseKeepaliveLoss may not be shorter than two of them (minLeaseKeepaliveLoss).
+	mcpKeepalivePeriod    = 30 * time.Second
+	minLeaseKeepaliveLoss = 2 * mcpKeepalivePeriod
+	// leaseReclaimFloorBytes is the 2 GiB term in LeaseReclaimFreeBytes' derivation.
+	leaseReclaimFloorBytes = 2 << 30
+)
+
 // Config is the pool's whole configuration surface (spec §4.1).
 type Config struct {
 	VMM           VMMKind // the seam E10 prices
@@ -100,7 +122,35 @@ type Config struct {
 	WorkspaceIdle       time.Duration // no Exec for this long -> delete the workspace too
 	ReplenishDelay      time.Duration // grace before refilling a popped slot
 	ReclaimScanInterval time.Duration // idle-host sweep tick
-	MaxReclaimsPerScan  int           // VMs destroyed per sweep; rate-limits munmap
+	// MaxReclaimsPerScan rate-limits munmap. It caps the standbys one per-Exec sweep
+	// destroys, and, separately, the leases a lease tick ends for their own clocks (idle,
+	// max_duration, grace_limit, ...; the rest end at the next tick), and the leases one
+	// reclaimLeasesLocked call ends for memory (per lease tick, and per admission). A lease
+	// tick may so end up to twice this many.
+	MaxReclaimsPerScan int
+
+	// ManifestFeatures is the loaded snapshot manifest's Features, passed by the
+	// caller. LeaseEnabled is NOT a setting: New computes it (LeaseSupported) from VMM
+	// and ManifestFeatures, overwriting whatever the caller put there.
+	ManifestFeatures []string
+	LeaseEnabled     bool
+
+	// Lease mode (spec §4, §6; the SH_LEASE_* knobs). Zero fills the default.
+	LeaseIdleDefault          time.Duration // an Exec's IdleTimeout of 0 means this
+	LeaseIdleCeiling          time.Duration // an owner's idle timeout is clamped to this...
+	LeaseIdleMin              time.Duration // ...and raised to this
+	LeaseMaxDuration          time.Duration // a lease expires after this (level 1)
+	LeaseMaxDurationProcesses time.Duration // the same for lease+processes (level 2)
+	LeaseGraceLimit           time.Duration // how long an expiring lease's Exec may run on
+	LeaseKeepaliveLoss        time.Duration // no keepalive for this long ends an opted-in lease
+	LeaseStartBytes           int64         // a new lease VM's admission charge, before it is measured
+	LeaseHeadroom             float64       // multiplier on a lease VM's measured memory.current
+	LeasePageCacheBytes       int64         // lease cgroup memory.max = PerVMBytes + this
+	// LeaseReclaimFreeBytes is the MemAvailable reclaim keeps free. 0 derives
+	// 2 x PerVMBytes + max(2 GiB, 2 x (bound - LeaseStartBytes)), where bound =
+	// LeaseHeadroom x (PerVMBytes + LeasePageCacheBytes) is a lease VM's highest charge.
+	LeaseReclaimFreeBytes int64
+	LeaseScanInterval     time.Duration // the lease ticker's period
 }
 
 // Normalize fills defaults and then validates, returning the first violation.
@@ -153,6 +203,9 @@ func (c *Config) Normalize() error {
 			"charge: a smaller factor would charge a standby less than the memory it has already "+
 			"dirtied", c.StandbyHeadroom)
 	}
+	if err := c.normalizeLease(); err != nil {
+		return err
+	}
 	if c.HostMemFloorBytes < 0 {
 		return fmt.Errorf("vmpool: HostMemFloorBytes (%d) must be >= 0 (0 disables the MemAvailable backstop)",
 			c.HostMemFloorBytes)
@@ -188,6 +241,64 @@ func (c *Config) Normalize() error {
 	if c.ReclaimScanInterval > c.StandbyIdle {
 		return fmt.Errorf("vmpool: ReclaimScanInterval (%v) > StandbyIdle (%v): the sweep could not converge "+
 			"within spec §8's StandbyIdle+ReclaimScanInterval leak bound", c.ReclaimScanInterval, c.StandbyIdle)
+	}
+	return nil
+}
+
+// normalizeLease fills the lease defaults and refuses what lease mode cannot honour.
+// It runs on every Config, lease-capable or not: the values are inert until a lease
+// Exec arrives, and validating them unconditionally means a bad SH_LEASE_* fails the
+// unit at start rather than when the snapshot is upgraded to lease-v1.
+func (c *Config) normalizeLease() error {
+	fill := func(d *time.Duration, def time.Duration) {
+		if *d <= 0 {
+			*d = def
+		}
+	}
+	fill(&c.LeaseIdleDefault, DefaultLeaseIdle)
+	fill(&c.LeaseIdleCeiling, DefaultLeaseIdleCeiling)
+	fill(&c.LeaseIdleMin, DefaultLeaseIdleMin)
+	fill(&c.LeaseMaxDuration, DefaultLeaseMaxDuration)
+	fill(&c.LeaseMaxDurationProcesses, DefaultLeaseMaxDurationProcesses)
+	fill(&c.LeaseGraceLimit, DefaultLeaseGraceLimit)
+	fill(&c.LeaseKeepaliveLoss, DefaultLeaseKeepaliveLoss)
+	fill(&c.LeaseScanInterval, DefaultLeaseScanInterval)
+	if c.LeaseStartBytes <= 0 {
+		c.LeaseStartBytes = DefaultLeaseStartBytes
+	}
+	if c.LeasePageCacheBytes <= 0 {
+		c.LeasePageCacheBytes = DefaultLeasePageCacheBytes
+	}
+	switch {
+	case c.LeaseHeadroom == 0:
+		c.LeaseHeadroom = DefaultLeaseHeadroom
+	case c.LeaseHeadroom >= 1 && !math.IsInf(c.LeaseHeadroom, 1):
+	default:
+		// The same direction StandbyHeadroom refuses: below 1 charges a lease VM less
+		// than the memory it is measured to hold, and NaN fails every comparison.
+		return fmt.Errorf("vmpool: LeaseHeadroom (%v) must be a finite number >= 1", c.LeaseHeadroom)
+	}
+	if c.LeaseIdleMin > c.LeaseIdleCeiling ||
+		c.LeaseIdleDefault < c.LeaseIdleMin || c.LeaseIdleDefault > c.LeaseIdleCeiling {
+		return fmt.Errorf("vmpool: LeaseIdleDefault (%v) must lie within [LeaseIdleMin (%v), LeaseIdleCeiling (%v)]",
+			c.LeaseIdleDefault, c.LeaseIdleMin, c.LeaseIdleCeiling)
+	}
+	if c.LeaseKeepaliveLoss < minLeaseKeepaliveLoss {
+		// Spec §8.3: with less than two keepalive periods, every opted-in lease would end
+		// keepalive_lost between two keepalives the harness sent on time.
+		return fmt.Errorf("vmpool: LeaseKeepaliveLoss (%v) must be >= %v, two of the MCP server's %v keepalive periods",
+			c.LeaseKeepaliveLoss, minLeaseKeepaliveLoss, mcpKeepalivePeriod)
+	}
+	if c.LeaseScanInterval > c.LeaseIdleMin/4 {
+		// The lease ticker is what ends an idle lease: slower than this, the shortest idle
+		// timeout an owner can set would be overrun by most of itself.
+		return fmt.Errorf("vmpool: LeaseScanInterval (%v) must be <= LeaseIdleMin/4 (%v)",
+			c.LeaseScanInterval, c.LeaseIdleMin/4)
+	}
+	if c.LeaseReclaimFreeBytes <= 0 {
+		perVM := PerVMBytes(*c)
+		bound := int64(math.Ceil(c.LeaseHeadroom * float64(perVM+c.LeasePageCacheBytes)))
+		c.LeaseReclaimFreeBytes = 2*perVM + max(leaseReclaimFloorBytes, 2*(bound-c.LeaseStartBytes))
 	}
 	return nil
 }

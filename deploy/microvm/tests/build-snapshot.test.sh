@@ -1742,6 +1742,7 @@ EOI
     echo "STAGE='$w/stage'"
     echo "EGRESS_CA='$EGT/ca.crt'"
     fn_body validate_egress_ca
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1783,6 +1784,23 @@ check "tree with neither tool: install_egress_ca fails" "$([ "$(eg_harness none 
 check "neither tool: the message is the documented one" \
   "$(grep -cF -- '--egress-ca: the rootfs has neither update-ca-certificates nor update-ca-trust' "$w/out")" "1"
 
+# The CA directory, or a directory above it, as an absolute symlink out of the tree: the build
+# refuses, and the directory outside gains nothing.
+for kind in debian rhel; do
+  w="$EGT/link-$kind"; mkdir -p "$w/outside"
+  if [ "$kind" = debian ]; then link=usr/local/share; else link=etc/pki/ca-trust/source/anchors; fi
+  mkdir -p "$w/stage/rootfs-tree/$(dirname "$link")"
+  ln -s "$w/outside" "$w/stage/rootfs-tree/$link"
+  check "$kind: a CA directory linked out of the tree is refused" "$([ "$(eg_harness "$kind" "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "$kind: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+  check "$kind: nothing is written outside the tree" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "0"
+done
+w="$EGT/link-file"; mkdir -p "$w/stage/rootfs-tree/usr/local/share/ca-certificates"
+printf 'OUTSIDE\n' >"$w/outside.crt"
+ln -s "$w/outside.crt" "$w/stage/rootfs-tree/usr/local/share/ca-certificates/moca-egress.crt"
+check "debian: a CA file that is a symlink is refused" "$([ "$(eg_harness debian "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "debian: the file outside is untouched" "$(cat "$w/outside.crt")" "OUTSIDE"
+
 echo "== SBX0.2b: the CA file is validated before anything is staged"
 mkdir -p "$EGT/tmp1"
 out=$(TMPDIR="$EGT/tmp1" bash "$SCRIPT" --kernel /k --rootfs /r --agent /a --image t --egress-ca "$EGT/ca.key" 2>&1); rc=$?
@@ -1818,6 +1836,7 @@ for drift in real drifted; do
   {
     echo 'chroot() { local t="$1"; shift; local c="$1"; shift; "$t$c" "$@"; }'
     echo "STAGE='$w/stage'; EGRESS_CA='$EGT/ca.crt'"
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1865,8 +1884,8 @@ check "the without-flag manifest is valid JSON" \
   "$(python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mw/without.json" && echo yes || echo no)" "yes"
 check "the manifest's kernel_release is the probed guest kernel" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_release"])' "$mw/without.json")" "6.1.155-guest"
-check "the Firecracker manifest's features are [lease-v1]" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1']"
+check "the Firecracker manifest's features are [lease-v1, balloon-fpr-v1]" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1', 'balloon-fpr-v1']"
 # CHV cannot serve a lease: chvWrapCommand mounts the workspace inside every Run.
 check "the Cloud Hypervisor manifest's features are []" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/chv.json")" "[]"
@@ -1913,6 +1932,41 @@ check "the Go golden lines hash to the digest snapshot_test.go pins" \
   "$(printf 'moca-snapshot-manifest/2\nimage:i\nvmm:firecracker\ninstance_type:t\nkernel_release:k\nguest_ram_mb:256\nvcpus:1\ncapabilities:bash,git\nbuilt_at:2026-11-03T00:00:00Z\nkernel:sha256:k\nrootfs:sha256:r\nagent:sha256:a\nvmstate:sha256:v\nmemfile:sha256:m\nch_config:\negress_ca:\nsource_image_digest:sha256:s\n' | sha256sum | cut -d' ' -f1)" \
   "$(sed -n 's/^const manifestV2Golden = "\([0-9a-f]*\)"$/\1/p' "$(dirname "$SCRIPT")/../../remote-worker/internal/vmpool/snapshot_test.go")"
 rm -rf "$EGT"
+
+echo "== balloon-fpr-v1: the Firecracker golden snapshot carries a reporting-only balloon"
+# Spec §6 "Free-page reporting" and §16 item 5: one golden snapshot, for every mode, with a
+# virtio-balloon that only reports freed pages (nothing ever inflates it). The device must be
+# configured pre-boot, so the PUT sits between /machine-config and InstanceStart; a restored
+# VM gets it back from the snapshot, so verify_restore_firecracker never sends it.
+#
+# A recorder, not a grep: boot_quiesce_snapshot_firecracker's own api_put/api_patch
+# statements (comments stripped, continuation lines joined) run against stubs that log
+# each call's method, path and EXPANDED body, so the order and the exact JSON are what
+# Firecracker would receive.
+BT="$(mktemp -d "${TMPDIR:-/tmp}/bs-balloon-test.XXXXXX")"
+# shellcheck disable=SC2016 # the stubs and the grep pattern are literal, not expanded here
+{
+  printf '%s\n' 'api_put() { printf "PUT %s %s\n" "$2" "$3" >>"$REC"; }' \
+    'api_patch() { printf "PATCH %s %s\n" "$2" "$3" >>"$REC"; }' \
+    "REC='$BT/calls'; api_sock=/run/api.sock; GUEST_RAM_MB=256"
+  printf '%s\n' "$fc_build_body" | grep -v '^[[:space:]]*#' | sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' |
+    grep -E '^[[:space:]]*api_(put|patch) "\$api_sock"'
+} >"$BT/run.sh"
+bash "$BT/run.sh" >"$BT/out" 2>&1
+balloon_call='PUT /balloon {"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}'
+mc_n=$(grep -n '^PUT /machine-config ' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+bl_n=$(grep -nxF "$balloon_call" "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+start_n=$(grep -nxF 'PUT /actions {"action_type":"InstanceStart"}' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+check "the Firecracker build sends PUT /balloon exactly once, with the reporting-only body" \
+  "$(grep -c '^PUT /balloon ' "$BT/calls" 2>/dev/null)|$(grep -cxF "$balloon_call" "$BT/calls" 2>/dev/null)" "1|1"
+check "PUT /balloon comes right after /machine-config and right before InstanceStart" \
+  "$([ -n "$mc_n" ] && [ -n "$bl_n" ] && [ -n "$start_n" ] &&
+    [ "$bl_n" -eq $((mc_n + 1)) ] && [ "$start_n" -eq $((bl_n + 1)) ] && echo yes || echo no)" "yes"
+check "the restore path never configures the balloon (it comes back from the snapshot)" \
+  "$(fn_body verify_restore_firecracker | grep -c '/balloon')" "0"
+check "the Cloud Hypervisor arm is unchanged (no balloon)" \
+  "$(fn_body boot_quiesce_snapshot_cloud_hypervisor | grep -ci 'balloon')" "0"
+rm -rf "$BT"
 
 echo "== lease-v1 image"
 # Lease mode (one VM, many Execs, each as uid 7000 in its own cgroup) needs cgroup2
@@ -1968,6 +2022,7 @@ LT="$(mktemp -d "${TMPDIR:-/tmp}/bs-lease-test.XXXXXX")"
 id_harness() { # $1 = work dir; the tree's etc/passwd and etc/group are already there
   {
     echo "STAGE='$1/stage'"
+    fn_body tree_write_target
     fn_body add_sbx_identity
     echo 'add_sbx_identity'
   } >"$1/run.sh"
@@ -1999,6 +2054,43 @@ check "gid 7000 under another name: the message names it" "$(grep -cF 'staff7:x:
 check "gid 7000 under another name: passwd untouched" "$(grep -c '^sbx:' "$w/stage/rootfs-tree/etc/passwd")" "0"
 w="$LT/name"; id_tree "$w" $'sbx:x:1234:1234::/home/sbx:/bin/sh\n' $'root:x:0:\n'
 check "the name sbx under another uid: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+# The image's etc/passwd, etc/group or etc itself as an absolute symlink out of the tree: refused,
+# and the file outside untouched.
+for f in passwd group; do
+  w="$LT/link-$f"; id_tree "$w" $'root:x:0:0:root:/root:/bin/bash\n' $'root:x:0:\n'
+  printf 'OUTSIDE\n' >"$w/outside"
+  rm -f "$w/stage/rootfs-tree/etc/$f"; ln -s "$w/outside" "$w/stage/rootfs-tree/etc/$f"
+  check "etc/$f linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "etc/$f linked out of the tree: the refusal says so" "$(grep -c "/etc/$f is a symlink" "$w/out")" "1"
+  check "etc/$f linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
+done
+w="$LT/link-etc"; mkdir -p "$w/outside" "$w/stage/rootfs-tree"
+printf 'OUTSIDE\n' >"$w/outside/passwd"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc"
+check "etc linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc linked out of the tree: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+check "etc linked out of the tree: the file outside is untouched" "$(cat "$w/outside/passwd")" "OUTSIDE"
+check "etc linked out of the tree: nothing new outside" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "1"
+# The etc/gitconfig append, run from assemble_rootfs's own lines.
+gc_harness() { # $1 = work dir
+  {
+    echo "STAGE='$1/stage'"
+    fn_body tree_write_target
+    sed -n '/^  tree_write_target etc\/gitconfig$/,/^GITCONFIG$/p' "$SCRIPT"
+  } >"$1/run.sh"
+  bash "$1/run.sh" >"$1/out" 2>&1
+  echo $?
+}
+# shellcheck disable=SC2016 # the pattern is literal
+check "assemble_rootfs checks etc/gitconfig right before appending to it" \
+  "$(sed -n '/^  tree_write_target etc\/gitconfig$/{n;p;}' "$SCRIPT" | grep -cF 'cat >>"$STAGE/rootfs-tree/etc/gitconfig"')" "1"
+w="$LT/gc-plain"; mkdir -p "$w/stage/rootfs-tree"
+check "a plain tree: the gitconfig append succeeds" "$(gc_harness "$w")" "0"
+check "a plain tree: the credential helper is there" "$(grep -c 'password=moca-placeholder' "$w/stage/rootfs-tree/etc/gitconfig")" "1"
+w="$LT/gc-link"; mkdir -p "$w/stage/rootfs-tree/etc"; printf 'OUTSIDE\n' >"$w/outside"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc/gitconfig"
+check "etc/gitconfig linked out of the tree: refused" "$([ "$(gc_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc/gitconfig linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
 
 # check_lease_support, run against a stub guest_client printing each possible answer.
 ls_harness() { # $1 = work dir, $2 = what the guest prints
