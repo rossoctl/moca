@@ -93,8 +93,8 @@ A model-level failure still returns 200 with `stopReason` `error` or `aborted` a
 | 503    | `credential_unavailable`, `redis_unavailable`                                           | Control plane or Redis fault. Has `Retry-After` for 503s                                                                                                                                                                                            |
 | 500    | `internal_error`                                                                        | Never carries error text                                                                                                                                                                                                                            |
 
-Error bodies are `{error, sessionId?}`, plus a `message` on auth errors and on the `/runs` 501, and
-`turnId` on `turn_in_progress`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
+Error bodies are `{error, sessionId?}`, plus a `message` on auth errors, on the `/turn` 503
+`sandbox_unavailable` and on the `/runs` 501, and `turnId` on `turn_in_progress`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
 (default 5), or, for a pending affinity, the wait clamped to 1 to 10 seconds. The credential exchange also
 passes through `credential_required`, `credential_ambiguous`, `credential_not_found`,
 `endpoint_unresolved`, `session_not_found`, `token_invalid` and `token_expired`, so authenticated callers
