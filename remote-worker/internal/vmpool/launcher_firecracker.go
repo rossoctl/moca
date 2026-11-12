@@ -925,6 +925,10 @@ type firecrackerVM struct {
 	standbyFootprint    int64
 	standbyFootprintErr error
 	standbyFootprintSet bool
+
+	// leaseCgroup is set by LeaseCgroup: this VM's cgroup has left the pool (spec §6, "Not
+	// from the cgroup pool"), so Reap retires it rather than releasing it. Under mu.
+	leaseCgroup bool
 }
 
 // StandbyBytes implements standbyFootprinter (budget.go): this paused VM's
@@ -948,6 +952,33 @@ func (v *firecrackerVM) StandbyBytes() (int64, error) {
 	}
 	v.standbyFootprint, v.standbyFootprintErr = readMemoryCurrent(v.cgroups.abs(v.cgroupRel))
 	return v.standbyFootprint, v.standbyFootprintErr
+}
+
+// LeaseCgroup implements leaseCgrouper (budget.go): at promotion to a lease VM, raise this VM's
+// cgroup memory.max to maxBytes and take the cgroup out of the pool, so Reap retires it.
+//
+// MARKED BEFORE THE WRITE. Once a raise has been attempted the cgroup is no longer known to
+// carry the pool's bound, and returning it to the free list on a failure would risk handing a
+// per-Exec VM a bound admission control never charged. Retiring costs one rmdir; that is the
+// cheap side of the trade.
+func (v *firecrackerVM) LeaseCgroup(maxBytes int64) error {
+	if v.cgroups == nil || v.cgroupRel == "" {
+		return fmt.Errorf("firecracker VM %s: no pooled cgroup to lease (ParentCgroup unset?)", v.id)
+	}
+	v.mu.Lock()
+	v.leaseCgroup = true
+	v.mu.Unlock()
+	return writeMemoryMax(v.cgroups.abs(v.cgroupRel), maxBytes)
+}
+
+// LeaseBytes implements leaseFootprinter (budget.go): this lease VM's cgroup memory.current,
+// read fresh on every call. Never cached -- a lease VM runs between reads, unlike the paused
+// standby StandbyBytes prices once.
+func (v *firecrackerVM) LeaseBytes() (int64, error) {
+	if v.cgroups == nil || v.cgroupRel == "" {
+		return 0, fmt.Errorf("firecracker VM %s: no pooled cgroup to read (ParentCgroup unset?)", v.id)
+	}
+	return readMemoryCurrent(v.cgroups.abs(v.cgroupRel))
 }
 
 // ResumePhases implements resumePhaser (diag.go). Zero until the first Resume.
@@ -1219,6 +1250,7 @@ func (v *firecrackerVM) Reap() error {
 	v.destroyed = true
 	cmd := v.cmd
 	phKill, phBarrier, barrierSeen := v.phKill, v.phBarrier, v.barrierSeen
+	leaseCgroup := v.leaseCgroup
 	v.mu.Unlock()
 
 	var errs []error
@@ -1348,12 +1380,19 @@ func (v *firecrackerVM) Reap() error {
 		// whether reuse is safe, and cmd.Wait above should already have emptied it -- measured at
 		// 0.04-0.07 ms, i.e. it never fires. The phase names are kept so a run's aggregate tooling
 		// is unchanged: cgroupwait_us still means the same thing, and cgrouprmdir_us now measures
-		// the RELEASE, which is expected to be ~0 because it is a slice append.
+		// the RELEASE, which is expected to be ~0 because it is a slice append -- except for a
+		// lease VM, whose cgroup is retired below: for it cgrouprmdir_us is a real rmdir again.
 		cgWaitStart := time.Now()
 		waitForCgroupEmpty(v.cgroups.abs(v.cgroupRel))
 		phCgroupWait = time.Since(cgWaitStart)
 		cgRelStart := time.Now()
-		v.cgroups.release(v.cgroupRel)
+		if leaseCgroup {
+			// A lease cgroup left the pool at promotion (spec §6): its memory.max is the lease
+			// bound, so it is removed, never handed to the next per-Exec VM.
+			v.cgroups.retire(v.cgroupRel)
+		} else {
+			v.cgroups.release(v.cgroupRel)
+		}
 		phCgroupRmdir = time.Since(cgRelStart)
 	}
 	if phaseLog != nil {

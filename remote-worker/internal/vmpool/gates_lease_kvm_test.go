@@ -25,11 +25,10 @@ import (
 // match the command line of the Exec's own bash, which carries the pattern as text. Each
 // gate has its own marker, so a leftover from one can never satisfy or fail another.
 
-// leaseGateVM restores and resumes one Firecracker VM from a lease-v1 snapshot, or skips
-// with a NOT RUN message when the snapshot does not advertise lease-v1. id is short on
-// purpose: the jailed firecracker.socket path must fit sun_path's 108 bytes under the
-// rig's chroot base (see TestGateCredentialNeverInGuest).
-func leaseGateVM(t *testing.T, id string) VM {
+// requireLeaseSnapshot skips with a NOT RUN message unless the gates run on the
+// Firecracker arm against a snapshot that advertises lease-v1, and returns the snapshot's
+// directory and manifest. Every lease gate calls it after requireKVM.
+func requireLeaseSnapshot(t *testing.T) (string, Manifest) {
 	t.Helper()
 	if v := envOr("SH_VMM", "firecracker"); v != "firecracker" {
 		t.Skipf("NOT RUN (no signal, not a pass): SH_VMM=%q; the lease gates run on the Firecracker arm only", v)
@@ -43,6 +42,16 @@ func leaseGateVM(t *testing.T, id string) VM {
 		t.Skipf("NOT RUN (no signal, not a pass): snapshot %s does not advertise %q (features %v); "+
 			"build one with deploy/microvm/build-snapshot.sh from this branch", snapshotDir, FeatureLeaseV1, m.Features)
 	}
+	return snapshotDir, m
+}
+
+// leaseGateVM restores and resumes one Firecracker VM from a lease-v1 snapshot, or skips
+// with a NOT RUN message when the snapshot does not advertise lease-v1. id is short on
+// purpose: the jailed firecracker.socket path must fit sun_path's 108 bytes under the
+// rig's chroot base (see TestGateCredentialNeverInGuest).
+func leaseGateVM(t *testing.T, id string) VM {
+	t.Helper()
+	snapshotDir, _ := requireLeaseSnapshot(t)
 	lc := fcLauncher(t)
 	vm, err := lc.Restore(context.Background(), RestoreRequest{
 		ID: id, Key: "lease-gate", WorkspaceDir: sameDeviceSiblingDir(t, snapshotDir), GuestRAMBytes: 256 << 20,
