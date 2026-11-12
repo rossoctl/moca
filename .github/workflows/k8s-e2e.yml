@@ -50,8 +50,10 @@ jobs:
           sudo install -m 0755 /tmp/kind /usr/local/bin/kind
           kind version
 
+      # SH_ASYNC_DRAIN=1: the async leaf consumer is opt-in (README §14), and the smoke's claims 13
+      # and 14 skip themselves on a stack that runs no drain. Without it they never run in CI.
       - name: Bring up P6 on kind (images built from this checkout)
-        run: deploy/k8s/setup.sh --target kind-ci --build
+        run: SH_ASYNC_DRAIN=1 deploy/k8s/setup.sh --target kind-ci --build
 
       - name: Live smoke
         run: |
