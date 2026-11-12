@@ -7,6 +7,8 @@ export interface SbxTemplate {
   tools: string[];
   /** The default build's readiness (template lifecycle spec §3.3); absent from an older control plane. */
   readiness?: string | null;
+  /** Why the default build is `unavailable` (template lifecycle spec §6.2); only then. */
+  readinessReason?: SbxReadinessReason;
   /** tag -> build id; absent from an older control plane. */
   tags?: Record<string, string>;
 }
@@ -41,12 +43,17 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** Why placement left a wanted build waiting (openapi ReadinessReason, template lifecycle spec §6.2). */
+export type SbxReadinessReason = 'not_held' | 'no_slot' | 'memory' | 'memfile_mismatch';
+
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
   status: string;
   profile: string;
   readiness: string | null;
+  /** Present only with readiness `unavailable`: why it is not placed. */
+  readinessReason?: SbxReadinessReason;
   capacity: { running: number; inUse: number | null } | null;
   lastUsedAt: number | null;
   tags: string[];
@@ -82,6 +89,28 @@ export interface SbxTemplateFull extends SbxTemplate {
   builds: SbxBuild[];
 }
 
+/** One KVM host as `GET /v1/templates` reports it (template lifecycle spec §6.2). */
+export interface SbxHost {
+  id: string;
+  active: { limit: number; used: number };
+  idleLimitSeconds: number;
+  disk: { freeGb: number; floorGb: number };
+  /** Only from a host agent that reports its memory: placement's figures, in MiB. */
+  memory?: {
+    totalMib: number;
+    availableMib: number;
+    floorMib: number;
+    usedMib: number;
+    headroomMib: number;
+    pressureFull10: number | null;
+    pressureLimit: number | null;
+    brake: 'pressure' | 'stale' | null;
+    runningWorkers: number;
+    memfileMismatch: string[];
+    reportedAt: number;
+  };
+}
+
 export class SandboxApiClient extends ControlPlaneClient {
   sandboxDiscovery(): Promise<SbxDiscovery> {
     return this.json('GET', '/v1/discovery', { auth: false });
@@ -89,6 +118,11 @@ export class SandboxApiClient extends ControlPlaneClient {
 
   async listTemplates(): Promise<SbxTemplate[]> {
     return (await this.json<{ templates: SbxTemplate[] }>('GET', '/v1/templates')).templates;
+  }
+
+  /** The KVM hosts' limits and use: the `hosts` block of `GET /v1/templates` (§6.2). */
+  async listHosts(): Promise<SbxHost[]> {
+    return (await this.json<{ hosts?: SbxHost[] }>('GET', '/v1/templates')).hosts ?? [];
   }
 
   /** One template with its builds and their specs (`GET /v1/templates/{id}`). */

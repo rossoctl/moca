@@ -16,7 +16,8 @@ import {
 
 // The template reads from mocactl (template lifecycle spec §4): `sbx templates` with readiness and
 // tags, `templates show`, and `create --template ID[@BUILD] --seed`; and activation (§6.3):
-// `templates activate` and `templates deactivate`. example.com hosts only.
+// `templates activate` and `templates deactivate`; and the hosts' slots and memory (§6.2):
+// `sbx hosts`, and why an unavailable build waits. example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -114,6 +115,22 @@ describe('templates show', () => {
     expect(w.out()).toBe(`${BUILD_ID}  registered  inactive  tags default\n`);
     expect(await w.run(['templates', 'show', 'my-python', '--build', BUILD_ID, '--json'])).toBe(0);
     expect(JSON.parse(w.out())).toMatchObject({ spec: { seed: 'true' } });
+  });
+
+  it('names why an unavailable build waits (readinessReason), on the template and the build', async () => {
+    const w = world({
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({
+          readiness: 'unavailable',
+          readinessReason: 'memory',
+          builds: [build({ readiness: 'unavailable', readinessReason: 'memory' })],
+        }),
+      }),
+    });
+    expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    expect(w.out()).toContain('registered  unavailable (memory)\n');
+    expect(w.out()).toContain(`  ${BUILD_ID}  registered  unavailable (memory)  tags default\n`);
   });
 
   it('reports 404 template_not_found as itself, not as a control plane without sandbox routes', async () => {
@@ -358,6 +375,42 @@ describe('sbx templates activate and deactivate (§6.3)', () => {
     expect(w.io.outs.join('')).toContain(`my-python ${BUILD_ID} active, leased until`);
   });
 
+  it('--wait: says when it waits for memory, from the refusal and from the build', async () => {
+    let tries = 0;
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/activate': () =>
+        ++tries < 2
+          ? {
+              status: 409,
+              body: {
+                error: 'no_active_slot',
+                message: 'no memory',
+                readiness: 'unavailable',
+                reason: 'memory',
+              },
+              headers: { 'retry-after': '20' },
+            }
+          : { status: 200, body: LEASE },
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body:
+          ++reads < 2
+            ? build({ readiness: 'unavailable', readinessReason: 'memory' })
+            : build({ readiness: 'active' }),
+      }),
+    });
+    expect(await cmdActivate(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain(
+      'my-python: waiting: no host holding it has the memory for its worker now',
+    );
+    expect(errs).toContain(
+      'my-python: waiting: unavailable: no host holding it has the memory for its worker now',
+    );
+    expect(errs).not.toContain('no active slot');
+  });
+
   it('--wait: exits 5 when the build is not active within --timeout', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
@@ -371,5 +424,66 @@ describe('sbx templates activate and deactivate (§6.3)', () => {
     );
     expect(w.slept).toEqual([5000, 5000, 2000]);
     expect(w.io.errs.join('')).toContain('timed out after 12 s');
+  });
+});
+
+describe('sbx hosts (§6.2)', () => {
+  const HOST = {
+    id: 'host-1',
+    active: { limit: 8, used: 3 },
+    idleLimitSeconds: 3600,
+    disk: { freeGb: 400, floorGb: 60 },
+  };
+  const MEMORY = {
+    totalMib: 65536,
+    availableMib: 40000,
+    floorMib: 6553,
+    usedMib: 12672,
+    headroomMib: 33447,
+    pressureFull10: 0.1,
+    pressureLimit: 10,
+    brake: null,
+    runningWorkers: 3,
+    memfileMismatch: [],
+    reportedAt: 1_800_000_000,
+  };
+
+  it('prints each host: active slots, memory headroom and floor (with a brake), disk', async () => {
+    const w = world({
+      'GET /v1/templates': () => ({
+        status: 200,
+        body: {
+          templates: [],
+          hosts: [
+            { ...HOST, memory: MEMORY },
+            {
+              ...HOST,
+              id: 'host-2',
+              memory: { ...MEMORY, headroomMib: 0, brake: 'stale', memfileMismatch: [BUILD_ID] },
+            },
+            { ...HOST, id: 'host-3' },
+          ],
+        },
+      }),
+    });
+    expect(await w.run(['hosts'])).toBe(0);
+    expect(w.out()).toBe(
+      'host-1           active 3 of 8; memory 33447 MiB headroom of 65536 (floor 6553); disk 400 GB free (floor 60)\n' +
+        'host-2           active 3 of 8; memory 0 MiB headroom of 65536 (floor 6553), brake: stale, 1 memory file mismatch; disk 400 GB free (floor 60)\n' +
+        'host-3           active 3 of 8; disk 400 GB free (floor 60)\n',
+    );
+    expect(await w.run(['hosts', '--json'])).toBe(0);
+    expect(JSON.parse(w.out())[0]).toEqual({ ...HOST, memory: MEMORY });
+  });
+
+  it('says when no host has reported, and refuses an argument', async () => {
+    const w = world({
+      'GET /v1/templates': () => ({ status: 200, body: { templates: [], hosts: [] } }),
+    });
+    expect(await w.run(['hosts'])).toBe(0);
+    expect(w.out()).toBe('no host has reported yet\n');
+    const calls = w.cp.calls.length;
+    expect(await w.run(['hosts', 'host-1'])).toBe(2);
+    expect(w.cp.calls).toHaveLength(calls);
   });
 });

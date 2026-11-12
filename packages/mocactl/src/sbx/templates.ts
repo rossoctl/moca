@@ -1,7 +1,7 @@
 import { TOKEN_MARGIN_S, WORKSPACE } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import type { SbxBuild } from './api.js';
+import type { SbxBuild, SbxReadinessReason } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, type ExecFactory } from './exec.js';
 import { baselineAtHead } from './push.js';
@@ -9,8 +9,8 @@ import { baselineAtHead } from './push.js';
 /**
  * The template reads from mocactl (template lifecycle spec §4): one template and its builds, or one
  * build, and `create --seed`, which runs the served build's own seed; and activation (§6.3): take or
- * renew a lease, wait for the build to be active, release it. Every command has `--json` (the API's
- * answer, never a token).
+ * renew a lease, wait for the build to be active, release it; and the KVM hosts' slots, memory and
+ * disk (§6.2). Every command has `--json` (the API's answer, never a token).
  */
 
 /** `templates activate --wait`'s limit with no --timeout, in seconds. */
@@ -26,12 +26,25 @@ const WAITING: Record<string, string> = {
   unknown: "unknown: the relay's presence cannot be read",
 };
 
-/** A build's readiness, with its capacity when it is active: `active (running 3, in use 1)`. */
-function readinessText(b: Pick<SbxBuild, 'readiness' | 'capacity'>): string {
+/** Why an `unavailable` build waits, by its readinessReason (template lifecycle spec §6.2). */
+const UNAVAILABLE: Record<SbxReadinessReason, string> = {
+  not_held: 'unavailable: no host that reports holds its snapshot',
+  no_slot: 'unavailable: every host holding it is at its active limit',
+  memory: 'unavailable: no host holding it has the memory for its worker now',
+  memfile_mismatch:
+    "unavailable: every host holding it reports its memory file is not the guest's size (rebuild it)",
+};
+
+/**
+ * A build's readiness, with its capacity when it is active (`active (running 3, in use 1)`), or why
+ * it is unavailable (`unavailable (memory)`).
+ */
+function readinessText(b: Pick<SbxBuild, 'readiness' | 'readinessReason' | 'capacity'>): string {
   if (b.readiness === null) return '';
   const c = b.capacity;
   const cap = c ? ` (running ${c.running}${c.inUse !== null ? `, in use ${c.inUse}` : ''})` : '';
-  return `${sanitizeRemote(b.readiness)}${cap}`;
+  const why = !c && b.readinessReason ? ` (${sanitizeRemote(b.readinessReason)})` : '';
+  return `${sanitizeRemote(b.readiness)}${cap}${why}`;
 }
 
 /** One build, for a person. */
@@ -60,9 +73,42 @@ export async function cmdShowTemplate(c: SbxCtx, id: string, build?: string): Pr
     c.io.out(
       `${sanitizeRemote(t.id)}  owner ${sanitizeRemote(t.owner ?? 'the deployment')}  ${sanitizeRemote(t.visibility)}` +
         `  ${sanitizeRemote(t.onboarding ?? 'no build')}` +
-        `${t.readiness !== null ? `  ${sanitizeRemote(t.readiness)}` : ''}\n`,
+        `${t.readiness !== null ? `  ${readinessText({ readiness: t.readiness, readinessReason: t.readinessReason, capacity: null })}` : ''}\n`,
     );
     for (const b of t.builds) c.io.out(`  ${buildLine(b)}\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
+ * `sbx hosts` (§6.2): per KVM host, its active slots, its memory (from an agent that reports it:
+ * headroom, the effective floor, a brake) and its disk.
+ */
+export async function cmdHosts(c: SbxCtx): Promise<number> {
+  try {
+    const hosts = await c.api.listHosts();
+    if (c.json) {
+      c.io.out(JSON.stringify(hosts) + '\n');
+      return SBX_EXIT.ok;
+    }
+    if (hosts.length === 0) c.io.out('no host has reported yet\n');
+    for (const h of hosts) {
+      const m = h.memory;
+      const parts = [
+        `active ${h.active.used} of ${h.active.limit}`,
+        ...(m
+          ? [
+              `memory ${m.headroomMib} MiB headroom of ${m.totalMib} (floor ${m.floorMib})` +
+                `${m.brake ? `, brake: ${sanitizeRemote(m.brake)}` : ''}` +
+                `${m.memfileMismatch.length ? `, ${m.memfileMismatch.length} memory file mismatch` : ''}`,
+            ]
+          : []),
+        `disk ${h.disk.freeGb} GB free (floor ${h.disk.floorGb})`,
+      ];
+      c.io.out(`${sanitizeRemote(h.id).padEnd(16)} ${parts.join('; ')}\n`);
+    }
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
@@ -169,7 +215,11 @@ export async function cmdActivate(
         break;
       } catch (err) {
         if (!(opts.wait && err instanceof ApiError && err.code === 'no_active_slot')) throw err;
-        say('no active slot: every host holding it is at its limit with leased builds');
+        say(
+          err.reason === 'memory'
+            ? 'no host holding it has the memory for its worker now'
+            : 'no active slot: every host holding it is at its limit with leased builds',
+        );
         const left = end - c.rt.now();
         if (left <= 0) return timedOut(c, `an active slot for ${id}`, timeoutS);
         await c.rt.sleep(Math.min(Math.max(1, err.retryAfterS ?? 30) * 1000, left), c.signal);
@@ -207,7 +257,13 @@ export async function cmdActivate(
         );
         return SBX_EXIT.failed;
       }
-      if (b) say(WAITING[b.readiness ?? ''] ?? sanitizeRemote(b.readiness ?? 'no readiness'));
+      if (b) {
+        const why =
+          b.readiness === 'unavailable' && b.readinessReason
+            ? UNAVAILABLE[b.readinessReason]
+            : undefined;
+        say(why ?? WAITING[b.readiness ?? ''] ?? sanitizeRemote(b.readiness ?? 'no readiness'));
+      }
       const left = end - c.rt.now();
       if (left <= 0) return timedOut(c, `${id} ${lease.buildId} to be active`, timeoutS);
       await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
