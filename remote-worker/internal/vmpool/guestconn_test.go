@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,6 +235,49 @@ func TestRunOverConnRefusesACommandLargerThanOneFrameAtOnce(t *testing.T) {
 	case <-got:
 		t.Fatal("the guest received a frame for a command it cannot take")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// closeRecorder is an io.ReadWriteCloser that records Close, wrapping one side of a pipe.
+type closeRecorder struct {
+	io.ReadWriteCloser
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closeRecorder) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.ReadWriteCloser.Close()
+}
+
+// runOverConn owns the connection it is given, so a command it refuses as too large
+// still closes it: left open, each refusal kept a vsock descriptor on the worker and
+// left the guest agent blocked reading a request that never came.
+func TestRunOverConnClosesTheConnOnACommandTooLarge(t *testing.T) {
+	host, guest := net.Pipe()
+	guestDone := make(chan error, 1)
+	go func() {
+		defer guest.Close()
+		_, _, err := ga.ReadFrame(guest)
+		guestDone <- err
+	}()
+	rw := &closeRecorder{ReadWriteCloser: host, closed: make(chan struct{})}
+	_, err := runOverConn(context.Background(), rw, Command{Command: strings.Repeat("x", ga.MaxFrame), CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+	if !errors.Is(err, ErrCommandTooLarge) {
+		t.Fatalf("err = %v, want ErrCommandTooLarge", err)
+	}
+	select {
+	case <-rw.closed:
+	default:
+		t.Fatal("runOverConn returned ErrCommandTooLarge without closing the connection")
+	}
+	select {
+	case err := <-guestDone:
+		if err == nil {
+			t.Fatal("the guest read a frame for a command it cannot take")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the guest's read is still blocked after the refusal")
 	}
 }
 
