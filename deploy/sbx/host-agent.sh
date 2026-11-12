@@ -319,7 +319,8 @@ removal() {
     done
     [[ -n "$rec" ]] || { error "no template record here for build $b of worker $w"; continue; }
     snap="$(jq -r .snapshot "$rec")"
-    [[ "$snap" =~ ^[A-Za-z0-9._-]+$ && "$snap" != . && "$snap" != .. ]] || { error 'a template record names a bad snapshot'; continue; }
+    # One plain entry under snapshots/: no slash, and no leading dot (no ., .. or hidden entry).
+    [[ "$snap" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { error 'a template record names a bad snapshot'; continue; }
     if systemctl is-active --quiet "sbx-worker@$w.service"; then
       say "{\"agent\":\"skipped\",\"worker\":\"$w\",\"why\":\"still running: removed once it is stopped\"}"
       continue
