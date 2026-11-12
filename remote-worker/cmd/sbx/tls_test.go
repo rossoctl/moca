@@ -156,7 +156,7 @@ func TestTLSConfigFromEnv(t *testing.T) {
 	}
 }
 
-// G30: with SBX_DIAL_ADDR the client connects to the given ip:port with no lookup, and still verifies the server as
+// With SBX_DIAL_ADDR the client connects to the given ip:port with no lookup, and still verifies the server as
 // SBX_ADDR's host. The host here does not resolve at all, so a lookup would fail the call.
 func TestDialAddrSkipsTheLookupAndVerifiesTheName(t *testing.T) {
 	const name = "exec.sbx0.invalid"
