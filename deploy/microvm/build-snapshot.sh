@@ -301,19 +301,26 @@ case "$VMM" in
     ;;
 esac
 
+# The three option checks match the WHOLE value with bash's [[ =~ ]], never grep: grep matches line
+# by line, so a value with an embedded newline passed when any one line did, and these values are
+# written into init (GUEST_HOME, through a sed script), the VMM's config and the manifest. The
+# patterns live in variables so bash 3.2 and 5 read them alike.
 # /tmp is the only writable tmpfs init mounts for every run (see assemble_rootfs), so a HOME
 # anywhere else would be read-only or vanish; the pattern keeps it one plain directory path.
-if [ -n "$GUEST_HOME" ] && ! printf '%s' "$GUEST_HOME" | grep -Eq '^/tmp(/[A-Za-z0-9._-]+)+$'; then
+guest_home_re='^/tmp(/[A-Za-z0-9._-]+)+$'
+vcpus_re='^([1-9]|[12][0-9]|3[0-2])$'
+verify_timeout_re='^[1-9][0-9]{0,4}$'
+if [ -n "$GUEST_HOME" ] && ! [[ "$GUEST_HOME" =~ $guest_home_re ]]; then
   echo "build-snapshot.sh: --guest-home must be a path under /tmp (e.g. /tmp/home), got '$GUEST_HOME'" >&2
   exit 2
 fi
 
-if ! printf '%s' "$VCPUS" | grep -Eq '^([1-9]|[12][0-9]|3[0-2])$'; then
+if ! [[ "$VCPUS" =~ $vcpus_re ]]; then
   echo "build-snapshot.sh: --vcpus must be an integer from 1 to 32, got '$VCPUS'" >&2
   exit 2
 fi
 
-if ! printf '%s' "$VERIFY_TIMEOUT_S" | grep -Eq '^[1-9][0-9]{0,4}$' || [ "$VERIFY_TIMEOUT_S" -gt 86400 ]; then
+if ! [[ "$VERIFY_TIMEOUT_S" =~ $verify_timeout_re ]] || [ "$VERIFY_TIMEOUT_S" -gt 86400 ]; then
   echo "build-snapshot.sh: --verify-timeout-s must be an integer from 1 to 86400, got '$VERIFY_TIMEOUT_S'" >&2
   exit 2
 fi
@@ -876,6 +883,10 @@ export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
   elif [ -n "$GUEST_HOME" ]; then
     sed -i "/^export PATH=/a mkdir -p $GUEST_HOME\\
 export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
+  fi
+  # Either way, the insertion must have landed (GUEST_HOME is one plain path, checked above, so it
+  # needs no quoting in init).
+  if [ -n "$GUEST_HOME" ]; then
     grep -qx "export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init" || {
       echo "build-snapshot.sh: could not add HOME=$GUEST_HOME to init" >&2
       exit 1

@@ -2173,6 +2173,22 @@ for bad in 0 33 two -1; do
 done
 check "the refusal names the rule" "$(printf '%s' "$out" | grep -c 'from 1 to 32')" "1"
 
+echo "== the option checks match the whole value: an embedded newline is refused"
+# grep matches line by line, so a check written as printf | grep -Eq passed a value whose first line
+# was valid. Each of these values reaches init, a sed script, the VMM's config or the manifest.
+nl=$'\n'
+for case_ in "--guest-home|/tmp/home${nl}x" "--guest-home|/tmp/home${nl}touch /x" \
+  "--vcpus|4${nl},\"x\":1" "--vcpus|4${nl}" "--verify-timeout-s|60${nl}x"; do
+  opt="${case_%%|*}" val="${case_#*|}"
+  rc=0
+  bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --verify-command true "$opt" "$val" >/dev/null 2>&1 || rc=$?
+  check "$opt with an embedded newline is refused before any build step (exit 2)" "$rc" "2"
+done
+check "no option is checked with grep any more" \
+  "$(sed -n '/^# The three option checks/,/^OUT=/p' "$SCRIPT" | grep -c 'grep -E')" "0"
+check "the HOME insertion is checked with or without --guest-home-gitconfig" \
+  "$(grep -B1 'grep -qx "export HOME=$GUEST_HOME"' "$SCRIPT" | head -1 | grep -c '^  if \[ -n "\$GUEST_HOME" \]; then$')" "1"
+
 echo "== assemble_rootfs never writes through the image's symlinks"
 # An image's /sbin/init is commonly an ABSOLUTE symlink (/lib/systemd/systemd); writing through it
 # hits the build host's file. The fix unlinks the targets first and refuses out-of-tree directories.
