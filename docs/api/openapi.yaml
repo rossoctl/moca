@@ -580,6 +580,12 @@ components:
           items: { type: string }
           description: sha256 digests of the gate records the benchmark profile trusts
         quota: { $ref: '#/components/schemas/Quota' }
+        quotaBySubject:
+          type: object
+          description: |
+            per-subject overrides of `quota`, keyed by subject (`github:<numeric id>` or
+            `oidc:<provider sub>`); an admin's, `PUT /v1/quota/{subject}`
+          additionalProperties: { $ref: '#/components/schemas/Quota' }
     Quota:
       type: object
       required: [templates, buildsQueued, active]
@@ -2317,7 +2323,8 @@ paths:
       operationId: getQuota
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
-        The policy's quotas and the caller's use: templates owned, builds queued or building, and
+        The quotas that apply to the caller (its admin-set override, else the deployment default;
+        `quotaSource` says which) and its use: templates owned, builds queued or building, and
         builds the caller holds a live activation lease on (§6.3). On the sandbox profile,
         `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
         the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
@@ -2336,6 +2343,10 @@ paths:
                   buildsQueued: { $ref: '#/components/schemas/LimitUse' }
                   active: { $ref: '#/components/schemas/LimitUse' }
                   sandboxes: { $ref: '#/components/schemas/LimitUse' }
+                  quotaSource:
+                    type: string
+                    enum: [subject, default]
+                    description: an admin-set quota for this subject, or the deployment default
         '400':
           description: '`invalid_request`: this deployment stores no templates'
           content:
@@ -2343,6 +2354,56 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/quota/{subject}:
+    put:
+      operationId: putQuota
+      summary: Set the deployment's default quota, or one subject's (an admin); recorded
+      description: |
+        Template lifecycle spec §5.2. `subject` is `default` (the deployment default) or a subject
+        (`github:<numeric id>` or `oidc:<provider sub>`, an override); a body of `null` removes a
+        subject's override, returning it to the default (the default itself is never removed).
+        Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
+        in it) naming the admin, whose digest is answered, so the chain shows who set which quota
+        when. Enforced at once, on the next create, queued build and activation. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: subject, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/Quota'
+                - type: 'null'
+      responses:
+        '200':
+          description: set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [target, subject, quota, before, policy, record]
+                properties:
+                  target:
+                    { type: string, description: '`default` or the subject whose quota changed' }
+                  subject: { type: string, description: the admin }
+                  quota: { oneOf: [{ $ref: '#/components/schemas/Quota' }, { type: 'null' }] }
+                  before: { description: 'the quota before (null: the subject had no override)' }
+                  policy: { type: string, description: the new policy's digest }
+                  record: { type: string, description: the policy record written }
+        '400':
+          description: '`invalid_request`: a bad target or quota, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden` (not an admin) or `not_enrolled`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/hosts/{host}/inventory:
     post:
       operationId: hostInventory

@@ -16,6 +16,7 @@ import {
   checkCreate,
   policyDigest,
   policyProblems,
+  quotaFor,
   TEMPLATE_ID_RE,
   type Policy,
   type PolicyStore,
@@ -36,6 +37,7 @@ import {
   type SandboxView,
 } from './sandbox-store.js';
 import { mintSandboxToken } from './sandbox-token.js';
+import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -535,7 +537,7 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   }
   const now = seconds(deps);
   const handle = buildHandle(deps.newId());
-  const quota = pol.quota;
+  const quota = quotaFor(pol, p.sub);
   const want = reuseKey(b.image as string, spec, result.profile, result.gateRecordSha256);
   let reused: TemplateBuild | undefined;
   const doc = await cat.update(id, async (cur) => {
@@ -875,10 +877,11 @@ async function takeLeaseLocked(
   const docs = await cat.list();
   // A renewal does not count against itself.
   const held = leasedBy(docs, p.sub, nowS).filter((x) => x.buildId !== target.buildId);
-  if (held.length >= pol.quota.active) {
+  const activeLimit = quotaFor(pol, p.sub).active;
+  if (held.length >= activeLimit) {
     throw new CpError(
       'quota_exceeded',
-      `at most ${pol.quota.active} active templates per subject`,
+      `at most ${activeLimit} active templates per subject`,
       undefined,
       { quota: 'active' },
     );
@@ -1240,10 +1243,60 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     return { status: 200, body: { policy, digest: policyDigest(policy), record } };
   },
 
+  /**
+   * Admin quotas (§5.2): `PUT /v1/quota/default` sets the deployment default, `PUT
+   * /v1/quota/{subject}` one subject's override; a body of `null` for a subject removes its
+   * override. Each is a policy change: a new `policy` record (the whole policy, as `PUT /v1/policy`
+   * writes), so the chain shows who set which quota when. Enforced at once.
+   */
+  putQuota: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    if (!isAdmin(p)) throw new CpError('forbidden', 'setting quotas requires the admin role');
+    const store = policyStore(deps);
+    const subject = ctx.params.subject ?? '';
+    const isDefault = subject === 'default';
+    if (!isDefault && !MEMBER_SUBJECT_RE.test(subject))
+      throw new CpError(
+        'invalid_request',
+        `the quota's target is 'default' or a subject, ${MEMBER_SUBJECT_FORMS}`,
+      );
+    const { policy: cur } = await store.current();
+    const body = ctx.body;
+    if (isDefault && body === null)
+      throw new CpError('invalid_request', 'the default quota is set, never removed');
+    const next: Policy = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
+    let before: unknown;
+    if (isDefault) {
+      before = cur.quota;
+      next.quota = body as Policy['quota'];
+    } else {
+      before = cur.quotaBySubject?.[subject] ?? null;
+      if (body === null) delete next.quotaBySubject![subject];
+      else next.quotaBySubject![subject] = body as Policy['quota'];
+    }
+    if (Object.keys(next.quotaBySubject!).length === 0) delete next.quotaBySubject;
+    const bad = policyProblems(next);
+    if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+    const { record } = await store.set(next, p.sub);
+    await auditBestEffort(deps, 'quota_set', subject, { subject: p.sub, decision: 'quota_set' });
+    return {
+      status: 200,
+      body: {
+        target: subject,
+        subject: p.sub,
+        quota: isDefault ? next.quota : (next.quotaBySubject?.[subject] ?? null),
+        before,
+        policy: policyDigest(next),
+        record,
+      },
+    };
+  },
+
   getQuota: async (ctx, deps) => {
     const p = requireEnrolled(ctx, deps);
     const { cat, policy } = writable(deps);
     const { policy: pol } = await policy.current();
+    const quota = quotaFor(pol, p.sub);
     const u = await usage(cat, p.sub);
     const nowS = seconds(deps);
     // The builds this subject holds a live lease on (§6.3), as activate counts them.
@@ -1259,9 +1312,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       status: 200,
       body: {
         subject: p.sub,
-        templates: { limit: pol.quota.templates, used: u.templates },
-        buildsQueued: { limit: pol.quota.buildsQueued, used: u.buildsQueued },
-        active: { limit: pol.quota.active, used: active },
+        templates: { limit: quota.templates, used: u.templates },
+        buildsQueued: { limit: quota.buildsQueued, used: u.buildsQueued },
+        active: { limit: quota.active, used: active },
+        // Whether this subject has an admin-set quota (§5.2) or the deployment default.
+        quotaSource: pol.quotaBySubject?.[p.sub] ? 'subject' : 'default',
         ...(sandboxes ? { sandboxes } : {}),
       },
     };

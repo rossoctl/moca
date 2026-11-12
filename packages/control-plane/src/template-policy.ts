@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 
 /**
  * Policy at create (template lifecycle spec §8.1): the checks a template create passes before any
@@ -41,9 +42,18 @@ export interface Policy {
    * copy of the trusted source's records, until a fetch from the trusted source exists).
    */
   trustedGateRecords: string[];
-  /** Per-subject quotas (§6.2), the deployment default. */
+  /** Per-subject quotas (§6.2), the deployment default; admins may set per-subject ones. */
   quota: Quota;
+  /**
+   * Per-subject overrides of `quota` (§5.2, `PUT /v1/quota/{subject}`), by subject; absent: none. A
+   * subject not listed has the default. Kept in the policy, so every change is a `policy` record.
+   */
+  quotaBySubject?: Record<string, Quota>;
 }
+
+/** The quota that applies to a subject (§6.2): its override, else the default. */
+export const quotaFor = (pol: Policy, subject: string): Quota =>
+  pol.quotaBySubject?.[subject] ?? pol.quota;
 
 export interface Quota {
   /** Templates a subject owns (not retired). */
@@ -394,8 +404,25 @@ export function policyProblems(p: unknown): string[] {
   )
     out.push('trustedGateRecords must be sha256 digests');
   const q = o.quota;
-  if (!q || ![q.templates, q.buildsQueued, q.active].every((n) => int(n) && n >= 0))
-    out.push('quota must hold whole numbers templates, buildsQueued, active');
+  const quotaOk = (x: unknown): boolean => {
+    const v = x as Partial<Quota> | undefined;
+    return (
+      !!v && [v.templates, v.buildsQueued, v.active].every((n) => int(n) && (n as number) >= 0)
+    );
+  };
+  if (!quotaOk(q)) out.push('quota must hold whole numbers templates, buildsQueued, active');
+  const by = (o as { quotaBySubject?: unknown }).quotaBySubject;
+  if (by !== undefined) {
+    if (typeof by !== 'object' || by === null || Array.isArray(by))
+      out.push('quotaBySubject must map subjects to quotas');
+    else
+      for (const [s, v] of Object.entries(by as Record<string, unknown>)) {
+        if (!MEMBER_SUBJECT_RE.test(s))
+          out.push(`quotaBySubject: ${s} is not a subject (${MEMBER_SUBJECT_FORMS})`);
+        if (!quotaOk(v))
+          out.push(`quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active`);
+      }
+  }
   return out;
 }
 

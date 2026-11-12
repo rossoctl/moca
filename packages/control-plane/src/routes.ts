@@ -521,6 +521,15 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'getQuota',
   },
+  // Template lifecycle spec §5.2: an admin sets the default quota, or one subject's override.
+  {
+    method: 'PUT',
+    path: '/v1/quota/{subject}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'putQuota',
+  },
   // Template lifecycle spec §6.1: a KVM host's sbx-host-agent, with its own bearer, for itself only.
   {
     method: 'POST',

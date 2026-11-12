@@ -859,6 +859,112 @@ describe('retire (§5.1)', () => {
   });
 });
 
+describe('admin quotas (§5.2)', () => {
+  const refusal = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+    return 'none';
+  };
+  const admin = { ...bob, roles: ['admin'] };
+  const putQuota = (d: TestDeps, subject: string, body: unknown, principal = admin) =>
+    HANDLERS.putQuota!(ctx({ principal, params: { subject }, body }), d);
+  const quotaOf = async (d: TestDeps, principal = alice) =>
+    (await HANDLERS.getQuota!(ctx({ principal }), d)).body as Body;
+
+  it("an admin sets one subject's quota and the default; each is a policy record; it is enforced", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4);
+    expect((await quotaOf(d)).quotaSource).toBe('default');
+    const before = (await d.provenance!.chain('policy')).length;
+    const r = (await putQuota(d, alice.sub, { templates: 5, buildsQueued: 2, active: 1 }))
+      .body as Body;
+    expect(r).toMatchObject({
+      target: alice.sub,
+      subject: admin.sub,
+      quota: { active: 1 },
+      before: null,
+    });
+    expect(r.record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(r.policy).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect((await d.provenance!.chain('policy')).length).toBe(before + 1);
+    expect((await d.provenance!.chain('policy')).at(-1)).toMatchObject({ subject: admin.sub });
+    expect(await quotaOf(d)).toMatchObject({
+      quotaSource: 'subject',
+      active: { limit: 1 },
+      templates: { limit: 5 },
+    });
+    // Another subject still has the default.
+    expect(await quotaOf(d, bob)).toMatchObject({ quotaSource: 'default', active: { limit: 8 } });
+    // Enforced at once: alice holds one active, so a second activation is over her quota.
+    await activate(d, 't1');
+    expect(await refusal(() => activate(d, 't2'))).toBe('quota_exceeded');
+    // The default too; removing alice's override returns her to it.
+    const def = (await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 3 }))
+      .body as Body;
+    expect(def).toMatchObject({ target: 'default', before: { active: 8 }, quota: { active: 3 } });
+    expect((await quotaOf(d, bob)).active.limit).toBe(3);
+    const rm = (await putQuota(d, alice.sub, null)).body as Body;
+    expect(rm).toMatchObject({ quota: null, before: { active: 1 } });
+    expect(await quotaOf(d)).toMatchObject({ quotaSource: 'default', active: { limit: 3 } });
+    expect((await activate(d, 't2')).status).toBe(200);
+    // No override left: the policy holds no empty quotaBySubject.
+    expect((await d.policy!.current()).policy.quotaBySubject).toBeUndefined();
+  });
+
+  it("enforces a subject's templates quota on create", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await putQuota(d, alice.sub, { templates: 1, buildsQueued: 10, active: 8 });
+    const e = await HANDLERS.createTemplate!(
+      ctx({ principal: alice, body: { id: 't2', image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+      d,
+    ).then(
+      () => null,
+      (x: { code: string; details?: unknown }) => x,
+    );
+    expect(e).toMatchObject({ code: 'quota_exceeded' });
+  });
+
+  it('refuses a non-admin, a bad target and a bad quota', async () => {
+    const d = await setup();
+    const q = { templates: 1, buildsQueued: 1, active: 1 };
+    expect(await refusal(() => putQuota(d, alice.sub, q, alice))).toBe('forbidden');
+    expect(await refusal(() => putQuota(d, 'alice', q))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, 'test:1', q))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, alice.sub, { ...q, templates: -1 }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => putQuota(d, alice.sub, { templates: 1 }))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, 'default', null))).toBe('invalid_request');
+  });
+
+  it("takes an oidc subject's override as a github one's (#701)", async () => {
+    const d = await setup();
+    const erin = 'oidc:erin@example.test';
+    const r = (await putQuota(d, erin, { templates: 2, buildsQueued: 1, active: 1 })).body as Body;
+    expect(r).toMatchObject({ target: erin, quota: { templates: 2 }, before: null });
+    expect((await putQuota(d, erin, null)).body).toMatchObject({ quota: null });
+  });
+
+  it('refuses a policy whose quotaBySubject names a non-subject', async () => {
+    const d = await setup();
+    const bad = {
+      ...DEFAULT_POLICY,
+      quotaBySubject: { 'test:1': { templates: 1, buildsQueued: 1, active: 1 } },
+    };
+    expect(await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: bad }), d))).toBe(
+      'invalid_request',
+    );
+  });
+});
+
 describe('place, alone', () => {
   const doc = (id: string, h: string, sinceS: number, until = 10_000): TemplateDoc => ({
     schema: 'moca-template/1',

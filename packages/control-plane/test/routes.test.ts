@@ -59,6 +59,7 @@ describe('the route table', () => {
         'GET /v1/policy',
         'PUT /v1/policy',
         'GET /v1/quota',
+        'PUT /v1/quota/{subject}',
         'POST /v1/hosts/{host}/inventory',
         'POST /v1/hosts/{host}/builds/claim',
         'GET /v1/hosts/{host}/blobs/{digest}',

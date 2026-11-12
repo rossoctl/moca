@@ -209,10 +209,10 @@ describe('§9.3 test 3 — contract drift', () => {
         // check enrollment.
         ((r.path.startsWith('/v1/templates') ||
           r.path === '/v1/policy' ||
-          r.path === '/v1/quota') &&
+          r.path.startsWith('/v1/quota')) &&
           r.auth === 'api'),
     ).map((r) => `${r.method} ${r.path}`);
-    expect(enrollable.length).toBe(22);
+    expect(enrollable.length).toBe(23);
     const missing = operations()
       .filter(({ path, method }) => enrollable.includes(`${method} ${path}`))
       .filter(({ op }) => !(op as { responses?: Record<string, unknown> }).responses?.['403'])
