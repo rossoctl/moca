@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { status } from '@grpc/grpc-js';
 import { makeSigner, mintAttachToken } from '@moca/control-plane';
 import type { RecordStore, SandboxRecord } from '@moca/harness';
+import { Exec } from '@moca/k8s-sandbox';
 import { createRelay, type RelayDeps } from '../src/relay.js';
 import { makeAttachVerifier, makeDefaultValidateToken } from '../src/main.js';
 
@@ -133,14 +134,15 @@ async function attach(
   return { stream: s, rec: r.map.get(id) };
 }
 
-const exec = (reqId = 1) => ({
-  reqId,
-  command: 'true',
-  stdin: new Uint8Array(),
-  timeoutS: 0,
-  streaming: true,
-  workspaceKey: '',
-});
+const exec = (reqId = 1) =>
+  Exec.fromPartial({
+    reqId,
+    command: 'true',
+    stdin: new Uint8Array(),
+    timeoutS: 0,
+    streaming: true,
+    workspaceKey: '',
+  });
 
 async function drive(
   r: ReturnType<typeof relayWith>,

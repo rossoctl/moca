@@ -11,7 +11,7 @@ import {
   SandboxExecClient,
   SandboxWorkerService,
   Stream,
-  type Exec,
+  Exec,
   type ExecEvent,
   type ServerFrame,
   type WorkerFrame,
@@ -240,14 +240,14 @@ export function exec(
     {
       sandboxId: opts.sandboxId ?? 'sbx_default',
       workload: opts.workload ?? '',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: opts.reqId ?? ++req,
         command: opts.command ?? 'true',
         stdin: new Uint8Array(),
         timeoutS: 5,
         streaming: true,
         workspaceKey: opts.wsk ?? 'sbx-aaaa',
-      },
+      }),
     },
     md,
   );

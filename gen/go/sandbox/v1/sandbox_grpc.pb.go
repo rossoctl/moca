@@ -121,8 +121,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SandboxExec_Exec_FullMethodName  = "/sandbox.v1.SandboxExec/Exec"
-	SandboxExec_Abort_FullMethodName = "/sandbox.v1.SandboxExec/Abort"
+	SandboxExec_Exec_FullMethodName           = "/sandbox.v1.SandboxExec/Exec"
+	SandboxExec_Abort_FullMethodName          = "/sandbox.v1.SandboxExec/Abort"
+	SandboxExec_LeaseControl_FullMethodName   = "/sandbox.v1.SandboxExec/LeaseControl"
+	SandboxExec_LeaseKeepalive_FullMethodName = "/sandbox.v1.SandboxExec/LeaseKeepalive"
 )
 
 // SandboxExecClient is the client API for SandboxExec service.
@@ -135,6 +137,12 @@ const (
 type SandboxExecClient interface {
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecEvent], error)
 	Abort(ctx context.Context, in *AbortRequest, opts ...grpc.CallOption) (*AbortResponse, error)
+	// Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+	// are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+	// ends the lease (reset) or changes the mode (set_mode, which needs a signed
+	// set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+	LeaseControl(ctx context.Context, in *LeaseControlRequest, opts ...grpc.CallOption) (*LeaseControlResponse, error)
+	LeaseKeepalive(ctx context.Context, in *LeaseKeepaliveRequest, opts ...grpc.CallOption) (*LeaseKeepaliveResponse, error)
 }
 
 type sandboxExecClient struct {
@@ -174,6 +182,26 @@ func (c *sandboxExecClient) Abort(ctx context.Context, in *AbortRequest, opts ..
 	return out, nil
 }
 
+func (c *sandboxExecClient) LeaseControl(ctx context.Context, in *LeaseControlRequest, opts ...grpc.CallOption) (*LeaseControlResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LeaseControlResponse)
+	err := c.cc.Invoke(ctx, SandboxExec_LeaseControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxExecClient) LeaseKeepalive(ctx context.Context, in *LeaseKeepaliveRequest, opts ...grpc.CallOption) (*LeaseKeepaliveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LeaseKeepaliveResponse)
+	err := c.cc.Invoke(ctx, SandboxExec_LeaseKeepalive_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxExecServer is the server API for SandboxExec service.
 // All implementations must embed UnimplementedSandboxExecServer
 // for forward compatibility.
@@ -184,6 +212,12 @@ func (c *sandboxExecClient) Abort(ctx context.Context, in *AbortRequest, opts ..
 type SandboxExecServer interface {
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecEvent]) error
 	Abort(context.Context, *AbortRequest) (*AbortResponse, error)
+	// Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+	// are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+	// ends the lease (reset) or changes the mode (set_mode, which needs a signed
+	// set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+	LeaseControl(context.Context, *LeaseControlRequest) (*LeaseControlResponse, error)
+	LeaseKeepalive(context.Context, *LeaseKeepaliveRequest) (*LeaseKeepaliveResponse, error)
 	mustEmbedUnimplementedSandboxExecServer()
 }
 
@@ -199,6 +233,12 @@ func (UnimplementedSandboxExecServer) Exec(*ExecRequest, grpc.ServerStreamingSer
 }
 func (UnimplementedSandboxExecServer) Abort(context.Context, *AbortRequest) (*AbortResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Abort not implemented")
+}
+func (UnimplementedSandboxExecServer) LeaseControl(context.Context, *LeaseControlRequest) (*LeaseControlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LeaseControl not implemented")
+}
+func (UnimplementedSandboxExecServer) LeaseKeepalive(context.Context, *LeaseKeepaliveRequest) (*LeaseKeepaliveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LeaseKeepalive not implemented")
 }
 func (UnimplementedSandboxExecServer) mustEmbedUnimplementedSandboxExecServer() {}
 func (UnimplementedSandboxExecServer) testEmbeddedByValue()                     {}
@@ -250,6 +290,42 @@ func _SandboxExec_Abort_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxExec_LeaseControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LeaseControlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxExecServer).LeaseControl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxExec_LeaseControl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxExecServer).LeaseControl(ctx, req.(*LeaseControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxExec_LeaseKeepalive_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LeaseKeepaliveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxExecServer).LeaseKeepalive(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxExec_LeaseKeepalive_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxExecServer).LeaseKeepalive(ctx, req.(*LeaseKeepaliveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxExec_ServiceDesc is the grpc.ServiceDesc for SandboxExec service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -260,6 +336,14 @@ var SandboxExec_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Abort",
 			Handler:    _SandboxExec_Abort_Handler,
+		},
+		{
+			MethodName: "LeaseControl",
+			Handler:    _SandboxExec_LeaseControl_Handler,
+		},
+		{
+			MethodName: "LeaseKeepalive",
+			Handler:    _SandboxExec_LeaseKeepalive_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -70,6 +70,102 @@ export function streamToJSON(object: Stream): string {
   }
 }
 
+/**
+ * A sandbox's execution mode. UNSPECIFIED (0) means per-exec: a sandbox, token or Exec
+ * that never names a mode runs every Exec in a fresh microVM, as before lease mode.
+ * The JWT and sandbox-record strings are "per-exec", "lease" and "lease+processes".
+ */
+export enum SandboxMode {
+  /** SANDBOX_MODE_UNSPECIFIED - = per-exec */
+  SANDBOX_MODE_UNSPECIFIED = 0,
+  SANDBOX_MODE_PER_EXEC = 1,
+  SANDBOX_MODE_LEASE = 2,
+  SANDBOX_MODE_LEASE_PROCESSES = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function sandboxModeFromJSON(object: any): SandboxMode {
+  switch (object) {
+    case 0:
+    case "SANDBOX_MODE_UNSPECIFIED":
+      return SandboxMode.SANDBOX_MODE_UNSPECIFIED;
+    case 1:
+    case "SANDBOX_MODE_PER_EXEC":
+      return SandboxMode.SANDBOX_MODE_PER_EXEC;
+    case 2:
+    case "SANDBOX_MODE_LEASE":
+      return SandboxMode.SANDBOX_MODE_LEASE;
+    case 3:
+    case "SANDBOX_MODE_LEASE_PROCESSES":
+      return SandboxMode.SANDBOX_MODE_LEASE_PROCESSES;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return SandboxMode.UNRECOGNIZED;
+  }
+}
+
+export function sandboxModeToJSON(object: SandboxMode): string {
+  switch (object) {
+    case SandboxMode.SANDBOX_MODE_UNSPECIFIED:
+      return "SANDBOX_MODE_UNSPECIFIED";
+    case SandboxMode.SANDBOX_MODE_PER_EXEC:
+      return "SANDBOX_MODE_PER_EXEC";
+    case SandboxMode.SANDBOX_MODE_LEASE:
+      return "SANDBOX_MODE_LEASE";
+    case SandboxMode.SANDBOX_MODE_LEASE_PROCESSES:
+      return "SANDBOX_MODE_LEASE_PROCESSES";
+    case SandboxMode.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum LeaseOp {
+  LEASE_OP_UNSPECIFIED = 0,
+  LEASE_OP_STATUS = 1,
+  LEASE_OP_RESET = 2,
+  LEASE_OP_SET_MODE = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function leaseOpFromJSON(object: any): LeaseOp {
+  switch (object) {
+    case 0:
+    case "LEASE_OP_UNSPECIFIED":
+      return LeaseOp.LEASE_OP_UNSPECIFIED;
+    case 1:
+    case "LEASE_OP_STATUS":
+      return LeaseOp.LEASE_OP_STATUS;
+    case 2:
+    case "LEASE_OP_RESET":
+      return LeaseOp.LEASE_OP_RESET;
+    case 3:
+    case "LEASE_OP_SET_MODE":
+      return LeaseOp.LEASE_OP_SET_MODE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return LeaseOp.UNRECOGNIZED;
+  }
+}
+
+export function leaseOpToJSON(object: LeaseOp): string {
+  switch (object) {
+    case LeaseOp.LEASE_OP_UNSPECIFIED:
+      return "LEASE_OP_UNSPECIFIED";
+    case LeaseOp.LEASE_OP_STATUS:
+      return "LEASE_OP_STATUS";
+    case LeaseOp.LEASE_OP_RESET:
+      return "LEASE_OP_RESET";
+    case LeaseOp.LEASE_OP_SET_MODE:
+      return "LEASE_OP_SET_MODE";
+    case LeaseOp.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** ---- worker → relay ---- */
 export interface WorkerFrame {
   /** sent first: identity + capabilities */
@@ -89,7 +185,15 @@ export interface WorkerFrame {
     | End
     | undefined;
   /** exec/channel failure */
-  error?: ExecError | undefined;
+  error?:
+    | ExecError
+    | undefined;
+  /** a lease state change, unsolicited */
+  lease?:
+    | LeaseEvent
+    | undefined;
+  /** the answer to a LeaseControlFrame, by ctl_id */
+  leaseResult?: LeaseControlResult | undefined;
 }
 
 /** ---- relay → worker ---- */
@@ -99,7 +203,15 @@ export interface ServerFrame {
     | Exec
     | undefined;
   /** cancel an in-flight exec */
-  abort?: Abort | undefined;
+  abort?:
+    | Abort
+    | undefined;
+  /** status | reset | set_mode; answered by lease_result */
+  leaseControl?:
+    | LeaseControlFrame
+    | undefined;
+  /** push back a live lease's idle timeout; no answer */
+  keepalive?: LeaseKeepaliveFrame | undefined;
 }
 
 export interface Hello {
@@ -150,6 +262,20 @@ export interface Exec {
    * would blind three separate safeguards at once (spec §3.4).
    */
   workspaceKey: string;
+  /**
+   * Lease mode (SBX0.3), ADDITIVE. An Exec that sets none of these is per-exec, epoch 0,
+   * which is what every client and worker built before them sends and expects. On the
+   * sandbox path the relay overwrites mode, mode_epoch and idle_timeout_s from the
+   * verified token claims; a client cannot pick its own. keepalive is the client's
+   * opt-in. On the harness path the relay zeroes all four.
+   */
+  mode: SandboxMode;
+  /** the mode's version; the worker refuses one below the stored epoch */
+  modeEpoch: number;
+  /** the owner's idle timeout; 0 = the worker's default (worker-clamped) */
+  idleTimeoutS: number;
+  /** opts the lease into the keepalive-loss rule (spec §4) */
+  keepalive: boolean;
 }
 
 export interface Abort {
@@ -211,6 +337,7 @@ export interface ExecEvent {
   chunk?: Chunk | undefined;
   end?: End | undefined;
   error?: ExecError | undefined;
+  lease?: LeaseEvent | undefined;
 }
 
 export interface AbortRequest {
@@ -221,8 +348,95 @@ export interface AbortRequest {
 export interface AbortResponse {
 }
 
+/**
+ * A lease state change. The worker sends it unsolicited (WorkerFrame.lease) and the
+ * relay forwards it to the client on an Exec stream (ExecEvent.lease). It is sent only
+ * for Execs whose mode is not per-exec, so a client that never asked for a lease never
+ * sees one.
+ */
+export interface LeaseEvent {
+  reqId: number;
+  /** "start" | "end" | "expiring" */
+  state: string;
+  /** why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end" */
+  reason: string;
+  /** when it happened; also the key the event is acknowledged by */
+  atUnixMs: number;
+  mode: SandboxMode;
+  /** the lease's age at the event */
+  ageMs: number;
+  /** processes that were running; filled from plan 5 on */
+  processes: string[];
+}
+
+/**
+ * relay → worker: one lease operation on the workspace. ctl_id correlates the
+ * worker's LeaseControlResult. mode and mode_epoch are read for SET_MODE only.
+ */
+export interface LeaseControlFrame {
+  ctlId: number;
+  workspaceKey: string;
+  op: LeaseOp;
+  mode: SandboxMode;
+  modeEpoch: number;
+}
+
+/** relay → worker: activity on a live lease, without an Exec. A no-op without a lease. */
+export interface LeaseKeepaliveFrame {
+  workspaceKey: string;
+}
+
+export interface LeaseStatus {
+  mode: SandboxMode;
+  /** the worker holds a stored epoch for the workspace */
+  epochKnown: boolean;
+  /** "none" | "active" | "expiring" */
+  state: string;
+  ageMs: number;
+  idleTimeoutS: number;
+  /** the last end event, kept until it is acknowledged */
+  pending: LeaseEvent | undefined;
+}
+
+/**
+ * worker → relay: the answer to a LeaseControlFrame. An empty error means OK; otherwise
+ * it is a wire string such as "stale_mode: <detail>" or "lease_unsupported: <detail>".
+ */
+export interface LeaseControlResult {
+  ctlId: number;
+  status: LeaseStatus | undefined;
+  error: string;
+}
+
+/** ---- client ↔ relay (SandboxExec lease calls) ---- */
+export interface LeaseControlRequest {
+  sandboxId: string;
+  op: LeaseOp;
+  /** the signed set-mode token; required for SET_MODE only */
+  setModeToken: string;
+}
+
+export interface LeaseControlResponse {
+  status: LeaseStatus | undefined;
+}
+
+export interface LeaseKeepaliveRequest {
+  sandboxId: string;
+}
+
+export interface LeaseKeepaliveResponse {
+}
+
 function createBaseWorkerFrame(): WorkerFrame {
-  return { hello: undefined, heartbeat: undefined, chunk: undefined, end: undefined, error: undefined };
+  return {
+    hello: undefined,
+    heartbeat: undefined,
+    chunk: undefined,
+    end: undefined,
+    error: undefined,
+    lease: undefined,
+    leaseResult: undefined,
+  };
 }
 
 export const WorkerFrame: MessageFns<WorkerFrame> = {
@@ -241,6 +455,12 @@ export const WorkerFrame: MessageFns<WorkerFrame> = {
     }
     if (message.error !== undefined) {
       ExecError.encode(message.error, writer.uint32(42).fork()).join();
+    }
+    if (message.lease !== undefined) {
+      LeaseEvent.encode(message.lease, writer.uint32(50).fork()).join();
+    }
+    if (message.leaseResult !== undefined) {
+      LeaseControlResult.encode(message.leaseResult, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -292,6 +512,22 @@ export const WorkerFrame: MessageFns<WorkerFrame> = {
           message.error = ExecError.decode(reader, reader.uint32());
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.lease = LeaseEvent.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.leaseResult = LeaseControlResult.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -308,6 +544,8 @@ export const WorkerFrame: MessageFns<WorkerFrame> = {
       chunk: isSet(object.chunk) ? Chunk.fromJSON(object.chunk) : undefined,
       end: isSet(object.end) ? End.fromJSON(object.end) : undefined,
       error: isSet(object.error) ? ExecError.fromJSON(object.error) : undefined,
+      lease: isSet(object.lease) ? LeaseEvent.fromJSON(object.lease) : undefined,
+      leaseResult: isSet(object.leaseResult) ? LeaseControlResult.fromJSON(object.leaseResult) : undefined,
     };
   },
 
@@ -328,6 +566,12 @@ export const WorkerFrame: MessageFns<WorkerFrame> = {
     if (message.error !== undefined) {
       obj.error = ExecError.toJSON(message.error);
     }
+    if (message.lease !== undefined) {
+      obj.lease = LeaseEvent.toJSON(message.lease);
+    }
+    if (message.leaseResult !== undefined) {
+      obj.leaseResult = LeaseControlResult.toJSON(message.leaseResult);
+    }
     return obj;
   },
 
@@ -345,12 +589,18 @@ export const WorkerFrame: MessageFns<WorkerFrame> = {
     message.error = (object.error !== undefined && object.error !== null)
       ? ExecError.fromPartial(object.error)
       : undefined;
+    message.lease = (object.lease !== undefined && object.lease !== null)
+      ? LeaseEvent.fromPartial(object.lease)
+      : undefined;
+    message.leaseResult = (object.leaseResult !== undefined && object.leaseResult !== null)
+      ? LeaseControlResult.fromPartial(object.leaseResult)
+      : undefined;
     return message;
   },
 };
 
 function createBaseServerFrame(): ServerFrame {
-  return { exec: undefined, abort: undefined };
+  return { exec: undefined, abort: undefined, leaseControl: undefined, keepalive: undefined };
 }
 
 export const ServerFrame: MessageFns<ServerFrame> = {
@@ -360,6 +610,12 @@ export const ServerFrame: MessageFns<ServerFrame> = {
     }
     if (message.abort !== undefined) {
       Abort.encode(message.abort, writer.uint32(18).fork()).join();
+    }
+    if (message.leaseControl !== undefined) {
+      LeaseControlFrame.encode(message.leaseControl, writer.uint32(26).fork()).join();
+    }
+    if (message.keepalive !== undefined) {
+      LeaseKeepaliveFrame.encode(message.keepalive, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -387,6 +643,22 @@ export const ServerFrame: MessageFns<ServerFrame> = {
           message.abort = Abort.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.leaseControl = LeaseControlFrame.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.keepalive = LeaseKeepaliveFrame.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -400,6 +672,8 @@ export const ServerFrame: MessageFns<ServerFrame> = {
     return {
       exec: isSet(object.exec) ? Exec.fromJSON(object.exec) : undefined,
       abort: isSet(object.abort) ? Abort.fromJSON(object.abort) : undefined,
+      leaseControl: isSet(object.leaseControl) ? LeaseControlFrame.fromJSON(object.leaseControl) : undefined,
+      keepalive: isSet(object.keepalive) ? LeaseKeepaliveFrame.fromJSON(object.keepalive) : undefined,
     };
   },
 
@@ -411,6 +685,12 @@ export const ServerFrame: MessageFns<ServerFrame> = {
     if (message.abort !== undefined) {
       obj.abort = Abort.toJSON(message.abort);
     }
+    if (message.leaseControl !== undefined) {
+      obj.leaseControl = LeaseControlFrame.toJSON(message.leaseControl);
+    }
+    if (message.keepalive !== undefined) {
+      obj.keepalive = LeaseKeepaliveFrame.toJSON(message.keepalive);
+    }
     return obj;
   },
 
@@ -421,6 +701,12 @@ export const ServerFrame: MessageFns<ServerFrame> = {
     const message = createBaseServerFrame();
     message.exec = (object.exec !== undefined && object.exec !== null) ? Exec.fromPartial(object.exec) : undefined;
     message.abort = (object.abort !== undefined && object.abort !== null) ? Abort.fromPartial(object.abort) : undefined;
+    message.leaseControl = (object.leaseControl !== undefined && object.leaseControl !== null)
+      ? LeaseControlFrame.fromPartial(object.leaseControl)
+      : undefined;
+    message.keepalive = (object.keepalive !== undefined && object.keepalive !== null)
+      ? LeaseKeepaliveFrame.fromPartial(object.keepalive)
+      : undefined;
     return message;
   },
 };
@@ -722,7 +1008,18 @@ export const Heartbeat: MessageFns<Heartbeat> = {
 };
 
 function createBaseExec(): Exec {
-  return { reqId: 0, command: "", stdin: new Uint8Array(0), timeoutS: 0, streaming: false, workspaceKey: "" };
+  return {
+    reqId: 0,
+    command: "",
+    stdin: new Uint8Array(0),
+    timeoutS: 0,
+    streaming: false,
+    workspaceKey: "",
+    mode: 0,
+    modeEpoch: 0,
+    idleTimeoutS: 0,
+    keepalive: false,
+  };
 }
 
 export const Exec: MessageFns<Exec> = {
@@ -744,6 +1041,18 @@ export const Exec: MessageFns<Exec> = {
     }
     if (message.workspaceKey !== "") {
       writer.uint32(50).string(message.workspaceKey);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(56).int32(message.mode);
+    }
+    if (message.modeEpoch !== 0) {
+      writer.uint32(64).uint64(message.modeEpoch);
+    }
+    if (message.idleTimeoutS !== 0) {
+      writer.uint32(72).uint32(message.idleTimeoutS);
+    }
+    if (message.keepalive !== false) {
+      writer.uint32(80).bool(message.keepalive);
     }
     return writer;
   },
@@ -803,6 +1112,38 @@ export const Exec: MessageFns<Exec> = {
           message.workspaceKey = reader.string();
           continue;
         }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.modeEpoch = longToNumber(reader.uint64());
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.idleTimeoutS = reader.uint32();
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.keepalive = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -820,6 +1161,10 @@ export const Exec: MessageFns<Exec> = {
       timeoutS: isSet(object.timeoutS) ? globalThis.Number(object.timeoutS) : 0,
       streaming: isSet(object.streaming) ? globalThis.Boolean(object.streaming) : false,
       workspaceKey: isSet(object.workspaceKey) ? globalThis.String(object.workspaceKey) : "",
+      mode: isSet(object.mode) ? sandboxModeFromJSON(object.mode) : 0,
+      modeEpoch: isSet(object.modeEpoch) ? globalThis.Number(object.modeEpoch) : 0,
+      idleTimeoutS: isSet(object.idleTimeoutS) ? globalThis.Number(object.idleTimeoutS) : 0,
+      keepalive: isSet(object.keepalive) ? globalThis.Boolean(object.keepalive) : false,
     };
   },
 
@@ -843,6 +1188,18 @@ export const Exec: MessageFns<Exec> = {
     if (message.workspaceKey !== "") {
       obj.workspaceKey = message.workspaceKey;
     }
+    if (message.mode !== 0) {
+      obj.mode = sandboxModeToJSON(message.mode);
+    }
+    if (message.modeEpoch !== 0) {
+      obj.modeEpoch = Math.round(message.modeEpoch);
+    }
+    if (message.idleTimeoutS !== 0) {
+      obj.idleTimeoutS = Math.round(message.idleTimeoutS);
+    }
+    if (message.keepalive !== false) {
+      obj.keepalive = message.keepalive;
+    }
     return obj;
   },
 
@@ -857,6 +1214,10 @@ export const Exec: MessageFns<Exec> = {
     message.timeoutS = object.timeoutS ?? 0;
     message.streaming = object.streaming ?? false;
     message.workspaceKey = object.workspaceKey ?? "";
+    message.mode = object.mode ?? 0;
+    message.modeEpoch = object.modeEpoch ?? 0;
+    message.idleTimeoutS = object.idleTimeoutS ?? 0;
+    message.keepalive = object.keepalive ?? false;
     return message;
   },
 };
@@ -1272,7 +1633,7 @@ export const ExecRequest: MessageFns<ExecRequest> = {
 };
 
 function createBaseExecEvent(): ExecEvent {
-  return { chunk: undefined, end: undefined, error: undefined };
+  return { chunk: undefined, end: undefined, error: undefined, lease: undefined };
 }
 
 export const ExecEvent: MessageFns<ExecEvent> = {
@@ -1285,6 +1646,9 @@ export const ExecEvent: MessageFns<ExecEvent> = {
     }
     if (message.error !== undefined) {
       ExecError.encode(message.error, writer.uint32(26).fork()).join();
+    }
+    if (message.lease !== undefined) {
+      LeaseEvent.encode(message.lease, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -1320,6 +1684,14 @@ export const ExecEvent: MessageFns<ExecEvent> = {
           message.error = ExecError.decode(reader, reader.uint32());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.lease = LeaseEvent.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1334,6 +1706,7 @@ export const ExecEvent: MessageFns<ExecEvent> = {
       chunk: isSet(object.chunk) ? Chunk.fromJSON(object.chunk) : undefined,
       end: isSet(object.end) ? End.fromJSON(object.end) : undefined,
       error: isSet(object.error) ? ExecError.fromJSON(object.error) : undefined,
+      lease: isSet(object.lease) ? LeaseEvent.fromJSON(object.lease) : undefined,
     };
   },
 
@@ -1348,6 +1721,9 @@ export const ExecEvent: MessageFns<ExecEvent> = {
     if (message.error !== undefined) {
       obj.error = ExecError.toJSON(message.error);
     }
+    if (message.lease !== undefined) {
+      obj.lease = LeaseEvent.toJSON(message.lease);
+    }
     return obj;
   },
 
@@ -1360,6 +1736,9 @@ export const ExecEvent: MessageFns<ExecEvent> = {
     message.end = (object.end !== undefined && object.end !== null) ? End.fromPartial(object.end) : undefined;
     message.error = (object.error !== undefined && object.error !== null)
       ? ExecError.fromPartial(object.error)
+      : undefined;
+    message.lease = (object.lease !== undefined && object.lease !== null)
+      ? LeaseEvent.fromPartial(object.lease)
       : undefined;
     return message;
   },
@@ -1484,6 +1863,835 @@ export const AbortResponse: MessageFns<AbortResponse> = {
   },
 };
 
+function createBaseLeaseEvent(): LeaseEvent {
+  return { reqId: 0, state: "", reason: "", atUnixMs: 0, mode: 0, ageMs: 0, processes: [] };
+}
+
+export const LeaseEvent: MessageFns<LeaseEvent> = {
+  encode(message: LeaseEvent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reqId !== 0) {
+      writer.uint32(8).uint64(message.reqId);
+    }
+    if (message.state !== "") {
+      writer.uint32(18).string(message.state);
+    }
+    if (message.reason !== "") {
+      writer.uint32(26).string(message.reason);
+    }
+    if (message.atUnixMs !== 0) {
+      writer.uint32(32).int64(message.atUnixMs);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(40).int32(message.mode);
+    }
+    if (message.ageMs !== 0) {
+      writer.uint32(48).uint64(message.ageMs);
+    }
+    for (const v of message.processes) {
+      writer.uint32(58).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseEvent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseEvent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reqId = longToNumber(reader.uint64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.state = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.reason = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.atUnixMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.ageMs = longToNumber(reader.uint64());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.processes.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseEvent {
+    return {
+      reqId: isSet(object.reqId) ? globalThis.Number(object.reqId) : 0,
+      state: isSet(object.state) ? globalThis.String(object.state) : "",
+      reason: isSet(object.reason) ? globalThis.String(object.reason) : "",
+      atUnixMs: isSet(object.atUnixMs) ? globalThis.Number(object.atUnixMs) : 0,
+      mode: isSet(object.mode) ? sandboxModeFromJSON(object.mode) : 0,
+      ageMs: isSet(object.ageMs) ? globalThis.Number(object.ageMs) : 0,
+      processes: globalThis.Array.isArray(object?.processes)
+        ? object.processes.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: LeaseEvent): unknown {
+    const obj: any = {};
+    if (message.reqId !== 0) {
+      obj.reqId = Math.round(message.reqId);
+    }
+    if (message.state !== "") {
+      obj.state = message.state;
+    }
+    if (message.reason !== "") {
+      obj.reason = message.reason;
+    }
+    if (message.atUnixMs !== 0) {
+      obj.atUnixMs = Math.round(message.atUnixMs);
+    }
+    if (message.mode !== 0) {
+      obj.mode = sandboxModeToJSON(message.mode);
+    }
+    if (message.ageMs !== 0) {
+      obj.ageMs = Math.round(message.ageMs);
+    }
+    if (message.processes?.length) {
+      obj.processes = message.processes;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseEvent>, I>>(base?: I): LeaseEvent {
+    return LeaseEvent.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseEvent>, I>>(object: I): LeaseEvent {
+    const message = createBaseLeaseEvent();
+    message.reqId = object.reqId ?? 0;
+    message.state = object.state ?? "";
+    message.reason = object.reason ?? "";
+    message.atUnixMs = object.atUnixMs ?? 0;
+    message.mode = object.mode ?? 0;
+    message.ageMs = object.ageMs ?? 0;
+    message.processes = object.processes?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseLeaseControlFrame(): LeaseControlFrame {
+  return { ctlId: 0, workspaceKey: "", op: 0, mode: 0, modeEpoch: 0 };
+}
+
+export const LeaseControlFrame: MessageFns<LeaseControlFrame> = {
+  encode(message: LeaseControlFrame, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.ctlId !== 0) {
+      writer.uint32(8).uint64(message.ctlId);
+    }
+    if (message.workspaceKey !== "") {
+      writer.uint32(18).string(message.workspaceKey);
+    }
+    if (message.op !== 0) {
+      writer.uint32(24).int32(message.op);
+    }
+    if (message.mode !== 0) {
+      writer.uint32(32).int32(message.mode);
+    }
+    if (message.modeEpoch !== 0) {
+      writer.uint32(40).uint64(message.modeEpoch);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseControlFrame {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseControlFrame();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.ctlId = longToNumber(reader.uint64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.workspaceKey = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.op = reader.int32() as any;
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.modeEpoch = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseControlFrame {
+    return {
+      ctlId: isSet(object.ctlId) ? globalThis.Number(object.ctlId) : 0,
+      workspaceKey: isSet(object.workspaceKey) ? globalThis.String(object.workspaceKey) : "",
+      op: isSet(object.op) ? leaseOpFromJSON(object.op) : 0,
+      mode: isSet(object.mode) ? sandboxModeFromJSON(object.mode) : 0,
+      modeEpoch: isSet(object.modeEpoch) ? globalThis.Number(object.modeEpoch) : 0,
+    };
+  },
+
+  toJSON(message: LeaseControlFrame): unknown {
+    const obj: any = {};
+    if (message.ctlId !== 0) {
+      obj.ctlId = Math.round(message.ctlId);
+    }
+    if (message.workspaceKey !== "") {
+      obj.workspaceKey = message.workspaceKey;
+    }
+    if (message.op !== 0) {
+      obj.op = leaseOpToJSON(message.op);
+    }
+    if (message.mode !== 0) {
+      obj.mode = sandboxModeToJSON(message.mode);
+    }
+    if (message.modeEpoch !== 0) {
+      obj.modeEpoch = Math.round(message.modeEpoch);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseControlFrame>, I>>(base?: I): LeaseControlFrame {
+    return LeaseControlFrame.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseControlFrame>, I>>(object: I): LeaseControlFrame {
+    const message = createBaseLeaseControlFrame();
+    message.ctlId = object.ctlId ?? 0;
+    message.workspaceKey = object.workspaceKey ?? "";
+    message.op = object.op ?? 0;
+    message.mode = object.mode ?? 0;
+    message.modeEpoch = object.modeEpoch ?? 0;
+    return message;
+  },
+};
+
+function createBaseLeaseKeepaliveFrame(): LeaseKeepaliveFrame {
+  return { workspaceKey: "" };
+}
+
+export const LeaseKeepaliveFrame: MessageFns<LeaseKeepaliveFrame> = {
+  encode(message: LeaseKeepaliveFrame, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceKey !== "") {
+      writer.uint32(10).string(message.workspaceKey);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseKeepaliveFrame {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseKeepaliveFrame();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceKey = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseKeepaliveFrame {
+    return { workspaceKey: isSet(object.workspaceKey) ? globalThis.String(object.workspaceKey) : "" };
+  },
+
+  toJSON(message: LeaseKeepaliveFrame): unknown {
+    const obj: any = {};
+    if (message.workspaceKey !== "") {
+      obj.workspaceKey = message.workspaceKey;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseKeepaliveFrame>, I>>(base?: I): LeaseKeepaliveFrame {
+    return LeaseKeepaliveFrame.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseKeepaliveFrame>, I>>(object: I): LeaseKeepaliveFrame {
+    const message = createBaseLeaseKeepaliveFrame();
+    message.workspaceKey = object.workspaceKey ?? "";
+    return message;
+  },
+};
+
+function createBaseLeaseStatus(): LeaseStatus {
+  return { mode: 0, epochKnown: false, state: "", ageMs: 0, idleTimeoutS: 0, pending: undefined };
+}
+
+export const LeaseStatus: MessageFns<LeaseStatus> = {
+  encode(message: LeaseStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.mode !== 0) {
+      writer.uint32(8).int32(message.mode);
+    }
+    if (message.epochKnown !== false) {
+      writer.uint32(16).bool(message.epochKnown);
+    }
+    if (message.state !== "") {
+      writer.uint32(26).string(message.state);
+    }
+    if (message.ageMs !== 0) {
+      writer.uint32(32).uint64(message.ageMs);
+    }
+    if (message.idleTimeoutS !== 0) {
+      writer.uint32(40).uint32(message.idleTimeoutS);
+    }
+    if (message.pending !== undefined) {
+      LeaseEvent.encode(message.pending, writer.uint32(50).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseStatus {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseStatus();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.mode = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.epochKnown = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.state = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.ageMs = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.idleTimeoutS = reader.uint32();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.pending = LeaseEvent.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseStatus {
+    return {
+      mode: isSet(object.mode) ? sandboxModeFromJSON(object.mode) : 0,
+      epochKnown: isSet(object.epochKnown) ? globalThis.Boolean(object.epochKnown) : false,
+      state: isSet(object.state) ? globalThis.String(object.state) : "",
+      ageMs: isSet(object.ageMs) ? globalThis.Number(object.ageMs) : 0,
+      idleTimeoutS: isSet(object.idleTimeoutS) ? globalThis.Number(object.idleTimeoutS) : 0,
+      pending: isSet(object.pending) ? LeaseEvent.fromJSON(object.pending) : undefined,
+    };
+  },
+
+  toJSON(message: LeaseStatus): unknown {
+    const obj: any = {};
+    if (message.mode !== 0) {
+      obj.mode = sandboxModeToJSON(message.mode);
+    }
+    if (message.epochKnown !== false) {
+      obj.epochKnown = message.epochKnown;
+    }
+    if (message.state !== "") {
+      obj.state = message.state;
+    }
+    if (message.ageMs !== 0) {
+      obj.ageMs = Math.round(message.ageMs);
+    }
+    if (message.idleTimeoutS !== 0) {
+      obj.idleTimeoutS = Math.round(message.idleTimeoutS);
+    }
+    if (message.pending !== undefined) {
+      obj.pending = LeaseEvent.toJSON(message.pending);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseStatus>, I>>(base?: I): LeaseStatus {
+    return LeaseStatus.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseStatus>, I>>(object: I): LeaseStatus {
+    const message = createBaseLeaseStatus();
+    message.mode = object.mode ?? 0;
+    message.epochKnown = object.epochKnown ?? false;
+    message.state = object.state ?? "";
+    message.ageMs = object.ageMs ?? 0;
+    message.idleTimeoutS = object.idleTimeoutS ?? 0;
+    message.pending = (object.pending !== undefined && object.pending !== null)
+      ? LeaseEvent.fromPartial(object.pending)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseLeaseControlResult(): LeaseControlResult {
+  return { ctlId: 0, status: undefined, error: "" };
+}
+
+export const LeaseControlResult: MessageFns<LeaseControlResult> = {
+  encode(message: LeaseControlResult, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.ctlId !== 0) {
+      writer.uint32(8).uint64(message.ctlId);
+    }
+    if (message.status !== undefined) {
+      LeaseStatus.encode(message.status, writer.uint32(18).fork()).join();
+    }
+    if (message.error !== "") {
+      writer.uint32(26).string(message.error);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseControlResult {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseControlResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.ctlId = longToNumber(reader.uint64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.status = LeaseStatus.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.error = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseControlResult {
+    return {
+      ctlId: isSet(object.ctlId) ? globalThis.Number(object.ctlId) : 0,
+      status: isSet(object.status) ? LeaseStatus.fromJSON(object.status) : undefined,
+      error: isSet(object.error) ? globalThis.String(object.error) : "",
+    };
+  },
+
+  toJSON(message: LeaseControlResult): unknown {
+    const obj: any = {};
+    if (message.ctlId !== 0) {
+      obj.ctlId = Math.round(message.ctlId);
+    }
+    if (message.status !== undefined) {
+      obj.status = LeaseStatus.toJSON(message.status);
+    }
+    if (message.error !== "") {
+      obj.error = message.error;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseControlResult>, I>>(base?: I): LeaseControlResult {
+    return LeaseControlResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseControlResult>, I>>(object: I): LeaseControlResult {
+    const message = createBaseLeaseControlResult();
+    message.ctlId = object.ctlId ?? 0;
+    message.status = (object.status !== undefined && object.status !== null)
+      ? LeaseStatus.fromPartial(object.status)
+      : undefined;
+    message.error = object.error ?? "";
+    return message;
+  },
+};
+
+function createBaseLeaseControlRequest(): LeaseControlRequest {
+  return { sandboxId: "", op: 0, setModeToken: "" };
+}
+
+export const LeaseControlRequest: MessageFns<LeaseControlRequest> = {
+  encode(message: LeaseControlRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sandboxId !== "") {
+      writer.uint32(10).string(message.sandboxId);
+    }
+    if (message.op !== 0) {
+      writer.uint32(16).int32(message.op);
+    }
+    if (message.setModeToken !== "") {
+      writer.uint32(26).string(message.setModeToken);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseControlRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseControlRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sandboxId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.op = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.setModeToken = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseControlRequest {
+    return {
+      sandboxId: isSet(object.sandboxId) ? globalThis.String(object.sandboxId) : "",
+      op: isSet(object.op) ? leaseOpFromJSON(object.op) : 0,
+      setModeToken: isSet(object.setModeToken) ? globalThis.String(object.setModeToken) : "",
+    };
+  },
+
+  toJSON(message: LeaseControlRequest): unknown {
+    const obj: any = {};
+    if (message.sandboxId !== "") {
+      obj.sandboxId = message.sandboxId;
+    }
+    if (message.op !== 0) {
+      obj.op = leaseOpToJSON(message.op);
+    }
+    if (message.setModeToken !== "") {
+      obj.setModeToken = message.setModeToken;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseControlRequest>, I>>(base?: I): LeaseControlRequest {
+    return LeaseControlRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseControlRequest>, I>>(object: I): LeaseControlRequest {
+    const message = createBaseLeaseControlRequest();
+    message.sandboxId = object.sandboxId ?? "";
+    message.op = object.op ?? 0;
+    message.setModeToken = object.setModeToken ?? "";
+    return message;
+  },
+};
+
+function createBaseLeaseControlResponse(): LeaseControlResponse {
+  return { status: undefined };
+}
+
+export const LeaseControlResponse: MessageFns<LeaseControlResponse> = {
+  encode(message: LeaseControlResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.status !== undefined) {
+      LeaseStatus.encode(message.status, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseControlResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseControlResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.status = LeaseStatus.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseControlResponse {
+    return { status: isSet(object.status) ? LeaseStatus.fromJSON(object.status) : undefined };
+  },
+
+  toJSON(message: LeaseControlResponse): unknown {
+    const obj: any = {};
+    if (message.status !== undefined) {
+      obj.status = LeaseStatus.toJSON(message.status);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseControlResponse>, I>>(base?: I): LeaseControlResponse {
+    return LeaseControlResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseControlResponse>, I>>(object: I): LeaseControlResponse {
+    const message = createBaseLeaseControlResponse();
+    message.status = (object.status !== undefined && object.status !== null)
+      ? LeaseStatus.fromPartial(object.status)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseLeaseKeepaliveRequest(): LeaseKeepaliveRequest {
+  return { sandboxId: "" };
+}
+
+export const LeaseKeepaliveRequest: MessageFns<LeaseKeepaliveRequest> = {
+  encode(message: LeaseKeepaliveRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sandboxId !== "") {
+      writer.uint32(10).string(message.sandboxId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseKeepaliveRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseKeepaliveRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sandboxId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LeaseKeepaliveRequest {
+    return { sandboxId: isSet(object.sandboxId) ? globalThis.String(object.sandboxId) : "" };
+  },
+
+  toJSON(message: LeaseKeepaliveRequest): unknown {
+    const obj: any = {};
+    if (message.sandboxId !== "") {
+      obj.sandboxId = message.sandboxId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseKeepaliveRequest>, I>>(base?: I): LeaseKeepaliveRequest {
+    return LeaseKeepaliveRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseKeepaliveRequest>, I>>(object: I): LeaseKeepaliveRequest {
+    const message = createBaseLeaseKeepaliveRequest();
+    message.sandboxId = object.sandboxId ?? "";
+    return message;
+  },
+};
+
+function createBaseLeaseKeepaliveResponse(): LeaseKeepaliveResponse {
+  return {};
+}
+
+export const LeaseKeepaliveResponse: MessageFns<LeaseKeepaliveResponse> = {
+  encode(_: LeaseKeepaliveResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LeaseKeepaliveResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLeaseKeepaliveResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): LeaseKeepaliveResponse {
+    return {};
+  },
+
+  toJSON(_: LeaseKeepaliveResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LeaseKeepaliveResponse>, I>>(base?: I): LeaseKeepaliveResponse {
+    return LeaseKeepaliveResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LeaseKeepaliveResponse>, I>>(_: I): LeaseKeepaliveResponse {
+    const message = createBaseLeaseKeepaliveResponse();
+    return message;
+  },
+};
+
 /**
  * Worker (any language) dials the relay and holds ONE bidi stream.
  * worker→relay carries results/liveness; relay→worker carries commands.
@@ -1546,12 +2754,44 @@ export const SandboxExecService = {
     responseSerialize: (value: AbortResponse) => Buffer.from(AbortResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => AbortResponse.decode(value),
   },
+  /**
+   * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+   * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+   * ends the lease (reset) or changes the mode (set_mode, which needs a signed
+   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   */
+  leaseControl: {
+    path: "/sandbox.v1.SandboxExec/LeaseControl",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: LeaseControlRequest) => Buffer.from(LeaseControlRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => LeaseControlRequest.decode(value),
+    responseSerialize: (value: LeaseControlResponse) => Buffer.from(LeaseControlResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => LeaseControlResponse.decode(value),
+  },
+  leaseKeepalive: {
+    path: "/sandbox.v1.SandboxExec/LeaseKeepalive",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: LeaseKeepaliveRequest) => Buffer.from(LeaseKeepaliveRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => LeaseKeepaliveRequest.decode(value),
+    responseSerialize: (value: LeaseKeepaliveResponse) => Buffer.from(LeaseKeepaliveResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => LeaseKeepaliveResponse.decode(value),
+  },
 } as const;
 
 export interface SandboxExecServer extends UntypedServiceImplementation {
   /** server-streaming output */
   exec: handleServerStreamingCall<ExecRequest, ExecEvent>;
   abort: handleUnaryCall<AbortRequest, AbortResponse>;
+  /**
+   * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+   * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+   * ends the lease (reset) or changes the mode (set_mode, which needs a signed
+   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   */
+  leaseControl: handleUnaryCall<LeaseControlRequest, LeaseControlResponse>;
+  leaseKeepalive: handleUnaryCall<LeaseKeepaliveRequest, LeaseKeepaliveResponse>;
 }
 
 export interface SandboxExecClient extends Client {
@@ -1572,6 +2812,42 @@ export interface SandboxExecClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: AbortResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+   * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+   * ends the lease (reset) or changes the mode (set_mode, which needs a signed
+   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   */
+  leaseControl(
+    request: LeaseControlRequest,
+    callback: (error: ServiceError | null, response: LeaseControlResponse) => void,
+  ): ClientUnaryCall;
+  leaseControl(
+    request: LeaseControlRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: LeaseControlResponse) => void,
+  ): ClientUnaryCall;
+  leaseControl(
+    request: LeaseControlRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: LeaseControlResponse) => void,
+  ): ClientUnaryCall;
+  leaseKeepalive(
+    request: LeaseKeepaliveRequest,
+    callback: (error: ServiceError | null, response: LeaseKeepaliveResponse) => void,
+  ): ClientUnaryCall;
+  leaseKeepalive(
+    request: LeaseKeepaliveRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: LeaseKeepaliveResponse) => void,
+  ): ClientUnaryCall;
+  leaseKeepalive(
+    request: LeaseKeepaliveRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: LeaseKeepaliveResponse) => void,
   ): ClientUnaryCall;
 }
 

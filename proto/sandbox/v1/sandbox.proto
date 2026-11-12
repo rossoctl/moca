@@ -13,6 +13,13 @@ service SandboxWorker {
 service SandboxExec {
   rpc Exec(ExecRequest) returns (stream ExecEvent);   // server-streaming output
   rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
+  // are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
+  // ends the lease (reset) or changes the mode (set_mode, which needs a signed
+  // set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+  rpc LeaseControl(LeaseControlRequest) returns (LeaseControlResponse);
+  rpc LeaseKeepalive(LeaseKeepaliveRequest) returns (LeaseKeepaliveResponse);
 }
 
 // ---- worker → relay ----
@@ -23,6 +30,8 @@ message WorkerFrame {
     Chunk     chunk     = 3;   // streamed stdout for an exec
     End       end       = 4;   // terminal success for an exec
     ExecError error     = 5;   // exec/channel failure
+    LeaseEvent         lease        = 6;   // a lease state change, unsolicited
+    LeaseControlResult lease_result = 7;   // the answer to a LeaseControlFrame, by ctl_id
   }
 }
 
@@ -31,6 +40,8 @@ message ServerFrame {
   oneof msg {
     Exec  exec  = 1;           // run one command
     Abort abort = 2;           // cancel an in-flight exec
+    LeaseControlFrame   lease_control = 3;   // status | reset | set_mode; answered by lease_result
+    LeaseKeepaliveFrame keepalive     = 4;   // push back a live lease's idle timeout; no answer
   }
 }
 
@@ -66,6 +77,16 @@ message Exec {
   // correct workspace to choose and nothing to fall back to, and an empty string
   // would blind three separate safeguards at once (spec §3.4).
   string workspace_key = 6;
+
+  // Lease mode (SBX0.3), ADDITIVE. An Exec that sets none of these is per-exec, epoch 0,
+  // which is what every client and worker built before them sends and expects. On the
+  // sandbox path the relay overwrites mode, mode_epoch and idle_timeout_s from the
+  // verified token claims; a client cannot pick its own. keepalive is the client's
+  // opt-in. On the harness path the relay zeroes all four.
+  SandboxMode mode           = 7;
+  uint64      mode_epoch     = 8;    // the mode's version; the worker refuses one below the stored epoch
+  uint32      idle_timeout_s = 9;    // the owner's idle timeout; 0 = the worker's default (worker-clamped)
+  bool        keepalive      = 10;   // opts the lease into the keepalive-loss rule (spec §4)
 }
 message Abort     { uint64 req_id = 1; }
 
@@ -109,6 +130,79 @@ message ExecRequest {
   // boundary: the worker that fills it in is still the trust root for routing.
   string workload = 3;
 }
-message ExecEvent   { oneof event { Chunk chunk = 1; End end = 2; ExecError error = 3; } }
+message ExecEvent   { oneof event { Chunk chunk = 1; End end = 2; ExecError error = 3; LeaseEvent lease = 4; } }
 message AbortRequest  { string sandbox_id = 1; uint64 req_id = 2; }
 message AbortResponse {}
+
+// ---- lease mode (SBX0.3) ----
+
+// A sandbox's execution mode. UNSPECIFIED (0) means per-exec: a sandbox, token or Exec
+// that never names a mode runs every Exec in a fresh microVM, as before lease mode.
+// The JWT and sandbox-record strings are "per-exec", "lease" and "lease+processes".
+enum SandboxMode {
+  SANDBOX_MODE_UNSPECIFIED     = 0;   // = per-exec
+  SANDBOX_MODE_PER_EXEC        = 1;
+  SANDBOX_MODE_LEASE           = 2;
+  SANDBOX_MODE_LEASE_PROCESSES = 3;
+}
+
+// A lease state change. The worker sends it unsolicited (WorkerFrame.lease) and the
+// relay forwards it to the client on an Exec stream (ExecEvent.lease). It is sent only
+// for Execs whose mode is not per-exec, so a client that never asked for a lease never
+// sees one.
+message LeaseEvent {
+  uint64      req_id     = 1;
+  string      state      = 2;   // "start" | "end" | "expiring"
+  string      reason     = 3;   // why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end"
+  int64       at_unix_ms = 4;   // when it happened; also the key the event is acknowledged by
+  SandboxMode mode       = 5;
+  uint64      age_ms     = 6;   // the lease's age at the event
+  repeated string processes = 7;   // processes that were running; filled from plan 5 on
+}
+
+enum LeaseOp {
+  LEASE_OP_UNSPECIFIED = 0;
+  LEASE_OP_STATUS      = 1;
+  LEASE_OP_RESET       = 2;
+  LEASE_OP_SET_MODE    = 3;
+}
+
+// relay → worker: one lease operation on the workspace. ctl_id correlates the
+// worker's LeaseControlResult. mode and mode_epoch are read for SET_MODE only.
+message LeaseControlFrame {
+  uint64      ctl_id        = 1;
+  string      workspace_key = 2;
+  LeaseOp     op            = 3;
+  SandboxMode mode          = 4;
+  uint64      mode_epoch    = 5;
+}
+
+// relay → worker: activity on a live lease, without an Exec. A no-op without a lease.
+message LeaseKeepaliveFrame { string workspace_key = 1; }
+
+message LeaseStatus {
+  SandboxMode mode           = 1;
+  bool        epoch_known    = 2;   // the worker holds a stored epoch for the workspace
+  string      state          = 3;   // "none" | "active" | "expiring"
+  uint64      age_ms         = 4;
+  uint32      idle_timeout_s = 5;
+  LeaseEvent  pending        = 6;   // the last end event, kept until it is acknowledged
+}
+
+// worker → relay: the answer to a LeaseControlFrame. An empty error means OK; otherwise
+// it is a wire string such as "stale_mode: <detail>" or "lease_unsupported: <detail>".
+message LeaseControlResult {
+  uint64      ctl_id = 1;
+  LeaseStatus status = 2;
+  string      error  = 3;
+}
+
+// ---- client ↔ relay (SandboxExec lease calls) ----
+message LeaseControlRequest {
+  string  sandbox_id     = 1;
+  LeaseOp op             = 2;
+  string  set_mode_token = 3;   // the signed set-mode token; required for SET_MODE only
+}
+message LeaseControlResponse   { LeaseStatus status = 1; }
+message LeaseKeepaliveRequest  { string sandbox_id = 1; }
+message LeaseKeepaliveResponse {}

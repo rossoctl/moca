@@ -22,6 +22,8 @@ import {
   type ExecEvent,
   type AbortRequest,
   type AbortResponse,
+  type LeaseControlResponse,
+  type LeaseKeepaliveResponse,
   MAX_EXEC_MESSAGE_BYTES,
 } from '@moca/k8s-sandbox';
 import { RedisRecordStore, affinityTimings } from '@moca/harness';
@@ -238,6 +240,11 @@ function addWorkerService(server: Server, relay: ReturnType<typeof createRelay>)
   server.addService(SandboxWorkerService, workerImpl);
 }
 
+/** grpc-js's own reply for an unimplemented method (server.js `getDefaultHandler`). */
+function notImplemented(method: string) {
+  return grpcError(status.UNIMPLEMENTED, `The server does not implement the method ${method}`);
+}
+
 function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
   // Audit lines (SBX0 §3.5) only on a relay with sandbox keys, so a MOCA relay's output is
   // unchanged. Fixed reasons, the token's sub and sbx only when it verified; never the token.
@@ -323,6 +330,12 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
       relay.routeAbort(entry.wrk, entry.wid);
       cb(null, {});
     },
+    // SBX0.3 lease calls: on the wire from plan 3 Task 1, served from Task 5. Until then
+    // they answer exactly what grpc-js answers for a method the implementation omits.
+    leaseControl: (_call, cb: sendUnaryData<LeaseControlResponse>) =>
+      cb(notImplemented('leaseControl'), null),
+    leaseKeepalive: (_call, cb: sendUnaryData<LeaseKeepaliveResponse>) =>
+      cb(notImplemented('leaseKeepalive'), null),
   };
   server.addService(SandboxExecService, execImpl);
 }
