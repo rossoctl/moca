@@ -61,8 +61,30 @@ class SandboxError(RuntimeError):
     no exit status to report."""
 
 
-class SandboxBusy(SandboxError):
+class RefusedAtCapacity(SandboxError):
+    """The sandbox declined the command at capacity BEFORE any of it ran (no Chunk had arrived), so it is safe to
+    send again: `refused` is the class (REFUSAL_CLASSES' names, or relay_busy) and `reason` the refusal's own text.
+    The worker's vmpool refusals (memory-budget, max-runs, queue full) arrive as an ExecError or a status message;
+    the relay's in-flight cap is SandboxBusy, below. Mirrors sandbox-client's TEMPLATE_BUSY and its busy rule."""
+
+    def __init__(self, message: str, refused: str, reason: str):
+        super().__init__(message)
+        self.refused, self.reason = refused, reason
+
+
+class SandboxBusy(RefusedAtCapacity):
     """RESOURCE_EXHAUSTED: the sandbox already has its cap of Execs in flight. Nothing ran."""
+
+    def __init__(self, message: str, reason: str = ""):
+        super().__init__(message, "relay_busy", reason or message)
+
+
+# The worker's refusals at capacity, sent before the command starts (packages/sandbox-client's TEMPLATE_BUSY).
+REFUSAL_CLASSES = (("memory-budget:", "memory_budget"), ("max-runs:", "max_runs"), ("busy: queue full", "queue_full"))
+
+
+def refusal_class(message: str) -> str:
+    return next((name for prefix, name in REFUSAL_CLASSES if message.startswith(prefix)), "")
 
 
 class TokenExpiredDuringExec(SandboxError):
@@ -212,12 +234,15 @@ class Sandbox:
             ),
             metadata=md,
         )
-        out, err, started = bytearray(), bytearray(), False
+        # started: any event arrived (the token was accepted); chunked: output arrived, so some of the command ran and
+        # a refusal after it is not a refusal before the start.
+        out, err, started, chunked = bytearray(), bytearray(), False, False
         try:
             for ev in events:
                 started = True
                 kind = ev.WhichOneof("event")
                 if kind == "chunk":
+                    chunked = True
                     (err if ev.chunk.stream == sandbox_pb2.STREAM_STDERR else out).extend(ev.chunk.data)
                 elif kind == "end":
                     return Result(bytes(out), bytes(err), ev.end.exit_code, ev.end.truncated)
@@ -225,6 +250,8 @@ class Sandbox:
                     if TIMEOUT_MESSAGE.fullmatch(ev.error.message):
                         # An outcome, not a failure: the command ran out of time.
                         return Result(bytes(out), bytes(err), 124, False, timed_out=True)
+                    if not chunked and (cls := refusal_class(ev.error.message)):
+                        raise RefusedAtCapacity(f"exec failed: {ev.error.message}", cls, ev.error.message)
                     # The machinery failed (VM boot, worker gone): not the command's exit status.
                     raise SandboxError(f"exec failed: {ev.error.message}")
         except KeyboardInterrupt:
@@ -243,9 +270,11 @@ class Sandbox:
                 raise TokenExpiredDuringExec(
                     f"{details or 'sandbox token expired during the Exec'}: the command outlived its "
                     f"token and was cancelled; give it a shorter timeout") from None
-            if code == grpc.StatusCode.RESOURCE_EXHAUSTED and details.startswith("sandbox busy"):
+            if code == grpc.StatusCode.RESOURCE_EXHAUSTED and details.startswith("sandbox busy") and not chunked:
                 raise SandboxBusy(
-                    f"{details}: nothing ran; retry once a running command finishes") from None
+                    f"{details}: nothing ran; retry once a running command finishes", details) from None
+            if not chunked and (cls := refusal_class(details)):
+                raise RefusedAtCapacity(f"exec failed: {code.name}: {details}", cls, details) from None
             raise SandboxError(f"exec failed: {code.name}: {details}") from None
         finally:
             # Close the call on every way out, the early returns after End and on timeout included;
