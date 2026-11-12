@@ -72,7 +72,7 @@ func execErr(msg string) *pb.ExecEvent {
 	return &pb.ExecEvent{Event: &pb.ExecEvent_Error{Error: &pb.ExecError{Message: msg}}}
 }
 
-var testCfg = config{addr: "x", sandboxID: "moca_microvm_0", key: "am4-k", token: "tok", timeoutS: 600}
+var testCfg = config{addr: "x", sandboxID: "moca_microvm_0", key: "ws-k", token: "tok", timeoutS: 600}
 
 func run(t *testing.T, c *fakeClient, cfg config) (int, string, string) {
 	t.Helper()
@@ -93,10 +93,23 @@ func TestExitCodeAndStreams(t *testing.T) {
 	}
 }
 
-func TestSignalExitIs137(t *testing.T) {
-	c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{end(-9, false)}}}
-	if code, _, _ := run(t, c, testCfg); code != 137 {
-		t.Fatalf("negative exit code: got %d, want 137", code)
+func TestSignalExitIs128PlusN(t *testing.T) {
+	for _, tc := range []struct {
+		exit int32
+		want int
+	}{{-9, 137}, {-15, 143}, {-2, 130}} {
+		c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{end(tc.exit, false)}}}
+		if code, _, _ := run(t, c, testCfg); code != tc.want {
+			t.Fatalf("exit code %d: got %d, want %d (128 + n, as sbx.py)", tc.exit, code, tc.want)
+		}
+	}
+}
+
+func TestTimeoutKeepsPartialOutput(t *testing.T) {
+	c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDOUT, "partial"), execErr("timeout:600")}}}
+	code, out, errw := run(t, c, testCfg)
+	if code != 124 || out != "partial" || !strings.Contains(errw, "sbx: command timed out after 600 s") {
+		t.Fatalf("got code=%d out=%q err=%q", code, out, errw)
 	}
 }
 
@@ -115,7 +128,7 @@ func TestFailures(t *testing.T) {
 		code int
 		want string
 	}{
-		{"in-stream timeout", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{execErr("timeout:600")}}}, 124, "sbx: command timed out"},
+		{"a machinery error that mentions a timeout is not one", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{execErr("vm boot failed: vsock dial timeout: 30s")}}}, 125, "sbx: exec failed: vm boot failed: vsock dial timeout: 30s"},
 		{"in-stream error", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{execErr("vm boot failed")}}}, 125, "sbx: exec failed: vm boot failed"},
 		{"refused token", &fakeClient{execErr: status.Error(codes.PermissionDenied, "key outside prefix")}, 125, "exec failed: PERMISSION_DENIED: key outside prefix"},
 		{"rpc error mid-stream", &fakeClient{stream: &fakeStream{final: status.Error(codes.Unavailable, "gone")}}, 125, "exec failed: UNAVAILABLE: gone"},
@@ -134,7 +147,7 @@ func TestRequestShape(t *testing.T) {
 	c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{end(0, false)}}}
 	run(t, c, testCfg)
 	e := c.req.GetExec()
-	if c.req.GetSandboxId() != "moca_microvm_0" || e.GetWorkspaceKey() != "am4-k" || e.GetTimeoutS() != 600 ||
+	if c.req.GetSandboxId() != "moca_microvm_0" || e.GetWorkspaceKey() != "ws-k" || e.GetTimeoutS() != 600 ||
 		!e.GetStreaming() || e.GetCommand() != "true" || e.GetReqId() != 7 {
 		t.Fatalf("request: %v", c.req)
 	}

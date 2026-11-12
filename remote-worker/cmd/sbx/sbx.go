@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,7 +40,10 @@ SBX_DIAL_ADDR (ip:port to connect to instead of looking up SBX_ADDR's host: the 
 verifies, and requests still name, SBX_ADDR's host),
 SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (with SBX_TLS: an extra CA, PEM,
 added to the system roots, e.g. a sandbox token grant's execCa).
-` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed.
+` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed,
+128 + n that signal n killed it.
+Unlike sbx.py, this client dials plaintext unless SBX_TLS=1, and reads no SBX_TOKEN_CMD (so the exports of
+` + "`mocactl sbx env`" + ` are not enough: give SBX_TOKEN or SBX_TOKEN_FILE).
 There is no ` + "`sbx push`" + `: this client is for a workspace seeded on the server side.
 `
 
@@ -138,7 +142,12 @@ type result struct {
 	stdout, stderr []byte
 	exitCode       int32
 	truncated      bool
+	timedOut       bool // the command ran out of SBX_TIMEOUT: the worker's in-stream ExecError "timeout:<n>"
 }
+
+// timeoutMessage is the worker's whole ExecError text for a command that ran out of its timeout,
+// as sbx.py's TIMEOUT_MESSAGE.fullmatch checks it; any other ExecError is a sandbox failure.
+var timeoutMessage = regexp.MustCompile(`^timeout:\d+$`)
 
 // execOnce runs one command. An error is the machinery failing (VM boot, worker gone, a timeout,
 // a refused token), never the command's own exit status, which comes back in result.
@@ -179,6 +188,10 @@ func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64
 			r.exitCode, r.truncated = ev.GetEnd().GetExitCode(), ev.GetEnd().GetTruncated()
 			return r, nil
 		case ev.GetError() != nil:
+			if timeoutMessage.MatchString(ev.GetError().GetMessage()) {
+				r.timedOut = true // the output so far is kept and written, as sbx.py does
+				return r, nil
+			}
 			return result{}, fmt.Errorf("exec failed: %s", ev.GetError().GetMessage())
 		}
 	}
@@ -205,30 +218,30 @@ func upperSnake(name string) string {
 }
 
 // call runs one command and turns its outcome into the process's exit code, writing output and
-// the SBX_LOG line the way sbx.py does: 124 for a timeout, 125 for any other sandbox failure,
-// 137 for a command killed by a signal (a negative exit code), else the command's own code.
+// the SBX_LOG line the way sbx.py does: 124 for a timeout (the output so far is written), 125 for
+// any other sandbox failure, 128 + n for a command killed by signal n (exit code -n), else the
+// command's own code.
 func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op, command string, stdin []byte, stdout, stderr io.Writer, now func() time.Time) int {
 	started := now()
 	r, err := execOnce(ctx, c, cfg, id, command, stdin)
 	var code int
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "timeout:") {
-			code = 124
-			fmt.Fprintln(stderr, "sbx: command timed out")
-		} else {
-			code = 125
-			fmt.Fprintf(stderr, "sbx: %s\n", msg)
-		}
+		code = 125
+		fmt.Fprintf(stderr, "sbx: %s\n", err.Error())
 	} else {
 		_, _ = stdout.Write(r.stdout)
 		_, _ = stderr.Write(r.stderr)
 		if r.truncated {
 			fmt.Fprintln(stderr, "sbx: stdout exceeded 8 MiB and was cut")
 		}
-		code = int(r.exitCode)
-		if code < 0 {
-			code = 128 + 9
+		switch {
+		case r.timedOut:
+			code = 124
+			fmt.Fprintf(stderr, "sbx: command timed out after %d s\n", cfg.timeoutS)
+		case r.exitCode < 0:
+			code = 128 - int(r.exitCode) // killed by signal n: 128 + n, as sbx.py
+		default:
+			code = int(r.exitCode)
 		}
 	}
 	logCall(cfg.logPath, op, started, now(), code)
