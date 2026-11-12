@@ -184,14 +184,17 @@ export interface Relay {
   /**
    * Send one lease operation to the parked worker (lease-mode §8.2) under a fresh `ctlId`, and
    * resolve with the worker's LeaseControlResult for that id. Every call ends: it rejects
-   * DEADLINE_EXCEEDED at `timeoutMs` (a worker on code older than lease mode ignores the frame) and
-   * UNAVAILABLE when there is no live worker or it disconnects first. A result's own `error` is
+   * DEADLINE_EXCEEDED at `timeoutMs` (a worker on code older than lease mode ignores the frame),
+   * UNAVAILABLE when there is no live worker, the frame cannot be written or the worker disconnects
+   * first, and CANCELLED when `signal` aborts (the caller went away). However it settles, its
+   * waiter is gone at once, so a later answer for its ctl_id is dropped. A result's own `error` is
    * the caller's to read; this resolves with it.
    */
   routeLeaseControl(
     sandboxId: string,
     f: Omit<LeaseControlFrame, 'ctlId'>,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<LeaseControlResult>;
   /** Activity on a live lease, without an Exec. Fire-and-forget; a no-op without a live worker. */
   routeKeepalive(sandboxId: string, workspaceKey: string): void;
@@ -371,10 +374,7 @@ export function createRelay(deps: RelayDeps): Relay {
       if (!parked) return;
       if (frame.leaseResult) {
         // Settled once: an answer after the timeout, or a duplicate, finds no waiter.
-        const ctlId = frame.leaseResult.ctlId;
-        const pending = parked.controls.get(ctlId);
-        parked.controls.delete(ctlId);
-        pending?.resolve(frame.leaseResult);
+        parked.controls.get(frame.leaseResult.ctlId)?.resolve(frame.leaseResult);
         return;
       }
       const reqId =
@@ -517,6 +517,7 @@ export function createRelay(deps: RelayDeps): Relay {
     sandboxId: string,
     f: Omit<LeaseControlFrame, 'ctlId'>,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<LeaseControlResult> {
     const parked = sessions.get(sandboxId);
     if (!parked) {
@@ -524,43 +525,61 @@ export function createRelay(deps: RelayDeps): Relay {
         statusError(status.UNAVAILABLE, `no live worker for sandbox '${sandboxId}'`),
       );
     }
+    if (signal?.aborted) {
+      return Promise.reject(statusError(status.CANCELLED, 'lease control cancelled'));
+    }
     const ctlId = ++nextCtlId;
     return new Promise<LeaseControlResult>((resolve, reject) => {
       let handle: unknown;
+      // Every way out goes through here: the waiter, the timer and the abort listener all go at once.
+      const settle = () => {
+        if (parked.controls.get(ctlId) === entry) parked.controls.delete(ctlId);
+        timers.clearTimeout(handle);
+        signal?.removeEventListener('abort', onAbort);
+      };
       const entry: PendingControl = {
         resolve: (r) => {
-          timers.clearTimeout(handle);
+          settle();
           resolve(r);
         },
         reject: (err) => {
-          timers.clearTimeout(handle);
+          settle();
           reject(err);
         },
       };
+      const onAbort = () => entry.reject(statusError(status.CANCELLED, 'lease control cancelled'));
       parked.controls.set(ctlId, entry);
-      handle = timers.setTimeout(() => {
-        if (parked.controls.get(ctlId) !== entry) return;
-        parked.controls.delete(ctlId);
-        reject(
+      handle = timers.setTimeout(
+        () =>
+          entry.reject(
+            statusError(
+              status.DEADLINE_EXCEEDED,
+              `the worker did not answer the lease control within ${timeoutMs} ms`,
+            ),
+          ),
+        timeoutMs,
+      );
+      signal?.addEventListener('abort', onAbort);
+      try {
+        // fromPartial: ts-proto's encode throws on a message literal missing a field.
+        parked.stream.write({
+          leaseControl: LeaseControlFrame.fromPartial({ ...f, ctlId }),
+        } as ServerFrame);
+      } catch (err) {
+        entry.reject(
           statusError(
-            status.DEADLINE_EXCEEDED,
-            `the worker did not answer the lease control within ${timeoutMs} ms`,
+            status.UNAVAILABLE,
+            `lease control not sent to the worker: ${err instanceof Error ? err.message : String(err)}`,
           ),
         );
-      }, timeoutMs);
-      // fromPartial: ts-proto's encode throws on a message literal missing a field.
-      parked.stream.write({
-        leaseControl: LeaseControlFrame.fromPartial({ ...f, ctlId }),
-      } as ServerFrame);
+      }
     });
   }
 
   function routeKeepalive(sandboxId: string, workspaceKey: string): void {
-    sessions
-      .get(sandboxId)
-      ?.stream.write({
-        keepalive: LeaseKeepaliveFrame.fromPartial({ workspaceKey }),
-      } as ServerFrame);
+    sessions.get(sandboxId)?.stream.write({
+      keepalive: LeaseKeepaliveFrame.fromPartial({ workspaceKey }),
+    } as ServerFrame);
   }
 
   async function drain(): Promise<void> {

@@ -389,7 +389,11 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         );
         return;
       }
-      sandbox.leaseControl(caller.claims, req, t0).then(
+      // A client that goes away withdraws its call: the relay drops the waiter and frees the slot.
+      const cancelled = new AbortController();
+      call.on('cancelled', () => cancelled.abort());
+      if (call.cancelled) cancelled.abort();
+      sandbox.leaseControl(caller.claims, req, t0, cancelled.signal).then(
         (res) => cb(null, res),
         (err: Error) => cb(err, null),
       );

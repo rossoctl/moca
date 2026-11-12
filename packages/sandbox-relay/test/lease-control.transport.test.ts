@@ -7,7 +7,7 @@ import {
   SandboxMode,
   type LeaseControlResponse,
 } from '@moca/k8s-sandbox';
-import { makeAudit, makeSandboxCaller } from '../src/sandbox-caller.js';
+import { LEASE_CONTROL_MAX_INFLIGHT, makeAudit, makeSandboxCaller } from '../src/sandbox-caller.js';
 import { makeSandboxTokenVerifier, makeSetModeTokenVerifier } from '../src/sandbox-auth.js';
 import type { Relay } from '../src/relay.js';
 import {
@@ -22,6 +22,7 @@ import {
   setModeToken,
   sleep,
   token,
+  tokenB,
   worker,
   type LeaseReply,
 } from './helpers/sandbox-relay.js';
@@ -52,17 +53,21 @@ interface CallResult {
   res?: LeaseControlResponse;
 }
 
-function leaseControl(
+type LeaseControlOpts = { sandboxId?: string; setModeToken?: string };
+
+/** One LeaseControl call that the test may cancel. */
+function leaseControlCall(
   addr: string,
   t: string | undefined,
   op: LeaseOp,
-  opts: { sandboxId?: string; setModeToken?: string } = {},
-): Promise<CallResult> {
+  opts: LeaseControlOpts = {},
+): { done: Promise<CallResult>; cancel: () => void } {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
   const md = new Metadata();
   if (t !== undefined) md.set('authorization', `Bearer ${t}`);
-  return new Promise<CallResult>((resolve) =>
-    client.leaseControl(
+  let cancel = () => {};
+  const done = new Promise<CallResult>((resolve) => {
+    const call = client.leaseControl(
       {
         sandboxId: opts.sandboxId ?? 'sbx_default',
         op,
@@ -73,9 +78,18 @@ function leaseControl(
         resolve(
           err ? { code: err.code, details: err.details } : { code: status.OK, details: '', res },
         ),
-    ),
-  ).finally(() => client.close());
+    );
+    cancel = () => call.cancel();
+  }).finally(() => client.close());
+  return { done, cancel };
 }
+
+const leaseControl = (
+  addr: string,
+  t: string | undefined,
+  op: LeaseOp,
+  opts: LeaseControlOpts = {},
+): Promise<CallResult> => leaseControlCall(addr, t, op, opts).done;
 
 function leaseKeepalive(
   addr: string,
@@ -184,6 +198,24 @@ describe('LeaseControl (lease-mode §8.2)', () => {
     ]);
   });
 
+  it('every set-mode token refusal tells the client the same thing', async () => {
+    const r = await relay();
+    const w = await worker(r.attach, 'sbx_default', 'auto', 0, undefined, undefined, answers);
+    const got = await Promise.all(
+      [
+        setModeToken({ now: now() - 1000 }), // expired
+        setModeToken({ sbx: 'sbx-bbbb' }), // verified, another sandbox
+        token({ mode: 'lease' }), // a sandbox token
+        '', // none
+      ].map((t) => leaseControl(r.exec, token(), LeaseOp.LEASE_OP_SET_MODE, { setModeToken: t })),
+    );
+    expect(got.map((g) => g.code)).toEqual(Array(4).fill(status.PERMISSION_DENIED));
+    expect(new Set(got.map((g) => g.details)).size).toBe(1);
+    // The reasons differ, in the audit line alone.
+    expect(new Set(leaseLines(r.lines).map((l) => l.reason)).size).toBe(4);
+    expect(w.controls).toEqual([]);
+  });
+
   it('refuses an expired set-mode token', async () => {
     const r = await relay();
     const w = await worker(r.attach, 'sbx_default', 'auto', 0, undefined, undefined, answers);
@@ -281,6 +313,74 @@ describe('LeaseControl (lease-mode §8.2)', () => {
     expect(leaseLines(r.lines)[0]).toMatchObject({ op: 'reset', outcome: 'error' });
   });
 
+  it('a late answer, after the timeout, and a duplicate are dropped', async () => {
+    const r = await relay({}, SHORT);
+    const w = await worker(r.attach, 'sbx_default');
+    const timedOut = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    expect(timedOut.code).toBe(status.DEADLINE_EXCEEDED);
+    const late = w.controls[0]!.ctlId;
+    w.answerControl(late, { status: ACTIVE });
+    const next = leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    await sleep(100);
+    const id = w.controls[1]!.ctlId;
+    w.answerControl(id, { status: ACTIVE });
+    w.answerControl(id, { error: 'duplicate' });
+    w.answerControl(late, { error: 'late again' });
+    expect(await next).toMatchObject({ code: status.OK, res: { status: ACTIVE } });
+    // The worker stays attached and serves the next call.
+    const after = leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    await sleep(100);
+    w.answerControl(w.controls[2]!.ctlId, { status: ACTIVE });
+    expect((await after).code).toBe(status.OK);
+  });
+
+  it(`at most ${LEASE_CONTROL_MAX_INFLIGHT} in flight per sandbox: the next is RESOURCE_EXHAUSTED`, async () => {
+    const r = await relay();
+    const w = await worker(r.attach, 'sbx_default');
+    const pending = Array.from({ length: LEASE_CONTROL_MAX_INFLIGHT }, () =>
+      leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS),
+    );
+    await sleep(150);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT);
+    const busy = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    expect(busy.code).toBe(status.RESOURCE_EXHAUSTED);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT);
+    expect(leaseLines(r.lines).at(-1)).toMatchObject({ op: 'status', outcome: 'busy' });
+    // Another sandbox on the same worker has its own slots.
+    const other = leaseControl(r.exec, tokenB(), LeaseOp.LEASE_OP_STATUS);
+    await sleep(100);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT + 1);
+    for (const c of w.controls) w.answerControl(c.ctlId, { status: ACTIVE });
+    for (const p of [...pending, other]) expect((await p).code).toBe(status.OK);
+    // Answered, the slots are free again.
+    const again = leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    await sleep(100);
+    w.answerControl(w.controls.at(-1)!.ctlId, { status: ACTIVE });
+    expect((await again).code).toBe(status.OK);
+  });
+
+  it('a cancelled call frees its slot at once', async () => {
+    const r = await relay();
+    const w = await worker(r.attach, 'sbx_default');
+    const calls = Array.from({ length: LEASE_CONTROL_MAX_INFLIGHT }, () =>
+      leaseControlCall(r.exec, token(), LeaseOp.LEASE_OP_RESET),
+    );
+    await sleep(150);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT);
+    calls[0]!.cancel();
+    expect((await calls[0]!.done).code).toBe(status.CANCELLED);
+    await sleep(100);
+    expect(leaseLines(r.lines).at(-1)).toMatchObject({ op: 'reset', outcome: 'cancelled' });
+    // The slot is free before the worker answers: a new call is sent, not refused.
+    const fresh = leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
+    await sleep(100);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT + 1);
+    // The cancelled call's answer is dropped; the others still reach their callers.
+    for (const c of w.controls) w.answerControl(c.ctlId, { status: ACTIVE });
+    expect((await fresh).code).toBe(status.OK);
+    for (const c of calls.slice(1)) expect((await c.done).code).toBe(status.OK);
+  });
+
   it('no live worker: UNAVAILABLE', async () => {
     const r = await relay();
     const got = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
@@ -327,6 +427,15 @@ describe('LeaseKeepalive (lease-mode §4)', () => {
     await sleep(100);
     expect(w.keepalives).toEqual([{ workspaceKey: 'sbx-aaaa' }]);
     expect(r.lines).toEqual([]);
+  });
+
+  it('with no worker connected: OK, and nothing breaks', async () => {
+    const r = await relay();
+    expect((await leaseKeepalive(r.exec, token())).code).toBe(status.OK);
+    const w = await worker(r.attach, 'sbx_default');
+    expect((await leaseKeepalive(r.exec, token())).code).toBe(status.OK);
+    await sleep(100);
+    expect(w.keepalives).toEqual([{ workspaceKey: 'sbx-aaaa' }]);
   });
 
   it('refuses a harness caller, an unauthenticated one, and another worker', async () => {

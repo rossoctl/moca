@@ -105,10 +105,13 @@ export type LeaseOpName = 'status' | 'reset' | 'set_mode' | 'unspecified';
  * - `ok`: the worker answered without an error;
  * - `failed`: the worker answered with one (FAILED_PRECONDITION; `reason` is its wire string);
  * - `timeout`: the worker did not answer within the op's timeout (DEADLINE_EXCEEDED);
- * - `error`: no live worker, or it disconnected first (UNAVAILABLE);
+ * - `error`: no live worker, the frame could not be written, or it disconnected first (UNAVAILABLE);
+ * - `busy`: the sandbox already had LEASE_CONTROL_MAX_INFLIGHT calls in flight (RESOURCE_EXHAUSTED);
+ * - `cancelled`: the client cancelled the call before the worker answered;
  * - `refused`: UNAUTHENTICATED, PERMISSION_DENIED or INVALID_ARGUMENT, with `reason`.
  */
-export type LeaseControlOutcome = 'ok' | 'failed' | 'timeout' | 'error' | 'refused';
+export type LeaseControlOutcome =
+  'ok' | 'failed' | 'timeout' | 'error' | 'busy' | 'cancelled' | 'refused';
 
 export function leaseOpName(op: LeaseOp): LeaseOpName {
   switch (op) {
@@ -298,6 +301,13 @@ export const LEASE_STATUS_TIMEOUT_MS = 15_000;
  * remote-worker/internal/vmpool/config.go), for which EndLease and SetMode can block, plus 60 s.
  */
 export const LEASE_MUTATE_TIMEOUT_MS = 31 * 60_000;
+
+/**
+ * LeaseControl calls in flight per `sbx` (plan 3 ruling R13). Each holds a waiter in the relay for
+ * up to LEASE_MUTATE_TIMEOUT_MS, so without a cap one sandbox could grow the relay's memory without
+ * bound. A cancelled call gives its slot back at once.
+ */
+export const LEASE_CONTROL_MAX_INFLIGHT = 4;
 
 /** The per-op LeaseControl timeouts; tests set short ones (plan 3 ruling R4). */
 export interface LeaseTimeoutsMs {
@@ -513,17 +523,22 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     status: LEASE_STATUS_TIMEOUT_MS,
     mutate: LEASE_MUTATE_TIMEOUT_MS,
   };
+  // LeaseControl calls in flight per sbx, sent to the worker and not yet settled.
+  const leaseInflight = new Map<string, number>();
 
   /**
    * A sandbox caller's LeaseControl (lease-mode spec §8.2): on its own worker and workspace only,
    * and a set_mode only with a set-mode token for this same sandbox, whose mode and epoch are the
-   * ones sent. Nothing reaches the worker before every check has passed. Rejects with the status
-   * the call ends with; exactly one audit line either way.
+   * ones sent. Nothing reaches the worker before every check has passed. At most
+   * LEASE_CONTROL_MAX_INFLIGHT per sbx; `signal` aborting (the client cancelled) withdraws the
+   * call and frees its slot at once. Rejects with the status the call ends with; exactly one audit
+   * line either way.
    */
   async function sandboxLeaseControl(
     claims: SandboxTokenClaims,
     req: LeaseControlRequest,
     t0: number,
+    signal?: AbortSignal,
   ): Promise<LeaseControlResponse> {
     const op = leaseOpName(req.op);
     let setMode: SetModeClaims | undefined;
@@ -559,26 +574,45 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       if (!v.claims) throw refusal(status.PERMISSION_DENIED, denied, v.reason);
       setMode = v.claims;
       // Exact equality on all three, as an Exec's: a token for sbx-a never changes sbx-b's lease.
+      // The same message as a token that did not verify (ruling R11): the client learns nothing
+      // about whose token it holds; the audit line says which check refused it.
       if (setMode.sbx !== claims.sbx || setMode.wrk !== claims.wrk || setMode.wsk !== claims.wsk) {
-        throw refusal(
-          status.PERMISSION_DENIED,
-          'set_mode not permitted: the set-mode token is for another sandbox',
-        );
+        throw refusal(status.PERMISSION_DENIED, denied, 'set-mode token is for another sandbox');
       }
       ({ mode, modeEpoch } = claimsToExecMode(setMode));
     }
 
+    const n = leaseInflight.get(claims.sbx) ?? 0;
+    if (n >= LEASE_CONTROL_MAX_INFLIGHT) {
+      line('busy');
+      throw grpcError(
+        status.RESOURCE_EXHAUSTED,
+        `sandbox busy: ${n} lease controls already in flight`,
+      );
+    }
+    leaseInflight.set(claims.sbx, n + 1);
     let result;
     try {
       result = await relay.routeLeaseControl(
         req.sandboxId,
         { workspaceKey: claims.wsk, op: req.op, mode, modeEpoch },
         op === 'status' ? leaseTimeouts.status : leaseTimeouts.mutate,
+        signal,
       );
     } catch (err) {
       const code = (err as { code?: unknown }).code;
-      line(code === status.DEADLINE_EXCEEDED ? 'timeout' : 'error', (err as Error).message);
+      const outcome =
+        code === status.DEADLINE_EXCEEDED
+          ? 'timeout'
+          : code === status.CANCELLED
+            ? 'cancelled'
+            : 'error';
+      line(outcome, (err as Error).message);
       throw err;
+    } finally {
+      const left = (leaseInflight.get(claims.sbx) ?? 1) - 1;
+      if (left > 0) leaseInflight.set(claims.sbx, left);
+      else leaseInflight.delete(claims.sbx);
     }
     if (result.error) {
       line('failed', result.error);
