@@ -1928,6 +1928,20 @@ lines = ["moca-snapshot-manifest/2"] + [f"{k}:{v}" for k, v in [
 print("ok" if m["hash"] == "sha256:" + hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest() else "mismatch")
 PY
 )" "ok"
+# The capabilities are sorted by byte, as Go's sort.Strings is, whatever the build host's locale:
+# en_US collates "a" before "B", byte order puts "B" first. (A host without that locale sorts by byte
+# anyway, and the check still holds.)
+{
+  echo 'log() { :; }'
+  echo "STAGE='$mv2/stage'; ROOTFS='$mv2/rootfs'; IMAGE=i; VMM=firecracker; INSTANCE_TYPE=t; GUEST_RAM_MB=256; VCPUS=1; EGRESS_CA=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+  printf '%s\n' "MANIFEST_CAPABILITIES='a"$'\n'"B'"
+  sed -n '/^write_manifest() {/,/^MANIFEST$/p' "$SCRIPT"
+  echo '}'
+  echo 'write_manifest'
+} >"$mv2/run-locale.sh"
+LC_ALL=en_US.UTF-8 bash "$mv2/run-locale.sh" >/dev/null 2>&1
+check "the manifest's capabilities are in byte order under an en_US locale" \
+  "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["capabilities"]))' "$mv2/stage/manifest.json" 2>/dev/null)" "B,a"
 check "the Go golden lines hash to the digest snapshot_test.go pins" \
   "$(printf 'moca-snapshot-manifest/2\nimage:i\nvmm:firecracker\ninstance_type:t\nkernel_release:k\nguest_ram_mb:256\nvcpus:1\ncapabilities:bash,git\nbuilt_at:2026-11-03T00:00:00Z\nkernel:sha256:k\nrootfs:sha256:r\nagent:sha256:a\nvmstate:sha256:v\nmemfile:sha256:m\nch_config:\negress_ca:\nsource_image_digest:sha256:s\n' | sha256sum | cut -d' ' -f1)" \
   "$(sed -n 's/^const manifestV2Golden = "\([0-9a-f]*\)"$/\1/p' "$(dirname "$SCRIPT")/../../remote-worker/internal/vmpool/snapshot_test.go")"

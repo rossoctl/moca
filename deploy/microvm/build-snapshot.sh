@@ -2159,8 +2159,10 @@ write_manifest() {
     srcdig="$(sed -n 's/^digest=\(sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOTFS/etc/moca-rootfs-source" | head -1)"
   fi
 
-  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
-  caps_csv="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | paste -sd, -)"
+  # Byte order (LC_ALL=C), as Go's sort.Strings in ComputeHash: the build host's locale must not
+  # change the capabilities line the hash covers.
+  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | LC_ALL=C sort | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
+  caps_csv="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | LC_ALL=C sort | paste -sd, -)"
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # The GUEST's kernel release, probed in the booted VM (probe_guest_kernel), not the build host's.
   krel="${MANIFEST_GUEST_KERNEL:-}"
