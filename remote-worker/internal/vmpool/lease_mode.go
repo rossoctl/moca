@@ -202,6 +202,12 @@ func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 	if s.Known && epoch < s.Epoch {
 		return refusal(RefuseStaleMode, "SetMode for %q: epoch %d is below the stored %d", key, epoch, s.Epoch)
 	}
+	if !s.Known {
+		// No readable state means an unknown history (ruling R7): unversioned per-Exec
+		// Execs record nothing, so any of them may have written the workspace as root.
+		// The first lease must normalise it.
+		s.RootWrote = true
+	}
 	s.Mode, s.Epoch, s.Known = m, epoch, true
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
 		return fmt.Errorf("vmpool: SetMode for %q: %w", key, err)

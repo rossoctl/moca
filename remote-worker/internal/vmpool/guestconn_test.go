@@ -206,3 +206,31 @@ func TestSendRequestCarriesTheLeaseFlags(t *testing.T) {
 		t.Fatalf("req = %+v, want both lease flags forwarded", req)
 	}
 }
+
+// TestLeaseRunCarriesHostClock pins spec §8.4's clock correction for lease mode (ruling R5):
+// a lease VM idles for minutes between Execs, so every lease request frame must carry the
+// host clock, not only the first after Resume. The stamp is added here, in runOverConn,
+// which every Run of a real launcher goes through; the fake VM cannot observe it.
+func TestLeaseRunCarriesHostClock(t *testing.T) {
+	now := time.Unix(1762940000, 0)
+	for i, c := range []Command{
+		{Command: "first", Lease: true, NormaliseWorkspace: true, CapBytes: OutputCapBytes},
+		{Command: "later", Lease: true, CapBytes: OutputCapBytes},
+	} {
+		var gotReq ga.Request
+		conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+			gotReq = req
+			_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{})
+		})
+		if _, err := runOverConn(context.Background(), conn, c, &capturingSink{}, now); err != nil {
+			t.Fatalf("Exec %d: runOverConn: %v", i, err)
+		}
+		if !gotReq.Lease || gotReq.NormaliseWorkspace != c.NormaliseWorkspace {
+			t.Fatalf("Exec %d: request flags = lease %v, normalise %v; want %v, %v",
+				i, gotReq.Lease, gotReq.NormaliseWorkspace, true, c.NormaliseWorkspace)
+		}
+		if gotReq.HostUnixNanos <= 0 || gotReq.HostUnixNanos != now.UnixNano() {
+			t.Fatalf("Exec %d: HostUnixNanos = %d, want the host clock %d", i, gotReq.HostUnixNanos, now.UnixNano())
+		}
+	}
+}

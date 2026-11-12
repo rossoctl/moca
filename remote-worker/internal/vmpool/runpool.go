@@ -62,6 +62,16 @@ type runPool struct {
 	// leaseStateLocked.
 	state       leaseState
 	stateLoaded bool
+
+	// lease is the key's live VM lease (lease.go), nil when none. A lease VM is counted
+	// apart from ready, inFlight and warming (spec §6), and replenishment keeps no
+	// standbys beside it. warmingLease counts cold restores for a lease, charged at
+	// LeaseStartBytes as warming is charged at PerVMBytes. pinned counts Execs between
+	// their arrival on the lease path and their return, so the sweep cannot delete the
+	// entry whose gate they wait on.
+	lease        *vmLease
+	warmingLease int
+	pinned       int
 }
 
 func (rp *runPool) signalSettledLocked() {
@@ -72,8 +82,12 @@ func (rp *runPool) signalSettledLocked() {
 func (rp *runPool) idleFor(now time.Time) time.Duration { return now.Sub(rp.lastExec) }
 
 // busy reports whether anything about this run is in motion. A run with work in
-// flight or a warming pending is never swept, whatever its idle clock says.
-func (rp *runPool) busy() bool { return rp.inFlight > 0 || rp.warming > 0 }
+// flight or a warming pending is never swept, whatever its idle clock says. Nor is a
+// run with a live lease, whose VM holds the workspace mounted between Execs, or one
+// pinned by a lease-path Exec (spec §8.4: a lease must never outlive its workspace).
+func (rp *runPool) busy() bool {
+	return rp.inFlight > 0 || rp.warming > 0 || rp.warmingLease > 0 || rp.pinned > 0 || rp.lease != nil
+}
 
 // forgetPending drops a fired timer so pending does not grow across a long run.
 // Caller holds pool.mu.

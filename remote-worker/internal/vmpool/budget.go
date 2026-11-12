@@ -75,7 +75,19 @@ type leaseFootprinter interface {
 // parked on the memory path can never retroactively widen the MaxRuns ceiling for the
 // caller that caused the eviction.
 func (p *pool) admitOrEvictLocked(newRun bool) error {
-	err := p.admitLocked(newRun)
+	return p.admitOrEvictAtLocked(newRun, p.perVMBytes())
+}
+
+// admitLeaseOrEvictLocked is admitOrEvictLocked for a new lease VM, priced at
+// LeaseStartBytes (spec §6, "Order when a lease Exec needs a VM", items 1 and 3; Task 6
+// adds item 2's idle-lease reclaim). Caller holds p.mu.
+func (p *pool) admitLeaseOrEvictLocked(newRun bool) error {
+	return p.admitOrEvictAtLocked(newRun, p.cfg.LeaseStartBytes)
+}
+
+// admitOrEvictAtLocked is admitOrEvictLocked for one VM priced at price. Caller holds p.mu.
+func (p *pool) admitOrEvictAtLocked(newRun bool, price int64) error {
+	err := p.admitAtLocked(newRun, price)
 	if ReasonOf(err) != RefuseMemoryBudget {
 		// Deliberately NOT RefuseHostMemory too. Eviction funds an admission's
 		// BOOKING, which the re-admit below re-measures synchronously — but a
@@ -88,18 +100,18 @@ func (p *pool) admitOrEvictLocked(newRun bool) error {
 		// standbys at.
 		return err
 	}
-	p.evictForBudgetLocked()
+	p.evictForBudgetLocked(price)
 	// Re-admitted, not assumed: eviction is best-effort (nothing idle to take, or the
 	// reclaim queue already saturated), and a refusal must describe the host as it is
 	// AFTER the attempt or its numbers send an operator to the wrong knob.
-	return p.admitLocked(newRun)
+	return p.admitAtLocked(newRun, price)
 }
 
 // evictForBudgetLocked funds one admission (a warming charge or a new key's first
-// VM) by reclaiming standbys from idle runs. Caller holds p.mu. Best-effort and
-// silent: admitOrEvictLocked re-measures rather than trusting a result.
-func (p *pool) evictForBudgetLocked() {
-	p.evictForAdmissionLocked(p.perVMBytes(), nil)
+// VM, priced at price) by reclaiming standbys from idle runs. Caller holds p.mu.
+// Best-effort and silent: admitOrEvictLocked re-measures rather than trusting a result.
+func (p *pool) evictForBudgetLocked(price int64) {
+	p.evictForAdmissionLocked(price, nil)
 }
 
 // evictForPromotionLocked funds one warm acquire: popping vm re-prices it from its
@@ -109,8 +121,8 @@ func (p *pool) evictForBudgetLocked() {
 // (acquire marks inFlight only after the pop), so nothing else would keep the loop
 // from handing the very standby being promoted to reclaimQ out from under the
 // caller. Caller holds p.mu.
-func (p *pool) evictForPromotionLocked(rp *runPool, vm VM) {
-	p.evictForAdmissionLocked(p.perVMBytes()-p.standbyChargeLocked(vm), rp)
+func (p *pool) evictForPromotionLocked(rp *runPool, vm VM, price int64) {
+	p.evictForAdmissionLocked(price-p.standbyChargeLocked(vm), rp)
 }
 
 // evictForAdmissionLocked makes `need` bytes of budget headroom by reclaiming
@@ -270,6 +282,18 @@ gather:
 // prediction would be "confirmed" by the host falling over, which is not a
 // measurement.
 func (p *pool) admitLocked(newRun bool) error {
+	return p.admitAtLocked(newRun, p.perVMBytes())
+}
+
+// admitLeaseLocked is admitLocked for a new lease VM: the same two ceilings, with the VM
+// priced at LeaseStartBytes rather than PerVMBytes (spec §6: a lease VM is charged its
+// starting estimate until it is measured). Caller holds p.mu.
+func (p *pool) admitLeaseLocked(newRun bool) error {
+	return p.admitAtLocked(newRun, p.cfg.LeaseStartBytes)
+}
+
+// admitAtLocked is admitLocked for one VM priced at price. Caller holds p.mu.
+func (p *pool) admitAtLocked(newRun bool, price int64) error {
 	if unparked := p.unparkedRunsLocked(); newRun && unparked >= p.cfg.MaxRuns {
 		return refusal(RefuseMaxRuns,
 			"MaxRuns=%d reached with %d unparked runs (%d entries incl. parked); the lease cap "+
@@ -281,11 +305,11 @@ func (p *pool) admitLocked(newRun bool) error {
 	}
 	committed := p.committedLocked()
 	budget := p.cfg.MaxCommittedBytes - p.cfg.MemoryReserveBytes
-	if next := committed + p.perVMBytes(); next > budget {
+	if next := committed + price; next > budget {
 		return refusal(RefuseMemoryBudget,
 			"committing %d more bytes would reach %d against a budget of %d "+
 				"(MaxCommittedBytes %d less MemoryReserveBytes %d)",
-			p.perVMBytes(), next, budget, p.cfg.MaxCommittedBytes, p.cfg.MemoryReserveBytes)
+			price, next, budget, p.cfg.MaxCommittedBytes, p.cfg.MemoryReserveBytes)
 	}
 	return nil
 }
@@ -317,6 +341,12 @@ func (p *pool) admitLocked(newRun bool) error {
 // mis-sized or standby-saturated host, where a failed exec is the correct
 // alternative to the OOM killer arbitrating (spec §6).
 func (p *pool) admitPromotionLocked(vm VM) error {
+	return p.admitPromotionAtLocked(vm, p.perVMBytes())
+}
+
+// admitPromotionAtLocked is admitPromotionLocked re-pricing the standby at price: a
+// per-Exec VM's PerVMBytes, or a new lease VM's LeaseStartBytes (spec §6). Caller holds p.mu.
+func (p *pool) admitPromotionAtLocked(vm VM, price int64) error {
 	if err := p.hostFloorLocked(); err != nil {
 		return err
 	}
@@ -324,13 +354,13 @@ func (p *pool) admitPromotionLocked(vm VM) error {
 	// committedLocked already books vm at its dirty-page charge; replace that with
 	// the full price it is one Resume away from costing.
 	standby := p.standbyChargeLocked(vm)
-	if next := p.committedLocked() - standby + p.perVMBytes(); next > budget {
+	if next := p.committedLocked() - standby + price; next > budget {
 		return refusal(RefuseMemoryBudget,
 			"promoting a standby would re-price it from %d to %d committed bytes, reaching %d "+
 				"against a budget of %d (MaxCommittedBytes %d less MemoryReserveBytes %d): the "+
 				"running set is at the memory ceiling. WORKER_MAX_CONCURRENT x PerVMBytes must fit "+
 				"the budget, or warm acquires fail as the slot count fills",
-			standby, p.perVMBytes(), next, budget, p.cfg.MaxCommittedBytes, p.cfg.MemoryReserveBytes)
+			standby, price, next, budget, p.cfg.MaxCommittedBytes, p.cfg.MemoryReserveBytes)
 	}
 	return nil
 }
@@ -426,8 +456,28 @@ func (p *pool) unparkedRunsLocked() int {
 // right direction: a host too full to promote a standby is too full to be
 // building one. It also keeps the warming -> inFlight handoff in acquire
 // charge-neutral, exactly as before.
+//
+// LEASE VMs ARE THE THIRD CLASS (spec §6): neither standby nor in-flight, charged by
+// leaseCommittedLocked whether an Exec is running in them or not.
 func (p *pool) committedLocked() int64 {
-	return p.runningCommittedLocked() + p.standbyCommittedLocked()
+	return p.runningCommittedLocked() + p.standbyCommittedLocked() + p.leaseCommittedLocked()
+}
+
+// leaseCommittedLocked is the lease component of committedLocked: every live lease VM
+// and every cold restore for one, at LeaseStartBytes each. Caller holds p.mu.
+//
+// Start-priced even once a lease has been sampled (ruling R2): vmLease.charge is recorded
+// after each Exec, and Task 6 replaces the per-lease term with the measured charge times
+// LeaseHeadroom. A lease VM is never re-priced to PerVMBytes, idle or busy.
+func (p *pool) leaseCommittedLocked() int64 {
+	var n int64
+	for _, rp := range p.runs {
+		n += int64(rp.warmingLease)
+		if rp.lease != nil {
+			n++
+		}
+	}
+	return n * p.cfg.LeaseStartBytes
 }
 
 // runningCommittedLocked is the full-price component of committedLocked: every VM

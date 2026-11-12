@@ -51,6 +51,12 @@ func (p *pool) scheduleReplenishLocked(rp *runPool) {
 	if p.closed {
 		return
 	}
+	// A key with a lease keeps its one VM and no standbys (spec §3): a standby beside a
+	// lease would be charged while nothing can pop it, and a busy run's standbys are
+	// beyond both the sweep and eviction.
+	if rp.lease != nil {
+		return
+	}
 	// Refill toward D, counting what is already Ready or on its way.
 	if len(rp.ready)+rp.warming >= p.cfg.StandbyDepth {
 		return
@@ -78,7 +84,7 @@ func (p *pool) scheduleReplenishLocked(rp *runPool) {
 func (p *pool) replenishOne(key string) {
 	p.mu.Lock()
 	rp := p.runs[key]
-	if rp == nil || p.closed {
+	if rp == nil || p.closed || rp.lease != nil {
 		p.mu.Unlock()
 		return
 	}
@@ -134,6 +140,14 @@ func (p *pool) replenishOne(key string) {
 		if err := vm.Destroy(); err != nil {
 			p.counters.destroyFailed()
 			log.Printf("vmpool: destroy replenished VM for %q on a closed pool: %v", key, err)
+		}
+		return
+	case rp.lease != nil:
+		// A lease started while this warm was in flight: no standby beside it.
+		p.mu.Unlock()
+		if err := vm.Destroy(); err != nil {
+			p.counters.destroyFailed()
+			log.Printf("vmpool: destroy replenished VM for leased %q: %v", key, err)
 		}
 		return
 	}

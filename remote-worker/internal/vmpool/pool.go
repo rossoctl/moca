@@ -83,7 +83,9 @@ func clampTimeoutS(timeoutS uint32) (uint32, bool) {
 // returning early.
 type Pool interface {
 	// Exec acquires a standby VM bound to key's workspace, runs exactly one
-	// command, and destroys the VM before returning. A VM is NEVER reused.
+	// command, and destroys the VM before returning. A VM is NEVER reused -- except
+	// in lease mode (Exec.Mode, lease.go), where one VM serves one key's Execs until
+	// its lease ends, and is then destroyed, never pooled (spec §3).
 	Exec(ctx context.Context, key string, e Exec, out Sink) (Result, error)
 	// ExecPhased is Exec with the hot path decomposed into Phases, for vmpoolctl
 	// and E10's driver (spec §3.1). ph may be nil. There is exactly one
@@ -307,8 +309,28 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	})
 	defer tm.Stop()
 
+	if p.cfg.LeaseEnabled {
+		// Lease mode (lease.go). With LeaseEnabled false -- every worker without the
+		// lease-v1 snapshot -- none of this runs and the path below is today's.
+		mode, endFirst, err := p.routeExec(key, e)
+		if err != nil {
+			return Result{}, err
+		}
+		if mode != ModePerExec {
+			return p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS)
+		}
+		if endFirst {
+			// A per-Exec Exec on a key that holds a lease: the lease ends (mode_change)
+			// under the gate BEFORE this Exec acquires, so its VM is never restored
+			// beside a live lease VM (Review Focus 2).
+			if err := p.endLeaseForPerExec(ctx, runCtx, key, &timedOut, timeoutS); err != nil {
+				return Result{}, err
+			}
+		}
+	}
+
 	t0 := p.clk.Now()
-	vm, rp, cause, err := p.acquire(runCtx, key)
+	vm, rp, cause, err := p.acquire(runCtx, key, false)
 	if ph != nil {
 		ph.Acquire = p.clk.Now().Sub(t0)
 		ph.Cold = cause
@@ -371,6 +393,12 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	// No early return below can leak a VM.
 	defer destroy()
 
+	if p.cfg.LeaseEnabled {
+		if err := p.perExecUnderGate(rp); err != nil {
+			return Result{}, err
+		}
+	}
+
 	if vm.Key() != key {
 		return Result{}, fmt.Errorf("%w: popped %q for %q", ErrKeyMismatch, vm.Key(), key)
 	}
@@ -427,7 +455,19 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 // second one (spec §4.2), then loops. Looping rather than recursing is what keeps
 // the acquire counted exactly once — cold-acquire rate is E11's headline diagnostic,
 // and double-counting it would read as replenishment falling behind.
-func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause, error) {
+//
+// With lease true the VM is for a new lease (lease.go, spec §6): the promotion check
+// and the cold path's warming charge are priced at LeaseStartBytes (the cold charge
+// in rp.warmingLease, not rp.warming), and the VM is returned installed as rp.lease
+// -- a vmLease holding only the VM, which execLease completes -- instead of counted
+// in rp.inFlight. Installing it in the critical section that ends the warming or the
+// pop keeps the VM charged exactly once at every instant, as the per-Exec handoff
+// below does for inFlight.
+func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPool, ColdCause, error) {
+	price := p.perVMBytes()
+	if lease {
+		price = p.cfg.LeaseStartBytes
+	}
 	counted := false
 	var cause ColdCause
 	for {
@@ -451,7 +491,7 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 			// a refusal must leave the standby exactly where it was for a later,
 			// colder host to promote. On a host whose slots x PerVMBytes fit the
 			// budget this never fires; see admitPromotionLocked.
-			if err := p.admitPromotionLocked(vm); err != nil {
+			if err := p.admitPromotionAtLocked(vm, price); err != nil {
 				// RefuseMemoryBudget is fundable: eviction needs only
 				// perVM minus this standby's dirty charge of headroom, which other
 				// idle runs' standbys can cover — without it, a standby-heavy host
@@ -463,8 +503,8 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 				// asynchronously, so MemAvailable is unchanged at the re-check and
 				// the standbys would be burned for a refusal either way.
 				if ReasonOf(err) == RefuseMemoryBudget {
-					p.evictForPromotionLocked(rp, vm)
-					err = p.admitPromotionLocked(vm)
+					p.evictForPromotionLocked(rp, vm, price)
+					err = p.admitPromotionAtLocked(vm, price)
 				}
 				if err != nil {
 					p.mu.Unlock()
@@ -472,7 +512,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 				}
 			}
 			rp.ready = rp.ready[:n-1]
-			rp.inFlight++
+			if lease {
+				rp.lease = &vmLease{vm: vm}
+			} else {
+				rp.inFlight++
+			}
 			p.mu.Unlock()
 			if !counted {
 				p.counters.warmAcquire()
@@ -506,7 +550,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 
 		// admitOrEvictLocked, not admitLocked: this refusal reaches a transcript, so a
 		// coldest idle standby is shed to make room before one is returned (#452).
-		if err := p.admitOrEvictLocked(false); err != nil {
+		admit := p.admitOrEvictLocked
+		if lease {
+			admit = p.admitLeaseOrEvictLocked
+		}
+		if err := admit(false); err != nil {
 			p.mu.Unlock()
 			return nil, nil, "", p.countRefusal(err)
 		}
@@ -520,14 +568,22 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 		// actually have. It errs safe (over-refusal, not over-commit), which is why it
 		// was a suggestion rather than a must-fix, but a ceiling that reads low is still
 		// a measurement of the wrong thing.
-		rp.warming++
+		if lease {
+			rp.warmingLease++
+		} else {
+			rp.warming++
+		}
 		dir, id := rp.dir, p.nextIDLocked()
 		p.mu.Unlock()
 
 		vm, err := p.warm(ctx, key, dir, id)
 
 		p.mu.Lock()
-		rp.warming--
+		if lease {
+			rp.warmingLease--
+		} else {
+			rp.warming--
+		}
 		rp.signalSettledLocked()
 		if err != nil {
 			rp.backoff = nextBackoff(rp.backoff)
@@ -550,7 +606,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 		// VM is charged exactly once at every instant a reader of committedLocked could
 		// observe, and busy() never reads false in between — a gap there would let a
 		// sweep reclaim the workspace of a VM that is about to run in it.
-		rp.inFlight++
+		if lease {
+			rp.lease = &vmLease{vm: vm}
+		} else {
+			rp.inFlight++
+		}
 		rp.backoff = 0
 		p.mu.Unlock()
 		return vm, rp, cause, nil
@@ -621,13 +681,19 @@ func (p *pool) destroy(key string, vm VM) {
 
 // runLocked returns key's runPool, creating it if unseen. Caller holds p.mu.
 func (p *pool) runLocked(key string) (*runPool, bool, error) {
+	return p.runAtLocked(key, p.perVMBytes())
+}
+
+// runAtLocked is runLocked with a new run's first VM priced at price: PerVMBytes, or
+// LeaseStartBytes for a run created by a lease Exec (spec §6). Caller holds p.mu.
+func (p *pool) runAtLocked(key string, price int64) (*runPool, bool, error) {
 	if rp := p.runs[key]; rp != nil {
 		return rp, false, nil
 	}
 	// admitOrEvictLocked, not admitLocked: a new workspace_key on a full host is #452's
 	// own repro ("create more distinct P4 sessions than the budget holds VMs"), and its
 	// refusal reaches a transcript, so a coldest idle standby is shed first.
-	if err := p.admitOrEvictLocked(true); err != nil {
+	if err := p.admitOrEvictAtLocked(true, price); err != nil {
 		return nil, false, err
 	}
 	dir, err := p.workspaceDir(key)
