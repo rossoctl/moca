@@ -119,10 +119,10 @@ type Config struct {
 	ReplenishDelay      time.Duration // grace before refilling a popped slot
 	ReclaimScanInterval time.Duration // idle-host sweep tick
 	// MaxReclaimsPerScan rate-limits munmap. It caps the standbys one per-Exec sweep
-	// destroys, and, separately, the leases one reclaimLeasesLocked call ends for memory
-	// (per lease tick, and per admission). It does not cap a lease tick's total: the
-	// leases due for their own clocks (idle, max_duration, grace_limit, ...) end
-	// uncapped, and memory reclaim adds up to this many on top.
+	// destroys, and, separately, the leases a lease tick ends for their own clocks (idle,
+	// max_duration, grace_limit, ...; the rest end at the next tick), and the leases one
+	// reclaimLeasesLocked call ends for memory (per lease tick, and per admission). A lease
+	// tick may so end up to twice this many.
 	MaxReclaimsPerScan int
 
 	// ManifestFeatures is the loaded snapshot manifest's Features, passed by the

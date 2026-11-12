@@ -195,57 +195,15 @@ func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) {
 		return
 	}
 
-	// Order the donor runs coldest-first and total what they could shed. The same
-	// pass serves the futility check: if evictable < shortfall there is no point
-	// detaching anything.
-	var (
-		order     []*runPool
-		evictable int64
-	)
-	for _, rp := range p.runs {
-		if rp == exclude || rp.busy() || len(rp.ready) == 0 {
-			continue
-		}
-		order = append(order, rp)
-		for _, vm := range rp.ready {
-			evictable += p.standbyChargeLocked(vm)
-		}
-	}
+	// The donor runs coldest-first and what they could shed. The same pass serves the
+	// futility check: if evictable < shortfall there is no point detaching anything.
+	order, evictable := p.standbyDonorsLocked(exclude)
 	// Idle leases are the second source (spec §6), so the futility check counts what
 	// reclaimLeasesLocked could take too. Zero on a pool with no lease.
 	if evictable+p.reclaimableLeaseBytesLocked() < -shortfall {
 		return
 	}
-	sort.Slice(order, func(i, j int) bool { return order[i].lastExec.Before(order[j].lastExec) })
-
-	var (
-		batch []VM
-		freed int64
-	)
-gather:
-	for _, rp := range order {
-		for len(rp.ready) > 0 {
-			// Top of the ready list first, the same end acquire pops from.
-			n := len(rp.ready) - 1
-			vm := rp.ready[n]
-			batch = append(batch, vm)
-			freed += p.standbyChargeLocked(vm)
-			rp.ready = rp.ready[:n]
-			if len(rp.ready) == 0 {
-				// Stopping these is load-bearing, not tidiness: a pending replenishment would
-				// restore exactly the standby just evicted and re-consume the budget this call
-				// exists to free, turning one admission into a refill race.
-				for _, tm := range rp.pending {
-					tm.Stop()
-				}
-				rp.pending = nil
-				rp.parked = true
-			}
-			if freed >= -shortfall {
-				break gather
-			}
-		}
-	}
+	batch, freed := p.shedStandbysLocked(order, -shortfall)
 	// Standbys first, then idle leases (spec §6): a standby costs its run a cold acquire,
 	// a lease costs its sandbox its processes and a lease_start notice. Reached only when
 	// idle leases exist, since the standbys alone would otherwise have covered the
@@ -257,11 +215,57 @@ gather:
 	if len(batch) == 0 && len(leases) == 0 {
 		return // every idle lease's gate was taken since it was counted
 	}
-	for range batch {
-		p.counters.evicted()
-	}
 	// One slot for both: doReclaim destroys the leases first, each under its gate.
 	p.reclaimQ <- reclaimBatch{vms: batch, leases: leases}
+}
+
+// standbyDonorsLocked is every idle run holding standbys, exclude never one of them,
+// coldest first (lastExec, sweepOnce's clock), and the standbys' total charge. Caller
+// holds p.mu.
+func (p *pool) standbyDonorsLocked(exclude *runPool) (order []*runPool, evictable int64) {
+	for _, rp := range p.runs {
+		if rp == exclude || rp.busy() || len(rp.ready) == 0 {
+			continue
+		}
+		order = append(order, rp)
+		for _, vm := range rp.ready {
+			evictable += p.standbyChargeLocked(vm)
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].lastExec.Before(order[j].lastExec) })
+	return order, evictable
+}
+
+// shedStandbysLocked detaches standbys from order's runs, coldest run first and the top
+// of each ready list first, until their charges cover want or none is left, counting each
+// as a budget eviction. A run left with none is parked, its replenishments stopped. The
+// caller sends the batch to reclaimLoop. Caller holds p.mu.
+func (p *pool) shedStandbysLocked(order []*runPool, want int64) (batch []VM, freed int64) {
+	for _, rp := range order {
+		for len(rp.ready) > 0 && freed < want {
+			// Top of the ready list first, the same end acquire pops from.
+			n := len(rp.ready) - 1
+			vm := rp.ready[n]
+			batch = append(batch, vm)
+			freed += p.standbyChargeLocked(vm)
+			rp.ready = rp.ready[:n]
+			p.counters.evicted()
+			if len(rp.ready) == 0 {
+				// Stopping these is load-bearing, not tidiness: a pending replenishment would
+				// restore exactly the standby just evicted and re-consume the budget this call
+				// exists to free, turning one admission into a refill race.
+				for _, tm := range rp.pending {
+					tm.Stop()
+				}
+				rp.pending = nil
+				rp.parked = true
+			}
+		}
+		if freed >= want {
+			break
+		}
+	}
+	return batch, freed
 }
 
 // admitLocked decides whether one more VM may be committed. Caller holds p.mu.

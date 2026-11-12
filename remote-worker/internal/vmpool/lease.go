@@ -702,6 +702,11 @@ func (p *pool) leaseGraceDeadline(l *vmLease) time.Time {
 // grace_limit is the one reason that ends a lease whose gate is held: the sweep cancels
 // the running Exec (l.cut, l.cancel), and that Exec's own unwind in runLease ends the
 // lease and destroys the VM under the gate it already holds.
+//
+// It ends at most MaxReclaimsPerScan leases per tick (PR #763 review): each end fsyncs
+// the key's state file under p.mu, and a burst of due leases -- a fleet idling out
+// together -- would otherwise hold the lock for all of them. The rest are still due at
+// the next tick, LeaseScanInterval later.
 func (p *pool) sweepLeasesLocked(now time.Time) []*leaseVictim {
 	var out []*leaseVictim
 	for _, rp := range p.runs {
@@ -710,6 +715,8 @@ func (p *pool) sweepLeasesLocked(now time.Time) []*leaseVictim {
 			// No lease, or one startLease is still installing under its gate.
 			continue
 		}
+		// Marking expiring and cutting a running Exec go on past the cap: neither writes
+		// the state file here.
 		if !now.Before(l.started.Add(p.cfg.leaseMaxDuration(l.mode))) {
 			l.expiring = true
 		}
@@ -725,7 +732,7 @@ func (p *pool) sweepLeasesLocked(now time.Time) []*leaseVictim {
 		if reason == "" {
 			reason = p.leaseEndDueLocked(l, now, graceOver)
 		}
-		if reason == "" {
+		if reason == "" || len(out) >= p.cfg.MaxReclaimsPerScan {
 			continue
 		}
 		select {
@@ -762,8 +769,9 @@ func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) Leas
 // reclaimLeasesLocked ends idle leases for memory (spec §6), idle-longest first, with
 // reason memory_reclaim, and returns the victims for destroySweptLeases. need is the
 // budget the caller must free: an admission's shortfall (evictForAdmissionLocked), or the
-// lease ticker's overshoot once measured charges have grown past the budget. Caller holds
-// p.mu, on a pool that is not closed.
+// lease ticker's overshoot once measured charges have grown past the budget (sweepLeases),
+// in both cases what idle standbys could not cover. Caller holds p.mu, on a pool that is
+// not closed.
 //
 // It takes victims while either deficit remains, and stops once need is covered and
 // MemAvailable is back above LeaseReclaimFreeBytes, or once it has taken
@@ -774,9 +782,11 @@ func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) Leas
 // MemAvailable drives no reclaim: ending a user's lease on "cannot tell" is the wrong
 // way to fail, and the host floor (hostFloorLocked) fails closed for that case instead.
 //
-// The cap is per call, not per sweep: a lease tick ends the leases sweepLeasesLocked
-// finds due, uncapped, and this call then ends up to MaxReclaimsPerScan more; each
-// admission's call (evictForAdmissionLocked) may end up to MaxReclaimsPerScan again.
+// The cap is per call, not per sweep: a lease tick ends up to MaxReclaimsPerScan leases
+// sweepLeasesLocked finds due, and this call then ends up to MaxReclaimsPerScan more;
+// each admission's call (evictForAdmissionLocked) may end up to MaxReclaimsPerScan again.
+// need is what is left of the overshoot once idle standbys have been shed for it (the
+// lease tick, as an admission does).
 //
 // A LEASE WITH AN EXEC IN FLIGHT IS NEVER RECLAIMED FOR MEMORY. A lease is taken only
 // after a non-blocking send on its run's gate succeeds, as the lease sweep does: a held

@@ -191,12 +191,14 @@ func (p *pool) armTickerLocked() {
 }
 
 // sweepLeases is the lease ticker's body. It re-samples the idle leases' charges, then
-// sweepLeasesLocked ends the leases that are due, then reclaimLeasesLocked ends idle
-// leases for memory while MemAvailable is below LeaseReclaimFreeBytes or the measured
-// charges have grown past the budget (spec §6). The VMs are destroyed on the reclaim
-// goroutine -- or inline when its queue is full, as sweep does -- each under its run's
-// gate. A closed pool ends no lease: Close has detached the idle ones and kept their open
-// records for worker_restart.
+// sweepLeasesLocked ends the leases that are due. Measured charges grown past the budget
+// are then funded in the order an admission uses (evictForAdmissionLocked): idle
+// standbys first, then idle leases, idle-longest first (reclaimLeasesLocked), which also
+// ends idle leases while MemAvailable is below LeaseReclaimFreeBytes -- that deficit goes
+// to the leases directly (spec §6). The VMs are destroyed on the reclaim goroutine -- or
+// inline when its queue is full, as sweep does -- each lease VM under its run's gate. A
+// closed pool ends no lease: Close has detached the idle ones and kept their open records
+// for worker_restart.
 func (p *pool) sweepLeases(now time.Time) {
 	p.mu.Lock()
 	if p.closed {
@@ -208,12 +210,21 @@ func (p *pool) sweepLeases(now time.Time) {
 	// After the sweep, so that a lease due to end for its own clocks ends with that reason,
 	// and its charge has already left committedLocked.
 	over := p.committedLocked() - (p.cfg.MaxCommittedBytes - p.cfg.MemoryReserveBytes)
+	var standbys []VM
+	if over > 0 {
+		// A standby costs its run one cold acquire, a lease its sandbox's processes, /tmp
+		// and a notice: standbys go first (PR #763 review).
+		order, _ := p.standbyDonorsLocked(nil)
+		var freed int64
+		standbys, freed = p.shedStandbysLocked(order, over)
+		over -= freed
+	}
 	vs = append(vs, p.reclaimLeasesLocked(now, over)...)
-	if len(vs) == 0 {
+	if len(vs) == 0 && len(standbys) == 0 {
 		p.mu.Unlock()
 		return
 	}
-	b := reclaimBatch{leases: vs}
+	b := reclaimBatch{vms: standbys, leases: vs}
 	select {
 	case p.reclaimQ <- b: // under p.mu, with p.closed false: see sweep
 		p.mu.Unlock()

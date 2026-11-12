@@ -46,7 +46,9 @@ type Stats struct {
 	// the field — and it is the only visibility on it after the first log line.
 	TimeoutsClamped uint64
 	// BudgetEvictions counts standbys shed by evictForBudgetLocked: user-visible memory
-	// refusals (#452) that were turned into somebody else's cold acquire instead.
+	// refusals (#452) that were turned into somebody else's cold acquire instead. The
+	// lease ticker sheds standbys the same way, and counts them here, when measured lease
+	// charges have grown past the budget (sweepLeases).
 	//
 	// READ IT AGAINST Refusals[RefuseMemoryBudget], because only the pair distinguishes
 	// the two states. Evictions rising while that stays flat is the mechanism absorbing

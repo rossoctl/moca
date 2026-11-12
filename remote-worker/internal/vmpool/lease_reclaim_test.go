@@ -338,3 +338,63 @@ func TestStandbysEvictedBeforeLeases(t *testing.T) {
 	}
 	waitFor(t, func() bool { return lc.destroyedFor("standby") == 2 }) // its Exec VM, and one standby
 }
+
+// PR #763 review (F4): the lease tick sheds in the order an admission does. Measured lease
+// charges that have grown past the budget are funded by idle standbys first, and only
+// then by ending idle leases: a standby costs its run one cold acquire, a lease its
+// sandbox's processes, /tmp and a notice.
+func TestLeaseTickShedsStandbysBeforeLeases(t *testing.T) {
+	budget := DefaultLeaseStartBytes + 2*perVM
+	p, lc, clk := leasePool(t, func(c *Config) { c.MaxCommittedBytes = budget })
+	leaseOn(t, p, "lease") // unsampled: LeaseStartBytes
+	clk.Advance(time.Second)
+	primed(t, p, clk, "standby") // two standbys at PerVMBytes each: the budget, exactly
+	if s := p.Stats(); s.CommittedBytes != budget {
+		t.Fatalf("CommittedBytes = %d, want the whole budget %d", s.CommittedBytes, budget)
+	}
+	// The idle lease's next sample charges it 100 MiB more than its start price: over the
+	// budget by less than one standby.
+	lc.setLeaseBytes((DefaultLeaseStartBytes + 100<<20) * 4 / 5) // x LeaseHeadroom 1.25
+	tickLeases(p, clk)
+	waitFor(t, func() bool { return lc.destroyedFor("standby") == 2 }) // its Exec VM, and one standby
+	if !keyLeased(p, "lease") {
+		t.Fatal("the tick ended the idle lease while a standby could cover the overshoot")
+	}
+	if s := p.Stats(); s.BudgetEvictions != 1 || s.LeaseEnds[LeaseEndMemoryReclaim] != 0 {
+		t.Fatalf("BudgetEvictions %d, LeaseEnds[memory_reclaim] %d; want one standby and no lease",
+			s.BudgetEvictions, s.LeaseEnds[LeaseEndMemoryReclaim])
+	}
+	if s := p.Stats(); s.CommittedBytes > budget {
+		t.Fatalf("CommittedBytes = %d after the tick, want within the budget %d", s.CommittedBytes, budget)
+	}
+}
+
+// PR #763 review (F8): the lease sweep ends at most MaxReclaimsPerScan leases per tick,
+// which bounds the state-file fsyncs it does under p.mu; the rest end on the next tick.
+func TestLeaseSweepEndsAtMostMaxReclaimsPerScan(t *testing.T) {
+	p, lc, clk := leasePool(t, func(c *Config) { c.MaxReclaimsPerScan = 2 })
+	for _, k := range []string{"a", "b", "c"} {
+		leaseOn(t, p, k) // all idle from the same instant
+	}
+	leased := func() int {
+		n := 0
+		for _, k := range []string{"a", "b", "c"} {
+			if keyLeased(p, k) {
+				n++
+			}
+		}
+		return n
+	}
+	clk.Advance(p.cfg.LeaseIdleDefault) // the tick at which all three are due
+	if n := leased(); n != 1 {
+		t.Fatalf("leases after the tick at which all three are due = %d, want 1 (two ended, the cap)", n)
+	}
+	clk.Advance(p.cfg.LeaseScanInterval)
+	if n := leased(); n != 0 {
+		t.Fatalf("leases after the next tick = %d, want 0", n)
+	}
+	waitFor(t, func() bool { return lc.liveCount() == 0 })
+	if n := p.Stats().LeaseEnds[LeaseEndIdle]; n != 3 {
+		t.Fatalf("LeaseEnds[idle] = %d, want 3", n)
+	}
+}
