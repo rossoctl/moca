@@ -217,3 +217,74 @@ func TestRestoreCleanupReturnsThePooledCgroupOnAFailedRestore(t *testing.T) {
 		t.Fatalf("minted=%d; the returned cgroup should have been reused", pool.mintedCount())
 	}
 }
+
+// TestWaitForHeldJailsWaitsForAKilledVMMToLetGoOfItsSocket is #797's wait before Probe. A
+// SIGKILLed VMM can still be answering on its API socket while the kernel tears it down, and
+// Probe's first Restore then meets it in the collision guard above and fails the start. The
+// listener here closes 300 ms in, standing in for that teardown: WaitForHeldJails must still
+// be waiting then, and return with nothing held once it has gone.
+func TestWaitForHeldJailsWaitsForAKilledVMMToLetGoOfItsSocket(t *testing.T) {
+	lc, base, _ := collisionLauncher(t)
+	jailRoot := filepath.Join(base, "firecracker", "vm-1", "root")
+	if err := os.MkdirAll(filepath.Join(jailRoot, "run"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(jailRoot, apiSockRelPath))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = ln.Close()
+		close(closed)
+	}()
+	t.Cleanup(func() { <-closed })
+
+	if held := WaitForHeldJails(lc, 5*time.Second); len(held) != 0 {
+		t.Fatalf("WaitForHeldJails = %v, want none: the listener closed well inside the bound", held)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("WaitForHeldJails returned while vm-1's API socket still had a listener — Probe would collide with it")
+	}
+}
+
+// TestWaitForHeldJailsNamesTheJailsStillHeldWhenItGivesUp is the bound's other side: a VMM
+// still answering when the wait ends is named, so the start fails saying which id, and only
+// that one. A free jail (a stale socket file, no listener) is not held — the same distinction
+// the collision guard makes — and a directory that is not a pool VM id is not asked at all.
+func TestWaitForHeldJailsNamesTheJailsStillHeldWhenItGivesUp(t *testing.T) {
+	lc, base, _ := collisionLauncher(t)
+	occupyJail(t, base, "vm-2")
+	occupyJail(t, base, "vm-x") // not an id this pool makes (ids are decimal)
+	free := filepath.Join(base, "firecracker", "vm-3", "root")
+	if err := os.MkdirAll(filepath.Join(free, "run"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale, err := net.Listen("unix", filepath.Join(free, apiSockRelPath))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// Leave the socket FILE behind with nothing accept()ing on it, as a crashed VMM does.
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = stale.Close()
+
+	start := time.Now()
+	held := WaitForHeldJails(lc, 150*time.Millisecond)
+	if len(held) != 1 || held[0] != "vm-2" {
+		t.Fatalf("WaitForHeldJails = %v, want exactly [vm-2]", held)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("WaitForHeldJails gave up after %s, before its 150ms bound", elapsed)
+	}
+}
+
+// TestWaitForHeldJailsIsANoOpForALauncherWithNoJails: only the Firecracker arm has jails to
+// ask, so any other launcher returns at once with nothing held rather than delaying the start.
+func TestWaitForHeldJailsIsANoOpForALauncherWithNoJails(t *testing.T) {
+	if held := WaitForHeldJails(&fakeLauncher{}, time.Hour); len(held) != 0 {
+		t.Fatalf("WaitForHeldJails = %v for a launcher with no jails, want none", held)
+	}
+}
