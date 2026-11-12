@@ -13,7 +13,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.1.0
+  version: 1.2.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -83,7 +83,8 @@ paths:
         Authenticated turns run on the caller's exchanged credential, with the session's
         config bundle, sandbox tier and sandbox template taken from the control plane — never
         from the request (ADR-0038) — and create the session if absent. A session with a
-        template runs only on workers serving it, and a template's seed runs once in the
+        template runs only on workers serving it (and, pinned to a manifest-hash build, only on
+        workers labelled moca.dev/build with that build), and a template's seed runs once in the
         session's workspace before the turn's first tool call; a session with none runs only
         on untemplated workers. Unauthenticated turns (SH_REQUIRE_AUTH
         off, no token) run on the operator's ambient credential: a named session must already

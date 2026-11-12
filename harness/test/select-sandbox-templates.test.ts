@@ -5,7 +5,7 @@ import {
   resetTierWarnings,
 } from '../src/select-sandbox.js';
 import type { SandboxRecord } from '../src/pool-records.js';
-import { TEMPLATE_LABEL } from '../src/sandbox-affinity.js';
+import { BUILD_LABEL, TEMPLATE_LABEL } from '../src/sandbox-affinity.js';
 import { deps, env, fakeAffinity, fakeLease, opts, TIERS } from './select-sandbox-tiers.test.js';
 
 /** The template filter and its affinity rule (session-templates spec §4). */
@@ -34,6 +34,38 @@ describe('selectPoolSandbox: the template filter', () => {
       deps(recs, lease),
     );
     expect(sel?.sandboxId).toBe('dj-1');
+  });
+
+  it('a session pinned to a build lands only on a worker serving that build', async () => {
+    const A = 'sha256:' + 'a'.repeat(64);
+    const B = 'sha256:' + 'b'.repeat(64);
+    const of = (id: string, build?: string) =>
+      rec(id, { [TEMPLATE_LABEL]: 'dj', ...(build ? { [BUILD_LABEL]: build } : {}) });
+    // The B worker is idle and the A one loaded: load alone would pick B, or the unlabelled one.
+    const { lease } = fakeLease({ 'dj-a': 1 });
+    const recs = [of('dj-old'), of('dj-b', B), of('dj-a', A)];
+    const pinned = await selectPoolSandbox(
+      env(),
+      '/h',
+      's-1',
+      opts({ template: 'dj', build: A }),
+      deps(recs, lease),
+    );
+    expect(pinned?.sandboxId).toBe('dj-a');
+    // Unpinned: any worker of the template, as before.
+    const any = await selectPoolSandbox(
+      env(),
+      '/h',
+      's-2',
+      opts({ template: 'dj' }),
+      deps(recs, lease),
+    );
+    expect(['dj-old', 'dj-b', 'dj-a']).toContain(any?.sandboxId);
+    // No worker of the pinned build: refused, never another build.
+    const C = 'sha256:' + 'c'.repeat(64);
+    await expect(
+      selectPoolSandbox(env(), '/h', 's-3', opts({ template: 'dj', build: C }), deps(recs, lease)),
+    ).rejects.toBeInstanceOf(SandboxPoolEmptyError);
   });
 
   it('a session without a template never lands on a templated worker', async () => {

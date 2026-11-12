@@ -16,6 +16,7 @@ import {
   OWNER_LABEL,
   TIER_LABEL,
   TEMPLATE_LABEL,
+  BUILD_LABEL,
   WORKLOAD_LABEL,
   type AffinityStore,
 } from './sandbox-affinity.js';
@@ -616,6 +617,12 @@ export async function selectPoolSandbox(
      */
     template?: string;
     /**
+     * The build the session's template resolved to (combined control plane spec §3.4). Set: only
+     * records labelled `moca.dev/build=<it>` are candidates, so a session pinned to a build never
+     * runs on another. Absent: any build of the template, as before.
+     */
+    build?: string;
+    /**
      * The workload key (`w-<32 hex>`) the run names (workload sandboxes spec §3.3). Set: only
      * records labelled `moca.dev/workload=<key>` are candidates, and there is no fallback to the
      * shared pool. Absent or '': records carrying any workload label are never candidates.
@@ -728,6 +735,10 @@ async function select(
   const template = opts.template || '';
   const ofTemplate = (r: SandboxRecord): boolean => (r.labels?.[TEMPLATE_LABEL] || '') === template;
   grpcRecs = grpcRecs.filter(ofTemplate);
+  // The build filter: only with a template and a pinned build; a worker reporting no
+  // build label never serves a pinned session.
+  const build = template && opts.build ? opts.build : '';
+  if (build) grpcRecs = grpcRecs.filter((r) => r.labels?.[BUILD_LABEL] === build);
   // The workload filter (spec §3.3): a workload run sees only its own workload's sandboxes, of its own
   // owner, and a run
   // without one never sees any workload's. A deployment with no workload sandboxes has no record

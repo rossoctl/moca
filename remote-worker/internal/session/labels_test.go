@@ -82,3 +82,20 @@ func TestLabelsMergesTierAndTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestWithBuildAddsTheBuildLabelOnlyForAHash(t *testing.T) {
+	base := map[string]string{session.TierLabelKey: "microvm", session.TemplateLabelKey: "t1"}
+	got := session.WithBuild(base, "sha256:abc")
+	if got[session.BuildLabelKey] != "sha256:abc" || got[session.TemplateLabelKey] != "t1" || got[session.TierLabelKey] != "microvm" {
+		t.Fatalf("WithBuild = %v", got)
+	}
+	if _, ok := base[session.BuildLabelKey]; ok {
+		t.Fatal("WithBuild changed its input")
+	}
+	if got := session.WithBuild(base, " "); got[session.BuildLabelKey] != "" {
+		t.Fatalf("a blank hash added the label: %v", got)
+	}
+	if got := session.WithBuild(nil, "sha256:abc"); got[session.BuildLabelKey] != "sha256:abc" {
+		t.Fatalf("session.WithBuild(nil) = %v", got)
+	}
+}

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { place, readinessOf } from '../src/activation.js';
 import { writeError } from '../src/errors.js';
+import { exchangeCredential } from '../src/exchange.js';
 import { HANDLERS } from '../src/handlers.js';
 import { HostRegistry } from '../src/host-handlers.js';
 import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenance.js';
@@ -390,6 +391,10 @@ describe('activation on first use (§6.4)', () => {
       sandboxBuildId: hash('1'),
       templateManifestHash: hash('1'),
     });
+    // The exchange hands the data plane that build, so the turn runs only on its workers.
+    const tok = (r.body as Body).token as string;
+    const ex = await exchangeCredential(tok, d);
+    expect(ex).toMatchObject({ sandboxTemplate: 't1', sandboxBuildId: hash('1') });
     expect(await refusal(() => session({ template: 'nope' }))).toMatchObject({
       code: 'unknown_template',
     });

@@ -42,6 +42,24 @@ func TemplateLabels(lookup func(string) (string, bool)) map[string]string {
 
 // Labels is a worker's whole Hello label set: its tier (TierLabels, with def) and its template
 // (TemplateLabels). Nil when it has neither.
+// BuildLabelKey is the presence label naming the build this worker serves: its snapshot's manifest
+// hash, `sha256:<hex>` (combined control plane spec §3.4). A session pinned to a build
+// runs only on workers labelled with it. Only microvm-worker sets it, from the manifest it verified.
+const BuildLabelKey = "moca.dev/build"
+
+// WithBuild returns labels plus BuildLabelKey=hash, or labels unchanged for an empty hash.
+func WithBuild(labels map[string]string, hash string) map[string]string {
+	if strings.TrimSpace(hash) == "" {
+		return labels
+	}
+	out := map[string]string{}
+	for k, v := range labels {
+		out[k] = v
+	}
+	out[BuildLabelKey] = hash
+	return out
+}
+
 func Labels(lookup func(string) (string, bool), def string) map[string]string {
 	out := TierLabels(lookup, def)
 	for k, v := range TemplateLabels(lookup) {

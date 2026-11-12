@@ -217,7 +217,7 @@ export async function acquireTurnSandbox(
   sessionId: string | undefined,
   deps: SelectDeps = {},
   tier?: string,
-  template?: { id: string; seed?: string },
+  template?: { id: string; seed?: string; build?: string },
 ): Promise<AcquiredTurnSandbox> {
   const noop = async () => {};
   if (injected) return { sandbox: injected, leased: false, heartbeat: noop, release: noop };
@@ -246,6 +246,7 @@ export async function acquireTurnSandbox(
       remoteSandbox: env.SH_REMOTE_SANDBOX === '1',
       tier,
       ...(template ? { template: template.id } : {}),
+      ...(template?.build ? { build: template.build } : {}),
     },
     deps,
   );
@@ -455,6 +456,11 @@ export interface TurnConfig {
    */
   sandboxTemplate?: string;
   sandboxSeed?: string;
+  /**
+   * The build the session's template resolved to (`sha256:…`, combined control plane spec §3.4).
+   * Set: only workers labelled `moca.dev/build=<it>` serve the turn.
+   */
+  sandboxBuildId?: string;
   /**
    * The session's model, from the exchange (per-session model spec §5.1). Read by executeTurn only:
    * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
@@ -1019,6 +1025,7 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
       ? {
           id: input.config.sandboxTemplate,
           ...(input.config.sandboxSeed ? { seed: input.config.sandboxSeed } : {}),
+          ...(input.config.sandboxBuildId ? { build: input.config.sandboxBuildId } : {}),
         }
       : undefined,
   );

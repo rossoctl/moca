@@ -52,6 +52,12 @@ export interface ExchangeResponse {
   sandboxTemplate?: string;
   sandboxSeed?: string;
   /**
+   * The build the session resolved its template to (`sha256:<manifest hash>`, combined control plane
+   * spec §3.4): the data plane keeps the session on workers labelled `moca.dev/build`
+   * with it. Absent for a session without a resolved build, so that response is unchanged.
+   */
+  sandboxBuildId?: string;
+  /**
    * The session's model and the limits snapshotted when it was chosen (per-session model spec
    * §4.5). Absent when the session names none, so that response is unchanged.
    */
@@ -423,6 +429,10 @@ export async function exchangeCredential(
     ...(tier ? { sandboxTier: tier } : {}),
     ...(template ? { sandboxTemplate: template.id } : {}),
     ...(template?.seed ? { sandboxSeed: template.seed } : {}),
+    // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
+    ...(template && rec.sandboxBuildId?.startsWith('sha256:')
+      ? { sandboxBuildId: rec.sandboxBuildId }
+      : {}),
     ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
   };
 }

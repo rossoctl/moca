@@ -2909,6 +2909,14 @@ paths:
                       the template's seed, a bash command the data plane runs once per workspace;
                       present only beside sandboxTemplate, while the deployment declares it with a
                       seed
+                  sandboxBuildId:
+                    type: string
+                    pattern: '^sha256:[0-9a-f]{64}$'
+                    description: |
+                      the manifest-hash build the session's template resolved to at creation
+                      (combined control plane spec §3.4); the data plane runs the turn only on
+                      workers labelled moca.dev/build with it, and refuses it when none is
+                      attached. Present only beside sandboxTemplate, for a manifest-hash build
                   model:
                     type: object
                     description: |
