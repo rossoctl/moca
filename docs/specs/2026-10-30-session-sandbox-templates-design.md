@@ -124,7 +124,7 @@ workspace** (the selection's `podCwd`: `/workspace` on a microVM, `/workspace/<s
 container worker), and only if that workspace is not seeded yet:
 
     cd <workspace> && flock .moca-seed.lock bash -c \
-      '[ -e .moca-seeded ] || { bash -c <seed> >.moca-seed.log 2>&1 && touch .moca-seeded; }'
+      '[ -e .moca-seeded ] || { bash -c <seed> >.moca-seed.log 2>&1 && <exclude> && touch .moca-seeded; }'
 
 - **The marker** (`.moca-seeded`) lives in the workspace, so it travels with it: a session that keeps
   its sandbox is seeded once; a workspace reset (a new, empty workspace) is seeded again.
@@ -133,8 +133,13 @@ container worker), and only if that workspace is not seeded yet:
   unlocked.
 - **A failed seed leaves no marker**, so the next turn runs it again on whatever it left: a seed must
   be safe to re-run (`cp -a` is; a bare `git clone` into the workspace is not).
-- **Output** goes to `.moca-seed.log` in the workspace, never into the turn, so a chatty seed cannot
-  trip the output cap. Only the exit code is read.
+- **Output** goes to `.moca-seed.log` in the workspace, never into the turn's output, so a chatty seed
+  cannot trip the output cap; only the exit code is read. The log is in the agent's own workspace, so
+  the agent can read it: **a seed must not print a secret** (a clone token, say).
+- **Out of a repository's patch:** when the workspace is a git repository (a seeded checkout), the seed
+  adds `/.moca-seeded`, `/.moca-seed.log` and `/.moca-seed.lock` to its `info/exclude` (`<exclude>`
+  above, each once; best-effort, a workspace without git is unaffected), so a patch taken with `git
+add -A` or `git status --porcelain`, or an agent that commits everything, never carries them.
 - **The lease is renewed** while the seed runs, as for the turn, since a seed (a clone, an install) may
   outlast the lease TTL. The worker's timeout is 600 s.
 - **A failed seed** fails the turn with `SandboxSeedError` (a 500, not retryable: the template's image

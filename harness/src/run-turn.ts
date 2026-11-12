@@ -296,8 +296,13 @@ export async function acquireTurnSandbox(
  * travels with that workspace and no other session's.
  */
 export const SEED_MARKER = '.moca-seeded';
-/** The seed's own output, kept in the workspace for the operator; the agent never reads it. */
+/**
+ * The seed's own output, kept in the workspace for the operator: never in the turn's output, but in
+ * the agent's own workspace, where the agent can read it, so a seed must not print a secret.
+ */
 export const SEED_LOG = '.moca-seed.log';
+/** The lock that holds concurrent first turns of one session to one seed run. */
+export const SEED_LOCK = '.moca-seed.lock';
 
 /** A template's seed failed: the turn cannot start on a workspace that is not the template's. */
 export class SandboxSeedError extends Error {
@@ -318,7 +323,9 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
  * leaves no marker, so the next turn runs it again on whatever it left: a seed must be safe to
  * re-run (`cp -a` is; a bare `git clone` into the workspace is not). A workspace reset has no
  * marker and is seeded again. The seed's output goes to SEED_LOG, never into the turn: only the
- * exit code is read, so a chatty seed cannot trip the output cap.
+ * exit code is read, so a chatty seed cannot trip the output cap. When the workspace is a git
+ * repository (a seeded checkout), the three seed files are added to its `info/exclude`, so a patch
+ * taken with `git add -A` or `git status --porcelain` never carries them.
  */
 export async function seedWorkspace(
   transport: {
@@ -328,11 +335,16 @@ export async function seedWorkspace(
   seed: string,
   workspace = '/workspace',
 ): Promise<void> {
-  const body = `[ -e ${SEED_MARKER} ] || { bash -c ${shq(seed)} >${SEED_LOG} 2>&1 && touch ${SEED_MARKER}; }`;
+  const files = [SEED_MARKER, SEED_LOG, SEED_LOCK];
+  // Best-effort: no git, or not a repository, skips it; it never fails the seed.
+  const exclude =
+    `{ x="$(git rev-parse --git-path info/exclude 2>/dev/null)" && mkdir -p "$(dirname "$x")" && ` +
+    `for f in ${files.map((f) => `/${f}`).join(' ')}; do grep -qxF "$f" "$x" 2>/dev/null || echo "$f" >>"$x"; done; true; }`;
+  const body = `[ -e ${SEED_MARKER} ] || { bash -c ${shq(seed)} >${SEED_LOG} 2>&1 && ${exclude} && touch ${SEED_MARKER}; }`;
   // flock(1) is util-linux, in every shipped sandbox image; without it the guard still runs, unlocked.
   const command =
     `cd ${shq(workspace)} && if command -v flock >/dev/null 2>&1; then ` +
-    `flock .moca-seed.lock bash -c ${shq(body)}; else ${body}; fi`;
+    `flock ${SEED_LOCK} bash -c ${shq(body)}; else ${body}; fi`;
   let res: { exitCode: number | null };
   try {
     res = await transport.exec(command, { timeout: 600 });

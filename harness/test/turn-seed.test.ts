@@ -79,6 +79,33 @@ describe('seedWorkspace', () => {
     expect(readFileSync(join(ws, '.moca-seed.log'), 'utf8')).toBe('loud\nlouder\n');
   });
 
+  it("keeps the seed's files out of a seeded repository's patch (info/exclude), once", async () => {
+    const ws = scratch();
+    execFileSync('git', ['init', '-q', ws]);
+    await seedWorkspace(realBash, 'py312', 'echo code > app.py', ws);
+    // A later turn (a new marker after a reset) appends nothing twice.
+    execFileSync('rm', ['-f', join(ws, '.moca-seeded')]);
+    await seedWorkspace(realBash, 'py312', 'echo code > app.py', ws);
+    const status = execFileSync(
+      'git',
+      ['-C', ws, 'status', '--porcelain', '--untracked-files=all'],
+      {
+        encoding: 'utf8',
+      },
+    );
+    expect(status.split('\n').filter(Boolean)).toEqual(['?? app.py']);
+    const exclude = readFileSync(join(ws, '.git', 'info', 'exclude'), 'utf8').split('\n');
+    for (const f of ['/.moca-seeded', '/.moca-seed.log', '/.moca-seed.lock'])
+      expect(exclude.filter((l) => l === f)).toHaveLength(1);
+  });
+
+  it('seeds a workspace that is not a repository as before (no git step fails it)', async () => {
+    const ws = scratch();
+    await seedWorkspace(realBash, 'py312', 'echo code > app.py', ws);
+    expect(existsSync(join(ws, '.moca-seeded'))).toBe(true);
+    expect(existsSync(join(ws, '.git'))).toBe(false);
+  });
+
   it('concurrent first turns run the seed once (flock, where the image has it)', async () => {
     const ws = scratch();
     const hasFlock = (() => {
