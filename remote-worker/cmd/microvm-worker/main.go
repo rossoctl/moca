@@ -621,7 +621,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
-	if err := man.Verify(snapDir); err != nil {
+	// SH_VERIFY_MEMFILE=1 re-hashes the memory file too (a version-2 manifest): a full read
+	// of the guest's RAM image, so off by default; the build hashes it.
+	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1"}); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
 	if err := verifyInstanceType(get, man.InstanceType, detectHostInstanceType); err != nil {

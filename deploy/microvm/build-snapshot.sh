@@ -39,10 +39,13 @@
 #                      device state to vmstate/memfile.
 #   5. write_manifest -- record image, vmm, instance type, the GUEST's kernel release
 #                      (uname -r inside the booted VM, not the build host's), guest RAM,
-#                      the capabilities probed INSIDE the guest before snapshotting,
-#                      and the three component digests + their combined hash, in the
-#                      exact kernel/rootfs/agent order vmpool.Manifest.ComputeHash
-#                      hashes them in. kernel_sha256 is expected to legitimately
+#                      vcpus, the capabilities probed INSIDE the guest before
+#                      snapshotting, the features the image supports (lease-v1 on the
+#                      Firecracker arm; outside the hash), the digests of kernel, rootfs,
+#                      agent, vmstate, memfile (and ch-config.json, the egress CA), the
+#                      image digest build-rootfs.sh recorded, and hash version 2: one
+#                      hash over every other field and digest, in the exact line format
+#                      vmpool.Manifest.ComputeHash hashes. kernel_sha256 is expected to legitimately
 #                      DIFFER between a firecracker-arm and a cloud-hypervisor-arm
 #                      manifest for the same --image: the two arms need different
 #                      kernels (see preflight's virtio-fs check, item 1 above, and
@@ -164,7 +167,7 @@ name something other than what this host reports.
 
 --egress-ca PATH bakes the KVM host's TLS-interception CA (the PUBLIC certificate
 only; a file holding any PRIVATE KEY block is refused) into the rootfs trust store,
-and records "egress_ca_sha256" (sha256 of the DER) in manifest.json, outside "hash". Writes vmstate, memfile and a
+and records "egress_ca_sha256" (sha256 of the DER) in manifest.json, inside "hash" (version 2). Writes vmstate, memfile and a
 manifest.json the worker verifies at start, then restores one VM to prove the
 artifact works.
 
@@ -2093,27 +2096,59 @@ write_manifest() {
   # boots -- both now need it in place at the jail-relative name "/kernel"
   # pre-boot, not just afterwards for hashing.
 
-  local khash rhash ahash hash caps_json built_at egress_json features_json
+  local khash rhash ahash vhash mhash chhash cahash srcdig hash caps_json caps_csv built_at krel egress_json features_json f
   khash="sha256:$(sha256sum "$STAGE/kernel" | cut -d' ' -f1)"
   rhash="sha256:$(sha256sum "$STAGE/rootfs" | cut -d' ' -f1)"
   ahash="sha256:$(sha256sum "$STAGE/agent" | cut -d' ' -f1)"
-  # Hashed in this exact order -- kernel, then rootfs, then agent -- to match
-  # vmpool.Manifest.ComputeHash byte for byte; a different order here would make
-  # every worker's startup verification fail against a perfectly good snapshot.
-  hash="sha256:$(printf 'kernel:%s\nrootfs:%s\nagent:%s\n' "$khash" "$rhash" "$ahash" | sha256sum | cut -d' ' -f1)"
-
-  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
-  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  # Only with --egress-ca, and AFTER "hash": the fingerprint is outside the hash (it is not one
-  # of vmpool.Manifest.ComputeHash's inputs) so a worker that predates it still verifies.
+  # Hash version 2: vmstate and memfile are hashed once here, and the hash covers every
+  # field below, so it names this build and nothing else.
+  vhash="sha256:$(sha256sum "$STAGE/vmstate" | cut -d' ' -f1)"
+  mhash="sha256:$(sha256sum "$STAGE/memfile" | cut -d' ' -f1)"
+  chhash=""
+  [ -f "$STAGE/ch-config.json" ] && chhash="sha256:$(sha256sum "$STAGE/ch-config.json" | cut -d' ' -f1)"
   # DER, not PEM, so it is independent of the file's encoding and line wrapping.
-  egress_json=""
-  if [ -n "$EGRESS_CA" ]; then
-    egress_json=",
-  \"egress_ca_sha256\": \"sha256:$(openssl x509 -in "$EGRESS_CA" -outform DER | sha256sum | cut -d' ' -f1)\""
+  cahash=""
+  [ -n "$EGRESS_CA" ] && cahash="sha256:$(openssl x509 -in "$EGRESS_CA" -outform DER | sha256sum | cut -d' ' -f1)"
+
+  # The image digest build-rootfs.sh recorded in the rootfs (/etc/moca-rootfs-source),
+  # copied here so a worker can compare it with its template record without mounting the
+  # rootfs; empty for a rootfs from elsewhere.
+  srcdig=""
+  if [ -n "$ROOTFS" ] && [ -f "$ROOTFS/etc/moca-rootfs-source" ]; then
+    srcdig="$(sed -n 's/^digest=\(sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOTFS/etc/moca-rootfs-source" | head -1)"
   fi
 
+  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
+  caps_csv="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | paste -sd, -)"
+  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # The GUEST's kernel release, probed in the booted VM (probe_guest_kernel), not the build host's.
+  krel="${MANIFEST_GUEST_KERNEL:-}"
+
+  # These lines, in this order, are what vmpool.Manifest.ComputeHash hashes for version 2;
+  # a difference here makes every worker refuse a perfectly good snapshot at start. A value
+  # holding a line break could forge a line: the Go side refuses one, so refuse it here too.
+  for f in "$IMAGE" "$VMM" "$INSTANCE_TYPE" "$krel" "$caps_csv"; do
+    case "$f" in *$'\n'* | *$'\r'*)
+      echo "build-snapshot.sh: a manifest field holds a line break: '$f'" >&2
+      exit 1
+      ;;
+    esac
+  done
+  hash="sha256:$(
+    printf 'moca-snapshot-manifest/2\nimage:%s\nvmm:%s\ninstance_type:%s\nkernel_release:%s\nguest_ram_mb:%s\nvcpus:%s\ncapabilities:%s\nbuilt_at:%s\nkernel:%s\nrootfs:%s\nagent:%s\nvmstate:%s\nmemfile:%s\nch_config:%s\negress_ca:%s\nsource_image_digest:%s\n' \
+      "$IMAGE" "$VMM" "$INSTANCE_TYPE" "$krel" "$GUEST_RAM_MB" "$VCPUS" "$caps_csv" "$built_at" \
+      "$khash" "$rhash" "$ahash" "$vhash" "$mhash" "$chhash" "$cahash" "$srcdig" | sha256sum | cut -d' ' -f1
+  )"
+
+  egress_json=""
+  [ -n "$cahash" ] && egress_json=",
+  \"egress_ca_sha256\": \"$cahash\""
+  local src_json=""
+  [ -n "$srcdig" ] && src_json=",
+  \"source_image_digest\": \"$srcdig\""
+  local ch_json=""
+  [ -n "$chhash" ] && ch_json=",
+  \"ch_config_sha256\": \"$chhash\""
   # lease-v1 on the Firecracker arm only: Cloud Hypervisor's Run mounts the virtiofs
   # workspace inside every command (chvWrapCommand), which a lease Exec, uid 7000 with
   # no capabilities, cannot do.
@@ -2124,6 +2159,7 @@ write_manifest() {
 
   cat >"$STAGE/manifest.json" <<MANIFEST
 {
+  "hash_version": 2,
   "image": "$IMAGE",
   "vmm": "$VMM",
   "instance_type": "$INSTANCE_TYPE",
@@ -2136,7 +2172,9 @@ write_manifest() {
   "kernel_sha256": "$khash",
   "rootfs_sha256": "$rhash",
   "agent_sha256": "$ahash",
-  "hash": "$hash"$egress_json
+  "vmstate_sha256": "$vhash",
+  "memfile_sha256": "$mhash"$ch_json$egress_json$src_json,
+  "hash": "$hash"
 }
 MANIFEST
 }

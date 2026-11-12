@@ -113,6 +113,14 @@ A microVM restores from one golden snapshot: kernel, rootfs, guest agent, and a 
 pinned by `manifest.json`. It is built **on the instance type that will run it**. Restore needs
 identical hardware, so `build-snapshot.sh` records the type and the worker checks it at start.
 
+**The manifest's hash (version 2).** `manifest.json` records the sha256 of every file (kernel,
+rootfs, agent, vmstate, memfile; for Cloud Hypervisor `ch-config.json`) and one `hash` over every
+field and digest, marked `"hash_version": 2`, so the hash names the build and any edit to the
+manifest is refused at worker start. The worker re-hashes the kernel, rootfs, agent and vmstate at
+every start, and the memory file only with `SH_VERIFY_MEMFILE=1` (a full read of the guest's RAM).
+A snapshot built before version 2 (no `hash_version`) still verifies under its old rule, a hash over
+kernel, rootfs and agent only, until it is rebuilt.
+
 **1. A guest kernel.** Firecracker's CI publishes one. This is its `getting-started.md` recipe,
 kernel only:
 
@@ -637,9 +645,9 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   uses the rootfs's own `update-ca-certificates` (Debian, Ubuntu, Alpine) or `update-ca-trust` (RHEL
   family), and dies if the rootfs has neither. Init then exports `NODE_EXTRA_CA_CERTS`,
   `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`. `manifest.json` gains `egress_ca_sha256`, the SHA-256 of
-  the CA in DER form (`openssl x509 -outform DER | sha256sum`, prefixed `sha256:`). It sits outside
-  `hash`, so a worker that predates it still verifies. Without the flag the rootfs and the manifest
-  are unchanged.
+  the CA in DER form (`openssl x509 -outform DER | sha256sum`, prefixed `sha256:`). It is inside
+  `hash` (version 2); a worker that predates version 2 refuses the snapshot, so upgrade workers
+  first. Without the flag the rootfs and the manifest are unchanged.
 - **Not in this slice:** no credentials (the guest's `GH_TOKEN` is the placeholder `moca-placeholder`),
   no TLS interception, no cert-pinning escape hatch, and `MOCA_TENANCY=multi` is refused at boot.
   Because nothing swaps the placeholder yet, tools that send `GH_TOKEN`/`GITHUB_TOKEN` to GitHub (`gh`,
