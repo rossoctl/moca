@@ -679,7 +679,67 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
   business hours. If it is lost, every sandbox on it ends and its files are gone. Your laptop
   keeps the original tree, so pull often.
 
-## 8. Using the API directly
+## 8. Using your own templates
+
+On a deployment with the template store, you can make templates of your own from an image pinned by
+digest and a spec, and use them like the ones your operator provides. Creating one and following its
+build (`mocactl sbx templates create`, `follow`, `show`, `cancel`, `build`) comes with the template
+authoring client; the template onboarding guide (`deploy/sbx/template-onboarding/GUIDE.md`, §4b)
+walks through it from an OCI image. Once a build is registered, every command below takes `--json`
+(the API's answer, never a token).
+
+**What you may do.** `mocactl sbx quota` shows your template quotas and use; `mocactl sbx policy`
+the profiles a create can name, each with its size envelope and egress, and the registries an image
+may come from; `mocactl sbx hosts` each KVM host's active slots, start line and memory.
+
+**Use it:**
+
+```bash
+mocactl sbx templates activate my-python --wait     # until active, saying why it waits
+mocactl sbx create --template my-python --seed      # the build's seed first, then a clean-tree check
+mocactl sbx templates deactivate my-python --stop-now
+```
+
+`activate --wait` prints why a start waits (queued at position N, no slot, memory, or a memory
+file to rebuild); a refusal other than a full slot fails at once.
+`create --template ID@BUILD` pins one build. `create --seed` runs the build's seed as the sandbox's
+first command, then checks that `/workspace` is a clean git tree; a failure keeps the sandbox, for
+you to look at. The seeded tree becomes the sandbox's baseline, so `sbx pull` returns only what
+changed after the seed, and `sbx rm` deletes an unchanged seeded sandbox with no `--force`.
+**A probe sandbox you then changed needs `sbx rm --force`:** a sandbox created with `--seed` to try
+a template, in which you ran something that wrote to `/workspace` (a test run's caches, a build),
+has changes not yet pulled, so a plain `rm` refuses it. Pull what you want to keep, then
+`mocactl sbx rm --force <id>`. `deactivate --stop-now` skips the host's idle grace.
+
+**Change and retire it:** `mocactl sbx templates tag ID default --build B` points new creates at
+another build; `templates edit ID` changes its description and visibility. `mocactl sbx templates
+retire my-python --wait` returns once no host holds it; `--build B` retires one build. A retire is
+refused while a sandbox or session still uses the build (`409 build_in_use`): delete those first. A
+create after a retire answers `410 template_retired`.
+
+**Waits and their exit.** `follow` waits up to 3600 s, `retire --wait` 300 s; `activate --wait` at
+least 1800 s, more for a build queued behind its host's start limit: (position ÷ starts at once,
+rounded up, plus 1) × the host's measured start time × 1.25, read at the first poll, and at most
+4 h. `--timeout S` sets another. Past it they exit **5**; nothing is undone.
+
+**What your sandbox reached.** For a template with egress, `mocactl sbx egress <sandbox>` lists the
+hosts the sandbox connected to, from the KVM host's egress proxy, and the sandbox's end record names
+the log's digest.
+
+**A record of every call.** `--record calls.ndjson` on these commands (and every other command that
+calls the API, but `token`, `login`, `logout` and `credentials`) appends one JSON line per HTTP
+attempt: the command, the path, the status, both bodies and their times. The file is created `0600`.
+Tokens and gate records are kept only as their sha256, and hosts and build-log text only as their
+length, so a record can be shared. `mocactl run "prompt" --record F` writes the same record for a
+Moca Pi session's calls ([CLI reference](../reference/cli-mocactl.md)).
+
+**For admins.** `mocactl sbx admin subjects enroll|unenroll|grant|revoke` reads the current value
+first and prints `old -> new` and the record written; if the value changed between that read and
+the write (another admin at the same time), it says so and exits 1: check it and write again.
+`mocactl sbx templates quota TARGET …` sets a subject's template quotas, and `templates transfer ID
+SUBJECT` hands a template to another owner.
+
+## 9. Using the API directly
 
 The sandbox is also reachable from your own code over gRPC (`sandbox/v1`):
 
@@ -692,7 +752,7 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 Start with `mocactl sbx doctor` in the repository:
 
@@ -777,7 +837,7 @@ Other messages:
 `~/.config/mocactl/`). It is kept apart from `mocactl login`'s moca login: you can have both, and
 logging out of one leaves the other.
 
-## 10. Data handling
+## 11. Data handling
 
 Your code sits on one shared KVM host that other users' sandboxes also run on. **Push internal
 code only, and no secrets.** `sbx up` and `push` leave out common secret files by default (`.env*`,
