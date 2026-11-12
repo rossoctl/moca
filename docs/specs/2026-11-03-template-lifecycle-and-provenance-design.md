@@ -302,6 +302,11 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
 - **Not reversible.** A new build (`POST /v1/templates/{id}/builds`) is the way back; a retired id
   stays its owner's, and a template whose every build is retired no longer counts against the
   `templates` quota.
+- **From mocactl:** `mocactl sbx templates retire ID`, with `--build B` for one build,
+  `--reason TEXT` (a whole template only) and `--wait [--timeout S]`. `--wait` returns once each
+  build reads `retired` and no host holds it (`heldBy` empty, or null without host agents), saying
+  who still holds it; past `--timeout` (default 300 s) it exits 5. A sandbox command refused
+  `template_retired` says that the template or build is never served again.
 
 Known limits: a tag that points at a retired build still resolves to it, and is refused; so does
 `default` when the default build is retired, even with another registered build. Removing a retired build's worker and snapshot from its host

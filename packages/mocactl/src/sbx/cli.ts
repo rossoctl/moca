@@ -37,7 +37,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
-import { cmdActivate, cmdDeactivate, cmdShowTemplate } from './templates.js';
+import { cmdActivate, cmdDeactivate, cmdRetire, cmdShowTemplate } from './templates.js';
 import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
@@ -57,6 +57,13 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  why it waits (default 1800 s; exit 5 on a timeout)
   mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
                                                  its worker drains and stops
+  mocactl sbx templates retire ID [--build BUILD] [--reason TEXT] [--wait [--timeout S]] [--json]
+                                                 retire a template you own (every build), or one
+                                                 build: never served again, refused while a sandbox
+                                                 runs on it, not undone (a new build is the way
+                                                 back). --reason: kept in its record (not with
+                                                 --build). --wait: until no host holds it (default
+                                                 300 s; exit 5 on a timeout)
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -363,6 +370,7 @@ export async function sbxMain(
         timeout: { type: 'string' },
         lease: { type: 'string' },
         wait: { type: 'boolean' },
+        reason: { type: 'string' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
         'max-push': { type: 'string' },
@@ -427,12 +435,33 @@ export async function sbxMain(
     return SBX_EXIT.usage;
   }
   const activating = command === 'templates' && arg === 'activate';
-  if (values.timeout !== undefined && command !== 'run' && !(activating && values.wait)) {
-    io.err(`sbx: --timeout only applies to run and templates activate --wait\n${SBX_USAGE}`);
+  const retiring = command === 'templates' && arg === 'retire';
+  if (
+    values.timeout !== undefined &&
+    command !== 'run' &&
+    !((activating || retiring) && values.wait)
+  ) {
+    io.err(
+      `sbx: --timeout only applies to run, templates activate --wait and templates retire --wait\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
-  if ((values.lease !== undefined || values.wait !== undefined) && !activating) {
-    io.err(`sbx: --lease and --wait only apply to templates activate\n${SBX_USAGE}`);
+  if (values.lease !== undefined && !activating) {
+    io.err(`sbx: --lease only applies to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.wait !== undefined && !(activating || retiring)) {
+    io.err(`sbx: --wait only applies to templates activate and templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && !retiring) {
+    io.err(`sbx: --reason only applies to templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && values.build !== undefined) {
+    io.err(
+      `sbx: --reason is kept for a whole template's retire; retiring one build (--build) takes none\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
   let leaseSeconds: number | undefined;
@@ -474,8 +503,8 @@ export async function sbxMain(
     return SBX_EXIT.usage;
   }
   // `templates show ID [--build BUILD]` (template lifecycle spec §4), `templates activate ID` and
-  // `templates deactivate ID` (§6.3); bare `templates` lists them.
-  const TEMPLATE_COMMANDS = ['show', 'activate', 'deactivate'];
+  // `templates deactivate ID` (§6.3), `templates retire ID` (§5.1); bare `templates` lists them.
+  const TEMPLATE_COMMANDS = ['show', 'activate', 'deactivate', 'retire'];
   if (command === 'templates' && arg !== undefined && !TEMPLATE_COMMANDS.includes(arg)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(arg)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -486,9 +515,9 @@ export async function sbxMain(
   }
   if (
     values.build !== undefined &&
-    !(command === 'templates' && (arg === 'show' || arg === 'activate'))
+    !(command === 'templates' && (arg === 'show' || arg === 'activate' || arg === 'retire'))
   ) {
-    io.err(`sbx: --build only applies to templates show and templates activate\n${SBX_USAGE}`);
+    io.err(`sbx: --build only applies to templates show, activate and retire\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.build !== undefined && !values.build.trim()) {
@@ -701,6 +730,13 @@ export async function sbxMain(
           ...(timeout !== undefined ? { timeoutS: timeout } : {}),
         });
       if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
+      if (arg === 'retire')
+        return cmdRetire(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(values.reason !== undefined ? { reason: values.reason } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
       return cmdTemplates(ctx);
     case 'create':
       return cmdCreate(

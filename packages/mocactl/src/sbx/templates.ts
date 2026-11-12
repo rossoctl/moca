@@ -8,14 +8,16 @@ import { baselineAtHead } from './push.js';
 
 /**
  * The template reads from mocactl (template lifecycle spec §4): one template and its builds, or one
- * build, and `create --seed`, which runs the served build's own seed; and activation (§6.3): take or
- * renew a lease, wait for the build to be active, release it. Every command has `--json` (the API's
- * answer, never a token).
+ * build, and `create --seed`, which runs the served build's own seed; activation (§6.3): take or
+ * renew a lease, wait for the build to be active, release it; and retire (§5.1), waiting until no
+ * host holds the build. Every command has `--json` (the API's answer, never a token).
  */
 
 /** `templates activate --wait`'s limit with no --timeout, in seconds. */
 export const ACTIVATE_TIMEOUT_S = 1800;
-/** Between two reads of a build while waiting for it to be active. */
+/** `templates retire --wait`'s limit with no --timeout, in seconds. */
+export const RETIRE_TIMEOUT_S = 300;
+/** Between two reads of a build while waiting for it to be active, or gone from every host. */
 export const POLL_MS = 5000;
 
 /** Why a leased build is not active yet, for a person. */
@@ -227,6 +229,72 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
       c.io.out(
         `${sanitizeRemote(r.templateId)}: released ${r.released} lease${r.released === 1 ? '' : 's'}\n`,
       );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
+ * `templates retire ID [--build B] [--reason T] [--wait [--timeout S]]` (§5.1): retire the template
+ * (every build of it) or build B, and print each build retired. With --wait, then read each build
+ * until it is `retired` and no host holds it (`heldBy` empty; null, or absent from an older control
+ * plane, means no host agents, so nothing to wait for), saying who still holds it. A wait past
+ * --timeout (default RETIRE_TIMEOUT_S) exits 5.
+ */
+export async function cmdRetire(
+  c: SbxCtx,
+  id: string,
+  opts: { build?: string; reason?: string; wait: boolean; timeoutS?: number },
+): Promise<number> {
+  const timeoutS = opts.timeoutS ?? RETIRE_TIMEOUT_S;
+  try {
+    const r = await c.api.retireTemplate(id, {
+      ...(opts.build !== undefined ? { build: opts.build } : {}),
+      ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+    });
+    const builds = r.builds ?? [{ build: r.build ?? opts.build ?? '', record: r.record ?? null }];
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      for (const b of builds)
+        c.io.out(
+          `retired ${sanitizeRemote(r.templateId)} ${sanitizeRemote(b.build)}` +
+            `${b.record ? '' : ' (already retired)'}\n`,
+        );
+    if (!opts.wait) return SBX_EXIT.ok;
+    const end = c.rt.now() + timeoutS * 1000;
+    for (const { build } of builds) {
+      let said = '';
+      for (;;) {
+        let b: SbxBuild | undefined;
+        try {
+          b = await c.api.getTemplateBuild(r.templateId, build);
+        } catch (err) {
+          if (!transient(err)) throw err;
+        }
+        const held = b?.heldBy ?? [];
+        if (b && b.status === 'retired' && held.length === 0) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, held by no host`,
+          );
+          break;
+        }
+        if (b) {
+          const why =
+            b.status !== 'retired'
+              ? sanitizeRemote(b.status)
+              : `retired, still held by ${held.map(sanitizeRemote).join(',')}`;
+          if (why !== said)
+            c.io.err(`${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: ${why}`);
+          said = why;
+        }
+        const left = end - c.rt.now();
+        if (left <= 0)
+          return timedOut(c, `${r.templateId} ${build} to be gone from every host`, timeoutS);
+        await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
+        if (c.signal?.aborted) return SBX_EXIT.failed;
+      }
+    }
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

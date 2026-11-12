@@ -49,9 +49,16 @@ export interface SbxBuild {
   readiness: string | null;
   capacity: { running: number; inUse: number | null } | null;
   lastUsedAt: number | null;
+  /**
+   * The hosts whose last inventory holds its snapshot (template lifecycle spec §6.1); null without
+   * host agents; absent from an older control plane.
+   */
+  heldBy?: string[] | null;
   tags: string[];
   createdAt: number;
   provenance: string | null;
+  /** The handle the create answered; equal to buildId for an imported build. */
+  handle?: string;
   /** On GET /v1/templates/{id} and the builds routes. */
   spec?: {
     guest_mb?: number;
@@ -70,6 +77,25 @@ export interface SbxLease {
   leaseUntil: number;
   /** The host it is placed on; null while no host agent has reported. */
   host: string | null;
+}
+
+/** One build a retire answered for (openapi RetiredBuild, template lifecycle spec §5.1). */
+export interface SbxRetiredBuild {
+  /** The build's handle. */
+  build: string;
+  /** Null for a build retired before it registered. */
+  buildId: string | null;
+  readiness: 'retired';
+  /** The retire record written now; null when it was already retired. */
+  record: string | null;
+}
+
+/** What a retire answers: a whole template's (`builds`), or one build's (its fields inline). */
+export interface SbxRetired extends Partial<SbxRetiredBuild> {
+  templateId: string;
+  subject: string;
+  status: 'retired';
+  builds?: SbxRetiredBuild[];
 }
 
 /** A template with its builds (openapi Template). */
@@ -115,6 +141,19 @@ export class SandboxApiClient extends ControlPlaneClient {
   /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
   deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
     return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
+  }
+
+  /**
+   * Retire a template (`POST /v1/templates/{id}/retire`), or one build of it (`DELETE
+   * /v1/templates/{id}/builds/{build}`, which takes no reason).
+   */
+  retireTemplate(id: string, opts: { build?: string; reason?: string } = {}): Promise<SbxRetired> {
+    const t = encodeURIComponent(id);
+    return opts.build !== undefined
+      ? this.json('DELETE', `/v1/templates/${t}/builds/${encodeURIComponent(opts.build)}`)
+      : this.json('POST', `/v1/templates/${t}/retire`, {
+          body: opts.reason !== undefined ? { reason: opts.reason } : {},
+        });
   }
 
   createSandbox(body: {

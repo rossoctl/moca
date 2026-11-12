@@ -117,7 +117,19 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
   {
     method: 'get',
     path: '/v1/templates/{id}/builds/{build}',
-    reads: ['buildId', 'status', 'readiness', 'capacity', 'tags', 'spec'],
+    reads: ['buildId', 'status', 'readiness', 'capacity', 'heldBy', 'tags', 'spec'],
+  },
+  // `sbx templates retire` (template lifecycle spec §5.1).
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/retire',
+    reads: ['templateId', 'subject', 'status', 'builds'],
+    sends: ['reason'],
+  },
+  {
+    method: 'delete',
+    path: '/v1/templates/{id}/builds/{build}',
+    reads: ['templateId', 'build', 'buildId', 'record', 'status'],
   },
   // `sbx templates activate` and `deactivate` (template lifecycle spec §6.3).
   {
@@ -139,6 +151,7 @@ const SBX_TEMPLATE_READS = ['id', 'description', 'tools', 'readiness', 'tags'];
 
 // Codes the client branches on (api/errors.ts, core/session-manager.ts, sbx/commands.ts).
 const CODES_USED = [
+  'template_retired',
   'token_required',
   'token_invalid',
   'token_expired',
@@ -315,7 +328,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 12 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 14 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -328,6 +341,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.getTemplateBuild('TID', 'BID');
     await c.activateTemplate('TID', {});
     await c.deactivateTemplate('TID');
+    await c.retireTemplate('TID');
+    await c.retireTemplate('TID', { build: 'BID' });
     const seen = calls.map(
       (k) =>
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
@@ -353,6 +368,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'getTemplateBuild',
         'activateTemplate',
         'deactivateTemplate',
+        'retireTemplate',
       ]),
     );
   });
