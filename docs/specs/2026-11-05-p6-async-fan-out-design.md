@@ -915,6 +915,23 @@ is narrower than it reads — one knob for the loop, plus the three §6.2 consta
 operator looks. And `asyncCounters()` (`counters.ts:19`), which #704 noted had no reader, gets its
 first one here.
 
+**A retention limit the per-turn result key makes visible, recorded rather than fixed.** Because the
+key now carries a turn id (`leaf:result:<sid>:<turnId>`), only an enumeration of a session's turns
+reaches it, and the only enumeration there is — `TurnStore.deleteSessionTurns`, walking the owner's
+open set — sees **open turns only**: `toTerminal` removes a finished turn from that set to free its
+quota slot. So a finished async turn's result survives `DELETE /v1/sessions/{id}` and expires on
+`LEAF_RESULT_TTL_SECONDS` (24 h by default). This is **not new with the per-turn key**: the finished
+turn's RECORD — which carries the envelope, so the same class of caller content — has always
+survived that delete on the same clock, which §5.1 chose deliberately when it made the terminal TTL
+the record's only expiry. The result now expires on `resultTtl` and the record on
+`resultTtl + margin`, so the pair goes together. The API cannot reach either (the session 404s), but
+the bytes are retained after the owner asked for deletion, and `configuration.md` says so in the
+`LEAF_RESULT_TTL_SECONDS` row. Making the delete immediate needs an index the design does not
+have — a per-session turn set, written at submission and walked here, covering terminal turns as
+well as open ones — which also changes §5.1's terminal-record rule. M2 owns that, with the record
+and the result deleted by the same walk; a `SCAN MATCH` is not the alternative, because SCAN's cost
+is the whole keyspace per session delete, not the matches.
+
 **Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
 sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported
 alternative for a caller who disconnects, which is async submission plus the §4.4 status read, and

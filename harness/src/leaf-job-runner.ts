@@ -73,6 +73,8 @@ export interface LeafJobDeps {
  * - `refused`: the control plane would not mint. Acked, because an entry nobody may run would
  *   otherwise be re-read until it exhausts `maxAttempts` -- three wasted deliveries for a turn
  *   whose answer will not change.
+ * - `lost`: a heartbeat found the entry owned by someone else, so this run's work is discarded --
+ *   no result, no finalize, NO ack. The reclaiming worker owns the turn and ends it.
  *
  * Every outcome but `idle` carries `reclaimed`, because `async_reclaims` (§7) counts XAUTOCLAIM
  * firing -- "a nonzero steady rate means workers die mid-leaf" -- and a reclaimed entry that then
@@ -84,7 +86,8 @@ export type ProcessOutcome =
   | { kind: 'completed'; turnId: string; status: LeafResult['status']; reclaimed: boolean }
   | { kind: 'redelivered'; turnId: string; reclaimed: boolean }
   | { kind: 'dead_lettered'; turnId: string; reclaimed: boolean }
-  | { kind: 'refused'; turnId: string; reclaimed: boolean };
+  | { kind: 'refused'; turnId: string; reclaimed: boolean }
+  | { kind: 'lost'; turnId: string; reclaimed: boolean };
 
 /**
  * Claim and process at most one queue entry.
@@ -131,6 +134,9 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     return { kind: 'refused', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
   }
 
+  // Set by a heartbeat that finds the entry owned by someone else. There is no cancellation path
+  // into `runLeaf`, so this run still finishes -- but its OUTPUT is discarded below.
+  let lost = false;
   const hb = setHb(() => {
     // Fire-and-forget, so a rejection here (e.g. the client was destroyed by a stop() racing this
     // leaf's shutdown, or a transient Redis blip) must not become an unhandled rejection that kills
@@ -141,11 +147,11 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
       .touch(claimed.entryId, deps.consumerId)
       .then((held) => {
         // `touch` refuses to steal the entry back (see its doc), so a false here means another
-        // worker is already running this turn. There is no cancellation path into `runLeaf`, so
-        // this run continues to completion and the two results race -- logged loudly because that
-        // is the only trace the duplicate leaves, and because it means this worker stalled past
-        // minIdleMs, which is a condition worth seeing.
+        // worker reclaimed it -- or it is already acked and gone. Logged loudly either way: it is
+        // the only trace the duplicate run leaves, and it means this worker stalled past
+        // minIdleMs, which is a condition worth seeing on its own.
         if (!held) {
+          lost = true;
           log(
             `[async] lost entry ${claimed.entryId} for turn ${claimed.turnId}: reclaimed elsewhere or already acked`,
           );
@@ -158,6 +164,22 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     result = await deps.runLeaf(turn.envelope, turn.config);
   } finally {
     clearHb(hb);
+  }
+
+  // The turn belongs to whoever holds the entry, and that is no longer this worker: drop this run's
+  // output entirely. Each of the three writes below would corrupt the owner's turn --
+  //
+  // - `writeResult` is an unconditional SET, so finishing SECOND would leave the owner's `done`
+  //   record beside this run's body, which may say `failed`;
+  // - `finalize` is a CAS the owner wins, so this call is at best a no-op;
+  // - XACK takes no consumer, so acking retires the OWNER's PEL entry -- removing the redelivery
+  //   that would otherwise cover the owner dying mid-leaf.
+  //
+  // Residual window: a heartbeat can discover the loss in the gap between this check and the ack.
+  // That is one beat wide instead of a whole leaf wide, and the writes it can still interleave are
+  // the ones above; closing it properly needs an owner-checked ack, which Redis streams do not have.
+  if (lost) {
+    return { kind: 'lost', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
   }
 
   const outcome = classifyOutcome(result);

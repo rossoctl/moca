@@ -242,10 +242,11 @@ export class TurnStore {
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
       // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
       // key carries a turn id, so only an enumeration of the session's turns reaches it. This loop
-      // is that enumeration -- but it sees OPEN turns only (`toTerminal` zRems from the owner
-      // index), so a terminal turn's result is left to expire on its own TTL. That is the same
-      // `resultTtl + margin` clock `toTerminal` already gives the terminal RECORD, so the pair
-      // disappears together and the only cost is the wait.
+      // is that enumeration -- but it sees OPEN turns only (`toTerminal` zRems from the owner index
+      // to free the quota slot), so a FINISHED turn's result is left to expire on its own TTL, as
+      // its record already is. The pair goes together (`resultTtl`, `resultTtl + margin`) and the
+      // API can reach neither, but the bytes do outlive this delete: §9.2 records that limit and
+      // what closing it costs (a per-session turn index, M2).
       await this.guard(() => this.redis.del([this.key(turnId), leafResultKey(sessionId, turnId)]));
       await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
     }

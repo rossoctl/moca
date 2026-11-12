@@ -243,6 +243,30 @@ describe('processOne', () => {
     expect(log.mock.calls.flat().join(' ')).toContain('1-0');
   });
 
+  // The duplicate's output must not reach the owner's turn: the result SET is unconditional (so
+  // finishing second would pair the owner's `done` with this body), and XACK takes no consumer (so
+  // acking would retire the OWNER's pending entry and with it the redelivery that covers its death).
+  it('discards a run whose entry was reclaimed mid-leaf: no result, no finalize, no ack', async () => {
+    queue.next = entry();
+    queue.stillOwned = false;
+    const out = await processOne(
+      deps({
+        log: vi.fn(),
+        // The beat the real loop fires on its timer, fired from inside the leaf instead: the loss
+        // has to be discovered while runLeaf is still running for the flag to matter.
+        runLeaf: async () => {
+          heartbeats[0]!();
+          for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+          return { status: 'done' } as LeafResult;
+        },
+      }),
+    );
+    expect(out).toEqual({ kind: 'lost', turnId: 't-1', reclaimed: false });
+    expect([...store.keys()]).toEqual([]);
+    expect(finalized).toEqual([]);
+    expect(queue.acked).toEqual([]);
+  });
+
   it('says nothing on a heartbeat that still owns the entry', async () => {
     queue.next = entry();
     const log = vi.fn();
