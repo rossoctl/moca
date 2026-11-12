@@ -328,6 +328,48 @@ Known limits:
 Follow-up, not done here: retiring the build `default` points to could move `default` to the
 newest registered build of the template, so a bare id keeps serving.
 
+### 5.2 The admin's
+
+**Quotas and reject after the fact (#748):** an admin sets the quotas per subject, and withdraws a
+registered build that later turns out wrong.
+
+| Route                                                    | Does                                                                                                      |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `PUT /v1/quota/default`                                  | sets the deployment default quota (`templates`, `buildsQueued`, `active`)                                 |
+| `PUT /v1/quota/{subject}`                                | sets one subject's override (`github:<numeric id>` or `oidc:<provider sub>`); a body of `null` removes it |
+| `POST /v1/templates/{id}/builds/{build}/reject {reason}` | a registered build becomes `rejected` (`reason.rule: admin`)                                              |
+
+- **Quotas are policy.** An override lives in the policy (`quotaBySubject`, keyed by subject), so
+  each change is a new `policy` record (the whole policy) naming the admin, and the answer carries
+  its digest and the quota before. It is enforced at once, on the next create, queued build and
+  activation: a subject's limits are its override, else the default (§6.2). `GET /v1/quota` shows
+  the limits that apply to the caller and `quotaSource` (`subject` or `default`). The default is
+  set, never removed. A subject is never `test:<n>` (a synthetic test user, enrolled by the
+  deployment's settings).
+- **Reject after the fact** shares retire's handling (§5.1): an admin only, with a reason, on a
+  registered build, by its build id or handle. Its activation leases go, a host holding it is told
+  to stop its worker (§6.3 `stop`, as for a retired build), and a sandbox create naming it answers
+  `400 unknown_template`, as for a build policy rejected at registration (an activation:
+  `409 template_unavailable`). A `reject` record names the admin, `from`, the reason and
+  `buildRecord`, the digest of the build's `build` record. It is refused `409 build_in_use` while a
+  live sandbox runs on the build, and is idempotent (an already rejected build is answered with
+  `record: null`). Not reversible: a new build is the way back. A retired build is not rejected;
+  a rejected one may still be retired.
+- **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N`,
+  or `--clear` for a subject's override (admins). Like every admin write it names the control
+  plane it writes to and refuses a login issued for another deployment, then reads the value
+  (`GET /v1/policy`), writes, and compares the answer's `before` with its read: it prints old ->
+  new with the policy's digest and record, and exits 1 loudly when the value changed between its
+  read and its write.
+
+Known limits:
+
+- Quotas are per subject only; there are no groups or tenants.
+- A reject does not cut off running work (`409 build_in_use` until it ends), and cannot be undone.
+- As for retire, a Moca Pi session does not yet name a build, so only live sandboxes count as use.
+- Removing a rejected build's worker and snapshot from its host comes with the host agent's
+  removal step (#743), as for a retired one.
+
 ## 6. Builds and activation on a host
 
 ### 6.1 The host agent
@@ -391,9 +433,10 @@ disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its
 from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
 `active {limit, used}`, where `used` is the leased builds placed on it now.
 
-**Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
-Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
-use.
+**Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on; an
+admin may set one subject's quota above or below the default (`quotaBySubject`, §5.2). Over it, an
+activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the limits that
+apply, the use, and `quotaSource`.
 
 **Placement:** a wanted build (one with a live lease, §6.3) is placed on a host whose last inventory
 holds its snapshot (by manifest hash) and that is under its `activeLimit`: the one with the fewest

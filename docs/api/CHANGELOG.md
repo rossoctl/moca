@@ -3,6 +3,33 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.9.0
+
+Admins set template quotas per subject, and reject a registered build after the fact
+([#748](https://github.com/rossoctl/moca/issues/748)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.2. Every
+change is additive; the routes mount on both route profiles and need `SH_PROVENANCE_DIR` (else
+`400 invalid_request`).
+
+- New PUT /v1/quota/{subject} (admin): `subject` is `default` (the deployment default) or a subject,
+  `github:<numeric id>` or `oidc:<provider sub>` (never `test:<n>`), for an override; the body is a
+  Quota, or `null` to remove a subject's override (the default is never removed). Each change is a
+  new `policy` record naming the admin. Answers `{target, subject, quota, before, policy, record}`:
+  the quota now and before (null: no override), the new policy's digest and the record's. Enforced
+  at once on creates, queued builds and activations.
+- Policy gains `quotaBySubject`, the per-subject overrides of `quota`, keyed by subject; a key that
+  is not a subject, or a malformed quota, is `400 invalid_request`.
+- GET /v1/quota answers the limits that apply to the caller (its override, else the default) and
+  gains `quotaSource`, `subject` or `default`.
+- New POST /v1/templates/{id}/builds/{build}/reject `{reason}` (admin; the reason is required): a
+  registered build becomes `rejected` with `reason.rule` `admin`, its activation leases go, a host
+  holding it finds it in the wanted state's `stop` (as a retired build) and its `detached` report is
+  taken, and a sandbox create naming it answers `400 unknown_template`. A `reject` record names the
+  admin, `from`, the reason and `buildRecord` (the digest of the build's `build` record). Answers
+  `{templateId, subject, build, buildId, record, status: rejected}`; idempotent (`record: null`).
+  Refused `409 build_in_use` while a live sandbox runs on the build; any status but `registered` is
+  `400 invalid_request`. Not reversible.
+
 ## 1.8.0
 
 Retire a template, or one build of it ([#749](https://github.com/rossoctl/moca/issues/749)), per the

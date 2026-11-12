@@ -190,6 +190,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Host agents    | `POST /v1/hosts/{host}/inventory`, `/builds/claim`, `/builds/{build}/log` and `/report`, `GET /v1/hosts/{host}/blobs/{digest}`: a host's own bearer, both route profiles (API 1.6.0)                    |
 | Activation     | `POST /v1/templates/{id}/activate` and `/deactivate` (both route profiles); `GET /v1/hosts/{host}/wanted`, `POST /v1/hosts/{host}/workers/report` (a host's own bearer) (API 1.7.0)                     |
 | Retire         | `POST /v1/templates/{id}/retire`, `DELETE /v1/templates/{id}/builds/{build}`: both route profiles (API 1.8.0)                                                                                           |
+| Admin          | `PUT /v1/quota/{subject\|default}`, `POST /v1/templates/{id}/builds/{build}/reject`: admins, both route profiles (API 1.9.0)                                                                            |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -238,6 +239,16 @@ build of the template is the way back. Each build lists `heldBy`, the hosts stil
 build reports `capacity` while its worker still runs (null once its host has stopped it). `mocactl sbx templates retire
 --wait` waits for that stop; waiting for the snapshot's removal from every host (`heldBy` empty) comes with
 [#743](https://github.com/rossoctl/moca/issues/743).
+
+The admin routes came with API 1.9.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one
+subject's override (`PUT /v1/quota/{subject}`, `github:<numeric id>` or `oidc:<provider sub>`; a body of `null` removes
+it). Overrides live in the policy (`quotaBySubject`), so each change is a `policy` record naming the admin, enforced at
+once; `GET /v1/quota` shows the limits that apply to the caller and `quotaSource` (`subject` or `default`). An admin also
+rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{build}/reject {reason}`): it becomes
+`rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire, and a
+sandbox create naming it is 400 `unknown_template`. A `reject` record names the admin, the reason and the build's `build`
+record; a reject is refused 409 `build_in_use` under a live sandbox, is idempotent, and cannot be undone.
+`mocactl sbx templates quota TARGET` sets a quota from the terminal.
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
