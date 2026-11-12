@@ -238,11 +238,13 @@ mint_api() {
     "import { readFileSync } from 'node:fs'; import { makeSigner } from './src/token.ts';
      const s = makeSigner(readFileSync('/run/credentials/SH_SESSION_TOKEN_PRIVATE_KEY', 'utf8'));
      process.stdout.write(s.mint({ sub: 'smoke:1', tenant: 'smoke:1', roles: [], scope: ['api'], ttlSeconds: 900 }));" || true)"
-  [[ -n "$api" ]] || { ko "could not mint an api token in the control-plane pod"; return 1; }
+  [[ -n "$api" ]] || return 1
   (umask 077; printf 'Authorization: Bearer %s\n' "$api" >"$OUT/api.hdr")
 }
+# It returns 1 and judges nothing: a failed mint makes a turn UNREADABLE, not wrong, and only the
+# caller knows which claim that lands in -- a ko here would add a second FAIL to the caller's own.
 # Nothing below this line works without a token, so the FIRST mint ends the run.
-mint_api || { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; exit 1; }
+mint_api || { ko "could not mint an api token in the control-plane pod"; printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; exit 1; }
 field=token
 [[ "$SMOKE_MODEL_KIND" == bearer ]] || field=key
 host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$SMOKE_MODEL_URL")"
@@ -653,7 +655,8 @@ else
   async_sids=() async_tids=() async_states=()
   async_ok=1
   still_queued=0
-  mint_api || async_ok=0
+  bad=''
+  mint_api || { async_ok=0; echo "  could not mint an api token in the control-plane pod"; }
   if ((async_ok)); then
     # quiet: one ko for the claim, not one per session that could not be opened.
     for _ in $(seq "$async_n"); do new_session quiet && async_sids+=("$SID") || async_ok=0; done
@@ -696,7 +699,6 @@ else
       [[ "$SECONDS" -lt "$deadline" ]] || break
       sleep 3
     done
-    bad=''
     for i in ${async_tids[@]+"${!async_tids[@]}"}; do
       [[ "${async_states[$i]%% *}" == responded ]] ||
         bad="$bad ${async_tids[$i]}=${async_states[$i]:-unreadable}"
@@ -708,14 +710,17 @@ else
     grep -q async-leaf-ok <<<"$text" ||
       bad="$bad (${async_tids[0]} returned no tool output: '${text:0:200}')"
   fi
-  if [[ "$depth" == NaN || -z "$depth" ]]; then
-    ko "the admin port reports async_queue_depth=\"${depth:-unreadable}\": no worker ever reported the gauge, so SH_ASYNC_DRAIN=1 reached none of them (README §14.1)"
+  # A NUMBER, not "anything but NaN": an absent key reads as `null` and an unreachable admin port as
+  # '', and neither is evidence of an armed worker. One message for both, because the reading alone
+  # cannot tell them apart -- and claiming one of them would send the reader to the wrong place.
+  if [[ ! "$depth" =~ ^[0-9]+$ ]]; then
+    ko "the admin port answered async_queue_depth='${depth:-<nothing>}', not a number: either no worker reported the gauge (so SH_ASYNC_DRAIN=1 reached none of them, README §14.1) or $ADMIN/metrics is unreachable"
   elif ((!async_ok)); then
     ko "could not submit $async_n async leaves (above)"
   elif [[ -n "$bad" ]]; then
     ko "not every async leaf reached a result:$bad"
   else
-    ok "$async_n leaves, all responded (async_queue_depth was $depth at the last 202)"
+    ok "$async_n leaves, all responded (async_queue_depth read $depth; slot 0 refreshes it every 10s, so it lags the last 202)"
   fi
 fi
 
@@ -727,7 +732,7 @@ claim 14 "an async leaf whose supervisor pod is deleted mid-run is redelivered a
 if [[ "$async_drain" != 1 ]]; then
   note "no drain on this stack (claim 13 says why): skipped"
 else
-  SID='' pod='' tid=''
+  SID='' pod='' tid='' st_err=''
   if new_session quiet; then
     # Not one already terminating from claim 9: deleting it again would prove nothing.
     pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o json 2>/dev/null |
@@ -743,11 +748,17 @@ else
     kc -n "$NS" delete pod "$pod" --wait=false >/dev/null || true
     kc -n "$NS" rollout status deployment/moca-supervisor --timeout=300s >/dev/null || true
     forward || ko "port-forward did not come back after the async pod delete"
-    mint_api || true
+    # The first token is ~900 s old by now, so re-mint. Without one every read below is a 401 and
+    # the turn is UNREADABLE -- which is not the same as a leaf that never finished, and must not be
+    # reported as one.
+    mint_api || st_err='could not re-mint an api token after the rollout, so this claim cannot read the turn'
     # 240 s covers MIN_IDLE_MS (90 s, the floor before any reclaim), the rollout, and a second run
-    # of the 40 s leaf.
-    st="$(await_turn "$SID" "$tid" 240)" || true
-    if [[ "${st%% *}" != responded ]]; then
+    # of the 40 s leaf. Skipped without a token: four minutes of 401s prove nothing.
+    st=''
+    [[ -n "$st_err" ]] || st="$(await_turn "$SID" "$tid" 240)" || true
+    if [[ -n "$st_err" ]]; then
+      ko "$st_err"
+    elif [[ "${st%% *}" != responded ]]; then
       ko "the leaf did not finish after its pod was deleted: $st"
     elif [[ "${st##* }" -lt 2 ]]; then
       ko "the leaf finished on attempt ${st##* }: it was never redelivered, so the delete did not interrupt it"

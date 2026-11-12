@@ -47,8 +47,8 @@ MOCK
 # kubectl mock's $MOCK_STATE/redis-restarted), the next N session POSTs fail, as a stack still
 # reconnecting to Redis does. Claim M1: a session POST's "model" and a PATCH /v1/sessions/<id> set the
 # model the next turn reports (a K8S-SMOKE-MODEL turn prints model=<it>, as the mock gateway does);
-# MOCK_PATCH_IGNORED=1 answers the PATCH 200 but keeps the old model. Everything else is a refused
-# connection.
+# MOCK_PATCH_IGNORED=1 answers the PATCH 200 but keeps the old model. /metrics answers MOCK_METRICS
+# verbatim (claim 13's arming check). Everything else is a refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 url='' data='' prev='' ofile='' wfmt=''
@@ -103,6 +103,7 @@ case "$url" in
     '{type: "tool_result", preview: (if $env == "1" then {content: [{type: "text", text: ($t + "\n")}]} | tojson else $t end)}' |
     sed 's/^/data: /'
   jq -nc --arg s "$sid" '{type: "done", sessionId: $s}' | sed 's/^/data: /' ;;
+*/metrics) printf '%s' "${MOCK_METRICS-}" ;;
 *) exit 7 ;;
 esac
 MOCK
@@ -444,6 +445,22 @@ pass 'an unreadable moca-settings FAILs claim 13 rather than skipping it, and cl
     fail "an absent SH_ASYNC_DRAIN did not skip claim 13: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
   ! grep -qE '^  (FAIL|ok).*async' "$TMP/out" || fail 'claim 13 judged a stack that runs no drain')
 pass 'a stack without SH_ASYNC_DRAIN skips claims 13 and 14 instead of failing them'
+
+# Claim 13's arming check wants a NUMBER, not "anything but NaN": a supervisor whose /metrics has no
+# such key reads as `null` through jq, and an unreachable admin port as empty. Neither says a worker
+# armed, so neither may pass -- and the FAIL must not blame the ConfigMap for an unreachable port.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1
+  export MOCK_METRICS='{"counters":{}}'
+  run_smoke
+  grep -qF "FAIL the admin port answered async_queue_depth='null', not a number" "$TMP/out" ||
+    fail "a /metrics without the gauge passed claim 13's arming check: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  export MOCK_METRICS=''
+  run_smoke
+  grep -qF "FAIL the admin port answered async_queue_depth='<nothing>', not a number" "$TMP/out" ||
+    fail "an unreadable /metrics was not reported as unreadable: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  grep -qF 'or http://127.0.0.1:18081/metrics is unreachable' "$TMP/out" ||
+    fail 'the FAIL blamed SH_ASYNC_DRAIN alone for a reading it cannot explain')
+pass "claim 13 requires a numeric async_queue_depth, and names both causes when it is not"
 
 echo "== P7 keeps the sticky sandbox count (#425)"
 # P7 runs the setup.sh beside smoke.sh, so the copy here runs a stand-in that records its env.
