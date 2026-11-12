@@ -301,6 +301,8 @@ turn_state() {
 }
 # A prompt leaf ends `responded`; the rest are the other terminal states a failure would land in.
 is_terminal() { case "$1" in responded | done | solved | failed | cancelled | lost) return 0 ;; *) return 1 ;; esac; }
+# is_running SID TURNID: a `wait_for` predicate -- a worker has the leaf and is running it.
+is_running() { [[ "$(turn_state "$1" "$2")" == running* ]]; }
 # await_turn SID TURNID SECONDS -> prints the final "<state> <attempts>"; false on timeout.
 await_turn() {
   local st=''
@@ -533,11 +535,22 @@ else
   ko "research turn: $(head -c 600 "$OUT/research.sse" 2>/dev/null)"
 fi
 
+# Both pod-delete claims (9 and 14) pick a supervisor pod BEFORE the work they interrupt starts, and
+# neither can learn which pod the Service or the queue then handed it to. That is the right pod only
+# at one replica (every overlay here ships `replicas: 1`); above one, the delete would interrupt
+# nothing and the claim would fail a healthy stack. So both SKIP there. Read once: nothing scales
+# this deployment (README §4), so the count cannot change mid-run. An unreadable count counts as 1 --
+# a guard that cannot read itself must not silently cancel two claims.
+sup_replicas="$(kc -n "$NS" get deployment moca-supervisor -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+one_pod() { [[ "${sup_replicas:-1}" == 1 ]]; }
+
 claim 9 "a turn in flight when its supervisor pod is deleted runs to completion (drain)"
 # Delete, not `rollout restart`: with maxUnavailable 0 a rollout keeps the old pod until the new one is
 # Ready, which can outlast the turn and prove nothing. Deletion sends SIGTERM (after preStop) mid-turn.
 SID=''
-if new_session; then
+if ! one_pod; then
+  note "$sup_replicas supervisor pods are ready, and this claim cannot tell which one serves its turn: skipped"
+elif new_session; then
   # Not one still terminating from an earlier run: deleting it again would prove nothing.
   pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o json 2>/dev/null |
     jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name // empty' 2>/dev/null || true)"
@@ -728,9 +741,12 @@ claim 14 "an async leaf whose supervisor pod is deleted mid-run is redelivered a
 # #389's crash-redelivery acceptance, on deploy/k8s. Deleting the pod is the cluster's kill -9: the
 # drain abandons its in-flight leaf UNACKED (it does not kill it, and does not DELCONSUMER), so the
 # entry sits in the PEL until XAUTOCLAIM reclaims it past MIN_IDLE_MS. Last claim of the run: it
-# costs a rollout, and claim 11's restart count must not see it.
+# costs a rollout, and claim 11's restart count must not see it. One supervisor pod only, as claim 9
+# is: the pod is picked before the leaf is submitted, and any other pod's drain could claim it.
 if [[ "$async_drain" != 1 ]]; then
   note "no drain on this stack (claim 13 says why): skipped"
+elif ! one_pod; then
+  note "$sup_replicas supervisor pods are ready, so another pod's drain could hold the leaf: skipped (claim 9 skipped for the same reason)"
 else
   SID='' pod='' tid='' st_err=''
   if new_session quiet; then
@@ -739,7 +755,6 @@ else
       jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name // empty' 2>/dev/null || true)"
     tid="$(submit_async async-crash "$SID" "$(ask K8S-SMOKE-ASYNC-SLOW 'sleep 40; echo async-slow-ok')")"
   fi
-  is_running() { [[ "$(turn_state "$1" "$2")" == running* ]]; }
   if [[ -z "$pod" || -z "$tid" ]]; then
     ko "could not start a slow async leaf on a live supervisor pod: pod='${pod:-none}' turn='${tid:-none}' ${SESSION_ERR:-}"
   elif ! wait_for 60 is_running "$SID" "$tid"; then

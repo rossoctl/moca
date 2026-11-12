@@ -1349,3 +1349,8 @@ once and requires all five to reach a result; claim 14 deletes the supervisor po
 leaf and requires that leaf to finish on a second delivery (`attempts` ≥ 2), which is the
 redelivery acceptance of [#389](https://github.com/rossoctl/moca/issues/389) on this path. CI brings
 its Kind stack up with `SH_ASYNC_DRAIN=1`, so both run on every `k8s-kind-e2e` (section 8).
+
+Claim 14 **assumes one supervisor pod**, as claim 9 does: it picks the pod before submitting the
+leaf, and cannot learn which pod's drain then claimed it. Above `replicas: 1` both claims skip with
+a `note` rather than delete a pod that may be holding nothing. If you raised `replicas` (section 4)
+and want the redelivery claim back, scale the supervisor to one for the run.

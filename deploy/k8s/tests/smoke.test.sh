@@ -119,6 +119,7 @@ case " $* " in
 *" exec redis-0 "*) printf '%s' "${MOCK_REDIS_OUT-}" ;;
 *" exec deploy/sandbox-relay "*) exit 0 ;;
 *" get statefulset "*) echo 1 ;;
+*" get deployment moca-supervisor "*) printf '%s' "${MOCK_SUP_REPLICAS-1}" ;;
 *"SH_SANDBOX_TIERS"*)
   [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_TIERS-}" ;;
@@ -461,6 +462,21 @@ pass 'a stack without SH_ASYNC_DRAIN skips claims 13 and 14 instead of failing t
   grep -qF 'or http://127.0.0.1:18081/metrics is unreachable' "$TMP/out" ||
     fail 'the FAIL blamed SH_ASYNC_DRAIN alone for a reading it cannot explain')
 pass "claim 13 requires a numeric async_queue_depth, and names both causes when it is not"
+
+# Claims 9 and 14 both pick a supervisor pod before the work they interrupt starts, so above one
+# replica the delete can miss the pod that holds it. A healthy multi-pod stack must be a SKIP, never
+# a FAIL that blames the drain -- and claim 13, which deletes nothing, must still run.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1 \
+  MOCK_METRICS='{"async_queue_depth":0}' MOCK_SUP_REPLICAS=3
+  run_smoke
+  grep -qF '  note 3 supervisor pods are ready, and this claim cannot tell which one serves its turn: skipped' "$TMP/out" ||
+    fail "claim 9 judged a multi-pod stack: $(grep -A1 'Claim 9' "$TMP/out" | tail -1)"
+  grep -qF "  note 3 supervisor pods are ready, so another pod's drain could hold the leaf: skipped" "$TMP/out" ||
+    fail "claim 14 judged a multi-pod stack: $(grep -A1 'Claim 14' "$TMP/out" | tail -1)"
+  ! grep -q 'never redelivered' "$TMP/out" || fail 'a multi-pod stack was failed for never redelivering'
+  ! grep -qE '^  (FAIL|ok) pod ' "$TMP/out" || fail 'a pod was deleted on a stack with more than one'
+  grep -q 'Claim 13' "$TMP/out" || fail 'the replica guard also skipped claim 13, which deletes nothing')
+pass 'claims 9 and 14 skip a stack with more than one supervisor pod instead of failing it'
 
 echo "== P7 keeps the sticky sandbox count (#425)"
 # P7 runs the setup.sh beside smoke.sh, so the copy here runs a stand-in that records its env.
