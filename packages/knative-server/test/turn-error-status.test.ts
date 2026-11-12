@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   SandboxPoolSaturatedError,
   SandboxPoolEmptyError,
@@ -6,7 +6,13 @@ import {
   SandboxCapacityRefusedError,
   BundleNotFoundError,
 } from '@moca/harness/run-turn';
-import { turnErrorStatus, turnErrorHeaders, turnErrorCode } from '../src/server.js';
+import {
+  turnErrorStatus,
+  turnErrorHeaders,
+  turnErrorCode,
+  turnErrorMessage,
+  logTurnCapacity,
+} from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
 // SandboxPoolSaturatedError became something a turn can fail with. It is TRANSIENT — every
@@ -156,5 +162,50 @@ describe('an expired config bundle', () => {
     expect(turnErrorCode(404)).toBe('session_not_found');
     expect(turnErrorCode(503)).toBe('sandbox_unavailable');
     expect(turnErrorCode(500)).toBe('internal_error');
+  });
+});
+
+describe('logTurnCapacity', () => {
+  it('logs one line naming the 503 cause, the session and the reason, on one line', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      logTurnCapacity(
+        'turn',
+        'sess-1',
+        new SandboxPoolEmptyError('app=sandbox', 'records', 'container'),
+      );
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0][0]);
+      expect(line).toContain('[turn] 503 SandboxPoolEmptyError for session sess-1:');
+      expect(line).toContain("no attached sandbox in sandbox tier 'container'");
+      expect(line).not.toContain('\n');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps a multi-line or hostile session id on one line', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      logTurnCapacity('turn:sse', 'a\nb', new SandboxPoolSaturatedError('app=sandbox'));
+      expect(String(warn.mock.calls[0][0])).not.toContain('\n');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('turnErrorMessage', () => {
+  it("carries a 503's capacity reason as the body's message", () => {
+    const err = new SandboxPoolEmptyError('app=sandbox', 'records', 'container');
+    expect(turnErrorMessage(503, err).message).toContain(
+      "no attached sandbox in sandbox tier 'container'",
+    );
+  });
+
+  it("never carries a 500's text, nor anything for other statuses", () => {
+    const leak = new Error('redis://user:secret@host');
+    expect(turnErrorMessage(500, leak)).toEqual({});
+    expect(turnErrorMessage(404, leak)).toEqual({});
   });
 });

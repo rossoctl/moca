@@ -4,7 +4,9 @@
 # workspace data alone, and that moca-egress is installed and wired beside the worker (#623).
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-TMP="$(mktemp -d)"
+# Short: the worker's jail path must fit a Unix socket (install-host.sh checks it), and macOS's
+# default temp directory is too long for that.
+TMP="$(mktemp -d /tmp/ih.XXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
@@ -100,6 +102,24 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
 pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+
+# The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
+# (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
+LONG=sbx_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_0123456789ab
+bash "$INSTALL" "$(bundle $LONG)" --snapshot default >"$TMP/out" 2>&1 || fail "install the longest worker id: $(cat "$TMP/out")"
+jb="$(grep '^SH_CHROOT_BASE=' "$SBX_ENV_DIR/workers/$LONG.env" | cut -d= -f2-)"
+[[ "$jb" =~ ^$SBX_SRV/jail/j[0-9a-f]{12}$ && -d "$jb" ]] || fail "the jail is not $SBX_SRV/jail/j<12 hex>: $jb"
+p="$jb/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+((${#p} < 108)) || fail "the worst-case API socket path is ${#p} bytes"
+[[ "$(grep -h '^SH_CHROOT_BASE=' "$SBX_ENV_DIR"/workers/*.env | sort | uniq -d)" == '' ]] || fail 'two workers share a jail'
+bash "$INSTALL" --uninstall $LONG >"$TMP/out" 2>&1 || fail 'uninstall the longest worker id'
+grep -qF "left in place: $SBX_SRV/workspaces/$LONG and $jb" "$TMP/out" || fail "uninstall does not name the jail: $(cat "$TMP/out")"
+DEEP="$TMP/$(printf 'x%.0s' {1..40})"
+mkdir -p "$DEEP/snapshots/default"
+rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"$TMP/out" 2>&1 || rc=$?
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
+[[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
+pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
 
 # A bundle without SH_WORKSPACE_IMAGE_MB gets microvm-worker's default, 2048 MiB.
 bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'

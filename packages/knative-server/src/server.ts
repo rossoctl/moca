@@ -401,13 +401,15 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
     res.writeHead(200, JSON_HEADERS).end(JSON.stringify(result));
   } catch (err) {
     const status = turnErrorStatus(err);
-    // Only the UNCLASSIFIED case is logged: 503s are expected capacity signals, and 404/410 name
-    // the caller's own mistake. A 500's text never reaches the body (see turnErrorCode), so the
-    // server log is the only place it exists.
+    // A 500's text never reaches the body (see turnErrorCode), so the server log is the only place
+    // it exists. A 503 is logged as one line naming its cause (logTurnCapacity); 404/410 name the
+    // caller's own mistake and are not logged.
     if (status === 500) console.error('[turn] unclassified error:', err);
+    else if (status === 503) logTurnCapacity('turn', sessionId, err);
     res.writeHead(status, turnErrorHeaders(status, err)).end(
       JSON.stringify({
         error: turnErrorCode(status),
+        ...turnErrorMessage(status, err),
         ...(sessionId ? { sessionId } : {}),
       }),
     );
@@ -454,6 +456,33 @@ const NO_CAPACITY = new Set([
   // model's reply.
   'SandboxCapacityRefusedError',
 ]);
+
+/**
+ * One log line for a /turn that answered 503, naming the cause. A 503 is an expected capacity
+ * signal, so it was never logged, and the reasons it covers are not alike: a full pool clears by
+ * waiting, but an empty TIER (no worker of it attached) never does, and the client sees the same
+ * "no capacity, retry" for both (bm1, 2026-10-31: a session retried an empty tier for 10 minutes
+ * with nothing in any log saying why). The capacity classes' messages name pools, tiers, templates
+ * and sandbox ids, never a secret; forLog keeps them on one line.
+ */
+export function logTurnCapacity(where: string, sessionId: string | undefined, err: unknown): void {
+  const name = err instanceof Error ? err.name : 'unknown';
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(
+    `[${where}] 503 ${name}${sessionId ? ` for session ${forLog(sessionId)}` : ''}: ${forLog(message)}`,
+  );
+}
+
+/**
+ * The 503's `message` (the Error schema's operator-facing detail): the capacity class's own text,
+ * which names a pool, tier, template or sandbox id and never a secret, so a client can say WHY it
+ * is waiting ("no attached sandbox in sandbox tier 'container'") rather than only that it is. Only
+ * for a 503: a 500's text never reaches the body.
+ */
+export function turnErrorMessage(status: number, err: unknown): { message?: string } {
+  if (status !== 503 || !(err instanceof Error) || err.message === '') return {};
+  return { message: err.message.slice(0, 500) };
+}
 
 export function turnErrorStatus(err: unknown): number {
   if (err instanceof Error && err.name === 'BundleNotFoundError') return 410;
@@ -623,9 +652,11 @@ async function handleTurnStream(
       // still returns real 404 JSON, byte-identical to the sync path (§3.4 regime 2).
       const status = turnErrorStatus(err);
       if (status === 500) console.error('[turn:sse] unclassified error:', err);
+      else if (status === 503) logTurnCapacity('turn:sse', sessionId, err);
       res.writeHead(status, turnErrorHeaders(status, err)).end(
         JSON.stringify({
           error: turnErrorCode(status),
+          ...turnErrorMessage(status, err),
           ...(sessionId ? { sessionId } : {}),
         }),
       );
@@ -757,6 +788,7 @@ async function handleDetachableTurn(
     // the body below; the text exists only in the server log.
     const status = turnErrorStatus(err);
     if (status === 500) console.error('[turn:detach] unclassified error:', err);
+    else if (status === 503) logTurnCapacity('turn:detach', auth.sessionId, err);
     const message =
       status === 500 ? turnErrorCode(status) : err instanceof Error ? err.message : String(err);
     const end = await endTurn({
@@ -767,9 +799,13 @@ async function handleDetachableTurn(
     });
     if (!started && !res.headersSent) {
       // The sync path's mapping, stable code included.
-      res
-        .writeHead(status, turnErrorHeaders(status, err))
-        .end(JSON.stringify({ error: turnErrorCode(status), sessionId: auth.sessionId }));
+      res.writeHead(status, turnErrorHeaders(status, err)).end(
+        JSON.stringify({
+          error: turnErrorCode(status),
+          ...turnErrorMessage(status, err),
+          sessionId: auth.sessionId,
+        }),
+      );
     } else {
       send(end.frame, end.id);
     }

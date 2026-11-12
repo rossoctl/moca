@@ -440,7 +440,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
 also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
-installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is left; remove it by hand.
+installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
 
