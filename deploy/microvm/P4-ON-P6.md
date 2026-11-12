@@ -113,6 +113,11 @@ A microVM restores from one golden snapshot: kernel, rootfs, guest agent, and a 
 pinned by `manifest.json`. It is built **on the instance type that will run it**. Restore needs
 identical hardware, so `build-snapshot.sh` records the type and the worker checks it at start.
 
+The steps below build one snapshot by hand. To turn a container image into a **sandbox template**
+(a snapshot checked in a microVM, a worker for it, and the id clients and sessions ask for), follow
+the [template onboarding guide](../sbx/template-onboarding/GUIDE.md) instead: its tools run these
+same scripts, and it covers images that are not Moca's own (a SWE-bench instance image, for example).
+
 **1. A guest kernel.** Firecracker's CI publishes one. This is its `getting-started.md` recipe,
 kernel only:
 
