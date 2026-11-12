@@ -3,6 +3,27 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.6.0
+
+Template tags, edits and owner transfer through the API
+([#747](https://github.com/rossoctl/moca/issues/747)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.1-§5.2.
+Every change is additive; the new routes mount on both route profiles and need `SH_PROVENANCE_DIR` (else
+`400 invalid_request`). Each change writes a provenance record naming the new value and the one before.
+
+- New POST /v1/templates/{id}/tags `{tags, build}` (the owner, or an admin): moves 1-16 tags onto a registered build of
+  the template, by build id or handle, without a rebuild. New sandboxes and sessions naming `id:tag` (and the bare `id`,
+  for `default`) get the new build; those already created keep theirs. A `tag` record per tag that changes
+  (`{tag, buildId, before}`); a tag already on the build answers `record: null`.
+- New DELETE /v1/templates/{id}/tags/{tag} (the owner, or an admin): removes a tag; its build is not deleted. `default`
+  is moved, never removed (`400 invalid_request`). A `tag` record with `buildId: null`.
+- New PATCH /v1/templates/{id} `{description?, visibility?}` (the owner, or an admin): a `visibility` record
+  (`{field, value, before}`) per field that changes.
+- New PUT /v1/templates/{id}/owner `{owner}` (an admin): the new owner, `github:<numeric id>` or `oidc:<provider sub>`
+  (never `test:<n>`), must be enrolled. A template the deployment declared (`owner: null`) can be handed to a subject
+  the same way (`before: null`), who can then build, tag and edit it; a restart does not undo it. An `owner` record
+  (`{owner, before}`).
+
 ## 1.5.0
 
 Self-serve template create, gated by policy ([#737](https://github.com/rossoctl/moca/issues/737)),

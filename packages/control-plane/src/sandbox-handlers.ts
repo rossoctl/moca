@@ -7,8 +7,9 @@ import {
   seconds,
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
+import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
+import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
 import {
   checkCreate,
   policyDigest,
@@ -38,7 +39,7 @@ import type { TokenClaims } from './token.js';
 /**
  * The sandbox resource's handlers (SBX0 spec §5.1), mounted on the `sandbox` route profile only,
  * and the template routes (template lifecycle spec §4: reads, self-serve create, cancel, the policy
- * and the quota), mounted on both.
+ * and the quota; §5.1-§5.2: tags, edits and owner transfer), mounted on both.
  * Only TYPES come from handlers.ts, which spreads this table into HANDLERS: a runtime import back
  * would be a module cycle.
  */
@@ -691,6 +692,244 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
   };
 }
 
+/**
+ * The owner's actions (§5.1): the template's owner, or an admin (every owner action is open to
+ * admins, on any template, §5.2). A caller who cannot see the template gets 404, as on the reads.
+ */
+async function ownTemplate(ctx: RequestCtx, deps: CpDeps, verb: string) {
+  const p = requireEnrolled(ctx, deps);
+  const w = writable(deps);
+  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
+  if (d0.owner !== p.sub && !isAdmin(p))
+    throw new CpError('forbidden', `only the template's owner, or an admin, ${verb}`);
+  return { p, ...w, d0 };
+}
+
+/**
+ * Tags (§3.2, §5.1): the owner, or an admin, moves tags onto a registered build without rebuilding;
+ * a reference `id:tag` (and `id` for `default`) then resolves to the new build for new sandboxes
+ * and sessions, and those already created keep theirs. Each tag that changes is a `tag` record with
+ * the new build and the one before (§7.1); a tag already on the build writes nothing.
+ */
+async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'moves its tags');
+  const b = asRecord(ctx.body);
+  const tags = b.tags;
+  if (!Array.isArray(tags) || tags.length === 0 || tags.length > 16)
+    throw new CpError('invalid_request', 'tags must be a list of 1-16 tag names');
+  for (const t of tags)
+    if (typeof t !== 'string' || !TEMPLATE_ID_RE.test(t))
+      throw new CpError(
+        'invalid_request',
+        `tag '${String(t)}' must match ${TEMPLATE_ID_RE.source}`,
+      );
+  if (new Set(tags).size !== tags.length)
+    throw new CpError('invalid_request', 'a tag is listed twice');
+  const ref = typeof b.build === 'string' ? b.build : '';
+  const nowS = seconds(deps);
+  let buildId = '';
+  const moved: { tag: string; from: string | null }[] = [];
+  // The build is checked under the template's write lock, so it is still registered when tagged.
+  await cat.update(d0.id, async (cur) => {
+    const target = cur!.builds.find((x) => x.buildId === ref || x.handle === ref);
+    if (!target) throw new CpError('template_not_found', 'no such build of this template');
+    if (target.status !== 'registered')
+      throw new CpError(
+        'invalid_request',
+        `the build is ${target.status}; only a registered build is tagged`,
+      );
+    buildId = target.buildId;
+    const next = { ...cur!.tags };
+    const meta = { ...(cur!.tagsMeta ?? {}) };
+    for (const t of tags as string[]) {
+      if (next[t] === buildId) continue;
+      moved.push({ tag: t, from: next[t] ?? null });
+      next[t] = buildId;
+      meta[t] = { at: nowS, by: p.sub };
+    }
+    return { ...cur!, tags: next, tagsMeta: meta };
+  });
+  const records: Record<string, string> = {};
+  for (const m of moved) {
+    const rec = await prov.append({
+      stream: `template/${d0.id}`,
+      kind: 'tag',
+      subject: p.sub,
+      body: { tag: m.tag, buildId, before: m.from },
+    });
+    records[m.tag] = rec.digest;
+  }
+  if (moved.length > 0)
+    await auditBestEffort(deps, 'template_tags_moved', d0.id, {
+      subject: p.sub,
+      decision: 'template_tags_moved',
+    });
+  return {
+    status: 200,
+    body: {
+      templateId: d0.id,
+      subject: p.sub,
+      buildId,
+      // `before`: what the tag named until now (null: it is new); an unchanged tag names its build.
+      tags: (tags as string[]).map((t) => {
+        const m = moved.find((x) => x.tag === t);
+        return { tag: t, buildId, before: m ? m.from : buildId, record: records[t] ?? null };
+      }),
+    },
+  };
+}
+
+/**
+ * Remove a tag (§5.1): its build is never deleted and stays addressable by its build id. `default`
+ * is moved, never removed: the bare id must resolve. A `tag` record with `buildId: null`.
+ */
+async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'removes its tags');
+  const tag = ctx.params.tag ?? '';
+  if (tag === 'default')
+    throw new CpError(
+      'invalid_request',
+      'the default tag is moved (POST …/tags), never removed: the bare id must resolve',
+    );
+  let before = '';
+  await cat.update(d0.id, async (cur) => {
+    const b = cur!.tags[tag];
+    if (b === undefined)
+      throw new CpError('template_not_found', `no tag '${tag}' on this template`);
+    before = b;
+    const next = { ...cur!.tags };
+    const meta = { ...(cur!.tagsMeta ?? {}) };
+    delete next[tag];
+    delete meta[tag];
+    return { ...cur!, tags: next, tagsMeta: meta };
+  });
+  const rec = await prov.append({
+    stream: `template/${d0.id}`,
+    kind: 'tag',
+    subject: p.sub,
+    body: { tag, buildId: null, before },
+  });
+  await auditBestEffort(deps, 'template_tag_removed', d0.id, {
+    subject: p.sub,
+    decision: 'template_tag_removed',
+  });
+  return {
+    status: 200,
+    body: { templateId: d0.id, subject: p.sub, tag, buildId: null, before, record: rec.digest },
+  };
+}
+
+type TemplateEdit = { field: 'visibility' | 'description'; value: string; before: string };
+
+/**
+ * Edit (§5.1): the owner, or an admin, changes a template's description or visibility. `private`
+ * hides it from other subjects (they get 404, as for an id that does not exist) and refuses their
+ * new use; their sandboxes and sessions already created keep running. Each field that changes is a
+ * `visibility` record (the field, the new value and the one before), so every edit is on the chain.
+ */
+async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'edits it');
+  const b = asRecord(ctx.body);
+  if (b.visibility === undefined && b.description === undefined)
+    throw new CpError('invalid_request', 'nothing to change: send visibility or description');
+  if (b.visibility !== undefined && b.visibility !== 'private' && b.visibility !== 'deployment')
+    throw new CpError('invalid_request', "visibility must be 'private' or 'deployment'");
+  if (
+    b.description !== undefined &&
+    (typeof b.description !== 'string' || b.description.length > 1024)
+  )
+    throw new CpError('invalid_request', 'description must be a string of at most 1024 characters');
+  const visibility = b.visibility as 'private' | 'deployment' | undefined;
+  const description = b.description as string | undefined;
+  let changes: TemplateEdit[] = [];
+  const after = await cat.update(d0.id, async (cur) => {
+    changes = [];
+    if (visibility !== undefined && visibility !== cur!.visibility)
+      changes.push({ field: 'visibility', value: visibility, before: cur!.visibility });
+    if (description !== undefined && description !== cur!.description)
+      changes.push({ field: 'description', value: description, before: cur!.description });
+    return {
+      ...cur!,
+      ...(visibility !== undefined ? { visibility } : {}),
+      ...(description !== undefined ? { description } : {}),
+    };
+  });
+  const records: Record<string, string> = {};
+  for (const c of changes) {
+    const rec = await prov.append({
+      stream: `template/${d0.id}`,
+      kind: 'visibility',
+      subject: p.sub,
+      body: { field: c.field, value: c.value, before: c.before },
+    });
+    records[c.field] = rec.digest;
+  }
+  if (changes.length > 0)
+    await auditBestEffort(deps, 'template_updated', d0.id, {
+      subject: p.sub,
+      decision: 'template_updated',
+    });
+  return {
+    status: 200,
+    body: {
+      templateId: d0.id,
+      subject: p.sub,
+      visibility: after.visibility,
+      description: after.description,
+      changes: changes.map((c) => ({ ...c, record: records[c.field]! })),
+    },
+  };
+}
+
+/**
+ * Transfer ownership (§5.2): an admin makes another enrolled subject the template's owner, for
+ * example when its creator leaves. The new owner gets every owner action, and the quotas count it
+ * as theirs from now on; sandboxes and sessions already made keep their own subjects. An `owner`
+ * record names the admin, the new owner and the one before.
+ *
+ * A template the deployment declared (imported from SH_SANDBOX_TEMPLATES, owner null) is handed to
+ * a subject the same way, `before: null`: its id otherwise blocks every self-serve create under it
+ * (`409 template_exists`). The import runs once, into an empty catalog, so a restart does not take
+ * it back.
+ */
+async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
+  const p = requireEnrolled(ctx, deps);
+  if (!isAdmin(p))
+    throw new CpError('forbidden', 'transferring a template requires the admin role');
+  const { cat, prov } = writable(deps);
+  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
+  const owner = asRecord(ctx.body).owner;
+  if (typeof owner !== 'string' || !MEMBER_SUBJECT_RE.test(owner))
+    throw new CpError('invalid_request', `owner must be a subject, ${MEMBER_SUBJECT_FORMS}`);
+  // The new owner must be able to act on it: enrolled now (the allow list, or an admin).
+  if (!isEnrolled(owner, deps.identity.rolesFor(owner), deps.config))
+    throw new CpError(
+      'invalid_request',
+      `${owner} is not enrolled: add them to SH_ALLOWED_SUBJECTS first`,
+    );
+  let before = null as string | null;
+  await cat.update(d0.id, async (cur) => {
+    before = cur!.owner;
+    return before === owner ? cur! : { ...cur!, owner };
+  });
+  let record: string | null = null;
+  if (owner !== before) {
+    record = (
+      await prov.append({
+        stream: `template/${d0.id}`,
+        kind: 'owner',
+        subject: p.sub,
+        body: { owner, before },
+      })
+    ).digest;
+    await auditBestEffort(deps, 'template_owner_transferred', d0.id, {
+      subject: p.sub,
+      decision: 'template_owner_transferred',
+    });
+  }
+  return { status: 200, body: { templateId: d0.id, subject: p.sub, owner, before, record } };
+}
+
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
   // The template reads (template lifecycle spec §4), on both route profiles (§4.1): on `harness`
   // requireEnrolled admits any logged-in subject. The worker id is deployment plumbing; a client
@@ -743,6 +982,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   createTemplate: (ctx, deps) => createBuild(ctx, deps, false),
   createTemplateBuild: (ctx, deps) => createBuild(ctx, deps, true),
   cancelTemplateBuild: cancelBuild,
+
+  // The owner's and the admin's actions (§5.1-§5.2): tags, edits and owner transfer.
+  moveTemplateTags,
+  removeTemplateTag,
+  updateTemplate,
+  transferTemplateOwner,
 
   // The policy (§8): any enrolled client reads it; only an admin sets it, and each set is a
   // `policy` record naming who.
