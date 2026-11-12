@@ -282,6 +282,21 @@ describe('the admin role (spec §3, §6)', () => {
     expect(await codeOf(() => call(d, 'listTemplates', who(CAROL)))).toBe('not_enrolled');
   });
 
+  it('refuses admin_granted under the store lock, for a grant that lands just before', async () => {
+    const d = setup();
+    const a = await asRequest(d, who(ENV_ADMIN));
+    await call(d, 'enrollSubject', who(ENV_ADMIN), { subject: CAROL }, { enrolled: true });
+    // Both started at once: the grant's change is queued first, so the unenroll sees it.
+    const [grant, unenroll] = await Promise.allSettled([
+      HANDLERS.grantAdmin!(ctx({ principal: a, params: { subject: CAROL }, body: {} }), d),
+      HANDLERS.unenrollSubject!(ctx({ principal: a, params: { subject: CAROL } }), d),
+    ]);
+    expect(grant.status).toBe('fulfilled');
+    expect(unenroll.status).toBe('rejected');
+    expect((unenroll as PromiseRejectedResult).reason).toMatchObject({ code: 'admin_granted' });
+    expect(await d.members.storeEnrolled(CAROL)).toBe(true);
+  });
+
   it('lapses a grant at its until by itself, recording the expiry once', async () => {
     const d = setup();
     const until = nowS() + 60;

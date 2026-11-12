@@ -94,15 +94,18 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
         `${subject} is enrolled by the deployment's settings (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS); remove it there`,
       );
     const nowS = seconds(deps);
-    // An admin is enrolled whatever its enrollment says, so an unenroll that left a live admin
-    // grant in place would answer 200 and change nothing the subject can do: refuse it instead.
-    if ((await members.rolesNow(subject, nowS)).includes('admin'))
-      throw new CpError(
-        'admin_granted',
-        `${subject} holds the admin role, which keeps it enrolled: revoke the role first`,
-      );
     const record = await members.change((doc) => {
       const m = doc.members[subject];
+      // An admin is enrolled whatever its enrollment says, so an unenroll that left a live admin
+      // grant in place would answer 200 and change nothing the subject can do: refuse it instead.
+      // Checked here, on the doc the change edits under the store's serial lock, so a grant that
+      // lands just before cannot slip past it.
+      const g = m?.roles.find((r) => r.role === ADMIN);
+      if (g && (g.until === undefined || g.until > nowS))
+        throw new CpError(
+          'admin_granted',
+          `${subject} holds the admin role, which keeps it enrolled: revoke the role first`,
+        );
       if (!m?.enrolled) return null;
       m.enrolled = false;
       m.since = nowS;
