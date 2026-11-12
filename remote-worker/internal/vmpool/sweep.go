@@ -191,17 +191,25 @@ func (p *pool) armTickerLocked() {
 	})
 }
 
-// sweepLeases is the lease ticker's body: sweepLeasesLocked ends the leases that are due,
-// and their VMs are destroyed on the reclaim goroutine -- or inline when its queue is
-// full, as sweep does -- each under its run's gate. A closed pool ends no lease: Close
-// has detached the idle ones and kept their open records for worker_restart.
+// sweepLeases is the lease ticker's body. It re-samples the idle leases' charges, then
+// sweepLeasesLocked ends the leases that are due, then reclaimLeasesLocked ends idle
+// leases for memory while MemAvailable is below LeaseReclaimFreeBytes or the measured
+// charges have grown past the budget (spec §6). The VMs are destroyed on the reclaim
+// goroutine -- or inline when its queue is full, as sweep does -- each under its run's
+// gate. A closed pool ends no lease: Close has detached the idle ones and kept their open
+// records for worker_restart.
 func (p *pool) sweepLeases(now time.Time) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return
 	}
+	p.refreshLeaseChargesLocked()
 	vs := p.sweepLeasesLocked(now)
+	// After the sweep, so that a lease due to end for its own clocks ends with that reason,
+	// and its charge has already left committedLocked.
+	over := p.committedLocked() - (p.cfg.MaxCommittedBytes - p.cfg.MemoryReserveBytes)
+	vs = append(vs, p.reclaimLeasesLocked(now, over)...)
 	if len(vs) == 0 {
 		p.mu.Unlock()
 		return

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -23,7 +24,7 @@ import (
 // and holds no VM and no charge.
 //
 // A lease VM is NOT counted in rp.inFlight: it is the third accounting class
-// (leaseCommittedLocked), and an idle lease VM holds no concurrency slot.
+// (leaseCommittedLocked, leaseChargeLocked), and an idle lease VM holds no concurrency slot.
 
 // vmLease is a run's held VM in lease mode. Every field is guarded by pool.mu, but
 // only the holder of the run's execGate may detach it (endLeaseLocked).
@@ -514,8 +515,8 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 			ph.Destroy = p.clk.Now().Sub(t1)
 		}
 	} else if live {
-		// Sampled under the gate, off p.mu: a cgroupfs read. Recorded for Task 6's
-		// measured charge; leaseCommittedLocked still charges LeaseStartBytes (R2).
+		// Sampled under the gate, off p.mu: a cgroupfs read. The lease's charge from here
+		// on (leaseChargeLocked), until the next Exec or lease tick re-samples it.
 		if lf, ok := vm.(leaseFootprinter); ok {
 			if b, err := lf.LeaseBytes(); err == nil && b > 0 {
 				p.mu.Lock()
@@ -710,6 +711,129 @@ func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) Leas
 		return LeaseEndMaxDuration
 	}
 	return LeaseEndIdle
+}
+
+// reclaimLeasesLocked ends idle leases for memory (spec §6), idle-longest first, with
+// reason memory_reclaim, and returns the victims for destroySweptLeases. need is the
+// budget the caller must free: an admission's shortfall (evictForAdmissionLocked), or the
+// lease ticker's overshoot once measured charges have grown past the budget. Caller holds
+// p.mu, on a pool that is not closed.
+//
+// It takes victims while either deficit remains, and stops once need is covered and
+// MemAvailable is back above LeaseReclaimFreeBytes, or once it has taken
+// MaxReclaimsPerScan victims. MemAvailable is read once, through the ~100ms cache
+// (cachedMemAvailable), and a victim's charge counts towards it as soon as it is taken:
+// its destroy is asynchronous, so no read inside this call could see it. The next tick
+// reads again, which is how the reclaim repeats until the target is met. An unreadable
+// MemAvailable drives no reclaim: ending a user's lease on "cannot tell" is the wrong
+// way to fail, and the host floor (hostFloorLocked) fails closed for that case instead.
+//
+// A LEASE WITH AN EXEC IN FLIGHT IS NEVER RECLAIMED FOR MEMORY. A lease is taken only
+// after a non-blocking send on its run's gate succeeds, as the lease sweep does: a held
+// gate (an Exec in Run, or queued past the gate, or a lease being started or ended) is
+// skipped, never waited on. The gate stays held, and the run pinned, until the VM is
+// destroyed. A lease carrying a cut may be taken: endLeaseLocked records the cut's reason.
+func (p *pool) reclaimLeasesLocked(now time.Time, need int64) []*leaseVictim {
+	cands := p.idleLeaseRunsLocked(now)
+	if len(cands) == 0 {
+		return nil // no MemAvailable read on a pool with no idle lease
+	}
+	want := max(need, p.leaseMemDeficitLocked())
+	var (
+		out   []*leaseVictim
+		freed int64
+	)
+	for _, rp := range cands {
+		if freed >= want || len(out) >= p.cfg.MaxReclaimsPerScan {
+			break
+		}
+		select {
+		case rp.execGate <- struct{}{}:
+		default:
+			continue // an Exec holds the gate: never reclaimed, never waited on
+		}
+		charge := p.leaseChargeLocked(rp.lease)
+		v := p.endLeaseLocked(rp, LeaseEndMemoryReclaim)
+		rp.pinned++
+		v.rp = rp
+		out = append(out, v)
+		freed += charge
+	}
+	return out
+}
+
+// reclaimableLeaseBytesLocked is what reclaimLeasesLocked could free right now for an
+// admission: the charges of the first MaxReclaimsPerScan idle leases whose gate is free,
+// idle-longest first. evictForAdmissionLocked's futility check adds it to the standbys'.
+// Caller holds p.mu.
+//
+// The gate is probed (a non-blocking send, then the receive) rather than kept, so a
+// waiting Exec may take it between this count and the take; the take then skips that
+// lease, and the admission's re-check refuses on the real numbers.
+func (p *pool) reclaimableLeaseBytesLocked() int64 {
+	var (
+		n     int
+		total int64
+	)
+	for _, rp := range p.idleLeaseRunsLocked(p.clk.Now()) {
+		if n >= p.cfg.MaxReclaimsPerScan {
+			break
+		}
+		select {
+		case rp.execGate <- struct{}{}:
+			<-rp.execGate
+		default:
+			continue
+		}
+		n++
+		total += p.leaseChargeLocked(rp.lease)
+	}
+	return total
+}
+
+// idleLeaseRunsLocked is every run whose lease has started and runs no Exec, idle-longest
+// first (the longest since its last Exec's end). Caller holds p.mu.
+func (p *pool) idleLeaseRunsLocked(now time.Time) []*runPool {
+	var out []*runPool
+	for _, rp := range p.runs {
+		if l := rp.lease; l != nil && !l.started.IsZero() && !l.running {
+			out = append(out, rp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return now.Sub(out[i].lease.lastEnd) > now.Sub(out[j].lease.lastEnd)
+	})
+	return out
+}
+
+// leaseMemDeficitLocked is how far MemAvailable is below LeaseReclaimFreeBytes, or 0: at
+// or above the target, or unreadable. Caller holds p.mu.
+func (p *pool) leaseMemDeficitLocked() int64 {
+	avail, err := cachedMemAvailable()
+	if err != nil {
+		return 0
+	}
+	return max(p.cfg.LeaseReclaimFreeBytes-avail, 0)
+}
+
+// refreshLeaseChargesLocked re-samples every idle lease VM's footprint for its charge
+// (leaseChargeLocked): an idle lease's memory.current falls as free-page reporting returns
+// the pages its guest freed (spec §6), and without a fresh sample it would stay charged at
+// its last Exec's peak until the next Exec. A running lease is sampled by runLease when its
+// Exec ends. Under p.mu: LeaseBytes is a cgroupfs counter read, no disk I/O, once per idle
+// lease per LeaseScanInterval. A failed or empty read keeps the last sample.
+func (p *pool) refreshLeaseChargesLocked() {
+	for _, rp := range p.runs {
+		l := rp.lease
+		if l == nil || l.started.IsZero() || l.running {
+			continue
+		}
+		if lf, ok := l.vm.(leaseFootprinter); ok {
+			if b, err := lf.LeaseBytes(); err == nil && b > 0 {
+				l.charge, l.sampled = b, true
+			}
+		}
+	}
 }
 
 // closeLeasesLocked detaches, for Close, every lease VM whose gate is free, taking the

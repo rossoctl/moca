@@ -49,6 +49,7 @@ func captureLog(t *testing.T) *lockedBuffer {
 // over the same host disk.
 func leasePoolOn(t *testing.T, root string, clk *fakeClock) (*pool, *leaseLauncher) {
 	t.Helper()
+	plentyOfHostMemory(t) // no memory reclaim on the host's own MemAvailable (lease_reclaim_test.go)
 	lc := newLeaseLauncher()
 	p, err := New(Config{
 		VMM:               lc.Kind(),

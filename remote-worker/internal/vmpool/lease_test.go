@@ -122,6 +122,7 @@ func (v *leaseFakeVM) Destroy() error {
 // leasePool is a lease-enabled pool (Firecracker kind + lease-v1) over a leaseLauncher.
 func leasePool(t *testing.T, tweak func(*Config)) (*pool, *leaseLauncher, *fakeClock) {
 	t.Helper()
+	plentyOfHostMemory(t) // no memory reclaim on the host's own MemAvailable (lease_reclaim_test.go)
 	lc := newLeaseLauncher()
 	clk := newFakeClock()
 	cfg := Config{

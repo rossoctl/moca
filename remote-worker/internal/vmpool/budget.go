@@ -79,8 +79,9 @@ func (p *pool) admitOrEvictLocked(newRun bool) error {
 }
 
 // admitLeaseOrEvictLocked is admitOrEvictLocked for a new lease VM, priced at
-// LeaseStartBytes (spec §6, "Order when a lease Exec needs a VM", items 1 and 3; Task 6
-// adds item 2's idle-lease reclaim). Caller holds p.mu.
+// LeaseStartBytes (spec §6, "Order when a lease Exec needs a VM"): admit (item 1), else
+// shed standbys and then idle leases, idle-longest first (item 2, evictForAdmissionLocked),
+// else refuse memory-budget (item 3). Caller holds p.mu.
 func (p *pool) admitLeaseOrEvictLocked(newRun bool) error {
 	return p.admitOrEvictAtLocked(newRun, p.cfg.LeaseStartBytes)
 }
@@ -165,6 +166,11 @@ func (p *pool) evictForPromotionLocked(rp *runPool, vm VM, price int64) {
 // LRU BY lastExec, the same clock sweepOnce's idleFor reads, so eviction order and
 // sweep order cannot disagree about which run is coldest.
 //
+// IDLE LEASES ARE THE SECOND SOURCE (spec §6, Task 6). When the standbys cannot cover
+// the shortfall, reclaimLeasesLocked ends idle leases, idle-longest first, memory_reclaim,
+// skipping any whose gate is held. Their destroys ride the same batch. On a pool with no
+// lease this adds nothing: no lease bytes to count, no lease to take.
+//
 // A BUSY RUN IS NEVER A CANDIDATE, for sweepOnce's reason: rp.busy() staying true is
 // what stops a reclaim landing under a running command. Together with `exclude`
 // that makes self-eviction impossible at all three call sites — runLocked's key has
@@ -205,7 +211,9 @@ func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) {
 			evictable += p.standbyChargeLocked(vm)
 		}
 	}
-	if evictable < -shortfall {
+	// Idle leases are the second source (spec §6), so the futility check counts what
+	// reclaimLeasesLocked could take too. Zero on a pool with no lease.
+	if evictable+p.reclaimableLeaseBytesLocked() < -shortfall {
 		return
 	}
 	sort.Slice(order, func(i, j int) bool { return order[i].lastExec.Before(order[j].lastExec) })
@@ -238,10 +246,22 @@ gather:
 			}
 		}
 	}
+	// Standbys first, then idle leases (spec §6): a standby costs its run a cold acquire,
+	// a lease costs its sandbox its processes and a lease_start notice. Reached only when
+	// idle leases exist, since the standbys alone would otherwise have covered the
+	// shortfall or the futility check returned.
+	var leases []*leaseVictim
+	if freed < -shortfall {
+		leases = p.reclaimLeasesLocked(p.clk.Now(), -shortfall-freed)
+	}
+	if len(batch) == 0 && len(leases) == 0 {
+		return // every idle lease's gate was taken since it was counted
+	}
 	for range batch {
 		p.counters.evicted()
 	}
-	p.reclaimQ <- reclaimBatch{vms: batch}
+	// One slot for both: doReclaim destroys the leases first, each under its gate.
+	p.reclaimQ <- reclaimBatch{vms: batch, leases: leases}
 }
 
 // admitLocked decides whether one more VM may be committed. Caller holds p.mu.
@@ -457,27 +477,48 @@ func (p *pool) unparkedRunsLocked() int {
 // building one. It also keeps the warming -> inFlight handoff in acquire
 // charge-neutral, exactly as before.
 //
-// LEASE VMs ARE THE THIRD CLASS (spec §6): neither standby nor in-flight, charged by
-// leaseCommittedLocked whether an Exec is running in them or not.
+// LEASE VMs ARE THE THIRD CLASS (spec §6): neither standby nor in-flight, charged their
+// measured footprint (leaseChargeLocked) whether an Exec is running in them or not.
 func (p *pool) committedLocked() int64 {
 	return p.runningCommittedLocked() + p.standbyCommittedLocked() + p.leaseCommittedLocked()
 }
 
-// leaseCommittedLocked is the lease component of committedLocked: every live lease VM
-// and every cold restore for one, at LeaseStartBytes each. Caller holds p.mu.
+// leaseCommittedLocked is the lease component of committedLocked: every live lease VM at
+// leaseChargeLocked, and every cold restore for one at LeaseStartBytes. Caller holds p.mu.
 //
-// Start-priced even once a lease has been sampled (ruling R2): vmLease.charge is recorded
-// after each Exec, and Task 6 replaces the per-lease term with the measured charge times
-// LeaseHeadroom. A lease VM is never re-priced to PerVMBytes, idle or busy.
+// Zero on a pool with no lease, which is what keeps the per-Exec arithmetic unchanged.
 func (p *pool) leaseCommittedLocked() int64 {
 	var n int64
 	for _, rp := range p.runs {
-		n += int64(rp.warmingLease)
+		n += int64(rp.warmingLease) * p.cfg.LeaseStartBytes
 		if rp.lease != nil {
-			n++
+			n += p.leaseChargeLocked(rp.lease)
 		}
 	}
-	return n * p.cfg.LeaseStartBytes
+	return n
+}
+
+// leaseChargeLocked is what one lease VM costs the budget (spec §6): LeaseStartBytes until
+// its first sample, then its measured memory.current times LeaseHeadroom, floored at
+// VMOverheadBytes, idle or busy. Caller holds p.mu.
+//
+// NEVER RE-PRICED TO PerVMBytes, also while an Exec runs in it: a lease VM's growth
+// during a long Exec is caught by the next sample (runLease after each Exec, the lease
+// ticker for an idle lease) and by reclaim, not by a reservation. No cap either, unlike
+// standbyChargeLocked: a lease VM's memory.max is PerVMBytes + LeasePageCacheBytes, so its
+// charge can legitimately pass PerVMBytes (the spec's charge bound), and
+// LeaseReclaimFreeBytes is sized against that bound. THE FLOOR has standbyChargeLocked's
+// reason: a live VMM is always resident, so a smaller read is not a cheaper VM.
+func (p *pool) leaseChargeLocked(l *vmLease) int64 {
+	if !l.sampled {
+		return p.cfg.LeaseStartBytes
+	}
+	// Scaled in float64 and clamped before the conversion, as standbyChargeLocked does.
+	scaled := float64(l.charge) * p.cfg.LeaseHeadroom
+	if scaled >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return max(int64(scaled), p.cfg.VMOverheadBytes)
 }
 
 // runningCommittedLocked is the full-price component of committedLocked: every VM
