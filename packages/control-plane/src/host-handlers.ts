@@ -3,7 +3,16 @@ import { asRecord, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
-import { liveLeases, place, type HostMemory, type HostView } from './activation.js';
+import { activationLock } from './activation-lock.js';
+import {
+  liveLeases,
+  place,
+  unattachedPlaced,
+  wantedBuilds,
+  type HostMemory,
+  type HostStart,
+  type HostView,
+} from './activation.js';
 import { isLive } from './sandbox-store.js';
 
 /**
@@ -23,8 +32,10 @@ import { isLive } from './sandbox-store.js';
  * policy (§8.2) and registers or rejects the build, automatically, with a `check` record.
  *
  *   GET  /v1/hosts/{host}/wanted             the builds this host should run (leased and placed on
- *                                            it), and those it holds that it should stop (no lease
- *                                            left, no live sandbox)
+ *                                            it, first leased first), those it holds that it should
+ *                                            stop (no lease left, no live sandbox), of `run` those
+ *                                            not attached yet (`starting`, for the start limit),
+ *                                            and those kept in its idle grace (`graced`)
  *   POST /v1/hosts/{host}/workers/report     {buildId, event: attached | refused | detached, reason?}
  *
  * Readiness itself is never taken from a report: `active` is the relay's attached record (§3.3).
@@ -72,6 +83,13 @@ export interface HostState {
    * older agent, and then its host is placed by activeLimit alone.
    */
   memory?: HostMemory;
+  /** The agent's start limit and measured start time (§6.5); absent from an older agent. */
+  start?: HostStart;
+  /**
+   * SBX_IDLE_GRACE_S as its agent reports it (§6.5, the idle grace); absent from an older agent,
+   * which is a grace of 0 (off).
+   */
+  idleGraceSeconds?: number;
 }
 
 /** In-memory host state; the inventory is re-sent on every poll, so a restart loses nothing durable. */
@@ -96,7 +114,25 @@ export function hostViewsOf(deps: CpDeps): HostView[] {
     activeLimit: h.limits.activeLimit,
     at: h.at,
     ...(h.memory ? { memory: h.memory } : {}),
+    ...(h.start ? { start: h.start } : {}),
+    ...(h.idleGraceSeconds ? { idleGraceSeconds: h.idleGraceSeconds } : {}),
   }));
+}
+
+/**
+ * The workers with a live sandbox, for placement's idle grace (§6.5: a draining worker is never
+ * graced, so never displaced). Read only when a host reports a grace; else undefined, and placement
+ * reads exactly as before.
+ */
+export async function graceBusy(
+  deps: CpDeps,
+  hosts: HostView[],
+  nowS: number,
+): Promise<Set<string> | undefined> {
+  if (!deps.sandboxes || !hosts.some((h) => (h.idleGraceSeconds ?? 0) > 0)) return undefined;
+  const busy = new Set<string>();
+  for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  return busy;
 }
 
 function catalogOf(deps: CpDeps) {
@@ -117,6 +153,29 @@ const hostOf = (ctx: RequestCtx): string => {
 
 const nonNeg = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+
+/** The most a start limit or a start time is taken at (a malformed figure is dropped). */
+const START_MAX = 1_000_000;
+
+/**
+ * The inventory limits' startConcurrency and startSeconds (§6.5): a concurrency of at least 1, and
+ * seconds only beside it. Neither from an older agent: then no start line for its host.
+ */
+export function parseHostStart(l: Record<string, unknown>): HostStart | undefined {
+  const c = nonNeg(l.startConcurrency);
+  if (c === undefined || c < 1 || c > START_MAX) return undefined;
+  const sec = nonNegNum(l.startSeconds);
+  return { concurrency: c, ...(sec !== undefined && sec <= START_MAX ? { seconds: sec } : {}) };
+}
+
+/** The most an idle grace is taken at: a day (a malformed or larger figure is dropped). */
+const GRACE_MAX = 86_400;
+
+/** The inventory limits' idleGraceSeconds (§6.5): a whole number 0..GRACE_MAX, else none. */
+export function parseIdleGrace(l: Record<string, unknown>): number | undefined {
+  const g = nonNeg(l.idleGraceSeconds);
+  return g !== undefined && g <= GRACE_MAX ? g : undefined;
+}
 
 const WORKER_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MEM_LIST_MAX = 1024;
@@ -264,26 +323,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
-    const { cat } = catalogOf(deps);
     const nowS = seconds(deps);
-    const docs = await cat.list();
-    const p = place(docs, hostViewsOf(deps), nowS);
-    const mine = deps.hosts?.get(host);
-    const busy = new Set<string>();
-    if (deps.sandboxes) {
-      for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
-    }
-    const run: Record<string, unknown>[] = [];
-    const stop: Record<string, unknown>[] = [];
-    for (const d of docs) {
-      for (const b of d.builds) {
-        if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
-        const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
-        if (p.placed.get(b.buildId) === host) run.push(entry);
-        else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) stop.push(entry);
-      }
-    }
-    return { status: 200, body: { run, stop } };
+    const grace = (deps.hosts?.get(host)?.idleGraceSeconds ?? 0) > 0;
+    return wantedAnswer(deps, host, nowS, hostViewsOf(deps), grace);
   },
 
   /**
@@ -340,7 +382,16 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
     const memory = parseHostMemory(b.memory);
-    deps.hosts?.set(host, { at: seconds(deps), holds, limits, ...(memory ? { memory } : {}) });
+    const start = parseHostStart(l);
+    const grace = parseIdleGrace(l);
+    deps.hosts?.set(host, {
+      at: seconds(deps),
+      holds,
+      limits,
+      ...(memory ? { memory } : {}),
+      ...(start ? { start } : {}),
+      ...(grace !== undefined ? { idleGraceSeconds: grace } : {}),
+    });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 
@@ -556,3 +607,100 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     };
   },
 };
+
+/**
+ * The wanted answer (§6.3), for GET /v1/hosts/{host}/wanted: `run` in the wanted order (first
+ * leased first, the order the agent starts them in), `stop`, and `starting` (§6.5). `grace`: the
+ * host has an idle grace (§6.5): its graced builds stay in `run` and are listed in `graced`, and a
+ * graced worker displaced for a wanted build is re-checked for a lease at stop time, under the
+ * activation lock (so a lease being taken is written, or not yet begun).
+ */
+async function wantedAnswer(
+  deps: CpDeps,
+  host: string,
+  nowS: number,
+  views: HostView[],
+  grace: boolean,
+) {
+  const { cat } = catalogOf(deps);
+  const docs = await cat.list();
+  const mine = deps.hosts?.get(host);
+  // A worker is never stopped under a live sandbox (§6.3): it drains first.
+  const busy = new Set<string>();
+  if (deps.sandboxes) {
+    for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  }
+  // Read-only: the same placement takeLease judges by (hostViewsOf). With a grace on any host it
+  // also says which unleased builds keep their running worker there (`graced`); `busy` is passed
+  // for every host's answer, so they all agree on it.
+  const p = place(docs, views, nowS, { busy });
+  const run: Record<string, unknown>[] = [];
+  const stop: Record<string, unknown>[] = [];
+  // The unleased builds this host keeps running in its idle grace, after `run`'s wanted ones (the
+  // agent starts nothing for them: their units run).
+  const keep: Record<string, unknown>[] = [];
+  const displaced: Record<string, unknown>[] = [];
+  for (const d of docs) {
+    for (const b of d.builds) {
+      if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
+      const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
+      if (p.placed.get(b.buildId) === host) run.push(entry);
+      else if (grace && p.graced.get(b.buildId)?.host === host) keep.push(entry);
+      else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) {
+        if (p.displaced.get(b.buildId) === host) displaced.push(entry);
+        else stop.push(entry);
+      }
+    }
+  }
+  // A graced worker displaced for a wanted build is the one stop nobody asked for: at stop time,
+  // the catalog is read again under the activation lock (no lease half-written), and a build
+  // leased since keeps its worker running.
+  if (displaced.length > 0) {
+    await activationLock(cat).run('activation', async () => {
+      const t = seconds(deps);
+      for (const e of displaced) {
+        const now = (await cat.get(e.template as string))?.builds.find(
+          (x) => x.buildId === e.buildId,
+        );
+        if (now && now.status === 'registered' && liveLeases(now, t).length === 0) stop.push(e);
+      }
+    });
+  }
+  // The agent starts `run` in order, as many as its start limit allows: first leased first, the
+  // order placement uses, so the oldest activations start first.
+  const order = new Map(wantedBuilds(docs, nowS).map((w, i) => [w.build.buildId, i]));
+  run.sort((a, b) => order.get(a.buildId as string)! - order.get(b.buildId as string)!);
+  // The graced builds stay in `run` (their units keep running), soonest grace end first, and are
+  // listed in `graced` so the agent counts them without guessing.
+  keep.sort(
+    (a, b) =>
+      p.graced.get(a.buildId as string)!.until - p.graced.get(b.buildId as string)!.until ||
+      ((a.buildId as string) < (b.buildId as string) ? -1 : 1),
+  );
+  run.push(...keep);
+  // Of `run`, the builds whose worker is not attached to the relay (its presence, as readiness
+  // reads it); the agent counts those whose unit it runs as starting. Absent when the presence
+  // cannot be read: the agent then counts its own recent starts.
+  let starting: string[] | undefined;
+  if (deps.presence) {
+    try {
+      const attached = new Map(
+        (await deps.presence.list()).map((r) => [r.sandboxId, r.capacityMax]),
+      );
+      starting = unattachedPlaced(docs, p, attached, nowS)
+        .filter((x) => x.host === host)
+        .map((x) => x.buildId);
+    } catch {
+      starting = undefined;
+    }
+  }
+  return {
+    status: 200,
+    body: {
+      run,
+      stop,
+      ...(starting ? { starting } : {}),
+      ...(grace ? { graced: keep.map((x) => x.buildId as string) } : {}),
+    },
+  };
+}

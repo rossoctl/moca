@@ -9,9 +9,20 @@ import {
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
-import { liveLeases, place, readinessOf, readinessReasonOf, type Placement } from './activation.js';
-import { hostViewsOf } from './host-handlers.js';
-import { SubjectQueue } from './subject-document.js';
+import {
+  lastLeaseEnd,
+  liveLeases,
+  place,
+  readinessOf,
+  readinessReasonOf,
+  startQueue,
+  startRetryAfterS,
+  type HostView,
+  type Placement,
+  type StartQueue,
+} from './activation.js';
+import { activationLock } from './activation-lock.js';
+import { graceBusy, hostViewsOf } from './host-handlers.js';
 import {
   checkCreate,
   policyDigest,
@@ -268,14 +279,23 @@ interface ReadinessFacts {
   lastUsed: Map<string, number> | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
+  /**
+   * The hosts' start lines (§6.5): placed, wanted builds not attached, per host that reports its
+   * startConcurrency; null without placement or presence.
+   */
+  queue: StartQueue | null;
+  /** The hosts as last reported (empty without host agents): a start line's Retry-After reads them. */
+  hosts: HostView[];
   nowS: number;
 }
 
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
-  const placement =
-    hosts.length > 0 ? place(docs ?? (await catalog(deps).list()), hosts, nowS) : null;
+  // The workers with a live sandbox are never graced (§6.5; read only with a grace).
+  const busy = await graceBusy(deps, hosts, nowS);
+  const list = hosts.length > 0 ? (docs ?? (await catalog(deps).list())) : [];
+  const placement = hosts.length > 0 ? place(list, hosts, nowS, busy ? { busy } : {}) : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -285,8 +305,9 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       attached = null;
     }
   }
+  const queue = placement && attached ? startQueue(list, hosts, placement, attached, nowS) : null;
   if (deps.config.routeProfile !== 'sandbox' || !deps.sandboxes) {
-    return { attached, inUse: null, lastUsed: null, placement, nowS };
+    return { attached, inUse: null, lastUsed: null, placement, queue, hosts, nowS };
   }
   const inUse = new Map<string, number>();
   const lastUsed = new Map<string, number>();
@@ -295,7 +316,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, nowS };
+  return { attached, inUse, lastUsed, placement, queue, hosts, nowS };
 }
 
 /**
@@ -308,6 +329,10 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
   const readiness =
     b.status !== 'registered' ? null : readinessOf(b, f.nowS, f.placement, f.attached);
   const readinessReason = readinessReasonOf(b, readiness, f.placement);
+  // Waiting for a start slot on its host (§6.5): present only on an `activating` build.
+  const line = readiness === 'activating' ? f.queue?.byBuild.get(b.buildId) : undefined;
+  // In its host's idle grace (§6.5): no lease, its worker kept running until gracedUntil.
+  const grace = b.status === 'registered' ? f.placement?.graced.get(b.buildId) : undefined;
   return {
     buildId: b.buildId,
     status: b.status,
@@ -315,6 +340,8 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     readiness,
     // Why an `unavailable` build is not placed: present only then.
     ...(readinessReason ? { readinessReason } : {}),
+    ...(line ? { queued: line.queued, queuePosition: line.position } : {}),
+    ...(grace ? { graced: true, gracedUntil: grace.until } : {}),
     capacity:
       readiness === 'active'
         ? {
@@ -716,12 +743,26 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
  * Per host: its limits, its use (builds placed on it now) and its disk (§4, §6.2), as its agent
  * last reported them, and, from an agent that reports it, its memory: the figures, the effective
  * floor, the use and headroom placement counts, and the brake (pressure or a stale inventory) that
- * stops new starts. Empty when no host has reported, never meaning "no limit".
+ * stops new starts; from an agent that reports them, its start limit, measured start time and start
+ * line, and its idle grace with the builds in it (§6.5). Empty when no host has reported, never
+ * meaning "no limit".
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
   const used = new Map<string, number>();
   for (const h of f.placement?.placed.values() ?? []) used.set(h, (used.get(h) ?? 0) + 1);
+  const graced = new Map<string, number>();
+  for (const g of f.placement?.graced.values() ?? [])
+    graced.set(g.host, (graced.get(g.host) ?? 0) + 1);
   return (deps.hosts?.all() ?? []).map(([id, h]) => {
+    const q = f.queue?.byHost.get(id);
+    const start = h.start
+      ? {
+          concurrency: h.start.concurrency,
+          seconds: h.start.seconds ?? null,
+          starting: q?.starting ?? null,
+          queued: q?.queued ?? null,
+        }
+      : undefined;
     const m = h.memory;
     const u = f.placement?.memory.get(id);
     const memory =
@@ -746,6 +787,11 @@ function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
       idleLimitSeconds: h.limits.idleLimitSeconds,
       disk: { freeGb: h.limits.diskFreeGb, floorGb: h.limits.diskFloorGb },
       ...(memory ? { memory } : {}),
+      ...(start ? { start } : {}),
+      // Its idle grace and the builds in it now, only from an agent that sets one.
+      ...(h.idleGraceSeconds
+        ? { idleGraceSeconds: h.idleGraceSeconds, graced: graced.get(id) ?? 0 }
+        : {}),
     };
   });
 }
@@ -786,31 +832,6 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
     status: 200,
     body: { templateId: d0.id, buildId: target.buildId, leaseUntil: r.until, host: r.host },
   };
-}
-
-/**
- * The deployment-wide activation lock. takeLease checks the subject's active quota and the hosts'
- * activeLimit against EVERY template's leases, then writes one template's lease; the catalog
- * serializes writes per template id only, so two activations of different templates (by one
- * subject, or placed on one host) could each pass the check before either lease was written, and
- * together overshoot. One lease-taking check-and-write at a time, per catalog, closes that: each
- * activation sees every earlier one's lease. It covers the policy read, the catalog read,
- * placement, the `activate` record and the lease write (record first, so no lease is stored
- * without its record), and nothing that calls a host. A path that only drops leases (deactivate)
- * does not take it: a drop can only free quota or a slot, so an activation that read the leases
- * before a drop judged against more leases than remain, never fewer.
- *
- * It is process-local, which suffices because one control plane process owns the store: the
- * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
- * ReadWriteOnce with the Recreate strategy (deploy/k8s/overlays/ocp-sbx/template-store), so no
- * second pod writes it, even during a rollout. A control plane with more than one replica on a
- * shared store would need a store-level lock (or a check-and-set on the whole catalog) instead.
- */
-const ACTIVATION_LOCKS = new WeakMap<TemplateCatalog, SubjectQueue>();
-function activationLock(cat: TemplateCatalog): SubjectQueue {
-  let q = ACTIVATION_LOCKS.get(cat);
-  if (!q) ACTIVATION_LOCKS.set(cat, (q = new SubjectQueue()));
-  return q;
 }
 
 /**
@@ -887,11 +908,14 @@ async function takeLeaseLocked(
       ? d
       : { ...d, builds: d.builds.map((x) => (x.buildId === target.buildId ? withLease(x) : x)) },
   );
-  const pl = place(trial, hosts, nowS);
+  // A graced worker gives its slot up to this lease (it is not `placed`, so never "displaced"
+  // below); the workers with a live sandbox are never graced.
+  const busy = await graceBusy(deps, hosts, nowS);
+  const pl = place(trial, hosts, nowS, busy ? { busy } : {});
   // A held build is never evicted to make room (§6.3): placement breaks a tie of equal `since` (whole
   // seconds) by buildId, so a lease taken in the same second as a placed one could otherwise sort
   // ahead of it and push it off its host. Such a lease waits, as one that does not fit.
-  const before = place(docs, hosts, nowS);
+  const before = place(docs, hosts, nowS, busy ? { busy } : {});
   const displaced = [...before.placed.keys()].find(
     (x) => x !== target.buildId && !pl.placed.has(x),
   );
@@ -957,31 +981,52 @@ async function takeLeaseLocked(
 /**
  * Deactivate (§6.3): drop this subject's leases on the template's builds (an admin with
  * `all: true`, everyone's); a build stays wanted while another subject's lease stands. A drop is
- * a `deactivate` record; one that drops nothing writes none.
+ * a `deactivate` record; one that drops nothing writes none. When none is left, the time is kept
+ * as the build's lastLeaseEnd, from which a host's idle grace runs (§6.5). `stopNow: true` skips
+ * that grace: a build left with no lease is stopped at the next wanted answer (forced cold), and
+ * the `deactivate` record says `stopNow: true`.
  */
 async function deactivate(ctx: RequestCtx, deps: CpDeps) {
   const p = requireEnrolled(ctx, deps);
   const { cat, prov } = writable(deps);
   const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
   const b = asRecord(ctx.body);
+  if (b.stopNow !== undefined && typeof b.stopNow !== 'boolean')
+    throw new CpError('invalid_request', 'stopNow must be a boolean');
+  const stopNow = b.stopNow === true;
   const nowS = seconds(deps);
   const all = isAdmin(p) && b.all === true;
   let dropped = 0;
+  // Builds whose idle grace this stopNow ends: unleased, with a lease end it had not covered yet.
+  let ended = 0;
   await cat.update(d0.id, async (cur) => ({
     ...cur!,
     builds: cur!.builds.map((x) => {
       const live = (x.leases ?? []).filter((l) => l.until > nowS);
       const keep = live.filter((l) => !(all || l.subject === p.sub));
       dropped += live.length - keep.length;
-      return { ...x, leases: keep };
+      // The end of its last lease: now when this drop leaves none, else what the expired leases
+      // this write clears said (lastLeaseEnd reads them before they go).
+      const prior = lastLeaseEnd(x, nowS);
+      const end = keep.length === 0 && live.length > 0 ? nowS : prior;
+      const out: TemplateBuild = {
+        ...x,
+        leases: keep,
+        ...(end !== undefined ? { lastLeaseEnd: end } : {}),
+      };
+      if (stopNow && keep.length === 0 && x.status === 'registered' && end !== undefined) {
+        if (x.stopNowAt === undefined || end > x.stopNowAt) ended += 1;
+        out.stopNowAt = nowS;
+      }
+      return out;
     }),
   }));
-  if (dropped > 0) {
+  if (dropped > 0 || ended > 0) {
     await prov.append({
       stream: `template/${d0.id}`,
       kind: 'deactivate',
       subject: p.sub,
-      body: { leases: dropped, all },
+      body: { leases: dropped, all, ...(stopNow ? { stopNow: true } : {}) },
     });
   }
   return { status: 200, body: { templateId: d0.id, released: dropped } };
@@ -1008,7 +1053,7 @@ async function requireActive(
   activate: boolean,
 ): Promise<void> {
   if (hostViewsOf(deps).length === 0 && !deps.config.templateHosts?.length) return;
-  const facts = await readinessFacts(deps);
+  let facts = await readinessFacts(deps);
   const readiness = readinessOf(t.build, facts.nowS, facts.placement, facts.attached);
   if (readiness === 'active') return;
   let now = readiness;
@@ -1018,10 +1063,25 @@ async function requireActive(
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {
     // Its refusals (no_active_slot, quota_exceeded, template_unavailable) answer as activate's.
-    await takeLease(deps, p, t.doc, t.build, undefined, 'first_use');
+    const lease = await takeLease(deps, p, t.doc, t.build, undefined, 'first_use');
+    // A build in its idle grace has its worker attached, and the lease keeps it there (placement
+    // prefers the host running it): it serves now, with no wait (§6.5).
+    const graced = facts.placement?.graced.get(t.build.buildId);
+    if (graced && lease.host === graced.host && readiness === 'deactivating') return;
     now = 'activating';
     started = true;
+    // The lease may have placed it just now: its start line is read after it (§6.5).
+    if (readiness !== 'activating') facts = await readinessFacts(deps);
   }
+  // On a host whose agent reports its start limit and time, the wait its place in the host's
+  // start line implies (§6.5); else FIRST_USE_RETRY_S, as before.
+  const line = now === 'activating' ? facts.queue?.byBuild.get(t.build.buildId) : undefined;
+  const estimate = line
+    ? startRetryAfterS(
+        line,
+        facts.hosts.find((h) => h.id === line.host),
+      )
+    : null;
   throw new CpError(
     'template_not_active',
     started
@@ -1036,7 +1096,7 @@ async function requireActive(
         ? { reason: facts.placement.unplaced.get(t.build.buildId)! }
         : {}),
     },
-    FIRST_USE_RETRY_S,
+    estimate ?? FIRST_USE_RETRY_S,
   );
 }
 

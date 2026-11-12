@@ -1,7 +1,7 @@
 import type { TemplateBuild, TemplateDoc } from './template-catalog.js';
 
 /**
- * Activation (template lifecycle spec §6.2-§6.4), as pure functions over the catalog, the hosts'
+ * Activation (template lifecycle spec §6.2-§6.5), as pure functions over the catalog, the hosts'
  * inventories and the relay's presence, so the rules are testable without a host:
  *
  *   - a build is WANTED active while any subject holds an unexpired lease on it (§6.3); aging is
@@ -11,7 +11,13 @@ import type { TemplateBuild, TemplateDoc } from './template-catalog.js';
  *     memory): the holding host with the fewest wanted builds, then by id;
  *   - over a host's limit, the newest leases wait: a held build is never evicted to make room,
  *     and the activation that cannot be placed is refused with no_active_slot (§6.3);
- *   - a subject holds at most quota.active builds at once.
+ *   - a subject holds at most quota.active builds at once;
+ *   - a host starts at most its startConcurrency workers at once (§6.5): a placed build beyond it
+ *     waits in the host's start line, `activating`, queued;
+ *   - on a host with an idle grace (SBX_IDLE_GRACE_S > 0, §6.5), a build whose last lease has
+ *     ended keeps its running worker for that long (GRACED), in a slot no wanted build needs: a
+ *     wanted build that needs the slot (or the memory) displaces it, the only stop of a worker
+ *     nobody asked to stop, and only of one with no lease.
  *
  * "Activation lease" here is a subject's timed claim that a build be kept running on some host. It
  * is neither the sandbox lease mode (a warm guest kept for one sandbox between Execs) nor the
@@ -49,6 +55,24 @@ export interface HostView {
    */
   at?: number;
   memory?: HostMemory;
+  /**
+   * Its agent's start limit and measured cold-start time (§6.5): absent from an older agent, and
+   * then its builds' readiness carries no queue position.
+   */
+  start?: HostStart;
+  /**
+   * SBX_IDLE_GRACE_S: how long a released build's running worker is kept, in seconds; absent or 0
+   * (off, and from an older agent): stopped as soon as it is not wanted.
+   */
+  idleGraceSeconds?: number;
+}
+
+/** What a host's agent reports of its starts (§6.5). */
+export interface HostStart {
+  /** SBX_START_CONCURRENCY: at most this many workers starting (started, not attached) at once. */
+  concurrency: number;
+  /** The mean of its last cold starts, start to attach, in seconds; absent before one is done. */
+  seconds?: number;
 }
 
 /**
@@ -77,6 +101,32 @@ export interface Placement {
   unplaced: Map<string, Unplaced>;
   /** Per host that reports its memory figures: its use after this placement. */
   memory: Map<string, HostMemoryUse>;
+  /**
+   * Builds in their host's idle grace: no live lease, their worker running there, kept until
+   * `until` (epoch seconds) in a slot no wanted build needs. Empty without a grace.
+   */
+  graced: Map<string, Graced>;
+  /**
+   * Builds that were in their host's idle grace and gave it up (buildId -> host): a wanted build
+   * needed the slot or the memory, or the host is over its memory with them. Stopped.
+   */
+  displaced: Map<string, string>;
+}
+
+/** A build kept in its host's idle grace. */
+export interface Graced {
+  host: string;
+  /** Epoch seconds: its last lease's end plus the host's idleGraceSeconds. */
+  until: number;
+}
+
+/** What placement needs beside the catalog and the hosts. */
+export interface PlaceOptions {
+  /**
+   * The workers with a live sandbox (drained, never stopped): never in a grace, so never displaced.
+   * Read only where a host has a grace; absent, none.
+   */
+  busy?: ReadonlySet<string>;
 }
 
 /** A worker's fixed overhead beside its guest's RAM: the VMM and the worker itself (§6.2). */
@@ -105,6 +155,32 @@ export function costMib(b: TemplateBuild): number {
 export const liveLeases = (b: TemplateBuild, nowS: number) =>
   (b.leases ?? []).filter((l) => l.until > nowS);
 
+/**
+ * When a build's last lease ended, epoch seconds: the latest of its recorded
+ * `lastLeaseEnd` (a deactivate's time, or an expired lease's end it cleared) and the ends of its
+ * expired leases still stored. Undefined when it has none (never leased, or released before
+ * the idle grace existed).
+ */
+export function lastLeaseEnd(b: TemplateBuild, nowS: number): number | undefined {
+  let end = b.lastLeaseEnd;
+  for (const l of b.leases ?? [])
+    if (l.until <= nowS && (end === undefined || l.until > end)) end = l.until;
+  return end;
+}
+
+/**
+ * Until when a build would be in an idle grace of `graceS` seconds: its last lease's
+ * end plus the grace, or undefined when none applies (a live lease, no recorded end, a grace of 0,
+ * or a release with stopNow since that end). Whether it is graced also needs its worker running on
+ * a host with room: place() decides that.
+ */
+export function graceUntil(b: TemplateBuild, graceS: number, nowS: number): number | undefined {
+  if (graceS <= 0 || b.status !== 'registered' || liveLeases(b, nowS).length > 0) return undefined;
+  const end = lastLeaseEnd(b, nowS);
+  if (end === undefined || (b.stopNowAt !== undefined && end <= b.stopNowAt)) return undefined;
+  return end + graceS;
+}
+
 /** The wanted builds, their leases' earliest start breaking ties: first leased, first placed. */
 export function wantedBuilds(
   docs: TemplateDoc[],
@@ -123,11 +199,11 @@ export function wantedBuilds(
 }
 
 /**
- * Placement (§6.2, with its memory rule). In the wanted order (first leased, first
- * placed), each build goes to a host that holds it and is under its activeLimit, the one with the
- * fewest builds placed this pass, then by id; a memory-reporting host already running the build's
- * worker comes first. A build no host holds is `not_held`; one whose every holder is full is
- * `no_slot`.
+ * Placement (§6.2, with its memory rule). In the wanted order (first leased, first placed), each
+ * build goes to a host that holds it and is under its activeLimit, the one with the fewest builds
+ * placed this pass, then by id; a host already running the build's worker comes first (no start at
+ * all, §6.5), whether or not it reports its memory figures, from its agent's `runningWorkers`. A
+ * build no host holds is `not_held`; one whose every holder is full is `no_slot`.
  *
  * A host that reports its memory figures must also have room for the build, unless it already runs
  * the build's worker (that is paid for, and a running worker is never evicted):
@@ -137,15 +213,31 @@ export function wantedBuilds(
  * (MemAvailable already reflects what runs, so only the pending starts come off it: two builds
  * placed in one pass both count against the same host, whichever bound binds)
  * and it fits if cost ≤ headroom; a build that fits no holder under its limit is `memory`. A host
- * whose inventory is older than memoryStaleS, or whose PSI `full avg10` is above its limit, takes no
- * new start (what it runs is kept). A build in a host's memfileMismatch is never placed there (every
- * holder: `memfile_mismatch`). A host with no memory figures is placed as before.
+ * whose inventory is older than memoryStaleS, or whose PSI
+ * `full avg10` is above its limit, takes no new start (what it runs is kept). A build in a host's
+ * memfileMismatch is never placed there (every holder: `memfile_mismatch`). A host with no memory
+ * figures is placed as before.
  *
  * "Running" is the agent's own report (`runningWorkers`: the sbx-worker units active on that
  * host), not the relay's presence: a worker pins its memfile from its start, before it attaches,
- * and presence does not say which host a worker is on.
+ * and presence does not say which host a worker is on. A worker in its idle grace still runs its
+ * unit, so it is counted as running here (its memory is in `used`) with no change.
+ *
+ * The idle grace (§6.5): on a host with idleGraceSeconds > 0, a registered build with no
+ * live lease and no live sandbox (opts.busy), whose worker runs there, is a grace candidate until
+ * graceUntil(). Each candidate takes a slot of the host's activeLimit; a wanted build that would
+ * otherwise not fit a holder (no slot, or no memory) displaces the candidates that end soonest
+ * there, as few as fit it: a host that fits without displacing comes first. A host still over its
+ * memory with its candidates (headroom below 0), or with more of them than free slots, drops the
+ * soonest-ending. The rest are `graced`; the dropped ones `displaced`. With no grace anywhere,
+ * placement is exactly as before.
  */
-export function place(docs: TemplateDoc[], hosts: HostView[], nowS: number): Placement {
+export function place(
+  docs: TemplateDoc[],
+  hosts: HostView[],
+  nowS: number,
+  opts: PlaceOptions = {},
+): Placement {
   const placed = new Map<string, string>();
   const unplaced = new Map<string, Unplaced>();
   const count = new Map(hosts.map((h) => [h.id, 0]));
@@ -175,13 +267,50 @@ export function place(docs: TemplateDoc[], hosts: HostView[], nowS: number): Pla
           : null;
     memUse.set(h.id, { usedMib: used, pendingMib: 0, headroomMib: 0, brake });
   }
+  // The memory displaced grace candidates free once stopped: not in MemAvailable yet.
+  const freedMib = new Map<string, number>();
   const headroom = (h: HostView): number => {
     const m = h.memory!;
     const u = memUse.get(h.id)!;
     return Math.min(
       m.totalMib! - m.floorMib! - u.usedMib,
-      m.availableMib! - m.floorMib! - u.pendingMib,
+      m.availableMib! - m.floorMib! - u.pendingMib + (freedMib.get(h.id) ?? 0),
     );
+  };
+  // Each host's grace candidates, soonest-ending first (the first displaced).
+  const candidates = new Map<string, { buildId: string; cost: number; until: number }[]>();
+  const taken = new Set<string>();
+  for (const h of [...hosts].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    const g = h.idleGraceSeconds ?? 0;
+    if (g <= 0) continue;
+    const list: { buildId: string; cost: number; until: number }[] = [];
+    for (const d of docs) {
+      for (const b of d.builds) {
+        if (taken.has(b.buildId) || h.holds[b.buildId] === undefined) continue;
+        if (b.worker === '' || !running.get(h.id)!.has(b.worker) || opts.busy?.has(b.worker))
+          continue;
+        const until = graceUntil(b, g, nowS);
+        if (until === undefined || nowS >= until) continue;
+        list.push({ buildId: b.buildId, cost: costMib(b), until });
+        taken.add(b.buildId);
+      }
+    }
+    list.sort((a, b) => a.until - b.until || (a.buildId < b.buildId ? -1 : 1));
+    if (list.length) candidates.set(h.id, list);
+  }
+  const displaced = new Map<string, string>();
+  const displace = (h: HostView, k: number) => {
+    const list = candidates.get(h.id) ?? [];
+    let freed = 0;
+    for (const c of list.splice(0, k)) {
+      displaced.set(c.buildId, h.id);
+      freed += c.cost;
+    }
+    const u = memUse.get(h.id);
+    if (u && freed > 0) {
+      u.usedMib -= freed;
+      freedMib.set(h.id, (freedMib.get(h.id) ?? 0) + freed);
+    }
   };
   for (const { build } of wantedBuilds(docs, nowS)) {
     const holders = hosts.filter((h) => h.holds[build.buildId] !== undefined);
@@ -194,29 +323,43 @@ export function place(docs: TemplateDoc[], hosts: HostView[], nowS: number): Pla
       unplaced.set(build.buildId, 'memfile_mismatch');
       continue;
     }
-    // Only on a host with memory figures: without them placement is exactly as before.
-    const isRunning = (h: HostView) =>
-      memUse.has(h.id) && build.worker !== '' && running.get(h.id)!.has(build.worker);
+    // The agent's runningWorkers, with or without memory figures: a running worker needs no
+    // start. With no runningWorkers (an older agent) no host runs it, and the order is as before.
+    const isRunning = (h: HostView) => build.worker !== '' && running.get(h.id)!.has(build.worker);
     const underLimit = sound.filter((h) => count.get(h.id)! < h.activeLimit);
     const cost = costMib(build);
-    const fits = (h: HostView) => {
+    // How many of the host's grace candidates must give way for this build (0: none), or null
+    // when it does not fit even with all of them gone. A grace candidate holds a slot, and its
+    // memory is in `used` (its worker runs); displacing k frees both.
+    const need = (h: HostView): number | null => {
+      const list = candidates.get(h.id) ?? [];
       const u = memUse.get(h.id);
-      if (!u || isRunning(h)) return true;
-      return u.brake === null && cost <= headroom(h);
+      let freed = 0;
+      for (let k = 0; k <= list.length; k++) {
+        if (k > 0) freed += list[k - 1]!.cost;
+        if (count.get(h.id)! + list.length - k >= h.activeLimit) continue;
+        if (!u || isRunning(h)) return k;
+        if (u.brake !== null) return null;
+        if (cost <= headroom(h) + freed) return k;
+      }
+      return null;
     };
     const free = underLimit
-      .filter(fits)
+      .map((h) => ({ h, k: need(h) }))
+      .filter((x): x is { h: HostView; k: number } => x.k !== null)
       .sort(
         (a, b) =>
-          Number(isRunning(b)) - Number(isRunning(a)) ||
-          count.get(a.id)! - count.get(b.id)! ||
-          (a.id < b.id ? -1 : 1),
+          Number(isRunning(b.h)) - Number(isRunning(a.h)) ||
+          a.k - b.k ||
+          count.get(a.h.id)! - count.get(b.h.id)! ||
+          (a.h.id < b.h.id ? -1 : 1),
       );
     if (free.length === 0) {
       unplaced.set(build.buildId, underLimit.length > 0 ? 'memory' : 'no_slot');
       continue;
     }
-    const to = free[0]!;
+    const to = free[0]!.h;
+    if (free[0]!.k > 0) displace(to, free[0]!.k);
     placed.set(build.buildId, to.id);
     count.set(to.id, count.get(to.id)! + 1);
     const u = memUse.get(to.id);
@@ -225,12 +368,24 @@ export function place(docs: TemplateDoc[], hosts: HostView[], nowS: number): Pla
       u.pendingMib += cost;
     }
   }
+  // The grace keeps only what the host has room for: free slots, and memory at or above the
+  // floor with its graced workers counted; the soonest-ending give way first.
+  const graced = new Map<string, Graced>();
+  for (const h of hosts) {
+    const list = candidates.get(h.id);
+    if (!list) continue;
+    const over = count.get(h.id)! + list.length - h.activeLimit;
+    if (over > 0) displace(h, over);
+    const u = memUse.get(h.id);
+    while (u && list.length > 0 && headroom(h) < 0) displace(h, 1);
+    for (const c of list) graced.set(c.buildId, { host: h.id, until: c.until });
+  }
   for (const h of hosts) {
     const u = memUse.get(h.id);
     // A braked host has none for a new start, whatever the figures (the brake says why).
     if (u) u.headroomMib = u.brake === null ? Math.max(0, headroom(h)) : 0;
   }
-  return { placed, unplaced, memory: memUse };
+  return { placed, unplaced, memory: memUse, graced, displaced };
 }
 
 /**
@@ -261,4 +416,84 @@ export function readinessReasonOf(
   p: Placement | null,
 ): Unplaced | null {
   return readiness === 'unavailable' ? (p?.unplaced.get(build.buildId) ?? null) : null;
+}
+
+/** A build's place in its host's start line. */
+export interface StartLine {
+  host: string;
+  /** 1-based, among the host's placed, wanted builds not attached yet, in the wanted order. */
+  position: number;
+  /** Beyond the host's startConcurrency: waiting for a start slot, not started yet. */
+  queued: boolean;
+}
+
+export interface StartQueue {
+  /** buildId -> its line, for builds on hosts that report a startConcurrency. */
+  byBuild: Map<string, StartLine>;
+  /** host -> its starting (within the limit) and queued (beyond it) builds. */
+  byHost: Map<string, { starting: number; queued: number }>;
+}
+
+/**
+ * The builds placed and wanted whose worker is not attached to the relay, in the
+ * wanted order (first leased first, the order the agent starts them in), with their host. This is
+ * the wanted answer's `starting`: the agent counts those whose unit it runs as starting. Attachment
+ * is the relay's presence, as readiness reads it.
+ */
+export function unattachedPlaced(
+  docs: TemplateDoc[],
+  p: Placement,
+  attached: Map<string, number>,
+  nowS: number,
+): { buildId: string; host: string }[] {
+  const out: { buildId: string; host: string }[] = [];
+  for (const { build } of wantedBuilds(docs, nowS)) {
+    const host = p.placed.get(build.buildId);
+    if (host === undefined) continue;
+    if (build.worker !== '' && attached.has(build.worker)) continue;
+    out.push({ buildId: build.buildId, host });
+  }
+  return out;
+}
+
+/**
+ * Each host's start line (§6.5): of its placed, wanted builds not
+ * attached, in the wanted order, the first startConcurrency are starting and the rest queued. Only
+ * for hosts whose agent reports its startConcurrency (an older agent's builds have no line). The
+ * agent applies the limit; this is the control plane's view of it, for readiness and Retry-After.
+ */
+export function startQueue(
+  docs: TemplateDoc[],
+  hosts: HostView[],
+  p: Placement,
+  attached: Map<string, number>,
+  nowS: number,
+): StartQueue {
+  const limit = new Map<string, number>();
+  for (const h of hosts) if (h.start) limit.set(h.id, h.start.concurrency);
+  const byBuild = new Map<string, StartLine>();
+  const byHost = new Map<string, { starting: number; queued: number }>();
+  for (const h of limit.keys()) byHost.set(h, { starting: 0, queued: 0 });
+  for (const { buildId, host } of unattachedPlaced(docs, p, attached, nowS)) {
+    const n = limit.get(host);
+    if (n === undefined) continue;
+    const c = byHost.get(host)!;
+    const position = c.starting + c.queued + 1;
+    const queued = position > n;
+    if (queued) c.queued += 1;
+    else c.starting += 1;
+    byBuild.set(buildId, { host, position, queued });
+  }
+  return { byBuild, byHost };
+}
+
+/**
+ * Retry-After for a build in a start line (§6.5): the waves before its start ends,
+ * ceil(ceil(position / startConcurrency) x the host's measured start seconds), at least 1; null
+ * when the host has measured none (the caller then answers as before).
+ */
+export function startRetryAfterS(line: StartLine, host: HostView | undefined): number | null {
+  const s = host?.start;
+  if (!s || s.seconds === undefined || s.concurrency < 1) return null;
+  return Math.max(1, Math.ceil(Math.ceil(line.position / s.concurrency) * s.seconds));
 }
