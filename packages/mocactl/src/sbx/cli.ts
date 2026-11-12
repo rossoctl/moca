@@ -37,6 +37,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
+import { openCallRecord, type CallRecorder } from './call-record.js';
 import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
@@ -115,6 +116,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx credentials delete NAME            delete one
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1)
+--record F (every command that calls the API but token, login, logout and credentials): one
+NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
@@ -147,6 +150,8 @@ export interface SbxDeps {
   loginHelpers?: LoginHelpers;
   /** `token --renew-every`'s sleep (default the runtime's). Tests only. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** `--record`'s clock (default Date.now). Tests only. */
+  now?: () => number;
 }
 
 export function resolveSbxUrl(
@@ -266,6 +271,11 @@ const NO_JSON = new Set([
 ]);
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
+/**
+ * The commands `--record F` is refused on: a token printed on purpose, the login itself, and
+ * credentials, whose secrets are the request.
+ */
+const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -344,6 +354,21 @@ export async function sbxMain(
   io: Io,
   deps: SbxDeps = {},
 ): Promise<number> {
+  const opened: { recorder?: CallRecorder } = {};
+  try {
+    return await sbxMainWith(argv, env, io, deps, opened);
+  } finally {
+    opened.recorder?.close();
+  }
+}
+
+async function sbxMainWith(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  io: Io,
+  deps: SbxDeps,
+  record: { recorder?: CallRecorder },
+): Promise<number> {
   let parsed;
   try {
     parsed = parseArgs({
@@ -372,6 +397,7 @@ export async function sbxMain(
         kind: { type: 'string' },
         preset: { type: 'string' },
         'renew-every': { type: 'string' },
+        record: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -432,6 +458,10 @@ export async function sbxMain(
   );
   if (flagMisuse) {
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.record !== undefined && NO_RECORD.has(command)) {
+    io.err(`sbx: ${command} takes no --record (it would record a secret)\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   const renewEvery = wholeSeconds(io, 'renew-every', values['renew-every']);
@@ -637,6 +667,22 @@ export async function sbxMain(
   // and the environment still win (R5j).
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
   const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
+  // --record F: every HTTP attempt this command makes, the login's refresh included, so the record
+  // is opened (or refused) before the runtime's clients exist. Exec calls are gRPC, not recorded.
+  if (values.record !== undefined) {
+    const r = openCallRecord(values.record, `sbx ${command}`, deps.now);
+    if ('error' in r) {
+      io.err(`sbx: ${r.error}`);
+      return SBX_EXIT.usage;
+    }
+    record.recorder = r;
+    const base = resolveSbxUrl(
+      flagUrl,
+      env,
+      loadConfig(resolvePaths(env, deps.home ?? homedir())).config,
+    );
+    deps = { ...deps, fetchImpl: r.wrap(deps.fetchImpl ?? fetch, base ?? 'http://invalid') };
+  }
   const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
     login: OWN_LOGIN.has(command),
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
