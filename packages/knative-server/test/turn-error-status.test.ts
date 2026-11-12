@@ -11,6 +11,8 @@ import {
   turnErrorHeaders,
   turnErrorCode,
   turnErrorMessage,
+  clientErrorText,
+  HOST_REFUSAL_MESSAGE,
   logTurnCapacity,
 } from '../src/server.js';
 
@@ -169,11 +171,7 @@ describe('logTurnCapacity', () => {
   it('logs one line naming the 503 cause, the session and the reason, on one line', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      logTurnCapacity(
-        'turn',
-        'sess-1',
-        new SandboxPoolEmptyError('app=sandbox', 'records', 'container'),
-      );
+      logTurnCapacity('turn', 'sess-1', new SandboxPoolEmptyError('app=sandbox', 'container'));
       expect(warn).toHaveBeenCalledTimes(1);
       const line = String(warn.mock.calls[0][0]);
       expect(line).toContain('[turn] 503 SandboxPoolEmptyError for session sess-1:');
@@ -197,9 +195,26 @@ describe('logTurnCapacity', () => {
 
 describe('turnErrorMessage', () => {
   it("carries a 503's capacity reason as the body's message", () => {
-    const err = new SandboxPoolEmptyError('app=sandbox', 'records', 'container');
+    const err = new SandboxPoolEmptyError('app=sandbox', 'container');
     expect(turnErrorMessage(503, err).message).toContain(
       "no attached sandbox in sandbox tier 'container'",
+    );
+  });
+
+  it("never carries a host refusal's figures: a fixed sentence instead (#452's arithmetic)", () => {
+    const host = new SandboxCapacityRefusedError(
+      'committing 4000000000 more bytes would reach 16000000000 against a budget of 12000000000',
+    );
+    const m = turnErrorMessage(503, host).message ?? '';
+    expect(m).toContain('the sandbox host refused the command for lack of capacity');
+    expect(m).not.toMatch(/[0-9]/);
+  });
+
+  it("keeps a host refusal's figures out of a client frame too (SSE and detached terminals)", () => {
+    const host = new SandboxCapacityRefusedError('committing 4000000000 more bytes …');
+    expect(clientErrorText(host)).toBe(HOST_REFUSAL_MESSAGE);
+    expect(clientErrorText(new SandboxPoolEmptyError('app=sandbox', 'container'))).toContain(
+      "sandbox tier 'container'",
     );
   });
 

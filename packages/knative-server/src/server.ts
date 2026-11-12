@@ -461,9 +461,9 @@ const NO_CAPACITY = new Set([
  * One log line for a /turn that answered 503, naming the cause. A 503 is an expected capacity
  * signal, so it was never logged, and the reasons it covers are not alike: a full pool clears by
  * waiting, but an empty TIER (no worker of it attached) never does, and the client sees the same
- * "no capacity, retry" for both (bm1, 2026-10-31: a session retried an empty tier for 10 minutes
- * with nothing in any log saying why). The capacity classes' messages name pools, tiers, templates
- * and sandbox ids, never a secret; forLog keeps them on one line.
+ * "no capacity, retry" for both (a session could retry an empty tier for minutes with nothing in
+ * any log saying why). The log keeps each class's own text, the host's admission arithmetic of a
+ * mid-turn refusal included (operators read it); forLog keeps it on one line.
  */
 export function logTurnCapacity(where: string, sessionId: string | undefined, err: unknown): void {
   const name = err instanceof Error ? err.name : 'unknown';
@@ -474,13 +474,30 @@ export function logTurnCapacity(where: string, sessionId: string | undefined, er
 }
 
 /**
- * The 503's `message` (the Error schema's operator-facing detail): the capacity class's own text,
- * which names a pool, tier, template or sandbox id and never a secret, so a client can say WHY it
- * is waiting ("no attached sandbox in sandbox tier 'container'") rather than only that it is. Only
- * for a 503: a 500's text never reaches the body.
+ * The 503's `message` (the Error schema's operator-facing detail), so a client can say WHY it is
+ * waiting ("no attached sandbox in sandbox tier 'container'") rather than only that it is. The three
+ * pre-turn classes' own texts name a pool, tier, template or sandbox id, and go to the body. A
+ * mid-turn host refusal's text is the worker host's admission arithmetic (its memory budget and
+ * commit level, #452), which is not the caller's to read: the body gets a fixed sentence instead,
+ * and the log line keeps the whole text. Only for a 503: a 500's text never reaches the body.
  */
+export const HOST_REFUSAL_MESSAGE =
+  'the sandbox host refused the command for lack of capacity; retry after Retry-After';
+
+/**
+ * An error's text as a client may read it in a frame (an SSE error frame after the first one, a
+ * detached turn's logged terminal, which any later attach replays): the error's own text, but never a
+ * host refusal's figures (the same rule as the 503 body's `message`, below).
+ */
+export function clientErrorText(err: unknown): string {
+  if (err instanceof Error && err.name === 'SandboxCapacityRefusedError')
+    return HOST_REFUSAL_MESSAGE;
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function turnErrorMessage(status: number, err: unknown): { message?: string } {
   if (status !== 503 || !(err instanceof Error) || err.message === '') return {};
+  if (err.name === 'SandboxCapacityRefusedError') return { message: HOST_REFUSAL_MESSAGE };
   return { message: err.message.slice(0, 500) };
 }
 
@@ -666,7 +683,7 @@ async function handleTurnStream(
     // Post-first-frame: status codes are spent; degrade to a terminal error frame (§3.4 regime 3).
     // Guarded so a concurrent disconnect can't double-write / EPIPE.
     if (!clientGone && !res.writableEnded) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = clientErrorText(err);
       res.write(
         `event: error\ndata: ${JSON.stringify({
           type: 'error',
@@ -789,8 +806,7 @@ async function handleDetachableTurn(
     const status = turnErrorStatus(err);
     if (status === 500) console.error('[turn:detach] unclassified error:', err);
     else if (status === 503) logTurnCapacity('turn:detach', auth.sessionId, err);
-    const message =
-      status === 500 ? turnErrorCode(status) : err instanceof Error ? err.message : String(err);
+    const message = status === 500 ? turnErrorCode(status) : clientErrorText(err);
     const end = await endTurn({
       type: 'error',
       sessionId: auth.sessionId,
