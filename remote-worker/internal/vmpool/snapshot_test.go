@@ -232,7 +232,7 @@ func TestManifestV2HashCoversEveryField(t *testing.T) {
 	}{
 		{"image", func(m *Manifest) { m.Image = "other" }},
 		{"vmm", func(m *Manifest) { m.VMM = "cloud-hypervisor" }},
-		{"instance_type", func(m *Manifest) { m.InstanceType = "c5.metal" }},
+		{"instance_type", func(m *Manifest) { m.InstanceType = "example.metal" }},
 		{"kernel_release", func(m *Manifest) { m.Kernel = "6.1.0" }},
 		{"guest_ram_mb", func(m *Manifest) { m.GuestRAMMB = 4096 }},
 		{"vcpus", func(m *Manifest) { m.VCPUs = 2 }},
