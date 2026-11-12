@@ -306,7 +306,8 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   `--reason TEXT` (a whole template only) and `--wait [--timeout S]`. `--wait` returns once each
   build reads `retired` and its worker no longer runs: a retired build whose worker still holds a
   presence record reports `capacity`, as an active one does, and `capacity` is null once its host
-  has stopped it (after the wanted state's `stop`). Without host agents (`heldBy` null) there is
+  has stopped it (after the wanted state's `stop`); when the relay's presence cannot be read it
+  reports `running: null`, and `--wait` keeps waiting rather than take that as stopped. Without host agents (`heldBy` null) there is
   nothing to wait for. Past `--timeout` (default 300 s) it exits 5. Waiting for the snapshot's
   removal from every host (`heldBy` empty) comes with the host's removal step (#743). A sandbox
   command refused `template_retired` says that the template or build is never served again.

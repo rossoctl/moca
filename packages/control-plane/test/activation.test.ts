@@ -37,7 +37,10 @@ async function setup(quotaActive = 8): Promise<TestDeps> {
     policy: new FilePolicyStore({ dir, provenance }),
     hosts: new HostRegistry(),
     presence: {
-      list: async () => attachedNow.map((w) => ({ sandboxId: w, labels: {}, capacityMax: 3 })),
+      list: async () => {
+        if (attachedNow === null) throw new Error('presence unreadable');
+        return attachedNow.map((w) => ({ sandboxId: w, labels: {}, capacityMax: 3 }));
+      },
     },
     config: { routeProfile: 'sandbox' },
   });
@@ -47,7 +50,8 @@ async function setup(quotaActive = 8): Promise<TestDeps> {
   );
   return d;
 }
-let attachedNow: string[] = [];
+/** The relay's attached workers; null: presence cannot be read. */
+let attachedNow: string[] | null = [];
 const asHost = (host: string, params: Record<string, string> = {}, body: unknown = {}) =>
   ({ ...ctx({ params: { host, ...params }, body }), host }) as ReturnType<typeof ctx> & {
     host: string;
@@ -771,6 +775,12 @@ describe('retire (§5.1)', () => {
       status: 'retired',
       readiness: 'retired',
       capacity: { running: 3, inUse: 0 },
+    });
+    // Presence unreadable: not known to be stopped, so `running` is null, never a null capacity.
+    attachedNow = null;
+    expect(await read()).toMatchObject({
+      readiness: 'retired',
+      capacity: { running: null, inUse: 0 },
     });
     attachedNow = [];
     expect(await read()).toMatchObject({ readiness: 'retired', capacity: null });

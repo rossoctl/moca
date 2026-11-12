@@ -47,7 +47,7 @@ export interface SbxBuild {
   status: string;
   profile: string;
   readiness: string | null;
-  capacity: { running: number; inUse: number | null } | null;
+  capacity: { running: number | null; inUse: number | null } | null;
   lastUsedAt: number | null;
   /**
    * The hosts whose last inventory holds its snapshot (template lifecycle spec §6.1); null without

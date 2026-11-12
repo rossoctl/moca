@@ -419,10 +419,15 @@ components:
           type: [object, 'null']
           description: |
             for an active build; and for a retired one whose worker still holds a presence record
-            (its host has not stopped it yet); null otherwise
+            (its host has not stopped it yet), or whose presence cannot be read (`running` null);
+            null otherwise, so for a retired build null means its worker is known to be stopped
           required: [running, inUse]
           properties:
-            running: { type: integer, description: the sandboxes its worker advertises at once }
+            running:
+              type: [integer, 'null']
+              description: |
+                the sandboxes its worker advertises at once; null for a retired build whose
+                presence cannot be read
             inUse:
               type: [integer, 'null']
               description: |

@@ -330,11 +330,14 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     profile: b.profile,
     readiness,
     // For an active build; and for a retired one whose worker still holds a presence record (it
-    // runs until its host stops it), so a client sees the stop.
+    // runs until its host stops it), so a client sees the stop. For a retired build whose
+    // presence cannot be read, `running: null`: not known to be stopped, so null capacity means
+    // only "read, and not attached".
     capacity:
-      readiness === 'active' || (b.status === 'retired' && f.attached?.has(b.worker))
+      readiness === 'active' ||
+      (b.status === 'retired' && (f.attached === null || f.attached.has(b.worker)))
         ? {
-            running: f.attached?.get(b.worker) ?? 0,
+            running: f.attached === null ? null : (f.attached.get(b.worker) ?? 0),
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
           }
         : null,

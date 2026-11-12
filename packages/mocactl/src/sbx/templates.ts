@@ -32,7 +32,9 @@ const WAITING: Record<string, string> = {
 function readinessText(b: Pick<SbxBuild, 'readiness' | 'capacity'>): string {
   if (b.readiness === null) return '';
   const c = b.capacity;
-  const cap = c ? ` (running ${c.running}${c.inUse !== null ? `, in use ${c.inUse}` : ''})` : '';
+  const cap = c
+    ? ` (running ${c.running ?? '?'}${c.inUse !== null ? `, in use ${c.inUse}` : ''})`
+    : '';
   return `${sanitizeRemote(b.readiness)}${cap}`;
 }
 
@@ -239,7 +241,8 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
  * `templates retire ID [--build B] [--reason T] [--wait [--timeout S]]` (§5.1): retire the template
  * (every build of it) or build B, and print each build retired. With --wait, then read each build
  * until it is `retired` and its worker no longer runs (`capacity` null: the host stopped it, after
- * the wanted state's `stop`), saying so while it still runs. `heldBy` null, or absent from an older
+ * the wanted state's `stop`), saying so while it still runs; `running` null, presence unreadable,
+ * is waited out too, never taken as stopped. `heldBy` null, or absent from an older
  * control plane, means no host agents: nothing to wait for. A wait past --timeout (default
  * RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty)
  * comes with the host's removal step (#743).
@@ -286,7 +289,9 @@ export async function cmdRetire(
           const why =
             b.status !== 'retired'
               ? sanitizeRemote(b.status)
-              : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
+              : b.capacity?.running === null
+                ? "retired, its worker's state cannot be read; still waiting"
+                : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
           if (why !== said)
             c.io.err(`${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: ${why}`);
           said = why;

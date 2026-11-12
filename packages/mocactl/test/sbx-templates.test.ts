@@ -506,6 +506,22 @@ describe('sbx templates retire (§5.1)', () => {
     expect(errs).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
   });
 
+  it("--wait: keeps waiting while its worker's state cannot be read (running null)", async () => {
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({
+        status: 200,
+        body: retiredRead(++reads < 3 ? { running: null, inUse: null } : null),
+      }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs.match(/its worker's state cannot be read; still waiting/g)).toHaveLength(1);
+    expect(errs).toContain('retired, its worker stopped');
+  });
+
   it('--wait: done at once without host agents (heldBy null)', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
