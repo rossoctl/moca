@@ -378,6 +378,10 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
 - **Live sandboxes:** a worker is never stopped under a live sandbox: an attached build with no
   lease is `deactivating` and drains (no new lease needed for the sandboxes it runs); it is stopped
   once none is left.
+- **Two passes, one lock:** the agent applies the wanted state after each build poll and, apart
+  from builds, every 15 s (`host-agent.sh --wanted-only`, `sbx-host-agent-wanted.timer`), so an
+  activation waits seconds, not behind a build. A lock on the host keeps the two from starting or
+  stopping workers at once; the one without it skips.
 
 ### 6.4 Activation on first use
 

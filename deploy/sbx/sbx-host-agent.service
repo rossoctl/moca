@@ -2,9 +2,10 @@
 # template lifecycle spec §6.1), started by sbx-host-agent.timer. host-agent.env holds SBX_API_URL,
 # SBX_HOST_ID, SBX_KERNEL and, optionally, SBX_API_CA_FILE, SBX_REGISTRY and the limits; the token is
 # only in host-agent.token, which the script reads itself. Installed by hand, with the timer and
-# host-agent.sh (the RUNBOOK's host agent section).
+# host-agent.sh (the RUNBOOK's host agent section). After its builds, a poll also applies the wanted
+# state; sbx-host-agent-wanted.service does that alone, every 15 s.
 [Unit]
-Description=SBX0 template host agent: build queued templates, report them
+Description=SBX0 template host agent: build queued templates, report them, apply the wanted state
 After=network-online.target
 Wants=network-online.target
 
