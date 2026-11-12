@@ -1,10 +1,11 @@
 # Template lifecycle, readiness and provenance — Design
 
-Version: 0.1 (draft for review) — November 2026
-Status: Proposed. This file holds §1-§4, the template store and its read API (#736), and §7,
-provenance (#730); §5, §6 and §8-§12 (the owner's and the admin's actions, builds and activation on a
-host, policy, tracing, validation, order of work, decisions) come with the issues that build them, and
-keep their numbers so a reference to a section stays valid.
+Version: 0.2 (draft for review) — November 2026
+Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
+self-serve create (#737), §7, provenance (#730), and §8, policy (#737); §5, §6 and §9-§12 (the
+owner's and the admin's actions, builds and activation on a host, tracing, validation, order of
+work, decisions) come with the issues that build them, and keep their numbers so a reference to a
+section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -68,7 +69,7 @@ store directory.
 E2B's templates were reviewed (docs.e2b.dev, "Template tags & versioning", "Template names", the
 templates API); adopted:
 
-- **Self-serve** (planned, §4): any enrolled client creates a template and its builds through the
+- **Self-serve** (§4, #737): any enrolled client creates a template and its builds through the
   API, as any E2B key holder does. Moca adds what E2B does not have: policy gating before
   registration (§8).
 - **A build is an immutable artifact with an id.** A build is one snapshot; its id is the snapshot's
@@ -77,9 +78,9 @@ templates API); adopted:
   template. A template imported from the env list has one registered build, `imported:<12 hex>`: the
   list names no snapshot, so there is no manifest hash, and the id is a digest of the worker id
   (stable per worker), never the worker id itself, which clients never see.
-- **A build is reused when its inputs are the same** (planned, with self-serve create): a create
-  whose image digest, spec, profile and gate record match an existing registered build returns that
-  build, not a second snapshot.
+- **A build is reused when its inputs are the same** (#737): a create whose image digest, spec,
+  profile and gate record match an existing build of the caller's template, registered or on its way
+  there, returns that build, not a second snapshot (§4).
 - **Tags are labels on builds, moved without rebuilding.** A template is referenced as `id[:tag]`,
   `default` when the tag is omitted; the template's owner moves tags between its registered builds
   (§5). Old builds stay addressable while their sandboxes drain. An imported template has the one
@@ -88,10 +89,13 @@ templates API); adopted:
   instead of a tag, and is then served by exactly that build or refused.
 - **The build is an API resource** with a status (§4), as E2B's build status is.
 - **Names:** Moca keeps its id rule, `^[a-z0-9][a-z0-9-]{0,30}$` (31 characters, the worker-id
-  limit); `GET /v1/templates/{id}` answering 404 is the existence check. A tag follows the same
-  rule. Ids are unique per deployment.
+  limit), lowercased on input and refused, never truncated, when longer; `GET /v1/templates/{id}`
+  answering 404 is the existence check. A tag follows the same rule. **Ids are unique per
+  deployment**: the first subject to create an id owns it; another's create of the same id is
+  `409 template_exists` (E2B scopes names to a project; a Moca deployment is one project).
 - **Visibility:** `private` (the owner and admins) or `deployment` (every enrolled client may use
-  it). An imported template is `deployment`.
+  it). An imported template is `deployment`, and so is a created one unless its create says
+  `private`, so per-instance benchmark templates are built once and shared.
 
 Not adopted, by design: a builder chain of layers in code (clients bring a finished image, built
 anywhere); capturing running processes (a clean guest per command); unlimited templates (a per-host
@@ -143,11 +147,55 @@ advertises, so the state cannot claim a worker that is not there.
 
 ## 4. The API: create, read, follow
 
-**Create (planned, self-serve):** `POST /v1/templates` with an image by digest, a spec (guest size,
-vcpus, workspace size, tools, seed, probe), an optional gate record, a policy profile and a
-visibility answers `202` with a provisional build handle to follow; `POST /v1/templates/{id}/builds`
-starts a new build of an existing template. A create that matches an existing build (§3.2) returns
-that build with `reused: true`.
+**Create (built, #737; any enrolled client):**
+
+```http
+POST /v1/templates
+{
+  "id": "django-django-11133",
+  "image": "<repository>@sha256:…",
+  "spec": { "guest_mb": 4096, "vcpus": 2, "workspace_mb": 2048, "egress": false,
+            "tools": ["bash", "git", "python3", "rg"], "seed": "…",
+            "probe": { "cmd": "…", "timeout_s": 900, "expect_rc": 0, "expect": ["…"] },
+            "probe_status": "vm", "source_record_digest": "sha256:…",
+            "skip_git_identity_check": true, "guest_home": "/tmp/home",
+            "description": "…" },
+  "gateRecord": "<the gate record file, byte for byte>",   // optional; required by benchmark (§8)
+  "profile": "benchmark",           // a policy profile the deployment offers (§8); default its default
+  "visibility": "deployment"
+}
+→ 202 { "templateId": "django-django-11133", "buildId": null,
+        "build": "/v1/templates/django-django-11133/builds/b-…", "status": "queued" }
+```
+
+The spec is a template spec (`moca-sbx-template-spec/1`; the samples in
+`deploy/sbx/template-onboarding/examples/` are a default sandbox image and a SWE-bench instance,
+spec and gate record), with `workspace_mb`, the size of the sandbox's `/workspace` image, within the
+profile's envelope. An `id` or `image` in the spec must equal the create's (M7, §8.1). The gate
+record is sent as the file's own bytes, since its sha256 is what the policy trusts; it is stored with
+the provenance records (§7.2) and checked (§8). `POST /v1/templates/{id}/builds` starts a new build
+of an existing template of the caller's (a new image or spec); same body, same answer. A build has a
+provisional handle (`b-<26 hex>`) until it is built; then its `buildId` is its manifest hash, and
+the handle still finds it.
+
+The create is checked against the deployment's policy before anything is queued (§8.1): a refusal
+is `422 policy_refused {rule, message}` and a `check` record, and nothing is queued. Over a quota
+(§6.2: templates owned, builds queued or building at once) is `429 quota_exceeded` naming which
+(`quota`). Another subject's id is `409 template_exists` (`404 template_not_found` when that
+template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
+record) and `check` records (§7.1) and queues the build for a build host (§6.1, a later issue).
+
+**Reuse.** A create that matches a build already registered answers
+`200 {buildId, status: "registered", reused: true}`; one that matches a build still on its way
+(queued to built) answers `202` with that build and `reused: true`, and queues nothing. The match is
+the image, the spec as sent, the profile and the gate record's sha256 on the caller's own template;
+the builder (Moca commit, kernel) is not compared (one deployment's hosts build with one builder),
+and a failed or rejected build is never reused. With host agents (§6.1), a registered build is to be
+reused only while a host reports holding its snapshot.
+
+**Cancel** (built, #737): `POST /v1/templates/{id}/builds/{build}/cancel`, by the owner or an
+admin, withdraws a `queued`, `building` or `probing` build: it becomes `failed` with
+`reason {message, step: "cancelled"}`, and a `build` record names who cancelled it.
 
 **Reads (built, #736; any enrolled client, `private` templates only to their owner and admins).**
 `GET /v1/templates` keeps its first fields (`id`, `description`, `tools`), so an older client reads
@@ -193,8 +241,8 @@ was served (`GET /v1/templates/{id}/builds/{buildId}`), never the newest build's
 | `GET /v1/templates/{id}/builds/{build}`      | one build: `status` (§3.3), `readiness`, `capacity`, `lastUsedAt`, `tags`, `spec` | #736    |
 | `GET /v1/templates/{id}/tags`                | each tag and the build it points to, with when it was assigned and by whom        | #736    |
 | `GET /v1/templates/{id}/builds/{build}/logs` | the build host's log entries, paged                                               | planned |
-| `GET /v1/quota`                              | the caller's quotas and use (§6.2)                                                | planned |
-| `GET /v1/policy`                             | the deployment's policy profiles and the policy's digest (§8)                     | planned |
+| `GET /v1/quota`                              | the caller's quotas and use (§6.2); on the sandbox profile, live sandboxes        | #737    |
+| `GET /v1/policy`                             | the deployment's policy profiles and the policy's digest (§8)                     | #737    |
 
 plus a `hosts` block in `GET /v1/templates`, one entry per host with its limits and use (§6.2),
 filled by the host agent (planned); empty means no host has reported, never that there is no limit.
@@ -303,3 +351,60 @@ time, not by digest; a verifier older than a kind refuses a store holding one.
   before a redaction no longer verifies against the new head, by design.
 - **The workload plane only reports**: a host posts build results and readiness events. The control
   plane checks and records; it never trusts a report it cannot tie to its chain.
+
+## 8. Policy: gating without an approver
+
+Self-serve replaces an admin's approval with **policy**: the gating rules
+([GATING-RULES](../../deploy/sbx/template-onboarding/governance/GATING-RULES.md)) as machine checks,
+applied by the control plane and the build host, each result recorded (`check`, §7). A deployment
+offers named **profiles**; an admin writes them (`PUT /v1/policy`, each change a `policy` record
+naming who), and each create names one, or gets the policy's default.
+
+The policy (`moca-template-policy/1`, `packages/control-plane/src/template-policy.ts`) is kept beside
+the template store (`<SH_PROVENANCE_DIR>/policy.json`, `template-policy-store.ts`) and holds the
+profiles, the allowed registries, the trusted gate records (by sha256) and the per-subject quotas
+(`templates`, `buildsQueued`, `active`). Until an admin sets one, the default policy applies, and it
+is recorded on first use, so every `check` cites a `policy` record that exists. `GET /v1/policy`
+shows it, its digest and its record.
+
+| Profile     | For                                                   | Requires, beyond the `base` rules                                                                                                                                                                                 |
+| ----------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base`      | any client's own image (a toolchain, a project's env) | Moca's rules M1, M7-M9 at create (M2-M4, M10-M17 on the build host); the image from an allowed registry; the size envelope                                                                                        |
+| `benchmark` | SWE-bench and the like                                | a gate record that passed (X1), from a **trusted source** (§8.3), whose `source_record_digest` equals the image digest (X10); X11 (no network), X12 (commits refused), X14 (a measured probe), X15 (the envelope) |
+
+### 8.1 At create (in the control plane, before any build)
+
+The profile exists; M7 (the id rule and every spec field, including a spec `id` or `image` that
+differs from the create's: `M7.spec_id`, `M7.spec_image`), M8, M9; the image pinned by digest (M1)
+**from an allowed registry** (`allowedRegistries`; a reference with no host is the build host's
+default registry, `<default>`); the profile's size envelope; for `benchmark`, X1, X10-X12, X14 and
+X15 from the spec and the gate record; X10 and X12 whenever the spec names a gate record or skips
+the git identity check, whatever the profile; and the caller's quota (§6.2). A refusal is
+`422 policy_refused {rule, message}` and a `check` record listing every rule and its result; nothing
+is queued. The control plane refuses early, so a refused create costs no host time; the build host
+still applies its own checks, since a host is never trusted to have been asked only valid builds.
+
+### 8.2 At build and registration
+
+On the build host, the build tool applies its checks (M1-M4, M10-M13, M15, and X10, X12 with the
+gate record). When the host agent (§6.1, a later issue) reports a build `built`, the control plane
+re-checks the build record against the create's spec and the policy, and registers the build or
+rejects it with the failing rule, with a `check` record either way. A build is registered only with
+a passed `check` against the policy named at create.
+
+### 8.3 Trusted gate-record sources
+
+Without signatures, a gate record proves nothing by itself: a client could write one. The `benchmark`
+profile therefore trusts a gate record only from a **source the policy names**: for an image builder,
+the place it records its gated images, from which the control plane (or the offline verifier) fetches
+the record and compares its sha256 with the one the client sent. For the first version the fetch is
+replaced by an admin-loaded copy of the source's records: the policy's `trustedGateRecords`, by
+sha256 (X1.trusted). Fetching is not built. A record that is not trusted is refused for `benchmark`;
+on `base` it may still be sent, and is stored and recorded with source `client`.
+
+### 8.4 The instance-id mapping
+
+So two clients onboarding the same benchmark instance name it alike (and §3.2's reuse or
+`409 template_exists` applies), the `benchmark` profile is to name its **id rule**: for SWE-bench, the
+instance id lower-cased, `__` and `_` to `-`, refused, never truncated, past 31 characters. Not
+enforced yet: the create checks the id's form only.
