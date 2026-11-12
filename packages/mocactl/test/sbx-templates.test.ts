@@ -1,8 +1,15 @@
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ApiError, errorFromResponse } from '../src/api/errors.js';
 import { sbxMain } from '../src/sbx/cli.js';
+import { refusalText } from '../src/sbx/commands.js';
+import { dryRun } from '../src/sbx/dry-run.js';
 import {
   cleanupTmp,
   fakeCp,
+  policyView,
   sandbox,
   SBX,
   setup,
@@ -11,8 +18,9 @@ import {
   type Handler,
 } from './helpers/sbx.js';
 
-// The template reads from mocactl (template lifecycle spec §4): `sbx templates` with readiness and
-// tags, `templates show`, and `create --template ID[@BUILD] --seed`. example.com hosts only.
+// The template commands of mocactl (template lifecycle spec §4, §8): `sbx templates` with readiness
+// and tags, `templates show`, `create --template ID[@BUILD] --seed`, and the authoring commands
+// (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`). example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -43,17 +51,39 @@ const template = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/** A fake clock the waits run on: sleep advances it. */
+function clock() {
+  let t = 1_800_000_000_000;
+  const slept: number[] = [];
+  return {
+    now: () => t,
+    sleep: async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    },
+    slept,
+  };
+}
+
 function world(routes: Record<string, Handler>) {
   const s = setup();
   const cp = fakeCp(routes);
+  const c = clock();
   const run = (argv: string[], over: Record<string, unknown> = {}) => {
     s.io.outs.length = 0;
     s.io.errs.length = 0;
-    return sbxMain(argv, s.env, s.io, { home: s.home, fetchImpl: cp.fetchImpl, ...over });
+    return sbxMain(argv, s.env, s.io, {
+      home: s.home,
+      fetchImpl: cp.fetchImpl,
+      sleep: c.sleep,
+      now: c.now,
+      ...over,
+    });
   };
   return {
     ...s,
     cp,
+    clock: c,
     run,
     out: () => s.io.outs.join(''),
     err: () => s.io.errs.join('\n'),
@@ -242,5 +272,650 @@ describe('create --template id@build, --seed', () => {
     expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(0);
     expect(s.w.err()).toContain('the template has no seed');
     expect(s.ws.get(SBX).sent).toEqual([]);
+  });
+});
+
+// The authoring commands: create, build, follow, cancel, quota, policy, and --dry-run.
+const DIGEST = `sha256:${'a'.repeat(64)}`;
+const IMAGE = `team/moca-microvm@${DIGEST}`;
+const SPEC = {
+  schema: 'moca-sbx-template-spec/1',
+  id: 'my-python',
+  image: IMAGE,
+  guest_ram_mb: 4096,
+  vcpus: 2,
+  egress: false,
+  seed: '',
+  tools: ['bash', 'git', 'python3'],
+  probe: { cmd: 'python3 -V', timeout_s: 60, expect_rc: 0, expect: ['^Python 3'] },
+  description: 'Python 3.12',
+};
+const HANDLE = 'b-0123456789abcdef0123456789';
+const BUILD_PATH = `/v1/templates/my-python/builds/${HANDLE}`;
+const QUEUED = { templateId: 'my-python', buildId: null, build: BUILD_PATH, status: 'queued' };
+const handled = (over: Record<string, unknown> = {}) =>
+  build({ handle: HANDLE, reason: null, ...over });
+
+/** Files in a temp directory: a spec, a gate record, anything a create reads. */
+function files(o: Record<string, unknown>): Record<string, string> & { dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'sbx-tpl-'));
+  const out: Record<string, string> = {};
+  for (const [name, v] of Object.entries(o)) {
+    out[name] = join(dir, name);
+    writeFileSync(out[name], typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+  }
+  return { dir, ...out };
+}
+
+describe('errors keep the rule and the quota', () => {
+  it('reads rule and quota from the body, and prints them', async () => {
+    const res = (status: number, body: object) => new Response(JSON.stringify(body), { status });
+    const p = await errorFromResponse(
+      'control-plane',
+      res(422, {
+        error: 'policy_refused',
+        message: "spec.id must be the create's id",
+        rule: 'M7.spec_id',
+      }),
+    );
+    expect(p).toMatchObject({ code: 'policy_refused', rule: 'M7.spec_id' });
+    expect(refusalText(p)).toBe(
+      "refused by policy rule M7.spec_id: spec.id must be the create's id",
+    );
+    const q = await errorFromResponse(
+      'control-plane',
+      res(429, {
+        error: 'quota_exceeded',
+        message: 'at most 10 builds queued per subject',
+        quota: 'buildsQueued',
+      }),
+    );
+    expect(refusalText(q)).toBe(
+      'over your buildsQueued quota: at most 10 builds queued per subject',
+    );
+    const n = await errorFromResponse(
+      'control-plane',
+      res(404, { error: 'template_not_found', message: 'no such template', rule: 7 }),
+    );
+    expect(n.rule).toBeUndefined();
+    expect(refusalText(n)).toBe('no such template');
+    expect(new ApiError('control-plane', 0, 'network_error', 'x', 5).rule).toBeUndefined();
+  });
+
+  it('prints a policy refusal with its rule, exit 1', async () => {
+    const f = files({ 'spec.json': SPEC });
+    const w = world({
+      'POST /v1/templates': () => ({
+        status: 422,
+        body: { error: 'policy_refused', message: 'needs a gate record (X10)', rule: 'X10' },
+      }),
+    });
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!])).toBe(1);
+    expect(w.err()).toContain('sbx: refused by policy rule X10: needs a gate record (X10)');
+  });
+});
+
+describe('sbx quota, policy', () => {
+  it('quota: limit and use, and --json', async () => {
+    const q = {
+      subject: 'github:1',
+      templates: { limit: 100, used: 3 },
+      buildsQueued: { limit: 10, used: 1 },
+      active: { limit: 8, used: 0 },
+      sandboxes: { limit: 3, used: 1 },
+    };
+    const w = world({ 'GET /v1/quota': () => ({ status: 200, body: q }) });
+    expect(await w.run(['quota'])).toBe(0);
+    expect(w.out()).toBe(
+      'github:1\n' +
+        'templates      3 of 100\n' +
+        'buildsQueued   1 of 10\n' +
+        'active         0 of 8\n' +
+        'sandboxes      1 of 3\n',
+    );
+    expect(await w.run(['quota', '--json'])).toBe(0);
+    expect(JSON.parse(w.out())).toEqual(q);
+  });
+
+  it('policy: each profile, the registries, the quotas and the digest', async () => {
+    const w = world({ 'GET /v1/policy': () => ({ status: 200, body: policyView() }) });
+    expect(await w.run(['policy'])).toBe(0);
+    expect(w.out()).toMatch(
+      /^base +\(default\) guest <= 16384 MiB, vcpus <= 8, workspace <= 16384 MiB; egress allowed; requires nothing$/m,
+    );
+    expect(w.out()).toMatch(
+      /^benchmark +guest <= 4096 MiB.*\(exactly 4096 MiB, 2 vCPUs\); no egress; requires X1 X10 X11 X12 X14 X15$/m,
+    );
+    expect(w.out()).toContain('registries <default>\n');
+    expect(w.out()).toContain(
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8\n',
+    );
+    expect(w.out()).toContain(`policy sha256:${'d'.repeat(64)} (record sha256:${'e'.repeat(64)})`);
+    expect(await w.run(['policy', '--json'])).toBe(0);
+    expect(JSON.parse(w.out()).digest).toBe(`sha256:${'d'.repeat(64)}`);
+  });
+});
+
+describe('templates create, build, follow, cancel', () => {
+  it('posts the spec with its own id and image, and the gate record byte for byte', async () => {
+    const gate = '{ "schema": "example-builder/moca-microvm/1",\n  "gate": {"passed": true} }\n';
+    const f = files({ 'spec.json': SPEC, 'gate.json': gate });
+    const w = world({ 'POST /v1/templates': () => ({ status: 202, body: QUEUED }) });
+    expect(
+      await w.run([
+        'templates',
+        'create',
+        '--spec',
+        f['spec.json']!,
+        '--profile',
+        'benchmark',
+        '--visibility',
+        'private',
+        '--gate-record',
+        f['gate.json']!,
+      ]),
+    ).toBe(0);
+    expect(w.cp.calls.at(-1)).toMatchObject({
+      method: 'POST',
+      path: '/v1/templates',
+      body: {
+        id: 'my-python',
+        image: IMAGE,
+        spec: SPEC,
+        profile: 'benchmark',
+        visibility: 'private',
+        gateRecord: gate,
+      },
+    });
+    expect(w.out()).toBe(`my-python ${HANDLE} queued\n`);
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!, '--json'])).toBe(0);
+    expect(JSON.parse(w.out())).toEqual(QUEUED);
+  });
+
+  it('says when the create was answered with a build of the same inputs', async () => {
+    const f = files({ 'spec.json': SPEC });
+    const w = world({
+      'POST /v1/templates': () => ({
+        status: 200,
+        body: {
+          templateId: 'my-python',
+          buildId: BUILD_ID,
+          build: `/v1/templates/my-python/builds/${BUILD_ID}`,
+          status: 'registered',
+          reused: true,
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!])).toBe(0);
+    expect(w.out()).toBe(
+      `my-python ${BUILD_ID} registered (reused: the same inputs as this build)\n`,
+    );
+  });
+
+  it("reads a gate record's template block as the spec, and refuses an id or image that differs (M7)", async () => {
+    const f = files({ 'rec.json': { schema: 'example-builder/moca-microvm/1', template: SPEC } });
+    const w = world({ 'POST /v1/templates': () => ({ status: 202, body: QUEUED }) });
+    expect(await w.run(['templates', 'create', '--spec', f['rec.json']!])).toBe(0);
+    expect((w.cp.calls.at(-1)!.body as { spec: unknown }).spec).toEqual(SPEC);
+    const n = w.cp.calls.length;
+    expect(await w.run(['templates', 'create', '--spec', f['rec.json']!, '--id', 'other'])).toBe(1);
+    expect(w.err()).toContain('refused by policy rule M7.spec_id');
+    expect(
+      await w.run([
+        'templates',
+        'create',
+        '--spec',
+        f['rec.json']!,
+        '--image',
+        `team/x@sha256:${'f'.repeat(64)}`,
+      ]),
+    ).toBe(1);
+    expect(w.err()).toContain('M7.spec_image');
+    expect(w.cp.calls.length).toBe(n);
+  });
+
+  it('refuses bad usage locally, before any request', async () => {
+    const { id: _id, image: _image, ...anon } = SPEC;
+    const f = files({
+      'spec.json': SPEC,
+      'a.json': SPEC,
+      'bad.json': 'not json',
+      'anon.json': anon,
+    });
+    const w = world({});
+    const usage = async (argv: string[], msg: RegExp) => {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+      expect(w.err()).toMatch(msg);
+    };
+    await usage(['templates', 'create'], /templates create needs --spec F/);
+    await usage(['templates', 'create', '--spec', f['bad.json']!], /cannot read --spec/);
+    await usage(['templates', 'create', '--spec', join(f.dir, 'none.json')], /cannot read --spec/);
+    await usage(['templates', 'create', '--spec', f['anon.json']!], /names no id: pass --id ID/);
+    await usage(
+      ['templates', 'create', '--spec', f['anon.json']!, '--id', 'my-python'],
+      /names no image: pass --image REF/,
+    );
+    await usage(
+      ['templates', 'create', '--spec', f['spec.json']!, '--gate-record', join(f.dir, 'no.json')],
+      /cannot read --gate-record/,
+    );
+    await usage(
+      ['templates', 'create', '--spec', f['spec.json']!, '--spec', f['a.json']!, '--id', 'x'],
+      /--id and --image name one template/,
+    );
+    await usage(['templates', 'create', 'my-python', '--spec', f['spec.json']!], /takes no ID/);
+    await usage(
+      ['templates', 'build', 'my-python', '--spec', f['spec.json']!, '--id', 'x'],
+      /--id only applies to templates create/,
+    );
+    await usage(
+      ['templates', 'build', 'my-python', '--spec', f['spec.json']!, '--spec', f['a.json']!],
+      /templates build takes one --spec/,
+    );
+    await usage(
+      ['templates', 'build', 'my-python', '--spec', f['spec.json']!, '--visibility', 'private'],
+      /--visibility only applies to templates create/,
+    );
+    await usage(['templates', 'build', '--spec', f['spec.json']!], /takes one template ID/);
+    await usage(
+      ['templates', 'show', 'my-python', '--spec', f['spec.json']!],
+      /--spec only applies to templates create and build/,
+    );
+    await usage(['templates', 'show', 'my-python', '--dry-run'], /--dry-run only applies/);
+    await usage(['templates', 'cancel', 'my-python'], /templates cancel needs --build BUILD/);
+    await usage(
+      ['templates', 'create', '--spec', f['spec.json']!, '--build', HANDLE],
+      /--build only applies to templates show, follow, cancel/,
+    );
+    await usage(
+      ['templates', 'follow', 'my-python', '--timeout', '0'],
+      /--timeout must be a whole number/,
+    );
+    await usage(
+      ['templates', 'show', 'my-python', '--timeout', '9'],
+      /--timeout only applies to run and templates follow, create, build/,
+    );
+    await usage(['ls', '--timeout', '9'], /--timeout only applies to run and templates/);
+    await usage(['templates', 'follow'], /templates follow takes one template ID/);
+    await usage(['quota', 'x'], /too many arguments for quota/);
+    expect(w.cp.calls).toEqual([]);
+  });
+
+  it('build ID: posts to /builds, with ID as the template', async () => {
+    const { id: _id, ...spec } = SPEC;
+    const f = files({ 'spec.json': spec });
+    const w = world({
+      'POST /v1/templates/my-python/builds': () => ({ status: 202, body: QUEUED }),
+    });
+    expect(await w.run(['templates', 'build', 'my-python', '--spec', f['spec.json']!])).toBe(0);
+    expect(w.cp.calls.at(-1)).toMatchObject({
+      method: 'POST',
+      path: '/v1/templates/my-python/builds',
+      body: { id: 'my-python', image: IMAGE },
+    });
+    expect(w.out()).toBe(`my-python ${HANDLE} queued\n`);
+  });
+
+  it('409 template_exists: follows your own newest build and posts nothing more', async () => {
+    const f = files({ 'spec.json': SPEC });
+    const w = world({
+      'POST /v1/templates': () => ({
+        status: 409,
+        body: { error: 'template_exists', message: "template 'my-python' exists" },
+      }),
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({ builds: [handled({ status: 'building', readiness: null })] }),
+      }),
+    });
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!, '--json'])).toBe(0);
+    expect(w.cp.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(JSON.parse(w.out())).toMatchObject({
+      build: BUILD_PATH,
+      status: 'building',
+      reused: true,
+    });
+    expect(w.err()).toContain(`my-python is already yours: following its newest build, ${HANDLE}`);
+  });
+
+  it("409 template_exists: names another's owner, and a declared one", async () => {
+    const f = files({ 'spec.json': SPEC });
+    let owner: string | null = 'github:1001';
+    const w = world({
+      'POST /v1/templates': () => ({ status: 409, body: { error: 'template_exists' } }),
+      'GET /v1/templates/my-python': () => ({ status: 200, body: template({ owner }) }),
+    });
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!])).toBe(1);
+    expect(w.err()).toContain('my-python belongs to github:1001: pick another id');
+    owner = null;
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!])).toBe(1);
+    expect(w.err()).toContain('my-python is a template the deployment declared: pick another id');
+  });
+
+  it('many creates: one refused does not stop the next; a lost control plane does', async () => {
+    const f = files({ 'a.json': SPEC, 'b.json': { ...SPEC, id: 'my-python-2' } });
+    let down = false;
+    const w = world({
+      'POST /v1/templates': (req) =>
+        (req.body as { id: string }).id === 'my-python'
+          ? down
+            ? new TypeError('fetch failed')
+            : {
+                status: 422,
+                body: {
+                  error: 'policy_refused',
+                  message: 'outside the envelope',
+                  rule: 'envelope',
+                },
+              }
+          : { status: 202, body: { ...QUEUED, templateId: 'my-python-2' } },
+    });
+    expect(
+      await w.run(['templates', 'create', '--spec', f['a.json']!, '--spec', f['b.json']!]),
+    ).toBe(1);
+    expect(w.err()).toContain('refused by policy rule envelope');
+    expect(w.out()).toBe(`my-python-2 ${HANDLE} queued\n`);
+    down = true;
+    const before = w.cp.calls.length;
+    expect(
+      await w.run(['templates', 'create', '--spec', f['a.json']!, '--spec', f['b.json']!]),
+    ).toBe(4);
+    expect(w.cp.calls.slice(before).map((c) => (c.body as { id: string }).id)).not.toContain(
+      'my-python-2',
+    );
+  });
+
+  it('many creates: waits for a queue slot at 429 buildsQueued, then times out with exit 5', async () => {
+    const f = files({ 'a.json': SPEC, 'b.json': { ...SPEC, id: 'my-python-2' } });
+    let full = 2;
+    const w = world({
+      'POST /v1/templates': (req) =>
+        (req.body as { id: string }).id === 'my-python-2' && full-- > 0
+          ? {
+              status: 429,
+              body: { error: 'quota_exceeded', message: 'at most 1', quota: 'buildsQueued' },
+              headers: { 'retry-after': '20' },
+            }
+          : { status: 202, body: { ...QUEUED, templateId: (req.body as { id: string }).id } },
+    });
+    expect(
+      await w.run(['templates', 'create', '--spec', f['a.json']!, '--spec', f['b.json']!]),
+    ).toBe(0);
+    expect(w.out()).toBe(`my-python ${HANDLE} queued\nmy-python-2 ${HANDLE} queued\n`);
+    expect(w.err()).toContain('1 waiting for a queue slot');
+    expect(w.clock.slept).toEqual([20_000, 20_000]);
+    full = 1000;
+    expect(await w.run(['templates', 'create', '--spec', f['b.json']!, '--timeout', '60'])).toBe(5);
+    expect(w.err()).toMatch(
+      /timed out after 60 s waiting for a queue slot for my-python-2 \(exit 5\)/,
+    );
+  });
+
+  it('a templates quota refusal is not waited out: it fails at once', async () => {
+    const f = files({ 'spec.json': SPEC });
+    const w = world({
+      'POST /v1/templates': () => ({
+        status: 429,
+        body: { error: 'quota_exceeded', message: 'at most 100 templates', quota: 'templates' },
+      }),
+    });
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!])).toBe(1);
+    expect(w.err()).toContain('over your templates quota: at most 100 templates');
+    expect(w.clock.slept).toEqual([]);
+  });
+
+  it('show: a build with its handle, and why it failed', async () => {
+    const w = world({
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({
+          builds: [
+            handled({
+              buildId: HANDLE,
+              status: 'rejected',
+              readiness: null,
+              tags: [],
+              reason: { message: 'the gate record is not trusted', rule: 'X1.trusted' },
+            }),
+            handled({ handle: 'b-1', buildId: BUILD_ID }),
+          ],
+        }),
+      }),
+    });
+    expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    expect(w.out()).toContain(
+      `  ${HANDLE}  rejected  rule X1.trusted: the gate record is not trusted\n`,
+    );
+    expect(w.out()).toContain(`  b-1 ${BUILD_ID}  registered  inactive  tags default\n`);
+  });
+
+  it('follow: through each status and a 5xx to registered (exit 0); a cancel is 1, with its reason', async () => {
+    const seq = [
+      { status: 503, body: { error: 'redis_unavailable' } },
+      { status: 200, body: handled({ buildId: HANDLE, status: 'queued', readiness: null }) },
+      { status: 200, body: handled({ buildId: HANDLE, status: 'building', readiness: null }) },
+      { status: 200, body: handled({ status: 'registered' }) },
+    ];
+    let i = 0;
+    const w = world({
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({ builds: [handled({ buildId: HANDLE, status: 'queued' })] }),
+      }),
+      [`GET ${BUILD_PATH}`]: () => seq[Math.min(i++, seq.length - 1)]!,
+    });
+    expect(await w.run(['templates', 'follow', 'my-python'])).toBe(0);
+    expect(w.err()).toContain(`my-python ${HANDLE}: queued`);
+    expect(w.err()).toContain(`my-python ${HANDLE}: building`);
+    expect(w.err()).toMatch(/polling again/);
+    expect(w.out()).toBe(`my-python ${HANDLE} ${BUILD_ID}  registered  inactive  tags default\n`);
+    seq.splice(0, seq.length, {
+      status: 200,
+      body: handled({
+        buildId: HANDLE,
+        status: 'failed',
+        readiness: null,
+        tags: [],
+        reason: { message: 'cancelled by github:1', step: 'cancelled' },
+      }),
+    });
+    i = 0;
+    expect(await w.run(['templates', 'follow', 'my-python', '--build', HANDLE, '--json'])).toBe(1);
+    expect(JSON.parse(w.out())).toMatchObject({ status: 'failed' });
+    expect(w.err()).toContain(`${HANDLE} was cancelled: step cancelled: cancelled by github:1`);
+  });
+
+  it('follow: a 404 is a refusal, at once; past --timeout is exit 5; no build is exit 1', async () => {
+    let missing = true;
+    const w = world({
+      [`GET ${BUILD_PATH}`]: () =>
+        missing
+          ? { status: 404, body: { error: 'template_not_found', message: 'no such build' } }
+          : { status: 200, body: handled({ buildId: HANDLE, status: 'probing', readiness: null }) },
+      'GET /v1/templates/empty': () => ({
+        status: 200,
+        body: template({ id: 'empty', builds: [], tags: {} }),
+      }),
+    });
+    expect(await w.run(['templates', 'follow', 'my-python', '--build', HANDLE])).toBe(1);
+    expect(w.err()).toContain('no such build');
+    missing = false;
+    expect(
+      await w.run(['templates', 'follow', 'my-python', '--build', HANDLE, '--timeout', '12']),
+    ).toBe(5);
+    expect(w.clock.slept).toEqual([5000, 5000, 2000]);
+    expect(w.err()).toContain('timed out after 12 s');
+    expect(await w.run(['templates', 'follow', 'empty'])).toBe(1);
+    expect(w.err()).toContain('empty has no build to follow');
+  });
+
+  it('cancel: posts the cancel, and reports a build past cancelling', async () => {
+    let ok = true;
+    const w = world({
+      [`POST ${BUILD_PATH}/cancel`]: () =>
+        ok
+          ? { status: 200, body: { templateId: 'my-python', build: HANDLE, status: 'failed' } }
+          : {
+              status: 400,
+              body: { error: 'invalid_request', message: 'the build is registered' },
+            },
+    });
+    expect(await w.run(['templates', 'cancel', 'my-python', '--build', HANDLE])).toBe(0);
+    expect(w.out()).toBe(`cancelled my-python ${HANDLE}\n`);
+    ok = false;
+    expect(await w.run(['templates', 'cancel', 'my-python', '--build', HANDLE])).toBe(1);
+    expect(w.err()).toContain('the build is registered');
+  });
+});
+
+describe('templates create --dry-run', () => {
+  const pol = policyView().policy;
+  const ok: { id: string; image: string; spec: Record<string, unknown> } = {
+    id: 'my-python',
+    image: IMAGE,
+    spec: SPEC,
+  };
+  const fails = (input: Partial<typeof ok> & { profile?: string; gateRecord?: string }) =>
+    dryRun({ ...ok, ...input }, pol).failed?.rule;
+
+  it('passes a good spec, under either name for the guest memory', () => {
+    expect(dryRun(ok, pol)).toMatchObject({ profile: 'base', notes: [] });
+    expect(dryRun(ok, pol).failed).toBeUndefined();
+    const { guest_ram_mb: _g, ...rest } = SPEC;
+    expect(fails({ spec: { ...rest, guest_mb: 4096 } })).toBeUndefined();
+  });
+
+  it.each([
+    ['M7.id', { id: 'My_Python' }],
+    ['M7.id', { id: 'x'.repeat(32) }],
+    ['M1', { image: 'team/moca-microvm:latest' }],
+    ['M1', { image: 'team/moca-microvm@sha256:<64 hex>' }],
+    ['M7.spec_id', { id: 'other' }],
+    ['M7.spec_image', { image: `team/other@sha256:${'f'.repeat(64)}` }],
+    ['profile', { profile: 'nope' }],
+  ] as const)('refuses %s', (rule, input) => {
+    expect(fails(input)).toBe(rule);
+  });
+
+  it.each([
+    ['M7.guest', { guest_ram_mb: 64 }],
+    ['M7.vcpus', { vcpus: 0 }],
+    ['M7.workspace', { workspace_mb: 100 }],
+    ['M7.home', { guest_home: '/home/x' }],
+    ['M7.egress', { egress: 'no' }],
+    ['M7.seed', { seed: 1 }],
+    ['M7.probe', { probe: { cmd: '', timeout_s: 60, expect_rc: 0 } }],
+    ['M7.tools', { tools: ['bash', 'bash'] }],
+    ['M7.description', { description: '' }],
+    ['M7.skip_git_identity_check', { skip_git_identity_check: 'yes' }],
+    ['M8', { guest_home_gitconfig: true }],
+    ['M9', { probe_status: 'unmeasured' }],
+    ['envelope', { guest_ram_mb: 32_768 }],
+    ['X10', { source_record_digest: `sha256:${'9'.repeat(64)}` }],
+  ] as const)('refuses a spec failing %s', (rule, change) => {
+    expect(fails({ spec: { ...SPEC, ...change } })).toBe(rule);
+  });
+
+  it("the benchmark profile needs a passed gate record for this image; the record's trust is the server's", () => {
+    const benchmark = { profile: 'benchmark' };
+    const bench = {
+      ...SPEC,
+      probe_status: 'vm',
+      source_record_digest: DIGEST,
+      skip_git_identity_check: true,
+    };
+    expect(fails({ ...benchmark, spec: bench })).toBe('X10.record');
+    const gate = (o: object) =>
+      JSON.stringify({
+        schema: 'example-builder/moca-microvm/1',
+        gate: { passed: true },
+        image: { digest: DIGEST },
+        observed: { testbed: { agent_can_commit: 'no' }, guest: { git_identity: 'none' } },
+        ...o,
+      });
+    // Not in the policy's trusted list (it is empty), yet passed: X1.trusted is the server's to check.
+    const r = dryRun({ ...ok, ...benchmark, spec: bench, gateRecord: gate({}) }, pol);
+    expect(r.failed).toBeUndefined();
+    expect(r.results.map((x) => x.rule)).not.toContain('X1.trusted');
+    expect(
+      fails({ ...benchmark, spec: bench, gateRecord: gate({ gate: { passed: false } }) }),
+    ).toBe('X1');
+    expect(fails({ ...benchmark, spec: bench, gateRecord: gate({ image: { digest: 'x' } }) })).toBe(
+      'X1.image',
+    );
+    expect(fails({ ...benchmark, spec: { ...bench, egress: true }, gateRecord: gate({}) })).toBe(
+      'X11',
+    );
+    expect(
+      fails({ ...benchmark, spec: { ...bench, probe_status: undefined }, gateRecord: gate({}) }),
+    ).toBe('X14');
+    expect(fails({ ...benchmark, spec: { ...bench, vcpus: 1 }, gateRecord: gate({}) })).toBe('X15');
+    expect(
+      fails({
+        ...benchmark,
+        spec: bench,
+        gateRecord: gate({ observed: { testbed: { agent_can_commit: 'yes' } } }),
+      }),
+    ).toBe('X12');
+    expect(fails({ ...benchmark, spec: bench, gateRecord: 'not json' })).toBe('gate.json');
+    // A record sent with a profile that requires none is admitted, and said to be untrusted.
+    const base = dryRun({ ...ok, gateRecord: gate({}) }, pol);
+    expect(base.failed).toBeUndefined();
+    expect(base.notes.join('\n')).toContain('the base profile requires no gate record (X1)');
+  });
+
+  it('passes the onboarding examples, each under the profile it is made for', () => {
+    const ex = (name: string) =>
+      readFileSync(
+        new URL(`../../../deploy/sbx/template-onboarding/examples/${name}`, import.meta.url),
+        'utf8',
+      );
+    const def = JSON.parse(ex('default.json')) as Record<string, unknown>;
+    expect(
+      dryRun({ id: def.id as string, image: def.image as string, spec: def }, pol).failed,
+    ).toBeUndefined();
+    const swe = JSON.parse(ex('django__django-11133.json')) as Record<string, unknown>;
+    const r = dryRun(
+      {
+        id: swe.id as string,
+        image: swe.image as string,
+        spec: swe,
+        profile: 'benchmark',
+        gateRecord: ex('django__django-11133.gate-record.json'),
+      },
+      pol,
+    );
+    expect(r.failed).toBeUndefined();
+  });
+
+  it('runs from the CLI: reads the policy, creates nothing, exit 1 with the rule', async () => {
+    const f = files({ 'good.json': SPEC, 'bad.json': { ...SPEC, id: 'other-id', vcpus: 64 } });
+    const w = world({ 'GET /v1/policy': () => ({ status: 200, body: policyView() }) });
+    expect(await w.run(['templates', 'create', '--spec', f['good.json']!, '--dry-run'])).toBe(0);
+    expect(w.out()).toBe('my-python: passes the local checks (base)\n');
+    expect(
+      await w.run([
+        'templates',
+        'create',
+        '--spec',
+        f['good.json']!,
+        '--spec',
+        f['bad.json']!,
+        '--dry-run',
+        '--json',
+      ]),
+    ).toBe(1);
+    const lines = w
+      .out()
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { failed?: { rule: string } });
+    expect(lines.map((l) => l.failed?.rule)).toEqual([undefined, 'M7.vcpus']);
+    expect(w.err()).toContain('other-id');
+    expect(w.err()).toContain('would be refused by policy rule M7.vcpus: spec.vcpus must be 1-32');
+    expect(
+      await w.run(['templates', 'build', 'my-python', '--spec', f['good.json']!, '--dry-run']),
+    ).toBe(0);
+    expect(w.cp.calls.every((c) => c.method === 'GET' && c.path === '/v1/policy')).toBe(true);
   });
 });
