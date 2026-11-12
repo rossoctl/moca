@@ -1,5 +1,6 @@
 import { CpError } from './errors.js';
 import { asRecord } from './handler-util.js';
+import type { ModelLimits } from './models.js';
 import { subjectHash } from './subject-document.js';
 
 /**
@@ -85,6 +86,33 @@ export interface TurnRecord {
   cfg: string;
   /** A NAME, resolved against the owner's credentials at dequeue -- never the credential (§5.1). */
   credentialName: string;
+  /**
+   * The session's model, copied at submission; '' when it names none, and the worker then uses its
+   * deployment default.
+   *
+   * COPIED rather than read from the live session at dequeue, which is what #388 changed. §5.1 copies
+   * onto the record what a turn must spend unchanged, and the model is one of those: a queued turn can
+   * wait an hour, so `PATCH /v1/sessions/{id}`'s own "a turn already running keeps its model" cannot
+   * cover it -- the turn has not started. Reading the session at dequeue therefore moved an
+   * already-queued turn onto a model its submitter never chose.
+   */
+  model: string;
+  /**
+   * The catalog's limits for `model`, snapshotted with it. Pinned TOGETHER with the id or they
+   * disagree: the limits describe that model, so a record keeping the old id against the session's
+   * new limits would send the wrong `max_tokens` upstream.
+   */
+  modelLimits?: ModelLimits;
+  /**
+   * The session's OWN tier choice, copied at submission; '' when it named none.
+   *
+   * RAW rather than resolved. `sessionTier` applies the deployment's current default to a session
+   * that chose no tier, and that default belongs to the deployment rather than to the submitter --
+   * pinning a resolved value here would keep naming a tier on a deployment that has since removed
+   * them, which `viewTier`'s own rule calls wrong. So the pin covers the session's choice and the
+   * dequeue still resolves it.
+   */
+  sandboxTier: string;
   caps: TurnCaps;
   /** Defaults to `sessionId` (§4.3). */
   idempotencyKey: string;

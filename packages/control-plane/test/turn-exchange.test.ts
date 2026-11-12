@@ -47,7 +47,11 @@ async function session(d: ExDeps, credential = 'my-anthropic'): Promise<string> 
   return (res.body as { sessionId: string }).sessionId;
 }
 
-/** A queued turn on `sid`, written through the store, copying owner/credential as submitTurn does. */
+/**
+ * A queued turn on `sid`, written through the store, copying owner/credential/model/tier as
+ * submitTurn does. The end-to-end proof that submitTurn copies them is the acceptance test at the
+ * bottom of this file, which goes through the real handler rather than this helper.
+ */
 async function queuedTurn(d: ExDeps, sid: string, over: Partial<TurnRecord> = {}): Promise<string> {
   const rec = (await d.index.get(sid))!;
   const turn: TurnRecord = {
@@ -57,6 +61,9 @@ async function queuedTurn(d: ExDeps, sid: string, over: Partial<TurnRecord> = {}
     sessionId: sid,
     cfg: rec.configRef ?? '',
     credentialName: rec.credentialName,
+    model: rec.model ?? '',
+    ...(rec.modelLimits ? { modelLimits: rec.modelLimits } : {}),
+    sandboxTier: rec.sandboxTier ?? '',
     caps: { tokens: 500, wallClock: 120 },
     idempotencyKey: sid,
     envelope: { item: { item_id: 'i1', file: 'f.ts', pattern: 'p' } },
@@ -374,5 +381,105 @@ describe('the envelope in the response', () => {
     expect(keys).not.toContain('credentialName');
     expect(keys).not.toContain('anthropicAuthToken');
     expect(JSON.stringify(res.envelope)).not.toContain(res.anthropicAuthToken);
+  });
+});
+
+/**
+ * #388: the turn runs on the model and tier its SUBMISSION chose. Through the real handlers
+ * end-to-end -- `submitTurn` rather than `queuedTurn` -- because what is being tested is the copy
+ * onto the record, which a helper that writes the fields itself would pass with the copy removed.
+ */
+describe('a queued turn is pinned to its submission (#388)', () => {
+  const INFO = {
+    data: [
+      {
+        model_name: 'claude-opus-4-8',
+        model_info: { max_input_tokens: 200000, max_output_tokens: 32000 },
+      },
+      {
+        model_name: 'cheap-model',
+        model_info: { max_input_tokens: 8000, max_output_tokens: 1000 },
+      },
+    ],
+  };
+  const gateway = (async (url: string) =>
+    url.endsWith('/model/info')
+      ? new Response(JSON.stringify(INFO), { status: 200 })
+      : new Response('', { status: 404 })) as unknown as typeof fetch;
+
+  /** Deps with a model catalog, and tiers declared so `sandboxTier` is not dropped. */
+  const modelDeps = () =>
+    exDeps({
+      fetchImpl: gateway,
+      config: {
+        modelCatalogHosts: ['litellm.internal'],
+        sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+      },
+    });
+
+  async function submittedTurn(d: ExDeps, sid: string): Promise<string> {
+    const res = await HANDLERS.submitTurn!(
+      ctx({
+        principal: alice,
+        params: { id: sid },
+        body: { async: true, item: { item_id: 'i1', file: 'f.ts', pattern: 'p' } },
+      }),
+      d,
+    );
+    return (res.body as { turnId: string }).turnId;
+  }
+
+  it('keeps the model it was submitted with after a PATCH switches the session', async () => {
+    const d = modelDeps();
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    await HANDLERS.createSession!(
+      ctx({
+        principal: alice,
+        body: { credentials: { inference: 'my-anthropic' }, model: 'claude-opus-4-8' },
+      }),
+      d,
+    );
+    const turnId = await submittedTurn(d, 'id-1');
+
+    // The switch a caller is free to make while the turn waits on the queue. `updateSession`'s own
+    // rule is that a turn already RUNNING keeps its model -- which cannot cover this turn, because
+    // it has not started: its exchange may be an hour from now.
+    await HANDLERS.updateSession!(
+      ctx({ principal: alice, params: { id: 'id-1' }, body: { model: 'cheap-model' } }),
+      d,
+    );
+    expect((await d.index.get('id-1'))?.model).toBe('cheap-model');
+
+    const res = await exchangeTurnCredential(turnId, d);
+    // The SUBMITTED model, with the SUBMITTED limits. Both, together: the limits describe the
+    // model, so `maxTokens: 1000` against `claude-opus-4-8` would send the wrong `max_tokens`
+    // upstream for every message of the turn.
+    expect(res.model).toEqual({
+      id: 'claude-opus-4-8',
+      contextWindow: 200000,
+      maxTokens: 32000,
+    });
+  });
+
+  it('keeps the tier it was submitted with, and still resolves the deployment default', async () => {
+    const d = modelDeps();
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    await HANDLERS.createSession!(
+      ctx({
+        principal: alice,
+        body: { credentials: { inference: 'my-anthropic' }, sandbox: { tier: 'microvm' } },
+      }),
+      d,
+    );
+    const pinned = await submittedTurn(d, 'id-1');
+    expect((await d.turns.get(pinned))?.sandboxTier).toBe('microvm');
+    expect((await exchangeTurnCredential(pinned, d)).sandboxTier).toBe('microvm');
+
+    // A record that pinned NO tier -- one written while the deployment declared none, or before
+    // this change -- still gets the deployment's default at dequeue. That is why the pin is the
+    // session's RAW choice: the default belongs to the deployment as it is now (`viewTier`'s rule),
+    // so a resolved pin would keep naming a tier on a deployment that has since removed them.
+    const untiered = await queuedTurn(d, 'id-1', { turnId: 't-untiered', sandboxTier: '' });
+    expect((await exchangeTurnCredential(untiered, d)).sandboxTier).toBe('container');
   });
 });

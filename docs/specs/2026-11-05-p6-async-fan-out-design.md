@@ -309,11 +309,23 @@ have it.
 | `sessionId`      | the session the turn belongs to                                       |
 | `cfg`            | bundle digest, as on the session                                      |
 | `credentialName` | a **name**, resolved server-side at dequeue — never the credential    |
+| `model`          | the session's model, copied at submission; `''` when it named none    |
+| `modelLimits`    | the catalog's limits for that model, snapshotted with it              |
+| `sandboxTier`    | the session's **own** tier choice, raw; resolved at dequeue           |
 | `caps`           | tokens, cost, wall-clock (§4.3)                                       |
 | `idempotencyKey` | defaults to `sessionId` (§4.3)                                        |
 | `envelope`       | the `LeafEnvelope` to run                                             |
 | `state`          | below                                                                 |
 | `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4) |
+
+> **`model`, `modelLimits` and `sandboxTier` added by #388's M2.** The first draft of this table
+> copied only `cfg` and `credentialName`, leaving the dequeue to read the model and the tier from the
+> live session. That was a defect, not a split: a `PATCH /v1/sessions/{id}` between submission and
+> dequeue moved an already-queued turn onto the new model, and the session API's own rule — a turn
+> already running keeps its model — cannot cover a turn that has not started, which an async turn may
+> not do for an hour. The tier is pinned **raw**: a turn that chose none still gets the deployment's
+> current default at dequeue, because the choice is the submitter's and the default is the
+> deployment's. `model` and `modelLimits` are pinned together, since the limits describe that model.
 
 ```
 queued → running → paused | responded | done | solved | failed | cancelled | lost

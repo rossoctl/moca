@@ -1,5 +1,6 @@
 import type { CpRedisLike } from './ownership.js';
 import { CpError } from './errors.js';
+import { sanitizeLimits } from './models.js';
 import {
   idempotencyKeyKey,
   isTerminalState,
@@ -140,6 +141,11 @@ export class TurnStore {
         sessionId: rec.sessionId,
         cfg: rec.cfg,
         credentialName: rec.credentialName,
+        // Always written, '' included, exactly as `cfg` is: a hash field present and empty is how
+        // "the session named no model" is stored, and `get` reads it back as that.
+        model: rec.model,
+        modelLimits: rec.modelLimits ? JSON.stringify(rec.modelLimits) : '',
+        sandboxTier: rec.sandboxTier,
         caps: JSON.stringify(rec.caps),
         idempotencyKey: rec.idempotencyKey,
         envelope: JSON.stringify(rec.envelope),
@@ -166,6 +172,10 @@ export class TurnStore {
     const state = (TURN_STATES as readonly string[]).includes(h.state ?? '')
       ? (h.state as TurnState)
       : 'queued';
+    // Re-sanitized on the way out, as OwnershipIndex.get does for the session's own copy: this field
+    // reaches the harness as a turn's `max_tokens`, and a hand-edited or half-written hash must not
+    // become one.
+    const limits = sanitizeLimits(parseJson(h.modelLimits));
     return {
       turnId,
       owner: h.owner,
@@ -173,6 +183,14 @@ export class TurnStore {
       sessionId: h.sessionId ?? '',
       cfg: h.cfg ?? '',
       credentialName: h.credentialName ?? '',
+      // shortcut: a record written before #388 carries neither field, so it reads as "the session
+      // named no model and no tier" and its leaf runs on the deployment defaults rather than on the
+      // session's choices. Only turns already on the queue during that one rollout are affected.
+      // Upgrade to a live-session fallback keyed on `h.model === undefined` if a deployment ever needs
+      // a queue to survive an upgrade unchanged.
+      model: h.model ?? '',
+      ...(limits ? { modelLimits: limits } : {}),
+      sandboxTier: h.sandboxTier ?? '',
       caps: parseJson<TurnCaps>(h.caps) ?? {},
       idempotencyKey: h.idempotencyKey ?? '',
       envelope: parseJson<Record<string, unknown>>(h.envelope) ?? {},

@@ -168,16 +168,19 @@ export async function exchangeTurnCredential(
     );
   }
 
-  // `sandboxTier` and `model` come from the LIVE session, while `credentialName` and `cfg` above come
-  // from the record. The split is deliberate, and it is where a turn record stops being authoritative:
-  // §5.1 copies onto the record only what a turn must spend unchanged, so the two it does not copy can
-  // only be read from the session as it is now. The consequence is real and worth knowing -- a
-  // `PATCH /v1/sessions/{id}` between submission and dequeue moves an already-queued turn onto the new
-  // model, which updateSession's own "a turn in flight keeps its model" does not cover because an async
-  // turn's exchange can be an hour after its submission. Pinning them means adding both to the record
-  // (M2/#388 -- the record is this issue's, so #389 cannot pin what it does not carry), not reading
-  // them from a different place here.
-  const tier = sessionTier(rec, deps.config.sandboxTiers);
+  // Everything below comes from the RECORD, which is now authoritative for all four of
+  // `credentialName`, `cfg`, `model` and `sandboxTier` (§5.1). `sandboxTier` and `model` used to be
+  // read from the live session, and that was a defect rather than a split: a
+  // `PATCH /v1/sessions/{id}` between submission and dequeue moved an already-queued turn onto the
+  // new model, which `updateSession`'s own "a turn already running keeps its model" cannot cover
+  // because the turn has not started -- an async turn's exchange can be an hour after its
+  // submission. The session is still read above, for the owner compare and the tombstone; nothing
+  // the turn SPENDS is taken from it.
+  //
+  // `sessionTier` applies the deployment's CURRENT default to a record that pinned no tier of its
+  // own, and that is the intended split: the choice is the submitter's and travels on the record,
+  // while the default belongs to the deployment as it is at dequeue (`viewTier`'s rule).
+  const tier = sessionTier(turn, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,
     mode,
@@ -193,6 +196,6 @@ export async function exchangeTurnCredential(
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(turn.cfg ? { configRef: turn.cfg } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
-    ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
+    ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
   };
 }
