@@ -304,15 +304,28 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   `templates` quota.
 - **From mocactl:** `mocactl sbx templates retire ID`, with `--build B` for one build,
   `--reason TEXT` (a whole template only) and `--wait [--timeout S]`. `--wait` returns once each
-  build reads `retired` and no host holds it (`heldBy` empty, or null without host agents), saying
-  who still holds it; past `--timeout` (default 300 s) it exits 5. A sandbox command refused
-  `template_retired` says that the template or build is never served again.
+  build reads `retired` and its worker no longer runs: a retired build whose worker still holds a
+  presence record reports `capacity`, as an active one does, and `capacity` is null once its host
+  has stopped it (after the wanted state's `stop`). Without host agents (`heldBy` null) there is
+  nothing to wait for. Past `--timeout` (default 300 s) it exits 5. Waiting for the snapshot's
+  removal from every host (`heldBy` empty) comes with the host's removal step (#743). A sandbox
+  command refused `template_retired` says that the template or build is never served again.
 
-Known limits: a tag that points at a retired build still resolves to it, and is refused; so does
-`default` when the default build is retired, even with another registered build. Removing a retired build's worker and snapshot from its host
-comes with the host agent's removal step; until then a retired build stays in `heldBy`. A Moca Pi
-session does not yet name a build, so only live sandboxes count as use; a session pinned to a build
-is to be checked beside them once sessions are.
+Known limits:
+
+- A tag that points at a retired build still resolves to it, and is refused; so does `default`
+  when the default build is retired, even with another registered build.
+- `build_in_use` is judged from a read of the live sandboxes taken before the catalog update, so a
+  sandbox create racing the retire can land on the build in between. It is harmless: that sandbox
+  runs, and its worker is stopped only once nothing on it is live, since the wanted state never
+  lists a worker with a live sandbox in `stop`.
+- Removing a retired build's worker and snapshot from its host comes with the host agent's removal
+  step (#743); until then a retired build stays in `heldBy`.
+- A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
+  pinned to a build is to be checked beside them once sessions are.
+
+Follow-up, not done here: retiring the build `default` points to could move `default` to the
+newest registered build of the template, so a bare id keeps serving.
 
 ## 6. Builds and activation on a host
 

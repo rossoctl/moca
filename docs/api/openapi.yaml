@@ -417,7 +417,9 @@ components:
             agent reports, readiness is the presence alone (`active` or `inactive`)
         capacity:
           type: [object, 'null']
-          description: for an active build
+          description: |
+            for an active build; and for a retired one whose worker still holds a presence record
+            (its host has not stopped it yet); null otherwise
           required: [running, inUse]
           properties:
             running: { type: integer, description: the sandboxes its worker advertises at once }

@@ -238,9 +238,11 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
 /**
  * `templates retire ID [--build B] [--reason T] [--wait [--timeout S]]` (§5.1): retire the template
  * (every build of it) or build B, and print each build retired. With --wait, then read each build
- * until it is `retired` and no host holds it (`heldBy` empty; null, or absent from an older control
- * plane, means no host agents, so nothing to wait for), saying who still holds it. A wait past
- * --timeout (default RETIRE_TIMEOUT_S) exits 5.
+ * until it is `retired` and its worker no longer runs (`capacity` null: the host stopped it, after
+ * the wanted state's `stop`), saying so while it still runs. `heldBy` null, or absent from an older
+ * control plane, means no host agents: nothing to wait for. A wait past --timeout (default
+ * RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty)
+ * comes with the host's removal step (#743).
  */
 export async function cmdRetire(
   c: SbxCtx,
@@ -272,25 +274,25 @@ export async function cmdRetire(
         } catch (err) {
           if (!transient(err)) throw err;
         }
-        const held = b?.heldBy ?? [];
-        if (b && b.status === 'retired' && held.length === 0) {
+        const noAgents = b !== undefined && (b.heldBy === null || b.heldBy === undefined);
+        if (b && b.status === 'retired' && (noAgents || b.capacity === null)) {
           c.io.err(
-            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, held by no host`,
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, its worker stopped`,
           );
           break;
         }
         if (b) {
+          const inUse = b.capacity?.inUse;
           const why =
             b.status !== 'retired'
               ? sanitizeRemote(b.status)
-              : `retired, still held by ${held.map(sanitizeRemote).join(',')}`;
+              : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
           if (why !== said)
             c.io.err(`${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: ${why}`);
           said = why;
         }
         const left = end - c.rt.now();
-        if (left <= 0)
-          return timedOut(c, `${r.templateId} ${build} to be gone from every host`, timeoutS);
+        if (left <= 0) return timedOut(c, `${r.templateId} ${build} to stop its worker`, timeoutS);
         await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
         if (c.signal?.aborted) return SBX_EXIT.failed;
       }

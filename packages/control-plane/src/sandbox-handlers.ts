@@ -329,8 +329,10 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     status: b.status,
     profile: b.profile,
     readiness,
+    // For an active build; and for a retired one whose worker still holds a presence record (it
+    // runs until its host stops it), so a client sees the stop.
     capacity:
-      readiness === 'active'
+      readiness === 'active' || (b.status === 'retired' && f.attached?.has(b.worker))
         ? {
             running: f.attached?.get(b.worker) ?? 0,
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),

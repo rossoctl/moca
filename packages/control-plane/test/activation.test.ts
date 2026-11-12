@@ -752,6 +752,30 @@ describe('retire (§5.1)', () => {
     ).toBe('not_found');
   });
 
+  it("reports a retired build's capacity while its worker still runs, and null once it stops", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    await retire(d, 't1');
+    const read = async () =>
+      (
+        await HANDLERS.getTemplateBuild!(
+          ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+          d,
+        )
+      ).body as Body;
+    // Its worker still holds a presence record: the host has not stopped it yet.
+    expect(await read()).toMatchObject({
+      status: 'retired',
+      readiness: 'retired',
+      capacity: { running: 3, inUse: 0 },
+    });
+    attachedNow = [];
+    expect(await read()).toMatchObject({ readiness: 'retired', capacity: null });
+  });
+
   it('never retires a build under a live sandbox (409 build_in_use); retires one build alone', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

@@ -24,7 +24,9 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   `410 template_retired`, a sandbox create or an activation naming a retired build, a tag of one, or
   a template whose every build is retired (was `400 unknown_template` or `409 template_unavailable`).
 - Readiness gains `retired` (Template, TemplateBuild). TemplateBuild gains `heldBy`, the hosts whose
-  last inventory holds its snapshot (null without host agents).
+  last inventory holds its snapshot (null without host agents). A retired build whose worker still
+  holds a presence record reports `capacity` `{running, inUse}`, as an active one does (null once
+  its worker is stopped).
 - GET /v1/hosts/{host}/wanted: `stop` also lists the retired builds the host holds with no live
   sandbox; POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
   retired build's worker and snapshot from its host is not part of this version.

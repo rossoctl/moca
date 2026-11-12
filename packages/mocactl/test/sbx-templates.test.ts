@@ -487,49 +487,43 @@ describe('sbx templates retire (§5.1)', () => {
     },
   });
 
-  it('--wait: reads the build until no host holds it, saying who still does', async () => {
+  const RUNNING = { running: 3, inUse: 1 };
+  const retiredRead = (capacity: unknown, heldBy: unknown = ['host-1']) =>
+    build({ status: 'retired', readiness: 'retired', capacity, heldBy });
+
+  it('--wait: reads the build until its worker stops, saying once that it still runs', async () => {
     let reads = 0;
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
-      [BUILD_PATH]: () => ({
-        status: 200,
-        body: build({
-          status: 'retired',
-          readiness: 'retired',
-          heldBy: ++reads < 3 ? ['host-1'] : [],
-        }),
-      }),
+      // The snapshot stays held (no removal yet): only the worker's stop is waited for.
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(++reads < 3 ? RUNNING : null) }),
     });
     expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
     expect(w.slept).toEqual([5000, 5000]);
     const errs = w.io.errs.join('');
     // Said once, however many reads say the same.
-    expect(errs.match(/still held by host-1/g)).toHaveLength(1);
-    expect(errs).toContain(`my-python ${HANDLE}: retired, held by no host`);
+    expect(errs.match(/retired, its worker still runs \(1 in use\)/g)).toHaveLength(1);
+    expect(errs).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
   });
 
   it('--wait: done at once without host agents (heldBy null)', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
-      [BUILD_PATH]: () => ({
-        status: 200,
-        body: build({ status: 'retired', readiness: 'retired', heldBy: null }),
-      }),
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING, null) }),
     });
     expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
     expect(w.slept).toEqual([]);
   });
 
-  it('--wait: exits 5 when a host still holds it at --timeout', async () => {
+  it('--wait: exits 5 when its worker still runs at --timeout', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
-      [BUILD_PATH]: () => ({
-        status: 200,
-        body: build({ status: 'retired', readiness: 'retired', heldBy: ['host-1'] }),
-      }),
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING) }),
     });
     expect(await cmdRetire(w.c, 'my-python', { wait: true, timeoutS: 12 })).toBe(SBX_EXIT.timedOut);
     expect(w.slept).toEqual([5000, 5000, 2000]);
-    expect(w.io.errs.join('')).toContain('timed out after 12 s');
+    expect(w.io.errs.join('')).toContain(
+      `timed out after 12 s waiting for my-python ${HANDLE} to stop its worker`,
+    );
   });
 });

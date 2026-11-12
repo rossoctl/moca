@@ -62,8 +62,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  build: never served again, refused while a sandbox
                                                  runs on it, not undone (a new build is the way
                                                  back). --reason: kept in its record (not with
-                                                 --build). --wait: until no host holds it (default
-                                                 300 s; exit 5 on a timeout)
+                                                 --build). --wait: until its worker has stopped
+                                                 (default 300 s; exit 5 on a timeout); waiting for
+                                                 its removal from every host comes with #743
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
