@@ -119,9 +119,12 @@ func TestDefaultAllowlistFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
+	// Match install-host.sh exactly: sed -n 's/^MOCA_EGRESS_ALLOW=//p' -- the key at
+	// column 0, no trimming -- so an indented line or a CRLF file fails here the same
+	// way it mis-seeds (or falls back) on a host.
 	var line string
 	for _, l := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "MOCA_EGRESS_ALLOW="); ok {
+		if v, ok := strings.CutPrefix(l, "MOCA_EGRESS_ALLOW="); ok {
 			line = v
 		}
 	}

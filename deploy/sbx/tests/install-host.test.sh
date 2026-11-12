@@ -368,7 +368,9 @@ bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall sbx_eg ag
 [[ ! -e "$U" && ! -e "$E" ]] || fail 'the last uninstall kept an unedited egress env file'
 pass 'the last uninstall removes the egress unit, and the env file unless it was edited'
 
-# Without egress-allow.env beside it, the script falls back to the GitHub hosts and says so.
+# Without egress-allow.env beside it, the script falls back to the GitHub hosts and says so -- but
+# only when the default is actually consumed: a run with MOCA_EGRESS_ALLOW exported, or --no-egress,
+# never seeds from it and so never warns.
 COPY="$TMP/scriptcopy/deploy/sbx"
 mkdir -p "$COPY/../microvm"
 cp "$SRC/deploy/sbx/install-host.sh" "$SRC/deploy/sbx/sbx.slice" "$SRC/deploy/sbx/sbx-worker@.service" "$COPY/"
@@ -378,8 +380,16 @@ grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'no fallback warni
 grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" ||
   fail 'the fallback did not seed the GitHub hosts'
 bash "$INSTALL" --uninstall sbx_fb >"$TMP/out" 2>&1 || fail 'uninstall sbx_fb'
+MOCA_EGRESS_ALLOW=pypi.org bash "$COPY/install-host.sh" "$(bundle sbx_fb2)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'install from a script copy with MOCA_EGRESS_ALLOW set'
+! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although MOCA_EGRESS_ALLOW was set'
+grep -qx 'MOCA_EGRESS_ALLOW=pypi.org' "$E" || fail 'the exported allowlist was not seeded'
+bash "$COPY/install-host.sh" "$(bundle sbx_fb3)" --snapshot default --no-egress >"$TMP/out" 2>&1 ||
+  fail 'install from a script copy with --no-egress'
+! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although --no-egress was given'
+for id in sbx_fb2 sbx_fb3; do bash "$INSTALL" --uninstall "$id" >"$TMP/out" 2>&1 || fail "uninstall $id"; done
 rm -rf "$TMP/scriptcopy"
-pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script'
+pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script, and stays quiet when the default is not used'
 
 # A unit this script did not install is reused, not overwritten.
 echo '# P6-owned' >"$U"
@@ -473,6 +483,15 @@ grep -qx "egress foo $TMP/foo.file" "$EM" && [[ -f "$TMP/foo.file" ]] || fail 'a
 sed -i.bak '/^egress foo /d' "$EM"; rm -f "$EM.bak"
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end: $(cat "$EM")"
 pass 'a two-field manifest uninstalls cleanly; an unknown egress kind is left alone'
+
+# An env file holding the legacy GitHub-only seed was written by an older script's fresh install,
+# not by an operator: with no digest recorded, the last uninstall removes it too.
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install for the legacy-seed case'
+printf 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com\n' >"$E"
+sed -i.bak 's/^\(egress [a-z]* [^ ]*\) [0-9a-f]\{64\}$/\1/' "$EM"; rm -f "$EM.bak"
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall with the legacy seed'
+[[ ! -e "$E" && ! -e "$U" ]] || fail 'an untouched legacy seed was kept as an edit'
+pass 'an env file holding the legacy GitHub-only seed is removed by the last uninstall'
 
 # Egress credentials (SBX0.2b, spec §6.2): --egress installs the host CA, the token and a unit drop-in;
 # a worker install checks the snapshot's egress_ca_sha256 once the drop-in exists.
