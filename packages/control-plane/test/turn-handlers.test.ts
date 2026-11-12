@@ -19,9 +19,9 @@ const item = { item_id: 'i1', file: 'f.ts', pattern: 'p' };
  *
  * `leafResults` and `streams` are both re-pointed at that same fake, which is the hazard the comment
  * at the end of makeDeps warns about: overriding `index` brings a new fake with it, and the fixture's
- * own defaults still read the OTHER one. Left alone, a `leaf:result:<sid>` seeded here would be
- * written to one map and read from another, so the §4.4 result assertion would fail; and `d.streams`
- * would be a permanently empty map, so an audit-stream assertion could never fail.
+ * own defaults still read the OTHER one. Left alone, a `leaf:result:<sid>:<turnId>` seeded here
+ * would be written to one map and read from another, so the §4.4 result assertion would fail; and
+ * `d.streams` would be a permanently empty map, so an audit-stream assertion could never fail.
  */
 function turnDeps(over: Record<string, unknown> = {}) {
   const fake = fakeRedis();
@@ -462,7 +462,7 @@ describe('getTurn (spec §4.4)', () => {
     const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
     await d.turns.finalize(turnId, 'solved', NOW_MS);
     d.fake.strings.set(
-      `leaf:result:${sid}`,
+      `leaf:result:${sid}:${turnId}`,
       JSON.stringify({ status: 'solved', patch: 'diff --git', sessionId: sid }),
     );
     expect((await get(d, sid, turnId)).body).toMatchObject({
@@ -475,10 +475,13 @@ describe('getTurn (spec §4.4)', () => {
     const d = turnDeps();
     const sid = await session(d);
     const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
-    // The result key is per SESSION and shared with the synchronous path, so this is what an earlier
-    // INTERACTIVE turn on the same session leaves behind. Reporting it beside `queued` would hand a
-    // caller polling for completion a stale result as if it were this turn's.
-    d.fake.strings.set(`leaf:result:${sid}`, JSON.stringify({ status: 'done', patch: 'stale' }));
+    // THIS turn's own key, written by a worker that then died before `finalize` -- the one window
+    // where a result exists for a record that is still open. The record's `state` is the single
+    // source of truth for status (§4.4), so the result waits for terminality.
+    d.fake.strings.set(
+      `leaf:result:${sid}:${turnId}`,
+      JSON.stringify({ status: 'done', patch: 'stale' }),
+    );
     const queued = (await get(d, sid, turnId)).body as Record<string, unknown>;
     expect(queued).toEqual({ turnId, state: 'queued', attempts: 0 });
     expect(queued.result).toBeUndefined();
@@ -497,20 +500,42 @@ describe('getTurn (spec §4.4)', () => {
     const d = turnDeps();
     const sid = await session(d);
     const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
-    // What an earlier INTERACTIVE turn on this session left in the shared per-session result key.
+    // The SYNCHRONOUS path's per-session key, which an earlier interactive turn on this session
+    // leaves behind. A cancelled turn is terminal, so terminality alone would read SOMETHING here;
+    // the turn id in the async key is what keeps the two paths from answering for each other.
     d.fake.strings.set(
       `leaf:result:${sid}`,
       JSON.stringify({ status: 'done', patch: 'stale-interactive' }),
     );
     await HANDLERS.cancelTurn!(ctx({ principal: alice, params: { id: sid, turnId } }), d);
 
-    // `cancelled` is terminal, but §4.5 defines it as withdrawing a turn that was still `queued`:
-    // no leaf ever started, so nothing was written for it. Keying the result off terminality alone
-    // hands back the PREVIOUS turn's patch as this turn's -- a caller that cancelled a turn and
-    // polled it would read a successful result for work that never happened.
     const body = (await get(d, sid, turnId)).body as Record<string, unknown>;
     expect(body).toEqual({ turnId, state: 'cancelled', attempts: 0 });
     expect(body.result).toBeUndefined();
+  });
+
+  it('never answers with a SIBLING turn s result (§4.3: two turns, one session)', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const a = (await submit(d, sid, { item, async: true, idempotencyKey: 'k1' })).body as {
+      turnId: string;
+    };
+    const b = (await submit(d, sid, { item, async: true, idempotencyKey: 'k2' })).body as {
+      turnId: string;
+    };
+    // A finishes first, B second -- the overwrite that a per-session key made unavoidable.
+    for (const [turnId, patch] of [
+      [a.turnId, 'patch-a'],
+      [b.turnId, 'patch-b'],
+    ] as const) {
+      d.fake.strings.set(
+        `leaf:result:${sid}:${turnId}`,
+        JSON.stringify({ status: 'solved', patch }),
+      );
+      await d.turns.finalize(turnId, 'solved', NOW_MS);
+    }
+    expect((await get(d, sid, a.turnId)).body).toMatchObject({ result: { patch: 'patch-a' } });
+    expect((await get(d, sid, b.turnId)).body).toMatchObject({ result: { patch: 'patch-b' } });
   });
 
   it('404s an unknown turn, and another subject s session before reading params.turnId', async () => {

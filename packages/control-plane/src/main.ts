@@ -37,6 +37,7 @@ import { routeProfileFromEnv, sandboxConfigFromEnv } from './sandbox-config.js';
 import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 import { readTenancy } from './tenancy.js';
 import { TurnStore } from './turn-store.js';
+import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
 import type { ResultRedisLike } from './turn-result.js';
 
@@ -98,18 +99,10 @@ function countEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
   return Number(v);
 }
 
-/**
- * The turn record's TTL: `LEAF_RESULT_TTL_SECONDS` plus a margin (async fan-out spec §5.1). The
- * record must OUTLIVE its result -- a caller polling a finished turn whose record expired first
- * would read `404 not submitted` for a turn that in fact succeeded. One hour, which is longer than
- * any plausible gap between a result being read and a poll that follows it.
- */
-const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
-
 function turnRecordTtlFromEnv(env: NodeJS.ProcessEnv): number {
-  // Matches server.ts:49's parseInt of the same variable: one deployment, one meaning.
-  const result = countEnv(env, 'LEAF_RESULT_TTL_SECONDS', 86_400);
-  return result + TURN_RECORD_TTL_MARGIN_SECONDS;
+  // `resultTtlSeconds` is the one parse of this variable, shared with the worker that writes the
+  // same results (`server.ts:52`): one deployment, one meaning.
+  return resultTtlSeconds(env) + TURN_RECORD_TTL_MARGIN_SECONDS;
 }
 
 /**

@@ -45,6 +45,17 @@ export interface TurnExchangeResponse extends ExchangeResponse {
   turnId: string;
   /** The caps recorded at submission (§4.3). Enforcing them is the worker's job (#389). */
   caps: TurnCaps;
+  /**
+   * The LeafEnvelope the worker runs, from the record (§5.1), with the record's `sessionId`
+   * attached -- `parseTurnSubmission` deliberately stores none, and `LeafEnvelope.sessionId` is
+   * required. Returned HERE rather than from a second internal route (§9.2): the handler that
+   * answers this call has already loaded the record, so fetching the envelope separately would be
+   * two round trips for one read, on a route whose contract is "the id alone is sufficient".
+   *
+   * It contains no credential and no bearer: the record stores a credential NAME, and the name is
+   * not in the envelope either.
+   */
+  envelope: Record<string, unknown>;
 }
 
 export async function exchangeTurnCredential(
@@ -175,6 +186,8 @@ export async function exchangeTurnCredential(
     sessionId: turn.sessionId,
     subject: turn.owner,
     caps: turn.caps,
+    // sessionId LAST, so a stored envelope cannot override the record's own.
+    envelope: { ...turn.envelope, sessionId: turn.sessionId },
     // Direct mode only: in placeholder mode the worker sends `Bearer <placeholder>` and the injector
     // decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
