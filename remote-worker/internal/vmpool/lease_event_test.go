@@ -698,3 +698,112 @@ func TestPendingEndSurvivesWorkspaceRemoval(t *testing.T) {
 		})
 	}
 }
+
+// holdGateWithCut takes key's gate as a holder that runs nothing and cuts the idle lease
+// with reason: the state endLeaseWaiting's grace bound leaves when no Exec is inside Run.
+// The returned func releases the gate.
+func holdGateWithCut(t *testing.T, p *pool, key string, reason LeaseEndReason) func() {
+	t.Helper()
+	p.mu.Lock()
+	rp := p.runs[key]
+	p.mu.Unlock()
+	rp.execGate <- struct{}{}
+	p.mu.Lock()
+	rp.lease.cut = reason
+	p.mu.Unlock()
+	return func() { <-rp.execGate }
+}
+
+// Ruling R12: a lease Exec that takes the gate of a cut lease never calls Run on its VM.
+// The lease ends with the cut's reason, and the Exec fails lease_ended(<reason>).
+func TestQueuedExecOnACutLeaseNeverRuns(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	release := holdGateWithCut(t, p, "k", LeaseEndReset)
+	errc := execAsync(p, "k", leaseExec("two", 1))
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 1 }) // queued on the gate
+	release()
+
+	var le *LeaseEndedError
+	if err := recvWithin(t, errc, "the queued Exec"); !errors.As(err, &le) || le.Reason != LeaseEndReset {
+		t.Fatalf("queued Exec: %v, want lease_ended(reset)", err)
+	}
+	if n := lc.count("run "); n != 1 {
+		t.Fatalf("Runs = %d, want 1: the queued Exec ran nothing", n)
+	}
+	leaseEnded(t, p, lc, LeaseEndReset)
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want 1: no fresh lease for the failed Exec", n)
+	}
+	if ends := p.Stats().LeaseEnds; len(ends) != 1 || ends[LeaseEndReset] != 1 {
+		t.Fatalf("LeaseEnds = %v, want reset 1 only", ends)
+	}
+}
+
+// Ruling R12: a per-Exec Exec that takes the gate of a cut lease ends it with the cut's
+// reason, not mode_change, and then runs as usual.
+func TestPerExecOnACutLeaseEndsItWithTheCutsReason(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	release := holdGateWithCut(t, p, "k", LeaseEndReset)
+	errc := execAsync(p, "k", Exec{Command: "per-exec", TimeoutS: 30})
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 1 }) // endFirst waits on the gate
+	release()
+	if err := recvWithin(t, errc, "the per-Exec Exec"); err != nil {
+		t.Fatalf("per-Exec Exec: %v", err)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending == nil || s.Pending.Reason != LeaseEndReset {
+		t.Fatalf("state = %+v, want the lease ended reset", s)
+	}
+	if ends := p.Stats().LeaseEnds; len(ends) != 1 || ends[LeaseEndReset] != 1 {
+		t.Fatalf("LeaseEnds = %v, want reset 1 only", ends)
+	}
+	if lc.liveCount() != 0 || liveLease(p, "k") != nil {
+		t.Fatalf("live VMs = %d, want 0 and no lease", lc.liveCount())
+	}
+}
+
+// Ruling R12, through real paths: a downgrade whose grace bound passes while the first
+// lease is still being started (Resume blocked) cuts that lease before any Exec is inside
+// Run. The starting Exec then never calls Run; it fails lease_ended(mode_change).
+func TestCutDuringLeaseStartNeverRuns(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	inResume := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	lc.setResumeFn(func(*fakeVM, context.Context) error {
+		inResume <- struct{}{}
+		<-resume
+		return nil
+	})
+	errc := execAsync(p, "k", Exec{Command: "first", TimeoutS: MaxExecTimeoutS, Mode: ModeLease, ModeEpoch: 1})
+	recvWithin(t, inResume, "the lease start's Resume")
+
+	setc := make(chan error, 1)
+	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
+	go func() { setc <- p.SetMode("k", ModePerExec, 2) }()
+	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	clk.Advance(p.cfg.LeaseGraceLimit)
+	waitFor(t, func() bool { l := liveLease(p, "k"); return l != nil && leaseCut(p, l) == LeaseEndModeChange })
+	close(resume)
+
+	var le *LeaseEndedError
+	if err := recvWithin(t, errc, "the starting Exec"); !errors.As(err, &le) || le.Reason != LeaseEndModeChange {
+		t.Fatalf("starting Exec: %v, want lease_ended(mode_change)", err)
+	}
+	if err := recvWithin(t, setc, "SetMode"); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	if n := lc.count("run "); n != 0 {
+		t.Fatalf("Runs = %d, want 0: the cut lease ran nothing", n)
+	}
+	leaseEnded(t, p, lc, LeaseEndModeChange)
+}
+
+func leaseCut(p *pool, l *vmLease) LeaseEndReason {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return l.cut
+}

@@ -119,8 +119,9 @@ func (p *pool) EndLease(key string, reason LeaseEndReason) error {
 // endLeaseWaiting ends key's lease for reason: the lease live when it is called, and only
 // that one. It waits for the gate, so for the Exec in flight to return. At LeaseGraceLimit
 // it cuts the lease (l.cut): the Exec inside Run is cancelled, and its unwind ends the
-// lease with reason; a lease no Exec is running in ends at the next gate holder's check
-// (execLease, runLease, or the lease sweep). From then on it waits for the lease to be
+// lease with reason; a lease no Exec is running in ends with reason under the next gate
+// holder (a queued lease Exec fails lease_ended(<reason>) without running, a per-Exec
+// Exec or the sweep ends it with reason, not its own). From then on it waits for the lease to be
 // gone, not for the gate: an Exec queued behind the cut one may start a fresh lease, and
 // neither that lease nor that Exec's duration is this call's. So it returns by
 // LeaseGraceLimit plus the cut Exec's unwind. The run is pinned meanwhile, as routeExec

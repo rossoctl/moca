@@ -43,8 +43,9 @@ type vmLease struct {
 	// cut is set by the lease sweep when it cancels the running Exec (grace_limit), or
 	// by endLeaseWaiting at its grace bound: the Exec's own unwind then ends the lease
 	// with this reason and returns ErrLeaseEnded. Set on a lease no Exec is running in,
-	// it is sticky: the next Exec to take the gate ends the lease with it (execLease),
-	// and one already past that check cancels its own Run (runLease).
+	// it is sticky: whoever takes the gate next ends the lease with this reason
+	// (endLeaseLocked prefers it), and a lease Exec that finds it set before Run fails
+	// lease_ended(<reason>) without ever calling Run (execLease, runLease).
 	cut LeaseEndReason
 	// gone is closed when the lease leaves its run (detachLeaseLocked, or startLease's
 	// failure path): what endLeaseWaiting waits on once it has cut the lease.
@@ -247,14 +248,19 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 			key, e.ModeEpoch, s.Epoch)
 	}
 	var v *leaseVictim
+	var cut LeaseEndReason
 	if closed {
 		// Close cannot take a gate this Exec holds, so this lease VM is this Exec's to
 		// destroy, or it would outlive the pool.
 		v = p.detachLeaseLocked(rp)
 	} else if l != nil && l.cut != "" {
-		// A caller ended this lease while it was between Execs (endLeaseWaiting's grace
-		// bound): it ends here with that reason, and this Exec starts a fresh one.
-		v, l = p.endLeaseLocked(rp, l.cut), nil
+		// A caller ended this lease while this Exec queued (endLeaseWaiting's grace
+		// bound, with no Exec running to cancel): the lease ends here with that reason,
+		// and this Exec, in flight at the end, fails lease_ended(<reason>). It runs
+		// nothing: not in the cut VM, whose guest the end is there to retire (reset,
+		// spec §11), and not in a fresh one.
+		cut = l.cut
+		v = p.endLeaseLocked(rp, cut)
 	} else if l != nil && !p.clk.Now().Before(p.leaseGraceDeadline(l)) {
 		// Past the grace limit, and the lease sweep has not run since: this Exec would
 		// run only to be cut at the next tick. The lease ends here, and the Exec starts
@@ -274,6 +280,9 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 	}
 	if closed {
 		return Result{}, ErrClosed
+	}
+	if cut != "" {
+		return Result{}, &LeaseEndedError{Reason: cut}
 	}
 
 	var vm VM
@@ -413,17 +422,27 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 // runLease runs one command in rp's lease VM. Caller holds rp's gate.
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32) (Result, error) {
-	// cancel lets the lease sweep cut this Exec at the grace limit (sweepLeasesLocked).
-	execCtx, cancel := context.WithCancel(runCtx)
-	defer cancel()
 	p.mu.Lock()
 	l := rp.lease
-	l.running, l.cancel = true, cancel
-	if l.cut != "" {
-		// Cut after execLease's check (endLeaseWaiting): this Run must not start the
-		// command, and its unwind ends the lease with the cut's reason.
-		cancel()
+	if cut := l.cut; cut != "" {
+		// Cut after execLease's check, or while startLease installed this lease
+		// (endLeaseWaiting): Run is never called, because a request written on a
+		// cancelled context can still reach the guest before the connection closes. The
+		// lease ends here with the cut's reason.
+		v := p.endLeaseLocked(rp, cut)
+		p.mu.Unlock()
+		t1 := p.clk.Now()
+		p.destroyLeaseVM(v.key, v.vm)
+		if ph != nil {
+			ph.Destroy = p.clk.Now().Sub(t1)
+		}
+		return Result{}, &LeaseEndedError{Reason: cut}
 	}
+	// cancel lets the lease sweep, or endLeaseWaiting, cut this Exec once it is inside
+	// Run (sweepLeasesLocked).
+	execCtx, cancel := context.WithCancel(runCtx)
+	defer cancel()
+	l.running, l.cancel = true, cancel
 	normalise := rp.state.RootWrote // the state is loaded: a lease mode needs a known one
 	rp.lastExec = p.clk.Now()
 	p.mu.Unlock()
@@ -522,8 +541,15 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 // reason} and Open = nil to the key's state file, writes the audit line, and returns the
 // victim for destruction outside the lock. nil when rp has no lease. The caller holds
 // p.mu and rp's gate.
+//
+// A lease carrying a cut ends with the cut's reason whoever holds the gate: a per-Exec
+// Exec's mode_change (endLeaseForPerExec, perExecUnderGate) does not overwrite the
+// reset that EndLease cut it for.
 func (p *pool) endLeaseLocked(rp *runPool, reason LeaseEndReason) *leaseVictim {
 	l := rp.lease
+	if l != nil && l.cut != "" {
+		reason = l.cut
+	}
 	v := p.detachLeaseLocked(rp)
 	if v == nil {
 		return nil
