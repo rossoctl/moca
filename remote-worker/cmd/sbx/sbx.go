@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -29,7 +33,9 @@ microVM over the workspace, and nothing runs on the local machine. See docs/api/
     sbx pull                  print every change since the baseline commit as a git patch
 
 Environment: SBX_ADDR, SBX_SANDBOX_ID, SBX_WORKSPACE_KEY, and SBX_TOKEN or SBX_TOKEN_FILE.
-Optional: SBX_TIMEOUT (seconds per command, default 600), SBX_LOG (append one JSON line per call).
+Optional: SBX_TIMEOUT (seconds per command, default 600), SBX_LOG (append one JSON line per call),
+SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (with SBX_TLS: an extra CA, PEM,
+added to the system roots, e.g. a sandbox token grant's execCa).
 ` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed.
 There is no ` + "`sbx push`" + `: this client is for a workspace seeded on the server side.
 `
@@ -42,6 +48,11 @@ type config struct {
 	addr, sandboxID, key, token string
 	timeoutS                    uint32
 	logPath                     string
+	// tls dials the exec endpoint over TLS (SBX_TLS=1), as SBX0's exec Route is; caPEM is an EXTRA root
+	// (SBX_CA_FILE: the token grant's execCa, when the Route's certificate is self-issued), added to the
+	// system roots, never replacing them -- as sandbox-client's caBundle does.
+	tls   bool
+	caPEM []byte
 }
 
 func configFrom(getenv func(string) string, readFile func(string) ([]byte, error)) (config, error) {
@@ -68,6 +79,26 @@ func configFrom(getenv func(string) string, readFile func(string) ([]byte, error
 			return c, fmt.Errorf("reading SBX_TOKEN_FILE: %w", err)
 		}
 		c.token = strings.TrimSpace(string(b))
+	}
+	switch v := getenv("SBX_TLS"); v {
+	case "", "0":
+	case "1":
+		c.tls = true
+	default:
+		return c, fmt.Errorf("SBX_TLS must be 1 or 0, got %q", v)
+	}
+	if path := getenv("SBX_CA_FILE"); path != "" {
+		if !c.tls {
+			return c, errors.New("SBX_CA_FILE is set but SBX_TLS is not 1")
+		}
+		b, err := readFile(path)
+		if err != nil {
+			return c, fmt.Errorf("reading SBX_CA_FILE: %w", err)
+		}
+		if !x509.NewCertPool().AppendCertsFromPEM(b) {
+			return c, errors.New("SBX_CA_FILE holds no PEM certificate")
+		}
+		c.caPEM = b
 	}
 	if s := getenv("SBX_TIMEOUT"); s != "" {
 		var n uint32
@@ -243,7 +274,27 @@ func parse(args []string) (op, command string, mode int, exit int, ok bool) {
 	return "", "", noStdin, 2, false
 }
 
-// dial keeps the Python client's 16 MiB receive limit; the worker cuts stdout at 8 MiB.
-func dial(addr string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(addr, grpcOpts()...)
+// dial keeps the Python client's 16 MiB receive limit; the worker cuts stdout at 8 MiB. Plaintext unless the
+// config asks for TLS (SBX0's exec Route); with TLS, the server is verified against the system roots plus the
+// config's extra CA, and its name against the address's host.
+func dial(c config) (*grpc.ClientConn, error) {
+	creds, err := transportCreds(c)
+	if err != nil {
+		return nil, err
+	}
+	return grpc.NewClient(c.addr, append(grpcOpts(), grpc.WithTransportCredentials(creds))...)
+}
+
+func transportCreds(c config) (credentials.TransportCredentials, error) {
+	if !c.tls {
+		return insecure.NewCredentials(), nil
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool() // no system pool on this platform: the extra CA alone, still verified
+	}
+	if len(c.caPEM) > 0 && !roots.AppendCertsFromPEM(c.caPEM) {
+		return nil, errors.New("SBX_CA_FILE holds no PEM certificate")
+	}
+	return credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}), nil
 }

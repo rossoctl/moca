@@ -15,15 +15,14 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
+// grpcOpts are the dial options besides the transport credentials, which dial chooses (plaintext or TLS).
 func grpcOpts() []grpc.DialOption {
 	return []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16 << 20)),
 	}
 }
@@ -58,7 +57,7 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			data = b
 		}
 	}
-	conn, err := dial(cfg.addr)
+	conn, err := dial(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "sbx: %v\n", err)
 		return 125
