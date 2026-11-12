@@ -1455,16 +1455,28 @@ pub_snippet="$pub_tmproot/publish_snippet.sh"
   fn_body cleanup_on_exit
   fn_body lock_down
   fn_body publish_snapshot
+  fn_body seed_verify_cache
   printf '%s\n' "$main_body"
 } >"$pub_snippet"
 
-# $1 = verify outcome (0 or 1), $2 = "pre" to seed a previously-good $OUT.
-# Echoes "<exit code>|<manifest contents or MISSING>|<leftover pending/retired dirs>".
+# $1 = verify outcome (0 or 1), $2 = "pre" to seed a previously-good $OUT, $3 = the mock
+# microvm-worker's exit code for the verify-cache seed ("none": no binary at all).
+# Echoes "<exit code>|<manifest contents or MISSING>|<leftover pending/retired dirs>|<seed>",
+# <seed> being the mock's argv and what $OUT held when it ran (manifest), or NONE.
 run_publish_scenario() {
-  local verify_rc="$1" seed="$2"
-  local root out rc manifest leftovers
+  local verify_rc="$1" seed="$2" worker_rc="${3:-0}"
+  local root out rc manifest leftovers seeded
   root="$(mktemp -d "$pub_tmproot/scenario.XXXXXX")"
   out="$root/snapshots/default"
+  if [ "$worker_rc" != none ]; then
+    # The mock records its argv, its environment's SH_SNAPSHOT_DIR (env -i must clear it),
+    # and the published manifest it was pointed at, then exits as told. Literal: the mock's
+    # own shell expands these, not this one.
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh\nprintf "%%s %%s %%s snapdir=%%s|" "$0" "$1" "$(cat "$2/manifest.json")" "${SH_SNAPSHOT_DIR:-unset}" >>"%s"\nexit %s\n' \
+      "$root/seed.log" "$worker_rc" >"$root/microvm-worker"
+    chmod 0755 "$root/microvm-worker"
+  fi
   if [ "$seed" = "pre" ]; then
     mkdir -p "$out"
     printf 'PREVIOUS-GOOD\n' >"$out/manifest.json"
@@ -1482,6 +1494,8 @@ run_publish_scenario() {
     for f in vmstate memfile kernel rootfs agent; do printf 'stub-%s\n' "$f" >"$STAGE/$f"; done
     printf 'FRESHLY-BUILT\n' >"$STAGE/manifest.json"
     VMM="firecracker"
+    WORKER_BIN="$root/microvm-worker"
+    export SH_SNAPSHOT_DIR="/must-not-reach-the-seed"
     PENDING=""
     CLEANUP_PID=""
     CLEANUP_JAIL=""
@@ -1512,7 +1526,7 @@ run_publish_scenario() {
     install() { cp "${@:$#-1:1}" "${@:$#:1}"; }
     chown() { :; }
     verify_restore() { return "$verify_rc"; }
-    : "$OUT" "$STAGE" "$PENDING" "$VMM" "$CLEANUP_PID" "$CLEANUP_JAIL" \
+    : "$OUT" "$STAGE" "$PENDING" "$VMM" "$WORKER_BIN" "$CLEANUP_PID" "$CLEANUP_JAIL" \
       "$CLEANUP_EXTRA_DIR" "$CLEANUP_FS_PID" "$CLEANUP_PENDING_DIR"
     # shellcheck disable=SC1090
     . "$pub_snippet"
@@ -1530,23 +1544,34 @@ run_publish_scenario() {
     manifest="MISSING"
   fi
   leftovers="$(find "$root/snapshots" -maxdepth 1 -name '.build-snapshot-*' 2>/dev/null | wc -l | tr -d ' ')"
-  printf '%s|%s|%s\n' "$rc" "$manifest" "$leftovers"
+  seeded="NONE"
+  if [ -f "$root/seed.log" ]; then
+    seeded="$(sed -e "s#$root/microvm-worker#BIN#" -e "s#$out#OUT#" "$root/seed.log")"
+  fi
+  printf '%s|%s|%s|%s\n' "$rc" "$manifest" "$leftovers" "$seeded"
 }
 
 got="$(run_publish_scenario 0 pre)"
-check "verify passes, previous snapshot present: main succeeds, \$OUT holds the NEW snapshot, nothing left behind" \
-  "$got" "0|FRESHLY-BUILT|0"
+check "verify passes, previous snapshot present: main succeeds, \$OUT holds the NEW snapshot, nothing left behind, the verify cache is seeded from the published \$OUT with a cleared environment" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
 got="$(run_publish_scenario 0 nopre)"
-check "verify passes, no previous snapshot: main succeeds, \$OUT is created, nothing left behind" \
-  "$got" "0|FRESHLY-BUILT|0"
+check "verify passes, no previous snapshot: main succeeds, \$OUT is created, nothing left behind, seeded" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
+# The verify-cache seed is best-effort: a failing (e.g. older) or missing worker binary never fails a
+# build that would otherwise succeed.
+got="$(run_publish_scenario 0 pre 1)"
+check "the seed fails (an older microvm-worker): the build still succeeds and \$OUT is published" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
+got="$(run_publish_scenario 0 pre none)"
+check "no microvm-worker binary: the build still succeeds, no seed" "$got" "0|FRESHLY-BUILT|0|NONE"
 # The two that would have gone green on the pre-fix order, with $OUT holding a sealed,
 # self-consistent snapshot that does not restore:
 got="$(run_publish_scenario 1 pre)"
-check "verify FAILS: main fails, the PREVIOUS good snapshot is untouched, and the unverified one is removed" \
-  "$got" "1|PREVIOUS-GOOD|0"
+check "verify FAILS: main fails, the PREVIOUS good snapshot is untouched, the unverified one is removed, nothing seeded" \
+  "$got" "1|PREVIOUS-GOOD|0|NONE"
 got="$(run_publish_scenario 1 nopre)"
 check "verify FAILS with no previous snapshot: main fails and \$OUT is never created" \
-  "$got" "1|MISSING|0"
+  "$got" "1|MISSING|0|NONE"
 chmod -R u+rwX "$pub_tmproot" 2>/dev/null
 rm -rf "$pub_tmproot"
 trap - EXIT
