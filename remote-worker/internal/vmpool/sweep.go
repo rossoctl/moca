@@ -13,6 +13,9 @@ import (
 type reclaimBatch struct {
 	vms  []VM
 	dirs []string
+	// leases are lease VMs the lease sweep ended, each with its run's execGate held and
+	// the run pinned; doReclaim releases both only after the VM is destroyed.
+	leases []*leaseVictim
 }
 
 // sweepOnce walks every run and detaches what has aged out, under the lock,
@@ -89,6 +92,13 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 				b.dirs = append(b.dirs, tomb)
 			}
 			delete(p.runs, key)
+			// The key's lease state is retired with its workspace, in the same critical
+			// section: the mode and epoch stay, root_wrote is set for the new tree, and an
+			// unacknowledged event stays (retireLeaseState). Only on a lease-enabled pool: a
+			// per-Exec-only worker does no lease-state I/O, so its paths are unchanged.
+			if p.cfg.LeaseEnabled {
+				retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
+			}
 			continue
 		}
 		// RunActive -> RunParked: drop the standbys, KEEP the workspace. RAM is
@@ -131,6 +141,8 @@ func (p *pool) sweep(now time.Time) {
 }
 
 func (p *pool) doReclaim(b reclaimBatch) {
+	// Leases first: an Exec may be waiting on each one's gate.
+	p.destroySweptLeases(b.leases)
 	for _, vm := range b.vms {
 		if err := vm.Destroy(); err != nil {
 			p.counters.destroyFailed()
@@ -177,6 +189,68 @@ func (p *pool) armTickerLocked() {
 		p.sweep(p.clk.Now())
 		p.mu.Lock()
 		p.armTickerLocked()
+		p.mu.Unlock()
+	})
+}
+
+// sweepLeases is the lease ticker's body. It re-samples the idle leases' charges, then
+// sweepLeasesLocked ends the leases that are due. Measured charges grown past the budget
+// are then funded in the order an admission uses (evictForAdmissionLocked): idle
+// standbys first, then idle leases, idle-longest first (reclaimLeasesLocked), which also
+// ends idle leases while MemAvailable is below LeaseReclaimFreeBytes -- that deficit goes
+// to the leases directly (spec §6). The VMs are destroyed on the reclaim goroutine -- or
+// inline when its queue is full, as sweep does -- each lease VM under its run's gate. A
+// closed pool ends no lease: Close has detached the idle ones and kept their open records
+// for worker_restart.
+func (p *pool) sweepLeases(now time.Time) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.refreshLeaseChargesLocked()
+	vs := p.sweepLeasesLocked(now)
+	// After the sweep, so that a lease due to end for its own clocks ends with that reason,
+	// and its charge has already left committedLocked.
+	over := p.committedLocked() - (p.cfg.MaxCommittedBytes - p.cfg.MemoryReserveBytes)
+	var standbys []VM
+	if over > 0 {
+		// A standby costs its run one cold acquire, a lease its sandbox's processes, /tmp
+		// and a notice: standbys go first (PR #763 review).
+		order, _ := p.standbyDonorsLocked(nil)
+		var freed int64
+		standbys, freed = p.shedStandbysLocked(order, over)
+		over -= freed
+	}
+	vs = append(vs, p.reclaimLeasesLocked(now, over)...)
+	if len(vs) == 0 && len(standbys) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	b := reclaimBatch{vms: standbys, leases: vs}
+	select {
+	case p.reclaimQ <- b: // under p.mu, with p.closed false: see sweep
+		p.mu.Unlock()
+	default:
+		p.mu.Unlock()
+		p.doReclaim(b)
+	}
+}
+
+// armLeaseTickerLocked schedules the next lease sweep and re-arms from inside its own
+// callback, as armTickerLocked does, on its own period: LeaseScanInterval, which
+// normalizeLease forces positive (the same load-bearing guarantee armTickerLocked's
+// comment explains). It is a second ticker rather than a shorter ReclaimScanInterval so
+// that the per-Exec sweep runs on exactly the schedule it has without lease mode. New
+// arms it only when LeaseEnabled. Caller holds p.mu.
+func (p *pool) armLeaseTickerLocked() {
+	if p.closed {
+		return
+	}
+	p.leaseTicker = p.clk.AfterFunc(p.cfg.LeaseScanInterval, func() {
+		p.sweepLeases(p.clk.Now())
+		p.mu.Lock()
+		p.armLeaseTickerLocked()
 		p.mu.Unlock()
 	})
 }

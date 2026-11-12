@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -166,6 +167,26 @@ func TestShimSeccompDeniesPtraceAndProcessVM(t *testing.T) {
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("output lacks %q (want EPERM):\n%s", want, out)
 		}
+	}
+}
+
+// The agent runs at oom_score_adj -1000 once it serves leases, and a fork inherits
+// that. An Exec must stay an OOM candidate, or an OOM finds nothing it may kill: the
+// shim puts it back to 0, and the exec uid cannot lower it again. sh stands in for the
+// agent here: it lowers its own, then execs the shim, which inherits it.
+func TestShimResetsTheInheritedOomScoreAdj(t *testing.T) {
+	requireRootCgroupV2(t)
+	cmd := exec.Command("sh", "-c",
+		`echo -1000 > /proc/self/oom_score_adj && echo "pre=$(cat /proc/self/oom_score_adj)" && exec "$0" "$@"`,
+		os.Args[0], ShimArg, testExecID, testExecID, t.TempDir(), "--",
+		"sh", "-c", `cat /proc/self/oom_score_adj; { echo -1000 > /proc/self/oom_score_adj; } 2>/dev/null; echo rc=$?`)
+	cmd.Dir = "/"
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim: %v\n%s", err, out)
+	}
+	if want := "pre=-1000\n0\nrc=1\n"; string(out) != want {
+		t.Errorf("output %q, want %q", out, want)
 	}
 }
 
@@ -348,6 +369,16 @@ func newLeaseAgent(t *testing.T) (*Agent, string) {
 	origSysctl := userNamespacesSysctl
 	userNamespacesSysctl = sysctl
 	t.Cleanup(func() { userNamespacesSysctl = origSysctl })
+
+	// The first lease request lowers the agent's oom_score_adj; here the agent is the
+	// test binary, which must stay an OOM candidate like any other process.
+	oomAdj := filepath.Join(t.TempDir(), "oom_score_adj")
+	if err := os.WriteFile(oomAdj, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origOomAdj := agentOomScoreAdjPath
+	agentOomScoreAdjPath = oomAdj
+	t.Cleanup(func() { agentOomScoreAdjPath = origOomAdj })
 
 	work := t.TempDir()
 	homeParent := t.TempDir()
@@ -1061,5 +1092,220 @@ func TestLeaseCloseDoesNotWaitForARunningExec(t *testing.T) {
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("Close blocked on the running lease Exec")
+	}
+}
+
+// fakeMemInfo points memInfoPath at a meminfo whose MemTotal is memTotal bytes, for
+// the rest of the test.
+func fakeMemInfo(t *testing.T, memTotal int64) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "meminfo")
+	body := fmt.Sprintf("MemTotal:       %d kB\nMemFree:        1024 kB\n", memTotal>>10)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := memInfoPath
+	memInfoPath = p
+	t.Cleanup(func() { memInfoPath = orig })
+}
+
+// subtreeControllers is the controllers dir enables for its children.
+func subtreeControllers(t *testing.T, dir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "cgroup.subtree_control"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(raw))
+}
+
+// Plan 1 review (#706): an OOM or a fork bomb in one Exec must cost that Exec, not the
+// guest. The first lease request enables pids and memory for the cgroup root's
+// children (and so in its parent first), and each e<seq> is capped. The Exec reads its
+// own cgroup's caps, which proves it runs in the capped cgroup.
+func TestLeasePrepareEnablesPidsAndMemory(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	fakeMemInfo(t, 1024<<20)
+	if got := subtreeControllers(t, root); len(got) != 0 {
+		t.Fatalf("%s enables %v before any lease request, want nothing", root, got)
+	}
+	out, stderr, end, errMsg := drive(t, a, leaseReq(`c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); cat "$c/memory.max" "$c/pids.max"`), nil)
+	if errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if want := "939524096\n4096\n"; out != want {
+		t.Errorf("the Exec's memory.max and pids.max: %q, want %q", out, want)
+	}
+	for _, dir := range []string{filepath.Dir(root), root} {
+		got := subtreeControllers(t, dir)
+		for _, c := range []string{"pids", "memory"} {
+			if !slices.Contains(got, c) {
+				t.Errorf("%s/cgroup.subtree_control is %v, lacks %s", dir, got, c)
+			}
+		}
+	}
+}
+
+// PR #763 review (F1): memory.max on each e<seq> alone lets tmpfs pages escape it. A
+// page an Exec writes to /tmp or /var outlives the Exec, and once its cgroup is removed
+// the charge moves to the cgroup root, so the next e<seq> would start from zero over it
+// and the guest would OOM globally. The first lease request caps the root as well, with
+// the same values: the limit is hierarchical and counts the reparented charge.
+func TestLeasePrepareCapsTheCgroupRoot(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	fakeMemInfo(t, 1024<<20)
+	if _, stderr, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	for file, want := range map[string]string{"memory.max": "939524096", "pids.max": "4096"} {
+		raw, err := os.ReadFile(filepath.Join(root, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(raw)); got != want {
+			t.Errorf("%s/%s = %q, want %q", root, file, got, want)
+		}
+	}
+}
+
+// Refuse lease service rather than serve an Exec uncapped. A process in the cgroup
+// root makes enabling memory for its children fail (EBUSY, no internal processes): the
+// request fails, the latch stays unset, and once the root is empty the next request
+// enables the controllers and runs.
+func TestLeaseControllersFailureRefusesTheLease(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	sleeper := exec.Command("sleep", "60")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	killed := false
+	kill := func() {
+		if !killed {
+			killed = true
+			_ = sleeper.Process.Kill()
+			_ = sleeper.Wait()
+		}
+	}
+	t.Cleanup(kill) // before removeCgroupTree, which cannot remove a populated root
+	if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte(strconv.Itoa(sleeper.Process.Pid)), 0); err != nil {
+		t.Fatalf("moving sleep into %s: %v", root, err)
+	}
+	_, _, _, errMsg := drive(t, a, leaseReq(`true`), nil)
+	if want := "guest-agent: lease: enable pids and memory in " + root + ": "; !strings.HasPrefix(errMsg, want) {
+		t.Fatalf("error %q, want it to start %q", errMsg, want)
+	}
+	if a.leaseOn.Load() {
+		t.Error("a request refused for want of cgroup caps set the lease latch")
+	}
+	if subs, _ := filepath.Glob(filepath.Join(root, "e*")); len(subs) != 0 {
+		t.Errorf("a refused request left %v", subs)
+	}
+	kill()
+	if _, stderr, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("retry: end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	if !a.leaseOn.Load() {
+		t.Error("the successful retry did not set the lease latch")
+	}
+}
+
+// Without a MemTotal there is no memory.max to give an Exec, so it is refused and its
+// cgroup removed, rather than run uncapped.
+func TestLeaseExecWithoutAMemTotalIsRefused(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	orig := memInfoPath
+	memInfoPath = filepath.Join(t.TempDir(), "missing")
+	t.Cleanup(func() { memInfoPath = orig })
+	_, _, _, errMsg := drive(t, a, leaseReq(`true`), nil)
+	if want := "guest-agent: lease: cgroup caps: "; !strings.HasPrefix(errMsg, want) {
+		t.Fatalf("error %q, want it to start %q", errMsg, want)
+	}
+	if subs, _ := filepath.Glob(filepath.Join(root, "e*")); len(subs) != 0 {
+		t.Errorf("a refused Exec left %v", subs)
+	}
+}
+
+// The first lease request, and no per-Exec request, lowers the agent's oom_score_adj
+// (newLeaseAgent points it at a scratch file).
+func TestLeaseFirstRequestSetsTheAgentOomScoreAdj(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	if _, _, end, errMsg := drive(t, a, Request{Command: "true", CapBytes: 1 << 20}, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("per-Exec request: end %+v, err %q", end, errMsg)
+	}
+	if got, _ := os.ReadFile(agentOomScoreAdjPath); strings.TrimSpace(string(got)) != "0" {
+		t.Fatalf("oom_score_adj %q after a per-Exec request, want 0", got)
+	}
+	if _, _, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("lease request: end %+v, err %q", end, errMsg)
+	}
+	if got, _ := os.ReadFile(agentOomScoreAdjPath); strings.TrimSpace(string(got)) != "-1000" {
+		t.Errorf("oom_score_adj %q after the first lease request, want -1000", got)
+	}
+}
+
+// Not root-only. protectAgentFromOOM writes -1000; a failure is logged, never fatal.
+func TestAgentOomScoreAdj(t *testing.T) {
+	orig := agentOomScoreAdjPath
+	t.Cleanup(func() { agentOomScoreAdjPath = orig })
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	agentOomScoreAdjPath = filepath.Join(t.TempDir(), "oom_score_adj")
+	if err := os.WriteFile(agentOomScoreAdjPath, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	protectAgentFromOOM()
+	if got, _ := os.ReadFile(agentOomScoreAdjPath); string(got) != "-1000" {
+		t.Errorf("oom_score_adj %q, want -1000", got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a successful write logged %q", logs.String())
+	}
+
+	agentOomScoreAdjPath = filepath.Join(t.TempDir(), "missing", "oom_score_adj")
+	protectAgentFromOOM()
+	if want := "guest-agent: lease: oom_score_adj -1000: "; !strings.Contains(logs.String(), want) {
+		t.Errorf("a failed write logged %q, want it to contain %q", logs.String(), want)
+	}
+}
+
+// PR #763 second review (G3): the cgroupfs reads behind the lease OOM hint, on a fake
+// cgroup tree (no root needed): the Exec cgroup's memory.events oom_kill, read before it
+// is removed, then the root's memory.current against its memory.max.
+func TestLeaseMemoryHintReadsTheCgroupFiles(t *testing.T) {
+	root := t.TempDir()
+	e := filepath.Join(root, "e1")
+	if err := os.Mkdir(e, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(e, "memory.events"), "low 0\nhigh 0\nmax 4\noom 1\noom_kill 1\noom_group_kill 0\n")
+	if n := (&execCgroup{path: e}).oomKills(); n != 1 {
+		t.Fatalf("oomKills = %d, want 1", n)
+	}
+	if n := (&execCgroup{path: filepath.Join(root, "e2")}).oomKills(); n != 0 {
+		t.Fatalf("oomKills of a cgroup with no memory.events = %d, want 0", n)
+	}
+
+	write(filepath.Join(root, "memory.current"), "314572800\n")
+	write(filepath.Join(root, "memory.max"), "419430400\n")
+	if got := leaseMemoryHintFor(root, 1); !strings.Contains(got, "300 MiB is still held in the lease") {
+		t.Fatalf("hint = %q, want one naming the 300 MiB the lease holds", got)
+	}
+	if got := leaseMemoryHintFor(root, 0); got != "" {
+		t.Fatalf("hint with no OOM kill = %q, want none", got)
+	}
+	write(filepath.Join(root, "memory.max"), "max\n")
+	if got := leaseMemoryHintFor(root, 1); got != "" {
+		t.Fatalf("hint with an uncapped root = %q, want none", got)
+	}
+	if got := leaseMemoryHintFor(filepath.Join(root, "missing"), 1); got != "" {
+		t.Fatalf("hint with unreadable root files = %q, want none", got)
 	}
 }

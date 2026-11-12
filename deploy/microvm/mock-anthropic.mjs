@@ -35,6 +35,12 @@ const SCRIPTS = {
   },
   // Well inside the supervisor's 20s SHUTDOWN_GRACE_MS, so a drain lets it finish.
   'K8S-SMOKE-DRAIN': { steps: ['sleep 8; echo drained'], done: 'done-k8s-drain' },
+  // Claims 13 and 14, the async leaf consumer. The queued one is as short as a real turn gets, so
+  // five of them over two drain slots finish inside one deadline. The slow one deliberately
+  // OUTLASTS the 20s SHUTDOWN_GRACE_MS: the drain abandons it unacked when its pod is deleted, and
+  // the claim is about the second delivery, so the first attempt must not get to finish.
+  'K8S-SMOKE-ASYNC': { steps: ['echo async-leaf-ok'], done: 'done-k8s-async' },
+  'K8S-SMOKE-ASYNC-SLOW': { steps: ['sleep 40; echo async-slow-ok'], done: 'done-k8s-async-slow' },
   // deploy/k8s/smoke.sh --tier p4 (#424): the write and the read-back, in a microVM workspace.
   'K8S-SMOKE-P4-WRITE': {
     steps: ['uname -r; echo p4-proof | tee proof.txt'],
@@ -137,7 +143,11 @@ export function plan(messages) {
   }
   if (i < 0) return null;
   const text = textOf(messages[i]);
-  const marker = Object.keys(SCRIPTS).find((k) => text.includes(k));
+  // The LONGEST match, not the first: one marker can be a prefix of another (K8S-SMOKE-ASYNC and
+  // K8S-SMOKE-ASYNC-SLOW), and `find` would hand the longer prompt the shorter script.
+  const marker = Object.keys(SCRIPTS)
+    .filter((k) => text.includes(k))
+    .sort((a, b) => b.length - a.length)[0];
   return marker ? { marker, step, results } : null;
 }
 

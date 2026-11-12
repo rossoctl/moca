@@ -3,6 +3,7 @@ package vmpool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -25,18 +26,6 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	if cap <= 0 {
 		cap = OutputCapBytes
 	}
-	// The whole command travels in ONE request frame, which the guest bounds at
-	// ga.MaxFrame. Refused here, before anything is sent: writing nothing and then
-	// waiting for the guest's answer hung the Exec until the caller's own deadline.
-	// Stdin has no such bound; it is split across frames below.
-	req, err := json.Marshal(guestRequest(c, cap, now))
-	if err != nil {
-		return Result{}, fmt.Errorf("encode request: %w", err)
-	}
-	if len(req) > ga.MaxFrame {
-		return Result{}, fmt.Errorf("%w: %d bytes, the guest takes at most %d in one request; send large content as stdin", ErrCommandTooLarge, len(req), ga.MaxFrame)
-	}
-
 	// Close the connection on cancellation so the blocking read below returns. There
 	// is no read deadline on a vsock stream we can rely on across VMMs, and Abort is
 	// GrpcRelayTransport's DECLARED truncation mechanism (transport.ts:57-73) — a read
@@ -48,6 +37,21 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	var once sync.Once
 	closeConn := func() { once.Do(func() { _ = rw.Close() }) }
 	defer closeConn()
+
+	// The whole command travels in ONE request frame, which the guest bounds at
+	// ga.MaxFrame. Refused here, before anything is sent: writing nothing and then
+	// waiting for the guest's answer hung the Exec until the caller's own deadline.
+	// Stdin has no such bound; it is split across frames below. This comes after the
+	// deferred close: this function owns rw, so a refused command still closes it
+	// (the guest's read then ends, and the worker keeps no descriptor for it).
+	req, err := json.Marshal(guestRequest(c, cap, now))
+	if err != nil {
+		return Result{}, fmt.Errorf("encode request: %w", err)
+	}
+	if len(req) > ga.MaxFrame {
+		return Result{}, fmt.Errorf("%w: %d bytes, the guest takes at most %d in one request; send large content as stdin", ErrCommandTooLarge, len(req), ga.MaxFrame)
+	}
+
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -112,7 +116,7 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 				TeardownFailed: e.TeardownFailed,
 			}, nil
 		case ga.KindError:
-			return Result{}, fmt.Errorf("%w: %s", ErrGuest, payload)
+			return Result{}, &guestError{msg: string(payload)}
 		default:
 			// An unknown kind is not something to skip past: it means the two sides
 			// disagree about the protocol, and continuing would report a plausible
@@ -120,6 +124,22 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 			return Result{}, refusal(RefuseShortResponse, "unknown guest frame kind %#x", byte(kind))
 		}
 	}
+}
+
+// guestError is ErrGuest with the agent's KindError message, kept as a field so that
+// guestTimedOut can read it; its text is the "%w: %s" it always was.
+type guestError struct{ msg string }
+
+func (e *guestError) Error() string { return ErrGuest.Error() + ": " + e.msg }
+
+func (e *guestError) Unwrap() error { return ErrGuest }
+
+// guestTimedOut reports whether err is the agent's report that the command's own timeout
+// fired (ga.TimeoutMessage): the guest killed the command, emptied its cgroup and
+// answered, so its VM is as fit for the next lease Exec as after an exit (runLease).
+func guestTimedOut(err error) bool {
+	var ge *guestError
+	return errors.As(err, &ge) && ga.IsTimeoutMessage(ge.msg)
 }
 
 // guestRequest is the request frame's content for c.

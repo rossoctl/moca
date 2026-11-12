@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 )
 
 // MaxFrame bounds one frame's payload. It equals wexec.ChunkSize (32 KiB), so one
@@ -129,3 +131,20 @@ func WriteJSON(w io.Writer, k Kind, v any) error {
 }
 
 func DecodeJSON(p []byte, v any) error { return json.Unmarshal(p, v) }
+
+// TimeoutMessage is the KindError payload the agent sends when a command's own timeout
+// fired, the command having been killed first. On a lease Exec the host keeps the lease
+// when this arrives (vmpool's runLease), so it has this one format.
+func TimeoutMessage(timeoutS uint32) string {
+	return "timeout:" + strconv.FormatUint(uint64(timeoutS), 10)
+}
+
+// IsTimeoutMessage reports whether a KindError payload is a TimeoutMessage.
+func IsTimeoutMessage(msg string) bool {
+	n, ok := strings.CutPrefix(msg, "timeout:")
+	if !ok || n == "" {
+		return false
+	}
+	_, err := strconv.ParseUint(n, 10, 32)
+	return err == nil
+}

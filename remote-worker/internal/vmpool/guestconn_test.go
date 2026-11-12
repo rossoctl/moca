@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,6 +141,33 @@ func TestRunOverConnSurfacesAGuestError(t *testing.T) {
 	}
 }
 
+// PR #763 review (F2): the agent's report that a command's own timeout fired is a guest
+// error like any other on the wire, and guestTimedOut tells it apart; the error text is
+// unchanged.
+func TestRunOverConnMarksTheGuestsOwnTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		payload string
+		timeout bool
+	}{
+		{ga.TimeoutMessage(7), true},
+		{"guest-agent: this agent is dead", false},
+	} {
+		conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+			_ = ga.WriteFrame(rw, ga.KindError, []byte(tc.payload))
+		})
+		_, err := runOverConn(context.Background(), conn, Command{Command: "true", CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+		if !errors.Is(err, ErrGuest) || err.Error() != "vmpool: guest error: "+tc.payload {
+			t.Fatalf("%q: err = %v, want ErrGuest with the message unchanged", tc.payload, err)
+		}
+		if got := guestTimedOut(err); got != tc.timeout {
+			t.Errorf("%q: guestTimedOut = %v, want %v", tc.payload, got, tc.timeout)
+		}
+	}
+	if guestTimedOut(ErrAborted) || guestTimedOut(nil) {
+		t.Error("guestTimedOut is true for an error the guest did not send")
+	}
+}
+
 func TestRunOverConnReportsDroppedBytes(t *testing.T) {
 	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
 		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{ExitCode: 0, DroppedStdout: 4096, DroppedStderr: 12})
@@ -210,6 +238,49 @@ func TestRunOverConnRefusesACommandLargerThanOneFrameAtOnce(t *testing.T) {
 	}
 }
 
+// closeRecorder is an io.ReadWriteCloser that records Close, wrapping one side of a pipe.
+type closeRecorder struct {
+	io.ReadWriteCloser
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closeRecorder) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.ReadWriteCloser.Close()
+}
+
+// runOverConn owns the connection it is given, so a command it refuses as too large
+// still closes it: left open, each refusal kept a vsock descriptor on the worker and
+// left the guest agent blocked reading a request that never came.
+func TestRunOverConnClosesTheConnOnACommandTooLarge(t *testing.T) {
+	host, guest := net.Pipe()
+	guestDone := make(chan error, 1)
+	go func() {
+		defer guest.Close()
+		_, _, err := ga.ReadFrame(guest)
+		guestDone <- err
+	}()
+	rw := &closeRecorder{ReadWriteCloser: host, closed: make(chan struct{})}
+	_, err := runOverConn(context.Background(), rw, Command{Command: strings.Repeat("x", ga.MaxFrame), CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+	if !errors.Is(err, ErrCommandTooLarge) {
+		t.Fatalf("err = %v, want ErrCommandTooLarge", err)
+	}
+	select {
+	case <-rw.closed:
+	default:
+		t.Fatal("runOverConn returned ErrCommandTooLarge without closing the connection")
+	}
+	select {
+	case err := <-guestDone:
+		if err == nil {
+			t.Fatal("the guest read a frame for a command it cannot take")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the guest's read is still blocked after the refusal")
+	}
+}
+
 // The same bound against the REAL guest agent, and its way around: a command just
 // under one frame runs, and content far larger than a frame goes through stdin.
 func TestRunOverConnAgainstTheAgentTakesLargeStdinButNotALargeCommand(t *testing.T) {
@@ -273,5 +344,33 @@ func TestSendRequestCarriesTheLeaseFlags(t *testing.T) {
 	}
 	if !req.Lease || !req.NormaliseWorkspace {
 		t.Fatalf("req = %+v, want both lease flags forwarded", req)
+	}
+}
+
+// TestLeaseRunCarriesHostClock pins spec §8.4's clock correction for lease mode (ruling R5):
+// a lease VM idles for minutes between Execs, so every lease request frame must carry the
+// host clock, not only the first after Resume. The stamp is added here, in runOverConn,
+// which every Run of a real launcher goes through; the fake VM cannot observe it.
+func TestLeaseRunCarriesHostClock(t *testing.T) {
+	now := time.Unix(1762940000, 0)
+	for i, c := range []Command{
+		{Command: "first", Lease: true, NormaliseWorkspace: true, CapBytes: OutputCapBytes},
+		{Command: "later", Lease: true, CapBytes: OutputCapBytes},
+	} {
+		var gotReq ga.Request
+		conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+			gotReq = req
+			_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{})
+		})
+		if _, err := runOverConn(context.Background(), conn, c, &capturingSink{}, now); err != nil {
+			t.Fatalf("Exec %d: runOverConn: %v", i, err)
+		}
+		if !gotReq.Lease || gotReq.NormaliseWorkspace != c.NormaliseWorkspace {
+			t.Fatalf("Exec %d: request flags = lease %v, normalise %v; want %v, %v",
+				i, gotReq.Lease, gotReq.NormaliseWorkspace, true, c.NormaliseWorkspace)
+		}
+		if gotReq.HostUnixNanos <= 0 || gotReq.HostUnixNanos != now.UnixNano() {
+			t.Fatalf("Exec %d: HostUnixNanos = %d, want the host clock %d", i, gotReq.HostUnixNanos, now.UnixNano())
+		}
 	}
 }
