@@ -2147,10 +2147,13 @@ paths:
                   minimum: 30
                   description: |
                     the lease idle timeout in seconds, at most SH_SANDBOX_IDLE_CEILING_S (default
-                    1800); omitted means the worker's default (stored as 0)
+                    1800). Omit it for the worker's default (stored as 0); an explicit 0 is refused
+                    (400).
       responses:
         '201':
-          description: the new sandbox, ready (mode epoch 0)
+          description: |
+            the new sandbox, ready: mode epoch 0 for `per-exec`, 1 for a lease mode, which the worker
+            serves per-Exec until the first LeaseControl set_mode (POST .../mode-token mints one)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Sandbox' }
@@ -2317,7 +2320,8 @@ paths:
       operationId: setSandboxMode
       summary: Change a sandbox's mode
       description: |
-        Owner only, admins included, and only with the owner's user API token: a sandbox token is
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken: a sandbox token is
         refused (401). Every accepted call raises `modeEpoch` by 1, the same mode included, and is
         audited as `sandbox_mode_changed` (who, the old mode, the new mode, the epoch). Sandbox
         tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
@@ -2343,8 +2347,8 @@ paths:
                   type: integer
                   minimum: 30
                   description: |
-                    at most SH_SANDBOX_IDLE_CEILING_S; omitted means the worker's default (stored
-                    as 0), not the previous value
+                    at most SH_SANDBOX_IDLE_CEILING_S. Omit it for the worker's default (stored as
+                    0, not the previous value); an explicit 0 is refused (400).
       responses:
         '200':
           description: the sandbox as changed, and a set-mode token for its new epoch
@@ -2385,9 +2389,10 @@ paths:
       operationId: mintSandboxModeToken
       summary: Mint a set-mode token for the current mode and epoch
       description: |
-        Owner only, admins included, with the owner's user API token. Raises nothing: it signs the
-        mode and epoch the record holds now, for a client to re-send `LeaseControl set_mode` when
-        the worker reports the epoch unknown (lease-mode spec §8.2). No request body.
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken. Raises nothing:
+        it signs the mode and epoch the record holds now, for a client to re-send `LeaseControl
+        set_mode` when the worker reports the epoch unknown (lease-mode spec §8.2). No request body.
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       responses:

@@ -947,9 +947,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       expiresAt: now + cfg.lifetimeS,
       mode,
       idleTimeoutS,
-      // 0 whatever the mode: the worker honours a lease mode only once a set_mode has made the
-      // workspace's epoch known (spec §8.2), and that set_mode carries this epoch.
-      modeEpoch: 0,
+      // Per-exec is epoch 0, as every sandbox made before modes existed is. A lease mode starts at
+      // 1 (ruling R8): the worker serves every epoch-0 Exec as unversioned per-Exec, so a lease at
+      // 0 could never be served. At 1 it is served per-Exec only until the first set_mode makes
+      // the workspace's epoch known (spec §8.2), which the client sends right after create.
+      modeEpoch: mode === 'per-exec' ? 0 : 1,
     };
     const outcome = await store.create(
       rec,
@@ -1048,8 +1050,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   /**
-   * Change the mode (lease-mode spec §8.1). Owner only, admins included, as minting is: a mode is
-   * what the owner's Execs may do. Every accepted call raises the epoch, the same mode included, and
+   * Change the mode (lease-mode spec §8.1). Owner only, as minting is: an admin calling it on
+   * another user's sandbox gets the same 404 as anyone else, since a mode is what the owner's Execs
+   * may do. Every accepted call raises the epoch, the same mode included, and
    * returns a set-mode token for that epoch, for the client's `LeaseControl set_mode`: a downgrade
    * takes effect at once only through it (spec §8.2).
    */
@@ -1061,18 +1064,20 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const b = asRecord(ctx.body);
     const mode = parseMode(b.mode, cfg);
     const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
-    const next = await store.setMode(rec.id, mode, idleTimeoutS);
-    if (!next) {
+    const changed = await store.setMode(rec.id, mode, idleTimeoutS);
+    if (!changed) {
       // Deleted, or past retention, since the read above: answer as a read would now.
       const fresh = await store.get(rec.id, now);
       if (fresh) requireLive(fresh, now);
       throw new CpError('sandbox_not_found', 'no such sandbox');
     }
+    const next = changed.record;
     await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
       subject: ctx.principal!.sub,
       sandboxId: rec.id,
       decision: 'sandbox_mode_changed',
-      fromMode: rec.mode,
+      // From the atomic update, not `rec`: another PUT may have landed since that read (ruling R9).
+      fromMode: changed.previousMode,
       toMode: next.mode,
       modeEpoch: next.modeEpoch,
     });

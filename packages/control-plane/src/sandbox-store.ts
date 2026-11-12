@@ -75,6 +75,12 @@ export interface SandboxLimits {
   retentionS: number;
 }
 
+/** What setMode changed: the record after it, and the mode it held just before, read atomically. */
+export interface SetModeResult {
+  record: SandboxRecord;
+  previousMode: SandboxModeName;
+}
+
 export type CreateOutcome = 'ok' | 'quota_subject' | 'quota_total' | 'name_conflict';
 export type DeleteOutcome = 'deleted' | 'already' | 'not_found';
 
@@ -89,13 +95,14 @@ export interface SandboxStore {
   /**
    * Sets mode and idle timeout and raises modeEpoch by 1, atomically, on EVERY call -- the same mode
    * again included. Stores what it is given: the policy bounds are the caller's. Undefined for a
-   * missing or deleted sandbox.
+   * missing or deleted sandbox. `previousMode` is read in the same atomic step, so an audit of the
+   * change names the mode it actually replaced, even when another setMode raced the caller's read.
    */
   setMode(
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
-  ): Promise<SandboxRecord | undefined>;
+  ): Promise<SetModeResult | undefined>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -171,13 +178,14 @@ export class MemorySandboxStore implements SandboxStore {
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
-  ): Promise<SandboxRecord | undefined> {
+  ): Promise<SetModeResult | undefined> {
     const r = this.recs.get(id);
     if (!r || r.deletedAt !== undefined) return undefined;
+    const previousMode = r.mode;
     r.mode = mode;
     r.idleTimeoutS = idleTimeoutS;
     r.modeEpoch += 1;
-    return strip(r);
+    return { record: strip(r), previousMode };
   }
 }
 

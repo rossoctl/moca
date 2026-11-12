@@ -52,17 +52,18 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       const r = rec({ name: 'm', labels: { project: 'x' } });
       await store.create(r, LIMITS, T0);
       const first = await store.setMode(r.id, 'lease', 600);
-      expect(first).toEqual({ ...r, mode: 'lease', idleTimeoutS: 600, modeEpoch: 1 });
+      expect(first).toEqual({
+        record: { ...r, mode: 'lease', idleTimeoutS: 600, modeEpoch: 1 },
+        previousMode: 'per-exec',
+      });
       // Same mode and timeout: a re-sent set-mode still needs a fresh epoch.
       expect(await store.setMode(r.id, 'lease', 600)).toMatchObject({
-        mode: 'lease',
-        idleTimeoutS: 600,
-        modeEpoch: 2,
+        record: { mode: 'lease', idleTimeoutS: 600, modeEpoch: 2 },
+        previousMode: 'lease',
       });
       expect(await store.setMode(r.id, 'per-exec', 0)).toMatchObject({
-        mode: 'per-exec',
-        idleTimeoutS: 0,
-        modeEpoch: 3,
+        record: { mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 3 },
+        previousMode: 'lease',
       });
       expect(await store.get(r.id, T0)).toEqual({
         ...r,
@@ -81,8 +82,12 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
         store.setMode(r.id, 'lease', 300),
         store.setMode(r.id, 'lease+processes', 900),
       ]);
-      expect(out.map((o) => o?.modeEpoch).sort()).toEqual([1, 2]);
+      expect(out.map((o) => o?.record.modeEpoch).sort()).toEqual([1, 2]);
       expect((await store.get(r.id, T0))?.modeEpoch).toBe(2);
+      // The previous mode is read in the same atomic step: the later call saw the earlier's mode.
+      const [one, two] = [...out].sort((a, b) => a!.record.modeEpoch - b!.record.modeEpoch);
+      expect(one!.previousMode).toBe('per-exec');
+      expect(two!.previousMode).toBe(one!.record.mode);
       await done();
     });
 
@@ -107,7 +112,7 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       const { store, done } = await make();
       const r = rec({ labels: { project: 'p' } });
       await store.create(r, LIMITS, T0);
-      const out = (await store.setMode(r.id, 'lease', 60))!;
+      const out = (await store.setMode(r.id, 'lease', 60))!.record;
       out.labels.project = 'mutated';
       out.modeEpoch = 99;
       expect(await store.get(r.id, T0)).toMatchObject({ labels: { project: 'p' }, modeEpoch: 1 });

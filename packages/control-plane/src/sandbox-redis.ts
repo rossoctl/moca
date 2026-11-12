@@ -7,6 +7,7 @@ import {
   type SandboxModeName,
   type SandboxRecord,
   type SandboxStore,
+  type SetModeResult,
 } from './sandbox-store.js';
 import { subjectHash } from './subject-document.js';
 
@@ -106,9 +107,12 @@ return 'deleted'
 const SET_MODE = `
 if redis.call('EXISTS', KEYS[1]) == 0 then return false end
 if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 1 then return false end
+local prev = redis.call('HGET', KEYS[1], 'mode') or ''
 redis.call('HSET', KEYS[1], 'mode', ARGV[1], 'idleTimeoutS', ARGV[2])
 redis.call('HINCRBY', KEYS[1], 'modeEpoch', 1)
-return redis.call('HGETALL', KEYS[1])
+local out = redis.call('HGETALL', KEYS[1])
+table.insert(out, 1, prev)
+return out
 `;
 
 export class RedisSandboxStore implements SandboxStore {
@@ -224,16 +228,21 @@ export class RedisSandboxStore implements SandboxStore {
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
-  ): Promise<SandboxRecord | undefined> {
+  ): Promise<SetModeResult | undefined> {
     return this.guard(async () => {
-      const flat = (await this.redis.eval(SET_MODE, {
+      // [the mode before the HSET ('' on a legacy hash), ...HGETALL after it]
+      const out = (await this.redis.eval(SET_MODE, {
         keys: [this.recKey(id)],
         arguments: [mode, String(idleTimeoutS)],
       })) as string[] | null;
-      if (!flat) return undefined;
+      if (!out) return undefined;
+      const [prev, ...flat] = out;
       const h: Record<string, string> = {};
       for (let i = 0; i + 1 < flat.length; i += 2) h[flat[i]!] = flat[i + 1]!;
-      return fromHash(h) ?? undefined;
+      const record = fromHash(h);
+      if (!record) return undefined;
+      // Read as fromHash reads a stored mode: absent or unknown is per-exec.
+      return { record, previousMode: isSandboxModeName(prev) ? prev : 'per-exec' };
     });
   }
 }

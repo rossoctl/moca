@@ -149,9 +149,8 @@ describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
     });
     // ...and its first setMode raises the epoch from 0 to 1.
     expect(await store.setMode('sbx-legacy', 'lease', 600)).toMatchObject({
-      mode: 'lease',
-      idleTimeoutS: 600,
-      modeEpoch: 1,
+      record: { mode: 'lease', idleTimeoutS: 600, modeEpoch: 1 },
+      previousMode: 'per-exec',
     });
     await done();
   });
@@ -169,6 +168,11 @@ describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
       mode: 'per-exec',
       idleTimeoutS: 60,
       modeEpoch: 3,
+    });
+    // ...and setMode reports it as it reads: per-exec.
+    expect(await store.setMode('sbx-odd', 'lease', 60)).toMatchObject({
+      record: { mode: 'lease', modeEpoch: 4 },
+      previousMode: 'per-exec',
     });
     await done();
   });

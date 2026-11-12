@@ -163,6 +163,7 @@ export {
   type SandboxLimits,
   type SandboxModeName,
   type SandboxRecord,
+  type SetModeResult,
   type SandboxState,
   type SandboxStore,
   type SandboxView as SandboxStoreView,
