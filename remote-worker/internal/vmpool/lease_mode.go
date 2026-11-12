@@ -3,6 +3,7 @@ package vmpool
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"slices"
 	"time"
 )
@@ -229,12 +230,8 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 		l = rp.lease
 	}
 	toLevel1 := l != nil && m == ModeLease && l.mode == ModeLeaseProcesses
-	if toLevel1 && s.Open != nil {
-		// The open record names the level the lease now runs at, so that a
-		// worker_restart end reports it.
-		o := *s.Open
-		o.Mode = m
-		s.Open = &o
+	if toLevel1 {
+		s = withOpenMode(s, m)
 	}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
 		return false, fmt.Errorf("vmpool: SetMode for %q: %w", key, err)
@@ -244,10 +241,58 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 	}
 	rp.state = s
 	if toLevel1 {
-		l.mode = m // level 1's maximum duration from now on
+		p.setLeaseLevelLocked(rp, l, m) // level 1's maximum duration from now on
 	}
 	// A pin without a lease may be a lease Exec about to install one.
 	return m == ModePerExec && (l != nil || rp.pinned > 0), nil
+}
+
+// relevelLeaseForExecLocked applies a lease level change that reached the worker on the
+// Exec about to run in l, rather than through SetMode (spec §8.2, ruling R18): an upgrade
+// lease -> lease+processes "takes effect from the next Exec that carries the new epoch",
+// and a downgrade whose LeaseControl was lost "lands at the next Exec". routeExec has
+// already stored the Exec's epoch and mode, and execLease's stale-mode check passed, so
+// m is the stored mode. A no-op when l already runs at m. A change to per-exec never
+// gets here: routeExec sends that Exec down the per-Exec path, which ends the lease
+// (mode_change). Caller holds p.mu and rp's gate, with l live and started.
+func (p *pool) relevelLeaseForExecLocked(rp *runPool, l *vmLease, m Mode) {
+	if l.mode == m {
+		return
+	}
+	if s := rp.state; s.Open != nil {
+		s = withOpenMode(s, m)
+		if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
+			// The open record only names the level a worker_restart end reports: losing
+			// it loses that detail, not safety (startLease's trade).
+			log.Printf("vmpool: lease level for %q: %v", rp.key, err)
+		}
+		rp.state = s
+	}
+	p.setLeaseLevelLocked(rp, l, m)
+}
+
+// setLeaseLevelLocked moves the live lease l to lease level m. Its maximum duration is
+// m's from now on, counted from the lease's original start (ruling R11): a lease already
+// past it is expiring at once, and one that is not is no longer expiring. Stopping a
+// level-2 lease's tracked processes on a downgrade is plan 5's. Caller holds p.mu.
+func (p *pool) setLeaseLevelLocked(rp *runPool, l *vmLease, m Mode) {
+	was := l.mode
+	l.mode = m
+	l.expiring = !p.clk.Now().Before(l.started.Add(p.cfg.leaseMaxDuration(m)))
+	log.Printf("vmpool: lease level workspace_key=%q vm=%s mode=%s was=%s expiring=%t",
+		rp.key, vmID(l.vm), m, was, l.expiring)
+}
+
+// withOpenMode is s with its open lease, if any, recorded at mode m, so that a
+// worker_restart end reports the level the lease ran at last. The record is copied, not
+// written through: s may share it with the cached state.
+func withOpenMode(s leaseState, m Mode) leaseState {
+	if s.Open != nil {
+		o := *s.Open
+		o.Mode = m
+		s.Open = &o
+	}
+	return s
 }
 
 const leaseUnsupportedDetail = "lease mode needs the Firecracker arm and a snapshot with the lease-v1 feature"

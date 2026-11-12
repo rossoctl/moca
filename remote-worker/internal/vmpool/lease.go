@@ -262,17 +262,23 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		// spec §11), and not in a fresh one.
 		cut = l.cut
 		v = p.endLeaseLocked(rp, cut)
-	} else if l != nil && !p.clk.Now().Before(p.leaseGraceDeadline(l)) {
-		// Past the grace limit, and the lease sweep has not run since: this Exec would
-		// run only to be cut at the next tick. The lease ends here, and the Exec starts
-		// a fresh one.
-		v, l = p.endLeaseLocked(rp, LeaseEndGraceLimit), nil
 	} else if l != nil {
-		// Each Exec carries the owner's current idle timeout, and a keepalive client's
-		// Exec turns the keepalive rule on, for good (spec §4).
-		l.idle = p.cfg.leaseIdle(e)
-		if e.Keepalive {
-			l.keepalive, l.lastKeepalive = true, p.clk.Now()
+		// A level change carried by this Exec's epoch applies first, under the gate and
+		// before Run, so the grace check below and the sweep from now on use the new
+		// level's maximum duration (ruling R18).
+		p.relevelLeaseForExecLocked(rp, l, mode)
+		if !p.clk.Now().Before(p.leaseGraceDeadline(l)) {
+			// Past the grace limit, and the lease sweep has not run since: this Exec would
+			// run only to be cut at the next tick. The lease ends here, and the Exec starts
+			// a fresh one.
+			v, l = p.endLeaseLocked(rp, LeaseEndGraceLimit), nil
+		} else {
+			// Each Exec carries the owner's current idle timeout, and a keepalive client's
+			// Exec turns the keepalive rule on, for good (spec §4).
+			l.idle = p.cfg.leaseIdle(e)
+			if e.Keepalive {
+				l.keepalive, l.lastKeepalive = true, p.clk.Now()
+			}
 		}
 	}
 	p.mu.Unlock()

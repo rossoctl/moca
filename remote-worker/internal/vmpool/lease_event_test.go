@@ -558,6 +558,99 @@ func TestDowngradeToLeaseKeepsTheLease(t *testing.T) {
 	}
 }
 
+// An upgrade lease -> lease+processes that reaches the worker only on an Exec's newer
+// epoch (no SetMode) takes effect from that Exec (spec §8.2, ruling R18): the lease is
+// kept, at level 2, on disk too, with level 2's 4 h maximum counted from its start.
+func TestExecEpochUpgradeRaisesTheLiveLease(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	vm := vmID(leaseAlive(t, p, "after the first Exec").vm)
+	e := Exec{Command: "two", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 2}
+	mustExec(t, p, "k", e)
+	l := leaseAlive(t, p, "after the upgrade")
+	if got := vmID(l.vm); got != vm || lc.count("restore ") != 1 {
+		t.Fatalf("lease VM = %s (restores %d), want %s kept", got, lc.count("restore "), vm)
+	}
+	if l.mode != ModeLeaseProcesses {
+		t.Fatalf("lease mode = %s, want lease+processes", l.mode)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Open == nil || s.Open.Mode != ModeLeaseProcesses {
+		t.Fatalf("file = %+v, want the open lease recorded at mode lease+processes", s)
+	}
+	step := 240 * time.Second
+	execEvery(t, p, clk, e, step, int(4*time.Hour/step)-1) // +3h56m
+	if leaseExpiring(p) {
+		t.Fatal("expiring before level 2's 4 h")
+	}
+	execEvery(t, p, clk, e, step, 1) // +4h
+	leaseAlive(t, p, "+4h")
+	if !leaseExpiring(p) {
+		t.Fatal("not expiring at level 2's 4 h after an upgrade by Exec epoch")
+	}
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want the one lease throughout", n)
+	}
+}
+
+// An upgrade by Exec epoch on a lease already past level 2's 4 h (but not its grace
+// deadline) makes it expiring at once: it ends at its next idle, max_duration.
+func TestExecEpochUpgradePastLevel2MaxExpiresAtOnce(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	step := 240 * time.Second
+	execEvery(t, p, clk, leaseExec("work", 1), step, int(4*time.Hour/step)+3) // +4h12m, level 1
+	if leaseExpiring(p) {
+		t.Fatal("a level-1 lease expiring at 4h12m")
+	}
+	mustExec(t, p, "k", Exec{Command: "up", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 2})
+	if l := leaseAlive(t, p, "after the upgrade"); l.mode != ModeLeaseProcesses || !l.expiring {
+		t.Fatalf("lease mode = %s, expiring = %v; want lease+processes, expiring at once", l.mode, l.expiring)
+	}
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want the one lease", n)
+	}
+	clk.Advance(299 * time.Second)
+	leaseAlive(t, p, "an expiring lease before its idle")
+	clk.Advance(2 * time.Second)
+	leaseEnded(t, p, lc, LeaseEndMaxDuration)
+}
+
+// A downgrade lease+processes -> lease that reaches the worker only on an Exec's newer
+// epoch (LeaseControl lost) lands at that Exec (spec §8.2, ruling R18), as SetMode's does
+// (ruling R11): the lease is kept, at level 1, with level 1's 8 h from its start.
+func TestExecEpochDowngradeLowersTheLiveLease(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLeaseProcesses, 1)
+	mustExec(t, p, "k", Exec{Command: "one", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 1})
+	vm := vmID(leaseAlive(t, p, "after the first Exec").vm)
+	e := leaseExec("two", 2)
+	mustExec(t, p, "k", e)
+	l := leaseAlive(t, p, "after the downgrade")
+	if got := vmID(l.vm); got != vm || lc.count("restore ") != 1 {
+		t.Fatalf("lease VM = %s (restores %d), want %s kept", got, lc.count("restore "), vm)
+	}
+	if l.mode != ModeLease {
+		t.Fatalf("lease mode = %s, want lease", l.mode)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Open == nil || s.Open.Mode != ModeLease {
+		t.Fatalf("file = %+v, want the open lease recorded at mode lease", s)
+	}
+	step := 240 * time.Second
+	execEvery(t, p, clk, e, step, int(4*time.Hour/step)+1) // +4h4m
+	if leaseExpiring(p) {
+		t.Fatal("expiring at level 2's 4 h after a downgrade by Exec epoch")
+	}
+	execEvery(t, p, clk, e, step, int(4*time.Hour/step)) // +8h4m
+	if !leaseExpiring(p) {
+		t.Fatal("not expiring at level 1's 8 h")
+	}
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want the one lease throughout", n)
+	}
+}
+
 func TestEndLeaseRefusesOtherReasons(t *testing.T) {
 	p, _, _ := leasePool(t, nil)
 	mustSetMode(t, p, "k", ModeLease, 1)
