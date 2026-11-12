@@ -92,12 +92,26 @@ func (a *Agent) leaseHarden() error {
 // children, the e<seq> cgroups, so each can be capped (lease_caps.go). The root's parent
 // must enable them first; in the guest that parent is the cgroup2 root, which the
 // no-internal-processes rule exempts, and the cgroup root holds no process of its own.
-// One of the first lease request's one-time steps, not leasePrepare's: a per-Exec VM
-// restored from the same snapshot keeps its cgroup tree as it was. Idempotent.
+// It then caps the root itself with an Exec's memory.max and pids.max (lease_caps.go):
+// tmpfs pages an Exec leaves behind are charged to the root once its cgroup is gone, and
+// the root's limit is what keeps the next Exec's OOM inside its own cgroup. MemTotal is
+// read once here; a balloon that changes it later moves each e<seq>'s cap, not the
+// root's. One of the first lease request's one-time steps, not leasePrepare's: a
+// per-Exec VM restored from the same snapshot keeps its cgroup tree as it was.
+// Idempotent.
 func enableExecControllers(root string) error {
 	for _, dir := range []string{filepath.Dir(root), root} {
 		if err := os.WriteFile(filepath.Join(dir, "cgroup.subtree_control"), []byte("+pids +memory"), 0); err != nil {
 			return fmt.Errorf("guest-agent: lease: enable pids and memory in %s: %w", dir, err)
+		}
+	}
+	memMax, err := execMemoryMax()
+	if err != nil {
+		return err
+	}
+	for _, w := range execCgroupCapFiles(memMax) {
+		if err := os.WriteFile(filepath.Join(root, w.file), []byte(w.val), 0); err != nil {
+			return fmt.Errorf("guest-agent: lease: cgroup caps on %s: %w", root, err)
 		}
 	}
 	return nil
@@ -410,10 +424,7 @@ func newExecCgroup(root string, seq uint64) (*execCgroup, error) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		return nil, fmt.Errorf("guest-agent: lease: cgroup: %w", err)
 	}
-	for _, w := range []struct{ file, val string }{
-		{"memory.max", strconv.FormatInt(memMax, 10)},
-		{"pids.max", strconv.Itoa(execCgroupPidsMax)},
-	} {
+	for _, w := range execCgroupCapFiles(memMax) {
 		if err := os.WriteFile(filepath.Join(path, w.file), []byte(w.val), 0); err != nil {
 			_ = os.Remove(path)
 			return nil, fmt.Errorf("guest-agent: lease: cgroup caps: %w", err)

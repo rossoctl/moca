@@ -1003,6 +1003,14 @@ poll:
 // with a non-zero exit, and the next Exec in the same lease runs with the agent alive as
 // PID 1 -- no guest panic, no agent_dead (spec §16; the caps are the guest agent's
 // memory.max and pids.max on each lease Exec's cgroup).
+//
+// Then the tmpfs case (PR #763 review): one Exec leaves ~60% of the guest's memory in
+// /tmp and /var, whose pages outlive it and are charged to the cgroup root once its own
+// cgroup is gone. The next Exec allocates past what remains. With the root capped as well
+// it is OOM-killed inside the cgroup tree (the root's memory.events oom count rises);
+// with only the e<seq> capped it would start from zero over the tmpfs charge and run the
+// guest into a global OOM, which a guest whose one other process is PID 1 at -1000 does
+// not survive.
 func TestGateLeaseExecCaps(t *testing.T) {
 	requireKVM(t)
 	g := newLeaseGate(t, nil)
@@ -1037,6 +1045,49 @@ while True: b.append(b"x" * (16 << 20))'`},
 		if g.leaseVM(t, key) != v {
 			t.Fatalf("after the %s: the lease runs in another VM", c.name)
 		}
+	}
+
+	// The root's cap, and its oom count before the tmpfs case. memory.events is
+	// hierarchical, so the OOM case above has already counted there.
+	const rootCg = "/sys/fs/cgroup/moca-execs"
+	rootOOMs := func(at string) int {
+		t.Helper()
+		out := g.run(t, key, gateLease(`awk '$1 == "oom" {print $2}' `+rootCg+`/memory.events`, 1))
+		n, err := strconv.Atoi(strings.TrimSpace(out))
+		if err != nil {
+			t.Fatalf("%s: %s/memory.events oom = %q: %v", at, rootCg, out, err)
+		}
+		return n
+	}
+	if got := strings.TrimSpace(g.run(t, key, gateLease("cat "+rootCg+"/memory.max", 1))); got == "max" || got == "" {
+		t.Fatalf("%s/memory.max = %q, want the Exec cap: the cgroup root is uncapped", rootCg, got)
+	}
+	before := rootOOMs("before the tmpfs case")
+	// /tmp and /var are unsized tmpfs mounts, each limited to half the guest's memory by
+	// default, so the ~60% is split 45/15 between them.
+	fill := `kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+dd if=/dev/zero of=/tmp/fill bs=1M count=$((kb * 45 / 100 / 1024)) 2>/dev/null &&
+dd if=/dev/zero of=/var/fill bs=1M count=$((kb * 15 / 100 / 1024)) 2>/dev/null && echo filled`
+	if got := g.run(t, key, gateLease(fill, 1)); got != "filled\n" {
+		t.Fatalf("filling /tmp and /var: stdout %q, want filled", got)
+	}
+	res, _, stderr, err := g.exec(key, gateLease(`python3 -c 'b = []
+while True: b.append(b"x" * (16 << 20))'`, 1))
+	if err != nil {
+		t.Fatalf("tmpfs: Exec error %v, want the allocation OOM-killed inside its cgroup", err)
+	}
+	if res.ExitCode == 0 || res.TeardownFailed {
+		t.Fatalf("tmpfs: exit %d, teardown_failed %v, want a non-zero exit and a clean teardown", res.ExitCode, res.TeardownFailed)
+	}
+	t.Logf("tmpfs: exit %d, stderr %.300q", res.ExitCode, stderr)
+	if got := g.run(t, key, gateLease("cat /proc/1/comm", 1)); got != "agent\n" {
+		t.Fatalf("after the tmpfs case: PID 1 is %q, want the agent", got)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("after the tmpfs case: the lease runs in another VM")
+	}
+	if after := rootOOMs("after the tmpfs case"); after <= before {
+		t.Fatalf("%s/memory.events oom %d -> %d: the allocation was not stopped by the cgroup tree's limit", rootCg, before, after)
 	}
 	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
 		t.Fatalf("LeaseEnds = %v, want none: the caps end the Exec, not the lease", s.LeaseEnds)

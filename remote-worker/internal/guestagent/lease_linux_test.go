@@ -1146,6 +1146,28 @@ func TestLeasePrepareEnablesPidsAndMemory(t *testing.T) {
 	}
 }
 
+// PR #763 review (F1): memory.max on each e<seq> alone lets tmpfs pages escape it. A
+// page an Exec writes to /tmp or /var outlives the Exec, and once its cgroup is removed
+// the charge moves to the cgroup root, so the next e<seq> would start from zero over it
+// and the guest would OOM globally. The first lease request caps the root as well, with
+// the same values: the limit is hierarchical and counts the reparented charge.
+func TestLeasePrepareCapsTheCgroupRoot(t *testing.T) {
+	a, root := newLeaseAgent(t)
+	fakeMemInfo(t, 1024<<20)
+	if _, stderr, end, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q, stderr %q", end, errMsg, stderr)
+	}
+	for file, want := range map[string]string{"memory.max": "939524096", "pids.max": "4096"} {
+		raw, err := os.ReadFile(filepath.Join(root, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(raw)); got != want {
+			t.Errorf("%s/%s = %q, want %q", root, file, got, want)
+		}
+	}
+}
+
 // Refuse lease service rather than serve an Exec uncapped. A process in the cgroup
 // root makes enabling memory for its children fail (EBUSY, no internal processes): the
 // request fails, the latch stays unset, and once the root is empty the next request

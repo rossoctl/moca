@@ -80,7 +80,7 @@ var manualOnlyGates = map[string]string{
 	"TestGateLeaseReclaim":            "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; measured lease charges under a squeezed budget",
 	"TestGateLeaseSecrets":            "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; reads the guest's RAM from the host through the VMM's /proc/<pid>/mem, SANDBOX_TOKEN forwarded for its live-token half",
 	"TestGateLeaseFreePageReporting":  "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; a snapshot with balloon-fpr-v1, and the memfile mlocked as the worker does",
-	"TestGateLeaseExecCaps":           "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; a fork bomb and an OOM against the guest agent's Exec cgroup caps",
+	"TestGateLeaseExecCaps":           "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; a fork bomb, an OOM, and tmpfs left by one Exec under the next's allocation, against the guest agent's Exec cgroup caps and the cgroup root's",
 }
 
 // gateCoverage is how a gate is gated, as the code says rather than as a map claims.

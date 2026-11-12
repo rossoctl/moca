@@ -43,3 +43,19 @@ func TestParseMemTotal(t *testing.T) {
 		}
 	}
 }
+
+// PR #763 review (F1): the same two caps go on every e<seq> and on the cgroup root above
+// them, the root's so that tmpfs pages an earlier Exec left (charged to the root once
+// their cgroup is gone) count against the next Exec's limit.
+func TestExecCgroupCapFiles(t *testing.T) {
+	got := execCgroupCapFiles(939524096)
+	want := []cgroupCap{{"memory.max", "939524096"}, {"pids.max", "4096"}}
+	if len(got) != len(want) {
+		t.Fatalf("execCgroupCapFiles = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execCgroupCapFiles = %v, want %v", got, want)
+		}
+	}
+}
