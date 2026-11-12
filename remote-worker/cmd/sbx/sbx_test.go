@@ -77,6 +77,12 @@ func execErr(msg string) *pb.ExecEvent {
 
 var testCfg = config{addr: "x", sandboxID: "moca_microvm_0", key: "ws-k", token: "tok", timeoutS: 600}
 
+// callID is call with the process's sleep, jitter and req_ids and the given clock; under testCfg (busyRetry 0) it never retries.
+func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op, command string, stdin []byte, stdout, stderr io.Writer, now func() time.Time) int {
+	var cur atomic.Uint64
+	return call(ctx, c, cfg, id, op, command, stdin, stdout, stderr, callEnv{now: now, sleep: sleepCtx, newID: reqID, jitter: jitterOf, cur: &cur})
+}
+
 func run(t *testing.T, c *fakeClient, cfg config) (int, string, string) {
 	t.Helper()
 	var out, errw bytes.Buffer
@@ -239,12 +245,14 @@ func TestConfig(t *testing.T) {
 
 // scriptedClient answers each Exec with the next script (an Exec-call error, or a stream), and records every req_id.
 type scriptedClient struct {
-	scripts []*fakeClient
-	ids     []uint64
+	scripts  []*fakeClient
+	ids      []uint64
+	timeouts []uint32
 }
 
 func (s *scriptedClient) Exec(ctx context.Context, in *pb.ExecRequest, o ...grpc.CallOption) (grpc.ServerStreamingClient[pb.ExecEvent], error) {
 	s.ids = append(s.ids, in.GetExec().GetReqId())
+	s.timeouts = append(s.timeouts, in.GetExec().GetTimeoutS())
 	next := s.scripts[0]
 	if len(s.scripts) > 1 {
 		s.scripts = s.scripts[1:]
@@ -566,5 +574,23 @@ func TestTokenExpiredDuringExec(t *testing.T) {
 		if code, out, errw := run(t, c, testCfg); code != 125 || out != "" || errw != tc.want {
 			t.Errorf("message %q: got code=%d out=%q err=%q, want %q", tc.msg, code, out, errw, tc.want)
 		}
+	}
+}
+
+// A retry starts later, with less of the token left, so each attempt caps its own timeout: exp 400 leaves 240 s at
+// t=100 and, after the first retry's 1 s backoff, 239 s at t=101.
+func TestEachAttemptCapsItsTimeout(t *testing.T) {
+	c := &scriptedClient{scripts: []*fakeClient{
+		{stream: &fakeStream{events: []*pb.ExecEvent{execErr(budgetRefusal)}}},
+		{stream: &fakeStream{events: []*pb.ExecEvent{end(0, false)}}},
+	}}
+	cfg := busyCfg(t)
+	cfg.token = jwt(`{"iat":100,"exp":400}`)
+	code, errw, _ := retryRun(t, c, cfg, nil)
+	if code != 0 || len(c.timeouts) != 2 || c.timeouts[0] != 240 || c.timeouts[1] != 239 {
+		t.Fatalf("code=%d timeouts sent=%v", code, c.timeouts)
+	}
+	if !strings.HasSuffix(errw, "sbx: timeout capped at 239 s, the sandbox token's lifetime minus 60 s\n") {
+		t.Fatalf("stderr %q", errw)
 	}
 }

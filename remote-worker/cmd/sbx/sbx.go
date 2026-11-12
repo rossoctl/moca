@@ -400,15 +400,11 @@ const (
 	exitInterrupted = 130
 )
 
-// callID runs one command and turns its outcome into the process's exit code, writing output and
-// the SBX_LOG line the way sbx.py does: 124 for a timeout, 125 for any other sandbox failure,
-// 137 for a command killed by a signal (a negative exit code), else the command's own code.
-func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op, command string, stdin []byte, stdout, stderr io.Writer, now func() time.Time) int {
-	var cur atomic.Uint64
-	return call(ctx, c, cfg, id, op, command, stdin, stdout, stderr, callEnv{now: now, sleep: sleepCtx, newID: reqID, jitter: jitterOf, cur: &cur})
-}
-
-// call is callID with its environment. A command the sandbox refused at capacity before anything of it ran
+// call runs one command and turns its outcome into the process's exit code, writing output and the SBX_LOG
+// records the way sbx.py does: the command's own code, 128 + n for a command killed by signal n (outcome), 124 for
+// a timeout, 125 for any other sandbox failure, 75 for a command refused at capacity until SBX_BUSY_RETRY_S ran out
+// (nothing ran), and 130 when interrupted while waiting to retry. Each attempt's timeout is capped to the token
+// (capTimeout). A command the sandbox refused at capacity before anything of it ran
 // (refusalClass) is retried, with backoff, until SBX_BUSY_RETRY_S of waiting is spent (a template worker at its
 // memory budget refuses a warm acquire while two reps' VMs run). Nothing else is ever retried: a command that may
 // have started is never run twice.
@@ -462,7 +458,10 @@ func call(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op
 	}
 }
 
-// outcome writes a finished (or failed) Exec's output and returns its exit code.
+// outcome writes a finished (or failed) Exec's output and returns its exit code: 125 (exitFailed) for a failure,
+// whose message goes to stderr; else the output, then the timeout-capped line when capped, and 124 (exitTimedOut)
+// for a command that ran out of timeoutS (the output so far is written), 128 + n for one killed by signal n (an
+// exit code of -n), or the command's own code.
 func outcome(r result, err error, timeoutS uint32, capped bool, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "sbx: %s\n", err.Error())
