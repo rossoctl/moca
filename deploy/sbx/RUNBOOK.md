@@ -166,6 +166,10 @@ subject from the settings, check its `storeEnrolled` in `mocactl sbx admin subje
 the API once the settings no longer name it. An admin can't revoke its own role.
 A subject holding an admin grant can't be unenrolled while it does (`409 admin_granted`): revoke
 the role first.
+If the store's `members.json` can't be read (damaged by hand, a bad restore), the subjects in the
+settings keep working, with a warning in the control plane's log, while API enrollments and grants
+don't count (those subjects are refused) until the file is restored: the settings stay the way back
+in.
 
 **What this changes for an operator:**
 

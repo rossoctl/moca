@@ -126,10 +126,14 @@ two cluster writes for one API call.
 
 - **The store:** `members.json` in `SH_PROVENANCE_DIR` (`packages/control-plane/src/members.ts`),
   read through an in-memory copy refreshed when the file's mtime changes, so the per-request
-  evaluation costs one `stat` at most. A change appends its record before the file is replaced: a
+  evaluation costs one `open` and `fstat` of the file (a parse only when it changed), and none for
+  an admin named in the settings. A change appends its record before the file is replaced: a
   crash between the two leaves a record for a change the store does not hold, never the reverse.
-- **Per request:** the router (`server.ts`) replaces a verified token's `roles` with
-  `MembersStore.rolesNow` and sets `enrolled` from the store; a token never carries `enrolled`. The
+- **Per request:** the router (`server.ts`) replaces a verified token's `roles` with the subject's
+  roles now and sets `enrolled` from the store, both from one read (`MembersStore.membershipNow`); a
+  token never carries `enrolled`. If `members.json` can't be read (damaged by hand, a bad restore, an
+  I/O error), the settings' subjects are still answered from the settings (a warning is logged, and
+  an API grant or store enrollment doesn't count until it is fixed); everyone else fails closed. The
   device login, the test-user login, the refresh and the egress owner check use the same evaluation
   (`membershipNow`, `handler-util.ts`). Without a store (no `SH_PROVENANCE_DIR`), the token's claims
   stand, as before.

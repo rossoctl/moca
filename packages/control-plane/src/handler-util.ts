@@ -46,8 +46,10 @@ export const defaultNewId = (): string => randomUUID();
 export const isAdmin = (p: TokenClaims): boolean => (p.roles ?? []).includes('admin');
 
 /**
- * A subject's roles and store enrollment NOW. Without a members store (no
- * SH_PROVENANCE_DIR) it is `fallbackRoles` and not enrolled by a store, as before API enrollment.
+ * A subject's roles and store enrollment NOW (`MembersStore.membershipNow`: one read of the store,
+ * none for a settings admin, and the settings' subjects still answered when it can't be read).
+ * Without a members store (no SH_PROVENANCE_DIR) it is `fallbackRoles` and not enrolled by a store,
+ * as before API enrollment.
  */
 export async function membershipNow(
   deps: { members?: MembersStore; now(): number },
@@ -55,11 +57,7 @@ export async function membershipNow(
   fallbackRoles: string[],
 ): Promise<{ roles: string[]; enrolled: boolean }> {
   if (!deps.members) return { roles: fallbackRoles, enrolled: false };
-  const nowS = seconds(deps);
-  return {
-    roles: await deps.members.rolesNow(subject, nowS),
-    enrolled: await deps.members.storeEnrolled(subject),
-  };
+  return deps.members.membershipNow(subject, seconds(deps));
 }
 
 /**

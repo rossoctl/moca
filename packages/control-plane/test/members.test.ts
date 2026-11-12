@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { MembersStore } from '../src/members.js';
 import { ProvenanceStore, verifyExport } from '../src/provenance.js';
@@ -50,8 +50,7 @@ const nowS = () => Math.floor(now / 1000);
 
 /** The router's per-request step, as server.ts runs it, for handler-level tests. */
 async function asRequest(d: ReturnType<typeof setup>, p: TokenClaims): Promise<TokenClaims> {
-  const roles = await d.members.rolesNow(p.sub, nowS());
-  return { ...p, roles, enrolled: await d.members.storeEnrolled(p.sub) };
+  return { ...p, ...(await d.members.membershipNow(p.sub, nowS())) };
 }
 const call = async (
   d: ReturnType<typeof setup>,
@@ -370,6 +369,51 @@ describe('the members stream verifies offline (spec §4)', () => {
     await expect(
       d.provenance.append({ stream: 'members', kind: 'create', subject: 'a', body: {} }),
     ).rejects.toThrow(/does not belong/);
+  });
+});
+
+describe('per-request evaluation from one read (spec §8)', () => {
+  it('reads the store once per request, and not at all for a settings admin', async () => {
+    const d = setup();
+    await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, {});
+    const reads = vi.spyOn(d.members, 'doc');
+    expect(await d.members.membershipNow(CAROL, nowS())).toEqual({
+      roles: ['admin'],
+      enrolled: false,
+    });
+    expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockClear();
+    expect(await d.members.membershipNow(ENV_ADMIN, nowS())).toEqual({
+      roles: ['admin'],
+      enrolled: false,
+    });
+    expect(reads).not.toHaveBeenCalled();
+  });
+
+  it("still answers the settings' subjects when members.json can't be read; others fail closed", async () => {
+    const d = setup();
+    const a = who(ENV_ADMIN);
+    await call(d, 'enrollSubject', a, { subject: CAROL }, { enrolled: true });
+    await call(d, 'grantAdmin', a, { subject: ALLOWED }, {});
+    const file = (d.members as unknown as { path: string }).path;
+    writeFileSync(file, '{"members": {'); // truncated
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await d.members.membershipNow(ENV_ADMIN, nowS())).toEqual({
+        roles: ['admin'],
+        enrolled: false,
+      });
+      // The allow list still enrolls ALLOWED; its API grant doesn't count until the file is fixed.
+      expect(await d.members.membershipNow(ALLOWED, nowS())).toEqual({
+        roles: [],
+        enrolled: false,
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('answered from the settings'));
+      await call(d, 'listTemplates', who(ALLOWED));
+      await expect(d.members.membershipNow(CAROL, nowS())).rejects.toThrow();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

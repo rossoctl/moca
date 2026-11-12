@@ -13,7 +13,9 @@ import type { ProvenanceStore } from './provenance.js';
  * Roles are evaluated PER REQUEST from the bootstrap lists and this store (`rolesNow`), not taken
  * from a token's claims, so a grant, a revoke or a lapsed `until` takes effect at the subject's next
  * request. Reads come from an in-memory copy, re-read only when the file's mtime changes, so the
- * per-request evaluation costs one stat at most.
+ * per-request evaluation (`membershipNow`) costs one open and fstat of the file, none for an admin
+ * named in the settings. A subject the settings name is still answered when the file can't be read
+ * (the settings stay the recovery path); anyone else fails closed.
  */
 
 export const ADMIN = 'admin';
@@ -175,7 +177,43 @@ export class MembersStore {
    */
   async rolesNow(subject: string, nowS: number): Promise<string[]> {
     if (this.bootstrap.admins.includes(subject)) return [ADMIN];
-    const m = (await this.doc()).members[subject];
+    return this.storeRoles(subject, (await this.doc()).members[subject], nowS);
+  }
+
+  /**
+   * The subject's roles and the store's own enrollment now, for the per-request evaluation, from ONE
+   * read of the store. An admin named in the settings is answered from the settings without reading
+   * the file at all. A subject on the allow list is answered from the settings (no API role, no
+   * store enrollment; the allow list still enrolls it) when the file can't be read, with a warning,
+   * so a damaged members.json never locks out the settings' subjects. Anyone else fails closed: the
+   * read's error propagates.
+   */
+  async membershipNow(
+    subject: string,
+    nowS: number,
+  ): Promise<{ roles: string[]; enrolled: boolean }> {
+    if (this.bootstrap.admins.includes(subject)) return { roles: [ADMIN], enrolled: false };
+    let doc: MembersDoc;
+    try {
+      doc = await this.doc();
+    } catch (err) {
+      if (!this.bootstrap.allowed.includes(subject)) throw err;
+      const why = (err as NodeJS.ErrnoException).code ?? (err as Error).name;
+      console.warn(
+        `[control-plane] members.json can't be read (${why}): ${subject} answered from the settings alone`,
+      );
+      return { roles: [], enrolled: false };
+    }
+    const m = doc.members[subject];
+    return { roles: await this.storeRoles(subject, m, nowS), enrolled: m?.enrolled === true };
+  }
+
+  /** A store grant's roles now; a grant first seen lapsed has its `expired` record written once. */
+  private async storeRoles(
+    subject: string,
+    m: Member | undefined,
+    nowS: number,
+  ): Promise<string[]> {
     const g = m?.roles.find((r) => r.role === ADMIN);
     if (!g) return [];
     if (g.until === undefined || g.until > nowS) return [ADMIN];
