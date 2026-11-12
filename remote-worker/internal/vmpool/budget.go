@@ -21,6 +21,22 @@ type standbyFootprinter interface {
 	StandbyBytes() (int64, error)
 }
 
+// leaseCgrouper is implemented by a launcher's VM when its cgroup can be taken out of the
+// cgroup pool for a lease (spec §6, "Not from the cgroup pool"): LeaseCgroup rewrites the
+// VM's cgroup memory.max to maxBytes and marks the cgroup to be retired, not released, when
+// the VM is reaped. Firecracker only -- lease mode is Firecracker-only.
+type leaseCgrouper interface {
+	LeaseCgroup(maxBytes int64) error
+}
+
+// leaseFootprinter is implemented by a launcher's VM when it can report a running lease VM's
+// host footprint: its cgroup's memory.current, read fresh on EVERY call. Unlike
+// standbyFootprinter's paused standby, a lease VM runs between reads, so a cached value would
+// be stale by construction.
+type leaseFootprinter interface {
+	LeaseBytes() (int64, error)
+}
+
 // admitOrEvictLocked is admitLocked for the two call sites whose refusal is
 // USER-VISIBLE: acquire's warming charge and runLocked's new key. Caller holds p.mu.
 //
