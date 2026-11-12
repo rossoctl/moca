@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { open as openFile, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { open as openFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ProvenanceStore } from './provenance.js';
 
@@ -78,11 +78,15 @@ export class MembersStore {
     return next;
   }
 
-  /** The store as on disk, through the cache (re-read when the file's mtime moved). */
+  /**
+   * The store as on disk, through the cache (re-read when the file's mtime moved). The mtime and the
+   * bytes come from ONE open file: the file is replaced by rename, so the handle always reads the
+   * version whose mtime it reported, never a newer one swapped in between a check and a read.
+   */
   async doc(): Promise<MembersDoc> {
-    let mtimeMs: number;
+    let fh;
     try {
-      mtimeMs = (await stat(this.path)).mtimeMs;
+      fh = await openFile(this.path, 'r');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.cache = { members: {} };
@@ -91,22 +95,31 @@ export class MembersStore {
       }
       throw err;
     }
-    if (mtimeMs !== this.cacheMtimeMs) {
-      const parsed = JSON.parse(await readFile(this.path, 'utf8')) as MembersDoc;
-      if (!parsed || typeof parsed.members !== 'object') throw new Error('members.json is invalid');
-      this.cache = parsed;
-      this.cacheMtimeMs = mtimeMs;
+    try {
+      const { mtimeMs } = await fh.stat();
+      if (mtimeMs !== this.cacheMtimeMs) {
+        const parsed = JSON.parse(await fh.readFile('utf8')) as MembersDoc;
+        if (!parsed || typeof parsed.members !== 'object')
+          throw new Error('members.json is invalid');
+        this.cache = parsed;
+        this.cacheMtimeMs = mtimeMs;
+      }
+    } finally {
+      await fh.close();
     }
     return this.cache;
   }
 
   private async write(doc: MembersDoc): Promise<void> {
     const tmp = `${this.path}.${randomUUID()}.tmp`;
+    let mtimeMs: number;
     try {
       const fh = await openFile(tmp, 'wx', 0o600);
       try {
         await fh.writeFile(JSON.stringify(doc));
         await fh.sync();
+        // The file's own mtime, from its handle: rename keeps it, so it is the mtime doc() will see.
+        mtimeMs = (await fh.stat()).mtimeMs;
       } finally {
         await fh.close();
       }
@@ -116,7 +129,7 @@ export class MembersStore {
       throw err;
     }
     this.cache = doc;
-    this.cacheMtimeMs = (await stat(this.path)).mtimeMs;
+    this.cacheMtimeMs = mtimeMs;
   }
 
   /**
