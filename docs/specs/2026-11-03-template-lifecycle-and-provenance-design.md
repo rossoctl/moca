@@ -3,7 +3,7 @@
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
 self-serve create (#737), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and
-placement by host memory (#744), §7,
+placement by host memory (#744), §6.5, the pacing of cold starts (#745), §7,
 provenance (#730), and §8, policy (#737); §5 and §9-§12 (the owner's and the admin's actions,
 tracing, validation, order of work, decisions) come with the issues that build them, and keep their
 numbers so a reference to a section stays valid.
@@ -446,7 +446,8 @@ So a client can name a template and go: on a deployment with template hosts
 (`SH_TEMPLATE_HOSTS`), `POST /v1/sandboxes` on a registered build that is not `active` takes the
 caller's lease (as `activate`, recorded with `reason: first_use`; its refusals `no_active_slot`,
 `template_unavailable` and `quota_exceeded` answer as they would) and answers
-`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries.
+`409 template_not_active` with `readiness` and `Retry-After` (30 s, or the build's place in its
+host's start line, §6.5); the client retries.
 `activate: false` starts nothing. No sandbox record is kept while waiting, so a wait never uses the
 live-sandbox cap. The gate applies whenever template hosts are configured, also before any of them
 has reported: until a host's first inventory, an attached worker serves and an absent one is
@@ -457,6 +458,76 @@ why; `mocactl sbx templates activate ID --wait` before a batch avoids the first 
 Known limits: the budget a worker is installed with still caps how many commands it runs at once
 (it is sized at install, not from the lease); a first use waits for one worker start, seconds to
 minutes by the snapshot's size and the host's disk.
+
+### 6.5 Pacing cold starts: the start limit, start lines and the idle grace
+
+**Why.** A build is `active` once its worker attaches to the relay. Before that the worker verifies
+its snapshot, maps and locks its whole memory file (`PinMemoryFile`, mmap + mlock, which reads the
+whole file from disk unless it is cached), restores a probe VM, and attaches. A host agent that
+starts every wanted worker in one pass (the units are `Type=simple`, so each start returns at once)
+has N workers read N memory files at the same time, so each start takes about
+`N × file size ÷ disk throughput`, and readiness showed only `activating`. And a worker stopped as
+soon as its last lease ended, so a template used again minutes later started cold again.
+
+Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
+125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): one cold start alone
+took about 37 s, a wave of four about 3-4 minutes, and with 28 started at once the last attached
+after more than twenty minutes. Width does not raise the disk's throughput: a start limit bounds
+each start's wait and makes the line visible; it does not shorten the total.
+
+- **The start limit, in the host agent:** `SBX_START_CONCURRENCY` (default 4; at least 1, 0
+  refused) caps the workers _starting_ (started, not yet attached) at once; it is not
+  `activeLimit`, which caps running ones. Each wanted run starts up to the free slots, in the
+  wanted answer's order (oldest lease first), leaves the rest for the next run (15 s), and never
+  waits for a start to finish. The wanted answer gains `starting: [buildId]`, the builds of `run`
+  whose worker the relay does not show attached; with an older control plane that sends none, the
+  agent counts as starting its own starts younger than `SBX_START_WINDOW_S` (default 300) whose
+  unit runs and which are still wanted, so the limit holds without a control-plane change.
+- **The measured start time:** the agent keeps its starts (`start-times`, 0600) and takes a start
+  as done when its build is still in `run` but no longer in `starting`; it reports
+  `startConcurrency` and `startSeconds`, the mean of its last ten starts (start to attach, to within
+  the 15 s poll), in the inventory's limits. `startSeconds` is absent before a start is done.
+- **Start lines, in the control plane:** on a host that reports `startConcurrency`, its placed,
+  wanted builds not attached, in the wanted order, form its start line: the first
+  `startConcurrency` are starting, the rest `queued`. A build in the line is `activating` with
+  `queued` and `queuePosition` (1-based). `Retry-After` on `409 template_not_active` becomes
+  `max(1, ceil(ceil(position / startConcurrency) × startSeconds))` once the host has measured a
+  start, else 30 s; on first use the facts are read again after the lease is taken, so the request's
+  own build has its place. The `hosts` block shows
+  `start: {concurrency, seconds, starting, queued}`. A queued activation stays `activating` longer
+  than before: a client polls with a timeout sized for the whole line (`mocactl sbx templates activate --wait` sizes its default as
+  `(ceil(position / concurrency) + 1) × startSeconds × 1.25`, at least 1800 s, at most 4 h;
+  `--timeout` wins).
+- **Start-aware placement:** after §6.2's memory test, a host already running the build's worker
+  (from its agent's `runningWorkers`: attached or graced) is preferred, whether or not it reports
+  memory figures.
+- **The idle grace (optional):** `SBX_IDLE_GRACE_S` (default 0, off; at most 86400), reported as
+  `limits.idleGraceSeconds`. After a build's last lease ends (`lastLeaseEnd`: a release's time, or
+  an expired lease's end), its running worker, with no live sandbox, stays in `run` until that end
+  plus the grace, listed in the wanted answer's `graced`, if the host has room under `activeLimit`
+  and its memory headroom (a graced worker counts as running there). Its readiness is
+  `deactivating` with `graced: true` and `gracedUntil`; a use within the grace finds it attached:
+  first use takes a lease and is served at once. The agent never starts a graced build; it only
+  keeps one running. The grace ends early for:
+  - a release with `stopNow: true` (`POST /v1/templates/{id}/deactivate`), which leaves a build with
+    no lease stopped at the next poll (its `stopNowAt`), so a benchmark can still measure each
+    task's cold start; the `deactivate` record says `stopNow: true`;
+  - a wanted build that needs the slot or the memory: the soonest-ending graced workers give way, as
+    few as fit it (a host that fits without displacing comes first). It is the only stop of a
+    worker nobody asked to stop, and only of one with no lease: the wanted answer re-reads the
+    build under the activation lock before listing it in `stop`, and a build leased since keeps its
+    worker. A host over its memory with its graced workers lets the soonest-ending go first.
+- **The shared lock:** the activation lock (§6.3) lives in its own module (`activation-lock.ts`), so
+  the wanted answer's re-check and activation share it; no call to a host runs under it.
+- **Compatibility:** an older agent sends none of the new limits: its host has no start line, its
+  Retry-After is 30 s, and it has no grace. An older control plane ignores them and sends no
+  `starting` (the agent counts its own starts) and no `graced`. Roll out the control plane before
+  setting `SBX_IDLE_GRACE_S` on a host.
+
+Known limits: the memory file's pin still reads the whole file at every cold start; prefetching
+memory files, or reporting what a host has cached, is out of scope. `startSeconds` is accurate to
+the 15 s poll. The grace is a host setting, not a client's choice. The activation lease is not the
+sandbox lease mode: a graced worker can hold lease-mode VMs only while their sandboxes live.
 
 ## 7. Provenance
 

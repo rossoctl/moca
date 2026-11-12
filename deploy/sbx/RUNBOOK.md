@@ -604,7 +604,8 @@ registers or rejects each built build by policy; nobody approves it. It needs:
 - on the host, `/etc/sbx/host-agent.env` (`SBX_API_URL`, `SBX_HOST_ID`, `SBX_KERNEL`, optionally
   `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB`, `SBX_BUILD_CONCURRENCY`, `SBX_ACTIVE_LIMIT`,
   `SBX_IDLE_LIMIT_S`, `SBX_MEM_FLOOR_MIB`, `SBX_MEM_PRESSURE_LIMIT` (see "Memory-aware placement"
-  below), `SBX_REGISTRY`), the token alone in `/etc/sbx/host-agent.token` (0600, root),
+  below), `SBX_START_CONCURRENCY`, `SBX_START_WINDOW_S`, `SBX_IDLE_GRACE_S` (see "Cold-start
+  pacing" below), `SBX_REGISTRY`), the token alone in `/etc/sbx/host-agent.token` (0600, root),
   the script at `/usr/local/libexec/sbx-host-agent.sh`, and in `/etc/systemd/system`
   `sbx-host-agent.service` with its timer (every 2 minutes) and `sbx-host-agent-wanted.service`
   with its timer (every 15 s, the wanted state alone); then `systemctl daemon-reload` and
@@ -624,7 +625,8 @@ against their sha256 before building with it. The token stays in a 0600 header f
 or the log. A bad setting is refused (exit 2) before any call. Each run ends with one summary line,
 `{"agent":"summary","claimed","built","failed","started","stopped","errors"}`, in the unit's
 journal, with `"psi":"absent"`, `"sliceUnread":[...]` and `"memfileMismatch":<n>` when there is
-something to say about memory.
+something to say about memory, `"startQueued":<n>` when the start limit left wanted workers for a
+later run, and `"graced":<n>` when the idle grace keeps any.
 
 **Nothing that names where an image lives leaves the host.** A failed build's reason and its
 uploaded log are redacted (`SBX_REGISTRY` exactly, then URLs, registry hosts, IP addresses and
@@ -720,6 +722,100 @@ pending)`, `used` being its running workers' cost, their VMs' committed memory a
   than it (openapi 1.8.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
   refuses to start a build whose memory file does not match. Upgrade either first; list both in the
   rollout.
+
+**Cold-start pacing** ([template lifecycle spec](../../docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§6.5): before it attaches to the relay, a worker reads and locks its whole snapshot memory file, and
+workers that start together share the host's disk. So the agent starts at most
+**`SBX_START_CONCURRENCY`** workers at once (default 4).
+
+- **What it caps:** workers **starting** (started, not attached yet), not running ones. It is not
+  `SBX_ACTIVE_LIMIT`, which caps running workers. Each run starts at most `SBX_START_CONCURRENCY`
+  less those still starting, oldest lease first, and leaves the rest for a later run (every 15 s);
+  the summary counts them (`"startQueued":<n>`). A run never waits for a start to finish:
+  `systemctl start` of the worker unit returns at once.
+- **The setting:** a whole number, at least 1, in `host-agent.env` (0600), never in argv. **0 is
+  refused** (exit 2, before any call), as is a leading zero or anything that is not a number.
+- **Where "starting" comes from:** the control plane's wanted answer lists, in `starting`, the
+  builds placed on this host whose worker the relay does not show attached. The limit is the
+  agent's, so it holds **with an older control plane too** (openapi before 1.9.0, no `starting`):
+  the agent then counts as starting the workers it started less than `SBX_START_WINDOW_S` ago
+  (default 300) that are still running and wanted. Its starts are kept in `/srv/sbx/start-times`
+  (0600).
+- **What it bounds:** each start's wait, not the total. The disk sets the total, at any width.
+  Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
+  125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): one cold start alone
+  took about 37 s, a wave of four about 3-4 minutes, and with 28 started at once the last attached
+  after more than twenty minutes. Raise the limit only on a faster disk.
+- **What the agent reports:** `startConcurrency` and `startSeconds` in the inventory's limits.
+  `startSeconds` is the mean of its last 10 cold starts, start to attach, to within the 15 s poll
+  (kept in `/srv/sbx/start-seconds`, 0600); it is absent until a start is done, and always with an
+  older control plane. The hosts block of `GET /v1/templates` shows
+  `start: {concurrency, seconds, starting, queued}` (`mocactl sbx hosts`).
+- **What a client sees:** a build waiting for a start slot is `activating` with `queued: true` and
+  its `queuePosition` (1-based, on its host). `409 template_not_active`'s Retry-After becomes
+  `ceil(ceil(position / concurrency) × startSeconds)` once the host has measured a start, else 30 s
+  as before. A queued activation stays `activating` longer than before, so **a client polls
+  readiness with a timeout sized for the host's whole start line**;
+  `mocactl sbx templates activate --wait` sizes its default from it
+  (`(ceil(position / concurrency) + 1) × startSeconds × 1.25`, at least 1800 s, at most 4 h;
+  `--timeout` wins).
+- **Measure cold starts with the page cache dropped** (`echo 3 > /proc/sys/vm/drop_caches`, or
+  after a reboot): a start right after its build, or after a recent stop, reads its memory file
+  from the cache and looks much faster than a cold one.
+- **Placement prefers a host already running the build's worker** (no start at all), whether or
+  not that host reports its memory.
+- **The one change on upgrade:** a host whose agent is upgraded, with no new settings and whatever
+  its control plane, now starts at most 4 workers per run instead of every wanted one at once; a
+  wide activation takes several 15 s runs to start everything, and a client's first Retry-After is
+  the old 30 s until the host has measured a start. A control plane older than 1.9.0 ignores the
+  new inventory fields; an older agent sends none, and the control plane then shows no queue and
+  answers Retry-After as before.
+
+**The idle grace** (part of cold-start pacing, openapi 1.9.0): a released worker can stay up for a
+while, so a template used again soon is warm (no memory-file read at all).
+
+- **The setting:** `SBX_IDLE_GRACE_S` in `host-agent.env` (0600), never in argv. **Default 0: off**,
+  and the host behaves exactly as before: a build with no lease and no live sandbox is stopped at
+  the next poll. A whole number of seconds, 0 to 86400, no leading zero; anything else is refused
+  (exit 2, before any call). The inventory reports it (`limits.idleGraceSeconds`). It is a host
+  setting, not a client's choice.
+- **When to use it:** long enough to cover the gaps between a workload's rounds on the same
+  templates. Leave it off where each task's cold start is what is measured, or use `stopNow`
+  (below).
+- **What it does:** after a build's last lease ends (its release, or the lease running out), the
+  control plane keeps it in the wanted answer's `run` until that end plus `SBX_IDLE_GRACE_S`, and
+  lists it in `graced`. It is graced only if its worker runs on the host (`runningWorkers`), has no
+  live sandbox, and the host has room for it: a slot under `SBX_ACTIVE_LIMIT` and memory-aware
+  placement's headroom. The agent never starts a graced build; it only keeps one running. A use
+  within the grace finds the worker attached and gets a sandbox at once (first use takes a lease;
+  no `409`).
+- **A wanted build that needs the slot** (or the memory) **displaces** the graced worker that ends
+  soonest: it goes to `stop`. That is the only stop of a worker nobody asked to stop, and only of
+  one with no lease. **At stop time the control plane re-checks that it is still unleased** (under
+  the activation lock): a lease taken in between keeps it running. The agent logs such a stop as
+  `{"agent":"stopped","worker":"<id>","was":"graced"}`.
+- **`stopNow`, to force cold:** `POST /v1/templates/{id}/deactivate {"stopNow": true}`
+  (`mocactl sbx templates deactivate ID --stop-now`) releases the caller's lease and, if no lease
+  remains, skips the grace: the worker is stopped at the next poll. On a build already in its grace
+  it ends the grace (`released: 0`). The `deactivate` record carries `stopNow: true`. Use it for
+  one-by-one comparisons, so each task still measures its cold start.
+- **Counting releases in the records:** a host's worker reports share record kinds with clients'
+  calls: `attached` and `refused` are written as `activate`, `detached` as `deactivate`, each with
+  subject `host:<id>` and the report in `body.event`. So a reader counting a client's releases or
+  activations filters on the subject (or on `body.event` being absent).
+- **What you see:** the agent's summary line gains `"graced":<n>` when it keeps any; the hosts block
+  of `GET /v1/templates` shows `idleGraceSeconds` and `graced` (a count) per host with a grace
+  (`mocactl sbx hosts`); a graced build reads `deactivating` with `graced: true` and `gracedUntil`
+  (epoch seconds; `mocactl sbx templates show ID` says "graced until ...").
+- **What it costs:** a graced worker still pins its **whole memory file** (it is a running worker).
+  Memory-aware placement counts it in `memory.usedMib`, and it holds a slot of `SBX_ACTIVE_LIMIT`
+  until a wanted build needs one. A host over its memory with its graced workers lets the
+  soonest-ending go first.
+- **Version skew:** an agent without the setting reports no `idleGraceSeconds`, which the control
+  plane takes as 0 (off). A control plane older than 1.9.0 ignores the field, sends no `graced`,
+  and stops released workers as before; the agent then just applies `stop`. **Roll out the control
+  plane before setting `SBX_IDLE_GRACE_S` on a host**: the order is the control plane, then the
+  agent, then the setting.
 
 **A registered build's worker is still installed by an operator.** The agent builds, reports, and
 starts and stops installed workers; it installs none, and a wanted build whose worker is not
