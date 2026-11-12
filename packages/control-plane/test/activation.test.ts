@@ -427,6 +427,79 @@ describe('activation on first use (§6.4)', () => {
     expect(SPEC.seed).toMatch(/\S/);
   });
 
+  it("a pinned session's span is on its build's chain: created, then deleted (§7.1)", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    await activate(d, 't1');
+    const act = (await d.provenance!.chain('template/t1'))
+      .filter((x) => x.kind === 'activate')
+      .at(-1)!;
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    const sid = (r.body as Body).sessionId as string;
+    const created = (await d.provenance!.chain('template/t1')).at(-1)!;
+    expect(created).toMatchObject({
+      kind: 'session',
+      subject: alice.sub,
+      body: {
+        sessionId: sid,
+        buildId: hash('1'),
+        templateManifestHash: hash('1'),
+        lease: recordDigestOf(act),
+        state: 'created',
+      },
+    });
+    // Its end, on the same chain, once.
+    now += 5000;
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+    const ended = (await d.provenance!.chain('template/t1')).at(-1)!;
+    expect(ended).toMatchObject({
+      kind: 'session',
+      subject: alice.sub,
+      body: {
+        sessionId: sid,
+        buildId: hash('1'),
+        state: 'terminated',
+        reason: 'deleted',
+        endedAt: Math.floor(now / 1000),
+      },
+    });
+    expect(
+      (await d.provenance!.chain('template/t1')).filter((x) => x.kind === 'session'),
+    ).toHaveLength(2);
+  });
+
+  it('a session with no lease cites none, and an untemplated session writes no record', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await seedCredential(d);
+    // No host agent has reported: no activation gate, so no lease.
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: 't1' } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'session',
+      body: { lease: null, state: 'created' },
+    });
+    const before = (await d.provenance!.chain('template/t1')).length;
+    const plain = await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+    expect(plain.status).toBe(201);
+    await HANDLERS.deleteSession!(
+      ctx({ principal: alice, params: { id: (plain.body as Body).sessionId as string } }),
+      d,
+    );
+    expect(await d.provenance!.chain('template/t1')).toHaveLength(before);
+  });
+
   it('a build without a seed sends none, even where the env list declares one', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

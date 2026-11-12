@@ -72,7 +72,7 @@ import {
   type SandboxTemplate,
 } from './sandbox-config.js';
 import type { ProvenanceStore } from './provenance.js';
-import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
+import type { PresenceReader, TemplateBuild, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
@@ -958,11 +958,11 @@ export const HANDLERS: Record<string, Handler> = {
     // With a template store, a session's template resolves through the catalog as a sandbox's does
     // (combined control plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
     // caller may see, and activation on first use (§6.4) where host agents run the workers.
-    let resolved: { id: string; buildId: string } | undefined;
+    let resolved: { id: string; buildId: string; build: TemplateBuild } | undefined;
     if (requestedTemplate !== undefined && deps.templates && deps.provenance) {
       const t = await resolveForUse(deps, p, requestedTemplate);
       await requireActive(deps, p, t, activateField !== false);
-      resolved = { id: t.id, buildId: t.buildId };
+      resolved = { id: t.id, buildId: t.buildId, build: t.build };
     }
     const templates = deps.config.sessionTemplates;
     if (requestedTemplate !== undefined && !resolved && !templates) {
@@ -1036,6 +1036,24 @@ export const HANDLERS: Record<string, Handler> = {
     resolveAuditLog(deps)({ event: 'audit', ...sessionCreatedEntry });
     await deps.index.audit(sessionCreatedEntry);
     const iat = seconds(deps);
+    // The session on its build's chain (lifecycle spec §7.1), as a sandbox is: its lease is the
+    // caller's live lease on the build, as the digest of the activate record that granted it (null:
+    // no lease, e.g. no host agents).
+    if (resolved && deps.provenance) {
+      const live = (resolved.build.leases ?? []).find((l) => l.subject === p.sub && l.until > iat);
+      await deps.provenance.append({
+        stream: `template/${resolved.id}`,
+        kind: 'session',
+        subject: p.sub,
+        body: {
+          sessionId,
+          buildId: resolved.buildId,
+          templateManifestHash: resolved.build.status === 'registered' ? resolved.buildId : null,
+          lease: live?.record ?? null,
+          state: 'created',
+        },
+      });
+    }
     return {
       status: 201,
       body: {
@@ -1172,6 +1190,27 @@ export const HANDLERS: Record<string, Handler> = {
     };
     resolveAuditLog(deps)({ event: 'audit', ...deletedEntry });
     await deps.index.audit(deletedEntry);
+    // Its end on the build's chain (§7.1): with a store and provenance, a session's build was
+    // resolved through the store at creation, so a `created` record precedes this one.
+    if (
+      deps.provenance &&
+      deps.templates &&
+      rec.sandboxTemplate &&
+      rec.sandboxBuildId?.startsWith('sha256:')
+    ) {
+      await deps.provenance.append({
+        stream: `template/${rec.sandboxTemplate}`,
+        kind: 'session',
+        subject: ctx.principal?.sub ?? rec.owner,
+        body: {
+          sessionId: rec.sessionId,
+          buildId: rec.sandboxBuildId,
+          state: 'terminated',
+          reason: 'deleted',
+          endedAt: seconds(deps),
+        },
+      });
+    }
     // 202 rather than pretending a synchronous delete happened; a sweeper reaps what the in-flight
     // turn writes on its way out (spec §7.3).
     return { status: inFlight ? 202 : 204, body: undefined };
