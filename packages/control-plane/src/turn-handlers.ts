@@ -198,23 +198,17 @@ export const TURN_HANDLERS: Record<string, Handler> = {
   getTurn: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const turn = await turnOnSession(ctx, deps, rec);
-    // Only once the turn is TERMINAL. The result key is per SESSION and shared with the synchronous
-    // path, so a session that ran an interactive turn and then submitted an async one would report
-    // `queued` beside the PREVIOUS turn's result, and a caller polling for completion would read it
-    // as this turn's. Nothing is written for an async turn until it finishes, so there is no partial
-    // result being withheld here (§4.4).
+    // The key carries THIS turn's id, so a sibling turn on the same session -- §4.3 permits one per
+    // distinct `idempotencyKey` -- can no longer answer in its place, and a `cancelled` turn (which
+    // never ran, §4.5) simply has no key to read.
     //
-    // `cancelled` is terminal but NEVER RAN: §4.5 defines it as a caller's withdrawal of a turn that
-    // was still `queued`, so no leaf ever started and nothing was ever written for it. Terminality
-    // alone would therefore hand back whatever the session's PREVIOUS turn left in the shared result
-    // key -- the same stale-result conflation the paragraph above refuses for `queued`, reappearing
-    // on the one terminal state it does not apply to.
-    const ran = isTerminalState(turn.state) && turn.state !== 'cancelled';
-    const result = ran
-      ? deps.leafResults
-        ? await readLeafResult(deps.leafResults, turn.sessionId)
-        : null
-      : null;
+    // Still gated on terminality, for one narrow window: a worker writes the result, then dies before
+    // `finalize`. The record is `running` until the reaper replaces the result with `failed/error`, so
+    // the record's own `state` stays the single source of truth for status (§4.4).
+    const result =
+      isTerminalState(turn.state) && deps.leafResults
+        ? await readLeafResult(deps.leafResults, turn.sessionId, turn.turnId)
+        : null;
     return {
       status: 200,
       body: {

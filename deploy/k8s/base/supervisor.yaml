@@ -82,6 +82,20 @@ spec:
               valueFrom: { secretKeyRef: { name: moca-mu1, key: SH_SESSION_TOKEN_PUBLIC_KEYS } }
             - { name: SH_CONTROL_PLANE_URL, value: 'http://moca-control-plane.moca.svc:8080' }
             - { name: SH_REQUIRE_AUTH, value: 'true' }
+            # #389: 1 makes every worker also drain the async leaf queue. `optional`, like the tier
+            # keys above: a moca-settings written by an older setup.sh still boots, and unset is off.
+            - name: SH_ASYNC_DRAIN
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: SH_ASYNC_DRAIN, optional: true } }
+            # The turn record's TTL is derived from this (+1 h margin); it must match the control
+            # plane's copy (LEAF_RESULT_TTL_SECONDS there), or the worker's own async leaf results
+            # expire on a different schedule than the record that explains them.
+            - name: LEAF_RESULT_TTL_SECONDS
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: LEAF_RESULT_TTL_SECONDS, optional: true },
+                }
             # Optional /workloads on Context Service (docs/context-service.md). Off unless the
             # operator creates the moca-context-service ConfigMap and Secret.
             - name: MOCA_CONTEXT_WORKLOADS_ENABLED

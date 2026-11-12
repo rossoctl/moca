@@ -32,6 +32,41 @@ export function isTerminalState(s: TurnState): boolean {
   return s !== 'queued' && s !== 'running';
 }
 
+/**
+ * How much longer the turn record lives than its result (§5.1). The record must OUTLIVE the
+ * result: a caller polling a finished turn whose record expired first would read `404 not
+ * submitted` for a turn that in fact succeeded. One hour, longer than any plausible gap between a
+ * result being read and the poll that follows it.
+ *
+ * Here rather than in `main.ts` because the WORKER finalizes turns too (#389), and a record
+ * finalized by a worker must get the same expiry as one finalized by the control plane. This module
+ * is pure, so a worker can import the number instead of re-typing it.
+ */
+export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
+
+/**
+ * `LEAF_RESULT_TTL_SECONDS`, the lifetime of a leaf result, read the SAME way in every process that
+ * writes one. Beside the margin above and for the same reason: the control plane and the async
+ * worker both write results, under the same keys, from the same variable, so a second parse of it
+ * is a second meaning. A malformed value refuses to boot rather than becoming `NaN` -- `writeResult`
+ * passes this straight to Redis as `EX`, and `EX NaN` is `ERR value is not an integer`, so a typo'd
+ * TTL would turn every result write into a runtime error instead of a startup one. Zero is refused
+ * too: Redis rejects `EX 0`, so "no retention" is not something this knob can express.
+ */
+export function resultTtlSeconds(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): number {
+  // TRIMMED first. The value reaches a worker from a systemd EnvironmentFile or a ConfigMap, where
+  // `LEAF_RESULT_TTL_SECONDS=86400 ` and a CRLF line ending are both ordinary operator slips -- and
+  // this parse runs at module load, so refusing one takes down a tier that was serving sync traffic
+  // happily before the knob was ever set. Whitespace-only is therefore the same as unset.
+  const v = env.LEAF_RESULT_TTL_SECONDS?.trim();
+  if (v === undefined || v === '') return 86_400;
+  if (!/^[1-9][0-9]*$/.test(v))
+    throw new Error(`LEAF_RESULT_TTL_SECONDS must be a positive integer (seconds), got "${v}"`);
+  return Number(v);
+}
+
 /** Per-turn caps, resolved at submission and stored (§4.3). Enforcement is the worker's (#389). */
 export interface TurnCaps {
   tokens?: number;
@@ -129,8 +164,8 @@ const str = (v: unknown): boolean => typeof v === 'string' && v.length > 0;
  * Validate a submission body (§4.1) into the envelope to store. The three kinds mirror the data
  * plane's `isLeafEnvelope` / `isPromptEnvelope` / `isSolveEnvelope` (knative-server server.ts) so one
  * body is accepted by both paths. `sessionId` is NOT read from the body: the handler supplies the
- * path's session id, which is what keeps the leaf's result under the key `cascadeDelete` already
- * cleans up (`leaf:result:<sid>`, ownership.ts dataKeys).
+ * path's session id, which is what keeps the leaf's result under a key this session's delete can
+ * reach (`leaf:result:<sid>:<turnId>`, TurnStore.deleteSessionTurns).
  */
 export function parseTurnSubmission(body: unknown): ParsedSubmission {
   const b = asRecord(body);

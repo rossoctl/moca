@@ -1,6 +1,20 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { connect } from 'node:net';
 import { once } from 'node:events';
+import { createClient } from 'redis';
+import { RedisWorkQueue } from '@moca/work-queue';
+// All four from @moca/control-plane, which is where the queue NAMES live too (turn-queue.ts:10-11):
+// they are exported "because a mismatch between submitter and consumer is a submission that
+// enqueues successfully and is never drained -- silent, not loud."
+import {
+  LEAF_QUEUE_GROUP,
+  LEAF_QUEUE_STREAM,
+  RedisTurnQueue,
+  TurnStore,
+  turnKey,
+  type CpRedisLike,
+} from '@moca/control-plane';
+import { resultKey } from '@moca/harness/leaf-result-store';
 import { readConfig } from '../src/config.js';
 import { startSupervisor, DEFAULT_WORKER_ENTRY, type Supervisor } from '../src/main.js';
 
@@ -244,4 +258,130 @@ describe('the real worker, forked from DEFAULT_WORKER_ENTRY', () => {
       held.destroy();
     }
   }, 60_000);
+});
+
+/**
+ * §9.2: "the live crash test proves the one thing injected timings cannot: that the supervisor
+ * restarts a worker whose leaf was mid-flight and the leaf completes once."
+ *
+ * Gated, following live-relay.test.ts's convention. It needs a real Redis, a reachable control
+ * plane that will mint for SH_EXCHANGE_TOKEN, a real model credential for the leaf, and it waits
+ * out the PRODUCTION minIdleMs of 90 s -- so it can never gate CI. Run it by hand whenever the
+ * drain changes:
+ *
+ *   SH_ASYNC_LIVE_CRASH=1 REDIS_URL=redis://... SH_CONTROL_PLANE_URL=http://... \
+ *   SH_EXCHANGE_TOKEN=... ANTHROPIC_API_KEY=... \
+ *     packages/supervisor/node_modules/.bin/vitest run test/real-worker.integration.test.ts
+ *
+ * The turn is seeded straight into Redis rather than submitted over the control plane's public
+ * API: from the worker's side the two are identical (a record plus a queue entry), and seeding
+ * keeps the env surface to the four variables above instead of also needing an API key.
+ */
+const liveCrash = process.env.SH_ASYNC_LIVE_CRASH === '1';
+
+describe.skipIf(!liveCrash)('async crash recovery, live (SH_ASYNC_LIVE_CRASH=1)', () => {
+  it('restarts a worker killed mid-leaf, and the leaf completes exactly once', async () => {
+    const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+    const client = createClient({ url: redisUrl });
+    await client.connect();
+    const turns = new TurnStore(client as unknown as CpRedisLike, {
+      resultTtlSeconds: 3600,
+      ttlMarginSeconds: 60,
+    });
+    // The queue is read-only here: `WorkQueue` has no `enqueue` on purpose (turn-queue.ts:17-21),
+    // so the submission goes through the real submitter, exactly as the control plane does it.
+    const queue = new RedisWorkQueue(client as never, LEAF_QUEUE_STREAM, LEAF_QUEUE_GROUP);
+    await queue.ensureGroup();
+    const submitter = new RedisTurnQueue(client as unknown as CpRedisLike, LEAF_QUEUE_STREAM);
+
+    const turnId = `t-live-${Date.now()}`;
+    const sessionId = `sid-live-${Date.now()}`;
+    try {
+      // One worker, not two: with SH_WORKERS=2 the test cannot know WHICH slot claimed, and
+      // killing the wrong pid proves nothing. One slot makes the claimant unambiguous.
+      ({ sup, restore } = await withRealWorker(
+        { SH_WORKERS: '1', SH_TURNS_PER_WORKER: '1' },
+        {
+          SH_ASYNC_DRAIN: '1',
+          REDIS_URL: redisUrl,
+          SH_STATS_INTERVAL_MS: '200',
+        },
+      ));
+      await waitReady(sup!);
+      const firstPid = sup!.pool.telemetry()[0]!.pid;
+
+      // The same twelve-field record `submitTurn` writes (turn-record.ts:33-57). `credentialName`,
+      // never a credential VALUE: the record and every audit entry carry the NAME (§5.1, §7.2).
+      await turns.create({
+        turnId,
+        owner: 'live-crash',
+        tenant: 'default',
+        sessionId,
+        cfg: '',
+        credentialName: process.env.SH_LIVE_CREDENTIAL_NAME ?? 'default',
+        caps: {},
+        idempotencyKey: sessionId,
+        envelope: { sessionId, kind: 'prompt', prompt: 'say the single word: ok' },
+        state: 'queued',
+        attempts: 0,
+        createdAt: Date.now(),
+      });
+      await submitter.enqueue(turnId);
+
+      // `running` means both halves happened: the loop claimed the entry AND the control plane
+      // minted for it. Killing before that would test the queue, not the crash path.
+      await vi.waitFor(async () => expect((await turns.get(turnId))?.state).toBe('running'), {
+        timeout: 60_000,
+        interval: 500,
+      });
+
+      // SIGKILL, not SIGTERM: §6.3's graceful drain is covered with injected timings in
+      // async-drain.integration.test.ts. This is the path where NO cleanup runs at all -- no
+      // ack, no record update, no XGROUP DELCONSUMER, nothing.
+      process.kill(firstPid!, 'SIGKILL');
+
+      // The supervisor's own job: fork a replacement. A new pid in the same slot is the proof.
+      await vi.waitFor(
+        () => {
+          const pid = sup!.pool.telemetry()[0]!.pid;
+          expect(pid).toBeGreaterThan(0);
+          expect(pid).not.toBe(firstPid);
+        },
+        { timeout: 60_000, interval: 500 },
+      );
+      await waitReady(sup!);
+
+      // Then the wait this test exists for: the entry is pending and unacked, and nothing can
+      // happen until the PRODUCTION minIdleMs of 90 s elapses. No injected timing shortens it.
+      await vi.waitFor(async () => expect((await turns.get(turnId))?.state).toBe('done'), {
+        timeout: 300_000,
+        interval: 2_000,
+      });
+
+      // "Exactly once", which is the whole assertion. A redelivery that ran the leaf TWICE also
+      // ends with the record `done`: that test would pass while the owner was billed twice and
+      // the session mutated twice. The counts are per-process and the first process's died with
+      // it, so the replacement must show precisely one claim, and it must be a reclaim.
+      //
+      // Read from aggregates(), not telemetry(): asyncClaims/asyncReclaims/asyncDeadLetters are
+      // summed pool-wide (pool.ts's own doc on aggregates()), not carried on the per-worker
+      // WorkerTelemetry row. With SH_WORKERS=1 the sum is this one worker's count.
+      const agg = sup!.pool.aggregates();
+      expect(agg.asyncClaims).toBe(1);
+      expect(agg.asyncReclaims).toBe(1);
+      expect(agg.asyncDeadLetters).toBe(0);
+      expect(await queue.pending()).toBe(0); // acked, so no third delivery is coming
+      // Under the RECORD's session id AND this turn's id -- Task 4's fix for the leafResultKey
+      // divergence, plus the per-turn key §4.3 needs. On a live rig this is also the assertion that
+      // a poller would have been able to read.
+      expect(JSON.parse((await client.get(resultKey(sessionId, turnId)))!)).toMatchObject({
+        sessionId,
+      });
+    } finally {
+      // No `queue.close()`: RedisWorkQueue takes an injected client and has none (Task 1). The
+      // opener closes, which is this block.
+      await client.del([turnKey(turnId), resultKey(sessionId, turnId)]).catch(() => {});
+      if (client.isOpen) await client.close();
+    }
+  }, 420_000);
 });

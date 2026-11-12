@@ -11,6 +11,8 @@ import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
 // call it itself because it never goes through startServer. See its use below.
 import { prepareServerProcess } from './server-process.js';
 import { attachTurnSlot } from './turn-slot.js';
+// #389: arm the async leaf drain on this worker, sharing its admission cap with sync /turn.
+import { armAsyncLeafWorker, type AsyncWorkerStats } from './async-worker.js';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -28,6 +30,14 @@ export type WorkerToSupervisor =
       leasesHeld?: number;
       leasePoolSize?: number;
       fileOpP95Ms?: number;
+      /** §7's async metrics. Advisory on the same terms as the rest of this row. The two gauge
+       * fields are sent by slot 0 only (§9.2). */
+      asyncClaims?: number;
+      asyncReclaims?: number;
+      asyncDeadLetters?: number;
+      asyncClaimDeniedFull?: number;
+      asyncQueueDepth?: number;
+      asyncOldestAgeMs?: number;
     };
 
 /**
@@ -36,14 +46,24 @@ export type WorkerToSupervisor =
  */
 export type SupervisorToWorker = { type: 'conn'; head?: string } | { type: 'drain' };
 
-/** The two turn routes `server.ts:641` matches, by exact URL equality as it does. */
-const TURN_PATHS = new Set(['/turn', '/v1/turn']);
+/**
+ * Every route that runs a leaf, matched by exact URL equality as `server.ts` does: the two turn
+ * routes (`server.ts:1348`) and the three sync leaf routes (`server.ts:1277`), including the
+ * deprecated `/run-leaf`, which is still served and so still consumes a worker.
+ *
+ * All five reach `runLeaf` (`server.ts:1105`), so all five must take an admission slot. Before
+ * #389 only the first two did, which meant a sync leaf ran outside the count the supervisor
+ * balances on -- and, now that the async drain loop decides whether to claim from that same count
+ * (§5.3), a missing route would silently over-admit rather than merely under-report.
+ */
+const TURN_PATHS = new Set(['/turn', '/v1/turn', '/runs', '/run-leaf', '/v1/runs']);
 
 /**
- * Does this request consume a turn slot? Mirrors `server.ts:641` exactly — including that
- * it compares the *raw* target, so `/turn?sid=x` is not a turn there and must not be one
- * here either. Divergence would make the worker's in-flight count describe a different set
- * of requests than the ones it actually runs.
+ * Does this request consume a turn slot? Mirrors `server.ts` exactly — including that it compares
+ * the *raw* target, so `/turn?sid=x` is not a turn there and must not be one here either.
+ * Divergence would make the worker's in-flight count describe a different set of requests than the
+ * ones it actually runs. The POST guard keeps `GET /v1/turn` (`server.ts:1337`), a status read, out
+ * of the count.
  */
 export function isTurnRequest(method: string | undefined, url: string | undefined): boolean {
   return method === 'POST' && TURN_PATHS.has(url ?? '');
@@ -61,10 +81,23 @@ export class TurnCounter {
     return this.n;
   }
 
+  // Swallowed, not propagated: onChange sends the ABSOLUTE count, never a delta, and the
+  // supervisor's copy is an estimate it reconciles from `load` (above) -- so one dropped send
+  // self-heals on the very next one. A throw here (process.send on a closed IPC channel is the
+  // real one) must not leak the slot start() is about to hand out, nor become an unhandled
+  // rejection on the releaser's sync path (attachTurnSlot's `finish` handler).
+  private notify(n: number): void {
+    try {
+      this.onChange(n);
+    } catch {
+      // see above
+    }
+  }
+
   /** Marks a turn started; returns an **idempotent** end function. */
   start(): () => void {
     this.n += 1;
-    this.onChange(this.n);
+    this.notify(this.n);
     let ended = false;
     return () => {
       // One-shot on purpose. A second decrement (an abort path that also calls end) would
@@ -72,7 +105,7 @@ export class TurnCounter {
       if (ended) return;
       ended = true;
       this.n -= 1;
-      this.onChange(this.n);
+      this.notify(this.n);
     };
   }
 }
@@ -154,7 +187,7 @@ export function createWorkerRuntime(opts: {
     accept(socket: Socket, head?: Buffer): void {
       // The supervisor credits its estimate +1 for EVERY connection it hands off (§3.9's
       // optimistic increment), but `load` is only ever sent from the turn counter above, and a
-      // non-turn request -- GET /health, POST /runs, a monitoring probe, a port scan -- returns
+      // non-turn request -- GET /health, GET /v1/turn, a monitoring probe, a port scan -- returns
       // early there. So without a report here the estimate rose by one PERMANENTLY per non-turn
       // connection: after S of them every worker read as saturated, every later connection was
       // refused BEFORE hand-off, so no turn could arrive to reconcile, and the pool stayed
@@ -232,6 +265,8 @@ export function startStatsReporter(opts: {
   intervalMs: number;
   lag?: () => number;
   rss?: () => number;
+  /** §7's async metrics, or undefined on a worker that is not draining the queue. */
+  asyncStats?: () => AsyncWorkerStats | undefined;
 }): () => void {
   const h = opts.lag ? undefined : monitorEventLoopDelay({ resolution: 10 });
   h?.enable();
@@ -241,6 +276,9 @@ export function startStatsReporter(opts: {
     // reading would carry rung 1's and no rung would be attributable.
     h?.reset();
     opts.send({
+      // Spread first: a future AsyncWorkerStats member sharing a name must not be able to
+      // clobber the row's own fields, especially its `type` discriminant.
+      ...(opts.asyncStats?.() ?? {}),
       type: 'stats',
       loopLagP99Ms: lag,
       rssBytes: opts.rss ? opts.rss() : process.memoryUsage.rss(),
@@ -333,9 +371,14 @@ if (isMainModule) {
     sendToSupervisor.call(process, msg);
   };
   const runtime = createWorkerRuntime({ send });
+  // #389: drain the async leaf queue on this worker, sharing `runtime.counter` with sync /turn so
+  // one cap governs both (§5.3). Returns null unless SH_ASYNC_DRAIN and the control-plane settings
+  // are all present, so a deployment that never submits async turns pays nothing.
+  const asyncWorker = armAsyncLeafWorker({ counter: runtime.counter });
   const stopStats = startStatsReporter({
     send,
     intervalMs: statsIntervalMs(process.env),
+    asyncStats: () => asyncWorker?.stats(),
   });
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   process.on('message', (msg: SupervisorToWorker, handle) => {
@@ -348,6 +391,12 @@ if (isMainModule) {
       // longer taking.
       stopStats();
       runtime.drain();
+      // Stop claiming at once. The in-flight leaf is abandoned unacked on purpose (§6.3): its
+      // heartbeat dies with this process, so another worker reclaims it after minIdleMs.
+      // Waiting for it cannot work -- MOCA_TURN_MAX_S is 1800 s against a 20 s SHUTDOWN_GRACE_MS.
+      // .catch(): a failed stop() must not become an unhandled rejection that kills a process
+      // still serving (or about to abort) sync turns.
+      void asyncWorker?.stop().catch(() => undefined);
       // Detached turns that finish within DETACHED_DRAIN_MS finish normally; the rest get their
       // terminal frame before the supervisor's grace runs out and SIGKILLs this process.
       drainTimer ??= armDetachedDrain(() =>
@@ -359,6 +408,11 @@ if (isMainModule) {
   // set rather than leaving orphaned workers holding sockets nobody routes to (§6). Detached turns
   // get a terminal frame first (turn-reattach spec §5.5); abortDetachedTurns bounds its own wait.
   process.on('disconnect', () => {
+    // Stop claiming before aborting detached turns, so the dying worker makes no further claim.
+    // .catch(): the IPC channel is already gone here, so a send inside stop() (via the counter's
+    // release) rejects with ERR_IPC_CHANNEL_CLOSED -- a failed stop() must not become an unhandled
+    // rejection that kills this process before abortDetachedTurns below can run.
+    void asyncWorker?.stop().catch(() => undefined);
     void abortDetachedTurns('restarting').finally(() => process.exit(0));
   });
 }

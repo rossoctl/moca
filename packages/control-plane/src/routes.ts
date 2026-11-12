@@ -84,6 +84,24 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'readyz',
   },
+  // §7's `async_quota_refusals`: the one async metric a worker cannot report, because §4.3 refuses
+  // the submission here and nothing is ever enqueued. HARNESS only -- the sandbox profile runs no
+  // turns, so the number is structurally zero there. Unversioned like the probes above: an operator
+  // surface, not client API, and the same path the supervisor's admin port serves.
+  //
+  // `auth: 'api'` with an admin check inside the handler, NOT `auth: 'none'` like the probes: this
+  // answers how often tenants hit their quota, on the public port. A small activity side channel,
+  // but free to close. The check is in the handler because RouteSpec has no whole-route admin field
+  // and one route does not justify adding one (`listSessions` gates its privileged branch the same
+  // way); a second admin-only route is the moment to lift it into the router.
+  {
+    method: 'GET',
+    path: '/metrics',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'getMetrics',
+  },
   // Public by design: a client asks it BEFORE logging in, to learn where the harness is.
   {
     method: 'GET',

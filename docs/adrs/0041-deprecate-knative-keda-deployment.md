@@ -70,12 +70,14 @@ with wording that keeps the underlying concerns alive while the deprecated path 
   fixes.
 - Negative / accepted cost: async leaf dispatch (the KEDA drainer) and the CronJob scheduled
   on-ramp have no P6 equivalent yet — ADR-0034 flagged both as owed, and they still are. Users
-  depending on them cannot finish migrating until that lands. _Update 2026-11-06:_ async fan-out
-  (archetype A) now has a decision record and design —
-  [ADR-0047](0047-p6-async-fan-out-in-worker-drain.md), tracked by
-  [#686](https://github.com/rossoctl/moca/issues/686) — which replaces the capability rather than
-  the deployment; implementation is still owed. The scheduled on-ramp (archetype C) is
-  [#536](https://github.com/rossoctl/moca/issues/536) and has no design yet. See the revision below.
+  depending on them cannot finish migrating until that lands. _Update 2026-11-12:_ **async fan-out
+  (archetype A) is discharged for `MOCA_TENANCY=single`** — designed in
+  [ADR-0047](0047-p6-async-fan-out-in-worker-drain.md) and shipped as a drain loop in the ordinary
+  turn worker, opt-in behind `SH_ASYNC_DRAIN`, tracked by
+  [#686](https://github.com/rossoctl/moca/issues/686). It replaces the capability rather than the
+  deployment, so a migrating user has a route to move to. The scheduled on-ramp (archetype C) is
+  [#536](https://github.com/rossoctl/moca/issues/536) and still has no design. See the revisions
+  below for what remains owed on archetype A.
 - Follow-up owed: the rollout this record authorizes — a runtime startup warning on the deprecated
   path, `deploy/knative/` banners, setup-script notices, README/CLAUDE.md/Makefile/Dockerfile/
   `build.yaml` relabeling, demo rewrites — lands in follow-up PRs on this branch.
@@ -150,15 +152,17 @@ control plane's `K8sSecretStore` on Kubernetes.
 
 Still owed, now open rather than gated: the P6 equivalents of async fan-out (archetype A) and
 the scheduled on-ramp (archetype C), flagged in ADR-0034; the `knative-server` rename decision;
-the `sandbox-transport` extraction (RA1 §9.1).
+the `sandbox-transport` extraction (RA1 §9.1). _Archetype A shipped on 2026-11-12 under
+`MOCA_TENANCY=single`; see the second revision below._
 
 ### 2026-11-06 — archetype A's replacement decided (design only)
 
 The first of the two owed capabilities above has a decision record:
 [ADR-0047](0047-p6-async-fan-out-in-worker-drain.md), with its design spec
 [`2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md), tracked
-by [#686](https://github.com/rossoctl/moca/issues/686). It is a **design**; nothing is implemented
-yet, so the owed note above narrows rather than clears.
+by [#686](https://github.com/rossoctl/moca/issues/686). At the time of this revision it was a
+**design** with nothing implemented, so the owed note above narrowed rather than cleared; the
+revision below records the implementation landing.
 
 What it settles that bears on this record:
 
@@ -178,3 +182,23 @@ What it settles that bears on this record:
 
 **Archetype C** (#536) remains owed in full — no design. It is expected to build on archetype A's
 consumer rather than a second one.
+
+### 2026-11-12 — archetype A's replacement ships (single tenancy)
+
+The design above is implemented and on `main`: a drain loop inside the `--role=turn` worker, the
+restored Redis Streams queue, submission and status on `POST`/`GET /v1/sessions/{id}/turns`, crash
+redelivery from the pending-entries list, and the `async_*` counters. It is **opt-in** behind
+`SH_ASYNC_DRAIN` (off by default, one knob), runs on `deploy/vm` and `deploy/compose`, and is wired
+on `deploy/k8s`. So the first of this record's two owed capabilities is discharged for the
+deployments it covers, and the "no P6 equivalent" line above no longer describes archetype A.
+
+Two limits keep it short of a full clear: the path is `MOCA_TENANCY=single` only — lifting that gate
+needs the grant and token-endpoint slice, ADR-0047 §9's M2 — and `deploy/k8s` is wired but not yet
+proven end to end, which is [#688](https://github.com/rossoctl/moca/issues/688). Both are a dated
+conditional refusal in the shape this record used for its own deprecation window, and
+[dispatch archetypes](../concepts/dispatch-archetypes.md) carries them with the operator detail, so
+they are stated once rather than three times.
+
+Nothing here changes this record's accepted costs. Scale-to-zero and queue-depth-driven capacity stay
+gone: fan-out width is one leaf per worker process, sized ahead of the load, and queue depth is an
+operational metric (`async_queue_depth`, `async_oldest_age_ms`) rather than a scaling input.
