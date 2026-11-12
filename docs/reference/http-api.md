@@ -129,6 +129,10 @@ terminal `error` frame, not an HTTP status.
 `done` is used when `stopReason` is `stop`, `length`, `end_turn` or `max_tokens`; anything else ends in
 `error`. On a non-detachable stream a client disconnect aborts the turn.
 
+A terminal `error` frame for a host's mid-turn capacity refusal has the 503 `message`'s fixed sentence as its
+`errorMessage`, never the host's figures. The refused command's `tool_result` is a tool result like any other:
+its `preview` is the clipped text the tool returned, which for a refusal is the transport's error text.
+
 ### Detachable turns: attach and cancel
 
 With `SH_TURN_DETACH=1`, a turn started with `detachable: true` outlives its connection. Every logged
