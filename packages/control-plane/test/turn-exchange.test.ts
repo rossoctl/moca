@@ -461,7 +461,7 @@ describe('a queued turn is pinned to its submission (#388)', () => {
     });
   });
 
-  it('keeps the tier it was submitted with, and still resolves the deployment default', async () => {
+  it('keeps the tier it was submitted with, and falls back to the session when it pinned none', async () => {
     const d = modelDeps();
     await seedCredential(d, 'github:1234', 'my-anthropic');
     await HANDLERS.createSession!(
@@ -472,14 +472,18 @@ describe('a queued turn is pinned to its submission (#388)', () => {
       d,
     );
     const pinned = await submittedTurn(d, 'id-1');
+    // These two hold whether the exchange reads the record or the session, because a session's tier
+    // is immutable: `updateSession` refuses every field but `model`. They pin the COPY, which is the
+    // half of this that could regress -- the read is guarded by the untiered case below.
     expect((await d.turns.get(pinned))?.sandboxTier).toBe('microvm');
     expect((await exchangeTurnCredential(pinned, d)).sandboxTier).toBe('microvm');
 
-    // A record that pinned NO tier -- one written while the deployment declared none, or before
-    // this change -- still gets the deployment's default at dequeue. That is why the pin is the
-    // session's RAW choice: the default belongs to the deployment as it is now (`viewTier`'s rule),
-    // so a resolved pin would keep naming a tier on a deployment that has since removed them.
+    // A record written before #388 carries no tier, and reads back as ''. It must resolve against
+    // the SESSION, not against the deployment default: handing this worker 'container' while the
+    // session runs on 'microvm' retiers the session's sandbox, and a retier starts its workspace
+    // empty. A session created while no tiers were declared stores '' too, so that case resolves to
+    // the deployment default through the same line -- `sessionTier`'s own suite covers it.
     const untiered = await queuedTurn(d, 'id-1', { turnId: 't-untiered', sandboxTier: '' });
-    expect((await exchangeTurnCredential(untiered, d)).sandboxTier).toBe('container');
+    expect((await exchangeTurnCredential(untiered, d)).sandboxTier).toBe('microvm');
   });
 });

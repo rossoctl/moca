@@ -104,13 +104,15 @@ export interface TurnRecord {
    */
   modelLimits?: ModelLimits;
   /**
-   * The session's OWN tier choice, copied at submission; '' when it named none.
+   * The session's STORED tier, copied at submission.
    *
-   * RAW rather than resolved. `sessionTier` applies the deployment's current default to a session
-   * that chose no tier, and that default belongs to the deployment rather than to the submitter --
-   * pinning a resolved value here would keep naming a tier on a deployment that has since removed
-   * them, which `viewTier`'s own rule calls wrong. So the pin covers the session's choice and the
-   * dequeue still resolves it.
+   * Not the submitter's raw choice: `createSession` already resolves it
+   * (`requestedTier ?? tiers?.default ?? ''`), so on a deployment that declared tiers when the
+   * session was created this is the default that was current THEN. Changing
+   * `sandboxTiers.default` afterwards therefore does not move an already-queued turn.
+   *
+   * '' in two cases only -- a session created while the deployment declared no tiers, and a record
+   * written before #388 -- and the dequeue resolves both against the session (`turn-exchange.ts`).
    */
   sandboxTier: string;
   caps: TurnCaps;

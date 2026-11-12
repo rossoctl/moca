@@ -184,10 +184,12 @@ export class TurnStore {
       cfg: h.cfg ?? '',
       credentialName: h.credentialName ?? '',
       // shortcut: a record written before #388 carries neither field, so it reads as "the session
-      // named no model and no tier" and its leaf runs on the deployment defaults rather than on the
-      // session's choices. Only turns already on the queue during that one rollout are affected.
-      // Upgrade to a live-session fallback keyed on `h.model === undefined` if a deployment ever needs
-      // a queue to survive an upgrade unchanged.
+      // named no model", and its leaf runs on the deployment's default model rather than the
+      // session's. Only turns already on the queue during that one rollout are affected, and the
+      // consequence is one turn answered by the wrong model. Upgrade to a live-session fallback keyed
+      // on `h.model === undefined` if a deployment ever needs a queue to survive an upgrade unchanged.
+      // The TIER has that fallback already (`turn-exchange.ts`), because there the same gap retiers
+      // the session's sandbox and starts its workspace empty -- data loss, not a wrong answer.
       model: h.model ?? '',
       ...(limits ? { modelLimits: limits } : {}),
       sandboxTier: h.sandboxTier ?? '',

@@ -1914,9 +1914,11 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in: the tier the TURN RECORD pinned at submission, or
-                      the deployment's current default for a turn that pinned none. Absent whenever
-                      the deployment declares no tiers.
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |

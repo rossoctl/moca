@@ -177,10 +177,18 @@ export async function exchangeTurnCredential(
   // submission. The session is still read above, for the owner compare and the tombstone; nothing
   // the turn SPENDS is taken from it.
   //
-  // `sessionTier` applies the deployment's CURRENT default to a record that pinned no tier of its
-  // own, and that is the intended split: the choice is the submitter's and travels on the record,
-  // while the default belongs to the deployment as it is at dequeue (`viewTier`'s rule).
-  const tier = sessionTier(turn, deps.config.sandboxTiers);
+  // The tier is the one the record STORED, which is the session's stored tier and not a raw choice:
+  // `createSession` already resolved it (`requestedTier ?? tiers?.default ?? ''`). So a turn keeps
+  // the default that was current when its SESSION was created, and an operator who changes
+  // `sandboxTiers.default` afterwards does not move an already-queued turn.
+  //
+  // It reads '' in exactly two cases, and the fallback to the session covers both. A session created
+  // while the deployment declared no tiers stores '' as well, so resolving against it is the same
+  // answer as resolving the record. A record written before #388 carries no tier at all, and there
+  // the fallback is load-bearing: handing the worker the deployment default instead of the session's
+  // own tier retiers the session's sandbox, and a retier starts its workspace empty
+  // (`select-sandbox.ts`, `reason: 'retiered'`).
+  const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,
     mode,
