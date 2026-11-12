@@ -24,7 +24,7 @@ provenance is persistent, verifiable offline, and hosted in the **control plane*
 
 A rule's evidence is kept in one of four records (see [Records](#records-and-what-each-holds)):
 
-- **G**: the image's gate record, written by the image builder (a per-family schema, such as `example-builder/moca-microvm/1`);
+- **G**: the image's gate record, written by the image builder (a per-family schema, such as `example-builder/moca-microvm/1`, or the general gate's, which `SH_GATE_RECORD_SCHEMA` names: default `moca-gate-record/1`);
 - **R**: `/etc/moca-rootfs-source` in the rootfs;
 - **S**: the snapshot's `manifest.json`;
 - **T**: the template record, `moca-sbx-template/1`.
@@ -100,6 +100,34 @@ that passed is the evidence. A template built from such an image must carry the 
 | X14 | **The probe's expectation was measured**: in a real VM (`vm`) or the guest emulation (`emulation`), on the same image digest and command; matched against the printed summary, colour codes stripped                                                                                                   | vm   | spec `probe_status`, `proved_in_vm`; the image builder's probe record                                      | enforced: the image builder (tests); M9 refuses an unmeasured one; the `benchmark` profile requires `probe_status` `vm` or `emulation` (policy, X14)                                                                   |
 | X15 | **The template's size is the gate's envelope**: 4096 MiB, 2 vCPUs, `HOME=/tmp/home`                                                                                                                                                                                                                    | vm   | spec                                                                                                       | enforced: the `benchmark` profile's envelope, exactly 4096 MiB and 2 vCPUs (policy, X15)                                                                                                                               |
 | X16 | **The guest exposes no registry host or account id**: no file Moca adds to a template's rootfs, and no line of its template record, names a registry host (a private one above all) or an AWS account id; images are recorded by the reference the spec gives (`repository@sha256:…`) and their digest | vm   | the rootfs's `/etc/moca-rootfs-source` (`image=` the spec's own reference); T; the provenance scans        | **enforced**: `template-build.sh`'s test that a `--registry` build writes a host-free `image=` line; the provenance export scans. `build-rootfs.sh` had once written the pull reference, `--registry`'s host included. |
+
+### 2.3 Self-attested gate records, and repositories per registry (Moca)
+
+A subject may submit its own gate record (made with the image builder's general gate) on a profile
+with `selfAttest`. It counts only for that subject's own templates, which stay private and are shown
+as self-attested until an admin adds the record's sha256 to `trustedGateRecords`. A record counts for
+one subject only: the same sha256 submitted by a second subject is refused (X1.self.scope). The X
+rules above apply unchanged, plus: commits always refused, whatever the spec says (X12.self), and
+egress only where the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for
+benchmark integrity) and, like `benchmark`, needs a general-gate record's floor checked offline
+(X1.offline: `gate.floor_checked_offline`, on a record of the schema `SH_GATE_RECORD_SCHEMA` names,
+default `moca-gate-record/1`; fail closed); `general-self` allows the KVM host's allowlisted egress
+and either floor. Moca's spec:
+[subject trust for gate records](../../../../docs/specs/2026-11-08-subject-trust-gate-records-design.md).
+
+| #                   | Rule                                                                                                              | Evidence                                         | Status                  |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ----------------------- |
+| X1.self.scope       | A self-attested record counts only for its first submitter                                                        | the catalog: each build's gate sha256, its owner | enforced: control plane |
+| X12.self            | A self-attested record shows commits refused (`agent_can_commit` `no`, `git_identity` `none`), whatever the spec  | G `observed`                                     | enforced: control plane |
+| X1.self.egress      | `spec.egress` false on a self-attested record unless the profile sets `selfAttestEgress`                          | spec `egress`; the policy                        | enforced: control plane |
+| X1.offline          | A general-gate record's floor checked offline, on a profile that requires X1 (unless `requireOfflineGate: false`) | G `gate.floor_checked_offline`                   | enforced: control plane |
+| registry.repository | From a registry the policy lists in `allowedRepositories`, the image is one of its repositories                   | spec `image`; the policy                         | enforced: control plane |
+
+The registry allowlist (`allowedRegistries`) admits a registry host. Where the policy also lists
+repositories for it (`allowedRepositories`, keyed by the host as the policy reads it, Docker Hub as
+`docker.io`), the image must come from one of them: an exact path (`library/python`) or a prefix
+(`library/*`), matched on whole path segments; a Docker Hub official name reads as `library/<name>`.
+A registry with no list allows every repository it serves.
 
 ## 3. Provenance: what must be kept, where
 

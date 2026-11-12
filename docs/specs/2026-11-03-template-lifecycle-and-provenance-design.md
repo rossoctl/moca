@@ -370,17 +370,22 @@ profiles, the allowed registries, the trusted gate records (by sha256) and the p
 is recorded on first use, so every `check` cites a `policy` record that exists. `GET /v1/policy`
 shows it, its digest and its record.
 
-| Profile     | For                                                   | Requires, beyond the `base` rules                                                                                                                                                                                 |
-| ----------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base`      | any client's own image (a toolchain, a project's env) | Moca's rules M1, M7-M9 at create (M2-M4, M10-M17 on the build host); the image from an allowed registry; the size envelope                                                                                        |
-| `benchmark` | SWE-bench and the like                                | a gate record that passed (X1), from a **trusted source** (§8.3), whose `source_record_digest` equals the image digest (X10); X11 (no network), X12 (commits refused), X14 (a measured probe), X15 (the envelope) |
+| Profile          | For                                                   | Requires, beyond the `base` rules                                                                                                                                                                                 |
+| ---------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base`           | any client's own image (a toolchain, a project's env) | Moca's rules M1, M7-M9 at create (M2-M4, M10-M17 on the build host); the image from an allowed registry; the size envelope                                                                                        |
+| `benchmark`      | SWE-bench and the like                                | a gate record that passed (X1), from a **trusted source** (§8.3), whose `source_record_digest` equals the image digest (X10); X11 (no network), X12 (commits refused), X14 (a measured probe), X15 (the envelope) |
+| `benchmark-self` | the same, on the creating subject's own gate record   | `benchmark`'s rules, with the record self-attested (§8.3): trusted for its submitter's own templates only, which stay private                                                                                     |
+| `general-self`   | general users whose sandboxes need a network          | `benchmark-self`'s without X11: the KVM host's allowlisted egress allowed                                                                                                                                         |
 
 ### 8.1 At create (in the control plane, before any build)
 
 The profile exists; M7 (the id rule and every spec field, including a spec `id` or `image` that
 differs from the create's: `M7.spec_id`, `M7.spec_image`), M8, M9; the image pinned by digest (M1)
 **from an allowed registry** (`allowedRegistries`; a reference with no host is the build host's
-default registry, `<default>`); the profile's size envelope; for `benchmark`, X1, X10-X12, X14 and
+default registry, `<default>`) and, where the policy lists repositories for that registry
+(`allowedRepositories`), from one of them (rule `registry.repository`; whole path segments,
+`prefix/*` for a prefix; a registry with no list allows every repository it serves); the profile's
+size envelope; for `benchmark`, X1, X10-X12, X14 and
 X15 from the spec and the gate record; X10 and X12 whenever the spec names a gate record or skips
 the git identity check, whatever the profile; and the caller's quota (§6.2). A refusal is
 `422 policy_refused {rule, message}` and a `check` record listing every rule and its result; nothing
@@ -404,6 +409,12 @@ the record and compares its sha256 with the one the client sent. For the first v
 replaced by an admin-loaded copy of the source's records: the policy's `trustedGateRecords`, by
 sha256 (X1.trusted). Fetching is not built. A record that is not trusted is refused for `benchmark`;
 on `base` it may still be sent, and is stored and recorded with source `client`.
+
+A profile with `selfAttest` (`benchmark-self`, `general-self`) also accepts a record the policy does
+not list, from the creating subject, for that subject's own templates only: the build is
+self-attested, private, and recorded with source `self` until an admin lists the record. The
+[subject trust spec](2026-11-08-subject-trust-gate-records-design.md) holds its rules (X1.self.scope,
+X12.self, X1.self.egress, X1.offline) and what a trust removal does.
 
 ### 8.4 The instance-id mapping
 
