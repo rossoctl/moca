@@ -344,6 +344,36 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Async counters (admin only)
+      security: [{ sessionToken: [] }]
+      description: |
+        Counters the control plane alone can report, because it answers the request that produces
+        them (async fan-out spec §7, §4.3). Process-local and reset by a restart: with more than one
+        replica, each request reports one replica's share. A rate signal, not a ledger.
+      responses:
+        '200':
+          description: counters
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [counters]
+                properties:
+                  counters:
+                    type: object
+                    required: [async_quota_refusals]
+                    properties:
+                      async_quota_refusals:
+                        type: integer
+                        description: Submissions refused with 429 async_quota_exhausted.
+        '403':
+          description: forbidden — the admin role is required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/discovery:
     get:
       operationId: getDiscovery
@@ -1586,7 +1616,7 @@ paths:
                 properties:
                   token: { type: string, description: 'JWT, typ moca-sandbox+jwt' }
                   expiresAt: { type: integer, description: epoch seconds }
-                  execEndpoint: { type: string, description: host:port of the exec Route }
+                  execEndpoint: { type: string, description: 'host:port of the exec Route' }
                   wrk:
                     type: string
                     description: the worker sandbox_id serving the template (ExecRequest.sandbox_id)
@@ -1824,7 +1854,16 @@ paths:
               schema:
                 type: object
                 required:
-                  [turnId, mode, anthropicAuthToken, anthropicBaseUrl, sessionId, subject, caps]
+                  [
+                    turnId,
+                    mode,
+                    anthropicAuthToken,
+                    anthropicBaseUrl,
+                    sessionId,
+                    subject,
+                    caps,
+                    envelope,
+                  ]
                 properties:
                   turnId:
                     type: string
@@ -1853,6 +1892,17 @@ paths:
                       tokens: { type: integer }
                       costUsd: { type: number }
                       wallClock: { type: integer, description: seconds }
+                  envelope:
+                    type: object
+                    description: |
+                      the leaf the worker runs, exactly as recorded at submission, with the turn's
+                      `sessionId` attached. Returned here rather than from a second internal route
+                      because this handler has already read the record. It carries no credential and
+                      no bearer token: the record stores a credential NAME, and not in the envelope.
+                    required: [sessionId]
+                    properties:
+                      sessionId: { type: string }
+                    additionalProperties: true
                   authHeader:
                     type: string
                     enum: [x-api-key]

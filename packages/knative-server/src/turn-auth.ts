@@ -205,6 +205,17 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
     }
     throw new CpError('credential_unavailable', `control plane returned ${res.status}`);
   }
+  return validateExchangeBody(body);
+}
+
+/**
+ * The post-200 validation of a credential-exchange body, shared by the session exchange above and
+ * the DEQUEUE claim (`turn-claim.ts`, #389). Extracted rather than copied: these six checks are the
+ * ones that keep a placeholder from being spent as a real credential, a secret from going to the
+ * wrong endpoint, and a malformed configRef or model from silently running the wrong turn. Two
+ * copies would be two places to forget the seventh.
+ */
+export function validateExchangeBody(body: Record<string, unknown>): ExchangeResponse {
   // An UNKNOWN mode must not default to `direct`: that would send a placeholder upstream as though it
   // were a real credential, which is the failure the tag exists to prevent (spec §3.6).
   if (body.mode !== 'direct' && body.mode !== 'placeholder') {

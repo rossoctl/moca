@@ -10,6 +10,7 @@ import {
   type TurnRecord,
   type TurnState,
 } from './turn-record.js';
+import { leafResultKey } from './turn-result.js';
 
 export interface TurnStoreOptions {
   /** `LEAF_RESULT_TTL_SECONDS` (86400 default) -- the RESULT's lifetime, not the record's. */
@@ -21,11 +22,38 @@ export interface TurnStoreOptions {
 }
 
 /**
+ * Write hash fields only if the record's CURRENT state is one of the allowed ones. Every state
+ * transition here goes through it, because a get-then-write over two round trips is not a
+ * compare-and-set: `DELETE /turns/{id}` flipping a record to `cancelled` between a claim's read and
+ * its write would be silently overwritten, and the worker would run -- and bill -- a turn the caller
+ * had already cancelled and been told was cancelled. The same gap lets the reaper's `lost` overwrite
+ * a `done` that landed first, and lets two finalizers each release the idempotency key.
+ *
+ * ARGV is `[allowedCount, ...allowedStates, ...field, value, field, value]`, flattened because
+ * that is the only shape EVAL's argument list has. A missing record (no `state` field) returns 0:
+ * nothing is created here, and a record that expired mid-turn must not be resurrected without its
+ * owner, caps or envelope.
+ */
+export const CAS_STATE_LUA = `
+local s = redis.call('HGET', KEYS[1], 'state')
+if not s then return 0 end
+local n = tonumber(ARGV[1])
+local ok = false
+for i = 2, n + 1 do if s == ARGV[i] then ok = true break end end
+if not ok then return 0 end
+local fields = {}
+for i = n + 2, #ARGV do fields[#fields + 1] = ARGV[i] end
+redis.call('HSET', KEYS[1], unpack(fields))
+return 1
+`;
+
+/** The two states a turn can be written from: everything else is already final (§5.4). */
+const OPEN_STATES: readonly TurnState[] = TURN_STATES.filter((s) => !isTerminalState(s));
+
+/**
  * The async turn record's only writer (async fan-out spec §5.1). Written against the STRUCTURAL
  * CpRedisLike, so one implementation serves the in-memory fake and real Redis
- * (test/helpers/turn-store-contract.ts runs it against both). `SandboxStore` needs two
- * implementations because its quotas are Lua; nothing here is -- the one place that needs
- * atomicity is the idempotency claim, which is a single HSETNX.
+ * (test/helpers/turn-store-contract.ts runs it against both).
  *
  * Two invariants live here rather than in a handler, because a handler cannot enforce them:
  *
@@ -33,8 +61,9 @@ export interface TurnStoreOptions {
  *   `resultTtlSeconds + ttlMarginSeconds`. A record that expired on a schedule from creation would
  *   answer 404 -- "never submitted" -- for a turn that succeeded, which is the same conflation §4.4
  *   rejects in `/runs/status`, reintroduced by a TTL instead of by an inference.
- * - **A terminal state is reached once.** `finalize` and `cancel` both compare-and-set, so the
- *   reaper's `lost` cannot overwrite a `done` that landed first.
+ * - **A terminal state is reached once.** Every transition compare-and-sets through
+ *   `CAS_STATE_LUA`, so the reaper's `lost` cannot overwrite a `done` that landed first, and a
+ *   claim cannot un-cancel a cancelled turn.
  */
 export class TurnStore {
   constructor(
@@ -211,7 +240,14 @@ export class TurnStore {
       const rec = await this.get(turnId);
       if (!rec || rec.sessionId !== sessionId) continue;
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
-      await this.guard(() => this.redis.del([this.key(turnId)]));
+      // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
+      // key carries a turn id, so only an enumeration of the session's turns reaches it. This loop
+      // is that enumeration -- but it sees OPEN turns only (`toTerminal` zRems from the owner index
+      // to free the quota slot), so a FINISHED turn's result is left to expire on its own TTL, as
+      // its record already is. The pair goes together (`resultTtl`, `resultTtl + margin`) and the
+      // API can reach neither, but the bytes do outlive this delete: §9.2 records that limit and
+      // what closing it costs (a per-session turn index, M2).
+      await this.guard(() => this.redis.del([this.key(turnId), leafResultKey(sessionId, turnId)]));
       await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
     }
   }
@@ -223,21 +259,22 @@ export class TurnStore {
    * terminal states are refused.
    */
   async markRunning(turnId: string, attempts: number): Promise<'ok' | 'refused'> {
-    const rec = await this.get(turnId);
-    if (!rec || isTerminalState(rec.state)) return 'refused';
-    await this.guard(() =>
-      this.redis.hSet(this.key(turnId), { state: 'running', attempts: String(attempts) }),
-    );
-    return 'ok';
+    const won = await this.cas(this.key(turnId), OPEN_STATES, {
+      state: 'running',
+      attempts: String(attempts),
+    });
+    return won ? 'ok' : 'refused';
   }
 
   async finalize(turnId: string, state: TurnState, now: number): Promise<'ok' | 'refused'> {
     if (!isTerminalState(state)) {
       throw new CpError('internal_error', `finalize needs a terminal state, got '${state}'`);
     }
+    // The record is read for the fields `toTerminal` needs AFTER it (owner, idempotencyKey); the
+    // state it reports is not trusted, because the CAS inside `toTerminal` re-checks it.
     const rec = await this.get(turnId);
-    if (!rec || isTerminalState(rec.state)) return 'refused';
-    return this.toTerminal(rec, state, now);
+    if (!rec) return 'refused';
+    return this.toTerminal(rec, state, now, OPEN_STATES);
   }
 
   /**
@@ -248,8 +285,25 @@ export class TurnStore {
   async cancel(turnId: string, now: number): Promise<'cancelled' | 'conflict'> {
     const rec = await this.get(turnId);
     if (!rec || rec.state !== 'queued') return 'conflict';
-    await this.toTerminal(rec, 'cancelled', now);
-    return 'cancelled';
+    // `queued` ALONE in the CAS: a claim that won the race between the read above and this write
+    // made the record `running`, and §4.5 is explicit that a running leaf is not interrupted.
+    const res = await this.toTerminal(rec, 'cancelled', now, ['queued']);
+    return res === 'ok' ? 'cancelled' : 'conflict';
+  }
+
+  /** One CAS attempt, with the transport mapped to 503 like every other call here. */
+  private async cas(
+    key: string,
+    allowed: readonly TurnState[],
+    fields: Record<string, string>,
+  ): Promise<boolean> {
+    const won = await this.guard(() =>
+      this.redis.eval(CAS_STATE_LUA, {
+        keys: [key],
+        arguments: [String(allowed.length), ...allowed, ...Object.entries(fields).flat()],
+      }),
+    );
+    return Number(won ?? 0) === 1;
   }
 
   /**
@@ -271,8 +325,14 @@ export class TurnStore {
     rec: TurnRecord,
     state: TurnState,
     now: number,
+    allowed: readonly TurnState[],
   ): Promise<'ok' | 'refused'> {
-    await this.guard(() => this.redis.hSet(this.key(rec.turnId), { state, endedAt: String(now) }));
+    // The CAS is the gate for everything below it. A loser does nothing at all -- in particular it
+    // does not release the idempotency key or re-arm the TTL, both of which belong to the writer
+    // that actually made the record terminal.
+    if (!(await this.cas(this.key(rec.turnId), allowed, { state, endedAt: String(now) }))) {
+      return 'refused';
+    }
     await this.releaseIdempotencyKeyIf(rec.owner, rec.idempotencyKey, rec.turnId);
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
     await this.guard(() =>

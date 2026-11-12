@@ -131,6 +131,12 @@ Only the addressing changes: `REDIS_URL=redis://redis:6379` and
 | `SH_HARNESS_IMAGE`, `SH_SANDBOX_IMAGE` | `ghcr.io/rossoctl/moca{,-remote-worker}:latest`  | Published by `.github/workflows/build.yaml` on every push to `main`. Mutable tags, so `install.sh` pulls on every run (see "Try it"); set `SH_SKIP_PULL=1` to run a local build of either.                                                                                                                                             |
 | model variables                        | unset                                            | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `SH_MODEL`, `SH_MODEL_PROVIDER`, `SH_MODEL_API`, `SH_MODEL_BASE_URL`, `SH_MODEL_AUTH`, `SH_MODEL_CUSTOM`. An unset one stays unset in the container, not empty.                                                                |
 
+`SH_ASYNC_DRAIN=1` turns on the async drain: turns submitted to the control plane's
+`POST /v1/sessions/{id}/turns` run on the worker pool instead of over a held connection. It needs
+the `control-plane` profile — without it nothing can mint a turn — and it shares
+`SH_TURNS_PER_WORKER` with plain `/turn`, so on a one-worker trial a queued turn and an interactive
+one compete for the same slot.
+
 After editing `.env`, run `docker compose up -d` again to apply it.
 
 ## Using mocactl: the control plane

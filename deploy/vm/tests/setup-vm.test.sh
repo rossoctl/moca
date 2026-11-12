@@ -384,6 +384,14 @@ grep -qE '^SH_CONTROL_PLANE_URL=http://127\.0\.0\.1:8090$' "$ENV_SRC_DIR/supervi
   fail "supervisor.env.example must dial the control plane on loopback :8090"
 pass "credentials: the units load exactly the files setup-vm.sh writes; no secret in any env template"
 
+# #389: the async drain knob ships COMMENTED. Uncommented, compose's check_mirror would demand an
+# identical value in docker-compose.yml, and an operator would inherit a drain they did not ask for.
+grep -qE '^#SH_ASYNC_DRAIN=1$' "$ENV_SRC_DIR/supervisor.env.example" ||
+  fail "supervisor.env.example must offer #SH_ASYNC_DRAIN=1, commented: the drain is opt-in"
+grep -qE '^SH_ASYNC_DRAIN=' "$ENV_SRC_DIR/supervisor.env.example" &&
+  fail "supervisor.env.example sets SH_ASYNC_DRAIN uncommented: the default must be off"
+pass "the async drain knob is present and opt-in"
+
 # --- the supervisor dials the relay's EXEC listener, and the two ports agree (F3, MI1 R5) ---------
 # R46 (same as above): both assignments below can abort the pipeline on no-match under
 # `set -euo pipefail`, before their `[[ -n ... ]] || fail ...` guards run -- `|| true` on the
@@ -1734,12 +1742,14 @@ pass "oidc credential: a present secret gets a LoadCredential= drop-in; the valu
 # The secret as an env line is refused (credentialValue refuses both at once).
 echo 'SH_OIDC_CLIENT_SECRET=envline' >>"$OD/control-plane.env"
 if od_err=$(od_run 2>&1); then fail "an env-line SH_OIDC_CLIENT_SECRET was accepted"; fi
-sed -i '/^SH_OIDC_CLIENT_SECRET=/d' "$OD/control-plane.env"
+sed -i.bak '/^SH_OIDC_CLIENT_SECRET=/d' "$OD/control-plane.env" &&
+  rm -f "$OD/control-plane.env.bak"
 pass "oidc credential: the secret as an env line refuses"
 
 # Secret gone, provider back to the default -> the drop-in is removed.
 rm "$OD/credentials/oidc-client-secret"
-sed -i '/^SH_IDENTITY_PROVIDER=/d' "$OD/control-plane.env"
+sed -i.bak '/^SH_IDENTITY_PROVIDER=/d' "$OD/control-plane.env" &&
+  rm -f "$OD/control-plane.env.bak"
 od_run || fail "ensure_oidc_credential refused after the secret went"
 [[ ! -e "$OD_DROPIN" ]] || fail "the drop-in outlived the secret file"
 pass "oidc credential: the drop-in is removed when the secret goes"
