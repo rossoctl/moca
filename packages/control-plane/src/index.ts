@@ -148,11 +148,14 @@ export { projectResources, resolveSandbox, type SandboxView } from './resources.
 // The store's SandboxView is aliased: resources.ts's SandboxView (a session's sandbox tier) owns the name.
 export {
   MemorySandboxStore,
+  SANDBOX_MODE_NAMES,
   isLive,
+  isSandboxModeName,
   viewOf,
   type CreateOutcome,
   type DeleteOutcome,
   type SandboxLimits,
+  type SandboxModeName,
   type SandboxRecord,
   type SandboxState,
   type SandboxStore,

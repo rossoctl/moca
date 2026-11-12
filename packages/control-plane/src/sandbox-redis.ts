@@ -1,10 +1,12 @@
 import { CpError } from './errors.js';
-import type {
-  CreateOutcome,
-  DeleteOutcome,
-  SandboxLimits,
-  SandboxRecord,
-  SandboxStore,
+import {
+  isSandboxModeName,
+  type CreateOutcome,
+  type DeleteOutcome,
+  type SandboxLimits,
+  type SandboxModeName,
+  type SandboxRecord,
+  type SandboxStore,
 } from './sandbox-store.js';
 import { subjectHash } from './subject-document.js';
 
@@ -95,6 +97,18 @@ redis.call('EXPIRE', KEYS[1], ret)
 redis.call('ZREM', KEYS[2], ARGV[3])
 if ARGV[4] == '1' and redis.call('GET', KEYS[3]) == ARGV[3] then redis.call('DEL', KEYS[3]) end
 return 'deleted'
+`;
+
+// KEYS: rec. ARGV: mode, idleTimeoutS.
+// HSET and HINCRBY keep the key's EXPIREAT. A hash written before the mode fields has no modeEpoch,
+// which HINCRBY reads as 0. The record is read back in the same script, so the caller sees the epoch
+// it raised and no later one.
+const SET_MODE = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 1 then return false end
+redis.call('HSET', KEYS[1], 'mode', ARGV[1], 'idleTimeoutS', ARGV[2])
+redis.call('HINCRBY', KEYS[1], 'modeEpoch', 1)
+return redis.call('HGETALL', KEYS[1])
 `;
 
 export class RedisSandboxStore implements SandboxStore {
@@ -205,6 +219,23 @@ export class RedisSandboxStore implements SandboxStore {
       })) as DeleteOutcome;
     });
   }
+
+  setMode(
+    id: string,
+    mode: SandboxModeName,
+    idleTimeoutS: number,
+  ): Promise<SandboxRecord | undefined> {
+    return this.guard(async () => {
+      const flat = (await this.redis.eval(SET_MODE, {
+        keys: [this.recKey(id)],
+        arguments: [mode, String(idleTimeoutS)],
+      })) as string[] | null;
+      if (!flat) return undefined;
+      const h: Record<string, string> = {};
+      for (let i = 0; i + 1 < flat.length; i += 2) h[flat[i]!] = flat[i + 1]!;
+      return fromHash(h) ?? undefined;
+    });
+  }
 }
 
 function toHash(r: SandboxRecord): Record<string, string> {
@@ -220,6 +251,9 @@ function toHash(r: SandboxRecord): Record<string, string> {
     labels: JSON.stringify(r.labels),
     createdAt: String(r.createdAt),
     expiresAt: String(r.expiresAt),
+    mode: r.mode,
+    idleTimeoutS: String(r.idleTimeoutS),
+    modeEpoch: String(r.modeEpoch),
   };
 }
 
@@ -244,5 +278,10 @@ function fromHash(h: Record<string, string>): SandboxRecord | null {
     createdAt: Number(h.createdAt),
     expiresAt: Number(h.expiresAt),
     ...(h.deletedAt !== undefined ? { deletedAt: Number(h.deletedAt) } : {}),
+    // Absent on a hash written before the mode fields: per-exec, the worker's default, never set.
+    // An unknown mode reads as per-exec too, the least a record can grant.
+    mode: isSandboxModeName(h.mode) ? h.mode : 'per-exec',
+    idleTimeoutS: Number(h.idleTimeoutS ?? 0),
+    modeEpoch: Number(h.modeEpoch ?? 0),
   };
 }

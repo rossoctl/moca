@@ -3,6 +3,7 @@ import type { CpConfig } from './handlers.js';
 import type { RouteProfile } from './routes.js';
 import { SUBJECT_RE } from './identity.js';
 import { DEFAULT_SANDBOX_ISSUER } from './sandbox-token.js';
+import { SANDBOX_MODE_NAMES, isSandboxModeName, type SandboxModeName } from './sandbox-store.js';
 import { egressConfigFromEnv, type EgressConfig } from './egress-config.js';
 
 /**
@@ -41,6 +42,10 @@ export interface SandboxConfig {
   execCa?: string;
   /** `SH_JANITOR_TOKEN` (a credential), at least 32 characters; absent refuses the janitor's route. */
   janitorToken?: string;
+  /** `SH_SANDBOX_MODES_ALLOWED`: the modes a user may pick (lease-mode spec §8.1). */
+  modesAllowed: ReadonlySet<SandboxModeName>;
+  /** `SH_SANDBOX_IDLE_CEILING_S`: the most an owner's idleTimeoutS may be. */
+  idleCeilingS: number;
   /** `SH_EGRESS_HOSTS` + `SH_CREDENTIAL_KEK`: user-scoped egress credentials (SBX0.2b); absent = off. */
   egress?: EgressConfig;
 }
@@ -74,6 +79,24 @@ function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
   if (v === undefined || v === '') return def;
   if (!/^[1-9][0-9]*$/.test(v)) throw new Error(`${name} must be a positive integer`);
   return Number(v);
+}
+
+/**
+ * `SH_SANDBOX_MODES_ALLOWED`: a comma list of mode names; absent or empty means `per-exec,lease`, so
+ * level 2 (`lease+processes`) stays off until an operator lists it. An unknown name, or a list of
+ * none, refuses boot.
+ */
+function modesAllowedFromEnv(env: NodeJS.ProcessEnv): ReadonlySet<SandboxModeName> {
+  const names = (env.SH_SANDBOX_MODES_ALLOWED || 'per-exec,lease')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (names.length === 0 || !names.every(isSandboxModeName)) {
+    throw new Error(
+      `SH_SANDBOX_MODES_ALLOWED must be a comma list of ${SANDBOX_MODE_NAMES.join(', ')}`,
+    );
+  }
+  return new Set(names);
 }
 
 export function parseTemplates(raw: string | undefined): SandboxTemplate[] {
@@ -162,6 +185,8 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
     maxTotal: positive(env, 'SH_SANDBOX_MAX_TOTAL', 40),
     issuer: env.SH_SANDBOX_TOKEN_ISSUER || DEFAULT_SANDBOX_ISSUER,
     execEndpoint,
+    modesAllowed: modesAllowedFromEnv(env),
+    idleCeilingS: positive(env, 'SH_SANDBOX_IDLE_CEILING_S', 1800),
     ...(execCa ? { execCa } : {}),
     ...(janitorToken ? { janitorToken } : {}),
     ...(egress ? { egress } : {}),

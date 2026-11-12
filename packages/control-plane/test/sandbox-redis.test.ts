@@ -41,6 +41,9 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
         labels: {},
         createdAt: now,
         expiresAt: now + 1000,
+        mode: 'per-exec',
+        idleTimeoutS: 0,
+        modeEpoch: 0,
       },
       { perSubject: 1, total: 1, retentionS: 500 },
       now,
@@ -70,6 +73,9 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
         labels: {},
         createdAt: now,
         expiresAt: now + 1000,
+        mode: 'per-exec',
+        idleTimeoutS: 0,
+        modeEpoch: 0,
       },
       { perSubject: 1, total: 1, retentionS: 500 },
       now,
@@ -95,6 +101,9 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
       labels: {},
       createdAt: now,
       expiresAt: now + 1000,
+      mode: 'per-exec' as const,
+      idleTimeoutS: 0,
+      modeEpoch: 0,
     });
     const limits = { perSubject: 50, total: 50, retentionS: 500 };
     for (let i = 0; i < 20; i++) {
@@ -109,6 +118,81 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
     // A live member stays.
     expect(await store.create(rec('sbx-live'), limits, now)).toBe('ok');
     expect(await client.zScore(owner, 'sbx-live')).not.toBeNull();
+    await done();
+  });
+});
+
+describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
+  // A hash as the store wrote it before the record had a mode: no mode, idleTimeoutS or modeEpoch.
+  const legacyHash = (id: string, now: number) => ({
+    id,
+    owner: 'github:1',
+    tenant: 'github:1',
+    name: '',
+    template: 'd',
+    worker: 'w',
+    wsk: id,
+    labels: '{}',
+    createdAt: String(now),
+    expiresAt: String(now + 1000),
+  });
+
+  it('reads a record written before the mode fields as per-exec, idle 0, epoch 0', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await client.hSet(`${prefix}sandbox:sbx-legacy`, legacyHash('sbx-legacy', now));
+    expect(await store.get('sbx-legacy', now)).toMatchObject({
+      id: 'sbx-legacy',
+      mode: 'per-exec',
+      idleTimeoutS: 0,
+      modeEpoch: 0,
+    });
+    // ...and its first setMode raises the epoch from 0 to 1.
+    expect(await store.setMode('sbx-legacy', 'lease', 600)).toMatchObject({
+      mode: 'lease',
+      idleTimeoutS: 600,
+      modeEpoch: 1,
+    });
+    await done();
+  });
+
+  it('reads an unknown stored mode as per-exec, the least it may grant', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await client.hSet(`${prefix}sandbox:sbx-odd`, {
+      ...legacyHash('sbx-odd', now),
+      mode: 'resident',
+      idleTimeoutS: '60',
+      modeEpoch: '3',
+    });
+    expect(await store.get('sbx-odd', now)).toMatchObject({
+      mode: 'per-exec',
+      idleTimeoutS: 60,
+      modeEpoch: 3,
+    });
+    await done();
+  });
+
+  it('keeps the record TTL across setMode', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(
+      {
+        ...legacyHash('sbx-ttl', now),
+        labels: {},
+        createdAt: now,
+        expiresAt: now + 1000,
+        mode: 'per-exec',
+        idleTimeoutS: 0,
+        modeEpoch: 0,
+      },
+      { perSubject: 1, total: 1, retentionS: 500 },
+      now,
+    );
+    await store.setMode('sbx-ttl', 'lease', 600);
+    const ttl = await client.ttl(`${prefix}sandbox:sbx-ttl`);
+    expect(ttl).toBeGreaterThan(1400);
+    expect(ttl).toBeLessThanOrEqual(1500);
     await done();
   });
 });

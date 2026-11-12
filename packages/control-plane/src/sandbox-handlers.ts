@@ -878,6 +878,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       labels,
       createdAt: now,
       expiresAt: now + cfg.lifetimeS,
+      mode: 'per-exec',
+      idleTimeoutS: 0,
+      modeEpoch: 0,
     };
     const outcome = await store.create(
       rec,

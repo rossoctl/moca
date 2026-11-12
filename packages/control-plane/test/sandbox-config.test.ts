@@ -56,6 +56,41 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
       execEndpoint: 'sbx-exec.apps.example.invalid:443',
     });
     expect(c.sandbox!.templates.map((t) => t.worker)).toEqual(['sbx_default', 'sbx_node22']);
+    // Lease-mode policy (lease-mode spec §8.1): level 2 stays off unless an operator lists it.
+    expect([...c.sandbox!.modesAllowed].sort()).toEqual(['lease', 'per-exec']);
+    expect(c.sandbox!.idleCeilingS).toBe(1800);
+  });
+
+  it('reads SH_SANDBOX_MODES_ALLOWED as a comma list, and an empty value as the default', () => {
+    const modes = (v: string | undefined) =>
+      [...configFromEnv(env({ SH_SANDBOX_MODES_ALLOWED: v })).sandbox!.modesAllowed].sort();
+    expect(modes(' per-exec , lease , lease+processes ')).toEqual([
+      'lease',
+      'lease+processes',
+      'per-exec',
+    ]);
+    expect(modes('per-exec')).toEqual(['per-exec']);
+    expect(modes('lease,lease')).toEqual(['lease']);
+    expect(modes('')).toEqual(['lease', 'per-exec']);
+  });
+
+  it('refuses an unknown or empty mode list at boot, without echoing it', () => {
+    for (const v of ['per-exec,resident', 'Lease', 'lease processes', ' , ']) {
+      const msg = messageOf(() => configFromEnv(env({ SH_SANDBOX_MODES_ALLOWED: v })));
+      expect(msg, v).toMatch(/^SH_SANDBOX_MODES_ALLOWED/);
+      if (v.trim().replace(/,/g, '') !== '') expect(msg, v).not.toContain(v);
+    }
+  });
+
+  it('reads SH_SANDBOX_IDLE_CEILING_S as a positive integer', () => {
+    expect(configFromEnv(env({ SH_SANDBOX_IDLE_CEILING_S: '3600' })).sandbox!.idleCeilingS).toBe(
+      3600,
+    );
+    for (const v of ['0', '-5', '30s', '1.5']) {
+      expect(() => configFromEnv(env({ SH_SANDBOX_IDLE_CEILING_S: v })), v).toThrow(
+        /^SH_SANDBOX_IDLE_CEILING_S must be a positive integer/,
+      );
+    }
   });
 
   it('refuses to boot without an allow list, templates or an exec endpoint', () => {

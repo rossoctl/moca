@@ -62,6 +62,8 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(rec).toMatchObject({ worker: 'sbx_node22', wsk: b.id, tenant: 'github:1234' });
     expect(b.buildId).toMatch(/^imported:[0-9a-f]{12}$/);
     expect(rec?.buildId).toBe(b.buildId);
+    // No mode asked for: per-exec, the worker's idle default, epoch 0 (lease-mode spec §8.1).
+    expect(rec).toMatchObject({ mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 0 });
   });
 
   it('shows an unnamed sandbox as name null', async () => {

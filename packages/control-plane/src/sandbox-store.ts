@@ -6,6 +6,22 @@
  * Expiry is COMPUTED, never scheduled (§5.2): a record past its expiresAt reads as terminated/expired
  * on every path, so no job has to run for an expired sandbox to stop minting.
  */
+
+/**
+ * How the worker runs a sandbox's Execs (lease-mode spec §8.1): the vmpool `Mode.String()` names, as
+ * the record and the sandbox token carry them. Named apart from the proto enum `SandboxMode`.
+ */
+export type SandboxModeName = 'per-exec' | 'lease' | 'lease+processes';
+
+export const SANDBOX_MODE_NAMES: readonly SandboxModeName[] = [
+  'per-exec',
+  'lease',
+  'lease+processes',
+];
+
+export const isSandboxModeName = (v: unknown): v is SandboxModeName =>
+  (SANDBOX_MODE_NAMES as readonly unknown[]).includes(v);
+
 export interface SandboxRecord {
   id: string;
   owner: string;
@@ -26,6 +42,12 @@ export interface SandboxRecord {
   expiresAt: number;
   /** Set by delete; absent while live or after a plain expiry. */
   deletedAt?: number;
+  /** `per-exec` unless the owner picked a lease mode. */
+  mode: SandboxModeName;
+  /** The owner's lease idle timeout in seconds; 0 = the worker's default. */
+  idleTimeoutS: number;
+  /** Raised by 1 on every setMode, so the worker can refuse an older mode (0 = never set). */
+  modeEpoch: number;
 }
 
 export type SandboxState = 'ready' | 'terminated';
@@ -64,6 +86,16 @@ export interface SandboxStore {
   /** Newest first, terminated (but retained) records included. */
   listAll(nowS: number): Promise<SandboxRecord[]>;
   markDeleted(id: string, nowS: number, retentionS: number): Promise<DeleteOutcome>;
+  /**
+   * Sets mode and idle timeout and raises modeEpoch by 1, atomically, on EVERY call -- the same mode
+   * again included. Stores what it is given: the policy bounds are the caller's. Undefined for a
+   * missing or deleted sandbox.
+   */
+  setMode(
+    id: string,
+    mode: SandboxModeName,
+    idleTimeoutS: number,
+  ): Promise<SandboxRecord | undefined>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -131,6 +163,21 @@ export class MemorySandboxStore implements SandboxStore {
     r.deletedAt = nowS;
     r.retentionS = retentionS;
     return 'deleted';
+  }
+
+  // No await before the mutation, as in create. No purge: there is no caller clock here, and a
+  // record past its retention is one that is deleted or expired, which the caller refuses anyway.
+  async setMode(
+    id: string,
+    mode: SandboxModeName,
+    idleTimeoutS: number,
+  ): Promise<SandboxRecord | undefined> {
+    const r = this.recs.get(id);
+    if (!r || r.deletedAt !== undefined) return undefined;
+    r.mode = mode;
+    r.idleTimeoutS = idleTimeoutS;
+    r.modeEpoch += 1;
+    return strip(r);
   }
 }
 
