@@ -235,9 +235,10 @@ or an activation naming it, a tag of it or a template whose every build is retir
 is refused 409 `build_in_use` while a live sandbox runs on the build, and is idempotent. Each build retired writes a
 `retire` record naming the caller, the status before and the build's `build` record. A retire cannot be undone: a new
 build of the template is the way back. Each build lists `heldBy`, the hosts still holding its snapshot, and a retired
-build reports `capacity` while its worker still runs (null once its host has stopped it). `mocactl sbx templates retire
---wait` waits for that stop; waiting for the snapshot's removal from every host (`heldBy` empty) comes with
-[#743](https://github.com/rossoctl/moca/issues/743).
+build reports `capacity` while its worker still runs (null once its host has stopped it). Since API 1.9.0
+([#743](https://github.com/rossoctl/moca/issues/743)) each holding host's agent then removes the build's worker and
+snapshot (the wanted state's `remove`) and reports it, a `retire` record by `host:<id>` with `event: removed`, and
+`heldBy` drops the host. `mocactl sbx templates retire --wait` waits for the stop and for `heldBy` to empty.
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,

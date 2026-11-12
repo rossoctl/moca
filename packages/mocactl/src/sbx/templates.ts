@@ -240,12 +240,12 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
 /**
  * `templates retire ID [--build B] [--reason T] [--wait [--timeout S]]` (§5.1): retire the template
  * (every build of it) or build B, and print each build retired. With --wait, then read each build
- * until it is `retired` and its worker no longer runs (`capacity` null: the host stopped it, after
- * the wanted state's `stop`), saying so while it still runs; `running` null, presence unreadable,
- * is waited out too, never taken as stopped. `heldBy` null, or absent from an older
- * control plane, means no host agents: nothing to wait for. A wait past --timeout (default
- * RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty)
- * comes with the host's removal step (#743).
+ * until it is `retired`, its worker no longer runs (`capacity` null: the host stopped it, after
+ * the wanted state's `stop`) and no host holds it any more (`heldBy` empty: each holding host has
+ * removed its worker and snapshot, §6.1 step 7), saying so, once per change, while it waits;
+ * `running` null, presence unreadable, is waited out too, never taken as stopped. `heldBy` null, or
+ * absent from an older control plane, means no host agents: nothing to wait for. A wait past
+ * --timeout (default RETIRE_TIMEOUT_S) exits 5.
  */
 export async function cmdRetire(
   c: SbxCtx,
@@ -278,9 +278,15 @@ export async function cmdRetire(
           if (!transient(err)) throw err;
         }
         const noAgents = b !== undefined && (b.heldBy === null || b.heldBy === undefined);
-        if (b && b.status === 'retired' && (noAgents || b.capacity === null)) {
+        const held = b?.heldBy ?? [];
+        if (
+          b &&
+          b.status === 'retired' &&
+          (noAgents || (b.capacity === null && held.length === 0))
+        ) {
           c.io.err(
-            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, its worker stopped`,
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, ` +
+              (noAgents ? 'its worker stopped' : 'its worker stopped and removed from every host'),
           );
           break;
         }
@@ -291,13 +297,20 @@ export async function cmdRetire(
               ? sanitizeRemote(b.status)
               : b.capacity?.running === null
                 ? "retired, its worker's state cannot be read; still waiting"
-                : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
+                : b.capacity === null
+                  ? `retired, its worker stopped; still held by ${held.map(sanitizeRemote).join(', ')}`
+                  : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
           if (why !== said)
             c.io.err(`${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: ${why}`);
           said = why;
         }
         const left = end - c.rt.now();
-        if (left <= 0) return timedOut(c, `${r.templateId} ${build} to stop its worker`, timeoutS);
+        if (left <= 0)
+          return timedOut(
+            c,
+            `${r.templateId} ${build} to stop its worker and be removed from every host`,
+            timeoutS,
+          );
         await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
         if (c.signal?.aborted) return SBX_EXIT.failed;
       }

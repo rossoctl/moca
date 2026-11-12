@@ -287,7 +287,8 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
 | `POST /v1/templates/{id}/builds/{build}/cancel` | a `queued`, `building` or `probing` build becomes `failed` (`cancelled`) (#737)     |
 
 - **Ends use for good.** A retired build's activation leases go, so it is no longer wanted: a host
-  holding it is told to stop its worker (§6.3 `stop`). A sandbox create or an activation naming it,
+  holding it is told to stop its worker (§6.3 `stop`), then to remove its worker and snapshot
+  (§6.1 step 7). A sandbox create or an activation naming it,
   a tag of it, or a template whose every build is retired, is refused `410 template_retired` (not
   `400 unknown_template`: it existed, and its records stay). Readiness reads `retired`, and each
   build lists `heldBy`, the hosts whose last inventory still holds its snapshot.
@@ -304,13 +305,15 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   `templates` quota.
 - **From mocactl:** `mocactl sbx templates retire ID`, with `--build B` for one build,
   `--reason TEXT` (a whole template only) and `--wait [--timeout S]`. `--wait` returns once each
-  build reads `retired` and its worker no longer runs: a retired build whose worker still holds a
-  presence record reports `capacity`, as an active one does, and `capacity` is null once its host
-  has stopped it (after the wanted state's `stop`); when the relay's presence cannot be read it
-  reports `running: null`, and `--wait` keeps waiting rather than take that as stopped. Without host agents (`heldBy` null) there is
-  nothing to wait for. Past `--timeout` (default 300 s) it exits 5. Waiting for the snapshot's
-  removal from every host (`heldBy` empty) comes with the host's removal step (#743). A sandbox
-  command refused `template_retired` says that the template or build is never served again.
+  build reads `retired`, its worker no longer runs and no host holds it: a retired build whose
+  worker still holds a presence record reports `capacity`, as an active one does, and `capacity` is
+  null once its host has stopped it (after the wanted state's `stop`); when the relay's presence
+  cannot be read it reports `running: null`, and `--wait` keeps waiting rather than take that as
+  stopped. `heldBy` is empty once every holding host has removed the worker and snapshot (§6.1
+  step 7). Without host agents (`heldBy` null) there is nothing to wait for. Past `--timeout`
+  (default 300 s) it exits 5; a holding host whose agent does not poll keeps the build in `heldBy`
+  until it does. A sandbox command refused `template_retired` says that the template or build is
+  never served again.
 
 Known limits:
 
@@ -320,8 +323,9 @@ Known limits:
   sandbox create racing the retire can land on the build in between. It is harmless: that sandbox
   runs, and its worker is stopped only once nothing on it is live, since the wanted state never
   lists a worker with a live sandbox in `stop`.
-- Removing a retired build's worker and snapshot from its host comes with the host agent's removal
-  step (#743); until then a retired build stays in `heldBy`.
+- A retired build is removed only from hosts whose agent polls: a host that is down removes it on
+  its next poll, and the build lists that host in `heldBy` until then. The removal keeps the worker's workspace data,
+  as `install-host.sh --uninstall` does; freeing it is the host janitor's.
 - A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
   pinned to a build is to be checked beside them once sessions are.
 
@@ -357,6 +361,20 @@ poll:
 | 2    | `POST /v1/hosts/{host}/builds/claim`: up to its free build slots                                                                          | hands out `queued` builds, oldest first, one subject's at a time in turn |
 | 3    | fetches a cited gate record (`GET /v1/hosts/{host}/blobs/{sha256}`) and checks its bytes against the sha256                               | serves the stored bytes                                                  |
 | 4    | builds; `POST /v1/hosts/{host}/builds/{build}/log` and `/report` (`building`, `probing`, `built` with T and S, or `failed` with the step) | records them; on `built`, checks policy and registers or rejects (§8.2)  |
+| 5    | `GET /v1/hosts/{host}/wanted`: starts and stops installed workers (§6.3)                                                                  | answers `run`, `stop` and `remove` (step 7)                              |
+| 6    | `POST /v1/hosts/{host}/workers/report`: each start, refusal, stop and removal                                                             | writes `activate`, `deactivate` and `retire` records by `host:<id>`      |
+| 7    | removes each `remove` build: uninstalls its worker, deletes its snapshot and template record, reports `removed`                           | a `retire` record citing `buildRecord`; the host no longer holds it      |
+
+**Removal (step 7, #743).** The wanted state's `remove` lists the retired builds the host holds with
+no live sandbox on their worker, each also in `stop`, so a running worker is stopped first, in the
+same run. For each, the agent finds the snapshot from its own template record whose manifest hash
+is the build id and whose worker is the one named, never from a path the control plane sends: a
+name no record matches deletes nothing and is reported as an error. It skips a worker whose unit
+still runs (removed once it is stopped), runs `install-host.sh --uninstall <worker>` if the worker is
+installed (`SBX_INSTALL_HOST`, set in both agent units), deletes the snapshot directory and its
+record, and reports `removed`. The control plane writes a `retire` record by `host:<id>` with
+`event: removed` and the build's `buildRecord` digest, and the build's `heldBy` drops the host at
+once (the next inventory says the same). The worker's workspace data stays for the host janitor.
 
 A claimed build's job is the spec as the policy checked it: the template's id and the create's
 image always win over keys of the same name in the spec, and the guest size is always named
@@ -425,8 +443,9 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
   (`409 no_active_slot`) rather than displacing it. The lock is in the control plane's process, so
   one process per template store is what makes it enough.
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
-  host) and `stop` (the builds it holds with no lease and no live sandbox, retired ones (§5.1)
-  included). The agent starts each
+  host), `stop` (the builds it holds with no lease and no live sandbox, retired ones (§5.1)
+  included) and `remove` (the retired ones of `stop`, whose worker and snapshot the agent removes
+  after the stop, §6.1 step 7). The agent starts each
   `run` worker that is installed and not running (`sbx-worker@<id>`), stops each `stop` worker that
   runs, and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
   `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`
@@ -481,7 +500,7 @@ follows) so the chain from the image to a sandbox can be walked and checked. Eve
 | `check`                        | policy is applied, at create and at registration                 | the policy's digest, the profile, each rule and its result, the outcome (`admitted`, `registered`, `rejected`); at registration, `build` is the digest of the `build` record it judged                                                                           |
 | `activate` · `deactivate`      | readiness changes                                                | host, worker, manifest hash, subject, reason; each lease stores its `activate` record's digest                                                                                                                                                                   |
 | `tag` · `visibility` · `owner` | the owner or an admin changes one                                | the new value and the one before                                                                                                                                                                                                                                 |
-| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`                                                                                                                                                        |
+| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`, `event: removed`                                                                                                                                      |
 | `sandbox`                      | a sandbox is created, and when it ends                           | at create: sandboxId, buildId, templateManifestHash, `lease` (null with no lease), expiresAt; at end: `state: terminated`, `reason` (`deleted` with endedAt, or `expired`, written once by the janitor's sweep when it first sees it; the true end is expiresAt) |
 | `session`                      | a Moca Pi session pinned to a template is created and deleted    | as `sandbox`, with sessionId                                                                                                                                                                                                                                     |
 | `use` (summary)                | sessions start                                                   | per build and day: count, first and last, by subject                                                                                                                                                                                                             |
