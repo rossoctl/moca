@@ -1,6 +1,6 @@
 # HTTP API guide
 
-> **Preview.** Describes the P6 runtime on `main` as of 2026-10-12. The machine-readable contracts are
+> **Preview.** Describes the P6 runtime on `main` as of 2026-11-12. The machine-readable contracts are
 > [`docs/api/openapi.yaml`](../api/openapi.yaml) (control plane) and
 > [`docs/api/harness-openapi.yaml`](../api/harness-openapi.yaml) (data plane); this page explains how
 > they fit together and records behaviour the specs do not. Workload routes are covered in
@@ -163,10 +163,11 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
   queue. Its replacement is the authenticated, owner-scoped `POST /v1/sessions/{id}/turns` with
   `async: true` → `202 {sessionId, turnId}`, designed in
   [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and documented in
-  [`docs/api/openapi.yaml`](../api/openapi.yaml). **Submission is implemented; the consumer that
-  drains the queue is not** ([#389](https://github.com/rossoctl/moca/issues/389)) — a submitted turn
-  is recorded and queued, and runs once the drain loop ships. Poll
-  `GET /v1/sessions/{id}/turns/{turnId}` for its state. Run leaves synchronously meanwhile.
+  [`docs/api/openapi.yaml`](../api/openapi.yaml). **That path works**, with two conditions: each
+  worker needs `SH_ASYNC_DRAIN=1` (off by default) to drain the queue, and the deployment must be
+  `MOCA_TENANCY=single` — under `multi`, submission answers 501 `async_tenancy_unsupported`. Poll
+  `GET /v1/sessions/{id}/turns/{turnId}` for state and result. See
+  [dispatch archetypes](../concepts/dispatch-archetypes.md) for the operator steps.
 - On a saturated pool the sync path waits with backoff (up to `KAGENTI_SYNC_SATURATION_WAIT_MS`, 30 s)
   and then returns 503 with `Retry-After` and `{"status":"failed","reason":"saturated"}`.
 
@@ -179,6 +180,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Probes         | `GET /healthz`, `GET /readyz`, `GET /v1/discovery` (harness URL, sandbox tiers, version; no auth)                                                                                                       |
 | Login          | `POST /v1/auth/device`, `/v1/auth/device/token`, `/v1/auth/token` (refresh), `/v1/auth/revoke`, `/v1/auth/revoke-all`, `GET /v1/me`                                                                     |
 | Sessions       | `POST` and `GET /v1/sessions`, `GET`, `PATCH` and `DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/resources`, `POST /v1/sessions/{id}/token`                                                         |
+| Async turns    | `POST /v1/sessions/{id}/turns` (submit, `202`), `GET /v1/sessions/{id}/turns/{turnId}` (state, attempts, result), `DELETE` the same path (cancel while `queued`)                                        |
 | Models         | `GET /v1/models?credential=` (the models a credential's endpoint lists), `GET /v1/sessions/{id}/models` (the models the session's credential lists)                                                     |
 | Credentials    | `GET /v1/credentials`, `PUT` and `DELETE /v1/credentials/{name}`                                                                                                                                        |
 | Config bundles | `POST` and `GET /v1/config-bundles` (your own, newest first), `DELETE /v1/config-bundles/{digest}`                                                                                                      |
