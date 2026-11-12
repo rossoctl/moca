@@ -143,6 +143,13 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/templates/{id}/deactivate',
     reads: ['templateId', 'released'],
   },
+  // `sbx templates quota` (template lifecycle spec §5.2): read the policy, write, compare.
+  { method: 'get', path: '/v1/policy', reads: ['policy', 'digest', 'record'] },
+  {
+    method: 'put',
+    path: '/v1/quota/{subject}',
+    reads: ['target', 'quota', 'before', 'policy', 'record'],
+  },
 ];
 
 // The fields of each Sandbox and template `mocactl sbx ls` / `templates` print.
@@ -328,7 +335,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 14 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 16 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -343,12 +350,15 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.deactivateTemplate('TID');
     await c.retireTemplate('TID');
     await c.retireTemplate('TID', { build: 'BID' });
+    await c.getPolicy();
+    await c.putQuota('SUBJ', null);
     const seen = calls.map(
       (k) =>
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
           .replace('/ID', '/{id}')
           .replace('/TID', '/{id}')
-          .replace('/BID', '/{build}')}`,
+          .replace('/BID', '/{build}')
+          .replace('/SUBJ', '/{subject}')}`,
     );
     expect(new Set(seen)).toEqual(new Set(SBX_USED.map((u) => `${u.method} ${u.path}`)));
     // A new method on SandboxApiClient must be called above and listed in SBX_USED.
@@ -369,6 +379,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'activateTemplate',
         'deactivateTemplate',
         'retireTemplate',
+        'getPolicy',
+        'putQuota',
       ]),
     );
   });
