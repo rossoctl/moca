@@ -1,7 +1,7 @@
 import { TOKEN_MARGIN_S, WORKSPACE } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import type { SbxBuild, SbxReadinessReason } from './api.js';
+import type { SbxBuild, SbxHost, SbxReadinessReason } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, type ExecFactory } from './exec.js';
 import { baselineAtHead } from './push.js';
@@ -9,12 +9,33 @@ import { baselineAtHead } from './push.js';
 /**
  * The template reads from mocactl (template lifecycle spec §4): one template and its builds, or one
  * build, and `create --seed`, which runs the served build's own seed; and activation (§6.3): take or
- * renew a lease, wait for the build to be active, release it; and the KVM hosts' slots, memory and
- * disk (§6.2). Every command has `--json` (the API's answer, never a token).
+ * renew a lease, wait for the build to be active, release it; and the KVM hosts' slots, start
+ * line, memory, idle grace and disk (§6.2, §6.5). Every command has `--json` (the API's answer, never a token).
  */
 
-/** `templates activate --wait`'s limit with no --timeout, in seconds. */
+/** `templates activate --wait`'s limit with no --timeout, in seconds: the floor of a sized one. */
 export const ACTIVATE_TIMEOUT_S = 1800;
+/** The sized limit's ceiling: a host reporting an outlier start time never makes --wait sit longer. */
+export const ACTIVATE_TIMEOUT_CAP_S = 14_400;
+
+/**
+ * `activate --wait`'s limit with no --timeout (§6.5): a build queued behind its host's start limit
+ * waits (ceil(queuePosition / concurrency) + 1) start times, plus a quarter, from the host's
+ * measured start time; never less than ACTIVATE_TIMEOUT_S (a long start line outgrows a fixed
+ * limit), never more than ACTIVATE_TIMEOUT_CAP_S. Without a queue position or a measured start
+ * time, the floor alone.
+ */
+export function sizedActivateTimeoutS(
+  b: Pick<SbxBuild, 'queued' | 'queuePosition'> | undefined,
+  host: SbxHost | undefined,
+): number {
+  const pos = b?.queued ? b.queuePosition : undefined;
+  const conc = host?.start?.concurrency;
+  const secs = host?.start?.seconds;
+  if (!pos || !conc || !secs) return ACTIVATE_TIMEOUT_S;
+  const sized = Math.ceil((Math.ceil(pos / conc) + 1) * secs * 1.25);
+  return Math.min(ACTIVATE_TIMEOUT_CAP_S, Math.max(ACTIVATE_TIMEOUT_S, sized));
+}
 /** Between two reads of a build while waiting for it to be active. */
 export const POLL_MS = 5000;
 
@@ -36,15 +57,34 @@ const UNAVAILABLE: Record<SbxReadinessReason, string> = {
 };
 
 /**
- * A build's readiness, with its capacity when it is active (`active (running 3, in use 1)`), or why
- * it is unavailable (`unavailable (memory)`).
+ * A build's readiness, with its capacity when it is active (`active (running 3, in use 1)`), why
+ * it is unavailable (`unavailable (memory)`), its place in its host's start line (`activating
+ * (queued at 3)`), or its idle grace (`deactivating (graced until ...)`).
  */
-function readinessText(b: Pick<SbxBuild, 'readiness' | 'readinessReason' | 'capacity'>): string {
+function readinessText(
+  b: Pick<
+    SbxBuild,
+    | 'readiness'
+    | 'readinessReason'
+    | 'capacity'
+    | 'queued'
+    | 'queuePosition'
+    | 'graced'
+    | 'gracedUntil'
+  >,
+): string {
   if (b.readiness === null) return '';
   const c = b.capacity;
   const cap = c ? ` (running ${c.running}${c.inUse !== null ? `, in use ${c.inUse}` : ''})` : '';
-  const why = !c && b.readinessReason ? ` (${sanitizeRemote(b.readinessReason)})` : '';
-  return `${sanitizeRemote(b.readiness)}${cap}${why}`;
+  const extra = [
+    ...(!c && b.readinessReason ? [sanitizeRemote(b.readinessReason)] : []),
+    ...(b.queued ? [`queued at ${b.queuePosition ?? '?'}`] : []),
+    ...(b.queued === false ? ['starting'] : []),
+    ...(b.graced
+      ? [`graced${b.gracedUntil ? ` until ${new Date(b.gracedUntil * 1000).toISOString()}` : ''}`]
+      : []),
+  ];
+  return `${sanitizeRemote(b.readiness)}${cap}${extra.length ? ` (${extra.join(', ')})` : ''}`;
 }
 
 /** One build, for a person. */
@@ -83,8 +123,9 @@ export async function cmdShowTemplate(c: SbxCtx, id: string, build?: string): Pr
 }
 
 /**
- * `sbx hosts` (§6.2): per KVM host, its active slots, its memory (from an agent that reports it:
- * headroom, the effective floor, a brake) and its disk.
+ * `sbx hosts` (§6.2, §6.5): per KVM host, its active slots, its start line (from an agent that
+ * reports its start limit), its memory (from an agent that reports it: headroom, the effective
+ * floor, a brake), its idle grace (from an agent that sets one) and its disk.
  */
 export async function cmdHosts(c: SbxCtx): Promise<number> {
   try {
@@ -98,12 +139,21 @@ export async function cmdHosts(c: SbxCtx): Promise<number> {
       const m = h.memory;
       const parts = [
         `active ${h.active.used} of ${h.active.limit}`,
+        ...(h.start
+          ? [
+              `start ${h.start.starting ?? '?'} starting, ${h.start.queued ?? '?'} queued (at most ${h.start.concurrency} at once` +
+                `${h.start.seconds !== null ? `, ${Math.round(h.start.seconds)} s each` : ''})`,
+            ]
+          : []),
         ...(m
           ? [
               `memory ${m.headroomMib} MiB headroom of ${m.totalMib} (floor ${m.floorMib})` +
                 `${m.brake ? `, brake: ${sanitizeRemote(m.brake)}` : ''}` +
                 `${m.memfileMismatch.length ? `, ${m.memfileMismatch.length} memory file mismatch` : ''}`,
             ]
+          : []),
+        ...(h.idleGraceSeconds !== undefined
+          ? [`grace ${h.idleGraceSeconds} s (${h.graced ?? 0} graced)`]
           : []),
         `disk ${h.disk.freeGb} GB free (floor ${h.disk.floorGb})`,
       ];
@@ -189,15 +239,18 @@ const transient = (err: unknown) =>
  * `templates activate ID [--build B] [--lease S] [--wait [--timeout S]]` (§6.3): take or renew the
  * caller's lease. Without --wait, the lease answer. With it, a `409 no_active_slot` is retried after
  * its Retry-After, and the build is read until it is `active`, saying why it waits; any other
- * refusal fails at once. A wait past --timeout (default ACTIVATE_TIMEOUT_S) exits 5.
+ * refusal fails at once. A wait past --timeout exits 5. Without --timeout the limit is
+ * ACTIVATE_TIMEOUT_S, raised once the build is read queued in its host's start line to what the
+ * line implies (sizedActivateTimeoutS), saying so; --timeout always wins.
  */
 export async function cmdActivate(
   c: SbxCtx,
   id: string,
   opts: { build?: string; leaseSeconds?: number; wait: boolean; timeoutS?: number },
 ): Promise<number> {
-  const timeoutS = opts.timeoutS ?? ACTIVATE_TIMEOUT_S;
-  const end = c.rt.now() + timeoutS * 1000;
+  let timeoutS = opts.timeoutS ?? ACTIVATE_TIMEOUT_S;
+  const start = c.rt.now();
+  let end = start + timeoutS * 1000;
   const body = {
     ...(opts.build !== undefined ? { build: opts.build } : {}),
     ...(opts.leaseSeconds !== undefined ? { leaseSeconds: opts.leaseSeconds } : {}),
@@ -236,6 +289,16 @@ export async function cmdActivate(
         );
       return SBX_EXIT.ok;
     }
+    // No --timeout: the limit is sized from the host's start line (best effort: without the hosts
+    // block, the floor stands).
+    let host: SbxHost | undefined;
+    if (opts.timeoutS === undefined && lease.host !== null) {
+      try {
+        host = (await c.api.listHosts()).find((h) => h.id === lease.host);
+      } catch {
+        host = undefined;
+      }
+    }
     for (;;) {
       let b: SbxBuild | undefined;
       try {
@@ -257,11 +320,24 @@ export async function cmdActivate(
         );
         return SBX_EXIT.failed;
       }
+      if (b && opts.timeoutS === undefined) {
+        const sized = sizedActivateTimeoutS(b, host);
+        if (sized > timeoutS) {
+          timeoutS = sized;
+          end = start + sized * 1000;
+          c.io.err(
+            `${sanitizeRemote(id)}: queued at ${b.queuePosition}; waiting up to ${sized} s (sized from the host's start line` +
+              `${sized >= ACTIVATE_TIMEOUT_CAP_S ? `, capped at ${ACTIVATE_TIMEOUT_CAP_S} s; pass --timeout for longer` : ''})`,
+          );
+        }
+      }
       if (b) {
         const why =
           b.readiness === 'unavailable' && b.readinessReason
             ? UNAVAILABLE[b.readinessReason]
-            : undefined;
+            : b.readiness === 'activating' && b.queued
+              ? `activating: queued at ${b.queuePosition ?? '?'} in its host's start line`
+              : undefined;
         say(why ?? WAITING[b.readiness ?? ''] ?? sanitizeRemote(b.readiness ?? 'no readiness'));
       }
       const left = end - c.rt.now();
@@ -274,14 +350,18 @@ export async function cmdActivate(
   }
 }
 
-/** `templates deactivate ID` (§6.3): release the caller's leases on the template. */
-export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
+/**
+ * `templates deactivate ID [--stop-now]` (§6.3): release the caller's leases on the template;
+ * --stop-now skips the host's idle grace (§6.5), so the worker stops at the host's next poll.
+ */
+export async function cmdDeactivate(c: SbxCtx, id: string, stopNow = false): Promise<number> {
   try {
-    const r = await c.api.deactivateTemplate(id);
+    const r = await c.api.deactivateTemplate(id, stopNow ? { stopNow: true } : {});
     if (c.json) c.io.out(JSON.stringify(r) + '\n');
     else
       c.io.out(
-        `${sanitizeRemote(r.templateId)}: released ${r.released} lease${r.released === 1 ? '' : 's'}\n`,
+        `${sanitizeRemote(r.templateId)}: released ${r.released} lease${r.released === 1 ? '' : 's'}` +
+          `${stopNow ? ', stopped now (no idle grace)' : ''}\n`,
       );
     return SBX_EXIT.ok;
   } catch (err) {

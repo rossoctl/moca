@@ -54,11 +54,15 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  take or renew your activation lease on a build (tag
                                                  default, or BUILD; S seconds, 60-86400); a host agent
                                                  starts its worker. --wait: until it is active, saying
-                                                 why it waits (default 1800 s; exit 5 on a timeout)
-  mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
-                                                 its worker drains and stops
-  mocactl sbx hosts [--json]                     per KVM host: active slots, memory headroom and floor,
-                                                 disk
+                                                 why it waits (queued at N, no slot, memory); default
+                                                 1800 s, raised from the host's start line when queued
+                                                 (at most 4 h); exit 5 on a timeout
+  mocactl sbx templates deactivate ID [--stop-now] [--json]
+                                                 release your leases on a template; with none left,
+                                                 its worker drains and stops (after the host's idle
+                                                 grace, if it has one; --stop-now skips the grace)
+  mocactl sbx hosts [--json]                     per KVM host: active slots, start line, memory
+                                                 headroom and floor, idle grace, disk
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -365,6 +369,7 @@ export async function sbxMain(
         timeout: { type: 'string' },
         lease: { type: 'string' },
         wait: { type: 'boolean' },
+        'stop-now': { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
         'max-push': { type: 'string' },
@@ -436,6 +441,10 @@ export async function sbxMain(
   }
   if ((values.lease !== undefined || values.wait !== undefined) && !activating) {
     io.err(`sbx: --lease and --wait only apply to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values['stop-now'] !== undefined && !(command === 'templates' && arg === 'deactivate')) {
+    io.err(`sbx: --stop-now only applies to templates deactivate\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   let leaseSeconds: number | undefined;
@@ -703,7 +712,7 @@ export async function sbxMain(
           wait: values.wait === true,
           ...(timeout !== undefined ? { timeoutS: timeout } : {}),
         });
-      if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
+      if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!, values['stop-now'] === true);
       return cmdTemplates(ctx);
     case 'hosts':
       return cmdHosts(ctx);

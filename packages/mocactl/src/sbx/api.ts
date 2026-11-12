@@ -54,6 +54,13 @@ export interface SbxBuild {
   readiness: string | null;
   /** Present only with readiness `unavailable`: why it is not placed. */
   readinessReason?: SbxReadinessReason;
+  /** Only while `activating` on a host that reports its start limit (§6.5): waiting for a start slot. */
+  queued?: boolean;
+  /** With `queued`: its 1-based place in the host's start line. */
+  queuePosition?: number;
+  /** Only while in its host's idle grace (§6.5), until `gracedUntil` (epoch seconds). */
+  graced?: true;
+  gracedUntil?: number;
   capacity: { running: number; inUse: number | null } | null;
   lastUsedAt: number | null;
   tags: string[];
@@ -109,6 +116,16 @@ export interface SbxHost {
     memfileMismatch: string[];
     reportedAt: number;
   };
+  /** Only from a host agent that reports its start limit (§6.5): the limit, start time, start line. */
+  start?: {
+    concurrency: number;
+    seconds: number | null;
+    starting: number | null;
+    queued: number | null;
+  };
+  /** Only from a host agent that sets an idle grace (§6.5): its length, and the builds in it now. */
+  idleGraceSeconds?: number;
+  graced?: number;
 }
 
 export class SandboxApiClient extends ControlPlaneClient {
@@ -146,9 +163,15 @@ export class SandboxApiClient extends ControlPlaneClient {
     return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/activate`, { body });
   }
 
-  /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
-  deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
-    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
+  /**
+   * Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`);
+   * `stopNow` skips the host's idle grace.
+   */
+  deactivateTemplate(
+    id: string,
+    body: { stopNow?: boolean } = {},
+  ): Promise<{ templateId: string; released: number }> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body });
   }
 
   createSandbox(body: {

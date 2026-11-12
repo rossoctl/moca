@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { openSbxRuntime, sbxMain } from '../src/sbx/cli.js';
 import { SBX_EXIT } from '../src/sbx/commands.js';
-import { cmdActivate } from '../src/sbx/templates.js';
+import type { SbxHost } from '../src/sbx/api.js';
+import { cmdActivate, sizedActivateTimeoutS } from '../src/sbx/templates.js';
 import {
   cleanupTmp,
   fakeCp,
@@ -17,7 +18,8 @@ import {
 // The template reads from mocactl (template lifecycle spec §4): `sbx templates` with readiness and
 // tags, `templates show`, and `create --template ID[@BUILD] --seed`; and activation (§6.3):
 // `templates activate` and `templates deactivate`; and the hosts' slots and memory (§6.2):
-// `sbx hosts`, and why an unavailable build waits. example.com hosts only.
+// `sbx hosts`, and why an unavailable build waits; and cold-start pacing (§6.5): the start line, the
+// sized `activate --wait`, the idle grace and `deactivate --stop-now`. example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -131,6 +133,35 @@ describe('templates show', () => {
     expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
     expect(w.out()).toContain('registered  unavailable (memory)\n');
     expect(w.out()).toContain(`  ${BUILD_ID}  registered  unavailable (memory)  tags default\n`);
+  });
+
+  it('says where a build waits in its host start line, or that it is in its idle grace', async () => {
+    const OTHER = `sha256:${'d'.repeat(64)}`;
+    const w = world({
+      'GET /v1/templates/my-python': () => ({
+        status: 200,
+        body: template({
+          readiness: 'activating',
+          builds: [
+            build({ readiness: 'activating', queued: true, queuePosition: 6 }),
+            build({
+              buildId: OTHER,
+              readiness: 'deactivating',
+              graced: true,
+              gracedUntil: 1_800_000_600,
+              tags: [],
+            }),
+          ],
+        }),
+      }),
+    });
+    expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    expect(w.out()).toContain(
+      `  ${BUILD_ID}  registered  activating (queued at 6)  tags default\n`,
+    );
+    expect(w.out()).toContain(
+      `  ${OTHER}  registered  deactivating (graced until ${new Date(1_800_000_600_000).toISOString()})\n`,
+    );
   });
 
   it('reports 404 template_not_found as itself, not as a control plane without sandbox routes', async () => {
@@ -299,6 +330,27 @@ describe('sbx templates activate and deactivate (§6.3)', () => {
     });
     expect(await w.run(['templates', 'deactivate', 'my-python'])).toBe(0);
     expect(w.out()).toBe('my-python: released 1 lease\n');
+    expect(w.cp.calls.at(-1)!.body).toEqual({});
+  });
+
+  it('--stop-now: releases with stopNow, skipping the host idle grace, and says so', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/deactivate': () => ({
+        status: 200,
+        body: { templateId: 'my-python', released: 1 },
+      }),
+    });
+    expect(await w.run(['templates', 'deactivate', 'my-python', '--stop-now'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ stopNow: true });
+    expect(w.out()).toBe('my-python: released 1 lease, stopped now (no idle grace)\n');
+    const calls = w.cp.calls.length;
+    for (const argv of [
+      ['templates', 'activate', 'my-python', '--stop-now'],
+      ['hosts', '--stop-now'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toHaveLength(calls);
   });
 
   it('fails a refused activation at once, naming the refusal', async () => {
@@ -411,6 +463,57 @@ describe('sbx templates activate and deactivate (§6.3)', () => {
     expect(errs).not.toContain('no active slot');
   });
 
+  it('sizes --wait from the start line: (ceil(position / concurrency) + 1) start times plus a quarter, 1800 s to 4 h', () => {
+    const host = (concurrency: number, seconds: number | null) =>
+      ({ id: 'host-1', start: { concurrency, seconds, starting: 4, queued: 16 } }) as SbxHost;
+    // Position 20 behind 4 at a time, 300 s a start: (5 + 1) x 300 x 1.25.
+    expect(sizedActivateTimeoutS({ queued: true, queuePosition: 20 }, host(4, 300))).toBe(2250);
+    expect(sizedActivateTimeoutS({ queued: true, queuePosition: 2 }, host(4, 300))).toBe(1800);
+    expect(sizedActivateTimeoutS({ queued: true, queuePosition: 20 }, host(4, null))).toBe(1800);
+    expect(sizedActivateTimeoutS({ queued: false }, host(4, 300))).toBe(1800);
+    expect(sizedActivateTimeoutS(undefined, undefined)).toBe(1800);
+    // A host reporting an outlier start time (hours) is capped at 4 h.
+    expect(sizedActivateTimeoutS({ queued: true, queuePosition: 20 }, host(4, 7200))).toBe(14_400);
+  });
+
+  it("--wait with no --timeout: sized from the host's start line, saying so; --timeout wins", async () => {
+    const hosts = {
+      templates: [],
+      hosts: [
+        {
+          id: 'host-1',
+          active: { limit: 20, used: 20 },
+          idleLimitSeconds: 3600,
+          disk: { freeGb: 400, floorGb: 60 },
+          start: { concurrency: 4, seconds: 300, starting: 4, queued: 16 },
+        },
+      ],
+    };
+    const routes = {
+      'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
+      'GET /v1/templates': () => ({ status: 200, body: hosts }),
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ readiness: 'activating', queued: true, queuePosition: 20 }),
+      }),
+    };
+    let w = waiting(routes);
+    expect(await cmdActivate(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.timedOut);
+    let errs = w.io.errs.join('');
+    expect(errs).toContain('my-python: queued at 20; waiting up to 2250 s');
+    expect(errs).toContain("waiting: activating: queued at 20 in its host's start line");
+    expect(errs).toContain('timed out after 2250 s');
+    expect(w.slept.reduce((a, b) => a + b, 0)).toBe(2_250_000);
+    w = waiting(routes);
+    expect(await cmdActivate(w.c, 'my-python', { wait: true, timeoutS: 60 })).toBe(
+      SBX_EXIT.timedOut,
+    );
+    errs = w.io.errs.join('');
+    expect(errs).not.toContain('waiting up to');
+    expect(errs).toContain('timed out after 60 s');
+    expect(w.cp.calls.some((c) => c.method === 'GET' && c.path === '/v1/templates')).toBe(false);
+  });
+
   it('--wait: exits 5 when the build is not active within --timeout', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
@@ -474,6 +577,35 @@ describe('sbx hosts (§6.2)', () => {
     );
     expect(await w.run(['hosts', '--json'])).toBe(0);
     expect(JSON.parse(w.out())[0]).toEqual({ ...HOST, memory: MEMORY });
+  });
+
+  it('prints the start line and the idle grace, from an agent that reports them', async () => {
+    const w = world({
+      'GET /v1/templates': () => ({
+        status: 200,
+        body: {
+          templates: [],
+          hosts: [
+            {
+              ...HOST,
+              start: { concurrency: 4, seconds: 40.4, starting: 4, queued: 2 },
+              idleGraceSeconds: 600,
+              graced: 1,
+            },
+            {
+              ...HOST,
+              id: 'host-2',
+              start: { concurrency: 2, seconds: null, starting: null, queued: null },
+            },
+          ],
+        },
+      }),
+    });
+    expect(await w.run(['hosts'])).toBe(0);
+    expect(w.out()).toBe(
+      'host-1           active 3 of 8; start 4 starting, 2 queued (at most 4 at once, 40 s each); grace 600 s (1 graced); disk 400 GB free (floor 60)\n' +
+        'host-2           active 3 of 8; start ? starting, ? queued (at most 2 at once); disk 400 GB free (floor 60)\n',
+    );
   });
 
   it('says when no host has reported, and refuses an argument', async () => {
