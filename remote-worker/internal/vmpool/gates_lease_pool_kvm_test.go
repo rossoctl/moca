@@ -613,6 +613,8 @@ type leaseCmdRecorder struct {
 
 type leaseRecordedRun struct {
 	vm               string
+	cmd              string
+	timeoutS         uint32
 	lease, normalise bool
 }
 
@@ -649,14 +651,17 @@ type leaseCmdRecordingVM struct {
 
 func (v *leaseCmdRecordingVM) Run(ctx context.Context, c Command, out Sink) (Result, error) {
 	v.r.mu.Lock()
-	v.r.runs = append(v.r.runs, leaseRecordedRun{vm: v.id, lease: c.Lease, normalise: c.NormaliseWorkspace})
+	v.r.runs = append(v.r.runs, leaseRecordedRun{vm: v.id, cmd: c.Command, timeoutS: c.TimeoutS,
+		lease: c.Lease, normalise: c.NormaliseWorkspace})
 	v.r.mu.Unlock()
 	return v.firecrackerVM.Run(ctx, c, out)
 }
 
 // TestGateLeaseOwnership: lease, then per-Exec (root writes a file and a directory), then
-// lease again: the first Exec of that lease normalises the workspace and can modify both,
-// and a lease that follows a lease, with no per-Exec Exec between, does not walk it (spec §4).
+// lease again: that lease's start normalises the workspace in a step of its own (`true`
+// with NormaliseWorkspace and LeaseNormaliseTimeout, PR #763 second review G2), and its
+// first Exec can modify both. A lease that follows a lease, with no per-Exec Exec between,
+// does not walk it (spec §4).
 func TestGateLeaseOwnership(t *testing.T) {
 	requireKVM(t)
 	var rec *leaseCmdRecorder
@@ -684,8 +689,16 @@ func TestGateLeaseOwnership(t *testing.T) {
 	if want := "7000\n7000\nr\nl\ng\n"; got != want {
 		t.Fatalf("first Exec of the lease after root wrote printed %q, want %q", got, want)
 	}
-	if runs := rec.runsIn(g.leaseVM(t, key).id); len(runs) != 1 || !runs[0].lease || !runs[0].normalise {
-		t.Fatalf("Runs in the lease after root wrote = %+v, want one lease Run that normalises", runs)
+	runs := rec.runsIn(g.leaseVM(t, key).id)
+	if len(runs) != 2 {
+		t.Fatalf("Runs in the lease after root wrote = %+v, want the normalise step, then the Exec", runs)
+	}
+	if n := runs[0]; n.cmd != "true" || !n.lease || !n.normalise || n.timeoutS != uint32(LeaseNormaliseTimeout/time.Second) {
+		t.Fatalf("the lease's first Run = %+v, want the normalise step: `true`, lease, normalise, timeout_s %d",
+			n, uint32(LeaseNormaliseTimeout/time.Second))
+	}
+	if u := runs[1]; !u.lease || u.normalise {
+		t.Fatalf("the lease's second Run = %+v, want the Exec: lease, without normalise", u)
 	}
 	if s := loadLeaseState(g.cfg.WorkspaceRoot, key); s.RootWrote {
 		t.Fatalf("state after the normalising Exec = %+v, want root_wrote cleared", s)

@@ -835,9 +835,12 @@ func TestLeaseModeSurvivesAnIdleWorkspaceReclaim(t *testing.T) {
 			if liveLease(p, "k") == nil {
 				t.Fatalf("Exec at epoch 2 after the reclaim started no lease (state %+v)", loadLeaseState(p.cfg.WorkspaceRoot, "k"))
 			}
-			cmds := lc.commands()
-			if last := cmds[len(cmds)-1]; !last.Lease || !last.NormaliseWorkspace {
-				t.Fatalf("the first Exec in the new tree = %+v, want a lease Exec that normalises", last)
+			// Two lease starts, each normalising: the first lease's (R7) and the new tree's.
+			if n := len(lc.normaliseCommands()); n != 2 {
+				t.Fatalf("normalise steps = %d, want 2: the new tree's lease normalises it", n)
+			}
+			if steps := guestSteps(lc); len(steps) < 2 || !strings.HasPrefix(steps[len(steps)-2], "normalise ") {
+				t.Fatalf("normalise steps and Runs = %v, want the new tree's normalise step just before its first Run", steps)
 			}
 		})
 	}

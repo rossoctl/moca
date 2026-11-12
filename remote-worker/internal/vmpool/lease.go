@@ -35,6 +35,12 @@ import (
 // Execs get no slack.
 const LeaseTimeoutSlack = 8 * time.Second
 
+// LeaseNormaliseTimeout bounds a lease start's normalise step (normaliseLease), the guest's
+// ownership walk of the workspace: the step's own timeout_s, with the host giving up
+// LeaseTimeoutSlack later. It is not charged to the Exec's budget (PR #763 second review,
+// G2): a walk over a big tree may take far longer than a short command's timeout.
+const LeaseNormaliseTimeout = 10 * time.Minute
+
 // leaseGuestTimeoutS is the timeout_s a lease Exec's guest gets when Run starts at now:
 // what is left of the budget until deadline, rounded up to whole seconds, and at least 1 s.
 // The gate wait, a cold restore and Resume have spent the rest.
@@ -246,11 +252,11 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // With a live lease it runs in the lease VM. Without one it acquires a VM priced at
 // LeaseStartBytes, raises its cgroup to PerVMBytes + LeasePageCacheBytes, resumes it --
 // once: the guest's latch refuses the launcher's per-Exec mount command after the
-// first lease Exec -- and installs the lease. The Run carries Lease and, on the first
-// Exec after root wrote the workspace, NormaliseWorkspace. A TeardownFailed result, a
-// Run error, the host's deadline or an abort ends the lease; otherwise, the guest's own
-// timeout included (runLease), its lastEnd moves to now and its footprint is sampled,
-// both before the gate is released. deadline is when the Exec's budget ends.
+// first lease Exec -- takes the normalise step when root wrote the workspace
+// (normaliseLease), and installs the lease. The Run carries Lease. A TeardownFailed
+// result, a Run error, the host's deadline or an abort ends the lease; otherwise, the
+// guest's own timeout included (runLease), its lastEnd moves to now and its footprint is
+// sampled, both before the gate is released. deadline is when the Exec's budget ends.
 func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode Mode, out Sink, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
 	p.mu.Lock()
@@ -341,7 +347,7 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		if ph != nil {
 			// Nothing was acquired or resumed: zero those phases rather than leave
 			// whatever a reused Phases held, as ExecPhased does for resumePhaser.
-			ph.Acquire, ph.Cold, ph.Resume = 0, "", 0
+			ph.Acquire, ph.Cold, ph.Resume, ph.Normalise = 0, "", 0, 0
 			ph.VMResume, ph.VsockDial, ph.Mount = 0, 0, 0
 			ph.VMID = vmID(vm)
 		}
@@ -354,9 +360,9 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 	return p.runLease(ctx, runCtx, rp, vm, e, out, ph, timedOut, timeoutS, deadline, extend)
 }
 
-// startLease acquires, raises the cgroup of, resumes and installs a new lease VM. Caller
-// holds rp's gate. On failure the VM is destroyed and no lease is recorded: one that
-// never ran an Exec never started.
+// startLease acquires, raises the cgroup of, resumes, normalises (when root_wrote is set)
+// and installs a new lease VM. Caller holds rp's gate. On failure the VM is destroyed and
+// no lease is recorded: one that never ran an Exec never started.
 func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, e Exec, mode Mode, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32) (VM, error) {
 	t0 := p.clk.Now()
@@ -421,6 +427,18 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 		}
 		return nil, p.refuse(RefuseSpawn, "resume %q: %v", key, resumeErr)
 	}
+	p.mu.Lock()
+	normalise := rp.state.RootWrote // the state is loaded: a lease mode needs a known one
+	p.mu.Unlock()
+	if ph != nil {
+		ph.Normalise = 0
+	}
+	if normalise {
+		if err := p.normaliseLease(ctx, rp, vm, ph); err != nil {
+			fail()
+			return nil, err
+		}
+	}
 
 	p.mu.Lock()
 	now := p.clk.Now()
@@ -434,6 +452,11 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 	}
 	s := p.leaseStateLocked(rp)
 	s.Open = &openLease{VMID: vmID(vm), Mode: mode, Started: now}
+	if normalise {
+		// The step ended with exit 0. Saved with the start: a lost save keeps root_wrote
+		// on disk, so a later lease normalises again, which is safe.
+		s.RootWrote = false
+	}
 	if s.Pending == nil || s.Pending.State != leaseEventEnd {
 		// The start is the notice only when no end is pending: "guest restarted" already
 		// tells the client the next Exec runs in a fresh guest (spec §5).
@@ -467,6 +490,66 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 		}
 	}
 	return vm, nil
+}
+
+// normaliseLease is a lease start's normalise step (spec §3.3; PR #763 second review, G2):
+// the guest walks the workspace's ownership over to the exec uid before the lease's first
+// Exec, in a request of its own, `true` with NormaliseWorkspace. The first lease request
+// also takes the guest's one-time hardening steps, so they run here too. Like the restore
+// and Resume, the step is not charged to the Exec's budget: it runs under the caller's ctx,
+// so an abort still applies, but not under the Exec's timer, with LeaseNormaliseTimeout
+// of its own (the host gives up LeaseTimeoutSlack later). A cut (endLeaseWaiting's grace
+// bound) cancels it, as it would a running Exec. Caller holds rp's gate, with the VM
+// resumed and installed as rp.lease but not yet started.
+//
+// Anything but a clean exit 0 -- a non-zero exit, teardown_failed, a transport or guest
+// error, its own timeout -- fails the lease start: the caller destroys the VM and records
+// no lease, and root_wrote stays set, so the next lease Exec takes the step again. An
+// abort returns ErrAborted, anything else a RefuseSpawn naming the step.
+func (p *pool) normaliseLease(ctx context.Context, rp *runPool, vm VM, ph *Phases) error {
+	stepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tm := p.clk.AfterFunc(LeaseNormaliseTimeout+LeaseTimeoutSlack, cancel)
+	defer tm.Stop()
+	p.mu.Lock()
+	l := rp.lease
+	l.running, l.cancel = true, cancel
+	p.mu.Unlock()
+
+	t0 := p.clk.Now()
+	res, err := vm.Run(stepCtx, Command{
+		Command:            "true",
+		TimeoutS:           uint32(LeaseNormaliseTimeout / time.Second),
+		CapBytes:           OutputCapBytes,
+		Lease:              true,
+		NormaliseWorkspace: true,
+	}, discardingSink{})
+	if ph != nil {
+		ph.Normalise = p.clk.Now().Sub(t0)
+	}
+	p.mu.Lock()
+	if rp.lease == l {
+		l.running, l.cancel = false, nil
+	}
+	p.mu.Unlock()
+
+	var why string
+	switch {
+	case err != nil:
+		why = err.Error()
+	case res.TeardownFailed:
+		why = "teardown failed"
+	case res.ExitCode != 0:
+		why = fmt.Sprintf("exit %d", res.ExitCode)
+	default:
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ErrAborted
+	}
+	log.Printf("vmpool: lease normalise workspace_key=%q vm=%s: %s; the lease start fails, root_wrote stays set",
+		rp.key, vmID(vm), why)
+	return p.refuse(RefuseSpawn, "lease normalise: workspace_key %q vm=%s: %s", rp.key, vmID(vm), why)
 }
 
 // runLease runs one command in rp's lease VM. Caller holds rp's gate. deadline is when
@@ -530,19 +613,17 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	execCtx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 	l.running, l.cancel = true, cancel
-	normalise := rp.state.RootWrote // the state is loaded: a lease mode needs a known one
 	rp.lastExec = p.clk.Now()
 	p.mu.Unlock()
 
 	t0 := p.clk.Now()
 	res, runErr := vm.Run(execCtx, Command{
-		Command:            e.Command,
-		Stdin:              e.Stdin,
-		TimeoutS:           leaseGuestTimeoutS(deadline, t0),
-		Streaming:          e.Streaming,
-		CapBytes:           OutputCapBytes,
-		Lease:              true,
-		NormaliseWorkspace: normalise,
+		Command:   e.Command,
+		Stdin:     e.Stdin,
+		TimeoutS:  leaseGuestTimeoutS(deadline, t0),
+		Streaming: e.Streaming,
+		CapBytes:  OutputCapBytes,
+		Lease:     true, // never NormaliseWorkspace: the lease's start took that step
 	}, out)
 	if ph != nil {
 		ph.Run = p.clk.Now().Sub(t0)
@@ -575,17 +656,6 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		// The sweep cancelled this Run at the grace limit: that, not the Run error the
 		// cancellation produced, is why the lease ends.
 		reason = cut
-	}
-	if normalise && (runErr == nil || guestTimeout) {
-		// An End arrived, or the guest's own timeout, which it arms only after the
-		// command starts: either way the guest got past the normalisation it runs first.
-		s := rp.state
-		s.RootWrote = false
-		if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
-			// The disk keeps root_wrote, so a later lease normalises again: safe.
-			log.Printf("vmpool: clear root_wrote for %q: %v", rp.key, err)
-		}
-		rp.state = s
 	}
 	switch {
 	case !live:

@@ -246,6 +246,11 @@ both lease levels:
   - The walk never follows a symlink. It uses `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)` and does not
     cross out of the workspace mount. A root `chown -R` that dereferenced a symlink planted in the
     workspace would otherwise change the owner of its target, for example a file in `/tmp` or `/var`.
+  - The walk is a step of the lease's start, like the restore and the resume: the worker sends the
+    agent a request of its own (`true` with the normalise flag, a 10 min timeout) before the first
+    Exec. The first request's one-time hardening runs in it too. The step is not charged to the
+    Exec's timeout. The flag clears only when the step exits 0; a step that fails fails the lease
+    start, and the next lease Exec takes it again.
   - The walk's time is part of the first Exec's latency. E17 measures it against workspace size.
     Moving per-`Exec` to the Exec uid (§16 item 4) would remove the walk.
 - **Per-`Exec` mode** runs as root today and stays so in v1. It destroys the VM, so root there has no

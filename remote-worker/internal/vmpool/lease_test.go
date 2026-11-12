@@ -28,6 +28,24 @@ type leaseLauncher struct {
 	leaseBytes int64 // LeaseBytes' answer; 0 = an error
 	// destroyHook, when set, runs at the start of every Destroy with the VM's id.
 	destroyHook func(id string)
+	// normalises is every lease-start normalise step's Command (startLease): a Run with
+	// NormaliseWorkspace, recorded as "normalise <id>" rather than in cmds and "run <id>",
+	// so a suite that counts an Exec's Runs is not thrown by the step a fresh key's first
+	// lease takes. normaliseFn, when set, answers it; otherwise it succeeds.
+	normalises  []Command
+	normaliseFn func(Command) (Result, error)
+}
+
+func (l *leaseLauncher) normaliseCommands() []Command {
+	l.rec.Lock()
+	defer l.rec.Unlock()
+	return slices.Clone(l.normalises)
+}
+
+func (l *leaseLauncher) setNormaliseFn(f func(Command) (Result, error)) {
+	l.rec.Lock()
+	l.normaliseFn = f
+	l.rec.Unlock()
 }
 
 func newLeaseLauncher() *leaseLauncher {
@@ -101,6 +119,24 @@ func (v *leaseFakeVM) Resume(ctx context.Context) error {
 }
 
 func (v *leaseFakeVM) Run(ctx context.Context, c Command, out Sink) (Result, error) {
+	if c.NormaliseWorkspace {
+		v.fakeVM.mu.Lock()
+		ok := v.fakeVM.resumed && !v.fakeVM.destroyed
+		v.fakeVM.mu.Unlock()
+		if !ok {
+			return Result{}, fmt.Errorf("leaseFakeVM %s: normalise Run before Resume or after Destroy", v.id)
+		}
+		v.l.rec.Lock()
+		v.l.normalises = append(v.l.normalises, c)
+		fn := v.l.normaliseFn
+		v.l.rec.Unlock()
+		v.l.record("normalise " + v.id)
+		if fn != nil {
+			c.ctxDone = ctx.Done()
+			return fn(c)
+		}
+		return Result{}, nil
+	}
 	v.l.rec.Lock()
 	v.l.cmds = append(v.l.cmds, c)
 	v.l.rec.Unlock()
@@ -243,14 +279,19 @@ func TestLeaseFirstExecNormalisesAfterRootWrote(t *testing.T) {
 
 	mustExec(t, p, "k", leaseExec("one", 1))
 	mustExec(t, p, "k", leaseExec("two", 1))
+	// The lease's start normalises in a step of its own (startLease); the Execs' own
+	// Commands never carry the flag.
+	if n := len(lc.normaliseCommands()); n != 1 {
+		t.Fatalf("normalise steps = %d, want 1: the lease's start", n)
+	}
 	var lease []Command
 	for _, c := range lc.commands() {
 		if c.Lease {
 			lease = append(lease, c)
 		}
 	}
-	if len(lease) != 2 || !lease[0].NormaliseWorkspace || lease[1].NormaliseWorkspace {
-		t.Fatalf("lease Commands = %+v, want NormaliseWorkspace true then false", lease)
+	if len(lease) != 2 || lease[0].NormaliseWorkspace || lease[1].NormaliseWorkspace {
+		t.Fatalf("lease Commands = %+v, want two without NormaliseWorkspace", lease)
 	}
 	if s := loadLeaseState(root, "k"); s.RootWrote {
 		t.Fatalf("after the first lease Exec: state = %+v, want root_wrote false", s)
@@ -263,9 +304,12 @@ func TestLeaseOnAKeyWithNoPriorStateNormalises(t *testing.T) {
 	mustSetMode(t, p, "k", ModeLease, 1) // the only way a key with no file reaches lease mode
 	mustExec(t, p, "k", leaseExec("one", 1))
 	mustExec(t, p, "k", leaseExec("two", 1))
+	if n := len(lc.normaliseCommands()); n != 1 {
+		t.Fatalf("normalise steps = %d, want 1: the lease's start", n)
+	}
 	cmds := lc.commands()
-	if len(cmds) != 2 || !cmds[0].NormaliseWorkspace || cmds[1].NormaliseWorkspace {
-		t.Fatalf("Commands = %+v, want NormaliseWorkspace true then false", cmds)
+	if len(cmds) != 2 || cmds[0].NormaliseWorkspace || cmds[1].NormaliseWorkspace {
+		t.Fatalf("Commands = %+v, want two without NormaliseWorkspace", cmds)
 	}
 }
 

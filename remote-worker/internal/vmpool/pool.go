@@ -266,6 +266,11 @@ type Phases struct {
 	Cold    ColdCause // "" when the acquire was warm
 	VMID    string    // the VM that ran this Exec; "" when acquire failed
 
+	// Normalise is a lease start's normalise step (lease.go, normaliseLease): the
+	// ownership walk the guest runs before the lease's first Exec when root has written
+	// the workspace. Zero when the Exec started no lease or its lease needed no walk.
+	Normalise time.Duration
+
 	// Resume's three sub-phases, populated only by a launcher implementing
 	// resumePhaser (Firecracker does; CHV does not, and reports zeros). They sum to
 	// Resume PER EXEC, to ~0.1% -- the remainder is checkNotDestroyed, newFCClient and
