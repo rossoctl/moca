@@ -631,16 +631,15 @@ build_agent() {
 # ---------------------------------------------------------------------------
 # 3. assemble_rootfs
 # ---------------------------------------------------------------------------
-# tree_write_target REL: REL is a file under the staged tree that the build writes or appends to on
-# THIS host (etc/passwd, etc/gitconfig, the egress CA). The tree is an image's filesystem, so a path
-# in it can be a symlink out of it (an absolute one resolves on the build host). It exits 1 unless
-# REL's directory resolves inside the tree, checking the deepest part that exists before making the
-# rest (mkdir -p follows symlinks), and REL itself is not a symlink: its target is unknown, and
-# appending through it would write the build host's file.
-tree_write_target() {
-  local rel="$1" tree dir probe real d
+# tree_dir_target DIR: DIR is a directory under the staged tree that the build creates or writes
+# into on THIS host. The tree is an image's filesystem, so a path in it can be a symlink out of it
+# (an absolute one resolves on the build host). It exits 1 unless DIR resolves inside the tree,
+# checking the deepest part of it that exists BEFORE `mkdir -p` makes the rest (mkdir -p follows
+# symlinks, so making first would create directories on the build host and only then refuse), and
+# DIR itself once made.
+tree_dir_target() {
+  local dir="$1" tree probe real d
   tree="$(cd -P "$STAGE/rootfs-tree" && pwd)"
-  dir="$(dirname "$rel")"
   probe="$dir"
   while [ "$probe" != . ] && [ ! -e "$STAGE/rootfs-tree/$probe" ] && [ ! -L "$STAGE/rootfs-tree/$probe" ]; do
     probe="$(dirname "$probe")"
@@ -651,11 +650,20 @@ tree_write_target() {
     case "$real/" in
       "$tree"/*) ;;
       *)
-        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($real); refusing to write /$rel through it" >&2
+        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($real); refusing to write /$dir through it" >&2
         exit 1
         ;;
     esac
   done
+}
+
+# tree_write_target REL: REL is a file under the staged tree that the build writes or appends to on
+# THIS host (etc/passwd, etc/gitconfig, the egress CA). It exits 1 unless REL's directory passes
+# tree_dir_target and REL itself is not a symlink: its target is unknown, and appending through it
+# would write the build host's file.
+tree_write_target() {
+  local rel="$1"
+  tree_dir_target "$(dirname "$rel")"
   if [ -L "$STAGE/rootfs-tree/$rel" ]; then
     echo "build-snapshot.sh: the rootfs's /$rel is a symlink ($(readlink "$STAGE/rootfs-tree/$rel")); refusing to write through it" >&2
     exit 1
@@ -751,26 +759,16 @@ assemble_rootfs() {
   # this build layers the agent and init onto. It is copied, never mutated in place,
   # so a failed build never corrupts the caller's base image.
   cp -a "$ROOTFS/." "$STAGE/rootfs-tree/"
-  mkdir -p "$STAGE/rootfs-tree/usr/local/bin" "$STAGE/rootfs-tree/sbin" \
-    "$STAGE/rootfs-tree/tmp" "$STAGE/rootfs-tree/var" "$STAGE/rootfs-tree/workspace" \
-    "$STAGE/rootfs-tree/.moca-var"
   # NEVER WRITE THROUGH THE IMAGE'S SYMLINKS. The tree is an image's filesystem, and paths in it
   # resolve on THIS host: Ubuntu-based images ship /sbin/init -> /lib/systemd/systemd (absolute), so
   # writing "$tree/sbin/init" opened the BUILD HOST's systemd (seen on an Ubuntu-based image:
   # "Text file busy" stopped it only because that file was running; a host file that was not
-  # running would have been overwritten as root). So: the directories we write into must resolve
-  # inside the tree, and the files we write are unlinked first, which replaces a symlink rather than
-  # following it.
-  local tree_real d
-  tree_real="$(realpath -e "$STAGE/rootfs-tree")"
-  for d in sbin usr/local/bin .moca-var; do
-    case "$(realpath -e "$STAGE/rootfs-tree/$d")/" in
-      "$tree_real"/*) ;;
-      *)
-        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($(realpath -e "$STAGE/rootfs-tree/$d")); refusing to write through it" >&2
-        exit 1
-        ;;
-    esac
+  # running would have been overwritten as root). So: every directory the build makes or writes
+  # into must resolve inside the tree, checked before it is made (tree_dir_target), and the files we
+  # write are unlinked first, which replaces a symlink rather than following it.
+  local d
+  for d in usr/local/bin sbin tmp var workspace .moca-var; do
+    tree_dir_target "$d"
   done
   # check_var's probe: one regular file the image has under /var, a plain name (quoted into a
   # guest command), smallest path first so it is stable between builds. None: the check only writes.
