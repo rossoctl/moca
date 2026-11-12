@@ -1,0 +1,19 @@
+# The template store on the sandbox profile (template lifecycle spec §3.1, §7.2). Names the BASE
+# namespace like every patch in the overlay. With SH_PROVENANCE_DIR set, SH_SANDBOX_TEMPLATES is
+# imported into the store once, at the first start against an empty store, and ignored after that.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  strategy: { type: Recreate, rollingUpdate: null }
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_PROVENANCE_DIR, value: /var/lib/moca/templates }
+          volumeMounts:
+            - { name: template-store, mountPath: /var/lib/moca/templates }
+      volumes:
+        - name: template-store
+          persistentVolumeClaim: { claimName: moca-sbx-templates }
