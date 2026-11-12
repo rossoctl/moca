@@ -667,19 +667,22 @@ export const HANDLERS: Record<string, Handler> = {
   // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust
   // when its certificate is self-issued (absent otherwise); templates are at the fixed /v1/templates.
   getDiscovery: async (_ctx, deps) => {
-    if (deps.config.routeProfile === 'sandbox') {
+    const profile = deps.config.routeProfile ?? 'harness';
+    let sandboxFields: Record<string, string> = {};
+    if (profile !== 'harness') {
       const sbx = deps.config.sandbox;
       // Never fall through to the harness body: a sandbox profile without its config is a bug.
-      if (!sbx) throw new CpError('internal_error', 'the sandbox profile has no sandbox config');
-      return {
-        status: 200,
-        body: {
-          profile: 'sandbox',
-          execEndpoint: sbx.execEndpoint,
-          ...(sbx.execCa ? { execCa: sbx.execCa } : {}),
-        },
+      if (!sbx) throw new CpError('internal_error', `the ${profile} profile has no sandbox config`);
+      sandboxFields = {
+        execEndpoint: sbx.execEndpoint,
+        ...(sbx.execCa ? { execCa: sbx.execCa } : {}),
       };
     }
+    if (profile === 'sandbox') {
+      return { status: 200, body: { profile: 'sandbox', ...sandboxFields } };
+    }
+    // harness, and combined (combined control plane spec §3.1): the harness fields, plus the
+    // sandbox ones on combined.
     return {
       status: 200,
       body: {
@@ -697,7 +700,8 @@ export const HANDLERS: Record<string, Handler> = {
             }
           : {}),
         version: deps.config.version ?? null,
-        profile: deps.config.routeProfile ?? 'harness',
+        profile,
+        ...sandboxFields,
       },
     };
   },

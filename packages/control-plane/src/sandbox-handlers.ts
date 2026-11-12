@@ -4,6 +4,7 @@ import {
   auditBestEffort,
   isAdmin,
   requireEnrolledPrincipal,
+  requireReader,
   seconds,
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
@@ -285,7 +286,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       attached = null;
     }
   }
-  if (deps.config.routeProfile !== 'sandbox' || !deps.sandboxes) {
+  if ((deps.config.routeProfile ?? 'harness') === 'harness' || !deps.sandboxes) {
     return { attached, inUse: null, lastUsed: null, placement, nowS };
   }
   const inUse = new Map<string, number>();
@@ -990,11 +991,11 @@ async function requireActive(
 }
 
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
-  // The template reads (template lifecycle spec §4), on both route profiles (§4.1): on `harness`
-  // requireEnrolled admits any logged-in subject. The worker id is deployment plumbing; a client
-  // names a template, never a worker.
+  // The template reads (template lifecycle spec §4), on every route profile (§4.1): on `harness`
+  // and `combined` requireReader admits any logged-in subject. The worker id is deployment
+  // plumbing; a client names a template, never a worker.
   listTemplates: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const docs = await visibleTemplates(deps, p);
     const live = await readinessFacts(deps);
     const templates = docs.map((d) => templateBody(d, live, false));
@@ -1004,7 +1005,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   listTemplateTags: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
     const tags = Object.entries(d.tags)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -1016,20 +1017,20 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   getTemplate: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
     return { status: 200, body: templateBody(d, await readinessFacts(deps), true) };
   },
 
   listTemplateBuilds: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
     const live = await readinessFacts(deps);
     return { status: 200, body: { builds: d.builds.map((b) => buildBody(d, b, live, true)) } };
   },
 
   getTemplateBuild: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
     const ref = ctx.params.build ?? '';
     const b = d.builds.find((x) => x.buildId === ref || x.handle === ref);
@@ -1049,7 +1050,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   // The policy (§8): any enrolled client reads it; only an admin sets it, and each set is a
   // `policy` record naming who.
   getPolicy: async (ctx, deps) => {
-    requireEnrolled(ctx, deps);
+    requireReader(ctx, deps.config);
     const { policy, record } = await policyStore(deps).current();
     return { status: 200, body: { policy, digest: policyDigest(policy), record } };
   },
@@ -1066,7 +1067,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   getQuota: async (ctx, deps) => {
-    const p = requireEnrolled(ctx, deps);
+    const p = requireReader(ctx, deps.config);
     const { cat, policy } = writable(deps);
     const { policy: pol } = await policy.current();
     const u = await usage(cat, p.sub);

@@ -705,7 +705,18 @@ paths:
                           the deployment's version (MOCA_VERSION, baked in at image build), so a client
                           can show it; `dev` when nothing was baked in, and `null` permitted for
                           compatibility with a control plane that reports none
-                      profile: { type: string, enum: [harness] }
+                      profile:
+                        type: string
+                        enum: [harness, combined]
+                        description: |
+                          `combined` (combined control plane spec §3.1) serves sessions and sandboxes:
+                          its body adds `execEndpoint` and `execCa`, as the sandbox profile's
+                      execEndpoint:
+                        type: string
+                        description: combined profile only -- host:port of the exec Route
+                      execCa:
+                        type: string
+                        description: combined profile only -- PEM of a self-issued exec certificate
                   - type: object
                     description: the sandbox profile (SBX0 §4.1)
                     required: [profile, execEndpoint]

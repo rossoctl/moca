@@ -221,7 +221,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   if ((env.SH_IDENTITY_PROVIDER || 'github') === 'github') {
     required(env, 'SH_GITHUB_CLIENT_ID');
   }
-  if (routeProfileFromEnv(env) === 'sandbox') return sandboxProfileConfig(env);
+  const profile = routeProfileFromEnv(env);
+  if (profile === 'sandbox') return sandboxProfileConfig(env);
   keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
   const config: CpConfig = {
     ...tokenTtlsFromEnv(env),
@@ -259,7 +260,28 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   testUserSecretFromEnv(env.SH_TEST_USER_SECRET, config.testUsers);
   checkInferenceConfig(config);
   checkRefreshConfig(config);
-  return config;
+  return profile === 'combined' ? combinedProfileConfig(env, config) : config;
+}
+
+/**
+ * Combined control plane spec §3.5: everything the harness profile requires (above) AND the sandbox
+ * profile's own settings, each refusal naming what is missing. Test users may stay (they log in and
+ * use sessions; the sandbox routes refuse them, §3.2). The template list is the one list both read.
+ */
+function combinedProfileConfig(env: NodeJS.ProcessEnv, harness: CpConfig): CpConfig {
+  const sandbox = sandboxConfigFromEnv(env, { kekIsShared: true });
+  return {
+    ...harness,
+    routeProfile: 'combined',
+    sandbox,
+    sessionTemplates: sandbox.templates,
+    // Distinct from the exchange token, the janitor's and every egress host's bearer.
+    templateHosts: templateHostsFromEnv(env, [
+      ...(harness.exchangeToken ? [harness.exchangeToken] : []),
+      ...(sandbox.janitorToken ? [sandbox.janitorToken] : []),
+      ...(sandbox.egress?.hosts.map((h) => h.token) ?? []),
+    ]),
+  };
 }
 
 /**
@@ -529,6 +551,8 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
+  // The sandbox stores, on the sandbox profile and on combined (combined control plane spec §3.5).
+  const servesSandboxes = config.routeProfile === 'sandbox' || config.routeProfile === 'combined';
   if (
     sandboxProfile &&
     config.sandbox?.egress &&
@@ -585,7 +609,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       sandboxProfile && !config.sandbox?.egress
         ? new UnavailableCredentialStore()
         : credentialStoreFromEnv(env),
-    ...(sandboxProfile
+    ...(servesSandboxes
       ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
       : {}),
     // Readiness (template lifecycle spec §3.3) from the relay's presence records, which the relay

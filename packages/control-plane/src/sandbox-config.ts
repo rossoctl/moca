@@ -56,14 +56,14 @@ const WORKER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ENDPOINT_RE = /^[A-Za-z0-9.-]+:[0-9]{1,5}$/;
 
 /**
- * `SH_ROUTE_PROFILE`: exactly `harness` or `sandbox`; absent or empty means `harness`. A near-miss
- * (`Sandbox`, ` sandbox`) refuses to boot rather than mounting nothing, `/healthz` included. The
- * value is not echoed, as no boot refusal here echoes one.
+ * `SH_ROUTE_PROFILE`: exactly `harness`, `sandbox` or `combined`; absent or empty means `harness`.
+ * A near-miss (`Sandbox`, ` sandbox`) refuses to boot rather than mounting nothing, `/healthz`
+ * included. The value is not echoed, as no boot refusal here echoes one.
  */
 export function routeProfileFromEnv(env: NodeJS.ProcessEnv): RouteProfile {
   const v = env.SH_ROUTE_PROFILE || 'harness';
-  if (v !== 'harness' && v !== 'sandbox') {
-    throw new Error(`SH_ROUTE_PROFILE must be exactly 'harness' or 'sandbox'`);
+  if (v !== 'harness' && v !== 'sandbox' && v !== 'combined') {
+    throw new Error(`SH_ROUTE_PROFILE must be exactly 'harness', 'sandbox' or 'combined'`);
   }
   return v;
 }
@@ -140,7 +140,10 @@ export function sessionTemplatesFromEnv(env: NodeJS.ProcessEnv): SandboxTemplate
   return raw ? parseTemplates(raw) : null;
 }
 
-export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
+export function sandboxConfigFromEnv(
+  env: NodeJS.ProcessEnv,
+  opts: { kekIsShared?: boolean } = {},
+): SandboxConfig {
   const allowedSubjects = (env.SH_ALLOWED_SUBJECTS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -175,7 +178,7 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
     );
   }
   const templates = parseTemplates(env.SH_SANDBOX_TEMPLATES);
-  const egress = egressConfigFromEnv(env, templates);
+  const egress = egressConfigFromEnv(env, templates, opts);
   return {
     templates,
     allowedSubjects,
@@ -193,11 +196,26 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
 }
 
 /**
- * Who may use the sandbox profile (spec §4.2): the allow list, plus admins. The harness profile has
- * no allow list (MU1 admits any GitHub account), so this is always true there.
+ * Who may LOG IN (spec §4.2): on the sandbox profile the allow list, plus admins. The harness
+ * profile has no allow list (MU1 admits any GitHub account), and neither does `combined` at login
+ * (combined control plane spec §3.2: login stays open, enrollment moves to the routes).
  */
 export function isEnrolled(subject: string, roles: string[], config: CpConfig): boolean {
   if (config.routeProfile !== 'sandbox') return true;
+  return onAllowList(subject, roles, config);
+}
+
+/**
+ * Who may use the sandbox routes and the template writes: the allow list, plus admins, on `sandbox`
+ * and on `combined` (combined spec §3.2). A test user (`test:<n>`) is never on it: SH_ALLOWED_SUBJECTS
+ * admits only `github:` subjects. Always true on `harness`, which mounts none of those routes.
+ */
+export function isEnrolledForSandbox(subject: string, roles: string[], config: CpConfig): boolean {
+  if (config.routeProfile === 'harness' || config.routeProfile === undefined) return true;
+  return onAllowList(subject, roles, config);
+}
+
+function onAllowList(subject: string, roles: string[], config: CpConfig): boolean {
   return roles.includes('admin') || (config.sandbox?.allowedSubjects ?? []).includes(subject);
 }
 

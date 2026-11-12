@@ -190,6 +190,20 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(existsSync(sbxPaths(paths).authFile)).toBe(false);
   });
 
+  it('logs in to a combined control plane, which serves sandboxes too (combined spec §3.1)', async () => {
+    const { home, env, paths, io } = setup({ loggedIn: false });
+    const cp = fakeCp({
+      'GET /v1/discovery': () => ({
+        status: 200,
+        body: { ...SBX_DISCOVERY, profile: 'combined', harnessUrl: 'https://h' },
+      }),
+      'POST /v1/auth/device': () => ({ status: 200, body: { ...DEVICE, userCode: 'X' } }),
+      'POST /v1/auth/device/token': () => ({ status: 200, body: loginBody('api-c', 'github:1') }),
+    });
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-c');
+  });
+
   it('explains a not-enrolled login', async () => {
     const { home, env, io } = setup({ loggedIn: false });
     const cp = fakeCp({

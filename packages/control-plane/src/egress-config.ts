@@ -35,14 +35,17 @@ export function egressTokenEnvName(hostId: string): string {
  * Egress credentials are on iff `SH_EGRESS_HOSTS` and `SH_CREDENTIAL_KEK` are both set. Every refusal
  * is at boot and names the variable, never a token value. `env` holds the KEK already resolved
  * (main.ts withCredentials); the per-host tokens have dynamic names, so they are read here.
+ * `kekIsShared`: on the combined profile the KEK is the harness credential store's and always set
+ * (combined control plane spec §3.5), so there egress is on iff `SH_EGRESS_HOSTS` is.
  */
 export function egressConfigFromEnv(
   env: NodeJS.ProcessEnv,
   templates: SandboxTemplate[],
+  opts: { kekIsShared?: boolean } = {},
 ): EgressConfig | undefined {
   const rawHosts = env.SH_EGRESS_HOSTS || undefined;
   const kek = env.SH_CREDENTIAL_KEK || undefined;
-  if (rawHosts === undefined && kek === undefined) return undefined;
+  if (rawHosts === undefined && (kek === undefined || opts.kekIsShared)) return undefined;
   if (rawHosts === undefined || kek === undefined) {
     throw new Error(
       'SH_EGRESS_HOSTS and SH_CREDENTIAL_KEK go together (egress credentials, SBX0.2b): set both or neither',

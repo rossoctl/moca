@@ -138,6 +138,25 @@ describe('route profiles (SBX0 §4.1)', () => {
     expect(matchRoute('POST', '/v1/sessions')?.route.operationId).toBe('createSession'); // default: harness
   });
 
+  it('mounts on combined exactly the union of the two profiles, and lists combined on no route', () => {
+    // Combined control plane spec §3.1: one process, both route sets; no route names `combined`.
+    expect(ROUTES.filter((r) => r.profiles.includes('combined')).map(key)).toEqual([]);
+    const on = (p: 'harness' | 'sandbox' | 'combined', egress: boolean) =>
+      ROUTES.filter((r) => matchRoute(r.method, concrete(r.path), p, { egress, testUsers: true }))
+        .map(key)
+        .sort();
+    for (const egress of [false, true]) {
+      const union = [...new Set([...on('harness', egress), ...on('sandbox', egress)])].sort();
+      expect(on('combined', egress)).toEqual(union);
+    }
+    expect(matchRoute('POST', '/v1/sessions', 'combined')?.route.operationId).toBe('createSession');
+    expect(matchRoute('POST', '/v1/sandboxes', 'combined')?.route.operationId).toBe(
+      'createSandbox',
+    );
+    // As on sandbox, the egress-only route needs egress configured.
+    expect(matchRoute('POST', '/v1/egress/credential', 'combined')).toBeNull();
+  });
+
   it('answers every harness-only route with the unknown-path 404 under the sandbox profile', async () => {
     const base = await serve('sandbox');
     const harnessOnly = ROUTES.filter((r) => !r.profiles.includes('sandbox'));
