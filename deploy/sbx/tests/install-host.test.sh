@@ -45,6 +45,8 @@ mkdir -p "$SBX_SRV/snapshots/default" "$SBX_SRV/snapshots/py312"
 export SBX_BIN_DIR="$TMP/usrbin" MOCA_EGRESS_SOCKET="$TMP/run/control.sock" MOCA_EGRESS_READY_TIMEOUT=2
 mkdir -p "$SBX_BIN_DIR" "$TMP/run"
 fake_egress() { : >"$SBX_BIN_DIR/moca-egress"; chmod +x "$SBX_BIN_DIR/moca-egress"; }
+export SBX_WORKER_BIN="$SBX_BIN_DIR/microvm-worker"
+: >"$SBX_WORKER_BIN"; chmod +x "$SBX_WORKER_BIN"
 fake_socket() { rm -f "$MOCA_EGRESS_SOCKET"; python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$MOCA_EGRESS_SOCKET"; }
 fake_egress
 fake_socket
@@ -80,6 +82,8 @@ grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/ou
 ! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a bundle with no SH_WORKSPACE_IDLE'
 pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size'
 
+# py312 has a template record (template-build.sh's); default has none.
+mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
 bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
@@ -101,7 +105,11 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
   [[ -n "$va" && "$va" != "$vb" ]] || fail "$k is shared between workers ($va)"
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
-pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py312.json" "$B" || fail "$B: SH_TEMPLATE_RECORD does not name the snapshot's record"
+! grep -q '^SH_TEMPLATE_RECORD=' "$A" || fail "$A: SH_TEMPLATE_RECORD set with no record"
+grep -qx 'SANDBOX_TEMPLATE=py312' "$B" || fail "$B: SANDBOX_TEMPLATE is not the record's id"
+! grep -q '^SANDBOX_TEMPLATE=' "$A" || fail "$A: SANDBOX_TEMPLATE set with no record"
+pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size, the template record and its id as SANDBOX_TEMPLATE when there is one"
 
 # The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
 # (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
@@ -631,3 +639,15 @@ pass '--egress refuses a moca-egress.service this script did not install'
 # Clean up the kept CA: the host is empty again.
 rm -rf "$CD"; sed -i.bak '/^egress credential /d' "$EM"; rm -f "$EM.bak"
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end of the credentials block: $(cat "$EM")"
+
+# SBX_WORKER_BIN: the unit runs that binary (beside a P4 worker, never /usr/local/bin/microvm-worker),
+# and a missing one is refused before systemd is touched.
+bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with SBX_WORKER_BIN'
+grep -qx "ExecStart=$SBX_WORKER_BIN" "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'the unit does not run SBX_WORKER_BIN'
+bash "$INSTALL" --uninstall sbx_bin >"$TMP/out" 2>&1 || fail 'uninstall sbx_bin'
+: >"$MOCK_LOG"
+! SBX_WORKER_BIN="$TMP/nowhere/microvm-worker" bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with a missing SBX_WORKER_BIN'
+grep -q "no worker binary $TMP/nowhere/microvm-worker" "$TMP/out" || fail 'the missing-binary refusal does not name the path'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a missing worker binary'
+pass 'the unit runs SBX_WORKER_BIN; a missing one is refused before systemd'

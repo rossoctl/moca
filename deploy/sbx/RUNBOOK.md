@@ -27,7 +27,10 @@ gitignored).
    Build them with a `build-snapshot.sh` from P4.1 or later: an older snapshot has no guest egress
    listener (see [Guest egress](#guest-egress)). The host also needs `/usr/local/bin/moca-egress`
    (`CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress`); the
-   worker install refuses without it, unless you pass `--no-egress`.
+   worker install refuses without it, unless you pass `--no-egress`. And SBX0's own worker binary,
+   `CGO_ENABLED=0 go build -o /usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`
+   (`SBX_WORKER_BIN`): the install refuses without it, and never runs
+   `/usr/local/bin/microvm-worker`, which a P4 worker on the same host may run.
 4. **The cluster side.** Write `<env file>` (README §1 lists every input; the required ones are
    `SBX_NAMESPACE`, `SBX_API_HOST`, `SBX_ATTACH_HOST`, `SBX_EXEC_HOST`, `SBX_IMAGE`, `SBX_WORKERS`,
    `SBX_TEMPLATES_FILE`, `SBX_GITHUB_CLIENT_ID`, `SBX_ALLOWED_SUBJECTS` and `SBX_WORKSPACE_FS_GIB`),
@@ -97,6 +100,11 @@ SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
 Then re-run `install-host.sh` with the new bundle for every worker (step 5 of §1); it refuses a 1a
 bundle. The run deletes the static client tokens and removes the relay's harness exec token. **1a
 workspaces are not migrated:** tell 1a users to pull their work out first.
+
+**The worker binary.** `install-host.sh` runs SBX0's own build at `SBX_WORKER_BIN` (default
+`/usr/local/libexec/sbx/microvm-worker`), no longer `/usr/local/bin/microvm-worker`: build it there
+(§1 step 3) before re-running `install-host.sh` on a host installed before, or the install refuses.
+A new worker binary takes effect when its workers restart.
 
 **A host bundle change.** Re-run `install-host.sh` with the new worker bundle whenever `setup.sh`
 says so, and `install-host.sh --janitor` with the new janitor bundle after a change to
@@ -573,3 +581,74 @@ What each step does:
 What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
 fixed the test by the shortest route, or tried its local tools first and was denied. The
 `no network in the guest` claim is not one of its steps (`docs/sbx/security-review.md` §2).
+
+## The template host agent
+
+The self-serve template build of the
+[template lifecycle spec](../../docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§6.1. `deploy/sbx/host-agent.sh --once` is one poll of a KVM host's agent: it reports what the host
+holds, claims queued template builds (clients create them with `POST /v1/templates`), runs
+`template-build.sh` on each with its gate record, and reports the result. The control plane
+registers or rejects each built build by policy; nobody approves it. It needs:
+
+- on the control plane, the template store and this host's bearer: run `setup.sh` with
+  `SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='<host id> ...'`. It adds the store's PVC
+  (`moca-sbx-templates`, mounted as `SH_PROVENANCE_DIR`; `SBX_TEMPLATES_FILE` is imported into it
+  once), a token per host in the Secret `sbx-template-hosts` (`SH_HOST_TOKEN_<ID>`, generated once
+  and kept; a host dropped from the list has its token revoked), and a bundle per host in
+  `.generated/host-agent/<id>/` (`host-agent.env`, `host-agent.token`, and `api-ca.crt` with
+  `SBX_API_CA_FILE`): copy it to the host as `/etc/sbx/host-agent.env` and
+  `/etc/sbx/host-agent.token`, add `SBX_KERNEL` (and `SBX_API_CA_FILE`, if the bundle has a CA) to
+  the env file, and delete the copy;
+- on the host, `/etc/sbx/host-agent.env` (`SBX_API_URL`, `SBX_HOST_ID`, `SBX_KERNEL`, optionally
+  `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB`, `SBX_BUILD_CONCURRENCY`, `SBX_ACTIVE_LIMIT`,
+  `SBX_IDLE_LIMIT_S`, `SBX_REGISTRY`), the token alone in `/etc/sbx/host-agent.token` (0600, root),
+  the script at `/usr/local/libexec/sbx-host-agent.sh`, and `sbx-host-agent.service` with its timer
+  (every 2 minutes) in `/etc/systemd/system`; then
+  `systemctl daemon-reload && systemctl enable --now sbx-host-agent.timer`. The unit sets
+  `SBX_TEMPLATE_BUILD` to the checkout at `/srv/sbx/src` (the agent cannot find it from
+  `/usr/local/libexec`) and `REGISTRY_AUTH_FILE=/run/containers/0/auth.json` (it hides root's
+  home): log root's podman in with `--authfile /run/containers/0/auth.json`. With `SBX_REGISTRY`
+  set, no build is claimed until that file holds a login for it. The unit also gives Go a home and
+  caches under `/srv/sbx` (`build-snapshot.sh` compiles the guest agent): run
+  `install -d -m 0700 /srv/sbx/go /srv/sbx/home` first. Do not set `GOFLAGS=-mod=mod`: the
+  repository is a Go workspace, which refuses it. Run a poll through the unit
+  (`systemctl start sbx-host-agent.service`), not by hand: only the unit loads the env file.
+
+It never claims a build below `SBX_DISK_FLOOR_GB` of free disk (default 60), claims at most
+`SBX_BUILD_CONCURRENCY` builds a poll (default 1, at most 4), and checks a gate record's bytes
+against their sha256 before building with it. The token stays in a 0600 header file, never in argv
+or the log. A bad setting is refused (exit 2) before any call. Each poll ends with one summary line,
+`{"agent":"summary","claimed","built","failed","errors"}`, in the unit's journal.
+
+**Nothing that names where an image lives leaves the host.** A failed build's reason and its
+uploaded log are redacted (`SBX_REGISTRY` exactly, then URLs, registry hosts, IP addresses and
+12-digit account ids); the full log stays on the host in `/srv/sbx/agent-logs/` (0700). The reason
+leads with a code a client can branch on: `pull_failed`, `probe_failed`, `disk_floor`,
+`spec_refused`, `build_failed`, or `leak_refused` (step `report`): the template record or manifest,
+which go byte for byte, names `SBX_REGISTRY`, so the build is reported failed and neither is sent.
+Name the image in the spec without its registry; `SBX_REGISTRY` supplies it at the pull. Text that
+reached the store before a redaction rule existed is removed offline with
+`template-onboarding/redact-provenance.py` (its `--catalog-only` mode for a build's stored log).
+
+**A registered build's worker is still installed by an operator.** The agent builds and reports; it
+installs and starts no worker. A worker's relay token is minted only by `setup.sh`, so for a new
+template: add a worker id to `SBX_WORKERS` and the template to `SBX_TEMPLATES_FILE`, re-run
+`setup.sh`, and install the worker on the host that built the snapshot, as in §5, with
+`--snapshot <snapshot>` (the record's `snapshot`, `$SBX_SRV/templates/<snapshot>.json`).
+`install-host.sh` then names the record in the worker's env (`SH_TEMPLATE_RECORD`) and its id as
+`SANDBOX_TEMPLATE`, and the worker checks the record against its snapshot and its own id at every
+start, refusing a mismatch. The worker runs SBX0's own binary, `SBX_WORKER_BIN` (default
+`/usr/local/libexec/sbx/microvm-worker`: `CGO_ENABLED=0 go build -o
+/usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`), never
+`/usr/local/bin/microvm-worker`, which a P4 worker on the same host may run; a missing one is
+refused. Letting the agent obtain a worker token from the control plane is a follow-up.
+
+Known limits: a claimed build is not re-queued if the agent dies mid-build (cancel it, `POST
+/v1/templates/{id}/builds/{build}/cancel`, and create it again); one poll builds up to
+`SBX_BUILD_CONCURRENCY` builds, and builds are not scheduled across hosts.
+
+To remove the agent: `systemctl disable --now sbx-host-agent.timer`, delete the two units,
+`/usr/local/libexec/sbx-host-agent.sh`, `/etc/sbx/host-agent.env` and `/etc/sbx/host-agent.token`,
+and `systemctl daemon-reload`; drop the host from `SBX_TEMPLATE_HOSTS` and re-run `setup.sh` to
+revoke its token.

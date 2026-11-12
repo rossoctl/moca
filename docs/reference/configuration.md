@@ -378,6 +378,13 @@ header is authoritative.
 - **Kubernetes `setup.sh`:** `SH_P4_SANDBOX_IDS`, `SH_SANDBOX_EGRESS_EXCEPT`, `SH_ROUTE_DOMAIN`,
   `SH_SINGLE_NAMESPACE`, `SH_WAIT_SECONDS`, `SH_PUBLIC_HARNESS_URL` (port-forward-reached targets
   only: overrides the default `http://127.0.0.1:8080`).
+- **SBX0 KVM host (`deploy/sbx/install-host.sh`, `deploy/sbx/host-agent.sh`):** `SBX_WORKER_BIN`
+  (default `/usr/local/libexec/sbx/microvm-worker`: the worker binary SBX0's units run, never
+  `/usr/local/bin/microvm-worker`); the host agent's `SBX_API_URL`, `SBX_HOST_ID`,
+  `SBX_HOST_TOKEN_FILE`, `SBX_KERNEL`, `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB` (default 60),
+  `SBX_BUILD_CONCURRENCY` (default 1, at most 4), `SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`,
+  `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host agent). `deploy/sbx/setup.sh`'s
+  `SBX_TEMPLATE_HOSTS` lists the hosts and writes each one's bundle.
 
 ## Known inconsistencies
 

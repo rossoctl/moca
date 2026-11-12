@@ -10,8 +10,15 @@
 #
 # BUNDLE_DIR is deploy/sbx/.generated/workers/<id> from deploy/sbx/setup.sh. IMAGE names a golden
 # snapshot under $SBX_SRV/snapshots (deploy/microvm/build-snapshot.sh --out $SBX_SRV/snapshots/IMAGE).
-# Needs microvm-worker, firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md;
+# When template-build.sh's record for it exists ($SBX_SRV/templates/IMAGE.json), the worker env names
+# it (SH_TEMPLATE_RECORD) and SANDBOX_TEMPLATE is the record's id, so the worker checks the record
+# against its snapshot and its own id at every start, refusing a mismatch.
+# Needs firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md;
 # moca-egress: CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress).
+# SBX_WORKER_BIN (an absolute path; default /usr/local/libexec/sbx/microvm-worker, SBX0's own build)
+# is the microvm-worker SBX0's workers run, never deploy/microvm's /usr/local/bin one, so SBX0 beside
+# Moca's own P4 worker never runs or replaces the binary that one runs; a missing one is refused
+# before systemd.
 #
 # Guest egress (#623, P4.1): a worker install also installs and starts moca-egress, the host's
 # allowlisted egress proxy, before the worker, and wires the worker to its control socket
@@ -61,6 +68,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 : "${SBX_BIN_DIR:=/usr/local/bin}"
+# The worker binary the template unit runs: SBX0's own build, never deploy/microvm's /usr/local/bin
+# one (see the header).
+: "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
 # moca-egress's control socket: the path inside the unit is fixed (RuntimeDirectory=moca-egress); the
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
@@ -298,6 +308,13 @@ snapshot_ca_fingerprint() {
   sed -n 's/.*"egress_ca_sha256"[[:space:]]*:[[:space:]]*"sha256:\([0-9a-f]\{64\}\)".*/\1/p' "$m" | head -1
 }
 
+# record_template_id IMAGE -> the id in template-build.sh's record for IMAGE, or nothing.
+record_template_id() {
+  local r="$SBX_SRV/templates/$1.json"
+  [[ -f "$r" ]] || return 0
+  sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([a-z0-9][a-z0-9-]*\)".*/\1/p' "$r" | head -1
+}
+
 # check_snapshot_ca: with credentials on (the drop-in exists) the snapshot must trust this host's CA.
 check_snapshot_ca() {
   [[ -f "$(egress_dropin)" ]] || return 0
@@ -408,7 +425,8 @@ uninstall_egress_credentials() {
 install_units() {
   install -d -m 0755 "$SBX_UNIT_DIR"
   install -m 0644 "$SCRIPT_DIR/sbx.slice" "$SBX_UNIT_DIR/sbx.slice"
-  sed "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" "$SCRIPT_DIR/sbx-worker@.service" \
+  sed -e "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" \
+    -e "s#^ExecStart=/usr/local/bin/microvm-worker\$#ExecStart=$SBX_WORKER_BIN#" "$SCRIPT_DIR/sbx-worker@.service" \
     >"$SBX_UNIT_DIR/sbx-worker@.service"
   chmod 0644 "$SBX_UNIT_DIR/sbx-worker@.service"
   record "unit $SBX_UNIT_DIR/sbx.slice"
@@ -434,6 +452,8 @@ validate_worker() {
   image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
   image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"
   [[ "$image_mb" =~ ^[1-9][0-9]*$ ]] || die "SH_WORKSPACE_IMAGE_MB in $env must be a whole number of MiB"
+  [[ "$SBX_WORKER_BIN" == /* && -x "$SBX_WORKER_BIN" ]] ||
+    die "no worker binary $SBX_WORKER_BIN: build it with CGO_ENABLED=0 go build -o $SBX_WORKER_BIN ./remote-worker/cmd/microvm-worker (SBX_WORKER_BIN must be an absolute path)"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
@@ -444,7 +464,7 @@ validate_worker() {
 }
 
 install_worker() {
-  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" ca=''
+  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" ca='' tpl=''
   install -d -m 0700 "$SBX_ENV_DIR" "$SBX_ENV_DIR/workers"
   if [[ -f "$BUNDLE/relay-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$BUNDLE/relay-ca.crt" || die "$BUNDLE/relay-ca.crt holds no PEM certificate"
@@ -459,6 +479,11 @@ install_worker() {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT"
+      # The record and its id: the worker refuses to start on a snapshot or id that is not the
+      # record's (remote-worker/cmd/microvm-worker, SH_TEMPLATE_RECORD).
+      [[ ! -f "$SBX_SRV/templates/$SNAPSHOT.json" ]] || printf 'SH_TEMPLATE_RECORD=%s\n' "$SBX_SRV/templates/$SNAPSHOT.json"
+      tpl="$(record_template_id "$SNAPSHOT")"
+      [[ -z "$tpl" ]] || printf 'SANDBOX_TEMPLATE=%s\n' "$tpl"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
