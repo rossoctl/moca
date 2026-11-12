@@ -92,6 +92,8 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
       anthropicBaseUrl: auth.anthropicBaseUrl,
       upstreamCredential: auth.credential,
       ...(auth.sandboxTier ? { sandboxTier: auth.sandboxTier } : {}),
+      ...(auth.sandboxTemplate ? { sandboxTemplate: auth.sandboxTemplate } : {}),
+      ...(auth.sandboxSeed ? { sandboxSeed: auth.sandboxSeed } : {}),
       // sessionModel, never model: runLeaf strips sessionModel, so /runs keeps its envelope's or the env's model.
       ...(auth.model ? { sessionModel: auth.model } : {}),
       ...server,
