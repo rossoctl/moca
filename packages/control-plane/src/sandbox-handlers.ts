@@ -404,7 +404,12 @@ function policyStore(deps: CpDeps): PolicyStore {
 /** `b-` and the same 26 random hex characters a sandbox id takes (sandboxId: a UUID's fixed nibbles dropped). */
 const buildHandle = (raw: string): string => `b-${sandboxId(raw).slice('sbx-'.length)}`;
 
-/** The quota counters for one subject (§6.2): templates owned, builds queued or building. */
+/**
+ * The quota counters for one subject (§6.2). `templates`: the templates it owns with a build
+ * registered or on its way there (a template whose builds all failed, were cancelled or were
+ * retired holds no slot, so a failure never locks a subject out). `buildsQueued`: its builds not
+ * yet built (queued, building or probing), the host work it has in flight.
+ */
 async function usage(
   cat: TemplateCatalog,
   subject: string,
@@ -413,8 +418,8 @@ async function usage(
   let buildsQueued = 0;
   for (const d of await cat.list()) {
     if (d.owner !== subject) continue;
-    if (d.builds.some((b) => b.status !== 'retired')) templates++;
-    buildsQueued += d.builds.filter((b) => b.status === 'queued' || b.status === 'building').length;
+    if (d.builds.some((b) => REUSABLE.has(b.status))) templates++;
+    buildsQueued += d.builds.filter((b) => CANCELLABLE.has(b.status)).length;
   }
   return { templates, buildsQueued };
 }
@@ -493,8 +498,12 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   const quota = pol.quota;
   const want = reuseKey(b.image as string, spec, result.profile, result.gateRecordSha256);
   let reused: TemplateBuild | undefined;
-  // The caller's quota check and write run under the caller's lock (quotaLock).
-  const doc = await quotaLock(cat).run(p.sub, () =>
+  // The quota is the template's owner's: an admin adding a build to another's template uses the
+  // owner's buildsQueued, not its own. The owner's lock is held around the check and the write
+  // (quotaLock). A template's owner never changes, so reading it before the lock is safe; a new id
+  // another subject takes meanwhile is refused inside, before any quota is read.
+  const charged = (await cat.get(id))?.owner ?? p.sub;
+  const doc = await quotaLock(cat).run(charged, () =>
     cat.update(id, async (cur) => {
       if (existing && !cur) throw new CpError('template_not_found', 'no such template');
       if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
@@ -508,7 +517,7 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       // register under one manifest hash).
       reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
       if (reused) return cur!;
-      const u = await usage(cat, p.sub);
+      const u = await usage(cat, charged);
       if (!cur && u.templates >= quota.templates) {
         throw new CpError(
           'quota_exceeded',

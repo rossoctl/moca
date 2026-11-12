@@ -183,7 +183,9 @@ is `422 policy_refused {rule, message}` and a `check` record (written only on a 
 may write: an id no template holds yet, its own, or as an admin adding a build; a refusal on another
 subject's id is only answered), and nothing is queued. Refusals on the caller's own and on new ids are
 bounded only by the request rate. Over a quota
-(§6.2: templates owned, builds queued or building at once) is `429 quota_exceeded` naming which
+(§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
+or were cancelled holds no slot; builds queued, building or probing at once, charged to the
+template's owner even when an admin adds the build) is `429 quota_exceeded` naming which
 (`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
 for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
