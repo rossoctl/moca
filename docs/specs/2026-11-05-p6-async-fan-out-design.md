@@ -440,8 +440,11 @@ worker would then report itself saturated essentially all the time — a one-slo
 interactive `/turn` while its queue sat empty. So `claim()` omits `BLOCK` (`BLOCK 0` means block
 _forever_ in Redis, so omitting is the only non-blocking spelling), and the loop does its own waiting
 after the slot is released: `idleBackoffMs` on `idle`, `errorBackoffMs` after a throw. The price is
-up to `idleBackoffMs` of extra pickup latency on a newly submitted turn, and a few Redis commands a
-second per idle worker.
+up to `idleBackoffMs` of extra pickup latency on a newly submitted turn, and a trickle of Redis
+traffic on an empty queue — at the 250 ms default, about 8 commands a second per worker, multiplied
+by `SH_WORKERS` and by replicas. M1 keeps that a flat poll because M1's deployments are one VM and
+one compose stack against a single Redis; the constant's own comment records when an exponential
+idle backoff becomes worth its pickup-latency cost.
 
 Pull-when-ready, rather than claim-then-queue-internally: an entry claimed but not started is an
 entry no other worker can take, and it is also the window in which a crash costs a reclaim cycle.
