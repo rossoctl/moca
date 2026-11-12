@@ -306,6 +306,23 @@ describe('the one rule /turn enforces', () => {
     await expect(turn(exchangeWith({ sandboxTemplate: 'py312', sandboxSeed: 7 }))).rejects.toThrow(
       'malformed sandboxSeed',
     );
+    // The seed's origin rides with it, and an unknown one fails the turn.
+    expect(
+      (
+        await turn(
+          exchangeWith({
+            sandboxTemplate: 'py312',
+            sandboxSeed: 'echo hi',
+            sandboxSeedSource: 'build',
+          }),
+        )
+      )?.sandboxSeedSource,
+    ).toBe('build');
+    await expect(
+      turn(
+        exchangeWith({ sandboxTemplate: 'py312', sandboxSeed: 'echo hi', sandboxSeedSource: 'x' }),
+      ),
+    ).rejects.toThrow('malformed sandboxSeedSource');
     // The build a session is pinned to: carried beside its template, refused malformed.
     const B = 'sha256:' + 'b'.repeat(64);
     expect(

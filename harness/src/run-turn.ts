@@ -456,6 +456,8 @@ export interface TurnConfig {
    */
   sandboxTemplate?: string;
   sandboxSeed?: string;
+  /** Where sandboxSeed came from, from the exchange: the pinned build's spec, or the declared list. */
+  sandboxSeedSource?: 'build' | 'declared';
   /**
    * The build the session's template resolved to (`sha256:…`, combined control plane spec §3.4).
    * Set: only workers labelled `moca.dev/build=<it>` serve the turn.

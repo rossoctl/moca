@@ -52,6 +52,12 @@ export interface ExchangeResponse {
   sandboxTemplate?: string;
   sandboxSeed?: string;
   /**
+   * Where `sandboxSeed` came from, sent with it: `build` when it is the pinned build's own
+   * `spec.seed` in the template store (combined control plane spec §3.4), `declared` when it is
+   * SH_SANDBOX_TEMPLATES's. A client checks the turn's `sandbox.seed` against its pin with it.
+   */
+  sandboxSeedSource?: 'build' | 'declared';
+  /**
    * The build the session resolved its template to (`sha256:<manifest hash>`, combined control plane
    * spec §3.4): the data plane keeps the session on workers labelled `moca.dev/build`
    * with it. Absent for a session without a resolved build, so that response is unchanged.
@@ -114,6 +120,29 @@ export function sessionTemplate(
   if (!rec.sandboxTemplate) return undefined;
   const t = templates?.find((x) => x.id === rec.sandboxTemplate);
   return { id: rec.sandboxTemplate, ...(t?.seed ? { seed: t.seed } : {}) };
+}
+
+/**
+ * The seed a session's workspace is filled with: the PINNED build's own `spec.seed` when the
+ * session resolved a `sha256:` build through the template store (combined control plane spec §3.4:
+ * a self-serve template is in no env list, and each build carries its own seed, lifecycle spec
+ * §3.2), else the declared one (sessionTemplate). The build is the session's, never the newest. A
+ * build with no seed (or an empty one) sends none, even if the env list declares one: the build is
+ * what the session runs. A store that cannot answer falls back to the declared seed.
+ */
+export async function sessionSeed(
+  rec: SessionRecord,
+  deps: Pick<CpDeps, 'templates' | 'config'>,
+): Promise<{ seed: string; source: 'build' | 'declared' } | undefined> {
+  if (!rec.sandboxTemplate) return undefined;
+  const build = rec.sandboxBuildId;
+  if (build?.startsWith('sha256:') && deps.templates) {
+    const doc = await deps.templates.get(rec.sandboxTemplate).catch(() => null);
+    const b = doc?.builds.find((x) => x.buildId === build);
+    if (b) return b.spec.seed?.trim() ? { seed: b.spec.seed, source: 'build' } : undefined;
+  }
+  const declared = sessionTemplate(rec, deps.config.sessionTemplates)?.seed;
+  return declared ? { seed: declared, source: 'declared' } : undefined;
 }
 
 /**
@@ -416,6 +445,7 @@ export async function exchangeCredential(
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,
@@ -428,7 +458,7 @@ export async function exchangeCredential(
     ...(rec.configRef ? { configRef: rec.configRef } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
     ...(template ? { sandboxTemplate: template.id } : {}),
-    ...(template?.seed ? { sandboxSeed: template.seed } : {}),
+    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
     // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
     ...(template && rec.sandboxBuildId?.startsWith('sha256:')
       ? { sandboxBuildId: rec.sandboxBuildId }
