@@ -440,7 +440,12 @@ components:
       required: [image, spec]
       properties:
         id: { type: string, description: 'the template id (lowercased); ignored on /{id}/builds' }
-        image: { type: string, description: 'repository@sha256:<64 hex>, from an allowed registry' }
+        image:
+          type: string
+          description: >-
+            [host[:port]/]path@sha256:<64 hex>, in the distribution reference grammar (lowercase
+            path components, no tag beside the digest), from an allowed registry (hosts compare
+            case-insensitively)
         spec:
           type: object
           description: |

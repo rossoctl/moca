@@ -546,6 +546,48 @@ describe('the rules alone', () => {
     expect(registryOf('ghcr.io/rossoctl/moca@sha256:ab')).toBe('ghcr.io');
     expect(registryOf('localhost:5000/x@sha256:ab')).toBe('localhost:5000');
     expect(registryOf('x@sha256:ab')).toBe('<default>');
+    expect(registryOf('GHCR.io/rossoctl/moca@sha256:ab')).toBe('ghcr.io');
+    expect(registryOf('Images/x@sha256:ab')).toBe('<default>');
+  });
+
+  it('M1 takes the distribution reference grammar, pinned by digest, no tag', () => {
+    const d = `@sha256:${'a'.repeat(64)}`;
+    const m1 = (image: string) =>
+      checkCreate({ id: 'x', image, spec: {} }, DEFAULT_POLICY).results.find(
+        (r) => r.rule === 'M1',
+      )!.passed;
+    for (const ok of [
+      'images/moca-microvm',
+      'x',
+      'ghcr.io/rossoctl/moca',
+      'GHCR.io/rossoctl/moca',
+      'localhost:5000/a/b_c/d.e/f__g/h--i',
+      'localhost/x',
+    ])
+      expect(m1(ok + d), ok).toBe(true);
+    for (const bad of [
+      'Images/X',
+      '-x',
+      'a//b',
+      '../x',
+      'x:tag',
+      'ghcr.io/x:1',
+      'a/\tb',
+      'a/b\u0007',
+      'x/',
+      '-bad.host/x',
+      'a/B',
+      `${'a'.repeat(256)}`,
+    ])
+      expect(m1(bad + d), bad).toBe(false);
+    expect(m1('x@sha256:abc')).toBe(false);
+    // An allowed host matches whatever case either side writes it in.
+    const pol = { ...DEFAULT_POLICY, allowedRegistries: ['GHCR.IO'] };
+    const reg = checkCreate(
+      { id: 'x', image: `ghcr.io/rossoctl/moca${d}`, spec: {} },
+      pol,
+    ).results.find((r) => r.rule === 'registry')!;
+    expect(reg.passed).toBe(true);
   });
 
   it('passes the worked example in full under its policy, every rule listed', () => {
