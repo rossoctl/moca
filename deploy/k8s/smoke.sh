@@ -299,8 +299,10 @@ turn_state() {
   curl -s --max-time 20 -H @"$OUT/api.hdr" "$CP/v1/sessions/$1/turns/$2" |
     jq -r 'select(.state) | "\(.state) \(.attempts // 0)"' 2>/dev/null || true
 }
-# A prompt leaf ends `responded`; the rest are the other terminal states a failure would land in.
-is_terminal() { case "$1" in responded | done | solved | failed | cancelled | lost) return 0 ;; *) return 1 ;; esac; }
+# The control plane's own rule, not a list of states to keep in step with it: everything but `queued`
+# and `running` is terminal (isTerminalState, turn-record.ts), `paused` included. An empty string is a
+# failed read, which is neither.
+is_terminal() { case "$1" in queued | running | '') return 1 ;; *) return 0 ;; esac; }
 # is_running SID TURNID: a `wait_for` predicate -- a worker has the leaf and is running it.
 is_running() { [[ "$(turn_state "$1" "$2")" == running* ]]; }
 # await_turn SID TURNID SECONDS -> prints the final "<state> <attempts>"; false on timeout.
@@ -541,15 +543,23 @@ fi
 # nothing and the claim would fail a healthy stack. So both SKIP there. Read once: nothing scales
 # this deployment (README §4), so the count cannot change mid-run. An unreadable count counts as 1 --
 # a guard that cannot read itself must not silently cancel two claims.
-sup_replicas="$(kc -n "$NS" get deployment moca-supervisor -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-one_pod() { [[ "${sup_replicas:-1}" == 1 ]]; }
+# Both numbers, and the larger wins. `.spec.replicas` is the operator's intent and the one README §14
+# says to set to 1; `.status.readyReplicas` catches a pod that is up from an earlier spec but not yet
+# counted, or a surge pod mid-rollout (base `maxSurge: 1`). Neither alone is the number of drain loops
+# running: a spurious skip costs a note, a spurious FAIL costs someone a bisect.
+sup_replicas="$(kc -n "$NS" get deployment moca-supervisor -o jsonpath='{.spec.replicas} {.status.readyReplicas}' 2>/dev/null || true)"
+sup_pods=1
+for n in $sup_replicas; do
+  if [[ "$n" =~ ^[0-9]+$ ]] && ((n > sup_pods)); then sup_pods="$n"; fi
+done
+one_pod() { ((sup_pods == 1)); }
 
 claim 9 "a turn in flight when its supervisor pod is deleted runs to completion (drain)"
 # Delete, not `rollout restart`: with maxUnavailable 0 a rollout keeps the old pod until the new one is
 # Ready, which can outlast the turn and prove nothing. Deletion sends SIGTERM (after preStop) mid-turn.
 SID=''
 if ! one_pod; then
-  note "$sup_replicas supervisor pods are ready, and this claim cannot tell which one serves its turn: skipped"
+  note "the supervisor runs $sup_pods pods, and this claim cannot tell which one serves its turn: skipped"
 elif new_session; then
   # Not one still terminating from an earlier run: deleting it again would prove nothing.
   pod="$(kc -n "$NS" get pods -l app=moca-supervisor -o json 2>/dev/null |
@@ -746,7 +756,7 @@ claim 14 "an async leaf whose supervisor pod is deleted mid-run is redelivered a
 if [[ "$async_drain" != 1 ]]; then
   note "no drain on this stack (claim 13 says why): skipped"
 elif ! one_pod; then
-  note "$sup_replicas supervisor pods are ready, so another pod's drain could hold the leaf: skipped (claim 9 skipped for the same reason)"
+  note "the supervisor runs $sup_pods pods, so another pod's drain could hold the leaf: skipped (claim 9 skipped for the same reason)"
 else
   SID='' pod='' tid='' st_err=''
   if new_session quiet; then

@@ -1315,14 +1315,19 @@ like an answer. Poll the turn route above.
 On the admin port's `/metrics`, under `counters` (counts, so missing and zero mean the same thing)
 and as two top-level gauges:
 
-| Reading                   | Means                                                                |
-| ------------------------- | -------------------------------------------------------------------- |
-| `async_claims`            | leaves claimed, deployment-wide                                      |
-| `async_reclaims`          | leaves redelivered after a worker died holding one (90 s idle floor) |
-| `async_dead_letters`      | leaves that exhausted their attempts                                 |
-| `async_claim_denied_full` | claims a worker refused because its admission cap was full           |
-| `async_queue_depth`       | queued turns, from slot 0 only                                       |
-| `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                      |
+| Reading                   | Means                                                                            |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| `async_claims`            | leaves claimed by this pod's workers since they started                          |
+| `async_reclaims`          | of those, the ones redelivered after a worker died holding one (90 s idle floor) |
+| `async_dead_letters`      | of those, the ones that exhausted their attempts                                 |
+| `async_claim_denied_full` | claims this pod's workers refused because their admission cap was full           |
+| `async_queue_depth`       | queued turns, from slot 0 only                                                   |
+| `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                                  |
+
+The four counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
+reached, each worker counts in its own memory, and a worker that respawns starts its own count at
+zero. At `replicas` > 1 (section 4) add the pods up yourself. The two gauges describe the one shared
+queue, so every pod's slot 0 reports the same numbers.
 
 Read the last two as a pair. Depth alone cannot tell a deep queue that is draining fast from a
 shallow one that is stalled; a rising `async_oldest_age_ms` at a flat depth is the stall.
@@ -1351,6 +1356,6 @@ redelivery acceptance of [#389](https://github.com/rossoctl/moca/issues/389) on 
 its Kind stack up with `SH_ASYNC_DRAIN=1`, so both run on every `k8s-kind-e2e` (section 8).
 
 Claim 14 **assumes one supervisor pod**, as claim 9 does: it picks the pod before submitting the
-leaf, and cannot learn which pod's drain then claimed it. Above `replicas: 1` both claims skip with
-a `note` rather than delete a pod that may be holding nothing. If you raised `replicas` (section 4)
-and want the redelivery claim back, scale the supervisor to one for the run.
+leaf, and cannot learn which pod's drain then claimed it. Above `replicas: 1` claims 9 and 14 skip
+with a `note` rather than delete a pod that may be holding nothing. If you raised `replicas`
+(section 4) and want the redelivery claim back, scale the supervisor to one for the run.
