@@ -13,8 +13,11 @@ import { createHash } from 'node:crypto';
 
 export const POLICY_SCHEMA = 'moca-template-policy/1';
 
+/** The rule ids a profile's `requires` may name: the ones checkCreate acts on. */
+export const PROFILE_RULES = ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'] as const;
+
 export interface Profile {
-  /** Rule ids beyond the base rules; the benchmark profile's are the X rules. */
+  /** Rule ids beyond the base rules (from PROFILE_RULES); the benchmark profile's are the X rules. */
   requires: string[];
   /** The size envelope: a spec outside it is refused (X15 for benchmark). */
   envelope: {
@@ -438,10 +441,20 @@ export function policyProblems(p: unknown): string[] {
       if (!/^[a-z][a-z0-9-]{0,30}$/.test(n))
         out.push(`profile name ${n} must match ^[a-z][a-z0-9-]{0,30}$`);
       const e = pr?.envelope;
-      if (!Array.isArray(pr?.requires) || !pr.requires.every((r) => typeof r === 'string'))
-        out.push(`${n}.requires must be a list of rule ids`);
+      if (
+        !Array.isArray(pr?.requires) ||
+        !pr.requires.every((r) => (PROFILE_RULES as readonly unknown[]).includes(r))
+      )
+        out.push(`${n}.requires must be a list of rule ids from ${PROFILE_RULES.join(', ')}`);
       if (!e || ![e.maxGuestMb, e.maxVcpus, e.maxWorkspaceMb].every((x) => int(x) && x > 0))
         out.push(`${n}.envelope must hold positive maxGuestMb, maxVcpus, maxWorkspaceMb`);
+      else if (
+        e.exact !== undefined &&
+        (!e.exact ||
+          typeof e.exact !== 'object' ||
+          ![e.exact.guestMb, e.exact.vcpus].every((x) => int(x) && x > 0))
+      )
+        out.push(`${n}.envelope.exact must hold positive whole numbers guestMb, vcpus`);
     }
   }
   if (typeof o.defaultProfile !== 'string' || !o.profiles?.[o.defaultProfile])

@@ -503,7 +503,10 @@ components:
             type: object
             required: [requires, envelope]
             properties:
-              requires: { type: array, items: { type: string }, description: gating rule ids }
+              requires:
+                type: array
+                items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
+                description: gating rule ids beyond the base rules; an unknown id is refused
               envelope:
                 type: object
                 required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
@@ -513,9 +516,10 @@ components:
                   maxWorkspaceMb: { type: integer }
                   exact:
                     type: object
+                    required: [guestMb, vcpus]
                     properties:
-                      guestMb: { type: integer }
-                      vcpus: { type: integer }
+                      guestMb: { type: integer, minimum: 1 }
+                      vcpus: { type: integer, minimum: 1 }
         defaultProfile: { type: string }
         allowedRegistries:
           type: array
