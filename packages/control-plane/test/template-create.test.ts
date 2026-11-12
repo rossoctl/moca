@@ -150,12 +150,15 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     });
   });
 
-  it('records a refusal as a check on the template stream, and queues nothing', async () => {
+  it("records a refusal on the caller's own template as a check, and queues nothing", async () => {
     const d = stored();
+    await create(d);
     await refusal(d, body({ spec: { ...spec, egress: true } }));
+    const t = (await d.templates!.get(ID))!;
+    expect(t.builds).toHaveLength(1);
     const chain = await d.provenance!.chain(`template/${ID}`);
-    expect(chain.map((r) => r.kind)).toEqual(['check']);
-    expect(chain[0].body).toMatchObject({ outcome: 'refused' });
+    expect(chain.map((r) => r.kind)).toEqual(['create', 'gate', 'check', 'check']);
+    expect(chain.at(-1)!.body).toMatchObject({ outcome: 'refused' });
   });
 
   it('X12 fails closed: skip_git_identity_check with a gate record that never measured the identity', async () => {
@@ -172,7 +175,7 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     });
   });
 
-  it("records a refusal on a new id or the caller's own, never on another subject's", async () => {
+  it("records a refusal on the caller's own id, never on a new id or another subject's", async () => {
     const d = stored();
     await create(d); // alice owns ID now
     const len = async () => (await d.provenance!.chain(`template/${ID}`)).length;
@@ -187,11 +190,11 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       kind: 'check',
       body: { outcome: 'refused' },
     });
-    // A refusal on an id no template holds yet is recorded too.
+    // A refusal on an id no template holds yet is only answered: no stream is opened for it.
     await expect(create(d, { ...bad, id: 'fresh-id' }, bob)).rejects.toMatchObject({
       code: 'policy_refused',
     });
-    expect((await d.provenance!.chain('template/fresh-id')).map((r) => r.kind)).toEqual(['check']);
+    expect(await d.provenance!.chain('template/fresh-id')).toEqual([]);
   });
 
   it.each([

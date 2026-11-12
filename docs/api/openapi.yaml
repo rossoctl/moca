@@ -1731,7 +1731,8 @@ paths:
         is checked against the deployment's policy (GET /v1/policy) before anything is queued: a
         refusal is `422 policy_refused` with `rule`, the gating rule's id
         (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
-        template's stream. Ids are unique per deployment: another subject's id is
+        template's stream when the template exists and is the caller's (an admin's, adding a
+        build); a refusal on a new id or another subject's is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
         `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for

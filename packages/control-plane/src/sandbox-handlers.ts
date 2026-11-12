@@ -482,13 +482,15 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
     results: result.results as unknown as Record<string, unknown>[],
   };
   if (!result.passed) {
-    // A refusal of a well-formed id is recorded on its template's stream, but only on a stream the
-    // caller may write: an id no template holds yet, the caller's own, or (adding a build) any as an
-    // admin. A refusal on someone else's id is only answered, so no subject grows another's stream.
-    // An id the rule refuses has no stream to record on, and is only answered too.
+    // A refusal is recorded on its template's stream only when the template exists and the caller
+    // may write its stream: its own, or (adding a build) any as an admin. A refusal on an id no
+    // template holds is only answered: recording it would let any enrolled subject open
+    // provenance streams without bound, which no quota counts. A refusal on someone else's id is
+    // only answered too, so no subject grows another's stream; and an id the rule refuses has no
+    // stream to record on.
     if (TEMPLATE_ID_RE.test(id)) {
       const cur = await cat.get(id);
-      if (!cur || cur.owner === p.sub || (existing && isAdmin(p)))
+      if (cur && (cur.owner === p.sub || (existing && isAdmin(p))))
         await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
     }
     const f = result.failed!;

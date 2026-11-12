@@ -181,10 +181,10 @@ provisional handle (`b-<26 hex>`) until it is built; then its `buildId` is its m
 the handle still finds it.
 
 The create is checked against the deployment's policy before anything is queued (§8.1): a refusal
-is `422 policy_refused {rule, message}` and a `check` record (written only on a stream the caller
-may write: an id no template holds yet, its own, or as an admin adding a build; a refusal on another
-subject's id is only answered), and nothing is queued. Refusals on the caller's own and on new ids are
-bounded only by the request rate. Over a quota
+is `422 policy_refused {rule, message}` and a `check` record (written only on the stream of a
+template that exists and whose stream the caller may write: its own, or as an admin adding a build;
+a refusal on another subject's id, or on an id no template holds, is only answered, so no subject
+opens streams without bound), and nothing is queued. Over a quota
 (§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
 or were cancelled holds no slot; builds queued, building or probing at once, charged to the
 template's owner even when an admin adds the build) is `429 quota_exceeded` naming which
@@ -390,8 +390,8 @@ X15 from the spec and the gate record; whatever the profile, X10 whenever the sp
 record (with X1's check of that record, or of any gate record sent: it passed, and is for this
 image; only `X1.trusted` is the profile's) and X12 whenever the spec skips the git identity check
 (a skip with no gate record showing commits refused is refused); and the caller's quota (§6.2). A refusal is
-`422 policy_refused {rule, message}` and a `check` record listing every rule and its result; nothing
-is queued. The control plane refuses early, so a refused create costs no host time; the build host
+`422 policy_refused {rule, message}` and, on an existing template's stream the caller may write
+(§4), a `check` record listing every rule and its result; nothing is queued. The control plane refuses early, so a refused create costs no host time; the build host
 still applies its own checks, since a host is never trusted to have been asked only valid builds.
 
 ### 8.2 At build and registration
