@@ -1742,6 +1742,7 @@ EOI
     echo "STAGE='$w/stage'"
     echo "EGRESS_CA='$EGT/ca.crt'"
     fn_body validate_egress_ca
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1783,6 +1784,23 @@ check "tree with neither tool: install_egress_ca fails" "$([ "$(eg_harness none 
 check "neither tool: the message is the documented one" \
   "$(grep -cF -- '--egress-ca: the rootfs has neither update-ca-certificates nor update-ca-trust' "$w/out")" "1"
 
+# The CA directory, or a directory above it, as an absolute symlink out of the tree: the build
+# refuses, and the directory outside gains nothing.
+for kind in debian rhel; do
+  w="$EGT/link-$kind"; mkdir -p "$w/outside"
+  if [ "$kind" = debian ]; then link=usr/local/share; else link=etc/pki/ca-trust/source/anchors; fi
+  mkdir -p "$w/stage/rootfs-tree/$(dirname "$link")"
+  ln -s "$w/outside" "$w/stage/rootfs-tree/$link"
+  check "$kind: a CA directory linked out of the tree is refused" "$([ "$(eg_harness "$kind" "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "$kind: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+  check "$kind: nothing is written outside the tree" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "0"
+done
+w="$EGT/link-file"; mkdir -p "$w/stage/rootfs-tree/usr/local/share/ca-certificates"
+printf 'OUTSIDE\n' >"$w/outside.crt"
+ln -s "$w/outside.crt" "$w/stage/rootfs-tree/usr/local/share/ca-certificates/moca-egress.crt"
+check "debian: a CA file that is a symlink is refused" "$([ "$(eg_harness debian "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "debian: the file outside is untouched" "$(cat "$w/outside.crt")" "OUTSIDE"
+
 echo "== SBX0.2b: the CA file is validated before anything is staged"
 mkdir -p "$EGT/tmp1"
 out=$(TMPDIR="$EGT/tmp1" bash "$SCRIPT" --kernel /k --rootfs /r --agent /a --image t --egress-ca "$EGT/ca.key" 2>&1); rc=$?
@@ -1818,6 +1836,7 @@ for drift in real drifted; do
   {
     echo 'chroot() { local t="$1"; shift; local c="$1"; shift; "$t$c" "$@"; }'
     echo "STAGE='$w/stage'; EGRESS_CA='$EGT/ca.crt'"
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1965,6 +1984,7 @@ LT="$(mktemp -d "${TMPDIR:-/tmp}/bs-lease-test.XXXXXX")"
 id_harness() { # $1 = work dir; the tree's etc/passwd and etc/group are already there
   {
     echo "STAGE='$1/stage'"
+    fn_body tree_write_target
     fn_body add_sbx_identity
     echo 'add_sbx_identity'
   } >"$1/run.sh"
@@ -1996,6 +2016,43 @@ check "gid 7000 under another name: the message names it" "$(grep -cF 'staff7:x:
 check "gid 7000 under another name: passwd untouched" "$(grep -c '^sbx:' "$w/stage/rootfs-tree/etc/passwd")" "0"
 w="$LT/name"; id_tree "$w" $'sbx:x:1234:1234::/home/sbx:/bin/sh\n' $'root:x:0:\n'
 check "the name sbx under another uid: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+# The image's etc/passwd, etc/group or etc itself as an absolute symlink out of the tree: refused,
+# and the file outside untouched.
+for f in passwd group; do
+  w="$LT/link-$f"; id_tree "$w" $'root:x:0:0:root:/root:/bin/bash\n' $'root:x:0:\n'
+  printf 'OUTSIDE\n' >"$w/outside"
+  rm -f "$w/stage/rootfs-tree/etc/$f"; ln -s "$w/outside" "$w/stage/rootfs-tree/etc/$f"
+  check "etc/$f linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "etc/$f linked out of the tree: the refusal says so" "$(grep -c "/etc/$f is a symlink" "$w/out")" "1"
+  check "etc/$f linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
+done
+w="$LT/link-etc"; mkdir -p "$w/outside" "$w/stage/rootfs-tree"
+printf 'OUTSIDE\n' >"$w/outside/passwd"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc"
+check "etc linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc linked out of the tree: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+check "etc linked out of the tree: the file outside is untouched" "$(cat "$w/outside/passwd")" "OUTSIDE"
+check "etc linked out of the tree: nothing new outside" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "1"
+# The etc/gitconfig append, run from assemble_rootfs's own lines.
+gc_harness() { # $1 = work dir
+  {
+    echo "STAGE='$1/stage'"
+    fn_body tree_write_target
+    sed -n '/^  tree_write_target etc\/gitconfig$/,/^GITCONFIG$/p' "$SCRIPT"
+  } >"$1/run.sh"
+  bash "$1/run.sh" >"$1/out" 2>&1
+  echo $?
+}
+# shellcheck disable=SC2016 # the pattern is literal
+check "assemble_rootfs checks etc/gitconfig right before appending to it" \
+  "$(sed -n '/^  tree_write_target etc\/gitconfig$/{n;p;}' "$SCRIPT" | grep -cF 'cat >>"$STAGE/rootfs-tree/etc/gitconfig"')" "1"
+w="$LT/gc-plain"; mkdir -p "$w/stage/rootfs-tree"
+check "a plain tree: the gitconfig append succeeds" "$(gc_harness "$w")" "0"
+check "a plain tree: the credential helper is there" "$(grep -c 'password=moca-placeholder' "$w/stage/rootfs-tree/etc/gitconfig")" "1"
+w="$LT/gc-link"; mkdir -p "$w/stage/rootfs-tree/etc"; printf 'OUTSIDE\n' >"$w/outside"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc/gitconfig"
+check "etc/gitconfig linked out of the tree: refused" "$([ "$(gc_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc/gitconfig linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
 
 # check_lease_support, run against a stub guest_client printing each possible answer.
 ls_harness() { # $1 = work dir, $2 = what the guest prints
