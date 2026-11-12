@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
@@ -103,13 +102,7 @@ func TestLeaseControlDoesNotBlockExecs(t *testing.T) {
 		release: make(chan struct{}),
 		status:  &pb.LeaseStatus{Mode: pb.SandboxMode_SANDBOX_MODE_PER_EXEC, EpochKnown: true, State: "none"},
 	}
-	t.Cleanup(func() {
-		select {
-		case <-r.release:
-		default:
-			close(r.release)
-		}
-	})
+	releaseOnCleanup(t, r)
 	s := session.New(testConfig(), r)
 	serve(t, s, st)
 	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
@@ -181,12 +174,10 @@ func TestLeaseControlUnsupportedRunner(t *testing.T) {
 	}
 }
 
-// At leaseControlCap (16) calls in flight, the next is refused at once, and a finished call
-// frees its place.
-func TestLeaseControlCap(t *testing.T) {
-	const leaseCap = 16
-	st := newFakeStream()
-	r := &leaseRunner{release: make(chan struct{}), status: &pb.LeaseStatus{State: "active"}}
+// releaseOnCleanup closes r.release when the test ends, unless the test already did, so an
+// early failure leaves no lease goroutine blocked in the controller.
+func releaseOnCleanup(t *testing.T, r *leaseRunner) {
+	t.Helper()
 	t.Cleanup(func() {
 		select {
 		case <-r.release:
@@ -194,6 +185,22 @@ func TestLeaseControlCap(t *testing.T) {
 			close(r.release)
 		}
 	})
+}
+
+// waitLeaseDrained waits until every lease goroutine of s has finished: its controller
+// returned and its reply was queued or dropped.
+func waitLeaseDrained(t *testing.T, s *session.Session) {
+	t.Helper()
+	waitFor(t, "every lease call to finish", func() bool { return session.LeaseCallsInFlight(s) == 0 })
+}
+
+// At leaseControlCap (16) calls in flight, the next is refused at once, and a finished call
+// frees its place.
+func TestLeaseControlCap(t *testing.T) {
+	const leaseCap = 16
+	st := newFakeStream()
+	r := &leaseRunner{release: make(chan struct{}), status: &pb.LeaseStatus{State: "active"}}
+	releaseOnCleanup(t, r)
 	s := session.New(testConfig(), r)
 	serve(t, s, st)
 	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
@@ -219,6 +226,9 @@ func TestLeaseControlCap(t *testing.T) {
 			t.Errorf("ctl %d result = %+v, want no error", id, got)
 		}
 	}
+	// A slot is freed just AFTER its reply is queued, so seeing all 16 replies does not yet
+	// prove the slots are free; this does.
+	waitLeaseDrained(t, s)
 	st.leaseControl(&pb.LeaseControlFrame{CtlId: 100, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_STATUS})
 	waitFor(t, "a call after the cap drained", func() bool { return leaseResultFor(st.sent(), 100) != nil })
 	if got := leaseResultFor(st.sent(), 100); got.GetError() != "" || got.GetStatus().GetState() != "active" {
@@ -230,13 +240,7 @@ func TestLeaseControlCap(t *testing.T) {
 // after its connection died holds its place, so a reconnect cannot run a second 16.
 func TestLeaseControlCapSurvivesReconnect(t *testing.T) {
 	r := &leaseRunner{release: make(chan struct{})}
-	t.Cleanup(func() {
-		select {
-		case <-r.release:
-		default:
-			close(r.release)
-		}
-	})
+	releaseOnCleanup(t, r)
 	s := session.New(testConfig(), r)
 
 	first := newFakeStream()
@@ -255,6 +259,16 @@ func TestLeaseControlCapSurvivesReconnect(t *testing.T) {
 	if got := leaseResultFor(second.sent(), 17).GetError(); got != "busy: too many lease calls in flight" {
 		t.Errorf("result on reconnect = %q, want the busy refusal", got)
 	}
+
+	// Let the 16 finish inside the test, so their "dropping its result" log lines (their
+	// connection is gone) do not land after it returns.
+	close(r.release)
+	waitLeaseDrained(t, s)
+	for _, f := range first.sent() {
+		if f.GetLeaseResult() != nil {
+			t.Errorf("a reply reached the closed first connection: %+v", f)
+		}
+	}
 }
 
 // A controller that outlives its connection must neither hold Serve's teardown (a set_mode
@@ -262,6 +276,7 @@ func TestLeaseControlCapSurvivesReconnect(t *testing.T) {
 // once it is closed.
 func TestLateLeaseReplyAfterDisconnectIsDropped(t *testing.T) {
 	r := &leaseRunner{release: make(chan struct{}), status: &pb.LeaseStatus{State: "none"}}
+	releaseOnCleanup(t, r)
 	s := session.New(testConfig(), r)
 	st := newFakeStream()
 	sv := serve(t, s, st)
@@ -271,11 +286,15 @@ func TestLateLeaseReplyAfterDisconnectIsDropped(t *testing.T) {
 	waitFor(t, "the controller to be called", func() bool { return r.callCount() == 1 })
 	st.close()
 	_ = sv.wait(t, "while a lease call is still blocked in the controller")
+	// Serve returned with the call still running: the case under test, not a vacuous one.
+	if n := session.LeaseCallsInFlight(s); n != 1 {
+		t.Fatalf("lease calls in flight after Serve returned = %d, want 1 (still blocked)", n)
+	}
 
 	close(r.release)
-	// Give the reply goroutine time to run; a send on the closed outbound channel would
-	// panic the test binary here.
-	time.Sleep(100 * time.Millisecond)
+	// The goroutine's slot is freed only after it tried to reply, so a drained count proves the
+	// reply was attempted -- and a send on the closed outbound channel would have panicked.
+	waitLeaseDrained(t, s)
 	if res := leaseResultFor(st.sent(), 1); res != nil {
 		t.Errorf("a reply reached a stream whose connection had ended: %+v", res)
 	}

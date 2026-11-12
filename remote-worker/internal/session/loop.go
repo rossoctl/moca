@@ -471,8 +471,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		default:
 			s.unsent.Add(-1)
 			log.Printf("session: WARNING the terminal-frame reserve (%d slots) is undrained, so the "+
-				"terminal frame for req_id %d cannot be queued; treating egress as wedged and "+
-				"dropping the connection so the harness re-dials", TerminalReserve, reqIDOf(f))
+				"terminal frame for %s cannot be queued; treating egress as wedged and "+
+				"dropping the connection so the harness re-dials", TerminalReserve, frameRef(f))
 			return false
 		}
 	}
@@ -833,19 +833,22 @@ func errFrame(reqID uint64, msg string) *pb.WorkerFrame {
 	return &pb.WorkerFrame{Msg: &pb.WorkerFrame_Error{Error: &pb.ExecError{ReqId: reqID, Message: msg}}}
 }
 
-// reqIDOf extracts the req_id carried by a WorkerFrame, for logging when
-// trySend drops a frame. Frames with no req_id (Hello, Heartbeat) report 0.
-func reqIDOf(f *pb.WorkerFrame) uint64 {
+// frameRef names what a WorkerFrame answers, for logging when trySend drops a frame:
+// "req_id N" for an Exec's frames, "ctl_id N" for a LeaseControl's result. Frames with
+// neither (Hello, Heartbeat) report "req_id 0".
+func frameRef(f *pb.WorkerFrame) string {
 	switch m := f.Msg.(type) {
 	case *pb.WorkerFrame_End:
-		return m.End.GetReqId()
+		return fmt.Sprintf("req_id %d", m.End.GetReqId())
 	case *pb.WorkerFrame_Error:
-		return m.Error.GetReqId()
+		return fmt.Sprintf("req_id %d", m.Error.GetReqId())
 	case *pb.WorkerFrame_Chunk:
-		return m.Chunk.GetReqId()
+		return fmt.Sprintf("req_id %d", m.Chunk.GetReqId())
 	case *pb.WorkerFrame_Lease:
-		return m.Lease.GetReqId()
+		return fmt.Sprintf("req_id %d", m.Lease.GetReqId())
+	case *pb.WorkerFrame_LeaseResult:
+		return fmt.Sprintf("ctl_id %d", m.LeaseResult.GetCtlId())
 	default:
-		return 0
+		return "req_id 0"
 	}
 }

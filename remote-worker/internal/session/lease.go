@@ -31,8 +31,11 @@ const (
 // lease_unsupported and ignores keepalives. vmpool.Runner implements it.
 //
 // LeaseControl runs on its own goroutine, off the receive loop and the Exec slots, so it may
-// block (a set_mode downgrade waits for the lease to end). ctx is the connection's: it ends
-// when the connection does, after which the result has nowhere to go.
+// block (a set_mode downgrade waits for the lease to end). ctx is the connection's context:
+// it ends when the connection does, after which the result has nowhere to go. A controller
+// may ignore it, and vmpool's does (the Pool's lease calls take no context): the op then runs
+// to completion, holding its leaseControlCap slot, and its result is dropped if the
+// connection has ended by the time it returns.
 //
 // LeaseKeepalive is called ON the receive loop and must not block: an Abort queued behind it
 // could not be read. vmpool's Keepalive only takes the pool lock.
