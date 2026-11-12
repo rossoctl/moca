@@ -39,6 +39,8 @@ describe('the route table', () => {
         'POST /internal/turn-credentials',
         'GET /healthz',
         'GET /readyz',
+        // §7's async_quota_refusals: the control plane's own /metrics (async fan-out spec §7).
+        'GET /metrics',
         'GET /v1/discovery',
         'POST /v1/egress/credential',
         // SBX0 §5.1: the sandbox profile's own.

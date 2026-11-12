@@ -344,6 +344,25 @@ OUT_RA="$(render require-auth "${CP_ENV[@]}" 'SH_REQUIRE_AUTH=true')" || fail "c
   fail "unset MU1 settings reach the supervisor as empty strings"
 pass "the supervisor verifies against the control plane's keys and dials it by service name"
 
+# #389: the drain knob passes through from .env and is OFF when .env is silent. Empty, not absent:
+# the bare `SH_ASYNC_DRAIN:` form is how compose carries the other opt-in keys, and truthy('') is
+# false in the worker, so an unset .env key cannot arm a drain.
+[[ "$(svc_env supervisor SH_ASYNC_DRAIN)" != '<absent>' ]] ||
+  fail "the supervisor service does not carry SH_ASYNC_DRAIN: .env cannot enable the drain"
+[[ -z "$(svc_env supervisor SH_ASYNC_DRAIN)" ]] ||
+  fail "SH_ASYNC_DRAIN reaches the supervisor as '$(svc_env supervisor SH_ASYNC_DRAIN)' when .env does not set it"
+pass "the async drain is off unless .env asks for it"
+
+# #389 extra item: LEAF_RESULT_TTL_SECONDS must also reach the supervisor (it already reached the
+# control plane), or an operator's configured TTL is honoured for control-plane-written results and
+# silently ignored for the async worker's own leaf results. Bare pass-through, like
+# SH_SESSION_TOKEN_PUBLIC_KEYS above: unset resolves to YAML null, which svc_env's `// "<absent>"`
+# cannot tell apart from a missing key, so this checks the key's PRESENCE in the rendered mapping
+# directly rather than its value.
+jq -e '.services.supervisor.environment | has("LEAF_RESULT_TTL_SECONDS")' "$OUT" >/dev/null ||
+  fail "the supervisor service does not carry LEAF_RESULT_TTL_SECONDS: an operator's configured TTL would be ignored for async leaf results"
+pass "LEAF_RESULT_TTL_SECONDS reaches the supervisor as well as the control plane"
+
 # Discovery: the control plane advertises the harness at the port the HOST reaches it on.
 [[ "$(cp_env control-plane SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] ||
   fail "SH_PUBLIC_HARNESS_URL must be the supervisor as the user reaches it, got $(cp_env control-plane SH_PUBLIC_HARNESS_URL)"
