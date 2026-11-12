@@ -143,7 +143,11 @@ export function plan(messages) {
   }
   if (i < 0) return null;
   const text = textOf(messages[i]);
-  const marker = Object.keys(SCRIPTS).find((k) => text.includes(k));
+  // The LONGEST match, not the first: one marker can be a prefix of another (K8S-SMOKE-ASYNC and
+  // K8S-SMOKE-ASYNC-SLOW), and `find` would hand the longer prompt the shorter script.
+  const marker = Object.keys(SCRIPTS)
+    .filter((k) => text.includes(k))
+    .sort((a, b) => b.length - a.length)[0];
   return marker ? { marker, step, results } : null;
 }
 
