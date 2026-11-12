@@ -8,8 +8,8 @@ import {
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
-import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
-import { liveLeases, place, readinessOf, type Placement } from './activation.js';
+import { buildRecordOf, canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
+import { liveLeases, place, readinessOf, type HostView, type Placement } from './activation.js';
 import { hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
@@ -268,8 +268,14 @@ interface ReadinessFacts {
   lastUsed: Map<string, number> | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
+  /** The hosts as last reported, for each build's `heldBy`; null without host agents. */
+  hosts: HostView[] | null;
   nowS: number;
 }
+
+/** The host views, or null on a deployment without host agents (no `heldBy` to report). */
+const viewsOrNull = (deps: CpDeps, hosts: HostView[]): HostView[] | null =>
+  hosts.length > 0 || deps.config.templateHosts?.length ? hosts : null;
 
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
   const nowS = seconds(deps);
@@ -286,7 +292,14 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     }
   }
   if (deps.config.routeProfile !== 'sandbox' || !deps.sandboxes) {
-    return { attached, inUse: null, lastUsed: null, placement, nowS };
+    return {
+      attached,
+      inUse: null,
+      lastUsed: null,
+      placement,
+      hosts: viewsOrNull(deps, hosts),
+      nowS,
+    };
   }
   const inUse = new Map<string, number>();
   const lastUsed = new Map<string, number>();
@@ -295,18 +308,22 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, nowS };
+  return { attached, inUse, lastUsed, placement, hosts: viewsOrNull(deps, hosts), nowS };
 }
 
 /**
  * One build on the wire (openapi TemplateBuild), never its worker. Readiness, for a registered
  * build (§3.3, activation.ts readinessOf): from its leases, where it is placed and whether the
- * relay holds its worker's presence record; `unknown` when presence cannot be read; null for a
- * build that is not registered.
+ * relay holds its worker's presence record; `unknown` when presence cannot be read; `retired` for
+ * a retired build (§5.1); null for any other build that is not registered.
  */
 function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
   const readiness =
-    b.status !== 'registered' ? null : readinessOf(b, f.nowS, f.placement, f.attached);
+    b.status === 'retired'
+      ? 'retired'
+      : b.status !== 'registered'
+        ? null
+        : readinessOf(b, f.nowS, f.placement, f.attached);
   return {
     buildId: b.buildId,
     status: b.status,
@@ -320,6 +337,15 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
           }
         : null,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
+    // The hosts whose last inventory holds this build's snapshot (§6.1): ids only, no paths, so a
+    // client sees which hosts still hold a retired build. Null without host agents.
+    heldBy:
+      f.hosts === null
+        ? null
+        : f.hosts
+            .filter((h) => h.holds[b.buildId] !== undefined)
+            .map((h) => h.id)
+            .sort(),
     tags: Object.entries(d.tags)
       .filter(([, id]) => id === b.buildId)
       .map(([t]) => t)
@@ -356,7 +382,8 @@ function templateBody(d: TemplateDoc, f: ReadinessFacts, full: boolean) {
  * A sandbox's template reference (§3.2, §4): `id`, `id:tag` or `id@<build id>`, resolved to one
  * registered build and its worker at creation, and kept for the sandbox's life. An unknown id, tag
  * or build, one the caller cannot see, or a build not registered is `400 unknown_template`, as an
- * unknown id always was. Whether the build is active is requireActive's question (§6.4).
+ * unknown id always was; a retired build, or a template whose every build is retired, is `410
+ * template_retired` (§5.1). Whether the build is active is requireActive's question (§6.4).
  */
 async function resolveForUse(
   deps: CpDeps,
@@ -376,6 +403,18 @@ async function resolveForUse(
     at >= 0 ? { build: ref.slice(at + 1) } : colon >= 0 ? { tag: ref.slice(colon + 1) } : {};
   const d = await catalog(deps).get(id);
   const b = d && canSee(d, p) ? resolveBuild(d, r) : null;
+  // A retired build, or a template whose every build is retired, is gone, not unknown (§5.1).
+  if (
+    d &&
+    canSee(d, p) &&
+    (b?.status === 'retired' ||
+      (!b && d.builds.length > 0 && d.builds.every((x) => x.status === 'retired')))
+  ) {
+    throw new CpError(
+      'template_retired',
+      `template '${d.id}'${b ? ` build ${b.buildId}` : ''} is retired`,
+    );
+  }
   if (!d || !b || b.status !== 'registered' || !b.worker) {
     throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
   }
@@ -745,6 +784,8 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
       ? { build: b.build }
       : { tag: typeof b.tag === 'string' ? b.tag : 'default' };
   const target = resolveBuild(d0, ref);
+  if (target?.status === 'retired')
+    throw new CpError('template_retired', `template '${d0.id}' build ${target.buildId} is retired`);
   if (!target || target.status !== 'registered') {
     throw new CpError(
       'template_unavailable',
@@ -941,6 +982,133 @@ async function deactivate(ctx: RequestCtx, deps: CpDeps) {
   return { status: 200, body: { templateId: d0.id, released: dropped } };
 }
 
+/**
+ * Why each build is in use now (§5.1): a live sandbox runs on its worker. A retire is refused
+ * while any build it names is in use, so it never cuts off running work. Sessions pinned to a
+ * build, once sessions are, are live use too, and are to be checked here.
+ */
+async function buildsInUse(
+  deps: CpDeps,
+  builds: TemplateBuild[],
+  nowS: number,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!deps.sandboxes) return out;
+  const busy = new Set<string>();
+  for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  for (const x of builds) {
+    if (x.worker && busy.has(x.worker)) out.set(x.buildId, 'still serves a live sandbox');
+  }
+  return out;
+}
+
+/** One build a retire answered for (openapi RetiredBuild). */
+interface RetiredBuild {
+  build: string;
+  buildId: string | null;
+  readiness: 'retired';
+  record: string | null;
+}
+
+/**
+ * Retire (§5.1): the owner, or an admin, retires a whole template (every build not yet retired) or
+ * one build. A retired build is never used again (a sandbox or an activation naming it answers
+ * `410 template_retired`) and its leases go, so it is no longer wanted: a host holding it is told
+ * to stop its worker (`GET /v1/hosts/{host}/wanted` `stop`). Refused while a live sandbox runs on
+ * a build it names (`409 build_in_use`). Its records stay, and each build retired writes a
+ * `retire` record naming the caller, the status before (`from`) and the build's `build` record
+ * (`buildRecord`). Idempotent: an already retired build is answered with `record: null`.
+ */
+async function retireBuilds(
+  ctx: RequestCtx,
+  deps: CpDeps,
+  which: (b: TemplateBuild) => boolean,
+): Promise<{ templateId: string; subject: string; builds: RetiredBuild[] }> {
+  const p = requireEnrolled(ctx, deps);
+  const { cat, prov } = writable(deps);
+  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
+  if (d0.owner !== p.sub && !isAdmin(p))
+    throw new CpError('forbidden', "only the template's owner, or an admin, retires it");
+  const reason = asRecord(ctx.body).reason;
+  if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1024))
+    throw new CpError('invalid_request', 'reason must be a string of at most 1024 characters');
+  // Read before the catalog update, so no store lookup runs inside it.
+  const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
+  const done: TemplateBuild[] = [];
+  await cat.update(d0.id, async (cur) => {
+    done.length = 0;
+    const targets = cur!.builds.filter(which);
+    if (targets.length === 0)
+      throw new CpError('template_not_found', 'no such build of this template');
+    const busy = targets.find((x) => x.status !== 'retired' && inUse.has(x.buildId));
+    if (busy)
+      throw new CpError(
+        'build_in_use',
+        `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then retire`,
+      );
+    done.push(...targets.filter((x) => x.status !== 'retired'));
+    return {
+      ...cur!,
+      builds: cur!.builds.map((x) =>
+        done.includes(x) ? { ...x, status: 'retired' as const, leases: [] } : x,
+      ),
+    };
+  });
+  const records = new Map<string, string>();
+  for (const x of done) {
+    const rec = await prov.append({
+      stream: `template/${d0.id}`,
+      kind: 'retire',
+      subject: p.sub,
+      body: {
+        build: x.handle ?? x.buildId,
+        ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
+        buildRecord: await buildRecordOf(prov, d0.id, x.buildId),
+        from: x.status,
+        ...(typeof reason === 'string' ? { reason } : {}),
+      },
+    });
+    records.set(x.handle ?? x.buildId, rec.digest);
+  }
+  if (done.length > 0)
+    await auditBestEffort(deps, 'template_retired', d0.id, {
+      subject: p.sub,
+      decision: 'template_retired',
+    });
+  // Each build, its id, its readiness and the record written now (null for one already retired),
+  // so a client can tie the answer to the template's chain.
+  const after = (await cat.get(d0.id))!;
+  return {
+    templateId: d0.id,
+    subject: p.sub,
+    builds: after.builds
+      .filter((x) => x.status === 'retired' && which(x))
+      .map((x) => ({
+        build: x.handle ?? x.buildId,
+        // A build retired before it registered has only its handle.
+        buildId: x.buildId.startsWith('b-') ? null : x.buildId,
+        readiness: 'retired' as const,
+        record: records.get(x.handle ?? x.buildId) ?? null,
+      })),
+  };
+}
+
+/** POST /v1/templates/{id}/retire (§5.1): every build of the template not yet retired. */
+async function retireTemplate(ctx: RequestCtx, deps: CpDeps) {
+  const r = await retireBuilds(ctx, deps, () => true);
+  return { status: 200, body: { ...r, status: 'retired' } };
+}
+
+/** DELETE /v1/templates/{id}/builds/{build} (§5.1): one build, by its build id or handle. */
+async function retireTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
+  const ref = ctx.params.build ?? '';
+  const r = await retireBuilds(ctx, deps, (x) => x.handle === ref || x.buildId === ref);
+  return {
+    status: 200,
+    body: { templateId: r.templateId, subject: r.subject, ...r.builds[0], status: 'retired' },
+  };
+}
+
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
 export const FIRST_USE_RETRY_S = 30;
 
@@ -1041,6 +1209,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   createTemplate: (ctx, deps) => createBuild(ctx, deps, false),
   createTemplateBuild: (ctx, deps) => createBuild(ctx, deps, true),
   cancelTemplateBuild: cancelBuild,
+  retireTemplate,
+  retireTemplateBuild,
 
   // Activation leases (§6.3): take or renew, and release.
   activateTemplate: activate,

@@ -201,8 +201,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
-   * live lease. A worker is never stopped under a live sandbox: it drains first, so a build with
-   * one is in neither list.
+   * live lease, and the retired ones it holds (§5.1: no longer wanted, never run again). A worker
+   * is never stopped under a live sandbox: it drains first, so a build with one is in neither list.
+   * Removing a retired build's worker and snapshot from the host is not asked here.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -219,8 +220,14 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const stop: Record<string, unknown>[] = [];
     for (const d of docs) {
       for (const b of d.builds) {
-        if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
+        if (!mine || mine.holds[b.buildId] === undefined) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
+        // A retired build has no lease and is never placed: its worker stops once it is idle.
+        if (b.status === 'retired') {
+          if (b.worker && !busy.has(b.worker)) stop.push(entry);
+          continue;
+        }
+        if (b.status !== 'registered') continue;
         if (p.placed.get(b.buildId) === host) run.push(entry);
         else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) stop.push(entry);
       }
@@ -231,7 +238,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
-   * holds: an `activate` or `deactivate` record by the host. Readiness still comes from the relay.
+   * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
+   * `deactivate` record by the host. Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -242,11 +250,19 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'event must be attached, refused or detached');
     }
     const buildId = typeof b.buildId === 'string' ? b.buildId : '';
+    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too.
+    const ok = (x: { status: string }) =>
+      x.status === 'registered' || (event === 'detached' && x.status === 'retired');
     const doc = (await cat.list()).find((d) =>
-      d.builds.some((x) => x.buildId === buildId && x.status === 'registered'),
+      d.builds.some((x) => x.buildId === buildId && ok(x)),
     );
     if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
-      throw new CpError('not_found', 'no registered build this host holds');
+      throw new CpError(
+        'not_found',
+        event === 'detached'
+          ? 'no registered or retired build this host holds'
+          : 'no registered build this host holds',
+      );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
     await prov.append({

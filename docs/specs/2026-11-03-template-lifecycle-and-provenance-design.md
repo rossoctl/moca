@@ -2,10 +2,10 @@
 
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
-self-serve create (#737), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742), §7,
-provenance (#730), and §8, policy (#737); §5 and §9-§12 (the owner's and the admin's actions,
-tracing, validation, order of work, decisions) come with the issues that build them, and keep their
-numbers so a reference to a section stays valid.
+self-serve create (#737), §5.1's retire (#749), §6.1, the host agent's builds (#741), §6.2-§6.4,
+activation (#742), §7, provenance (#730), and §8, policy (#737); the rest of §5 and §9-§12 (the
+owner's other actions and the admin's, tracing, validation, order of work, decisions) come with the
+issues that build them, and keep their numbers so a reference to a section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -104,7 +104,8 @@ active limit); public templates across deployments.
 **Built (#736):** a reference is resolved at sandbox creation to one registered build and its worker,
 and kept for the sandbox's life (the sandbox record's `buildId`): a template whose worker changes
 later serves new sandboxes from the new build, and earlier sandboxes keep theirs. An unknown id, tag
-or build, or one the caller cannot see, is `400 unknown_template`, as an unknown id always was.
+or build, or one the caller cannot see, is `400 unknown_template`, as an unknown id always was; a
+retired one is `410 template_retired` (§5.1, #749).
 
 ### 3.3 The two states
 
@@ -139,6 +140,7 @@ create (§4) and the host agent (§6.1).
 | `activating`   | the control plane asked a host to attach its worker; not yet attached                | #742  |
 | `deactivating` | the control plane asked the host to detach it; live sandboxes drain                  | #742  |
 | `unavailable`  | it cannot be activated: no host declares its snapshot, or the host refused, with why | #742  |
+| `retired`      | the build is retired (§5.1): never served again                                      | #749  |
 
 Readiness follows from facts, not from intent: `active` means the relay holds an attached record for
 its worker (the same record the harness routes on, in the relay's presence hash `sh:sandbox:records`
@@ -272,6 +274,41 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
 `harness` profile holds no sandbox records, so there `capacity.inUse` and `lastUsedAt` are null
 (unknown), not zero.
 
+## 5. Actions: the owner's, and the admin's
+
+### 5.1 The owner's (self-serve)
+
+**Retire (#749):** the template's owner, or an admin, retires a whole template or one build of it.
+
+| Route                                           | Does                                                                                |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `POST /v1/templates/{id}/retire {reason?}`      | every build not yet retired becomes `retired`                                       |
+| `DELETE /v1/templates/{id}/builds/{build}`      | one build, by its build id or handle, becomes `retired`; the template's others stay |
+| `POST /v1/templates/{id}/builds/{build}/cancel` | a `queued`, `building` or `probing` build becomes `failed` (`cancelled`) (#737)     |
+
+- **Ends use for good.** A retired build's activation leases go, so it is no longer wanted: a host
+  holding it is told to stop its worker (§6.3 `stop`). A sandbox create or an activation naming it,
+  a tag of it, or a template whose every build is retired, is refused `410 template_retired` (not
+  `400 unknown_template`: it existed, and its records stay). Readiness reads `retired`, and each
+  build lists `heldBy`, the hosts whose last inventory still holds its snapshot.
+- **Never cuts off running work.** A retire is refused `409 build_in_use` while a live sandbox runs
+  on a build it names: delete the sandbox (or let it end), then retire. A worker is never stopped
+  under a live sandbox either (§6.3).
+- **Recorded.** Each build retired writes a `retire` record naming the caller, `from` (the status
+  before), `buildRecord` (the digest of its `build` record; null for a build never built) and the
+  reason; its earlier records stay. The answer lists each build with its id, readiness and the
+  record's digest, so a client ties it to the trace. Idempotent: an already retired build is listed
+  with `record: null`, and no second record is written.
+- **Not reversible.** A new build (`POST /v1/templates/{id}/builds`) is the way back; a retired id
+  stays its owner's, and a template whose every build is retired no longer counts against the
+  `templates` quota.
+
+Known limits: a tag that points at a retired build still resolves to it, and is refused; so does
+`default` when the default build is retired, even with another registered build. Removing a retired build's worker and snapshot from its host
+comes with the host agent's removal step; until then a retired build stays in `heldBy`. A Moca Pi
+session does not yet name a build, so only live sandboxes count as use; a session pinned to a build
+is to be checked beside them once sessions are.
+
 ## 6. Builds and activation on a host
 
 ### 6.1 The host agent
@@ -369,10 +406,12 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
   (`409 no_active_slot`) rather than displacing it. The lock is in the control plane's process, so
   one process per template store is what makes it enough.
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
-  host) and `stop` (the builds it holds with no lease and no live sandbox). The agent starts each
+  host) and `stop` (the builds it holds with no lease and no live sandbox, retired ones (§5.1)
+  included). The agent starts each
   `run` worker that is installed and not running (`sbx-worker@<id>`), stops each `stop` worker that
   runs, and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
-  `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`.
+  `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`
+  (`detached` is taken for a retired build too).
   Readiness never comes from a report: `active` is the relay's attached record. A worker that is
   not installed is reported `refused`, never installed by the agent.
 - **Live sandboxes:** a worker is never stopped under a live sandbox: an attached build with no

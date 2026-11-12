@@ -459,6 +459,25 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     operationId: 'cancelTemplateBuild',
   },
+  // Template lifecycle spec §5.1: retire a whole template, or one build of it.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/retire',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'retireTemplate',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/templates/{id}/builds/{build}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'retireTemplateBuild',
+  },
   // Template lifecycle spec §6.3: take, renew or release the caller's activation lease.
   {
     method: 'POST',

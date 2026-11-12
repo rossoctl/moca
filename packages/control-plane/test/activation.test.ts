@@ -629,6 +629,202 @@ describe('activation is one check-and-write at a time across templates', () => {
   });
 });
 
+describe('retire (§5.1)', () => {
+  const refusal = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+    return 'none';
+  };
+  const retire = (d: TestDeps, id: string, principal = alice, body: unknown = {}) =>
+    HANDLERS.retireTemplate!(ctx({ principal, params: { id }, body }), d);
+  const retireBuild = (d: TestDeps, id: string, build: string, principal = alice) =>
+    HANDLERS.retireTemplateBuild!(ctx({ principal, params: { id, build } }), d);
+  const sandbox = (d: TestDeps, template: string) =>
+    HANDLERS.createSandbox!(ctx({ principal: alice, body: { template } }), d);
+  const wanted = async (d: TestDeps, host: string) =>
+    (await HANDLERS.hostWanted!(asHost(host), d)).body as Body;
+
+  it('retires a template: builds retired, leases gone, 410 on use, a retire record per build', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const r = await retire(d, 't1', alice, { reason: 'superseded' });
+    expect(r.status).toBe(200);
+    const body = r.body as Body;
+    expect(body).toMatchObject({ templateId: 't1', subject: alice.sub, status: 'retired' });
+    // `build` is the handle the create answered; `buildId` the registered build's id.
+    expect(body.builds).toEqual([
+      {
+        build: expect.stringMatching(/^b-[0-9a-f]{26}$/),
+        buildId: hash('1'),
+        readiness: 'retired',
+        record: expect.any(String),
+      },
+    ]);
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'retired',
+      leases: [],
+    });
+    expect(await readiness(d, 't1')).toBe('retired');
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+        d,
+      )
+    ).body as Body;
+    // The host still holds its snapshot: removing it is not the retire's.
+    expect(b).toMatchObject({ status: 'retired', readiness: 'retired', heldBy: ['host-1'] });
+    // The record names the caller, the status before and the build record, by digest.
+    const chain = await d.provenance!.chain('template/t1');
+    const rec = chain.at(-1)!;
+    expect(recordDigestOf(rec)).toBe(body.builds[0].record);
+    const buildRec = chain.find((x) => x.kind === 'build' && (x.body as Body).outcome === 'built')!;
+    expect(rec).toMatchObject({
+      kind: 'retire',
+      subject: alice.sub,
+      body: {
+        build: body.builds[0].build,
+        buildId: hash('1'),
+        buildRecord: recordDigestOf(buildRec),
+        from: 'registered',
+        reason: 'superseded',
+      },
+    });
+    // Use is refused as gone, not unknown: by id, by tag and by build; an activation too.
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('template_retired');
+    expect(await refusal(() => sandbox(d, 't1:default'))).toBe('template_retired');
+    expect(await refusal(() => sandbox(d, `t1@${hash('1')}`))).toBe('template_retired');
+    expect(await refusal(() => sandbox(d, 'nope'))).toBe('unknown_template');
+    expect(await refusal(() => activate(d, 't1'))).toBe('template_retired');
+    // Idempotent: a second retire answers retired, with no second record.
+    const again = (await retire(d, 't1')).body as Body;
+    expect(again.builds).toEqual([{ ...body.builds[0], record: null }]);
+    expect((await d.provenance!.chain('template/t1')).length).toBe(chain.length);
+    // The quota no longer counts it; a new build is the way back, under the same id.
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.templates.used).toBe(0);
+    const nb = await HANDLERS.createTemplateBuild!(
+      ctx({
+        principal: alice,
+        params: { id: 't1' },
+        body: { image: IMAGE, spec: BASE_SPEC, profile: 'base' },
+      }),
+      d,
+    );
+    expect((nb.body as Body).status).toBe('queued');
+  });
+
+  it("drops a retired build's worker to stop in the wanted state, and takes its detached report", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await inventory(d, 'host-2', {}, 2);
+    await activate(d, 't1');
+    expect((await wanted(d, 'host-1')).run).toHaveLength(1);
+    await retire(d, 't1');
+    const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [entry] });
+    // A host that does not hold it is told nothing about it.
+    expect(await wanted(d, 'host-2')).toEqual({ run: [], stop: [] });
+    // The stop is reported as for any worker; a start of a retired build is not taken.
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'detached' }),
+      d,
+    );
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'deactivate',
+      subject: 'host:host-1',
+      body: { buildId: hash('1'), event: 'detached' },
+    });
+    expect(
+      await refusal(() =>
+        HANDLERS.hostWorkerReport!(
+          asHost('host-1', {}, { buildId: hash('1'), event: 'attached' }),
+          d,
+        ),
+      ),
+    ).toBe('not_found');
+  });
+
+  it('never retires a build under a live sandbox (409 build_in_use); retires one build alone', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const sb = (await sandbox(d, 't1')).body as Body;
+    expect(await refusal(() => retireBuild(d, 't1', hash('1')))).toBe('build_in_use');
+    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    // While it drains, its worker is in neither list of the wanted state.
+    expect((await wanted(d, 'host-1')).stop).toEqual([]);
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    const r = (await retireBuild(d, 't1', hash('1'))).body as Body;
+    expect(r).toMatchObject({
+      templateId: 't1',
+      subject: alice.sub,
+      buildId: hash('1'),
+      readiness: 'retired',
+      status: 'retired',
+    });
+    expect(r.record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(await refusal(() => retireBuild(d, 't1', hash('9')))).toBe('template_not_found');
+  });
+
+  it('retires a build not yet built by its handle: no build id, no build record', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const q = (
+      await HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id: 't1' },
+          body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: 4 }, profile: 'base' },
+        }),
+        d,
+      )
+    ).body as Body;
+    const handle = String(q.build).split('/').at(-1)!;
+    expect((await retireBuild(d, 't1', handle)).body).toMatchObject({
+      build: handle,
+      buildId: null,
+      readiness: 'retired',
+    });
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'retire',
+      body: { build: handle, buildRecord: null, from: 'queued' },
+    });
+    // The registered build is untouched, and still serves.
+    const doc = (await d.templates!.get('t1'))!;
+    expect(doc.builds.find((x) => x.buildId === hash('1'))!.status).toBe('registered');
+  });
+
+  it("refuses another subject and a bad reason; an admin may retire anyone's", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    expect(await refusal(() => retire(d, 't1', bob))).toBe('forbidden');
+    expect(await refusal(() => retire(d, 't1', alice, { reason: 7 }))).toBe('invalid_request');
+    expect(await refusal(() => retire(d, 't1', alice, { reason: 'x'.repeat(1025) }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => retire(d, 'nope'))).toBe('template_not_found');
+    const admin = { ...bob, roles: ['admin'] };
+    expect((await retire(d, 't1', admin)).status).toBe(200);
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'retire',
+      subject: bob.sub,
+    });
+  });
+});
+
 describe('place, alone', () => {
   const doc = (id: string, h: string, sinceS: number, until = 10_000): TemplateDoc => ({
     schema: 'moca-template/1',

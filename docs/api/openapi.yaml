@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.7.0
+  version: 1.8.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -122,6 +122,8 @@ components:
             - no_active_slot
             - template_unavailable
             - template_not_active
+            - template_retired
+            - build_in_use
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -379,7 +381,7 @@ components:
         readiness:
           type: [string, 'null']
           description: the default build's readiness
-          enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
+          enum: [active, activating, deactivating, inactive, unavailable, unknown, retired, null]
         tags:
           type: object
           additionalProperties: { type: string }
@@ -403,16 +405,16 @@ components:
         profile: { type: string, description: the policy profile; `imported` for the env list's }
         readiness:
           type: [string, 'null']
-          enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
+          enum: [active, activating, deactivating, inactive, unavailable, unknown, retired, null]
           description: |
             for a registered build (§3.3), from facts: `active` the relay holds an attached
             presence record for its worker; `activating` an activation lease stands and a host
             holding it is asked to run it, not attached yet; `deactivating` attached with no lease
             (draining: a worker is never stopped under a live sandbox); `inactive` no lease, not
             attached; `unavailable` leased, but no host that reports holds it or every holder is at
-            its active limit; `unknown` the relay's presence could not be read; null for a build
-            that is not registered. Before any host agent reports, readiness is the presence alone
-            (`active` or `inactive`)
+            its active limit; `unknown` the relay's presence could not be read; `retired` for a
+            retired build (§5.1); null for any other build that is not registered. Before any host
+            agent reports, readiness is the presence alone (`active` or `inactive`)
         capacity:
           type: [object, 'null']
           description: for an active build
@@ -429,6 +431,13 @@ components:
           description: |
             epoch seconds of the newest sandbox created on it (retained records included); null
             when it has none, and on the harness profile
+        heldBy:
+          type: [array, 'null']
+          items: { type: string }
+          description: |
+            the ids of the hosts whose last inventory holds this build's snapshot (template lifecycle
+            spec §6.1), sorted; no paths. A retired build stays held until its host removes it.
+            `[]` when no host holds it; null on a deployment without host agents
         tags: { type: array, items: { type: string } }
         createdAt: { type: integer, description: epoch seconds }
         provenance:
@@ -456,6 +465,20 @@ components:
             workspace_mb: { type: integer }
             seed: { type: string }
             tools: { type: array, items: { type: string } }
+    RetiredBuild:
+      type: object
+      description: One build a retire answered for, with what ties it to the trace (§5.1)
+      required: [build, buildId, readiness, record]
+      properties:
+        build:
+          { type: string, description: "the build's handle (its build id for an imported build)" }
+        buildId:
+          type: [string, 'null']
+          description: the build id; null for one retired before it registered
+        readiness: { type: string, enum: [retired] }
+        record:
+          type: [string, 'null']
+          description: the retire record written now (`sha256:...`); null if it was already retired
     WantedWorker:
       type: object
       required: [template, buildId, worker]
@@ -1927,6 +1950,53 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: retireTemplateBuild
+      summary: Retire one build (the owner, or an admin)
+      description: |
+        Template lifecycle spec §5.1. As `POST /v1/templates/{id}/retire`, for one build named by
+        its build id or its handle; the template's other builds stay. A tag that points at it
+        (`default` included) still resolves to it, and a create through that tag is refused
+        `410 template_retired`. The retire record carries no reason (a DELETE has no body).
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: retired
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RetiredBuild'
+                  - type: object
+                    required: [templateId, subject, status]
+                    properties:
+                      templateId: { type: string }
+                      subject: { type: string, description: who retired it }
+                      status: { type: string, enum: [retired] }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`build_in_use`: a live sandbox runs on the build'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds/{build}/cancel:
     post:
       operationId: cancelTemplateBuild
@@ -1966,6 +2036,69 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/retire:
+    post:
+      operationId: retireTemplate
+      summary: Retire a template, every build of it (the owner, or an admin)
+      description: |
+        Template lifecycle spec §5.1. Every build not yet retired becomes `retired` (readiness
+        `retired`) and its activation leases go, so it is no longer wanted: a host holding it is
+        told to stop its worker (`GET /v1/hosts/{host}/wanted` `stop`). A sandbox or an activation
+        naming the template, a tag of it or a build of it is then refused `410 template_retired`.
+        Each build retired writes a `retire` record naming the caller, `from` (the status before)
+        and `buildRecord` (the digest of the build's `build` record; null for one never built);
+        its earlier records stay. Idempotent: an already retired build is listed with
+        `record: null` (no second record). Refused `409 build_in_use` while a live sandbox runs on
+        any of its builds: delete it, then retire. A retire never cuts off running work. It cannot
+        be undone: a new build of the template (`POST /v1/templates/{id}/builds`) is the way back,
+        and the id stays its owner's. Needs SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 1024, description: kept in each retire record }
+      responses:
+        '200':
+          description: retired
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, builds, status]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: who retired it }
+                  status: { type: string, enum: [retired] }
+                  builds:
+                    type: array
+                    items: { $ref: '#/components/schemas/RetiredBuild' }
+        '400':
+          description: '`invalid_request`: a reason that is not a string of at most 1024 characters, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`build_in_use`: a live sandbox runs on one of its builds'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2020,7 +2153,8 @@ paths:
         `409 template_unavailable` (no registered build under that reference, or no host that
         reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
         with leased builds, or a lease in the same second as a placed build), `429 quota_exceeded`
-        with `quota: active`. Needs SH_PROVENANCE_DIR.
+        with `quota: active`, `410 template_retired` (the build is retired, §5.1). Needs
+        SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2063,6 +2197,11 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: '`template_unavailable`, or `no_active_slot` with Retry-After; with `readiness`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: '`template_retired`: the build is retired'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2390,13 +2529,14 @@ paths:
   /v1/hosts/{host}/wanted:
     get:
       operationId: hostWanted
-      summary: The workers a host agent should run (leased and placed on it) and stop (no lease, no live sandbox)
+      summary: The workers a host agent should run (leased and placed on it) and stop (no lease or retired, no live sandbox)
       description: |
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
         holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
         placement an activation is judged by). `stop`: the ones it holds with no live lease and no
-        live sandbox on their worker; a worker with a live sandbox is in neither list (it drains
-        first). The agent starts only workers already installed on the host.
+        live sandbox on their worker, and the retired ones it holds (§5.1) with no live sandbox; a
+        worker with a live sandbox is in neither list (it drains first). The agent starts only
+        workers already installed on the host.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2424,8 +2564,8 @@ paths:
       description: |
         Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
         worker unit started) and `refused` (not started, with why: not installed, or the start
-        failed) write an `activate` record, `detached` (stopped) a `deactivate` record, each with
-        the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
+        failed) write an `activate` record, `detached` (stopped; also for a retired build, whose
+        worker `stop` lists) a `deactivate` record, each with the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
         attached record.
       security: [{ hostToken: [] }]
       parameters:
@@ -2454,7 +2594,7 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
-          description: '`not_found`: no registered build this host holds'
+          description: '`not_found`: no registered build this host holds (for `detached`: no registered or retired one)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2528,6 +2668,13 @@ paths:
             `template_not_active` (Retry-After), with `readiness`: the build is not active yet, its
             activation started unless `activate: false`; `no_active_slot` (Retry-After) and
             `template_unavailable`: as activate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: |
+            `template_retired`: the template, the tag or the build it names is retired, or every
+            build of the template is (template lifecycle spec §5.1)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

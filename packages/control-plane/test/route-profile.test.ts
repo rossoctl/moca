@@ -29,6 +29,8 @@ const SHARED = [
   'POST /v1/templates',
   'POST /v1/templates/{id}/builds',
   'POST /v1/templates/{id}/builds/{build}/cancel',
+  'POST /v1/templates/{id}/retire',
+  'DELETE /v1/templates/{id}/builds/{build}',
   'POST /v1/templates/{id}/activate',
   'POST /v1/templates/{id}/deactivate',
   'GET /v1/policy',
