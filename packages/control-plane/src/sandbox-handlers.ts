@@ -34,6 +34,7 @@ import {
   type SandboxView,
 } from './sandbox-store.js';
 import { mintSandboxToken } from './sandbox-token.js';
+import { SubjectQueue } from './subject-document.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -478,13 +479,26 @@ async function usage(
 }
 
 /**
+ * One create at a time per gate record sha256, per catalog, within this process: X1.self.scope's
+ * lookup (who already self-attested the record) and the create's write run as one step, so two
+ * subjects sending the same untrusted record at once can't both claim it. The catalog serializes
+ * its own writes per id the same way, in this process; a deployment runs one control plane.
+ */
+const gateClaimQueues = new WeakMap<TemplateCatalog, SubjectQueue>();
+function gateClaimQueue(cat: TemplateCatalog): SubjectQueue {
+  let q = gateClaimQueues.get(cat);
+  if (!q) gateClaimQueues.set(cat, (q = new SubjectQueue()));
+  return q;
+}
+
+/**
  * The shared body of both create routes. `existing`: true for POST /v1/templates/{id}/builds (the
  * template must exist and be the caller's), false for POST /v1/templates (a new id, or the
  * caller's own existing one).
  */
 async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   const p = requireEnrolled(ctx, deps);
-  const { cat, policy, prov } = writable(deps);
+  const { cat } = writable(deps);
   const b = asRecord(ctx.body);
   const id = existing ? (ctx.params.id ?? '') : typeof b.id === 'string' ? b.id.toLowerCase() : '';
   const spec = asRecord(b.spec);
@@ -501,10 +515,34 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   if (b.visibility !== undefined && b.visibility !== 'private' && b.visibility !== 'deployment') {
     throw new CpError('invalid_request', "visibility must be 'private' or 'deployment'");
   }
-  const { policy: pol, record: policyRecord } = await policy.current();
-  // Self-attestation: who already self-attested this record (keyed by subject and sha256), from the
-  // catalog: a build's create names its gate record's sha256 and the template its owner.
   const gateSha = gateRecordBytes ? `sha256:${sha256Hex(gateRecordBytes)}` : undefined;
+  const admit = () => admitBuild(deps, existing, p, b, id, spec, gateRecordBytes, gateSha);
+  return gateSha ? gateClaimQueue(cat).run(gateSha, admit) : admit();
+}
+
+/** createBuild's checks and write, under the gate record's claim queue when it sends one. */
+async function admitBuild(
+  deps: CpDeps,
+  existing: boolean,
+  p: TokenClaims,
+  b: Record<string, unknown>,
+  id: string,
+  spec: Record<string, unknown>,
+  gateRecordBytes: Buffer | undefined,
+  gateSha: string | undefined,
+) {
+  const { cat, policy, prov } = writable(deps);
+  const { policy: pol, record: policyRecord } = await policy.current();
+  // Self-attestation: the subject a self-attested record counts for is the template's owner (the
+  // gate record's `scope` and X1.self.scope's key alike). An admin adding a build to another
+  // subject's template attests for that owner; an imported template (owner null) has none, so a
+  // self-attested record is refused there (X1.trusted).
+  const prior = existing && isAdmin(p) ? await cat.get(id) : null;
+  const attester = prior && prior.owner !== p.sub ? prior.owner : p.sub;
+  // Who already self-attested this record (keyed by subject and sha256), from the catalog: a build
+  // self-attested at create (selfAttested) names its record's sha256, and its template the owner it
+  // counts for. A claim is made by an admitted self-attested create and held whatever its build
+  // becomes (failed, rejected or retired); a refused create claims nothing.
   const gateSelfSubmitters =
     gateSha && !pol.trustedGateRecords.includes(gateSha)
       ? [
@@ -514,9 +552,7 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
                 (d) =>
                   d.owner !== null &&
                   d.builds.some(
-                    (x) =>
-                      x.request?.gateRecordSha256 === gateSha &&
-                      pol.profiles[x.profile]?.selfAttest === true,
+                    (x) => x.selfAttested === true && x.request?.gateRecordSha256 === gateSha,
                   ),
               )
               .map((d) => d.owner as string),
@@ -530,7 +566,7 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       spec,
       ...(typeof b.profile === 'string' ? { profile: b.profile } : {}),
       ...(gateRecordBytes ? { gateRecordBytes } : {}),
-      subject: p.sub,
+      ...(attester ? { subject: attester } : {}),
       gateSelfSubmitters,
     },
     pol,
@@ -587,6 +623,12 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
         'self_attested',
         `template '${id}' is deployment-visible: it must be private before a self-attested build is added`,
       );
+    // The record was checked as attested for `attester`; the template's owner must still be it.
+    if (selfAttestedCreate && (cur ? cur.owner : p.sub) !== attester)
+      throw new CpError(
+        'self_attested',
+        `template '${id}' changed owner during the create; send it again`,
+      );
     // §3.2: the same inputs are the same build. One registered, or still on its way there, is
     // answered instead of a second build (two creates would otherwise queue two builds that
     // register under one manifest hash).
@@ -630,13 +672,14 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
         subject: p.sub,
         body: {
           record_sha256: result.gateRecordSha256,
-          // `trusted`: in trustedGateRecords. `self` (self-attestation): trusted only for its
-          // submitter, on a selfAttest profile, which `scope` names. `client`: any other (a profile
+          // `trusted`: in trustedGateRecords. `self` (self-attestation): trusted only for the
+          // template owner's templates, on a selfAttest profile, which `scope` names (the
+          // submitter, or the owner an admin added the build for). `client`: any other (a profile
           // that does not require X1). The policy record in force names what the trust was at
           // create, after any later change.
           source:
             result.gateTrust === 'trusted' ? 'trusted' : selfAttestedCreate ? 'self' : 'client',
-          ...(selfAttestedCreate ? { scope: p.sub } : {}),
+          ...(selfAttestedCreate ? { scope: attester } : {}),
           policy: policyRecord,
         },
       });

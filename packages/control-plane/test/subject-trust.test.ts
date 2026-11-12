@@ -180,6 +180,65 @@ describe('a subject self-attests its own gate record (self-attestation)', () => 
     expect(await rule(() => create(d, body({ id: 't-bob' }), bob))).toBe('X1.self.scope');
   });
 
+  it('lets one of two concurrent subjects claim a record, never both', async () => {
+    const d = await setup();
+    const rs = await Promise.allSettled([
+      create(d, body({ id: 't-a' }), alice),
+      create(d, body({ id: 't-b' }), bob),
+    ]);
+    expect(rs.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = rs.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect((refused.reason as { extra?: { rule?: string } }).extra?.rule).toBe('X1.self.scope');
+  });
+
+  it('counts only self-attestations: a build made while the record was trusted claims nothing', async () => {
+    const d = await setup();
+    expect((await create(d, body({ id: 't-a' }))).status).toBe(202);
+    const promoted = { ...(await d.policy!.current()).policy, trustedGateRecords: [SHA] };
+    await putPolicy(d, promoted);
+    expect((await create(d, body({ id: 't-b' }), bob)).status).toBe(202);
+    await putPolicy(d, { ...promoted, trustedGateRecords: [] });
+    // The record is untrusted again: its first submitter keeps it, the other subject does not.
+    expect((await create(d, body({ id: 't-a2' }))).status).toBe(202);
+    expect(await rule(() => create(d, body({ id: 't-b2' }), bob))).toBe('X1.self.scope');
+  });
+
+  it('holds a claim whatever its build becomes (a failed build still claims)', async () => {
+    const d = await setup();
+    await create(d);
+    await d.templates!.update!('t-self', async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'failed' as const })),
+    }));
+    expect(await rule(() => create(d, body({ id: 't-bob' }), bob))).toBe('X1.self.scope');
+  });
+
+  it("attests an admin's build on another subject's template for that template's owner", async () => {
+    const d = await setup();
+    const other = general({ built_at: '2026-11-09T00:00:00Z' });
+    expect((await create(d, body({ gateRecord: other }))).status).toBe(202);
+    const add = (principal: typeof admin, id = 't-self') =>
+      HANDLERS.createTemplateBuild!(
+        ctx({ principal, params: { id }, body: { ...body(), id: undefined } }),
+        d,
+      );
+    expect((await add(admin)).status).toBe(202);
+    const gates = (await d.provenance!.chain('template/t-self')).filter((x) => x.kind === 'gate');
+    const g = gates.find((x) => x.body.record_sha256 === SHA)!;
+    expect(g.subject).toBe(admin.sub);
+    expect(g.body).toMatchObject({ source: 'self', scope: alice.sub });
+    // The record now counts for the owner: another subject is refused, the owner is not.
+    expect(await rule(() => create(d, body({ id: 't-bob' }), bob))).toBe('X1.self.scope');
+    expect((await create(d, body({ id: 't-a2' }))).status).toBe(202);
+    // The admin can't attest the owner's record for another subject's template.
+    await create(
+      d,
+      body({ id: 't-bob', gateRecord: general({ built_at: '2026-11-10T00:00:00Z' }) }),
+      bob,
+    );
+    expect(await rule(() => add(admin, 't-bob'))).toBe('X1.self.scope');
+  });
+
   it('still refuses an untrusted record on the curated benchmark profile', async () => {
     const d = await setup();
     expect(await rule(() => create(d, body({ profile: 'benchmark' })))).toBe('X1.trusted');

@@ -110,26 +110,27 @@ A subject may submit its own gate record (made with the image builder's general 
 with `selfAttest`. It counts only for that subject's own templates, which stay private and are shown
 as self-attested until an admin adds the record's sha256 to `trustedGateRecords`; a build made on a
 `selfAttest` profile while its record was trusted reads as self-attested again (and its template as
-private) once an admin removes it. A record counts for
-one subject only: the same sha256 submitted by a second subject is refused (X1.self.scope). The X
-rules above apply unchanged, plus: commits always refused, whatever the spec says (X12.self), and
-egress only where the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for
-benchmark integrity) and, like `benchmark`, needs a general-gate record's floor checked offline
-(X1.offline: `gate.floor_checked_offline`, on a record of the schema `SH_GATE_RECORD_SCHEMA` names,
-default `moca-gate-record/1`; fail closed: a record of any other schema, such as a builder's family
-records, which predate the field, passes unless it says `floor_checked_offline: false`, so a
-deployment that takes another builder's general-gate records sets `SH_GATE_RECORD_SCHEMA` to that
-builder's schema and holds them fail-closed too); `general-self` allows the KVM host's allowlisted
-egress and either floor. All of §2.3's rules are tier `vm` and are checked at create. Moca's spec:
-[subject trust for gate records](../../../../docs/specs/2026-11-08-subject-trust-gate-records-design.md).
+private) once an admin removes it. A record counts for one subject only, its first submitter,
+whatever that build later becomes: the same sha256 submitted by a second subject is refused
+(X1.self.scope); a build made while the record was trusted claims nothing. The X rules above apply
+unchanged, plus: commits always refused, whatever the spec says (X12.self), and egress only where
+the profile allows it (X1.self.egress). `benchmark-self` keeps X11 (offline, for benchmark
+integrity) and, like `benchmark`, needs a general-gate record's floor checked offline (X1.offline:
+`gate.floor_checked_offline`, on a record of the schema `SH_GATE_RECORD_SCHEMA` names, default
+`moca-gate-record/1`; fail closed: a record of any other schema, such as a builder's family records,
+which predate the field, passes unless it says `floor_checked_offline: false`, so a deployment that
+takes another builder's general-gate records sets `SH_GATE_RECORD_SCHEMA` to that builder's schema
+and holds them fail-closed too); `general-self` allows the KVM host's allowlisted egress and either
+floor. All of §2.3's rules are tier `vm` and are checked at create. Moca's spec: [subject trust for
+gate records](../../../../docs/specs/2026-11-08-subject-trust-gate-records-design.md).
 
-| #                   | Rule                                                                                                              | Evidence                                         | Status                  |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ----------------------- |
-| X1.self.scope       | A self-attested record counts only for its first submitter                                                        | the catalog: each build's gate sha256, its owner | enforced: control plane |
-| X12.self            | A self-attested record shows commits refused (`agent_can_commit` `no`, `git_identity` `none`), whatever the spec  | G `observed`                                     | enforced: control plane |
-| X1.self.egress      | `spec.egress` false on a self-attested record unless the profile sets `selfAttestEgress`                          | spec `egress`; the policy                        | enforced: control plane |
-| X1.offline          | A general-gate record's floor checked offline, on a profile that requires X1 (unless `requireOfflineGate: false`) | G `gate.floor_checked_offline`                   | enforced: control plane |
-| registry.repository | From a registry the policy lists in `allowedRepositories`, the image is one of its repositories                   | spec `image`; the policy                         | enforced: control plane |
+| #                   | Rule                                                                                                              | Evidence                                                                  | Status                  |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------- |
+| X1.self.scope       | A self-attested record counts only for its first submitter                                                        | the catalog: each self-attested build's gate sha256, its template's owner | enforced: control plane |
+| X12.self            | A self-attested record shows commits refused (`agent_can_commit` `no`, `git_identity` `none`), whatever the spec  | G `observed`                                                              | enforced: control plane |
+| X1.self.egress      | `spec.egress` false on a self-attested record unless the profile sets `selfAttestEgress`                          | spec `egress`; the policy                                                 | enforced: control plane |
+| X1.offline          | A general-gate record's floor checked offline, on a profile that requires X1 (unless `requireOfflineGate: false`) | G `gate.floor_checked_offline`                                            | enforced: control plane |
+| registry.repository | From a registry the policy lists in `allowedRepositories`, the image is one of its repositories                   | spec `image`; the policy                                                  | enforced: control plane |
 
 The registry allowlist (`allowedRegistries`) admits a registry host. Where the policy also lists
 repositories for it (`allowedRepositories`, keyed by the host as the policy reads it, Docker Hub as

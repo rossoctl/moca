@@ -16,7 +16,8 @@ who submits a gate record, never by anything inside it. Every change is additive
   `trustedGateRecords`).
 - On a `selfAttest` profile, a record not in `trustedGateRecords` passes `X1.trusted` for the
   creating subject's own templates. New create rules, each in the `check` record and named by a
-  `422 policy_refused`: `X1.self.scope` (another subject already self-attested the same sha256),
+  `422 policy_refused`: `X1.self.scope` (another subject already self-attested the same sha256;
+  a build made while the record was trusted claims nothing),
   `X12.self` (the record must show commits refused, whatever the spec), `X1.self.egress`
   (`spec.egress` false unless the profile allows it) and `X1.offline`.
 - `X1.offline`: on a profile that requires X1 (unless `requireOfflineGate: false`, as on
@@ -25,7 +26,9 @@ who submits a gate record, never by anything inside it. Every change is additive
   `SH_GATE_RECORD_SCHEMA` (default `moca-gate-record/1`; a malformed value refuses to boot), and
   GET /v1/policy answers it as `gateRecordSchema`, so a client's dry run applies the rule as the
   deployment does (an older control plane without the field reads as the default).
-- The `gate` provenance record's `source` adds `self`, with `scope` (the submitter).
+- The `gate` provenance record's `source` adds `self`, with `scope`: the subject the record counts
+  for, the template's owner (the submitter, except on an admin's build for another subject's
+  template).
 - `Template` and `TemplateBuild` add `attestation` (`deployment | self`), recomputed on every read
   from the current policy: `self` for a build made on a `selfAttest` profile whose record is not
   trusted now, whatever its trust at create. `TemplateBuild` adds `gateFloorCheckedOffline`, and
