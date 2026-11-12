@@ -49,7 +49,12 @@ gitignored).
    ssh <host> rm -r sbx-<id>
    ```
 
-   It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`).
+   It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`). The worker's guest
+   RAM (`SH_GUEST_RAM_MB`) is taken from the snapshot's `manifest.json` (`guest_ram_mb`), never set
+   by hand: a snapshot without it is refused. `--budget-mb` (default 8192) must hold at least one
+   session, (guest RAM + 32) × 3 + 1024 MiB at the unit's standby depth of 2: 13408 MiB for a
+   4096 MiB guest. A smaller budget is refused, naming the minimum. The worker runs
+   `SBX_WORKER_BIN` (default `/usr/local/libexec/sbx/microvm-worker`, [README](README.md#2-kvm-host-side)).
 
 6. **The janitor,** once per KVM host:
 
@@ -82,9 +87,12 @@ and no sandbox profile; 1b added the control-plane inputs (`SBX_API_HOST`, `SBX_
 ## 2. Upgrading
 
 **An image upgrade** (a new `SBX_IMAGE`): set it in `<env file>` and re-run `setup.sh`. A changed
-image, or any changed setting, rolls the control plane and the relay. Workers keep running, and
-reattach when the relay comes back; Execs running through the old relay pod end with it (the worker
-kills a dropped stream's Execs), so apply changes when nothing long is running.
+image rolls the control plane and the relay, and so does a change to what the relay reads (the
+token issuer, `SBX_MAX_INFLIGHT`, the signing keyset, the attach or exec certificate). Workers keep
+running, and reattach when the relay comes back; Execs running through the old relay pod end with it
+(the worker kills a dropped stream's Execs), so apply those when nothing long is running. Any other
+setting (templates, subjects, quotas, lifetimes) rolls the control plane alone, and running Execs
+carry on.
 
 **From 1a:** unset `SBX_CLIENTS` (the run refuses it), move `SBX_IMAGE` off the team-only 1a image,
 and run with `SBX_ACK_HOSTS=1`, because every 1a worker bundle lacks the workspace idle time and
@@ -97,6 +105,27 @@ SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
 Then re-run `install-host.sh` with the new bundle for every worker (step 5 of §1); it refuses a 1a
 bundle. The run deletes the static client tokens and removes the relay's harness exec token. **1a
 workspaces are not migrated:** tell 1a users to pull their work out first.
+
+**Redis's image and its data.** Since #670 the base runs Valkey 9, which **cannot read RDB format
+12**, the format Redis 7.4 writes. On a namespace whose data a Redis 7.4 wrote, Valkey's AOF load
+aborts (`Can't handle RDB format version 12`) and `redis-0` crash-loops, taking the control plane
+down with it. Until a migration exists, keep such a namespace on Redis 7: set `SBX_REDIS_IMAGE` to
+the digest it ran, e.g.
+`docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`
+(the pin before #670). Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
+`dump.rdb` and `appendonlydir`). The StatefulSet is OrderedReady: a `redis-0` that crash-loops on
+the old revision is never replaced, so `setup.sh`'s rollout wait times out. Then delete the pod
+(`kubectl -n <namespace> delete pod redis-0`; its PVC stays) and re-run `setup.sh`.
+
+**Redis's memory limit.** `setup.sh`'s `redis.conf` sets `maxmemory 200mb` with
+`maxmemory-policy noeviction`, under the container's 256 MiB limit: a full Redis refuses writes (the
+control plane answers `503 redis_unavailable`) and evicts nothing, instead of being OOM-killed with
+every session and sandbox record. A new namespace gets it at Redis's first start. An existing one
+does not: the Secret's change does not restart `redis-0` (the StatefulSet has no settings hash), so
+apply it live, `kubectl -n <namespace> exec redis-0 -c redis -- redis-cli CONFIG SET maxmemory
+209715200` and `… CONFIG SET maxmemory-policy noeviction` (`REDISCLI_AUTH` is set in the container),
+or let the next restart read the file. Check with `CONFIG GET maxmemory`. A namespace that raises
+the container's memory limit should raise `maxmemory` with it.
 
 **A host bundle change.** Re-run `install-host.sh` with the new worker bundle whenever `setup.sh`
 says so, and `install-host.sh --janitor` with the new janitor bundle after a change to
@@ -147,7 +176,8 @@ another user's: they cannot run commands in another user's code.
 2. Pick a worker id (`^[A-Za-z_][A-Za-z0-9_]*$`, say `sbx_node22`) and add it to `SBX_WORKERS`.
 3. Add its entry, `{ "id", "worker", "description", "tools" }`, to `SBX_TEMPLATES_FILE`. One
    template per worker; every worker in the list.
-4. Re-run `setup.sh`: it mints the worker's token and writes its bundle.
+4. Re-run `setup.sh`: it mints the worker's token and writes its bundle. It rolls the control
+   plane but not the relay (§2), so running `Exec`s on every template carry on.
 5. Install the worker with that bundle and `--snapshot <image>` (§1 step 5). A new worker's token
    reaches the relay when the kubelet syncs the Secret, about a minute, so its first attaches may be
    refused; `install-host.sh` waits.
@@ -172,8 +202,8 @@ deploy/sbx/setup.sh --env-file <env file>
 
 Remove that one key only: `moca-mu1` also holds the janitor's token (`SH_JANITOR_TOKEN`), which
 deleting the whole Secret would rotate too. The run generates a new key, publishes its public half
-as the whole keyset, and rolls the relay and the control plane (the settings hash covers the
-keyset). `setup.sh` does not keep the old key beside the new one, and nothing else does.
+as the whole keyset, and rolls the relay and the control plane (both pods' settings hashes cover
+the keyset). `setup.sh` does not keep the old key beside the new one, and nothing else does.
 
 What users see: `mocactl` mints a fresh sandbox token for its calls, and re-mints once when the
 relay refuses a token before the call started, so sessions carry on with the new key. A token
@@ -329,9 +359,11 @@ adds each command's first 200 bytes as `cmd`.
 
 `install-host.sh` installs and starts one `moca-egress` per host (`moca-egress.service`) before the
 worker, and wires every template worker to its control socket
-(`MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock` in the worker env). A sandbox can then reach
-only the hosts on the allowlist; everything else is refused with a named error (`destination_denied`),
-never a timeout. No credential is involved.
+(`MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock` in the worker env), with a drop-in
+`sbx-worker@<id>.service.d/egress.conf` that orders the worker after `moca-egress`. A `--no-egress`
+worker gets neither, so it never starts a `moca-egress.service` that the host has. A sandbox can
+then reach only the hosts on the allowlist; everything else is refused with a named error
+(`destination_denied`), never a timeout. No credential is involved.
 
 - **The allowlist** is `MOCA_EGRESS_ALLOW` in `/etc/sbx/moca-egress.env`, a comma-separated list of
   hosts. It is seeded on the first install with `api.github.com,github.com,codeload.github.com,objects.githubusercontent.com`
