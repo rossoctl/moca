@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.7.0
+  version: 1.8.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -155,7 +155,12 @@ components:
         sessionId: { type: string }
         reason:
           type: string
-          description: 'sandbox_terminated only: deleted | expired'
+          description: |
+            sandbox_terminated: deleted | expired. no_active_slot: `memory` when no holder under its
+            active limit has the memory for the worker (1.8.0; absent at the active limit, as
+            before). template_unavailable: `memfile_mismatch` when every holder reports the
+            snapshot's memory file is not the guest's size. template_not_active with readiness
+            `unavailable`: the build's readinessReason
         rule:
           type: string
           description: |
@@ -380,6 +385,8 @@ components:
           type: [string, 'null']
           description: the default build's readiness
           enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
         tags:
           type: object
           additionalProperties: { type: string }
@@ -387,6 +394,16 @@ components:
         builds:
           type: array
           items: { $ref: '#/components/schemas/TemplateBuild' }
+    ReadinessReason:
+      type: string
+      enum: [not_held, no_slot, memory, memfile_mismatch]
+      description: |
+        present only with readiness `unavailable` (1.8.0): why placement left the build waiting.
+        `not_held` no host holds its snapshot; `no_slot` every holder is at its active limit;
+        `memory` a holder under its limit has no memory headroom for the worker now (template
+        lifecycle spec §6.2: its floor, a pressure brake, or an inventory older than 60 s);
+        `memfile_mismatch` every holder reports the snapshot's memory file is not the guest's size
+        (a rebuild clears it, not a wait)
     TemplateBuild:
       type: object
       description: One build of a template, an immutable snapshot (template lifecycle spec §3.2, §3.3)
@@ -409,10 +426,13 @@ components:
             presence record for its worker; `activating` an activation lease stands and a host
             holding it is asked to run it, not attached yet; `deactivating` attached with no lease
             (draining: a worker is never stopped under a live sandbox); `inactive` no lease, not
-            attached; `unavailable` leased, but no host that reports holds it or every holder is at
-            its active limit; `unknown` the relay's presence could not be read; null for a build
-            that is not registered. Before any host agent reports, readiness is the presence alone
-            (`active` or `inactive`)
+            attached; `unavailable` leased, but no host that reports holds it, every holder is at
+            its active limit, none has the memory for its worker, or every holder reports its
+            memory file wrong (`readinessReason` says which); `unknown` the relay's presence could
+            not be read; null for a build that is not registered. Before any host agent reports,
+            readiness is the presence alone (`active` or `inactive`)
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
         capacity:
           type: [object, 'null']
           description: for an active build
@@ -1721,7 +1741,8 @@ paths:
                     description: |
                       per KVM host, its limits and use, as its host agent last reported them
                       (template lifecycle spec §6.2). Empty means no host has reported, never that
-                      there is no limit
+                      there is no limit. `memory` (1.8.0) only from an agent that reports it: then
+                      placement also needs the memory for each new worker
                     items:
                       type: object
                       required: [id, active, idleLimitSeconds, disk]
@@ -1735,6 +1756,57 @@ paths:
                           properties:
                             freeGb: { type: integer }
                             floorGb: { type: integer }
+                        memory:
+                          type: object
+                          description: |
+                            template lifecycle spec §6.2, all in MiB. `usedMib` is what placement
+                            counts: each running worker's guest RAM + 128 (4096 + 128 for a build
+                            with no recorded guest size), its VMs' committed memory, and the builds
+                            placed here not started yet. `headroomMib` = min(total − floor − used,
+                            available − floor − the pending starts), 0 while `brake` is set; a new
+                            worker starts here only if its cost fits it
+                          required:
+                            [
+                              totalMib,
+                              availableMib,
+                              floorMib,
+                              usedMib,
+                              headroomMib,
+                              pressureFull10,
+                              pressureLimit,
+                              brake,
+                              runningWorkers,
+                              memfileMismatch,
+                              reportedAt,
+                            ]
+                          properties:
+                            totalMib: { type: integer }
+                            availableMib: { type: integer }
+                            floorMib:
+                              type: integer
+                              description: |
+                                the effective floor the agent applies: SBX_MEM_FLOOR_MIB, else 10%
+                                of MemTotal, at least 4096
+                            usedMib: { type: integer }
+                            headroomMib: { type: integer }
+                            pressureFull10:
+                              type: [number, 'null']
+                              description: memory PSI `full avg10` (a percentage); null with no /proc/pressure
+                            pressureLimit: { type: [number, 'null'] }
+                            brake:
+                              type: [string, 'null']
+                              enum: [pressure, stale, null]
+                              description: |
+                                why the host takes no new start now (what it runs is kept): PSI over
+                                its limit, or its last inventory over 60 s old; null otherwise
+                            runningWorkers:
+                              { type: integer, description: the template workers running there }
+                            memfileMismatch:
+                              type: array
+                              items: { type: string }
+                              description: build ids never placed there (their memory file is not the guest's size)
+                            reportedAt:
+                              { type: integer, description: epoch seconds of its last inventory }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
     post:
@@ -2018,9 +2090,11 @@ paths:
         digest as `lease`. One activation at a time: the quota and placement check, the record and
         the lease write run under one lock across all templates. Refusals keep no lease:
         `409 template_unavailable` (no registered build under that reference, or no host that
-        reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
-        with leased builds, or a lease in the same second as a placed build), `429 quota_exceeded`
-        with `quota: active`. Needs SH_PROVENANCE_DIR.
+        reports holds it; `reason: memfile_mismatch` when every holder reports its memory file
+        wrong), `409 no_active_slot` with `Retry-After` (every holder at its active limit with
+        leased builds, or a lease in the same second as a placed build; `reason: memory` when a
+        holder under its limit has no memory headroom for the worker), `429 quota_exceeded` with
+        `quota: active`. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2205,8 +2279,13 @@ paths:
         Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
         the host in the path must be the one whose token is presented. Body
         `{holds: [{template, manifestHash}], limits: {activeLimit, idleLimitSeconds,
-        buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
-        inventory in its own process; the agent re-sends it on every poll.
+        buildConcurrency, diskFreeGb, diskFloorGb}, memory?}`. The control plane keeps each host's
+        last inventory in its own process; the agent re-sends it on every poll.
+
+        `memory` (1.8.0) is optional: an agent before it sends none, and its host is placed by
+        `activeLimit` alone, as before; a control plane before it ignores it. Each field is
+        optional and a malformed one is dropped. `memTotalMib`, `memAvailableMib` and
+        `memFloorMib` are used only all three together.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2232,6 +2311,40 @@ paths:
                     buildConcurrency: { type: integer }
                     diskFreeGb: { type: integer }
                     diskFloorGb: { type: integer }
+                memory:
+                  type: object
+                  description: what the host agent reads of its memory (template lifecycle spec §6.2)
+                  properties:
+                    memTotalMib: { type: integer, description: /proc/meminfo MemTotal, MiB }
+                    memAvailableMib: { type: integer, description: /proc/meminfo MemAvailable, MiB }
+                    memFloorMib:
+                      type: integer
+                      description: the effective floor (SBX_MEM_FLOOR_MIB, else 10% of MemTotal, at least 4096)
+                    memPressureFull10:
+                      type: number
+                      description: |
+                        /proc/pressure/memory `full avg10`, a percentage; absent with no
+                        /proc/pressure (no brake)
+                    memPressureLimit:
+                      type: number
+                      description: SBX_MEM_PRESSURE_LIMIT (default 10); above it, no new start on this host
+                    runningWorkers:
+                      type: array
+                      items: { type: string }
+                      description: the workers of held builds whose sbx-worker unit is active
+                    vmCommittedMib:
+                      type: object
+                      additionalProperties: { type: integer }
+                      description: |
+                        worker id -> its VMs' unreclaimable memory, MiB: its slice's memory.stat
+                        anon + shmem + kernel, never page cache; a worker whose slice could not be
+                        read is absent
+                    memfileMismatch:
+                      type: array
+                      items: { type: string }
+                      description: |
+                        manifest hashes of held builds whose memory file is not guest_ram_mb x 1 MiB:
+                        never placed on this host
       responses:
         '200':
           description: recorded
@@ -2393,8 +2506,9 @@ paths:
       summary: The workers a host agent should run (leased and placed on it) and stop (no lease, no live sandbox)
       description: |
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
-        holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
-        placement an activation is judged by). `stop`: the ones it holds with no live lease and no
+        holds whose lease stands and which placement puts on it, within its `activeLimit` and,
+        from an agent that reports its memory, its memory headroom (the same placement an
+        activation is judged by; a build whose worker already runs there is kept). `stop`: the ones it holds with no live lease and no
         live sandbox on their worker; a worker with a live sandbox is in neither list (it drains
         first). The agent starts only workers already installed on the host.
       security: [{ hostToken: [] }]
@@ -2526,7 +2640,8 @@ paths:
           description: |
             `name_conflict`: the caller already has a live sandbox with that name;
             `template_not_active` (Retry-After), with `readiness`: the build is not active yet, its
-            activation started unless `activate: false`; `no_active_slot` (Retry-After) and
+            activation started unless `activate: false` (with readiness `unavailable`, `reason` is
+            its readinessReason); `no_active_slot` (Retry-After) and
             `template_unavailable`: as activate
           content:
             application/json:

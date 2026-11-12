@@ -2,10 +2,17 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { place, readinessOf } from '../src/activation.js';
+import {
+  costMib,
+  defaultCostMib,
+  place,
+  readinessOf,
+  workerOverheadMib,
+  type HostView,
+} from '../src/activation.js';
 import { writeError } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
-import { HostRegistry } from '../src/host-handlers.js';
+import { HostRegistry, parseHostMemory } from '../src/host-handlers.js';
 import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenance.js';
 import { FileTemplateCatalog, type TemplateDoc } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
@@ -97,7 +104,13 @@ async function registered(
   ).body as Body;
   expect(r.status).toBe('registered');
 }
-const inventory = (d: TestDeps, host: string, holds: Record<string, string>, activeLimit: number) =>
+const inventory = (
+  d: TestDeps,
+  host: string,
+  holds: Record<string, string>,
+  activeLimit: number,
+  memory?: Record<string, unknown>,
+) =>
   HANDLERS.hostInventory!(
     asHost(
       host,
@@ -108,6 +121,7 @@ const inventory = (d: TestDeps, host: string, holds: Record<string, string>, act
           template,
         })),
         limits: { activeLimit, idleLimitSeconds: 3600 },
+        ...(memory ? { memory } : {}),
       },
     ),
     d,
@@ -665,5 +679,409 @@ describe('place, alone', () => {
   });
   it('reads readiness unknown when presence is unreadable', () => {
     expect(readinessOf(doc('a', hash('a'), 0).builds[0]!, 0, null, null)).toBe('unknown');
+  });
+});
+
+describe('memory-aware placement', () => {
+  const G = 4096 + workerOverheadMib; // a 4 GiB guest's cost
+  const doc = (
+    id: string,
+    h: string,
+    sinceS: number,
+    guest?: number,
+    leased = true,
+  ): TemplateDoc => ({
+    schema: 'moca-template/1',
+    id,
+    owner: 'github:1',
+    visibility: 'deployment',
+    description: '',
+    tags: { default: h },
+    builds: [
+      {
+        buildId: h,
+        status: 'registered',
+        profile: 'base',
+        worker: `w_${id}`,
+        spec: { tools: [], ...(guest !== undefined ? { guest_mb: guest } : {}) },
+        createdAt: 0,
+        leases: leased ? [{ subject: 'github:1', until: 10_000, since: sinceS }] : [],
+      },
+    ],
+    createdAt: 0,
+  });
+  /** A host at time 100 with `headroom` MiB free above a 4096 floor, both bounds alike. */
+  const host = (
+    id: string,
+    holds: string[],
+    headroom: number,
+    extra: Partial<NonNullable<HostView['memory']>> = {},
+    activeLimit = 8,
+    at = 100,
+  ): HostView => ({
+    id,
+    holds: Object.fromEntries(holds.map((h) => [h, 'x'])),
+    activeLimit,
+    at,
+    memory: {
+      totalMib: 4096 + headroom,
+      availableMib: 4096 + headroom,
+      floorMib: 4096,
+      pressureLimit: 10,
+      ...extra,
+    },
+  });
+
+  it("costs a build its guest RAM plus the worker's overhead; one with no guest size at 4096", () => {
+    expect(costMib(doc('a', hash('a'), 0, 2048).builds[0]!)).toBe(2048 + 128);
+    expect(costMib(doc('a', hash('a'), 0).builds[0]!)).toBe(defaultCostMib + 128);
+    expect(workerOverheadMib).toBe(128);
+  });
+
+  it('a 4 GiB build skips a host with 3 GiB of headroom and goes to one with 8 GiB', () => {
+    // h1 sorts first by id and has fewer builds: only memory sends the build to h2.
+    const p = place(
+      [doc('a', hash('a'), 1, 4096)],
+      [host('h1', [hash('a')], 3072), host('h2', [hash('a')], 8192)],
+      100,
+    );
+    expect(p.placed.get(hash('a'))).toBe('h2');
+    expect(p.memory.get('h1')).toEqual({
+      usedMib: 0,
+      pendingMib: 0,
+      headroomMib: 3072,
+      brake: null,
+    });
+    expect(p.memory.get('h2')).toMatchObject({ usedMib: G, headroomMib: 8192 - G });
+    const only = place([doc('a', hash('a'), 1, 4096)], [host('h1', [hash('a')], 3072)], 100);
+    expect(only.unplaced.get(hash('a'))).toBe('memory');
+  });
+
+  it('two builds placed in one pass both count against the same host', () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    const p = place(docs, [host('h1', [hash('a'), hash('b')], 2 * G - 1)], 100);
+    expect(p.placed.get(hash('a'))).toBe('h1');
+    expect(p.unplaced.get(hash('b'))).toBe('memory');
+    // The available bound alone (total ample) binds the same way: pending starts come off it.
+    const wide = host('h1', [hash('a'), hash('b')], 2 * G - 1, { totalMib: 1_000_000 });
+    expect(place(docs, [wide], 100).unplaced.get(hash('b'))).toBe('memory');
+    expect(place(docs, [host('h1', [hash('a'), hash('b')], 2 * G)], 100).placed.size).toBe(2);
+  });
+
+  it("counts running workers (any build's, wanted or not) and their VMs' committed memory", () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('idle', hash('i'), 0, 2048, false)];
+    // 2 G of headroom by the figures, but the idle build's worker runs (2176) and VMs hold 1000.
+    const h = host('h1', [hash('a'), hash('i')], 2 * G, {
+      availableMib: 1_000_000,
+      running: ['w_idle'],
+      vmCommittedMib: { w_idle: 1000 },
+    });
+    expect(place(docs, [h], 100).memory.get('h1')!.usedMib).toBe(2176 + 1000 + G);
+    const tight = host('h1', [hash('a'), hash('i')], 2176 + 1000 + G - 1, {
+      availableMib: 1_000_000,
+      running: ['w_idle'],
+      vmCommittedMib: { w_idle: 1000 },
+    });
+    expect(place(docs, [tight], 100).unplaced.get(hash('a'))).toBe('memory');
+    // A running worker of no known build counts at the default cost.
+    const stray = host('h1', [hash('a')], G + defaultCostMib + 127, {
+      availableMib: 1_000_000,
+      running: ['w_unknown'],
+    });
+    expect(place([doc('a', hash('a'), 1, 4096)], [stray], 100).unplaced.get(hash('a'))).toBe(
+      'memory',
+    );
+  });
+
+  it('a stale inventory (over 60 s) gives no headroom for new starts, and keeps what runs', () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    const h = host('h1', [hash('a'), hash('b')], 100_000, { running: ['w_a'] }, 8, 100);
+    expect(place(docs, [h], 160).placed.size).toBe(2);
+    const p = place(docs, [h], 161);
+    expect(p.placed.get(hash('a'))).toBe('h1'); // its worker runs: kept
+    expect(p.unplaced.get(hash('b'))).toBe('memory');
+    expect(p.memory.get('h1')!.brake).toBe('stale');
+  });
+
+  it('pressure above the limit blocks new starts but keeps placed (running) ones', () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    const at = (psi: number) =>
+      host('h1', [hash('a'), hash('b')], 100_000, { running: ['w_a'], pressureFull10: psi });
+    expect(place(docs, [at(10)], 100).placed.size).toBe(2); // at the limit: not above it
+    const p = place(docs, [at(10.5)], 100);
+    expect(p.placed.get(hash('a'))).toBe('h1');
+    expect(p.unplaced.get(hash('b'))).toBe('memory');
+    expect(p.memory.get('h1')!.brake).toBe('pressure');
+    // No PSI reported (no /proc/pressure): no brake.
+    expect(place(docs, [host('h1', [hash('a'), hash('b')], 100_000)], 100).placed.size).toBe(2);
+  });
+
+  it('never places a build on a host that reports its memory file wrong; elsewhere it may go', () => {
+    const docs = [doc('a', hash('a'), 1, 4096)];
+    const bad = host('h1', [hash('a')], 100_000, { memfileMismatch: [hash('a')] });
+    expect(place(docs, [bad], 100).unplaced.get(hash('a'))).toBe('memfile_mismatch');
+    expect(place(docs, [bad, host('h2', [hash('a')], 100_000)], 100).placed.get(hash('a'))).toBe(
+      'h2',
+    );
+  });
+
+  it('a host without memory figures places exactly by activeLimit, as before', () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    const bare: HostView = {
+      id: 'h1',
+      holds: { [hash('a')]: 'a', [hash('b')]: 'b' },
+      activeLimit: 1,
+    };
+    const p = place(docs, [bare], 100);
+    expect([...p.placed]).toEqual([[hash('a'), 'h1']]);
+    expect(p.unplaced.get(hash('b'))).toBe('no_slot');
+    expect(p.memory.size).toBe(0);
+    // Workers or a PSI reading without the figures change nothing either.
+    const partial = { ...bare, activeLimit: 2, memory: { running: ['w_x'], pressureFull10: 99 } };
+    expect(place(docs, [partial], 100).placed.size).toBe(2);
+    // At its activeLimit, a memory-reporting host still says no_slot (the limit binds first).
+    expect(
+      place(docs, [host('h1', [hash('a'), hash('b')], 100_000, {}, 1)], 100).unplaced.get(
+        hash('b'),
+      ),
+    ).toBe('no_slot');
+  });
+
+  it('keeps the memory fields of an inventory, drops malformed ones, and needs all three figures', () => {
+    expect(parseHostMemory(undefined)).toBeUndefined();
+    expect(parseHostMemory([1])).toBeUndefined();
+    expect(
+      parseHostMemory({
+        memTotalMib: 16384,
+        memAvailableMib: 12288,
+        memFloorMib: 4096,
+        memPressureFull10: 0.25,
+        memPressureLimit: 10,
+        runningWorkers: ['sbx_a', '../x', 3],
+        vmCommittedMib: { sbx_a: 512, 'bad id': 1, sbx_b: -1 },
+        memfileMismatch: [hash('a'), 'nope'],
+      }),
+    ).toEqual({
+      totalMib: 16384,
+      availableMib: 12288,
+      floorMib: 4096,
+      pressureFull10: 0.25,
+      pressureLimit: 10,
+      running: ['sbx_a'],
+      vmCommittedMib: { sbx_a: 512 },
+      memfileMismatch: [hash('a')],
+    });
+    expect(parseHostMemory({ memTotalMib: 16384, memAvailableMib: 12288 })).toEqual({});
+    expect(parseHostMemory({ memTotalMib: 1.5, memAvailableMib: 1, memFloorMib: 1 })).toEqual({});
+  });
+});
+
+describe('memory-aware placement through the routes', () => {
+  /** 16 GiB, a 4096 floor: `free` MiB of headroom. */
+  const mem = (free: number, extra: Record<string, unknown> = {}) => ({
+    memTotalMib: 4096 + free,
+    memAvailableMib: 4096 + free,
+    memFloorMib: 4096,
+    memPressureLimit: 10,
+    runningWorkers: [],
+    vmCommittedMib: {},
+    memfileMismatch: [],
+    ...extra,
+  });
+  const G = 4096 + workerOverheadMib;
+  const writeOf = (e: unknown) => {
+    const res = { status: 0, headers: {} as Record<string, string>, body: '' };
+    writeError(
+      {
+        headersSent: false,
+        writeHead: (st: number, h: Record<string, string>) => (
+          (res.status = st),
+          (res.headers = h)
+        ),
+        end: (b: string) => (res.body = b),
+      },
+      e,
+    );
+    return { ...res, json: JSON.parse(res.body) as Body };
+  };
+
+  it('a 409 no_active_slot names memory, with Retry-After; readiness is unavailable for memory', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2', bob);
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, mem(G + 100));
+    await activate(d, 't1', alice, { leaseSeconds: 600 });
+    const e = await activate(d, 't2', bob).catch((x) => x);
+    expect(e.code).toBe('no_active_slot');
+    const w = writeOf(e);
+    expect(w.status).toBe(409);
+    expect(w.headers['Retry-After']).toBe('600');
+    expect(w.json).toMatchObject({
+      error: 'no_active_slot',
+      readiness: 'unavailable',
+      reason: 'memory',
+    });
+    // The refusal kept no lease.
+    const t2 = (await HANDLERS.getTemplate!(ctx({ principal: bob, params: { id: 't2' } }), d))
+      .body as Body;
+    expect(t2.readiness).toBe('inactive');
+    // Make t2 wanted (its lease written behind placement's back, as a shared lease would be), and
+    // its readiness says why it waits.
+    await d.templates!.update!('t2', async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((b) => ({
+        ...b,
+        leases: [
+          {
+            subject: bob.sub,
+            until: Math.floor(now / 1000) + 600,
+            since: Math.floor(now / 1000) + 1,
+          },
+        ],
+      })),
+    }));
+    const t2b = (await HANDLERS.getTemplate!(ctx({ principal: bob, params: { id: 't2' } }), d))
+      .body as Body;
+    expect(t2b.readiness).toBe('unavailable');
+    expect(t2b.readinessReason).toBe('memory');
+    expect(t2b.builds[0]).toMatchObject({ readiness: 'unavailable', readinessReason: 'memory' });
+    // A create on it answers template_not_active with that reason.
+    const c = await HANDLERS.createSandbox!(
+      ctx({ principal: bob, body: { template: 't2' } }),
+      d,
+    ).catch((x) => x);
+    expect(c.code).toBe('template_not_active');
+    expect(c.extra).toMatchObject({ readiness: 'unavailable', reason: 'memory' });
+    // At the active limit with memory to spare, the refusal is as before: no reason field.
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 1, mem(100_000));
+    const e2 = await activate(d, 't2', bob).catch((x) => x);
+    expect(e2.code).toBe('no_active_slot');
+    expect(e2.extra).toEqual({ readiness: 'unavailable' });
+    const t2c = (await HANDLERS.getTemplate!(ctx({ principal: bob, params: { id: 't2' } }), d))
+      .body as Body;
+    expect(t2c.builds[0]).toMatchObject({ readiness: 'unavailable', readinessReason: 'no_slot' });
+  });
+
+  it('an older agent (no memory) places by activeLimit alone, and the hosts block has no memory', async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 2);
+    expect((await activate(d, 't1')).status).toBe(200);
+    expect((await activate(d, 't2')).status).toBe(200);
+    const b = (await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body;
+    expect(b.hosts[0]).not.toHaveProperty('memory');
+    expect(b.templates.every((t: Body) => !('readinessReason' in t))).toBe(true);
+  });
+
+  it('shows the memory and the effective floor in the hosts block', async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(
+      d,
+      'host-1',
+      { [hash('1')]: 't1' },
+      4,
+      mem(16384, {
+        memPressureFull10: 0.5,
+        runningWorkers: ['sbx_x'],
+        vmCommittedMib: { sbx_x: 300 },
+      }),
+    );
+    await activate(d, 't1');
+    const b = (await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body;
+    expect(b.hosts[0].memory).toEqual({
+      totalMib: 20480,
+      availableMib: 20480,
+      floorMib: 4096,
+      // sbx_x is no build's worker: it counts at the default cost (4096 + 128).
+      usedMib: 4224 + 300 + G,
+      headroomMib: Math.min(16384 - (4224 + 300 + G), 16384 - G),
+      pressureFull10: 0.5,
+      pressureLimit: 10,
+      brake: null,
+      runningWorkers: 1,
+      memfileMismatch: [],
+      reportedAt: Math.floor(now / 1000),
+    });
+  });
+
+  it('a stale inventory takes no new start; a memfile mismatch on every holder is template_unavailable', async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, mem(100_000));
+    now += 61_000;
+    const e = await activate(d, 't1').catch((x) => x);
+    expect(e.code).toBe('no_active_slot');
+    expect(e.extra).toMatchObject({ reason: 'memory' });
+    const b = (await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body;
+    expect(b.hosts[0].memory).toMatchObject({ brake: 'stale', headroomMib: 0 });
+    await inventory(
+      d,
+      'host-1',
+      { [hash('1')]: 't1' },
+      4,
+      mem(100_000, { memfileMismatch: [hash('1')] }),
+    );
+    const m = await activate(d, 't1').catch((x) => x);
+    expect(m.code).toBe('template_unavailable');
+    expect(m.extra).toEqual({ readiness: 'unavailable', reason: 'memfile_mismatch' });
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, mem(100_000));
+    expect((await activate(d, 't1')).status).toBe(200);
+  });
+
+  it("the wanted state runs only what fits a host's memory", async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, mem(100_000));
+    await activate(d, 't1');
+    now += 1000;
+    await activate(d, 't2');
+    // The host's memory shrinks (another workload): the placed builds stay only while their workers
+    // run; t1's runs, t2's has not started and no longer fits.
+    await inventory(
+      d,
+      'host-1',
+      { [hash('1')]: 't1', [hash('2')]: 't2' },
+      4,
+      mem(G + 10, { runningWorkers: ['sbx_t1'] }),
+    );
+    const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect(w.run.map((x: Body) => x.template)).toEqual(['t1']);
+  });
+
+  it('two concurrent activations onto one host with headroom for one: one is placed (the activation lock)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2', bob);
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 8, mem(2 * G - 1));
+    const prov = d.provenance!;
+    const orig = prov.append.bind(prov);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let entered = 0;
+    prov.append = (async (rec: Parameters<typeof orig>[0]) => {
+      if (rec.kind === 'activate') {
+        entered++;
+        await gate;
+      }
+      return orig(rec);
+    }) as typeof prov.append;
+    const all = Promise.allSettled([activate(d, 't1', alice), activate(d, 't2', bob)]);
+    for (let i = 0; i < 50 && entered < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    open();
+    const out = (await all).map((r) =>
+      r.status === 'fulfilled' ? 'ok' : String((r.reason as { code?: string }).code),
+    );
+    expect([...out].sort()).toEqual(['no_active_slot', 'ok']);
+    const refused = (await all).find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(refused.reason.extra).toMatchObject({ reason: 'memory' });
+    const leases = (await d.templates!.list())
+      .flatMap((x) => x.builds)
+      .flatMap((b) => (b.leases ?? []).filter((l) => l.until > Math.floor(now / 1000)));
+    expect(leases).toHaveLength(1);
   });
 });
