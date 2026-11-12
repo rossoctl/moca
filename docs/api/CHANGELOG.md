@@ -3,6 +3,30 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.9.0
+
+Sessions and sandboxes from one combined control plane
+([#750](https://github.com/rossoctl/moca/issues/750)), per the
+[combined control plane spec](../specs/2026-11-05-combined-control-plane-design.md). Additive: the
+`harness` and `sandbox` profiles answer as before.
+
+- `SH_ROUTE_PROFILE=combined` mounts every route of both profiles. Its GET /v1/discovery answers
+  `profile: "combined"` with the harness fields plus `execEndpoint` and `execCa`.
+- On `combined` login is open, as on `harness`; the sandbox routes and the template writes need an
+  enrolled subject (`403 not_enrolled` otherwise, test users included), and the template, policy and
+  quota reads take any logged-in subject. Its API tokens carry the harness issuer.
+- With a template store (`SH_PROVENANCE_DIR`), POST /v1/sessions resolves `sandbox.template` through
+  it as POST /v1/sandboxes does: `id`, `id:tag` or `id@sha256:…`, else 400 `unknown_template`; the
+  build is kept for the session's life. `sandbox.activate` (default true) and activation on first
+  use apply: 409 `template_not_active` with Retry-After, or `no_active_slot`,
+  `template_unavailable`.
+- The `Session` view adds `sandboxBuildId` and `templateManifestHash` beside `sandboxTemplate`.
+- POST /internal/credentials returns `sandboxBuildId` for a session pinned to a manifest-hash build.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.2.0: a session pinned
+to a build runs only on workers labelled `moca.dev/build` with it, and its turn is refused (503
+`sandbox_unavailable`) when none is attached.
+
 ## 1.8.0
 
 Sandbox templates for agent sessions
