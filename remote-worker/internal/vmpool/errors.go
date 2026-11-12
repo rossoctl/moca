@@ -35,6 +35,11 @@ var ErrShortResponse = errors.New("vmpool: guest closed before End")
 // undiagnosable at 200 VMs a second.
 var ErrGuest = errors.New("vmpool: guest error")
 
+// ErrCommandTooLarge means the command, once wrapped and encoded, is larger than the
+// guest's one request frame (guestagent.MaxFrame). Refused before anything is sent;
+// large content goes in stdin, which is split across frames.
+var ErrCommandTooLarge = errors.New("vmpool: command too large")
+
 // RefusalReason names why the pool declined. Spec §6 requires a memory-driven
 // refusal to be recorded DISTINCTLY from a MaxRuns refusal — "or the two ceilings
 // get conflated and neither is diagnosable" — and §7.3 reports ExecErrors by cause.

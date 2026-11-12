@@ -3,6 +3,7 @@ package vmpool
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -176,6 +177,70 @@ func TestRunOverConnUnblocksOnContextCancel(t *testing.T) {
 	}
 }
 
+// The whole command is one request frame, bounded by ga.MaxFrame. A larger
+// one used to be refused by WriteFrame on the write goroutine while the read loop waited
+// for an answer the guest could never send, so the Exec hung to the caller's deadline.
+// It is refused at once now, before anything reaches the guest.
+func TestRunOverConnRefusesACommandLargerThanOneFrameAtOnce(t *testing.T) {
+	got := make(chan struct{}, 1)
+	host, guest := net.Pipe()
+	go func() {
+		defer guest.Close()
+		if _, _, err := ga.ReadFrame(guest); err == nil {
+			got <- struct{}{}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	_, err := runOverConn(ctx, host, Command{Command: strings.Repeat("x", ga.MaxFrame), CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+	if !errors.Is(err, ErrCommandTooLarge) {
+		t.Fatalf("err = %v, want ErrCommandTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "stdin") {
+		t.Fatalf("err = %v, want it to name stdin as the way to send large content", err)
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("refused after %v, want at once", d)
+	}
+	select {
+	case <-got:
+		t.Fatal("the guest received a frame for a command it cannot take")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// The same bound against the REAL guest agent, and its way around: a command just
+// under one frame runs, and content far larger than a frame goes through stdin.
+func TestRunOverConnAgainstTheAgentTakesLargeStdinButNotALargeCommand(t *testing.T) {
+	run := func(c Command) (string, error) {
+		a, err := ga.NewAgent(ga.AgentOptions{WorkDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("NewAgent: %v", err)
+		}
+		defer a.Close()
+		host, guest := net.Pipe()
+		go func() { _ = a.ServeConn(guest) }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var out capturingSink
+		c.TimeoutS, c.CapBytes = 5, OutputCapBytes
+		_, err = runOverConn(ctx, host, c, &out, time.Now())
+		return out.out(), err
+	}
+	// Just under the frame once encoded: the JSON envelope is well under 1 KiB.
+	if out, err := run(Command{Command: ": " + strings.Repeat("x", ga.MaxFrame-1024) + "; echo ok"}); err != nil || out != "ok\n" {
+		t.Fatalf("command under one frame: out=%q err=%v", out, err)
+	}
+	if _, err := run(Command{Command: ": " + strings.Repeat("x", 40*1024)}); !errors.Is(err, ErrCommandTooLarge) {
+		t.Fatalf("40 KiB command: err = %v, want ErrCommandTooLarge", err)
+	}
+	big := strings.Repeat("y", 175*1024)
+	if out, err := run(Command{Command: "wc -c", Stdin: []byte(big)}); err != nil || strings.TrimSpace(out) != "179200" {
+		t.Fatalf("175 KiB stdin: out=%q err=%v", out, err)
+	}
+}
+
 func TestRunOverConnSurfacesTeardownFailed(t *testing.T) {
 	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
 		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{ExitCode: 0, TeardownFailed: true})
@@ -191,7 +256,11 @@ func TestRunOverConnSurfacesTeardownFailed(t *testing.T) {
 
 func TestSendRequestCarriesTheLeaseFlags(t *testing.T) {
 	var buf bytes.Buffer
-	if err := sendRequest(&buf, Command{Command: "true", Lease: true, NormaliseWorkspace: true}, OutputCapBytes, time.Now()); err != nil {
+	enc, err := json.Marshal(guestRequest(Command{Command: "true", Lease: true, NormaliseWorkspace: true}, OutputCapBytes, time.Now()))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := sendRequest(&buf, enc, nil); err != nil {
 		t.Fatalf("sendRequest: %v", err)
 	}
 	_, p, err := ga.ReadFrame(&buf)

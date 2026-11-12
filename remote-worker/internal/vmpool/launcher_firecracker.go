@@ -149,6 +149,14 @@ func (o FirecrackerOptions) maxEgressSocketPath() string {
 		"/root" + vsockRelPath + "_" + strconv.FormatUint(uint64(o.EgressPort), 10)
 }
 
+// maxAPISocketPath is the longest API socket path any VM id can produce under this
+// configuration, as maxEgressSocketPath: the launcher dials it on the host, so it must fit
+// sun_path whether egress is on or off.
+func (o FirecrackerOptions) maxAPISocketPath() string {
+	return o.ChrootBase + "/" + filepath.Base(o.FirecrackerBin) + "/vm-" + strings.Repeat("9", 20) +
+		"/root" + apiSockRelPath
+}
+
 // egressSocketPath is the host path of VM jailRoot's egress listener.
 func (o FirecrackerOptions) egressSocketPath(jailRoot string) string {
 	return filepath.Join(jailRoot, vsockRelPath) + "_" + strconv.FormatUint(uint64(o.EgressPort), 10)
@@ -175,10 +183,17 @@ func (o FirecrackerOptions) validate() error {
 			"restore would fail (spec §6 mitigation #3 would be unimplemented); set it from " +
 			"vmpool.PerVMBytes(cfg)")
 	}
-	// bind(2) fails on a path that does not fit sun_path (108 on Linux, 104 elsewhere), and it
-	// would do so per VM at restore time, as an opaque error. Refuse at construction instead,
-	// against the worst-case id. Only when egress is on: with it off the egress socket is never
-	// bound and this constraint does not exist.
+	// bind(2) and connect(2) fail on a path that does not fit sun_path (108 on Linux, 104
+	// elsewhere), and they would do so per VM at restore time, as an opaque error: Firecracker
+	// listens inside its chroot, and the launcher's dial of the host path times out as "API socket
+	// never appeared" once the VM id grows a digit (with a chroot base named after a 31-character
+	// template id, every restore from vm-10 on failed). Refuse at construction instead, against the
+	// worst-case id. The API socket is always dialled; the egress socket only with egress on.
+	if p := o.maxAPISocketPath(); len(p) >= len(syscall.RawSockaddrUnix{}.Path) {
+		return fmt.Errorf("firecracker: API socket path %q is %d bytes, which does not fit "+
+			"sun_path (%d bytes including the terminator); shorten ChrootBase (SH_CHROOT_BASE)",
+			p, len(p), len(syscall.RawSockaddrUnix{}.Path))
+	}
 	if o.Egress != nil {
 		if p := o.maxEgressSocketPath(); len(p) >= len(syscall.RawSockaddrUnix{}.Path) {
 			return fmt.Errorf("firecracker: egress socket path %q is %d bytes, which does not fit "+
@@ -216,6 +231,40 @@ func firecrackerCgroupArgs(parentRel string) []string {
 	// --cgroup-version 2 stays explicit: jailer's own default is "1", which this cgroup2-only host
 	// does not have (D2).
 	return []string{"--cgroup-version", "2", "--parent-cgroup", parentRel}
+}
+
+// jailerOutputTail bounds what a restore keeps of the jailer's and Firecracker's output.
+const jailerOutputTail = 4096
+
+// tailBuffer is an io.Writer keeping only the last max bytes written to it, safe for the two
+// os/exec copying goroutines (stdout and stderr) writing at once.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if over := len(t.b) - t.max; over > 0 {
+		t.b = append(t.b[:0], t.b[over:]...)
+	}
+	return len(p), nil
+}
+
+// String is the tail on one line (newlines as " | "), or "(none)": it goes into an error.
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := strings.TrimSpace(string(t.b))
+	if s == "" {
+		return "(none)"
+	}
+	return strings.ReplaceAll(s, "\n", " | ")
 }
 
 // firecrackerLauncher is the Firecracker arm of Launcher.
@@ -519,8 +568,14 @@ func (l *firecrackerLauncher) Restore(ctx context.Context, req RestoreRequest) (
 	// that inherits a controlling terminal's stdin can be sent SIGTTIN and stop the
 	// moment it tries to read from it, which from this launcher's side is
 	// indistinguishable from a hang (coordinator finding #2).
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	// The jailer's own errors (before it execs) and Firecracker's log both go to stdout/stderr.
+	// They used to be discarded, so a jailer or Firecracker that failed left nothing but the
+	// socket timeout below (diagnosing a too-long socket path took strace). A
+	// bounded tail keeps the last few KiB for the restore's error; like io.Discard it is not an
+	// *os.File, so os/exec's pipes and copying goroutines are the same as before.
+	jailerOut := newTailBuffer(jailerOutputTail)
+	cmd.Stdout = jailerOut
+	cmd.Stderr = jailerOut
 	fcIsolateProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, errors.Join(fmt.Errorf("firecracker: restore %s: start jailer: %w", req.ID, err), cleanup())
@@ -549,7 +604,7 @@ func (l *firecrackerLauncher) Restore(ctx context.Context, req RestoreRequest) (
 		observe = boundary.observe
 	}
 	if err := waitForUnixSocketObserved(ctx, apiSockHost, 5*time.Second, observe); err != nil {
-		return nil, errors.Join(fmt.Errorf("firecracker: restore %s: API socket never appeared: %w", req.ID, err), cleanup())
+		return nil, errors.Join(fmt.Errorf("firecracker: restore %s: API socket never appeared: %w (jailer output: %s)", req.ID, err, jailerOut.String()), cleanup())
 	}
 
 	phSock = time.Since(phaseStart) - phPrep - phWsImg - phSpawn
