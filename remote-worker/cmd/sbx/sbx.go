@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"regexp"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -36,13 +39,14 @@ microVM over the workspace, and nothing runs on the local machine. See docs/api/
     sbx pull                  print every change since the baseline commit as a git patch
 
 Environment: SBX_ADDR, SBX_SANDBOX_ID, SBX_WORKSPACE_KEY, and SBX_TOKEN or SBX_TOKEN_FILE.
-Optional: SBX_TIMEOUT (seconds per command, default 600), SBX_LOG (append one JSON line per call),
+Optional: SBX_TIMEOUT (seconds per command, default 600; as in sbx.py, cut to what a JWT token has left before its
+exp, less 60 s, so the command times out before the relay cancels it at exp), SBX_LOG (append one JSON line per call),
 SBX_DIAL_ADDR (ip:port to connect to instead of looking up SBX_ADDR's host: the caller resolved it once; TLS still
 verifies, and requests still name, SBX_ADDR's host),
 SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (with SBX_TLS: an extra CA, PEM,
 added to the system roots, e.g. a sandbox token grant's execCa).
-` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed,
-128 + n that signal n killed it.
+` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed
+(or that the command outlived its token), 128 + n that signal n killed it.
 Unlike sbx.py, this client dials plaintext unless SBX_TLS=1, and reads no SBX_TOKEN_CMD (so the exports of
 ` + "`mocactl sbx env`" + ` are not enough: give SBX_TOKEN or SBX_TOKEN_FILE).
 There is no ` + "`sbx push`" + `: this client is for a workspace seeded on the server side.
@@ -201,9 +205,75 @@ func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64
 
 func rpcErr(err error) error {
 	if s, ok := status.FromError(err); ok {
+		if s.Code() == codes.DeadlineExceeded && tokenExpiry(s.Message()) {
+			// The relay cancels an Exec at its token's exp: name that case, in sbx.py's words.
+			msg := s.Message()
+			if msg == "" {
+				msg = "sandbox token expired during the Exec"
+			}
+			return fmt.Errorf("%s: the command outlived its token and was cancelled; give it a shorter timeout", msg)
+		}
 		return fmt.Errorf("exec failed: %s: %s", upperSnake(s.Code().String()), s.Message())
 	}
 	return fmt.Errorf("exec failed: %v", err)
+}
+
+// tokenExpiry says a DEADLINE_EXCEEDED is the relay cancelling the Exec at its token's exp ("sandbox token expired
+// during the Exec"); the client sets no deadline of its own, so an empty message is taken as that case too, as sbx.py does.
+func tokenExpiry(msg string) bool {
+	m := strings.ToLower(msg)
+	return m == "" || (strings.Contains(m, "token") && strings.Contains(m, "expir"))
+}
+
+// marginS is sbx.py's MARGIN_S: an Exec's timeout leaves this much of the token's life spare, so the worker's
+// own timeout fires before the relay cancels the Exec at the token's exp.
+const marginS = 60
+
+// tokenTimes is the token's (iat, exp), read without verifying, as sandbox_v1_client.py's _times_of: the relay
+// verifies, the client only schedules. (0, 0) when the token is not a JWT or has no exp.
+func tokenTimes(token string) (iat, exp int64) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0, 0
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return 0, 0
+	}
+	var claims struct {
+		Iat *float64 `json:"iat"`
+		Exp *float64 `json:"exp"`
+	}
+	if json.Unmarshal(b, &claims) != nil || claims.Exp == nil {
+		return 0, 0
+	}
+	if claims.Iat != nil {
+		iat = int64(*claims.Iat)
+	}
+	return iat, int64(*claims.Exp)
+}
+
+// capTimeout is sbx.py's rule for a static token (Sandbox._prepare): the requested timeout is cut to the token's
+// lifetime (exp - iat) less 60 s, and then to what it has left at now (exp - now, rounded up) less 60 s, never
+// below 1 s; capped says it was cut. A token whose exp cannot be read is not capped.
+func capTimeout(token string, requested uint32, now time.Time) (timeout uint32, capped bool) {
+	iat, exp := tokenTimes(token)
+	t := int64(requested)
+	if iat > 0 && exp > iat {
+		if limit := max(1, exp-iat-marginS); t > limit {
+			t, capped = limit, true
+		}
+	}
+	if exp != 0 {
+		left := float64(exp) - float64(now.UnixNano())/1e9
+		if float64(t+marginS) > left {
+			// ceil: a token minted this instant keeps its full cap
+			if cut := max(1, int64(math.Ceil(left))-marginS); cut < t {
+				t, capped = cut, true
+			}
+		}
+	}
+	return uint32(t), capped
 }
 
 // upperSnake spells a gRPC code the way grpcio's Python enum names it (PermissionDenied ->
@@ -220,11 +290,14 @@ func upperSnake(name string) string {
 }
 
 // call runs one command and turns its outcome into the process's exit code, writing output and
-// the SBX_LOG line the way sbx.py does: 124 for a timeout (the output so far is written), 125 for
-// any other sandbox failure, 128 + n for a command killed by signal n (exit code -n), else the
+// the SBX_LOG line the way sbx.py does: the timeout is capped to the token first (capTimeout), with a
+// line on stderr when it was; 124 for a timeout (the output so far is written), 125 for any other
+// sandbox failure, 128 + n for a command killed by signal n (exit code -n), else the
 // command's own code.
 func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op, command string, stdin []byte, stdout, stderr io.Writer, now func() time.Time) int {
 	started := now()
+	var capped bool
+	cfg.timeoutS, capped = capTimeout(cfg.token, cfg.timeoutS, started)
 	r, err := execOnce(ctx, c, cfg, id, command, stdin)
 	var code int
 	if err != nil {
@@ -233,6 +306,9 @@ func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, 
 	} else {
 		_, _ = stdout.Write(r.stdout)
 		_, _ = stderr.Write(r.stderr)
+		if capped {
+			fmt.Fprintf(stderr, "sbx: timeout capped at %d s, the sandbox token's lifetime minus 60 s\n", cfg.timeoutS)
+		}
 		if r.truncated {
 			fmt.Fprintln(stderr, "sbx: stdout exceeded 8 MiB and was cut")
 		}

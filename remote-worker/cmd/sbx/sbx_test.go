@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -252,6 +254,74 @@ func TestTimeoutFromEnv(t *testing.T) {
 		env["SBX_TIMEOUT"] = bad
 		if _, err := configFrom(getenv, os.ReadFile); err == nil || !strings.Contains(err.Error(), "SBX_TIMEOUT") {
 			t.Errorf("SBX_TIMEOUT=%q: err=%v, want a refusal naming SBX_TIMEOUT", bad, err)
+		}
+	}
+}
+
+// jwt builds an unsigned token whose payload holds claims; the client reads it without verifying.
+func jwt(claims string) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(claims)) + ".sig"
+}
+
+// The test clock starts at t=100 (run), so a token with exp 400 has 300 s left: 240 s after the 60 s margin.
+func TestTimeoutCappedAtTheTokensLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		token  string
+		want   uint32
+		capped bool
+	}{
+		{"300 s left", jwt(`{"iat":100,"exp":400}`), 240, true},
+		{"300 s left, no iat", jwt(`{"exp":400}`), 240, true},
+		{"a 300 s lifetime, more left by a skewed clock", jwt(`{"iat":1000,"exp":1300}`), 240, true},
+		{"60 s or less left", jwt(`{"iat":40,"exp":160}`), 1, true},
+		{"already expired", jwt(`{"exp":50}`), 1, true},
+		{"room to spare", jwt(`{"iat":100,"exp":1000}`), 600, false},
+		{"exactly enough", jwt(`{"exp":760}`), 600, false},
+		{"not a JWT", "tok", 600, false},
+		{"no exp", jwt(`{"iat":100}`), 600, false},
+		{"a payload that is not JSON", "a.bm90IGpzb24.c", 600, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testCfg
+			cfg.token = tc.token
+			c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{end(0, false)}}}
+			code, _, errw := run(t, c, cfg)
+			if got := c.req.GetExec().GetTimeoutS(); code != 0 || got != tc.want {
+				t.Fatalf("timeout_s sent = %d (exit %d), want %d", got, code, tc.want)
+			}
+			line := fmt.Sprintf("sbx: timeout capped at %d s, the sandbox token's lifetime minus 60 s\n", tc.want)
+			if tc.capped != (errw == line) || (!tc.capped && errw != "") {
+				t.Fatalf("stderr %q, capped=%v", errw, tc.capped)
+			}
+			if strings.Contains(errw, tc.token) {
+				t.Fatal("stderr holds the token")
+			}
+		})
+	}
+}
+
+func TestCappedTimeoutIsTheOneReported(t *testing.T) {
+	cfg := testCfg
+	cfg.token = jwt(`{"exp":400}`)
+	c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDERR, "e\n"), execErr("timeout:240")}}}
+	code, _, errw := run(t, c, cfg)
+	want := "e\nsbx: timeout capped at 240 s, the sandbox token's lifetime minus 60 s\nsbx: command timed out after 240 s\n"
+	if code != 124 || errw != want {
+		t.Fatalf("got code=%d err=%q, want %q", code, errw, want)
+	}
+}
+
+func TestTokenExpiredDuringExec(t *testing.T) {
+	for _, tc := range []struct{ msg, want string }{
+		{"sandbox token expired during the Exec", "sbx: sandbox token expired during the Exec: the command outlived its token and was cancelled; give it a shorter timeout\n"},
+		{"", "sbx: sandbox token expired during the Exec: the command outlived its token and was cancelled; give it a shorter timeout\n"},
+		{"worker deadline", "sbx: exec failed: DEADLINE_EXCEEDED: worker deadline\n"},
+	} {
+		c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{chunk(pb.Stream_STREAM_STDOUT, "x")}, final: status.Error(codes.DeadlineExceeded, tc.msg)}}
+		if code, out, errw := run(t, c, testCfg); code != 125 || out != "" || errw != tc.want {
+			t.Errorf("message %q: got code=%d out=%q err=%q, want %q", tc.msg, code, out, errw, tc.want)
 		}
 	}
 }
