@@ -192,14 +192,29 @@ only when `SBX_TOKEN_CMD` is unset.
 [`examples/sbx.py`](examples/sbx.py) is an example of a thin command line on top of it, for one
 sandbox. It is an example only: `mocactl sbx run` and `put` (increment 1c) are the supported CLI.
 
-| Command              | Does                                                                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `sbx run [COMMAND…]` | Runs `COMMAND`, or with no arguments the script on stdin, in `/workspace`. Exits with its exit code: 124 timed out, 125 the sandbox failed |
-| `sbx put PATH`       | Writes stdin to `PATH`, creating parent directories                                                                                        |
-| `sbx push [DIR]`     | Replaces `/workspace` with `DIR`'s git working tree and commits it as a baseline                                                           |
-| `sbx pull`           | Prints every change since the push as a git patch                                                                                          |
+| Command              | Does                                                                                                                                                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sbx run [COMMAND…]` | Runs `COMMAND`, or with no arguments the script on stdin, in `/workspace`. Exits with its exit code: 124 timed out, 125 the sandbox failed, 75 refused at capacity (nothing ran) |
+| `sbx put PATH`       | Writes stdin to `PATH`, creating parent directories                                                                                                                              |
+| `sbx push [DIR]`     | Replaces `/workspace` with `DIR`'s git working tree and commits it as a baseline                                                                                                 |
+| `sbx pull`           | Prints every change since the push as a git patch                                                                                                                                |
 
-A busy sandbox and a token that expired during the Exec also exit 125, each with its own message.
+A token that expired during the Exec also exits 125, with its own message.
+
+**A command refused at capacity is retried, then exits 75.** The worker refuses an Exec before
+anything of it runs when its template's memory budget or run count is full (`memory-budget:`,
+`max-runs:`, `busy: queue full`), and the relay does when the sandbox already has its cap of Execs
+in flight (`RESOURCE_EXHAUSTED` `sandbox busy`). Since nothing ran, `sbx` sends the command again,
+each time as a new Exec with a new `req_id`, after about 1, 2, 4, 8 and then 8 s (with jitter), until
+`SBX_BUSY_RETRY_S` seconds of waiting are spent (default 30; `0` turns retries off, and the refusal
+exits 125 as before). Then it exits **75**, nothing having run. A refusal after any output, and every
+other failure, is never retried. Both `sbx.py` and the Go `sbx` do this, and write the same `SBX_LOG`
+keys besides `{t, op, ms, exit}`:
+
+- `attempt`: the attempt number, from 1, on every record;
+- `refused` and `reason`: a refused attempt's class (`memory_budget`, `max_runs`, `queue_full`,
+  `relay_busy`) and its text, cut to 300 characters;
+- `busy_wait_ms`: the total wait between retries, on the call's final record only.
 
 Both need Python 3.10 or later and `grpcio`. From `docs/api/examples`:
 

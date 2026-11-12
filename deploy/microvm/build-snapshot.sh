@@ -627,6 +627,37 @@ build_agent() {
 # ---------------------------------------------------------------------------
 # 3. assemble_rootfs
 # ---------------------------------------------------------------------------
+# tree_write_target REL: REL is a file under the staged tree that the build writes or appends to on
+# THIS host (etc/passwd, etc/gitconfig, the egress CA). The tree is an image's filesystem, so a path
+# in it can be a symlink out of it (an absolute one resolves on the build host). It exits 1 unless
+# REL's directory resolves inside the tree, checking the deepest part that exists before making the
+# rest (mkdir -p follows symlinks), and REL itself is not a symlink: its target is unknown, and
+# appending through it would write the build host's file.
+tree_write_target() {
+  local rel="$1" tree dir probe real d
+  tree="$(cd -P "$STAGE/rootfs-tree" && pwd)"
+  dir="$(dirname "$rel")"
+  probe="$dir"
+  while [ "$probe" != . ] && [ ! -e "$STAGE/rootfs-tree/$probe" ] && [ ! -L "$STAGE/rootfs-tree/$probe" ]; do
+    probe="$(dirname "$probe")"
+  done
+  for d in "$probe" "$dir"; do
+    if [ "$d" = "$dir" ]; then mkdir -p "$STAGE/rootfs-tree/$dir"; fi
+    real="$(cd -P "$STAGE/rootfs-tree/$d" 2>/dev/null && pwd)" || real="unresolvable"
+    case "$real/" in
+      "$tree"/*) ;;
+      *)
+        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($real); refusing to write /$rel through it" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [ -L "$STAGE/rootfs-tree/$rel" ]; then
+    echo "build-snapshot.sh: the rootfs's /$rel is a symlink ($(readlink "$STAGE/rootfs-tree/$rel")); refusing to write through it" >&2
+    exit 1
+  fi
+}
+
 # Bakes the host's interception CA (public cert) into the STAGED tree using the tree's own
 # trust-store tool, then points the runtimes that ignore the system store at it via init.
 install_egress_ca() {
@@ -634,13 +665,13 @@ install_egress_ca() {
   if [ -x "$STAGE/rootfs-tree/usr/sbin/update-ca-certificates" ]; then
     ca_guest=/usr/local/share/ca-certificates/moca-egress.crt
     bundle=/etc/ssl/certs/ca-certificates.crt
-    mkdir -p "$STAGE/rootfs-tree/usr/local/share/ca-certificates"
+    tree_write_target "${ca_guest#/}"
     cp "$EGRESS_CA" "$STAGE/rootfs-tree$ca_guest"
     chroot "$STAGE/rootfs-tree" /usr/sbin/update-ca-certificates
   elif [ -x "$STAGE/rootfs-tree/usr/bin/update-ca-trust" ]; then
     ca_guest=/etc/pki/ca-trust/source/anchors/moca-egress.crt
     bundle=/etc/pki/tls/certs/ca-bundle.crt
-    mkdir -p "$STAGE/rootfs-tree/etc/pki/ca-trust/source/anchors"
+    tree_write_target "${ca_guest#/}"
     cp "$EGRESS_CA" "$STAGE/rootfs-tree$ca_guest"
     chroot "$STAGE/rootfs-tree" /usr/bin/update-ca-trust extract
   else
@@ -683,8 +714,10 @@ add_sbx_identity() {
   local etc="$STAGE/rootfs-tree/etc"
   local pw_line='sbx:x:7000:7000::/tmp/sbx-home:/bin/bash' gr_line='sbx-ws:x:7000:'
   local f clash
-  mkdir -p "$etc"
-  for f in passwd group; do [ -e "$etc/$f" ] || : >"$etc/$f"; done
+  for f in passwd group; do
+    tree_write_target "etc/$f"
+    [ -e "$etc/$f" ] || : >"$etc/$f"
+  done
   clash="$(awk -F: -v want="$pw_line" '($1 == "sbx" || $3 == "7000") && $0 != want' "$etc/passwd")"
   if [ -n "$clash" ]; then
     echo "build-snapshot.sh: the rootfs /etc/passwd already uses the name sbx or uid 7000 for another account; lease mode needs it as '$pw_line': $clash" >&2
@@ -859,7 +892,7 @@ export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
   # (not the host's /etc) before mkfs. Appended, because the image may already carry an
   # /etc/gitconfig (the identity, see check_git_identity); the leading newline guards a
   # file that lacks a trailing one.
-  mkdir -p "$STAGE/rootfs-tree/etc"
+  tree_write_target etc/gitconfig
   cat >>"$STAGE/rootfs-tree/etc/gitconfig" <<'GITCONFIG'
 
 [credential]
@@ -1863,6 +1896,14 @@ boot_quiesce_snapshot_firecracker() {
     "{\"vsock_id\":\"vsock0\",\"guest_cid\":3,\"uds_path\":\"/vsock.sock\"}"
   api_put "$api_sock" /machine-config \
     "{\"mem_size_mib\":$GUEST_RAM_MB,\"vcpu_count\":$VCPUS}"
+  # balloon-fpr-v1 (spec §6 "Free-page reporting", §16 item 5): a virtio-balloon in free-page
+  # reporting mode only. amount_mib 0 and nothing ever inflates it; the guest reports the
+  # pages it frees and the host drops them, so an idle lease is charged its working set, not
+  # its peak. Pre-boot like every device here, and so in the snapshot: one golden snapshot
+  # for every mode (per-Exec latency measured unchanged with it on the E15 rig), and a
+  # restored VM keeps reporting, so verify_restore_firecracker never sends it. Validated
+  # against the real Firecracker v1.17.0 binary.
+  api_put "$api_sock" /balloon '{"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}'
   api_put "$api_sock" /actions '{"action_type":"InstanceStart"}'
 
   wait_for_agent "$vsock_uds" "$console_log"
@@ -2151,10 +2192,11 @@ write_manifest() {
   \"ch_config_sha256\": \"$chhash\""
   # lease-v1 on the Firecracker arm only: Cloud Hypervisor's Run mounts the virtiofs
   # workspace inside every command (chvWrapCommand), which a lease Exec, uid 7000 with
-  # no capabilities, cannot do.
+  # no capabilities, cannot do. balloon-fpr-v1 likewise: only boot_quiesce_snapshot_
+  # firecracker configures the reporting balloon.
   features_json=""
   if [ "$VMM" = firecracker ]; then
-    features_json='"lease-v1"'
+    features_json='"lease-v1", "balloon-fpr-v1"'
   fi
 
   cat >"$STAGE/manifest.json" <<MANIFEST

@@ -1,6 +1,7 @@
 package vmpool
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -89,5 +90,113 @@ func TestNormalizeRejects(t *testing.T) {
 				t.Fatalf("error %q does not name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLeaseDefaults pins every lease default in plan 2's Global Constraints (spec §4, §6).
+func TestLeaseDefaults(t *testing.T) {
+	c := good()
+	if err := c.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"LeaseIdleDefault", c.LeaseIdleDefault, 300 * time.Second},
+		{"LeaseIdleCeiling", c.LeaseIdleCeiling, 1800 * time.Second},
+		{"LeaseIdleMin", c.LeaseIdleMin, 30 * time.Second},
+		{"LeaseMaxDuration", c.LeaseMaxDuration, 8 * time.Hour},
+		{"LeaseMaxDurationProcesses", c.LeaseMaxDurationProcesses, 4 * time.Hour},
+		{"LeaseGraceLimit", c.LeaseGraceLimit, 30 * time.Minute},
+		{"LeaseKeepaliveLoss", c.LeaseKeepaliveLoss, 120 * time.Second},
+		{"LeaseScanInterval", c.LeaseScanInterval, 5 * time.Second},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+	if c.LeaseStartBytes != 192<<20 {
+		t.Errorf("LeaseStartBytes = %d, want 192 MiB", c.LeaseStartBytes)
+	}
+	if c.LeaseHeadroom != 1.25 {
+		t.Errorf("LeaseHeadroom = %v, want 1.25", c.LeaseHeadroom)
+	}
+	if c.LeasePageCacheBytes != 256<<20 {
+		t.Errorf("LeasePageCacheBytes = %d, want 256 MiB", c.LeasePageCacheBytes)
+	}
+	if c.LeaseEnabled {
+		t.Error("Normalize set LeaseEnabled: only New may, from VMM and the manifest")
+	}
+
+	// The derived reclaim target: 2 x PerVMBytes + max(2 GiB, 2 x (bound - start)),
+	// bound = 1.25 x (PerVMBytes + page cache). The 32 MiB overhead is the default.
+	for _, tc := range []struct{ guestMiB, wantMiB int64 }{
+		{1024, 5008}, // 2x1056 + 2x(1640-192)
+		{256, 2624},  // 2x288 + 2048 (the 2 GiB floor binds)
+	} {
+		c := good()
+		c.GuestRAMBytes = tc.guestMiB << 20
+		if err := c.Normalize(); err != nil {
+			t.Fatal(err)
+		}
+		if c.LeaseReclaimFreeBytes != tc.wantMiB<<20 {
+			t.Errorf("guest %d MiB: LeaseReclaimFreeBytes = %d MiB, want %d MiB",
+				tc.guestMiB, c.LeaseReclaimFreeBytes>>20, tc.wantMiB)
+		}
+	}
+	// An explicit value is kept, not re-derived.
+	c = good()
+	c.LeaseReclaimFreeBytes = 7 << 30
+	if err := c.Normalize(); err != nil || c.LeaseReclaimFreeBytes != 7<<30 {
+		t.Errorf("explicit LeaseReclaimFreeBytes: %d, %v", c.LeaseReclaimFreeBytes, err)
+	}
+}
+
+func TestLeaseConfigRefusesWhatItCannotHonour(t *testing.T) {
+	for name, mut := range map[string]func(*Config){
+		"headroom below 1":      func(c *Config) { c.LeaseHeadroom = 0.5 },
+		"headroom NaN":          func(c *Config) { c.LeaseHeadroom = math.NaN() },
+		"default above ceiling": func(c *Config) { c.LeaseIdleDefault = 2 * time.Hour },
+		"default below floor":   func(c *Config) { c.LeaseIdleDefault = 10 * time.Second },
+	} {
+		c := good()
+		mut(&c)
+		if err := c.Normalize(); err == nil || !strings.Contains(err.Error(), "Lease") {
+			t.Errorf("%s: Normalize = %v, want a Lease* refusal", name, err)
+		}
+	}
+}
+
+// PR #763 review (F6): two lease timings that cannot work are refused. A keepalive loss
+// under two MCP keepalive periods (2 x 30 s, spec §8.3) ends every opted-in lease between
+// two keepalives; a lease ticker slower than a quarter of LeaseIdleMin ends idle leases
+// late. The bounds themselves are accepted.
+func TestLeaseTimingCrossChecks(t *testing.T) {
+	for name, mut := range map[string]func(*Config){
+		"keepalive loss under two keepalive periods": func(c *Config) { c.LeaseKeepaliveLoss = 59 * time.Second },
+		"scan interval above a quarter of idle min":  func(c *Config) { c.LeaseScanInterval = 7*time.Second + 500*time.Millisecond + 1 },
+		"scan interval above idle min": func(c *Config) {
+			c.LeaseScanInterval = time.Minute
+		},
+	} {
+		c := good()
+		mut(&c)
+		if err := c.Normalize(); err == nil || !strings.Contains(err.Error(), "Lease") {
+			t.Errorf("%s: Normalize = %v, want a Lease* refusal", name, err)
+		}
+	}
+	c := good()
+	c.LeaseKeepaliveLoss = 60 * time.Second
+	c.LeaseScanInterval = 7*time.Second + 500*time.Millisecond // LeaseIdleMin 30 s / 4
+	if err := c.Normalize(); err != nil {
+		t.Errorf("keepalive loss 60 s, scan interval 7.5 s: Normalize = %v, want accepted", err)
+	}
+	// The scan bound follows a configured LeaseIdleMin.
+	c = good()
+	c.LeaseIdleMin, c.LeaseIdleDefault, c.LeaseIdleCeiling = 4*time.Hour, 4*time.Hour, 4*time.Hour
+	c.LeaseScanInterval = time.Hour
+	if err := c.Normalize(); err != nil {
+		t.Errorf("scan interval 1 h with LeaseIdleMin 4 h: Normalize = %v, want accepted", err)
 	}
 }
