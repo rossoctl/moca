@@ -121,6 +121,38 @@ rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"
 [[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
 pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
 
+# A worker installed before the digest-keyed jail had $SBX_SRV/jail/<id>. A reinstall and an uninstall
+# remove that worker's own old jail (its hard-linked files stay) and say so; another worker's is kept.
+legacy_jail() { # legacy_jail ID: an old jail with a VM chroot holding a hard link to a workspace file
+  mkdir -p "$SBX_SRV/jail/$1/firecracker/vm-1/root" "$SBX_SRV/workspaces/$1"
+  printf 'DATA\n' >"$SBX_SRV/workspaces/$1/ws.img"
+  ln "$SBX_SRV/workspaces/$1/ws.img" "$SBX_SRV/jail/$1/firecracker/vm-1/root/ws.img"
+}
+legacy_jail sbx_default
+legacy_jail sbx_py312
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail "reinstall over a legacy jail: $(cat "$TMP/out")"
+[[ ! -e "$SBX_SRV/jail/sbx_default" ]] || fail 'the reinstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_default " "$TMP/out" || fail "the reinstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_default/ws.img")" == DATA ]] || fail 'the legacy jail removal took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the reinstall removed another worker's legacy jail"
+[[ -d "$(grep '^SH_CHROOT_BASE=' "$A" | cut -d= -f2-)" ]] || fail 'the reinstall has no current jail'
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'reinstall with no legacy jail'
+! grep -q "removed $SBX_SRV/jail/" "$TMP/out" || fail 'a reinstall with no legacy jail says it removed one'
+bash "$INSTALL" "$(bundle sbx_unin)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_unin'
+legacy_jail sbx_unin
+bash "$INSTALL" --uninstall sbx_unin >"$TMP/out" 2>&1 || fail 'uninstall over a legacy jail'
+[[ ! -e "$SBX_SRV/jail/sbx_unin" ]] || fail 'the uninstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_unin " "$TMP/out" || fail "the uninstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_unin/ws.img")" == DATA ]] || fail 'the uninstall took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the uninstall removed another worker's legacy jail"
+# An id shaped like a current jail's name could be another worker's jail: left, and said so.
+mkdir -p "$SBX_SRV/jail/j0123456789ab/firecracker"
+bash "$INSTALL" --uninstall j0123456789ab >"$TMP/out" 2>&1 || fail 'uninstall j0123456789ab'
+[[ -d "$SBX_SRV/jail/j0123456789ab" ]] || fail 'removed a jail named like a current one'
+grep -qF "left in place: $SBX_SRV/jail/j0123456789ab " "$TMP/out" || fail "the jail-shaped id's message is missing: $(cat "$TMP/out")"
+rm -rf "$SBX_SRV/jail/j0123456789ab" "$SBX_SRV/jail/sbx_py312"
+pass "a reinstall and an uninstall remove the worker's own legacy jail <SBX_SRV>/jail/<id>, keep its files' data, and say so"
+
 # A bundle without SH_WORKSPACE_IMAGE_MB gets microvm-worker's default, 2048 MiB.
 bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$SBX_ENV_DIR/workers/sbx_old.env" || fail 'SH_WORKSPACE_IMAGE_MB is not the 2048 default'
