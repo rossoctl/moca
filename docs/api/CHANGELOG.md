@@ -42,10 +42,10 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
 Upgrade note (the policy fails closed):
 
 - X12 applies under every profile, `base` included: a `skip_git_identity_check: true` that no gate
-  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client whose image refuses
-  commits on purpose sends a gate record showing it (X5: `agent_can_commit: "no"`,
-  `git_identity: "none"`); otherwise it drops the skip, and the build host then runs its git
-  identity check, which needs git in the image with an identity configured.
+  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client sends a gate record
+  showing commits refused (X5: `agent_can_commit: "no"`, `git_identity: "none"`), or drops the skip:
+  the build host's git identity check then needs git with an identity in the image, or no git at all
+  once the build-snapshot change in [#757](https://github.com/rossoctl/moca/pull/757) is in.
 - A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
   check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
   numbers, is refused when it is read: every create and every read of the policy or the quota fails
