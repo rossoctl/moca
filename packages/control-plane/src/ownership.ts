@@ -91,6 +91,13 @@ export interface SessionRecord {
    */
   sandboxTemplate?: string;
   /**
+   * The build `sandboxTemplate` resolved to at creation through the template store (combined
+   * control plane spec §3.4): `id` by its default tag, `id:tag`, or `id@<build id>`. Kept for the
+   * session's life; when it is a manifest hash, a turn runs only on a worker labelled with it.
+   * Absent without a template store.
+   */
+  sandboxBuildId?: string;
+  /**
    * The model this session's turns run on (per-session model spec §4.4). '' or absent means the
    * deployment default. Changed by PATCH /v1/sessions/{id}, unlike the fields above.
    */
@@ -207,6 +214,7 @@ export class OwnershipIndex {
         tombstone: rec.tombstone ? '1' : '0',
         sandboxTier: rec.sandboxTier ?? '',
         sandboxTemplate: rec.sandboxTemplate ?? '',
+        sandboxBuildId: rec.sandboxBuildId ?? '',
         model: rec.model ?? '',
         modelLimits: rec.modelLimits ? JSON.stringify(rec.modelLimits) : '',
       }),
@@ -233,6 +241,7 @@ export class OwnershipIndex {
       tombstone: h.tombstone === '1',
       sandboxTier: h.sandboxTier,
       ...(h.sandboxTemplate ? { sandboxTemplate: h.sandboxTemplate } : {}),
+      ...(h.sandboxBuildId ? { sandboxBuildId: h.sandboxBuildId } : {}),
       ...(h.model ? { model: h.model } : {}),
       ...(readLimits(h.modelLimits) ? { modelLimits: readLimits(h.modelLimits) } : {}),
     };

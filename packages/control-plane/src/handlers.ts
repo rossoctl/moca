@@ -75,7 +75,7 @@ import type { ProvenanceStore } from './provenance.js';
 import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
-import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
 import type { TemplateHost } from './host-config.js';
 import { HOST_HANDLERS, type HostRegistry } from './host-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
@@ -459,7 +459,15 @@ async function sessionView(rec: SessionRecord, deps: CpDeps) {
     // Shown on a deployment that declares templates, and wherever the session named one, so a
     // dropped template is visible too (it fails closed); a view elsewhere is unchanged.
     ...(deps.config.sessionTemplates || rec.sandboxTemplate
-      ? { sandboxTemplate: rec.sandboxTemplate || null }
+      ? {
+          sandboxTemplate: rec.sandboxTemplate || null,
+          // The build the template resolved to at creation (combined control plane spec §3.4),
+          // which its turns run on; its manifest hash, null for an imported build.
+          sandboxBuildId: rec.sandboxBuildId || null,
+          templateManifestHash: rec.sandboxBuildId?.startsWith('sha256:')
+            ? rec.sandboxBuildId
+            : null,
+        }
       : {}),
     model: rec.model || null,
   };
@@ -943,12 +951,26 @@ export const HANDLERS: Record<string, Handler> = {
     if (requestedTemplate !== undefined && typeof requestedTemplate !== 'string') {
       throw new CpError('invalid_request', 'sandbox.template must be a string');
     }
+    const activateField = asRecord(sandbox).activate;
+    if (activateField !== undefined && typeof activateField !== 'boolean') {
+      throw new CpError('invalid_request', 'sandbox.activate must be true or false');
+    }
+    // With a template store, a session's template resolves through the catalog as a sandbox's does
+    // (combined control plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
+    // caller may see, and activation on first use (§6.4) where host agents run the workers.
+    let resolved: { id: string; buildId: string } | undefined;
+    if (requestedTemplate !== undefined && deps.templates && deps.provenance) {
+      const t = await resolveForUse(deps, p, requestedTemplate);
+      await requireActive(deps, p, t, activateField !== false);
+      resolved = { id: t.id, buildId: t.buildId };
+    }
     const templates = deps.config.sessionTemplates;
-    if (requestedTemplate !== undefined && !templates) {
+    if (requestedTemplate !== undefined && !resolved && !templates) {
       throw new CpError('invalid_request', 'this deployment declares no sandbox templates');
     }
     if (
       requestedTemplate !== undefined &&
+      !resolved &&
       templates &&
       !templates.some((t) => t.id === requestedTemplate)
     ) {
@@ -957,7 +979,9 @@ export const HANDLERS: Record<string, Handler> = {
         `unknown sandbox template '${requestedTemplate}': this deployment declares ${templates.map((t) => t.id).join(', ')}`,
       );
     }
-    const sandboxTemplate = requestedTemplate ?? '';
+    const sandboxTemplate = resolved?.id ?? requestedTemplate ?? '';
+    // The build the reference resolved to, kept for the session's life; none without a store.
+    const sandboxBuildId = resolved?.buildId ?? '';
 
     if (configRef) {
       let found: boolean;
@@ -996,6 +1020,7 @@ export const HANDLERS: Record<string, Handler> = {
       configRef,
       sandboxTier,
       ...(sandboxTemplate ? { sandboxTemplate } : {}),
+      ...(sandboxBuildId ? { sandboxBuildId } : {}),
       tombstone: false,
       model: choice?.model ?? '',
       ...(choice?.limits ? { modelLimits: choice.limits } : {}),

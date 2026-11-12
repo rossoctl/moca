@@ -75,7 +75,7 @@ export interface CreateSessionRequest {
   credentials?: { inference?: string };
   /** A promoted config bundle digest; fixed for the session's life (ADR-0038). */
   configRef?: string;
-  sandbox?: { tier?: string; template?: string };
+  sandbox?: { tier?: string; template?: string; activate?: boolean };
   /** A model id the credential lists; fixed until switched with /model. */
   model?: string;
 }

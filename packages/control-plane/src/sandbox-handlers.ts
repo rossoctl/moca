@@ -359,7 +359,7 @@ function templateBody(d: TemplateDoc, f: ReadinessFacts, full: boolean) {
  * or build, one the caller cannot see, or a build not registered is `400 unknown_template`, as an
  * unknown id always was. Whether the build is active is requireActive's question (§6.4).
  */
-async function resolveForUse(
+export async function resolveForUse(
   deps: CpDeps,
   p: TokenClaims,
   ref: string,
@@ -956,7 +956,7 @@ export const FIRST_USE_RETRY_S = 30;
  * is the worker's presence alone: an attached worker serves, and an absent one is refused rather
  * than left to wait at the relay.
  */
-async function requireActive(
+export async function requireActive(
   deps: CpDeps,
   p: TokenClaims,
   t: { doc: TemplateDoc; build: TemplateBuild },

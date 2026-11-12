@@ -10,7 +10,15 @@ import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenan
 import { FileTemplateCatalog, type TemplateDoc } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
-import { alice, bob, ctx, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
+import {
+  alice,
+  bob,
+  ctx,
+  makeDeps,
+  NOW_MS,
+  seedCredential,
+  type TestDeps,
+} from './helpers/deps.js';
 
 const EX = resolve(__dirname, '../../../deploy/sbx/template-onboarding/examples');
 const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf8')) as Record<
@@ -348,6 +356,46 @@ describe('activation on first use (§6.4)', () => {
     const r = await createSandbox(d, { template: 't1' });
     expect(r.status).toBe(201);
     expect((r.body as Body).buildId).toBe(hash('1'));
+  });
+
+  it('gates a session on its template the same way, and records the build it resolved (combined spec §3.4)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    const session = (sandbox: Record<string, unknown>) =>
+      HANDLERS.createSession!(ctx({ principal: alice, body: { sandbox } }), d);
+    // A self-serve template, in no static SH_SANDBOX_TEMPLATES list: the catalog resolves it.
+    expect(d.config.sessionTemplates?.some((t) => t.id === 't1') ?? false).toBe(false);
+    expect(await refusal(() => session({ template: 't1', activate: false }))).toMatchObject({
+      code: 'template_not_active',
+      readiness: 'inactive',
+    });
+    expect(await leases(d, 't1')).toHaveLength(0);
+    expect(await refusal(() => session({ template: 't1' }))).toMatchObject({
+      code: 'template_not_active',
+      readiness: 'activating',
+      retryAfterS: 30,
+    });
+    expect(await leases(d, 't1')).toHaveLength(1);
+    attachedNow = ['sbx_t1'];
+    const r = await session({ template: `t1@${hash('1')}` });
+    expect(r.status).toBe(201);
+    const sid = (r.body as Body).sessionId as string;
+    const got = (await HANDLERS.getSession!(ctx({ principal: alice, params: { id: sid } }), d))
+      .body as Body;
+    expect(got).toMatchObject({
+      sandboxTemplate: 't1',
+      sandboxBuildId: hash('1'),
+      templateManifestHash: hash('1'),
+    });
+    expect(await refusal(() => session({ template: 'nope' }))).toMatchObject({
+      code: 'unknown_template',
+    });
+    expect(await refusal(() => session({ template: 't1', activate: 'no' }))).toMatchObject({
+      code: 'invalid_request',
+    });
   });
 
   it('with activate: false, answers 409 and starts nothing', async () => {

@@ -203,6 +203,16 @@ components:
             deployment that declares templates (SH_SANDBOX_TEMPLATES), null there for a session
             with none; present too for any session that named one, even once the deployment no
             longer declares it (its turns then find no worker and are refused)
+        sandboxBuildId:
+          type: [string, 'null']
+          description: |
+            with sandboxTemplate: the build the template resolved to at creation through the
+            template store (combined control plane spec §3.4), kept for the session's life; a
+            manifest-hash build's turns run only on workers labelled moca.dev/build with it. Null
+            without a template store
+        templateManifestHash:
+          type: [string, 'null']
+          description: with sandboxTemplate, the manifest hash of sandboxBuildId; null for an imported build
         model:
           type: [string, 'null']
           description: |
@@ -1182,7 +1192,18 @@ paths:
                       description: |
                         a template id from GET /v1/discovery's sandboxTemplates; 400 when unknown, or
                         on a deployment that declares none. Omitted: none, and the session runs only
-                        on untemplated workers
+                        on untemplated workers. With a template store (SH_PROVENANCE_DIR) it
+                        resolves through the store as a sandbox's template does (combined control
+                        plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
+                        caller may see (`400 unknown_template` otherwise), recorded as the session's
+                        sandboxBuildId; and, with host agents, activation on first use
+                        (`409 template_not_active`)
+                    activate:
+                      type: boolean
+                      default: true
+                      description: |
+                        false to be refused on a template that is not active without starting its
+                        activation (template lifecycle spec §6.4)
                 model:
                   type: string
                   pattern: '^[\x21-\x7e]{1,256}$'
@@ -1207,6 +1228,14 @@ paths:
                     description: false when the catalog could not be read and the id was accepted unchecked
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: |
+            `template_not_active` (Retry-After): the session's template is not active yet, its
+            activation started unless `sandbox.activate` is false; `no_active_slot` (Retry-After),
+            `template_unavailable`: as activate (template lifecycle spec §6.4)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: |
             `config_bundle_not_found`: `configRef` names a digest that is not stored (never
