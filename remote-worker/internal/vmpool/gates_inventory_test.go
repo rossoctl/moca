@@ -72,6 +72,15 @@ var manualOnlyGates = map[string]string{
 	"TestGateLeaseExecKillsProcesses": "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
 	"TestGateLeaseFreshShell":         "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
 	"TestGateLeasePrivilege":          "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh",
+	"TestGateLeaseOneSandbox":         "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2",
+	"TestGateLeaseTeardown":           "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; checks the lease cgroup, jail, sockets, VMM process and host taps after every drivable end reason",
+	"TestGateLeaseStaleEpoch":         "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; restarts the pool with the state file deleted",
+	"TestGateLeaseOwnership":          "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; root writes through a per-Exec VM, then a lease Exec as uid 7000 modifies it",
+	"TestGateLeaseNotice":             "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; the pending event after every drivable end reason",
+	"TestGateLeaseReclaim":            "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; measured lease charges under a squeezed budget",
+	"TestGateLeaseSecrets":            "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; reads the guest's RAM from the host through the VMM's /proc/<pid>/mem, SANDBOX_TOKEN forwarded for its live-token half",
+	"TestGateLeaseFreePageReporting":  "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; a snapshot with balloon-fpr-v1, and the memfile mlocked as the worker does",
+	"TestGateLeaseExecCaps":           "the pool's lease path over a real lease-v1 guest, VMs in a gate-private pooled cgroup; /dev/kvm + a lease-v1 snapshot, run as root on cgroup v2; a fork bomb and an OOM against the guest agent's Exec cgroup caps",
 }
 
 // gateCoverage is how a gate is gated, as the code says rather than as a map claims.
