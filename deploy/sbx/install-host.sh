@@ -24,8 +24,9 @@
 #   - The binary is the operator's, like microvm-worker: a missing /usr/local/bin/moca-egress is
 #     refused before anything is written or systemd is touched.
 #   - $SBX_ENV_DIR/moca-egress.env (the allowlist; no secret, 0644) is written ONLY when absent,
-#     seeded from MOCA_EGRESS_ALLOW in the environment or else the GitHub hosts, so an operator's
-#     edit survives a re-run. Restart moca-egress by hand after editing it or rebuilding the binary.
+#     seeded from MOCA_EGRESS_ALLOW in the environment or else deploy/sbx/egress-allow.env beside
+#     this script, so an operator's edit survives a re-run. Restart moca-egress by hand after
+#     editing it or rebuilding the binary.
 #   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK and installs no egress unit.
 #
 # Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
@@ -64,7 +65,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
 : "${MOCA_EGRESS_READY_TIMEOUT:=30}"
-: "${DEFAULT_EGRESS_ALLOW:=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com}"
+# The default guest-egress allowlist: the MOCA_EGRESS_ALLOW= line of egress-allow.env beside this
+# script (a systemd EnvironmentFile, so comments are allowed). DEFAULT_EGRESS_ALLOW in the
+# environment overrides the file; MOCA_EGRESS_ALLOW overrides both (egress_seed). A copy of the
+# script without the file falls back to the GitHub hosts and says so on stderr.
+default_egress_allow() {
+  local v
+  v="$(sed -n 's/^MOCA_EGRESS_ALLOW=//p' "$SCRIPT_DIR/egress-allow.env" 2>/dev/null | tail -1)" || v=''
+  if [[ -n "$v" ]]; then
+    printf '%s\n' "$v"
+  else
+    printf 'deploy/sbx/install-host.sh: no MOCA_EGRESS_ALLOW line in %s; falling back to the GitHub hosts\n' \
+      "$SCRIPT_DIR/egress-allow.env" >&2
+    printf 'api.github.com,github.com,codeload.github.com,objects.githubusercontent.com\n'
+  fi
+}
+: "${DEFAULT_EGRESS_ALLOW:="$(default_egress_allow)"}"
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
 # spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
 # the image size defaults to microvm-worker's own.

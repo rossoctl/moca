@@ -312,6 +312,9 @@ pass 'the last worker uninstall leaves the janitor; --uninstall-janitor removes 
 # state is clean here (no worker, no janitor, an empty manifest), so the first install installs the unit.
 EM="$SBX_ENV_DIR/manifest"
 sha_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" | cut -d' ' -f1; }
+# The default seed is deploy/sbx/egress-allow.env beside the installer.
+EXPECTED_ALLOW="$(sed -n 's/^MOCA_EGRESS_ALLOW=//p' "$SRC/deploy/sbx/egress-allow.env" | tail -1)"
+[[ -n "$EXPECTED_ALLOW" ]] || fail 'deploy/sbx/egress-allow.env has no MOCA_EGRESS_ALLOW line'
 U="$SBX_UNIT_DIR/moca-egress.service" E="$SBX_ENV_DIR/moca-egress.env"
 [[ ! -e "$U" && ! -s "$EM" ]] || fail 'the egress block does not start from a clean host'
 : >"$MOCK_LOG"
@@ -320,7 +323,7 @@ grep -qx "EnvironmentFile=$E" "$U" || fail 'egress unit does not read this host 
 ! grep -q '^#' "$U" || fail 'egress unit kept source comments'
 grep -qx 'ExecStart=/usr/local/bin/moca-egress' "$U" || fail 'egress unit lost its ExecStart'
 [[ "$(mode "$E")" == 644 ]] || fail "the egress env file is not 0644 ($(mode "$E"))"
-grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" || fail 'allowlist not seeded'
+grep -qxF "MOCA_EGRESS_ALLOW=$EXPECTED_ALLOW" "$E" || fail 'allowlist not seeded from deploy/sbx/egress-allow.env'
 grep -qx 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock' "$SBX_ENV_DIR/workers/sbx_eg.env" || fail 'worker not wired to the egress socket'
 grep '^After=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker not ordered after moca-egress'
 grep '^Wants=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker does not want moca-egress'
@@ -364,6 +367,19 @@ bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail '
 bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall sbx_eg again'
 [[ ! -e "$U" && ! -e "$E" ]] || fail 'the last uninstall kept an unedited egress env file'
 pass 'the last uninstall removes the egress unit, and the env file unless it was edited'
+
+# Without egress-allow.env beside it, the script falls back to the GitHub hosts and says so.
+COPY="$TMP/scriptcopy/deploy/sbx"
+mkdir -p "$COPY/../microvm"
+cp "$SRC/deploy/sbx/install-host.sh" "$SRC/deploy/sbx/sbx.slice" "$SRC/deploy/sbx/sbx-worker@.service" "$COPY/"
+cp "$SRC/deploy/microvm/moca-egress.service" "$COPY/../microvm/"
+bash "$COPY/install-host.sh" "$(bundle sbx_fb)" --snapshot default >"$TMP/out" 2>&1 || fail 'install from a script copy without egress-allow.env'
+grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'no fallback warning beside a missing egress-allow.env'
+grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" ||
+  fail 'the fallback did not seed the GitHub hosts'
+bash "$INSTALL" --uninstall sbx_fb >"$TMP/out" 2>&1 || fail 'uninstall sbx_fb'
+rm -rf "$TMP/scriptcopy"
+pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script'
 
 # A unit this script did not install is reused, not overwritten.
 echo '# P6-owned' >"$U"
