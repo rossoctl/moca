@@ -1,6 +1,6 @@
 # HTTP API guide
 
-> **Preview.** Describes the P6 runtime on `main` as of 2026-10-12. The machine-readable contracts are
+> **Preview.** Describes the P6 runtime on `main` as of 2026-11-12. The machine-readable contracts are
 > [`docs/api/openapi.yaml`](../api/openapi.yaml) (control plane) and
 > [`docs/api/harness-openapi.yaml`](../api/harness-openapi.yaml) (data plane); this page explains how
 > they fit together and records behaviour the specs do not. Workload routes are covered in

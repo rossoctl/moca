@@ -43,7 +43,10 @@ replacement is [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) with
 consumer is a drain loop inside the ordinary `--role=turn` worker, sharing one admission budget with
 interactive turns, rather than a separate process or a `--role=leaf` worker (that role stays reserved
 and unimplemented). A worker claims one queued turn at a time, runs it through the same `runLeaf` the
-synchronous route uses, and writes the result where `GET /runs/status` already looks.
+synchronous route uses, and writes the result under that turn's own key, read back by
+`GET /v1/sessions/{id}/turns/{turnId}`. The data plane's `GET /runs/status` is deliberately
+untouched and never answers for an async turn (spec §10): it reads the session-wide result key, and
+an async result is written per turn.
 
 **Running it.** Three things, none of them a new service:
 
@@ -59,8 +62,10 @@ synchronous route uses, and writes the result where `GET /runs/status` already l
 2. **Submit through the authenticated route.** `POST /v1/sessions/{id}/turns` with `async: true`
    answers `202 {sessionId, turnId}`. Over the fan-out quota it answers 429 `async_quota_exhausted`;
    under `MOCA_TENANCY=multi` it answers 501 `async_tenancy_unsupported` (see the limits below).
-3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state`, `attempts` and the result
-   once one exists. `DELETE` the same path cancels a turn that is still `queued`; a running leaf is
+3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state` and `attempts`, plus the
+   result once the turn is terminal — the record's state is the source of truth, so a result written
+   by a worker that then died is withheld until the reaper has ruled on it, rather than returned as
+   an answer. `DELETE` the same path cancels a turn that is still `queued`; a running leaf is
    not interrupted (409 `turn_not_cancellable`). A result expires on `LEAF_RESULT_TTL_SECONDS` — the
    same variable and the same 24 h default the KEDA path used, nothing replaces it — and a finished
    turn's record an hour after that, so the record outlives the result it points at.

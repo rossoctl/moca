@@ -188,20 +188,16 @@ consumer rather than a second one.
 The design above is implemented and on `main`: a drain loop inside the `--role=turn` worker, the
 restored Redis Streams queue, submission and status on `POST`/`GET /v1/sessions/{id}/turns`, crash
 redelivery from the pending-entries list, and the `async_*` counters. It is **opt-in** behind
-`SH_ASYNC_DRAIN` (off by default, one knob) and runs on `deploy/vm`, `deploy/compose` and
-`deploy/k8s`. So the first of this record's two owed capabilities is discharged for the deployments
-it covers, and the "no P6 equivalent" line above no longer describes archetype A.
+`SH_ASYNC_DRAIN` (off by default, one knob), runs on `deploy/vm` and `deploy/compose`, and is wired
+on `deploy/k8s`. So the first of this record's two owed capabilities is discharged for the
+deployments it covers, and the "no P6 equivalent" line above no longer describes archetype A.
 
-Two limits keep it short of a full clear, and both are named rather than inferred:
-
-- **`MOCA_TENANCY=single` only.** Under `multi`, submission answers 501
-  `async_tenancy_unsupported` and the drain refuses to arm, logging one line. Lifting the gate needs
-  the grant and token-endpoint slice (ADR-0047 §9's M2), which is why this ADR's own revision records
-  a dated conditional refusal rather than a capability.
-- **`deploy/k8s` is wired but not yet proven.** The ConfigMap key, both overlays and the `setup.sh`
-  validation are in; the queued-leaf smoke test and the written capacity story are
-  [#688](https://github.com/rossoctl/moca/issues/688). Until that lands, the end-to-end claim holds
-  for `deploy/vm` and compose.
+Two limits keep it short of a full clear: the path is `MOCA_TENANCY=single` only — lifting that gate
+needs the grant and token-endpoint slice, ADR-0047 §9's M2 — and `deploy/k8s` is wired but not yet
+proven end to end, which is [#688](https://github.com/rossoctl/moca/issues/688). Both are a dated
+conditional refusal in the shape this record used for its own deprecation window, and
+[dispatch archetypes](../concepts/dispatch-archetypes.md) carries them with the operator detail, so
+they are stated once rather than three times.
 
 Nothing here changes this record's accepted costs. Scale-to-zero and queue-depth-driven capacity stay
 gone: fan-out width is one leaf per worker process, sized ahead of the load, and queue depth is an
