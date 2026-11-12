@@ -238,7 +238,82 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 			cfg.WorkspaceIdle = d
 		}
 	}
+	if e := leaseConfig(get, &cfg); e != nil && err == nil {
+		err = e
+	}
 	return cfg, err
+}
+
+// leaseConfig reads the SH_LEASE_* knobs (spec §4, §6). Unset leaves a field zero for
+// vmpool's Normalize to default; a malformed value is refused, never defaulted -- the
+// WORKER_MAX_CONCURRENT posture, since a lease's lifetime or reclaim target that came
+// from a typo must not look like one that was chosen. Read on every worker, lease-capable
+// or not, so a bad value fails at start rather than when the snapshot gains lease-v1.
+func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
+	var err error
+	seconds := func(k string, dst *time.Duration) {
+		if get(k) == "" {
+			return
+		}
+		if v, e := envInt64(get, k, 0); e != nil {
+			if err == nil {
+				err = e
+			}
+		} else {
+			*dst = time.Duration(v) * time.Second
+		}
+	}
+	mib := func(k string, dst *int64) {
+		if get(k) == "" {
+			return
+		}
+		if v, e := envInt64(get, k, 0); e != nil {
+			if err == nil {
+				err = e
+			}
+		} else {
+			*dst = v << 20
+		}
+	}
+	seconds("SH_LEASE_IDLE_DEFAULT_S", &cfg.LeaseIdleDefault)
+	seconds("SH_LEASE_IDLE_CEILING_S", &cfg.LeaseIdleCeiling)
+	seconds("SH_LEASE_MAX_DURATION_S", &cfg.LeaseMaxDuration)
+	seconds("SH_LEASE_MAX_DURATION_L2_S", &cfg.LeaseMaxDurationProcesses)
+	seconds("SH_LEASE_GRACE_S", &cfg.LeaseGraceLimit)
+	seconds("SH_LEASE_KEEPALIVE_LOSS_S", &cfg.LeaseKeepaliveLoss)
+	mib("SH_LEASE_START_MB", &cfg.LeaseStartBytes)
+	mib("SH_LEASE_PAGECACHE_MB", &cfg.LeasePageCacheBytes)
+	mib("SH_LEASE_RECLAIM_FREE_MB", &cfg.LeaseReclaimFreeBytes)
+	if v := get("SH_LEASE_HEADROOM"); v != "" {
+		h, e := strconv.ParseFloat(v, 64)
+		// !(h >= 1) rather than h < 1: it also refuses NaN, which compares false to everything.
+		if e != nil || !(h >= 1) || math.IsInf(h, 0) {
+			if err == nil {
+				err = fmt.Errorf("SH_LEASE_HEADROOM=%q must be a finite number >= 1", v)
+			}
+		} else {
+			cfg.LeaseHeadroom = h
+		}
+	}
+	return err
+}
+
+// leaseBanner is the banner's lease fields: whether this worker serves lease mode, and
+// the resolved values it would serve it with. It normalizes a COPY, as slotBudgetWarning
+// does, because vmpool.New normalizes its own.
+func leaseBanner(cfg vmpool.Config) string {
+	if !vmpool.LeaseSupported(cfg) {
+		return "lease=off"
+	}
+	c := cfg
+	if err := c.Normalize(); err != nil {
+		return "lease=on"
+	}
+	return fmt.Sprintf("lease=on lease_idle=%s/%s lease_max=%s/%s lease_grace=%s lease_start=%dMiB "+
+		"lease_headroom=%s lease_pagecache=%dMiB lease_reclaim_free=%dMiB",
+		c.LeaseIdleDefault, c.LeaseIdleCeiling, c.LeaseMaxDuration, c.LeaseMaxDurationProcesses,
+		c.LeaseGraceLimit, c.LeaseStartBytes>>20, strconv.FormatFloat(c.LeaseHeadroom, 'g', -1, 64),
+		c.LeasePageCacheBytes>>20, c.LeaseReclaimFreeBytes>>20)
 }
 
 // effectiveWorkspaceIdle is what the pool will use: poolConfig leaves the field zero when unset,
@@ -607,6 +682,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
+	// Loaded before New, which decides LeaseEnabled from the manifest's features; it is
+	// still verified below, before anything is served.
+	man, err := vmpool.LoadManifest(snapDir)
+	if err != nil {
+		log.Fatalf("microvm-worker: %v", err)
+	}
+	cfg.ManifestFeatures = man.Features
 	pool, err := vmpool.New(cfg, lc, vmpool.RealClock())
 	if err != nil {
 		log.Fatalf("microvm-worker: %v", err)
@@ -617,10 +699,6 @@ func main() {
 	// the live stream (remote-worker/DESIGN.md:29-30): a worker that registers and then
 	// discovers it cannot restore has already been given work. Spec §6: fail at start,
 	// not on a user's first request.
-	man, err := vmpool.LoadManifest(snapDir)
-	if err != nil {
-		log.Fatalf("microvm-worker: %v", err)
-	}
 	if err := man.Verify(snapDir); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
@@ -772,11 +850,11 @@ func main() {
 	// nothing in journalctl naming the number, and /stats is gated behind the opt-in
 	// SH_DIAG_STATS_ADDR. cmd/worker logs the same thing as capacity=%d. #305's own thesis
 	// is that a run whose slots came from a typo must not look like a run that chose them.
-	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d standby_headroom=%s mem_floor=%dMiB workspace_idle=%s labels=%v",
+	log.Printf("microvm-worker: relay=%s sandbox_id=%s tls=%v vmm=%s D=%d guest=%dMiB budget=%dMiB slots=%d standby_headroom=%s mem_floor=%dMiB workspace_idle=%s %s labels=%v",
 		relayAddr, env(get, "SANDBOX_ID", "sbx-microvm-1"), useTLS, cfg.VMM,
 		cfg.StandbyDepth, cfg.GuestRAMBytes>>20, cfg.MaxCommittedBytes>>20, maxConcurrent,
 		standbyHeadroomLabel(cfg), cfg.HostMemFloorBytes>>20,
-		effectiveWorkspaceIdle(cfg), labels)
+		effectiveWorkspaceIdle(cfg), leaseBanner(cfg), labels)
 	if w := slotBudgetWarning(cfg, maxConcurrent); w != "" {
 		log.Printf("microvm-worker: %s", w)
 	}

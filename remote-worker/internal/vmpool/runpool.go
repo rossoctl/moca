@@ -56,6 +56,12 @@ type runPool struct {
 	// that is never going to answer. Created in runLocked: unlike a zero Mutex, a
 	// nil channel would block forever.
 	execGate chan struct{}
+
+	// state is the key's mode, epoch and lease bookkeeping (lease_state.go), read from
+	// its file on first use (stateLoaded) and written through on every change. See
+	// leaseStateLocked.
+	state       leaseState
+	stateLoaded bool
 }
 
 func (rp *runPool) signalSettledLocked() {

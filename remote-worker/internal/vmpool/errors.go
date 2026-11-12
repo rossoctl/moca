@@ -54,6 +54,13 @@ const (
 	RefuseMaxRuns       RefusalReason = "max-runs"
 	RefuseSpawn         RefusalReason = "spawn-failure"
 	RefuseShortResponse RefusalReason = "vsock-short-response"
+	// RefuseStaleMode is spec §8.2's stale_mode: an Exec (or SetMode) whose mode_epoch
+	// is below the one stored for the key, so a token minted before a downgrade cannot
+	// keep its higher mode.
+	RefuseStaleMode RefusalReason = "stale-mode"
+	// RefuseLeaseUnsupported is a lease-mode request on a worker that cannot serve
+	// one: not the Firecracker arm, or a snapshot without lease-v1.
+	RefuseLeaseUnsupported RefusalReason = "lease-unsupported"
 )
 
 // RefusalError carries a reason to microvm-worker, which counts it and returns an

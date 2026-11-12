@@ -22,6 +22,16 @@ type Exec struct {
 	Stdin     []byte
 	TimeoutS  uint32
 	Streaming bool
+
+	// Lease mode (spec §3, §8.2). The relay sets Mode and ModeEpoch from the sandbox
+	// token's claims; the zero values are today's per-Exec path. IdleTimeout is the
+	// owner's lease idle timeout: 0 means Config.LeaseIdleDefault, and any value is
+	// clamped to [LeaseIdleMin, LeaseIdleCeiling]. Keepalive opts the lease into the
+	// keepalive-loss rule (spec §4).
+	Mode        Mode
+	ModeEpoch   uint64
+	IdleTimeout time.Duration
+	Keepalive   bool
 }
 
 // Bounds on Exec.TimeoutS. Every Exec is bounded; there is no unbounded form.
@@ -89,6 +99,10 @@ type Pool interface {
 	// so the caller (the worker's startup sequence) must fail at START, not on a
 	// user's first request.
 	Probe(ctx context.Context) error
+	// SetMode records a verified LeaseControl set_mode for key: {m, epoch}, known. It
+	// refuses an epoch below a known one (stale-mode), and a lease mode on a worker
+	// that cannot serve it (lease-unsupported). Spec §8.2.
+	SetMode(key string, m Mode, epoch uint64) error
 	// Close stops the sweep and destroys everything. Beyond spec §4.1's listing:
 	// §6 requires a shutdown that leaves no orphan VMs.
 	Close() error
@@ -164,6 +178,9 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	if clk == nil {
 		clk = RealClock()
 	}
+	// Computed, never configured: a Config claiming lease support the VMM or the
+	// snapshot cannot back would put lease Execs on a guest without plan 1's half.
+	cfg.LeaseEnabled = LeaseSupported(cfg)
 	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters()}
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
@@ -258,6 +275,9 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 
 	if err := checkKey(key); err != nil {
 		return Result{}, p.countRefusal(err)
+	}
+	if e.Mode != ModePerExec && !p.cfg.LeaseEnabled {
+		return Result{}, p.refuse(RefuseLeaseUnsupported, "%s Exec for %q: %s", e.Mode, key, leaseUnsupportedDetail)
 	}
 
 	// The timeout must bound the WHOLE Exec, including a cold acquire's VM boot —
