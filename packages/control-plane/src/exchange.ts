@@ -72,8 +72,14 @@ export function placeholderFor(subject: string): string {
  * response stays byte-identical. That holds even for a record that stored a tier while tiers were
  * declared: the data plane runs untiered then and filters nothing, so naming the stored tier would
  * claim a placement that no longer happens (spec §3.3).
+ *
+ * Takes the FIELD rather than a SessionRecord, so a TurnRecord -- which pins its own
+ * `sandboxTier` (#388) -- gets the identical reading with no second copy of this rule.
  */
-export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string {
+export function sessionTier(
+  rec: Pick<SessionRecord, 'sandboxTier'>,
+  tiers: CpConfig['sandboxTiers'],
+): string {
   return tiers ? rec.sandboxTier || tiers.default : '';
 }
 

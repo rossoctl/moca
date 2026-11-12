@@ -6,9 +6,9 @@
 > The Knative/KEDA deployment was removed (ADR-0041).
 
 _Consolidated findings, June 2026. Source data:
-[`moca-experiments/experiments/RESULTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/RESULTS.md)
+[`moca-experiments/experiments/e02-e05-harness/RESULTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e02-e05-harness/RESULTS.md)
 (E2, E5),
-[`moca-experiments/knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md)
+[`moca-experiments/experiments/e01-e07-knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e01-e07-knative/EXPERIMENTS.md)
 (E1, E3, E4) — both moved to a separate repo 2026-09-25, see
 `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`. Designs:
 `docs/specs/2026-06-{23,24,25}-*.md`._
@@ -67,7 +67,7 @@ reads a **constant 6 entries / ~900 bytes**, while `openFromBackend` reads the w
 and `buildSessionContext()` is byte-identical under both loaders at every N (correctness preserved).
 **PASS.** _Reproduce:_ `pnpm -C experiments test e2-reconstruction-cost` from a pre-split
 checkout (see caveat below) -- preserved as a historical record in
-[`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments),
+[`moca-experiments/experiments/e02-e05-harness/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments/e02-e05-harness),
 not standalone-runnable there.
 
 ## E3 — Session fidelity + mobility
@@ -133,7 +133,7 @@ own consolidated results file rather than extending this one:
 - **P4 — MicroVM sandbox tier (E10 lifecycle primitives, E11 density/replenishment
   ceiling):** drivers live in `microvm/` in
   [`moca-experiments`](https://github.com/rossoctl/moca-experiments); results are consolidated in
-  [`moca-experiments/microvm/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/microvm/EXPERIMENTS.md). As of this writing,
+  [`moca-experiments/experiments/e10-e13-microvm/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e10-e13-microvm/EXPERIMENTS.md). As of this writing,
   E11's driver and its cluster-free test are built and green, but the density sweep has
   only been exercised for shape (no run against real hardware) — see that file's E11
   section for exactly which numbers are filled in and which are still named blanks.
@@ -148,7 +148,7 @@ history preserved.
 `@sh/session-backend` as `workspace:*` packages and on `pi-fork` via a `link:` path — none of
 which exist standalone in `moca-experiments`. `pnpm -C experiments test` only actually runs from
 _inside this monorepo's workspace, before the split_ (i.e. checked out at or before
-commit `3057c5f`, the last commit before the split). The code in `moca-experiments/experiments/`
+commit `3057c5f`, the last commit before the split). The code in `moca-experiments/experiments/e02-e05-harness/`
 is preserved as a historical record of what
 E2/E5 measured, not as a standalone-runnable package — same caveat the E1/E3/E4/E6/E7 Kind/OCP
 drivers already carry for needing a live cluster.
