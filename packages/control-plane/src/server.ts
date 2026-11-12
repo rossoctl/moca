@@ -4,6 +4,7 @@ import { CpError, writeError } from './errors.js';
 import type { EgressHost } from './egress-config.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
 import { HANDLERS, apiIssuer, type CpDeps, type RequestCtx } from './handlers.js';
+import { membershipNow } from './handler-util.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
 import { verifyToken } from './token.js';
 
@@ -122,6 +123,17 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
       // consequence leaked and the 64 KiB cap bounded it, but authentication belongs in front. Every
       // route here is new in MU1, so no existing caller depends on the old codes.
       authorize(matched.route, req, deps, ctx);
+      // Roles and enrollment NOW: a token's `roles` are what was true at its mint; with
+      // a members store the subject's current ones replace them, so a grant, revoke or lapse takes
+      // effect at the next request. Without a store the token's claims stand, as before.
+      if (ctx.principal && deps.members) {
+        const m = await membershipNow(deps, ctx.principal.sub, ctx.principal.roles ?? []);
+        ctx.principal = { ...ctx.principal, roles: m.roles, enrolled: m.enrolled };
+      } else if (ctx.principal) {
+        // A token never carries enrollment: only this step sets it.
+        const { enrolled: _ignored, ...claims } = ctx.principal;
+        ctx.principal = claims;
+      }
 
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
         const raw = await readBody(req, bodyLimitFor(matched.route));

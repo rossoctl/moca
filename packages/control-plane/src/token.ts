@@ -43,6 +43,11 @@ export interface TokenClaims {
   jti: string;
   /** Present only on a session token; absent on an api token (plan gap #7). */
   sid?: string;
+  /**
+   * Whether the members store enrolls the subject. Never read from a token: the
+   * control plane sets it per request, after verification, discarding any value a token carries.
+   */
+  enrolled?: boolean;
 }
 
 export interface MintInput {

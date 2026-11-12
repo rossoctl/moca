@@ -26,6 +26,11 @@ const SHARED = [
   'GET /v1/templates/{id}/builds',
   'GET /v1/templates/{id}/builds/{build}',
   'GET /v1/templates/{id}/tags',
+  'GET /v1/subjects',
+  'PUT /v1/subjects/{subject}',
+  'DELETE /v1/subjects/{subject}',
+  'PUT /v1/subjects/{subject}/roles/admin',
+  'DELETE /v1/subjects/{subject}/roles/admin',
 ];
 
 const servers: Server[] = [];

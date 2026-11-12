@@ -332,6 +332,48 @@ describe.skipIf(!havePython)('verify-provenance.py agrees with verifyExport', ()
     expect(r.out).toContain('ok template/demo-app: 7 records');
   });
 
+  it('verifies a members stream holding the member and role kinds', async () => {
+    const s = store();
+    await s.append({
+      stream: 'members',
+      kind: 'member',
+      subject: 'github:1',
+      body: { subject: 'oidc:erin@example.test', enrolled: true, before: false },
+    });
+    await s.append({
+      stream: 'members',
+      kind: 'role',
+      subject: 'github:1',
+      body: {
+        subject: 'github:1001',
+        role: 'admin',
+        state: 'granted',
+        until: null,
+        before: 'none',
+      },
+    });
+    const doc = JSON.parse(JSON.stringify(await s.export(['members'])));
+    expect(verifyExport(doc).ok).toBe(true);
+    const r = runVerifier(doc);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain('ok members: 2 records');
+  });
+
+  it('refuses a member kind outside the members stream, as verifyExport does', async () => {
+    const s = store();
+    await onboard(s);
+    const doc = JSON.parse(
+      JSON.stringify(await s.export(['template/demo-app'])),
+    ) as ProvenanceExport;
+    (doc.records[doc.records.length - 1] as { kind: string }).kind = 'role';
+    expect(verifyExport(doc).errors.join('\n')).toMatch(
+      /a role record in stream template\/demo-app/,
+    );
+    const r = runVerifier(doc);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('a role record in stream template/demo-app');
+  });
+
   it('fails where verifyExport fails', async () => {
     const s = store();
     await onboard(s);

@@ -1,4 +1,5 @@
 import { ProvenanceStore } from './provenance.js';
+import { MembersStore } from './members.js';
 import {
   FileTemplateCatalog,
   redisPresenceReader,
@@ -490,8 +491,8 @@ export function redisClientOptions(url: string) {
 
 /**
  * `SH_PROVENANCE_DIR` (template lifecycle spec §3.1, §7.2), either profile: a directory on the
- * control plane's persistent volume holding the provenance store and the template catalog, opened
- * together. Set, the catalog is the store (SH_SANDBOX_TEMPLATES imported into it once, each import
+ * control plane's persistent volume holding the provenance store, the template catalog and the
+ * members store (enrollment and roles through the API), opened together. Set, the catalog is the store (SH_SANDBOX_TEMPLATES imported into it once, each import
  * a provenance `create` record); unset, templates come from SH_SANDBOX_TEMPLATES at every start, as
  * before, and nothing is recorded. Each store checks its directory writable here, so a missing or
  * read-only volume fails the start, not the first write.
@@ -499,7 +500,7 @@ export function redisClientOptions(url: string) {
 export function templateCatalogFromEnv(
   env: NodeJS.ProcessEnv,
   config: CpConfig,
-): { templates?: TemplateCatalog; provenance?: ProvenanceStore } {
+): { templates?: TemplateCatalog; provenance?: ProvenanceStore; members?: MembersStore } {
   const dir = env.SH_PROVENANCE_DIR;
   if (!dir) return {};
   if (!dir.startsWith('/')) throw new Error('SH_PROVENANCE_DIR must be an absolute path');
@@ -511,6 +512,16 @@ export function templateCatalogFromEnv(
       provenance,
     }),
     provenance,
+    // Enrollment and roles through the API, beside the catalog; the settings' lists are its
+    // bootstrap, never edited by it.
+    members: new MembersStore({
+      dir,
+      provenance,
+      bootstrap: {
+        allowed: config.sandbox?.allowedSubjects ?? [],
+        admins: adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),
+      },
+    }),
   };
 }
 

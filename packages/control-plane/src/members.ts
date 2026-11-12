@@ -1,0 +1,228 @@
+import { randomUUID } from 'node:crypto';
+import { open as openFile, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { ProvenanceStore } from './provenance.js';
+
+/**
+ * Enrollment and roles through the API (enrollment and roles spec). The deployment's
+ * settings stay the bootstrap: SH_ALLOWED_SUBJECTS are always enrolled and SH_ADMIN_SUBJECTS always
+ * admins, and the API never edits either. This store holds what the API adds on top of them, in the
+ * control plane's template store directory (SH_PROVENANCE_DIR) beside the catalog, and each change is
+ * a record on the `members` provenance stream.
+ *
+ * Roles are evaluated PER REQUEST from the bootstrap lists and this store (`rolesNow`), not taken
+ * from a token's claims, so a grant, a revoke or a lapsed `until` takes effect at the subject's next
+ * request. Reads come from an in-memory copy, re-read only when the file's mtime changes, so the
+ * per-request evaluation costs one stat at most.
+ */
+
+export const ADMIN = 'admin';
+
+export interface RoleGrant {
+  role: typeof ADMIN;
+  /** Epoch seconds; absent: no expiry. */
+  until?: number;
+  /** The admin who granted it. */
+  by: string;
+  /** Epoch seconds. */
+  since: number;
+  /** Set once the lapse has been recorded (the `expired` record is written once). */
+  expiredRecorded?: boolean;
+}
+
+export interface Member {
+  subject: string;
+  enrolled: boolean;
+  roles: RoleGrant[];
+  /** Epoch seconds of the last change. */
+  since: number;
+  /** The admin who made the last change. */
+  by: string;
+}
+
+interface MembersDoc {
+  members: Record<string, Member>;
+}
+
+export interface MemberView {
+  subject: string;
+  enrolled: boolean;
+  /** `env`: from the deployment's settings (SH_ALLOWED_SUBJECTS / SH_ADMIN_SUBJECTS); `api`: this store. */
+  source: 'env' | 'api';
+  roles: { role: string; source: 'env' | 'api'; until: number | null; by: string | null }[];
+}
+
+/** The deployment's bootstrap lists: what the API can never change. */
+export interface Bootstrap {
+  allowed: readonly string[];
+  admins: readonly string[];
+}
+
+export class MembersStore {
+  private readonly path: string;
+  private readonly provenance: ProvenanceStore;
+  private pending: Promise<unknown> = Promise.resolve();
+  private cache: MembersDoc = { members: {} };
+  private cacheMtimeMs = -1;
+  readonly bootstrap: Bootstrap;
+
+  constructor(opts: { dir: string; provenance: ProvenanceStore; bootstrap: Bootstrap }) {
+    this.path = join(opts.dir, 'members.json');
+    this.provenance = opts.provenance;
+    this.bootstrap = opts.bootstrap;
+  }
+
+  private serial<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.pending.then(op, op);
+    this.pending = next.catch(() => undefined);
+    return next;
+  }
+
+  /** The store as on disk, through the cache (re-read when the file's mtime moved). */
+  async doc(): Promise<MembersDoc> {
+    let mtimeMs: number;
+    try {
+      mtimeMs = (await stat(this.path)).mtimeMs;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.cache = { members: {} };
+        this.cacheMtimeMs = -1;
+        return this.cache;
+      }
+      throw err;
+    }
+    if (mtimeMs !== this.cacheMtimeMs) {
+      const parsed = JSON.parse(await readFile(this.path, 'utf8')) as MembersDoc;
+      if (!parsed || typeof parsed.members !== 'object') throw new Error('members.json is invalid');
+      this.cache = parsed;
+      this.cacheMtimeMs = mtimeMs;
+    }
+    return this.cache;
+  }
+
+  private async write(doc: MembersDoc): Promise<void> {
+    const tmp = `${this.path}.${randomUUID()}.tmp`;
+    try {
+      const fh = await openFile(tmp, 'wx', 0o600);
+      try {
+        await fh.writeFile(JSON.stringify(doc));
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await rename(tmp, this.path);
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw err;
+    }
+    this.cache = doc;
+    this.cacheMtimeMs = (await stat(this.path)).mtimeMs;
+  }
+
+  /**
+   * One change, serialized: `fn` edits a copy of the doc and returns the record to write (or null
+   * for no change). The record is appended before the file is replaced: a crash between the two leaves a record for a change the store does not hold, never the reverse.
+   */
+  change(
+    fn: (
+      doc: MembersDoc,
+    ) => { kind: 'member' | 'role'; subject: string; body: Record<string, unknown> } | null,
+  ): Promise<string | null> {
+    return this.serial(async () => {
+      const doc = structuredClone(await this.doc());
+      const rec = fn(doc);
+      if (!rec) return null;
+      const { digest } = await this.provenance.append({
+        stream: 'members',
+        kind: rec.kind,
+        subject: rec.subject,
+        body: rec.body,
+      });
+      await this.write(doc);
+      return digest;
+    });
+  }
+
+  /**
+   * The subject's roles now: the bootstrap admins, plus a store grant that has not lapsed. A grant
+   * first seen lapsed has its `expired` record written once (best effort: a failure to record it
+   * never changes the answer, which is already "not admin").
+   */
+  async rolesNow(subject: string, nowS: number): Promise<string[]> {
+    if (this.bootstrap.admins.includes(subject)) return [ADMIN];
+    const m = (await this.doc()).members[subject];
+    const g = m?.roles.find((r) => r.role === ADMIN);
+    if (!g) return [];
+    if (g.until === undefined || g.until > nowS) return [ADMIN];
+    if (!g.expiredRecorded) await this.recordExpiry(subject, nowS).catch(() => undefined);
+    return [];
+  }
+
+  /** Whether the store (not the allow list) enrolls the subject. */
+  async storeEnrolled(subject: string): Promise<boolean> {
+    return (await this.doc()).members[subject]?.enrolled === true;
+  }
+
+  /** Whether the subject is enrolled: the allow list, the store, or an admin by either route. */
+  async enrolledNow(subject: string, nowS: number): Promise<boolean> {
+    if (this.bootstrap.allowed.includes(subject)) return true;
+    if ((await this.doc()).members[subject]?.enrolled) return true;
+    return (await this.rolesNow(subject, nowS)).includes(ADMIN);
+  }
+
+  private recordExpiry(subject: string, nowS: number): Promise<string | null> {
+    return this.change((doc) => {
+      const g = doc.members[subject]?.roles.find((r) => r.role === ADMIN);
+      if (!g || g.expiredRecorded || g.until === undefined || g.until > nowS) return null;
+      g.expiredRecorded = true;
+      return {
+        kind: 'role',
+        subject: 'control-plane',
+        body: { subject, role: ADMIN, state: 'expired', until: g.until, before: 'granted' },
+      };
+    });
+  }
+
+  /** Every subject the deployment or the store knows, with where each fact comes from. */
+  async list(nowS: number): Promise<MemberView[]> {
+    const bootstrap = this.bootstrap;
+    const doc = await this.doc();
+    const subjects = new Set([
+      ...bootstrap.allowed,
+      ...bootstrap.admins,
+      ...Object.keys(doc.members),
+    ]);
+    const out: MemberView[] = [];
+    for (const subject of [...subjects].sort()) {
+      const m = doc.members[subject];
+      const envEnrolled = bootstrap.allowed.includes(subject);
+      const envAdmin = bootstrap.admins.includes(subject);
+      const roles: MemberView['roles'] = [];
+      if (envAdmin) roles.push({ role: ADMIN, source: 'env', until: null, by: null });
+      const g = m?.roles.find((r) => r.role === ADMIN);
+      if (!envAdmin && g && (g.until === undefined || g.until > nowS))
+        roles.push({ role: ADMIN, source: 'api', until: g.until ?? null, by: g.by });
+      const enrolled = envEnrolled || !!m?.enrolled || roles.length > 0;
+      if (!enrolled) continue;
+      out.push({
+        subject,
+        enrolled,
+        source: envEnrolled || envAdmin ? 'env' : 'api',
+        roles,
+      });
+    }
+    return out;
+  }
+
+  /** One subject's view (enrolled false, no roles, when neither the settings nor the store has it). */
+  async view(subject: string, nowS: number): Promise<MemberView> {
+    return (
+      (await this.list(nowS)).find((v) => v.subject === subject) ?? {
+        subject,
+        enrolled: false,
+        source: 'api',
+        roles: [],
+      }
+    );
+  }
+}

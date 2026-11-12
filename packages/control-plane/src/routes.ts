@@ -411,6 +411,49 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'listTemplateTags',
   },
+  // Enrollment and roles through the API (member-handlers.ts): admin only, on both profiles as the
+  // template routes; with no members store (no SH_PROVENANCE_DIR) they answer 400.
+  {
+    method: 'GET',
+    path: '/v1/subjects',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'listSubjects',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/subjects/{subject}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'enrollSubject',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/subjects/{subject}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'unenrollSubject',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/subjects/{subject}/roles/admin',
+    auth: 'api',
+    sessionScoped: false,
+    bodyRequired: false,
+    profiles: BOTH,
+    operationId: 'grantAdmin',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/subjects/{subject}/roles/admin',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'revokeAdmin',
+  },
   // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {
     method: 'POST',
