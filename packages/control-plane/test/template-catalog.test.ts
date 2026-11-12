@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -144,6 +144,30 @@ describe('FileTemplateCatalog: the env list imported once (§3.1)', () => {
     expect(warnings.join()).toMatch(/SH_SANDBOX_TEMPLATES differs/);
     // No second create record: the import ran once.
     expect((await prov.chain('template/default')).length).toBe(1);
+  });
+
+  it('resumes an import a crash cut short: the missing templates, no second create record', async () => {
+    const dir = freshDir();
+    const prov = new ProvenanceStore({ dir });
+    await new FileTemplateCatalog({ dir, declared: DECLARED, provenance: prov }).list();
+    // A crash after the first document: the second is missing and the marker was never written.
+    rmSync(join(dir, 'catalog', 'django-django-11133.json'));
+    rmSync(join(dir, 'catalog', '.imported'));
+    const warnings: string[] = [];
+    const again = new FileTemplateCatalog({
+      dir,
+      declared: DECLARED,
+      provenance: prov,
+      warn: (m) => warnings.push(m),
+    });
+    expect((await again.list()).map((d) => d.id)).toEqual(['default', 'django-django-11133']);
+    expect(warnings).toEqual([]);
+    // The second template's create record (written before the crash) is reused, not appended again.
+    for (const id of ['default', 'django-django-11133'])
+      expect((await prov.chain(`template/${id}`)).map((r) => r.kind)).toEqual(['create']);
+    const doc = (await again.list()).find((d) => d.id === 'django-django-11133')!;
+    expect(doc.builds[0].provenance).toBe((await prov.head('template/django-django-11133'))!.head);
+    expect(existsSync(join(dir, 'catalog', '.imported'))).toBe(true);
   });
 
   it('does not warn when the env list still matches', async () => {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, constants, mkdirSync } from 'node:fs';
-import { open as openFile, readdir, readFile, rename, unlink } from 'node:fs/promises';
+import { access, open as openFile, readdir, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ProvenanceStore } from './provenance.js';
 import type { SandboxTemplate } from './sandbox-config.js';
@@ -22,6 +22,9 @@ import type { SandboxTemplate } from './sandbox-config.js';
  * deployment plumbing a client never sees, so the id is a digest of it, not the worker itself. A
  * built build (a later issue) is named by its snapshot's manifest hash.
  */
+
+/** Written last by the one-time import, so a start without it resumes an interrupted import. */
+const IMPORTED_MARKER = '.imported';
 
 export const TEMPLATE_DOC_SCHEMA = 'moca-template/1';
 
@@ -169,9 +172,17 @@ export class FileTemplateCatalog implements TemplateCatalog {
     return this.ready;
   }
 
+  /**
+   * Imports SH_SANDBOX_TEMPLATES once, into an empty catalog, and is safe to crash part way: the
+   * marker `.imported` is written last, so a start that finds no marker resumes. It writes only the
+   * templates not yet in the catalog, and reuses a template's `create` record from the env list when
+   * its stream already ends in one (a crash between the record and the document), so a resumed
+   * import never appends a second `create`. With the marker present the catalog holds the
+   * templates, and an env list that differs is only warned about.
+   */
   private async importOnce(): Promise<void> {
     const have = await this.readAll();
-    if (have.length > 0) {
+    if (await this.imported()) {
       const ids = new Set(have.map((d) => d.id));
       const differs =
         this.declared.length !== have.filter((d) => d.owner === null).length ||
@@ -184,21 +195,57 @@ export class FileTemplateCatalog implements TemplateCatalog {
       }
       return;
     }
+    const done = new Set(have.map((d) => d.id));
     const nowS = Math.floor(this.now() / 1000);
     for (const t of this.declared) {
-      const { digest } = await this.provenance.append({
-        stream: `template/${t.id}`,
-        kind: 'create',
-        subject: 'deployment',
-        body: {
-          source: 'SH_SANDBOX_TEMPLATES',
-          buildId: importedBuildId(t.worker),
-          worker: t.worker,
-          description: t.description,
-          tools: [...t.tools],
-        },
-      });
+      if (done.has(t.id)) continue;
+      const digest = (await this.importedCreate(t.id)) ?? (await this.appendCreate(t));
       await this.write(docFromDeclared(t, nowS, digest));
+    }
+    await this.markImported();
+  }
+
+  private async appendCreate(t: SandboxTemplate): Promise<string> {
+    const { digest } = await this.provenance.append({
+      stream: `template/${t.id}`,
+      kind: 'create',
+      subject: 'deployment',
+      body: {
+        source: 'SH_SANDBOX_TEMPLATES',
+        buildId: importedBuildId(t.worker),
+        worker: t.worker,
+        description: t.description,
+        tools: [...t.tools],
+      },
+    });
+    return digest;
+  }
+
+  /** The digest of an earlier, interrupted import's `create` record for `id`, if its stream ends in one. */
+  private async importedCreate(id: string): Promise<string | null> {
+    const h = await this.provenance.head(`template/${id}`);
+    if (!h) return null;
+    const rec = await this.provenance.get(h.head);
+    const body = rec?.body as { source?: unknown } | undefined;
+    return rec?.kind === 'create' && body?.source === 'SH_SANDBOX_TEMPLATES' ? h.head : null;
+  }
+
+  private async imported(): Promise<boolean> {
+    try {
+      await access(join(this.dir, IMPORTED_MARKER));
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw err;
+    }
+  }
+
+  private async markImported(): Promise<void> {
+    const fh = await openFile(join(this.dir, IMPORTED_MARKER), 'w', 0o600);
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
     }
   }
 
