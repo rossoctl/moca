@@ -674,9 +674,10 @@ install_template_unit() {
     "$SCRIPT_DIR/microvm-worker.service" >"$stage/tpl.service"
   # The two lines that keep this worker's VMs apart from the main worker's: if the shipped unit ever
   # renames them, the sed above matches nothing and the instance would sweep the MAIN worker's slice.
-  grep -qx 'Slice=microvm-tpl-%i.slice' "$stage/tpl.service" &&
-    grep -qx 'Environment=SH_PARENT_CGROUP=microvm.slice/microvm-tpl.slice/microvm-tpl-%i.slice' "$stage/tpl.service" ||
+  if ! grep -qx 'Slice=microvm-tpl-%i.slice' "$stage/tpl.service" ||
+    ! grep -qx 'Environment=SH_PARENT_CGROUP=microvm.slice/microvm-tpl.slice/microvm-tpl-%i.slice' "$stage/tpl.service"; then
     die "could not derive the template unit from $SCRIPT_DIR/microvm-worker.service (its Slice= or SH_PARENT_CGROUP= line changed)"
+  fi
   install_if_changed "$stage/tpl.service" "$SH_UNIT_DIR/$TPL_UNIT_SRC" 0644
 }
 
@@ -743,8 +744,9 @@ template_main() {
   # (install-host.sh's rule for SBX0's workers).
   local need=$(((guest + 32) * 3 + 1024))
   TPL_BUDGET_MB="${TPL_BUDGET_MB:-$need}"
-  [[ "$TPL_BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((TPL_BUDGET_MB >= need)) ||
+  if ! [[ "$TPL_BUDGET_MB" =~ ^[1-9][0-9]*$ ]] || ((TPL_BUDGET_MB < need)); then
     die "--budget-mb $TPL_BUDGET_MB cannot hold one session of a ${guest} MiB guest: at least $need MiB"
+  fi
   local port token stage
   port="$(relay_port "$SH_ENV_DIR/relay.env")"
   token="$(env_value "SH_RELAY_TOKEN_$TPL_SID" "$TPL_RELAY_ENV" 2>/dev/null || true)"

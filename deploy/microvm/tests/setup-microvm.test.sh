@@ -794,7 +794,11 @@ for f in "etc/microvm-worker-$SID.env" "etc/microvm-relay-$SID.env" "units/sh-re
   "units/microvm-worker@$SID.service.d/50-moca-template.conf" "units/microvm-worker@.service" "units/microvm-tpl.slice"; do
   check "removed $f" "$([ -e "$TMP/$f" ] && echo present || echo gone)" "gone"
 done
-check "the main worker's files stay" "$(cd "$TMP" && ls units/microvm-worker.service etc/microvm-worker.env etc/microvm-relay.env 2>/dev/null | wc -l | tr -d ' ')" "3"
+kept=0
+for f in units/microvm-worker.service etc/microvm-worker.env etc/microvm-relay.env; do
+  if [[ -e "$TMP/$f" ]]; then kept=$((kept + 1)); fi
+done
+check "the main worker's files stay" "$kept" "3"
 check "workspace data is kept" "$([ -f "$TPLROOT/$KEY/workspaces/s-1/kept" ] && echo kept)" "kept"
 check "the instance's slice is stopped too (its VMs are siblings of the unit)" "$(grep -c "^systemctl stop microvm-tpl-$SID.slice$" "$MOCK_LOG")" "1"
 check "the instance is disabled and stopped" "$(grep -c "^systemctl disable --now microvm-worker@$SID.service$" "$MOCK_LOG")" "1"
