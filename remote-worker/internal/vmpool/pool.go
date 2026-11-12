@@ -2,6 +2,7 @@ package vmpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -22,6 +23,16 @@ type Exec struct {
 	Stdin     []byte
 	TimeoutS  uint32
 	Streaming bool
+
+	// Lease mode (spec §3, §8.2). The relay sets Mode and ModeEpoch from the sandbox
+	// token's claims; the zero values are today's per-Exec path. IdleTimeout is the
+	// owner's lease idle timeout: 0 means Config.LeaseIdleDefault, and any value is
+	// clamped to [LeaseIdleMin, LeaseIdleCeiling]. Keepalive opts the lease into the
+	// keepalive-loss rule (spec §4).
+	Mode        Mode
+	ModeEpoch   uint64
+	IdleTimeout time.Duration
+	Keepalive   bool
 }
 
 // Bounds on Exec.TimeoutS. Every Exec is bounded; there is no unbounded form.
@@ -73,7 +84,9 @@ func clampTimeoutS(timeoutS uint32) (uint32, bool) {
 // returning early.
 type Pool interface {
 	// Exec acquires a standby VM bound to key's workspace, runs exactly one
-	// command, and destroys the VM before returning. A VM is NEVER reused.
+	// command, and destroys the VM before returning. A VM is NEVER reused -- except
+	// in lease mode (Exec.Mode, lease.go), where one VM serves one key's Execs until
+	// its lease ends, and is then destroyed, never pooled (spec §3).
 	Exec(ctx context.Context, key string, e Exec, out Sink) (Result, error)
 	// ExecPhased is Exec with the hot path decomposed into Phases, for vmpoolctl
 	// and E10's driver (spec §3.1). ph may be nil. There is exactly one
@@ -89,6 +102,29 @@ type Pool interface {
 	// so the caller (the worker's startup sequence) must fail at START, not on a
 	// user's first request.
 	Probe(ctx context.Context) error
+	// SetMode records a verified LeaseControl set_mode for key: {m, epoch}, known. It
+	// refuses an epoch below a known one (stale-mode), and a lease mode on a worker
+	// that cannot serve it (lease-unsupported). Spec §8.2.
+	//
+	// A downgrade to per-exec ends a live lease (mode_change) before SetMode returns, so
+	// it BLOCKS for the Exec in flight: up to LeaseGraceLimit (30 min by default), after
+	// which that Exec is cut, plus its unwind. lease+processes -> lease keeps the lease.
+	SetMode(key string, m Mode, epoch uint64) error
+	// Keepalive records a keepalive for key's live lease: the keepalive-loss rule then
+	// applies until the lease ends. It never resets the idle clock, and without a live
+	// lease it is a no-op. Spec §4.
+	Keepalive(key string) error
+	// LeaseStatus reports key's stored mode, whether its epoch is known, the live lease
+	// (none, active or expiring, its age and idle timeout) and the unacknowledged lease
+	// event. Spec §5, §8.3's LeaseControl status.
+	LeaseStatus(key string) LeaseInfo
+	// AckLeaseEvent clears key's pending lease event whose At equals at; a newer one
+	// stays. Spec §5: the worker keeps the last end event until a client has seen it.
+	AckLeaseEvent(key string, at time.Time)
+	// EndLease ends key's live lease for reset or sandbox_deleted, and refuses any other
+	// reason. It BLOCKS for the Exec in flight: up to LeaseGraceLimit, after which that
+	// Exec is cut with lease_ended(<reason>), plus its unwind. Spec §8.3.
+	EndLease(key string, reason LeaseEndReason) error
 	// Close stops the sweep and destroys everything. Beyond spec §4.1's listing:
 	// §6 requires a shutdown that leaves no orphan VMs.
 	Close() error
@@ -113,7 +149,11 @@ type pool struct {
 
 	// ticker is spec §4.2's second sweep trigger: the per-Exec sweep alone cannot
 	// reclaim a run whose last Exec was also its last (Task 6).
-	ticker      Timer
+	ticker Timer
+	// leaseTicker ends leases on time (lease.go, sweepLeasesLocked): idle, keepalive
+	// loss, maximum duration, grace limit. Armed only when LeaseEnabled, and apart from
+	// ticker, so the per-Exec sweep's timing is the same with lease mode on or off.
+	leaseTicker Timer
 	reclaimQ    chan reclaimBatch
 	reclaimDone sync.WaitGroup
 	// reaper is nil unless Config.DeferReapWorkers > 0. When set, destroy hands each VM's
@@ -164,10 +204,15 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	if clk == nil {
 		clk = RealClock()
 	}
+	// Computed, never configured: a Config claiming lease support the VMM or the
+	// snapshot cannot back would put lease Execs on a guest without plan 1's half.
+	cfg.LeaseEnabled = LeaseSupported(cfg)
 	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters()}
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
 	p.reaper = newReaper(cfg.DeferReapWorkers)
+	// Before anything is served: the previous process's open leases ended with it.
+	p.endLeasesOpenAtStart()
 	// Sized so a full host's worth of sweeps queues rather than blocking; a full
 	// queue falls back to an inline destroy (see sweep).
 	p.reclaimQ = make(chan reclaimBatch, 64)
@@ -175,6 +220,9 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	go p.reclaimLoop()
 	p.mu.Lock()
 	p.armTickerLocked()
+	if cfg.LeaseEnabled {
+		p.armLeaseTickerLocked()
+	}
 	p.mu.Unlock()
 	return p, nil
 }
@@ -218,6 +266,11 @@ type Phases struct {
 	Cold    ColdCause // "" when the acquire was warm
 	VMID    string    // the VM that ran this Exec; "" when acquire failed
 
+	// Normalise is a lease start's normalise step (lease.go, normaliseLease): the
+	// ownership walk the guest runs before the lease's first Exec when root has written
+	// the workspace. Zero when the Exec started no lease or its lease needed no walk.
+	Normalise time.Duration
+
 	// Resume's three sub-phases, populated only by a launcher implementing
 	// resumePhaser (Firecracker does; CHV does not, and reports zeros). They sum to
 	// Resume PER EXEC, to ~0.1% -- the remainder is checkNotDestroyed, newFCClient and
@@ -259,6 +312,9 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	if err := checkKey(key); err != nil {
 		return Result{}, p.countRefusal(err)
 	}
+	if e.Mode != ModePerExec && !p.cfg.LeaseEnabled {
+		return Result{}, p.refuse(RefuseLeaseUnsupported, "%s Exec for %q: %s", e.Mode, key, leaseUnsupportedDetail)
+	}
 
 	// The timeout must bound the WHOLE Exec, including a cold acquire's VM boot —
 	// not just vm.Run — or a wedged VMM hangs until the relay stream dies. The
@@ -281,14 +337,55 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var timedOut atomic.Bool
-	tm := p.clk.AfterFunc(time.Duration(timeoutS)*time.Second, func() {
+	fire := func() {
 		timedOut.Store(true)
 		cancel()
-	})
-	defer tm.Stop()
+	}
+	deadline := p.clk.Now().Add(time.Duration(timeoutS) * time.Second)
+	tm := p.clk.AfterFunc(time.Duration(timeoutS)*time.Second, fire)
+	defer func() { tm.Stop() }() // the timer live at return: a lease Exec extends it
+
+	if p.cfg.LeaseEnabled {
+		// Lease mode (lease.go). With LeaseEnabled false -- every worker without the
+		// lease-v1 snapshot -- none of this runs and the path below is today's.
+		mode, endFirst, err := p.routeExec(key, e)
+		if err != nil {
+			return Result{}, err
+		}
+		switch {
+		case mode != ModePerExec:
+			// The host's timer stays at the budget's end through the gate wait, the
+			// acquire, Resume and the normalise step. runLease calls extend immediately
+			// before Run, which moves it LeaseTimeoutSlack past the budget, so the guest's
+			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). extend
+			// reports false when the timer has already fired: the Exec is timed out, and
+			// runLease does not run it (PR #763 second review, G1).
+			extend := func() bool {
+				if !tm.Stop() {
+					return false
+				}
+				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
+				return true
+			}
+			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline, extend)
+			if !errors.Is(err, errServePerExec) {
+				return res, err
+			}
+			// A same-epoch downgrade to per-exec landed while the Exec queued (execLease
+			// ended the lease, mode_change): it runs per-Exec below. The timer was never
+			// extended, so the per-Exec budget has no slack.
+		case endFirst:
+			// A per-Exec Exec on a key that holds a lease: the lease ends (mode_change)
+			// under the gate BEFORE this Exec acquires, so its VM is never restored
+			// beside a live lease VM (Review Focus 2).
+			if err := p.endLeaseForPerExec(ctx, runCtx, key, &timedOut, timeoutS); err != nil {
+				return Result{}, err
+			}
+		}
+	}
 
 	t0 := p.clk.Now()
-	vm, rp, cause, err := p.acquire(runCtx, key)
+	vm, rp, cause, err := p.acquire(runCtx, key, false)
 	if ph != nil {
 		ph.Acquire = p.clk.Now().Sub(t0)
 		ph.Cold = cause
@@ -351,6 +448,12 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	// No early return below can leak a VM.
 	defer destroy()
 
+	if p.cfg.LeaseEnabled {
+		if err := p.perExecUnderGate(rp); err != nil {
+			return Result{}, err
+		}
+	}
+
 	if vm.Key() != key {
 		return Result{}, fmt.Errorf("%w: popped %q for %q", ErrKeyMismatch, vm.Key(), key)
 	}
@@ -407,7 +510,19 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 // second one (spec §4.2), then loops. Looping rather than recursing is what keeps
 // the acquire counted exactly once — cold-acquire rate is E11's headline diagnostic,
 // and double-counting it would read as replenishment falling behind.
-func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause, error) {
+//
+// With lease true the VM is for a new lease (lease.go, spec §6): the promotion check
+// and the cold path's warming charge are priced at LeaseStartBytes (the cold charge
+// in rp.warmingLease, not rp.warming), and the VM is returned installed as rp.lease
+// -- a vmLease holding only the VM, which execLease completes -- instead of counted
+// in rp.inFlight. Installing it in the critical section that ends the warming or the
+// pop keeps the VM charged exactly once at every instant, as the per-Exec handoff
+// below does for inFlight.
+func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPool, ColdCause, error) {
+	price := p.perVMBytes()
+	if lease {
+		price = p.cfg.LeaseStartBytes
+	}
 	counted := false
 	var cause ColdCause
 	for {
@@ -422,6 +537,10 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 			return nil, nil, "", p.countRefusal(err)
 		}
 		rp.lastExec = p.clk.Now()
+		// A run routeExec created (lease.go) is not fresh here, but its first acquire is
+		// still a first Exec's.
+		fresh = fresh || rp.unacquired
+		rp.unacquired = false
 
 		if n := len(rp.ready); n > 0 {
 			vm := rp.ready[n-1]
@@ -431,7 +550,7 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 			// a refusal must leave the standby exactly where it was for a later,
 			// colder host to promote. On a host whose slots x PerVMBytes fit the
 			// budget this never fires; see admitPromotionLocked.
-			if err := p.admitPromotionLocked(vm); err != nil {
+			if err := p.admitPromotionAtLocked(vm, price); err != nil {
 				// RefuseMemoryBudget is fundable: eviction needs only
 				// perVM minus this standby's dirty charge of headroom, which other
 				// idle runs' standbys can cover — without it, a standby-heavy host
@@ -443,8 +562,8 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 				// asynchronously, so MemAvailable is unchanged at the re-check and
 				// the standbys would be burned for a refusal either way.
 				if ReasonOf(err) == RefuseMemoryBudget {
-					p.evictForPromotionLocked(rp, vm)
-					err = p.admitPromotionLocked(vm)
+					p.evictForPromotionLocked(rp, vm, price)
+					err = p.admitPromotionAtLocked(vm, price)
 				}
 				if err != nil {
 					p.mu.Unlock()
@@ -452,7 +571,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 				}
 			}
 			rp.ready = rp.ready[:n-1]
-			rp.inFlight++
+			if lease {
+				rp.lease = newVMLease(vm)
+			} else {
+				rp.inFlight++
+			}
 			p.mu.Unlock()
 			if !counted {
 				p.counters.warmAcquire()
@@ -486,7 +609,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 
 		// admitOrEvictLocked, not admitLocked: this refusal reaches a transcript, so a
 		// coldest idle standby is shed to make room before one is returned (#452).
-		if err := p.admitOrEvictLocked(false); err != nil {
+		admit := p.admitOrEvictLocked
+		if lease {
+			admit = p.admitLeaseOrEvictLocked
+		}
+		if err := admit(false); err != nil {
 			p.mu.Unlock()
 			return nil, nil, "", p.countRefusal(err)
 		}
@@ -500,14 +627,22 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 		// actually have. It errs safe (over-refusal, not over-commit), which is why it
 		// was a suggestion rather than a must-fix, but a ceiling that reads low is still
 		// a measurement of the wrong thing.
-		rp.warming++
+		if lease {
+			rp.warmingLease++
+		} else {
+			rp.warming++
+		}
 		dir, id := rp.dir, p.nextIDLocked()
 		p.mu.Unlock()
 
 		vm, err := p.warm(ctx, key, dir, id)
 
 		p.mu.Lock()
-		rp.warming--
+		if lease {
+			rp.warmingLease--
+		} else {
+			rp.warming--
+		}
 		rp.signalSettledLocked()
 		if err != nil {
 			rp.backoff = nextBackoff(rp.backoff)
@@ -530,7 +665,11 @@ func (p *pool) acquire(ctx context.Context, key string) (VM, *runPool, ColdCause
 		// VM is charged exactly once at every instant a reader of committedLocked could
 		// observe, and busy() never reads false in between — a gap there would let a
 		// sweep reclaim the workspace of a VM that is about to run in it.
-		rp.inFlight++
+		if lease {
+			rp.lease = newVMLease(vm)
+		} else {
+			rp.inFlight++
+		}
 		rp.backoff = 0
 		p.mu.Unlock()
 		return vm, rp, cause, nil
@@ -601,13 +740,19 @@ func (p *pool) destroy(key string, vm VM) {
 
 // runLocked returns key's runPool, creating it if unseen. Caller holds p.mu.
 func (p *pool) runLocked(key string) (*runPool, bool, error) {
+	return p.runAtLocked(key, p.perVMBytes())
+}
+
+// runAtLocked is runLocked with a new run's first VM priced at price: PerVMBytes, or
+// LeaseStartBytes for a run created by a lease Exec (spec §6). Caller holds p.mu.
+func (p *pool) runAtLocked(key string, price int64) (*runPool, bool, error) {
 	if rp := p.runs[key]; rp != nil {
 		return rp, false, nil
 	}
 	// admitOrEvictLocked, not admitLocked: a new workspace_key on a full host is #452's
 	// own repro ("create more distinct P4 sessions than the budget holds VMs"), and its
 	// refusal reaches a transcript, so a coldest idle standby is shed first.
-	if err := p.admitOrEvictLocked(true); err != nil {
+	if err := p.admitOrEvictAtLocked(true, price); err != nil {
 		return nil, false, err
 	}
 	dir, err := p.workspaceDir(key)
@@ -679,6 +824,9 @@ func (p *pool) Reclaim(ctx context.Context, key string) error {
 	if !busy {
 		if tomb, detachErr = detachWorkspace(rp.dir); detachErr == nil {
 			delete(p.runs, key)
+			if p.cfg.LeaseEnabled { // as the sweep does: see sweepOnce
+				retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -715,8 +863,15 @@ func (p *pool) Stats() Stats {
 		if rp.idleFor(now) > half {
 			s.IdleStandbyResidency += len(rp.ready)
 		}
+		if rp.lease != nil {
+			s.LeaseVMs++
+			if rp.lease.running {
+				s.LeaseExecuting++
+			}
+		}
 	}
 	s.CommittedBytes = p.committedLocked()
+	s.LeaseCommittedBytes = p.leaseCommittedLocked()
 	s.StandbyCommittedBytes = p.standbyCommittedLocked()
 	p.mu.Unlock()
 	p.counters.snapshot(&s)
@@ -746,6 +901,12 @@ func (p *pool) Close() error {
 	if p.ticker != nil {
 		p.ticker.Stop()
 	}
+	if p.leaseTicker != nil {
+		p.leaseTicker.Stop()
+	}
+	// Every lease VM whose gate is free, gate taken; the rest are destroyed by the Exec
+	// holding the gate. Their state files keep the open lease (worker_restart, Task 5).
+	leases := p.closeLeasesLocked()
 	var victims []VM
 	for _, rp := range p.runs {
 		victims = append(victims, rp.ready...)
@@ -788,6 +949,12 @@ func (p *pool) Close() error {
 				firstErr = err
 			}
 		}
+	}
+	for _, v := range leases {
+		if err := p.destroyLeaseVM(v.key, v.vm); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		<-v.gate
 	}
 
 	// p.closed is now true, and every sweep checks it under p.mu before sending on

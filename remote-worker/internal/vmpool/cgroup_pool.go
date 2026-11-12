@@ -161,6 +161,38 @@ func (p *cgroupPool) release(rel string) {
 	p.mu.Unlock()
 }
 
+// retire removes rel instead of returning it for reuse: the lease path (spec §6, "Not from the
+// cgroup pool"). A lease VM starts as a pooled standby, and at promotion LeaseCgroup raises its
+// memory.max past this pool's bound -- so handing the cgroup to the next per-Exec VM would give
+// that VM the lease bound, which admission control does not charge it for. The name is never
+// reissued: issued is monotonic, so the next acquire mints a new one.
+//
+// The guard is release's, for release's reason: a stray process still inside is left alone and
+// counted, never removed out from under. A failed rmdir is counted the same way. A directory
+// that is already gone is not a leak -- there is nothing left.
+func (p *cgroupPool) retire(rel string) {
+	if _, statErr := os.Stat(p.abs(rel)); statErr != nil {
+		log.Printf("vmpool: cgroup pool: retiring %s, its directory is already gone (%v)", rel, statErr)
+		return
+	}
+	pids, err := readCgroupProcs(filepath.Join(p.abs(rel), "cgroup.procs"))
+	switch {
+	case err != nil:
+		p.leaked.Add(1)
+		log.Printf("vmpool: cgroup pool: leaking lease cgroup %s, cannot read cgroup.procs: %v", rel, err)
+		return
+	case len(pids) > 0:
+		p.leaked.Add(1)
+		log.Printf("vmpool: cgroup pool: leaking lease cgroup %s, %d process(es) still inside after "+
+			"Destroy (a child escaped the process group)", rel, len(pids))
+		return
+	}
+	if err := removeCgroupDir(p.abs(rel)); err != nil {
+		p.leaked.Add(1)
+		log.Printf("vmpool: cgroup pool: leaking lease cgroup %s, could not remove it: %v", rel, err)
+	}
+}
+
 func (p *cgroupPool) idle() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
