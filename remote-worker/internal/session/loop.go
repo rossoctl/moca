@@ -104,6 +104,9 @@ type Session struct {
 	// handed to Send. An Exec's terminal frame is queued before inflight drops, so Idle reads
 	// inflight first and then this: a terminal frame still behind chunks keeps the session busy.
 	unsent atomic.Int64
+	// leaseSlots holds one token per LeaseControl call running, across every connection: see
+	// leaseControlCap.
+	leaseSlots chan struct{}
 }
 
 // Idle reports that no admitted Exec is queued or running, and that every frame queued for the
@@ -123,7 +126,7 @@ func New(cfg Config, r wexec.Runner) *Session {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
 	}
-	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize)}
+	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize), leaseSlots: make(chan struct{}, leaseControlCap)}
 }
 
 // slot tracks one accepted exec so an Abort can reach it whether it is running
@@ -266,8 +269,36 @@ const (
 type conn struct {
 	st      Stream
 	trySend func(*pb.WorkerFrame) bool
-	queue   chan *pb.Exec
-	reg     *execRegistry
+	// sendLate is the blocking enqueue for a producer Serve does NOT wait for (a LeaseControl
+	// goroutine). It reports false, and queues nothing, once the connection has ended.
+	sendLate func(*pb.WorkerFrame) bool
+	queue    chan *pb.Exec
+	reg      *execRegistry
+}
+
+// lateGate lets a goroutine that Serve does not wait for enqueue safely. Serve closes
+// outbound once its own producers are done; a send on a closed channel panics, even inside a
+// select. Holders of the read lock may enqueue; Serve takes the write lock, after cancelling
+// the connection (so a held enqueue returns promptly), and marks the gate shut before it
+// closes outbound.
+type lateGate struct {
+	mu     sync.RWMutex
+	closed bool
+}
+
+func (g *lateGate) send(enqueue func(*pb.WorkerFrame) bool, f *pb.WorkerFrame) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.closed {
+		return false
+	}
+	return enqueue(f)
+}
+
+func (g *lateGate) shut() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
 }
 
 // Serve runs one connection to exhaustion and returns why it ended. The caller
@@ -366,7 +397,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		}
 	}()
 
-	// enqueue is the blocking sender used by producers (heartbeat, the pool).
+	// enqueue is the blocking sender used by producers (heartbeat, the pool). It reports
+	// whether the frame was queued: false only when connCtx ended first.
 	// Backpressure here is correct: neither is the recv goroutine, so blocking
 	// them cannot stall a read of an Abort frame.
 	//
@@ -378,7 +410,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// reserve; the semaphore just adds a second place to hit it. Frames abandoned
 	// this way are not silently lost work: the connection is already dying, the
 	// harness re-dials, and the dedup cache answers the redelivery (spec §5, §6.2).
-	enqueue := func(f *pb.WorkerFrame) {
+	enqueue := func(f *pb.WorkerFrame) bool {
 		// Non-blocking attempts first, so behaviour is unchanged whenever there is
 		// room. select picks at random among ready cases, so without these a done
 		// connCtx could abandon a frame that would have fit.
@@ -388,7 +420,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 			select {
 			case chunkSlots <- struct{}{}:
 			case <-connCtx.Done():
-				return
+				return false
 			}
 		}
 		// A held slot does NOT guarantee room here, so this wait is real rather than
@@ -401,14 +433,16 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		s.unsent.Add(1)
 		select {
 		case outbound <- outFrame{frame: f}:
-			return
+			return true
 		default:
 		}
 		select {
 		case outbound <- outFrame{frame: f}:
+			return true
 		case <-connCtx.Done():
 			s.unsent.Add(-1)
 			<-chunkSlots // hand the slot back; nothing will ever drain this frame
+			return false
 		}
 	}
 	// trySend is the non-blocking sender used by the recv goroutine (via accept).
@@ -459,11 +493,13 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		}
 	}()
 
+	gate := &lateGate{}
 	c := &conn{
-		st:      st,
-		trySend: trySend,
-		queue:   make(chan *pb.Exec, QueueCap),
-		reg:     newExecRegistry(),
+		st:       st,
+		trySend:  trySend,
+		sendLate: func(f *pb.WorkerFrame) bool { return gate.send(enqueue, f) },
+		queue:    make(chan *pb.Exec, QueueCap),
+		reg:      newExecRegistry(),
 	}
 
 	for i := 0; i < s.cfg.MaxConcurrent; i++ {
@@ -492,7 +528,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// spawning a real bash child only to kill it immediately.
 	cancelConn() // stop heartbeats and kill in-flight/queued children
 	close(c.queue)
-	wg.Wait() // producers done: no more enqueues to outbound
+	wg.Wait()   // producers done: no more enqueues to outbound from them
+	gate.shut() // nor from a LeaseControl goroutine still running
 	close(outbound)
 	wgSender.Wait()
 	return recvErr
@@ -524,6 +561,15 @@ func (s *Session) recvLoop(ctx context.Context, c *conn) error {
 			// Abort for an unknown req_id is a no-op (spec §8). The "leaves it in the
 			// map" reasoning now lives on execRegistry.abort.
 			c.reg.abort(m.Abort.GetReqId())
+		case *pb.ServerFrame_LeaseControl:
+			// Off this loop: the call itself runs on its own goroutine (it can block for
+			// minutes), and a refusal goes through trySend like accept's.
+			if err := s.leaseControl(ctx, c, m.LeaseControl); err != nil {
+				return err
+			}
+		case *pb.ServerFrame_Keepalive:
+			// Inline: LeaseController.LeaseKeepalive must not block.
+			s.leaseKeepalive(m.Keepalive)
 		}
 	}
 }
@@ -668,7 +714,8 @@ func (s *Session) enqueueAdmitted(
 // read once, after Run returns, to set End.truncated (#189).
 type frameSink struct {
 	reqID uint64
-	send  func(*pb.WorkerFrame)
+	// send is the blocking enqueue; false means the frame was not queued (see Lease).
+	send func(*pb.WorkerFrame) bool
 	// dropped counts STDOUT bytes only — see Dropped.
 	dropped int
 }
@@ -712,7 +759,7 @@ func (f *frameSink) Dropped(stream pb.Stream, n int) {
 // runOne executes one exec and sends exactly one terminal frame (spec §5).
 // send is the blocking enqueue: runOne runs on a pool goroutine, not the recv
 // goroutine, so backpressure here is correct rather than dangerous.
-func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.Exec) {
+func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame) bool, e *pb.Exec) {
 	reqID := e.GetReqId()
 	if ctx.Err() != nil {
 		// Aborted while queued: never spawn bash, but still owe a terminal frame.
@@ -729,6 +776,10 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.
 		TimeoutS:     e.GetTimeoutS(),
 		Streaming:    e.GetStreaming(),
 		WorkspaceKey: e.GetWorkspaceKey(),
+		Mode:         specMode(e.GetMode()),
+		ModeEpoch:    e.GetModeEpoch(),
+		IdleTimeoutS: e.GetIdleTimeoutS(),
+		Keepalive:    e.GetKeepalive(),
 	}, sink)
 
 	var frame *pb.WorkerFrame
@@ -792,6 +843,8 @@ func reqIDOf(f *pb.WorkerFrame) uint64 {
 		return m.Error.GetReqId()
 	case *pb.WorkerFrame_Chunk:
 		return m.Chunk.GetReqId()
+	case *pb.WorkerFrame_Lease:
+		return m.Lease.GetReqId()
 	default:
 		return 0
 	}
