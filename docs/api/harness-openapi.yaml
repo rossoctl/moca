@@ -13,7 +13,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.0.0
+  version: 1.1.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -81,8 +81,11 @@ paths:
         carried `Retry-After`.
 
         Authenticated turns run on the caller's exchanged credential, with the session's
-        config bundle and sandbox tier taken from the control plane — never from the request
-        (ADR-0038) — and create the session if absent. Unauthenticated turns (SH_REQUIRE_AUTH
+        config bundle, sandbox tier and sandbox template taken from the control plane — never
+        from the request (ADR-0038) — and create the session if absent. A session with a
+        template runs only on workers serving it, and a template's seed runs once in the
+        session's workspace before the turn's first tool call; a session with none runs only
+        on untemplated workers. Unauthenticated turns (SH_REQUIRE_AUTH
         off, no token) run on the operator's ambient credential: a named session must already
         exist (404 session_not_found otherwise), and an omitted sessionId starts a fresh one.
 
@@ -199,9 +202,10 @@ paths:
         '503':
           description: |
             Retryable, from one of three causes: no sandbox capacity right now (every candidate
-            is at its cap, none is present yet, or the session's own sandbox is briefly absent —
-            sandbox_unavailable, whose message names the cause: a pool, tier, template or
-            sandbox id, never a secret), the control-plane credential exchange failed
+            is at its cap, none is present yet — none of the session's tier or template, say —
+            or the session's own sandbox is briefly absent — sandbox_unavailable, whose message
+            names the cause: a pool, tier, template or sandbox id, never a secret), the
+            control-plane credential exchange failed
             (credential_unavailable — the control plane is unreachable or its answer was
             unusable), or a detachable turn could not take its lease because Redis did not
             answer, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000) —
@@ -214,7 +218,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '500':
-          description: internal_error — not retryable as-is
+          description: |
+            internal_error — not retryable as-is; among its causes, a sandbox template's seed
+            that failed (its output is in the workspace's .moca-seed.log)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -674,7 +680,9 @@ components:
             tier: { type: string }
             workspaceReset:
               type: object
-              description: Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE frame).
+              description: |
+                Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
+                frame). `retiered`: the sandbox now serves another tier or sandbox template.
               properties:
                 from: { type: string }
                 reason: { type: string, enum: [detached, retiered] }

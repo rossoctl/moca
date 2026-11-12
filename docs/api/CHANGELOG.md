@@ -3,6 +3,29 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.8.0
+
+Sandbox templates for agent sessions
+([#731](https://github.com/rossoctl/moca/issues/731)), per the
+[session templates spec](../specs/2026-10-30-session-sandbox-templates-design.md). Additive: a
+deployment that does not set `SH_SANDBOX_TEMPLATES` on the harness profile answers exactly as
+before.
+
+- POST /v1/sessions accepts `sandbox.template`, fixed for the session's life. A non-string is
+  400 `invalid_request`; so is an id the deployment does not declare (the message lists the
+  declared ids), and any template on a deployment that declares none.
+- The `Session` view gains `sandboxTemplate` (null for none) on a deployment that declares
+  templates, and for any session that named one.
+- GET /v1/discovery gains `sandboxTemplates: [{id, description, tools}]`, the declared templates
+  without their seeds; absent when none are declared.
+- POST /internal/credentials returns `sandboxTemplate` and `sandboxSeed` for a session that named a
+  template, and neither otherwise. A template the deployment no longer declares is still returned,
+  without a seed, so its turns are refused rather than run on an untemplated worker.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.1.0: authenticated
+turns take the session's template from the control plane, a failed seed is a 500, and
+`workspace_reset`'s `retiered` also covers a sandbox that now serves another template.
+
 ## 1.7.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),

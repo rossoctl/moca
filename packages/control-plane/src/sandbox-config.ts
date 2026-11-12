@@ -17,6 +17,11 @@ export interface SandboxTemplate {
   worker: string;
   description: string;
   tools: string[];
+  /**
+   * A bash command that fills a new workspace (session-templates spec §5). Optional, and read only
+   * by the harness profile, whose harness runs it once per workspace; SBX0 clients run it themselves.
+   */
+  seed?: string;
 }
 
 export interface SandboxConfig {
@@ -110,10 +115,29 @@ export function parseTemplates(raw: string | undefined): SandboxTemplate[] {
     if (new Set(o.tools).size !== o.tools.length) {
       throw new Error(`${where}: tools must not list a tool twice`);
     }
+    if (o.seed !== undefined && typeof o.seed !== 'string') {
+      throw new Error(`${where}: seed must be a string`);
+    }
     if (seen.has(o.id)) throw new Error(`${where}: template id '${o.id}' is listed twice`);
     seen.add(o.id);
-    return { id: o.id, worker: o.worker, description: o.description, tools: o.tools as string[] };
+    return {
+      id: o.id,
+      worker: o.worker,
+      description: o.description,
+      tools: o.tools as string[],
+      ...(typeof o.seed === 'string' && o.seed.trim() !== '' ? { seed: o.seed } : {}),
+    };
   });
+}
+
+/**
+ * The harness profile's session templates (session-templates spec §3.3): `SH_SANDBOX_TEMPLATES`,
+ * the same list the sandbox profile reads, or null when it is unset or blank (no templates, and
+ * nothing about sessions changes). Malformed refuses to boot, as on the sandbox profile.
+ */
+export function sessionTemplatesFromEnv(env: NodeJS.ProcessEnv): SandboxTemplate[] | null {
+  const raw = env.SH_SANDBOX_TEMPLATES?.trim();
+  return raw ? parseTemplates(raw) : null;
 }
 
 export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {

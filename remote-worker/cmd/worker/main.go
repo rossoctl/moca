@@ -276,7 +276,7 @@ func main() {
 		// workspace directory (wexec.WorkspaceCapability).
 		Capabilities:  append(capabilities(), wexec.WorkspaceCapability),
 		MaxConcurrent: envInt("WORKER_MAX_CONCURRENT", session.DefaultConcurrency),
-		Labels:        session.TierLabels(os.LookupEnv, "container"),
+		Labels:        session.Labels(os.LookupEnv, "container"),
 	}
 
 	// Plaintext h2c for an in-cluster ClusterIP or an `oc port-forward` tunnel;

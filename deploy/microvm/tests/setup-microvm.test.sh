@@ -693,7 +693,141 @@ check "that failure also names journalctl -u moca-egress (set -e must not pre-em
   "$(grep -cF 'moca-egress failed to start; the reason is in: journalctl -u moca-egress' "$TMP/run.log")" "1"
 check "and the worker is not started after it" \
   "$(grep -cE 'systemctl (start|restart) microvm-worker' "$MOCK_LOG")" "0"
+echo "== --template: a second, templated P4 worker beside the main one (session templates)"
 reset_host
+check "the main install first: exit 0" "$(run)" "0"
+mkdir -p "$TMP/tpl-snap/django-django-11133-3d3e705ff379"
+printf '{"guest_ram_mb": 4096, "hash": "x"}\n' >"$TMP/tpl-snap/django-django-11133-3d3e705ff379/manifest.json"
+SNAP="$TMP/tpl-snap/django-django-11133-3d3e705ff379"
+# The default root is beside the snapshot (<snapshot dir>/.tpl/t<12 hex>); a temp dir here (63
+# characters on macOS) is too long for the VMs' API socket path, so the installer would rightly refuse it.
+# The default is exercised once below with a short snapshot path; elsewhere a short root on the same
+# filesystem stands in.
+TPLROOT="$(mktemp -d /tmp/tpl.XXXX)"; export MICROVM_TPL_SRV="$TPLROOT"
+trun() { "$REAL_BASH" "$SCRIPT" "$@" >"$TMP/run.log" 2>&1; echo $?; }
+: >"$MOCK_LOG"
+main_before="$(cd "$TMP" && cksum units/microvm-worker.service etc/microvm-worker.env etc/microvm-relay.env units/sh-relay.service.d/50-moca-microvm.conf | sort)"
+check "--template exit 0" "$(trun --template django-django-11133 --snapshot "$SNAP")" "0"
+SID=tpl_django_django_11133
+# The roots' key: t + 12 hex of the sid's sha256, short whatever the template id.
+tkey() { printf 't%s' "$(printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"; }
+KEY="$(tkey "$SID")"
+TE="$TMP/etc/microvm-worker-$SID.env" TR="$TMP/etc/microvm-relay-$SID.env"
+check "the template unit is installed" "$([ -f "$TMP/units/microvm-worker@.service" ] && echo yes)" "yes"
+check "each instance runs in its own slice" "$(grep -c '^Slice=microvm-tpl-%i.slice$' "$TMP/units/microvm-worker@.service")" "1"
+check "its VMs' parent cgroup is that slice, never the main worker's" \
+  "$(grep -c '^Environment=SH_PARENT_CGROUP=microvm.slice/microvm-tpl.slice/microvm-tpl-%i.slice$' "$TMP/units/microvm-worker@.service")" "1"
+check "the main unit is unchanged" "$(cd "$TMP" && cksum units/microvm-worker.service etc/microvm-worker.env etc/microvm-relay.env units/sh-relay.service.d/50-moca-microvm.conf | sort)" "$main_before"
+check "the worker env names the template" "$(val SANDBOX_TEMPLATE "$TE")" "django-django-11133"
+check "and its sandbox id" "$(val SANDBOX_ID "$TE")" "$SID"
+check "the snapshot by directory and name" "$(val SH_SNAPSHOT_DIR "$TE")/$(val SH_SNAPSHOT_IMAGE "$TE")" "$SNAP"
+check "the guest RAM is the manifest's" "$(val SH_GUEST_RAM_MB "$TE")" "4096"
+check "the default budget holds one session: (4096+32)x3+1024" "$(val SH_MAX_COMMITTED_MB "$TE")" "13408"
+check "no egress by default" "$(val MOCA_EGRESS_CONTROL_SOCK "$TE")" ""
+check "its own workspace and jail roots" "$(val SH_WORKSPACE_ROOT "$TE") $(val SH_CHROOT_BASE "$TE")" \
+  "$TPLROOT/$KEY/workspaces $TPLROOT/$KEY/jail"
+check "the same token in the worker env and the relay env" "$(val SANDBOX_TOKEN "$TE")" "$(val "SH_RELAY_TOKEN_$SID" "$TR")"
+check "a token unlike the main worker's" "$([ "$(val SANDBOX_TOKEN "$TE")" != "$(val SANDBOX_TOKEN "$TMP/etc/microvm-worker.env")" ] && echo yes)" "yes"
+check "both env files are 0600" "$(mode "$TE") $(mode "$TR")" "600 600"
+check "the relay loads its token through its own drop-in" "$(grep -c "^EnvironmentFile=$TR$" "$TMP/units/sh-relay.service.d/51-moca-$SID.conf")" "1"
+check "the instance loads its env through its drop-in" "$(grep -c "^EnvironmentFile=$TE$" "$TMP/units/microvm-worker@$SID.service.d/50-moca-template.conf")" "1"
+check "the token is never in argv" "$(grep -c "$(val SANDBOX_TOKEN "$TE")" "$MOCK_LOG")" "0"
+check "the relay is restarted for the token" "$(grep -c '^systemctl restart sh-relay.service$' "$MOCK_LOG")" "1"
+check "the instance is enabled and started" "$(grep -c -E "^systemctl (enable|start) microvm-worker@$SID.service$" "$MOCK_LOG")" "2"
+check "its stale presence record is dropped first" "$(grep -c "HDEL sh:sandbox:records $SID" "$MOCK_LOG")" "1"
+check "the main worker is not restarted" "$(grep -c -E '^systemctl (restart|stop|start) microvm-worker.service$' "$MOCK_LOG")" "0"
+
+echo "== --template re-run: nothing changes, the token is kept"
+tok1="$(val SANDBOX_TOKEN "$TE")"; : >"$MOCK_LOG"
+check "exit 0" "$(trun --template django-django-11133 --snapshot "$SNAP")" "0"
+check "nothing to change" "$(grep -c 'nothing to change' "$TMP/run.log")" "1"
+check "the token is kept" "$(val SANDBOX_TOKEN "$TE")" "$tok1"
+check "no relay restart" "$(grep -c 'restart sh-relay' "$MOCK_LOG")" "0"
+
+echo "== --template refusals, before anything is written"
+for c in "--template Bad_Id --snapshot $SNAP|must match" "--template ok-id|needs --snapshot" \
+  "--template ok-id --snapshot $TMP/nope|no snapshot" "--template ok-id --snapshot $SNAP --budget-mb 2000|at least 13408" \
+  "--snapshot $SNAP|go with --template"; do
+  args="${c%%|*}" want="${c#*|}"
+  # shellcheck disable=SC2086 # the cases are word lists on purpose
+  rc="$(trun $args)"
+  check "refused: $args (exit 1)" "$rc" "1"
+  check "  says: $want" "$(grep -c -- "$want" "$TMP/run.log")" "1"
+done
+check "a refused id wrote no env file" "$(find "$TMP/etc" -name '*tpl_ok_id*' | wc -l | tr -d ' ')" "0"
+check "--remote with --template refused" "$(trun --remote "$TMP" --template ok-id --snapshot "$SNAP")" "1"
+check "--uninstall-template with --snapshot refused" "$(trun --uninstall-template ok-id --snapshot "$SNAP")" "1"
+# A root too deep for the VMs' API socket, wherever it comes from: MICROVM_TPL_SRV here (the default
+# would be the same check under <snapshot dir>/.tpl).
+LONG="$TMP/$(printf 'd%.0s' {1..40})"; mkdir -p "$LONG/s"; printf '{"guest_ram_mb": 256}\n' >"$LONG/s/manifest.json"
+check "a jail path too long for the API socket refused" "$(MICROVM_TPL_SRV="$LONG" trun --template scikit-learn-scikit-learn-13142 --snapshot "$LONG/s")" "1"
+check "  says to set MICROVM_TPL_SRV" "$(grep -c 'MICROVM_TPL_SRV' "$TMP/run.log")" "1"
+reset_host
+check "no main install: refused" "$(trun --template ok-id --snapshot "$SNAP")" "1"
+check "  says: install the main P4 worker first" "$(grep -c 'install the main P4 worker first' "$TMP/run.log")" "1"
+
+echo "== --egress: refused beside another egress-on worker (moca-egress keys VMs by id across workers)"
+reset_host; run >/dev/null
+check "refused while the main worker uses egress (exit 1)" "$(trun --template django-django-11133 --snapshot "$SNAP" --egress)" "1"
+check "  says why" "$(grep -c 'already uses moca-egress' "$TMP/run.log")" "1"
+check "  wrote nothing" "$([ -e "$TE" ] && echo written || echo none)" "none"
+printf 'MOCA_EGRESS_CONTROL_SOCK=\n' >>"$TMP/etc/microvm-worker.env"   # the main worker with egress off
+check "allowed when no other worker uses egress, with a larger budget" \
+  "$(trun --template django-django-11133 --snapshot "$SNAP" --budget-mb 40960 --egress)" "0"
+check "the budget given" "$(val SH_MAX_COMMITTED_MB "$TE")" "40960"
+check "egress wired to moca-egress's socket" "$(val MOCA_EGRESS_CONTROL_SOCK "$TE")" "$EGRESS_SOCK"
+: >"$MOCK_LOG"
+check "a bare re-run keeps the stored budget and egress (exit 0)" "$(trun --template django-django-11133 --snapshot "$SNAP")" "0"
+check "  budget kept" "$(val SH_MAX_COMMITTED_MB "$TE")" "40960"
+check "  egress kept" "$(val MOCA_EGRESS_CONTROL_SOCK "$TE")" "$EGRESS_SOCK"
+check "  and nothing restarted" "$(grep -c -E "^systemctl (stop|start) microvm-worker@" "$MOCK_LOG")" "0"
+mkdir -p "$TMP/tpl-snap/django-django-11133-bbbbbbbbbbbb"; printf '{"guest_ram_mb": 4096}\n' >"$TMP/tpl-snap/django-django-11133-bbbbbbbbbbbb/manifest.json"
+check "a new snapshot under the same id is refused (a new image is a new worker)" \
+  "$(trun --template django-django-11133 --snapshot "$TMP/tpl-snap/django-django-11133-bbbbbbbbbbbb")" "1"
+check "  says so" "$(grep -c 'a new snapshot is a new template worker' "$TMP/run.log")" "1"
+
+echo "== --uninstall-template removes exactly what --template wrote"
+mkdir -p "$TPLROOT/$KEY/workspaces/s-1"; : >"$TPLROOT/$KEY/workspaces/s-1/kept"
+: >"$MOCK_LOG"
+check "exit 0" "$(trun --uninstall-template django-django-11133)" "0"
+for f in "etc/microvm-worker-$SID.env" "etc/microvm-relay-$SID.env" "units/sh-relay.service.d/51-moca-$SID.conf" \
+  "units/microvm-worker@$SID.service.d/50-moca-template.conf" "units/microvm-worker@.service" "units/microvm-tpl.slice"; do
+  check "removed $f" "$([ -e "$TMP/$f" ] && echo present || echo gone)" "gone"
+done
+kept=0
+for f in units/microvm-worker.service etc/microvm-worker.env etc/microvm-relay.env; do
+  if [[ -e "$TMP/$f" ]]; then kept=$((kept + 1)); fi
+done
+check "the main worker's files stay" "$kept" "3"
+check "workspace data is kept" "$([ -f "$TPLROOT/$KEY/workspaces/s-1/kept" ] && echo kept)" "kept"
+check "the instance's slice is stopped too (its VMs are siblings of the unit)" "$(grep -c "^systemctl stop microvm-tpl-$SID.slice$" "$MOCK_LOG")" "1"
+check "the instance is disabled and stopped" "$(grep -c "^systemctl disable --now microvm-worker@$SID.service$" "$MOCK_LOG")" "1"
+check "the relay drops the token" "$(grep -c '^systemctl restart sh-relay.service$' "$MOCK_LOG")" "1"
+check "a second uninstall changes nothing" "$(trun --uninstall-template django-django-11133; grep -c 'nothing to change' "$TMP/run.log")" "0
+1"
+
+echo "== the default root is beside the snapshot, on its filesystem"
+reset_host; run >/dev/null
+SHORT="$(mktemp -d /tmp/snp.XXXX)"; mkdir -p "$SHORT/py312-aaaaaaaaaaaa"; printf '{"guest_ram_mb": 256}\n' >"$SHORT/py312-aaaaaaaaaaaa/manifest.json"
+check "exit 0" "$(env -u MICROVM_TPL_SRV "$REAL_BASH" "$SCRIPT" --template py312 --snapshot "$SHORT/py312-aaaaaaaaaaaa" >"$TMP/run.log" 2>&1; echo $?)" "0"
+check "the roots are <snapshot dir>/.tpl/t<12 hex>" "$(val SH_CHROOT_BASE "$TMP/etc/microvm-worker-tpl_py312.env")" "$SHORT/.tpl/$(tkey tpl_py312)/jail"
+# The overflow case: /srv/sbx/snapshots/.tpl/<sid> was 116 bytes of API socket path for this
+# id; the key keeps it at 101 under a 23-character snapshot directory.
+p="/srv/sbx/snapshots/.tpl/$(tkey tpl_django_django_11133)/jail/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+check "the worst-case API socket path under /srv/sbx/snapshots fits" "$([ "${#p}" -lt 108 ] && echo yes || echo "no (${#p})")" "yes"
+rm -rf "$SHORT"
+
+echo "== two templates: removing one keeps the other and the shared unit"
+reset_host; run >/dev/null
+mkdir -p "$TMP/tpl-snap/py312-aaaaaaaaaaaa"; printf '{"guest_ram_mb": 256}\n' >"$TMP/tpl-snap/py312-aaaaaaaaaaaa/manifest.json"
+trun --template django-django-11133 --snapshot "$SNAP" >/dev/null
+check "a second template: exit 0" "$(trun --template py312 --snapshot "$TMP/tpl-snap/py312-aaaaaaaaaaaa")" "0"
+check "its budget for a 256 MiB guest" "$(val SH_MAX_COMMITTED_MB "$TMP/etc/microvm-worker-tpl_py312.env")" "1888"
+trun --uninstall-template py312 >/dev/null
+check "the shared template unit stays for the other" "$([ -f "$TMP/units/microvm-worker@.service" ] && echo yes)" "yes"
+check "the other's env stays" "$([ -f "$TE" ] && echo yes)" "yes"
+reset_host
+rm -rf "$TPLROOT"
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

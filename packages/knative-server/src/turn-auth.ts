@@ -34,6 +34,9 @@ export interface TurnAuth {
   configRef?: string;
   /** The session's sandbox tier from the exchange (P6.3); absent ⇒ the data plane's default. */
   sandboxTier?: string;
+  /** The session's sandbox template and its seed from the exchange (session-templates spec §3.4); absent ⇒ none. */
+  sandboxTemplate?: string;
+  sandboxSeed?: string;
   /** The session's model from the exchange (per-session model spec §5.1); absent ⇒ the deployment default. */
   model?: SessionModelSpec;
 }
@@ -255,6 +258,20 @@ export function validateExchangeBody(body: Record<string, unknown>): ExchangeRes
   if (body.model !== undefined && !isSessionModel(body.model)) {
     throw new CpError('credential_unavailable', 'control plane returned a malformed model');
   }
+  // A present template that is not a non-empty string would be dropped, and the session's turn run
+  // on an untemplated worker: refuse instead (session-templates spec §3.4). The seed likewise.
+  if (
+    body.sandboxTemplate !== undefined &&
+    (typeof body.sandboxTemplate !== 'string' || body.sandboxTemplate === '')
+  ) {
+    throw new CpError(
+      'credential_unavailable',
+      'control plane returned a malformed sandboxTemplate',
+    );
+  }
+  if (body.sandboxSeed !== undefined && typeof body.sandboxSeed !== 'string') {
+    throw new CpError('credential_unavailable', 'control plane returned a malformed sandboxSeed');
+  }
   return body as unknown as ExchangeResponse;
 }
 
@@ -307,6 +324,15 @@ export async function resolveTurnAuth(
     // Only a non-empty string is trusted; anything else is "no tier", never an odd value in a filter.
     ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
       ? { sandboxTier: resolved.sandboxTier }
+      : {}),
+    // As for the tier: only a non-empty string is a template; the seed only beside one.
+    ...(typeof resolved.sandboxTemplate === 'string' && resolved.sandboxTemplate
+      ? {
+          sandboxTemplate: resolved.sandboxTemplate,
+          ...(typeof resolved.sandboxSeed === 'string' && resolved.sandboxSeed
+            ? { sandboxSeed: resolved.sandboxSeed }
+            : {}),
+        }
       : {}),
     ...(resolved.model ? { model: resolved.model } : {}),
   };

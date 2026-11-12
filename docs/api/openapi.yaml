@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.7.0
+  version: 1.8.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -196,6 +196,13 @@ components:
             tiers), today's deployment default, which the data plane applies; null whenever the
             deployment declares no tiers, even for a session that recorded one (the data plane
             then runs untiered)
+        sandboxTemplate:
+          type: [string, 'null']
+          description: |
+            the sandbox template the session runs on (session-templates spec §3.3): present on a
+            deployment that declares templates (SH_SANDBOX_TEMPLATES), null there for a session
+            with none; present too for any session that named one, even once the deployment no
+            longer declares it (its turns then find no worker and are refused)
         model:
           type: [string, 'null']
           description: |
@@ -680,6 +687,18 @@ paths:
                         properties:
                           names: { type: array, items: { type: string } }
                           default: { type: string }
+                      sandboxTemplates:
+                        type: array
+                        description: |
+                          the templates a session may name at creation (SH_SANDBOX_TEMPLATES),
+                          without their seeds; absent when the deployment declares none
+                        items:
+                          type: object
+                          required: [id, description, tools]
+                          properties:
+                            id: { type: string }
+                            description: { type: string }
+                            tools: { type: array, items: { type: string } }
                       version:
                         type: [string, 'null']
                         description: |
@@ -1147,6 +1166,12 @@ paths:
                   type: object
                   properties:
                     tier: { type: string }
+                    template:
+                      type: string
+                      description: |
+                        a template id from GET /v1/discovery's sandboxTemplates; 400 when unknown, or
+                        on a deployment that declares none. Omitted: none, and the session runs only
+                        on untemplated workers
                 model:
                   type: string
                   pattern: '^[\x21-\x7e]{1,256}$'
@@ -2831,6 +2856,19 @@ paths:
                       the tier the session's turn runs in (P6.3): the recorded tier, or today's
                       default for a session that recorded none; absent whenever the deployment
                       declares no tiers, even for a session that recorded one
+                  sandboxTemplate:
+                    type: string
+                    description: |
+                      the sandbox template the session named at creation; the data plane runs the
+                      turn only on workers labelled moca.dev/template with it. Absent when the
+                      session named none. Sent even when the deployment no longer declares it, so
+                      the turn is refused rather than run on an untemplated worker (fail closed)
+                  sandboxSeed:
+                    type: string
+                    description: |
+                      the template's seed, a bash command the data plane runs once per workspace;
+                      present only beside sandboxTemplate, while the deployment declares it with a
+                      seed
                   model:
                     type: object
                     description: |

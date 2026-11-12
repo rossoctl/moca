@@ -23,6 +23,13 @@ export function forLog(value: string): string {
 export const TIER_LABEL = 'moca.dev/tier';
 
 /**
+ * The presence label naming the sandbox template a worker serves; the workers'
+ * `session.TemplateLabelKey` (session-templates spec §3.1). A session with template T runs only on
+ * workers labelled T; a session with none only on workers without the label (§4).
+ */
+export const TEMPLATE_LABEL = 'moca.dev/template';
+
+/**
  * The presence labels that bind a sandbox to one workload and its owner (workload sandboxes spec
  * §3). Trusted only from a relay with attach public keys: it sets them from a signed attach token
  * and strips them from every other `Hello`. `selectPoolSandbox` reads both: a workload run takes

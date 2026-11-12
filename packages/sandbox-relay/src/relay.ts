@@ -1,5 +1,5 @@
 import { status } from '@grpc/grpc-js';
-import { OWNER_LABEL, TIER_LABEL, WORKLOAD_LABEL } from '@moca/harness';
+import { OWNER_LABEL, TEMPLATE_LABEL, TIER_LABEL, WORKLOAD_LABEL } from '@moca/harness';
 import type { RecordStore, SandboxRecord } from '@moca/harness';
 import type { Exec, ExecEvent, ServerFrame, WorkerFrame } from '@moca/k8s-sandbox';
 
@@ -111,7 +111,9 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 /**
  * The labels a parked sandbox's record carries. With an attach binding, its three labels overwrite
  * whatever Hello sent; without one (a shared-pool sandbox on a relay with attach keys), the workload
- * and owner labels are removed, so no sandbox can claim to be someone's by saying so.
+ * and owner labels are removed, so no sandbox can claim to be someone's by saying so. A workload
+ * sandbox (one with a binding) also loses any template label: workload sandboxes are not templated
+ * (session-templates spec §3.2), and a template is not in the signed binding.
  */
 function trustedLabels(
   sent: Record<string, string> | undefined,
@@ -121,6 +123,7 @@ function trustedLabels(
   delete labels[WORKLOAD_LABEL];
   delete labels[OWNER_LABEL];
   if (binding) {
+    delete labels[TEMPLATE_LABEL];
     labels[WORKLOAD_LABEL] = binding.workload;
     labels[OWNER_LABEL] = binding.owner;
     labels[TIER_LABEL] = binding.tier;
