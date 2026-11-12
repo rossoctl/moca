@@ -1,0 +1,57 @@
+# The combined control plane (docs/specs/2026-11-05-combined-control-plane-design.md §3.6): sessions
+# (Moca Pi through the supervisor and harness) and sandboxes (stock agents, SBX0) in ONE namespace,
+# on one control plane with SH_ROUTE_PROFILE=combined, one Redis, one signing key, one template
+# store, and the relay serving both callers.
+#
+# Built on ocp-single (no Namespace object, no SCC grant, restricted-v2 UIDs, no cluster-scoped
+# object at all), plus SBX0's pieces:
+#   ../ocp-single/routes       the supervisor's Route (Moca Pi clients' turns) and TLS sidecar
+#   ../ocp/p4-relay            the attach Route and its ghostunnel sidecar (KVM hosts' workers dial in)
+#   ../ocp-sbx/exec-tls        the exec Route and its sidecar (stock agents' Execs, sandbox tokens)
+#   ../ocp-sbx/template-store  the template store's PVC and the host agents' tokens
+#   api-route.yaml             the control plane's edge Route, as ocp-sbx's
+#   patch-control-plane.yaml   the combined profile: SBX0's settings beside the harness ones
+#   patch-relay.yaml           both Exec callers: the harness's exec token AND the sandbox keyset
+#   pvc-credentials.yaml       the harness's FILE credential store: no Role, no Kubernetes API access
+#
+# Unlike ocp-sbx, the supervisor and harness stay, and the relay keeps its in-cluster exec Service
+# for the harness. Unlike ocp-single, the harness's credentials are files, so its Role goes: in ONE
+# namespace a Role over Secrets would reach every other Secret in it (RBAC cannot scope by prefix).
+#
+# Every patch names the BASE namespace (moca), as ocp-sbx's do. deploy/sbx/setup.sh's generated
+# overlay would set the real namespace, hosts, image and settings hashes; the placeholders keep this
+# one renderable for tests. Deployed by deploy/sbx/setup.sh SBX_PROFILE=combined (combined design increment 6).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: moca-sbx-combined
+resources:
+  - ../ocp-single
+  - api-route.yaml
+  - pvc-credentials.yaml
+components:
+  # The supervisor's passthrough Route (Moca Pi clients send their turns there) and its TLS sidecar.
+  # It also adds a moca-control-plane Route; patch-routes.yaml removes that one (moca-api serves the API).
+  - ../ocp-single/routes
+  - ../ocp/p4-relay
+  - ../ocp-sbx/exec-tls
+  - ../ocp-sbx/template-store
+patches:
+  - path: patch-control-plane.yaml
+  - path: patch-relay.yaml
+  - path: patch-addressing.yaml
+  # One API Route (moca-api, edge, HTTP refused): drop ocp-single/routes' second one and its policy.
+  - patch: |-
+      $patch: delete
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata: { name: moca-control-plane, namespace: moca-single }
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata: { name: moca-control-plane-credentials, namespace: moca-credentials }
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata: { name: moca-control-plane-credentials, namespace: moca-credentials }

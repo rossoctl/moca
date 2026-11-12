@@ -45,6 +45,18 @@
 #                           (template lifecycle spec §6.1); one bearer each in the Secret
 #                           sbx-template-hosts, and a host-agent bundle each
 #   SBX_WORKSPACE_IMAGE_MB  optional; default 2048 (microvm-worker's SH_WORKSPACE_IMAGE_MB)
+#   SBX_PROFILE             optional; sandbox (default) or combined. combined renders
+#                           deploy/k8s/overlays/ocp-combined instead of ocp-sbx: one control plane on
+#                           the combined route profile serving Moca Pi sessions (the supervisor and its
+#                           Route, SBX_MOCA_HOST) beside sandboxes (combined control plane design §3.6).
+#                           It turns the template store on, keeps the harness's exec token in moca-relay,
+#                           and adds the harness's keys to moca-mu1 (SH_SESSION_TOKEN_PUBLIC_KEYS,
+#                           SH_CREDENTIAL_KEK, SH_EXCHANGE_TOKEN). Egress credentials are refused with it
+#                           (both would mount a KEK). Its namespace must be another than a sandbox one's
+#   SBX_MOCA_HOST           required with SBX_PROFILE=combined: the supervisor Route's host (Moca Pi turns);
+#                           SBX_MOCA_TLS_{CERT,KEY} its certificate, otherwise self-signed
+#   SBX_SANDBOX_IMAGE       required with SBX_PROFILE=combined, pinned by digest: the in-cluster container
+#                           sandbox's image (moca-remote-worker); SBX_SANDBOX_REPLICAS, default 0
 #   SBX_{ATTACH,EXEC,API}_TLS_{CERT,KEY}   optional; otherwise self-signed (attach, exec) or the
 #                           router's default certificate (API)
 #   SBX_JANITOR_WAIT_MINUTES optional; default max(60, SBX_TOKEN_TTL_MINUTES + 5): how long after a
@@ -67,12 +79,17 @@
 # (egress.env, egress.token [+ api-ca.crt], for install-host.sh --egress). Copy each bundle straight to its host and delete
 # the copy. With SBX_TEMPLATE_STORE=1 and SBX_TEMPLATE_HOSTS, also host-agent/<host id>/
 # (host-agent.env, host-agent.token [+ api-ca.crt]) for deploy/sbx/host-agent.sh (the RUNBOOK's host
-# agent section). Users log in with `mocactl sbx login`; nothing here is handed to them.
+# agent section). Users log in with `mocactl sbx login`; nothing here is handed to them. With
+# SBX_PROFILE=combined all of it goes to deploy/sbx/.generated-<SBX_NAMESPACE>/ instead, with
+# moca-ca.crt (the supervisor Route's self-signed certificate, the CA its clients trust, e.g.
+# NODE_EXTRA_CA_CERTS) beside the other CAs.
 set -euo pipefail
 
 SBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN="$SBX_DIR/.generated"
-OVERLAY_REL=../../k8s/overlays/ocp-sbx # from $GEN
+OVERLAY_REL=../../k8s/overlays/ocp-sbx # from $GEN; ocp-combined with SBX_PROFILE=combined (validate)
+# GEN is .generated-<namespace> with SBX_PROFILE=combined (validate), at the same depth, so OVERLAY_REL holds.
+API_ROUTE='sbx-api'
 HOSTS_TO_REINSTALL='' # workers whose SH_WORKSPACE_IDLE this run changes (check_host_idle)
 
 log() { printf '==> %s\n' "$*" >&2; }
@@ -96,6 +113,10 @@ validate() {
   [[ -z "${SBX_CLIENTS:-}" ]] ||
     die 'SBX_CLIENTS was increment 1a (static client tokens) and is gone: unset it; users now run `mocactl sbx login`'
   [[ "${SBX_NAMESPACE:-}" =~ $NS_RE ]] || die 'SBX_NAMESPACE is required and must be a namespace name'
+  # Combined: its own generated folder, so a run from a checkout that also deploys an SBX0 namespace
+  # never rewrites that one's overlay, CAs or bundles (it would delete worker bundles it does not list,
+  # and rewrite a host-agent bundle with another namespace's token). Before check_host_idle reads it.
+  [[ "${SBX_PROFILE:-sandbox}" != combined ]] || GEN="$SBX_DIR/.generated-$SBX_NAMESPACE"
   [[ "${SBX_ATTACH_HOST:-}" =~ $HOST_RE ]] || die 'SBX_ATTACH_HOST is required and must be a DNS name'
   [[ "${SBX_EXEC_HOST:-}" =~ $HOST_RE ]] || die 'SBX_EXEC_HOST is required and must be a DNS name'
   [[ "$SBX_ATTACH_HOST" != "$SBX_EXEC_HOST" ]] || die 'SBX_ATTACH_HOST and SBX_EXEC_HOST must differ (one certificate each)'
@@ -165,15 +186,46 @@ validate() {
 
   validate_templates
   validate_egress
+  validate_profile
   validate_store
 
   local pair
-  for pair in ATTACH EXEC API; do
+  for pair in ATTACH EXEC API MOCA; do
     local cert="SBX_${pair}_TLS_CERT" key="SBX_${pair}_TLS_KEY"
     [[ -z "${!cert:-}" && -z "${!key:-}" ]] || [[ -f "${!cert:-/nonexistent}" && -f "${!key:-/nonexistent}" ]] ||
       die "$cert and $key must both name readable files, or both be unset"
   done
   NS="$SBX_NAMESPACE"
+}
+
+# SBX_PROFILE (combined control plane design §3.6). Sets COMBINED, the overlay and the API Route's
+# name, and turns the template store on (the combined overlay mounts its Secret unconditionally).
+COMBINED=''
+validate_profile() {
+  case "${SBX_PROFILE:-sandbox}" in
+  sandbox) return 0 ;;
+  combined) ;;
+  *) die 'SBX_PROFILE must be sandbox or combined' ;;
+  esac
+  COMBINED=1
+  OVERLAY_REL=../../k8s/overlays/ocp-combined
+  API_ROUTE='moca-api'
+  [[ "${SBX_MOCA_HOST:-}" =~ $HOST_RE ]] || die 'SBX_MOCA_HOST is required with SBX_PROFILE=combined (the supervisor Route host)'
+  local h
+  for h in "$SBX_ATTACH_HOST" "$SBX_EXEC_HOST" "$SBX_API_HOST"; do
+    [[ "$SBX_MOCA_HOST" != "$h" ]] || die 'SBX_MOCA_HOST must differ from the attach, exec and API hosts'
+  done
+  [[ -z "$EGRESS_ON" ]] ||
+    die 'SBX_EGRESS_CREDENTIALS=1 is not supported with SBX_PROFILE=combined yet: both would mount SH_CREDENTIAL_KEK'
+  # Pinned by digest, as every image in the namespace: a tag can move under a run.
+  [[ "${SBX_SANDBOX_IMAGE:-}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] ||
+    die 'SBX_SANDBOX_IMAGE is required with SBX_PROFILE=combined, pinned by digest: repository[:tag]@sha256:<64 hex>'
+  [[ "$SBX_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] ||
+    die 'SBX_IMAGE must be pinned by digest with SBX_PROFILE=combined: repository[:tag]@sha256:<64 hex>'
+  : "${SBX_SANDBOX_REPLICAS:=0}"
+  [[ "$SBX_SANDBOX_REPLICAS" =~ ^[0-9]$ ]] || die 'SBX_SANDBOX_REPLICAS must be 0-9'
+  [[ "${SBX_TEMPLATE_STORE:-1}" == 1 ]] || die 'SBX_PROFILE=combined needs the template store (SBX_TEMPLATE_STORE=1)'
+  SBX_TEMPLATE_STORE=1
 }
 
 # SBX_TEMPLATE_STORE and SBX_TEMPLATE_HOSTS (template lifecycle spec §3.1, §6.1, §7.2). Sets STORE_ON,
@@ -365,13 +417,28 @@ ensure_redis_secret() {
 # 1b there is no harness exec token (spec §3.1): the overlay drops the env entry, and
 # remove_exec_token drops a 1a namespace's key once the new relay is up.
 ensure_relay_secret() {
-  local json relay
+  local json relay exec=''
   json="$(secret_json moca-relay)"
   relay="$(json_value "$json" SH_RELAY_TOKEN)"
   [[ -n "$relay" ]] || { log 'generating SH_RELAY_TOKEN'; relay="$(rand_hex)"; }
+  if [[ -z "$COMBINED" ]]; then
+    (
+      export S_0="$relay"
+      apply_secret moca-relay SH_RELAY_TOKEN
+    )
+    return 0
+  fi
+  # Combined (design §3.6): the harness is an Exec caller too, with its own token, which the
+  # supervisor and the relay both read from moca-relay. The in-cluster container sandbox attaches
+  # with SH_RELAY_TOKEN, from moca-relay-attach as deploy/k8s/setup.sh lays it out.
+  exec="$(json_value "$json" MOCA_RELAY_EXEC_TOKEN)"
+  [[ -n "$exec" ]] || { log 'generating MOCA_RELAY_EXEC_TOKEN (the harness Exec caller)'; exec="$(rand_hex)"; }
+  [[ "$exec" != "$relay" ]] || die 'moca-relay MOCA_RELAY_EXEC_TOKEN equals SH_RELAY_TOKEN: delete one and re-run'
   (
+    export S_0="$relay" S_1="$exec"
+    apply_secret moca-relay SH_RELAY_TOKEN MOCA_RELAY_EXEC_TOKEN
     export S_0="$relay"
-    apply_secret moca-relay SH_RELAY_TOKEN
+    apply_secret moca-relay-attach SH_RELAY_TOKEN
   )
 }
 
@@ -380,6 +447,7 @@ ensure_relay_secret() {
 # template requires that key, so removing it earlier, in a run that then fails, would leave any
 # restarted 1a relay pod in CreateContainerConfigError.
 remove_exec_token() {
+  [[ -z "$COMBINED" ]] || return 0 # the harness's caller token stays (combined design §3.6)
   local json
   # Captured first (errexit), as in route_cert: inside the `if`, a failing get would read as "no key".
   json="$(secret_json moca-relay)"
@@ -446,6 +514,14 @@ ensure_signing_key() {
   fi
   priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
   jtok="$(json_value "$json" SH_JANITOR_TOKEN)"
+  # Combined: the harness's keys beside SBX0's (combined design §3.5), each generated once and kept.
+  local kek='' xtok=''
+  if [[ -n "$COMBINED" ]]; then
+    kek="$(json_value "$json" SH_CREDENTIAL_KEK)"
+    [[ -n "$kek" ]] || { log 'generating the credential KEK (SH_CREDENTIAL_KEK)'; kek="$(openssl rand -base64 32 | tr -d '\n')"; }
+    xtok="$(json_value "$json" SH_EXCHANGE_TOKEN)"
+    [[ -n "$xtok" ]] || { log 'generating the exchange token (SH_EXCHANGE_TOKEN)'; xtok="$(rand_hex)"; }
+  fi
   if [[ -z "$jtok" ]]; then
     log 'generating the janitor token (SH_JANITOR_TOKEN)'
     jtok="$(rand_hex)"
@@ -471,8 +547,16 @@ ensure_signing_key() {
     spki="$(base64 <"$dir/pub.der" | tr -d '\n')"
     [[ -z "$foreign" || "$published" == "$kid:$spki" ]] ||
       die 'moca-mu1 exists but was not created by deploy/sbx/setup.sh: SBX0 needs a namespace of its own (or delete the Secret, which rotates the key)'
-    export S_0="$priv" S_1="$jtok"
-    apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN
+    if [[ -n "$COMBINED" ]]; then
+      # SH_SESSION_TOKEN_PUBLIC_KEYS is what the supervisor verifies session tokens with: the same
+      # <kid>:<SPKI> as sbx-token-keys (genkeys.ts's format).
+      export S_0="$priv" S_1="$jtok" S_2="$kid:$spki" S_3="$kek" S_4="$xtok"
+      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN SH_SESSION_TOKEN_PUBLIC_KEYS \
+        SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN
+    else
+      export S_0="$priv" S_1="$jtok"
+      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN
+    fi
     export S_0="$kid:$spki"
     apply_secret sbx-token-keys PUBLIC_KEYS
   )
@@ -582,11 +666,15 @@ apply_configmap() {
 # the relay's), then SETTINGS_HASH: what both pods read at boot, with the public keyset, so a change
 # to any of it rolls both (write_overlay). Runs after route_cert: it reads exec-ca.crt.
 ensure_settings() {
-  local ca='' moca sbx keys attach_crt exec_crt egress hosts
+  local ca='' moca sbx keys attach_crt exec_crt moca_crt egress hosts
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
   moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
     'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS=')
+  # Combined: the keys the base's control plane reads beside these (base/control-plane.yaml), with
+  # the harness's public URL the supervisor Route serves; no operator key fallback, no tiers.
+  [[ -z "$COMBINED" ]] || moca+=("SH_PUBLIC_HARNESS_URL=https://$SBX_MOCA_HOST" 'SH_ALLOW_OPERATOR_FALLBACK=false'
+    'SH_SANDBOX_TIERS=' 'SH_SANDBOX_DEFAULT_TIER=' 'SH_MODEL_CATALOG_HOSTS=' 'SH_TEST_USERS=0')
   sbx=("SH_ALLOWED_SUBJECTS=$SBX_ALLOWED_SUBJECTS" "SH_SANDBOX_TEMPLATES=$TEMPLATES_JSON"
     "SH_SANDBOX_EXEC_ENDPOINT=$SBX_EXEC_HOST:443" 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane'
     "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S" "SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
@@ -606,6 +694,8 @@ ensure_settings() {
   keys="$(secret_json sbx-token-keys)"
   attach_crt="$(secret_json moca-relay-tls)"
   exec_crt="$(secret_json sbx-exec-tls)"
+  moca_crt=''
+  [[ -z "$COMBINED" ]] || moca_crt="$(secret_json moca-supervisor-tls)"
   # With egress on, the Secret's data is hashed too (names and base64 values, sorted): a new host
   # token or KEK changes the pod template, so the control plane rolls and rereads its files.
   # With the store on, the host tokens' Secret likewise: a new or revoked host token rolls it.
@@ -617,6 +707,7 @@ ensure_settings() {
     json_value "$keys" PUBLIC_KEYS
     json_value "$attach_crt" tls.crt
     json_value "$exec_crt" tls.crt
+    [[ -z "$COMBINED" ]] || json_value "$moca_crt" tls.crt
     [[ -z "$EGRESS_ON" ]] || printf '%s\n' "$egress"
     [[ -z "$STORE_ON" ]] || printf '%s\n' "$hosts"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
@@ -685,7 +776,8 @@ write_overlay() {
     printf '# GENERATED by deploy/sbx/setup.sh on every run. Do not edit; gitignored.\n'
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n'
     printf 'namespace: %s\nresources:\n  - %s\n' "$NS" "$OVERLAY_REL"
-    if [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
+    # The combined overlay already holds the template store (and refuses egress, validate_profile).
+    if [[ -z "$COMBINED" ]] && [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
       printf 'components:\n'
       [[ -z "$EGRESS_ON" ]] || printf '  - %s/egress-credentials\n' "$OVERLAY_REL"
       [[ -z "$STORE_ON" ]] || printf '  - %s/template-store\n' "$OVERLAY_REL"
@@ -693,7 +785,16 @@ write_overlay() {
     printf 'patches:\n'
     printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_ATTACH_HOST"
     printf '  - target: { kind: Route, name: sbx-exec }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_EXEC_HOST"
-    printf '  - target: { kind: Route, name: sbx-api }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_API_HOST"
+    printf '  - target: { kind: Route, name: %s }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$API_ROUTE" "$SBX_API_HOST"
+    if [[ -n "$COMBINED" ]]; then
+      printf '  - target: { kind: Route, name: moca }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_MOCA_HOST"
+      # The supervisor reads the settings too (the public keyset, the exchange token): roll it with them.
+      printf '  - target: { kind: Deployment, name: moca-supervisor }\n    patch: |-\n'
+      printf '      - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
+      printf '  - target: { kind: StatefulSet, name: moca-sandbox }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$SBX_SANDBOX_REPLICAS"
+      # ocp-combined's in-cluster addresses name its placeholder namespace; this one's, from here.
+      combined_addresses
+    fi
     # Both pods read their settings and keys only at boot: a new hash changes their pod templates,
     # so the apply rolls them. The control plane's template has no annotations map; p4-relay gives
     # the relay's one, so there this adds a key.
@@ -703,7 +804,30 @@ write_overlay() {
     printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$SETTINGS_HASH"
     printf 'images:\n'
     image_entry ghcr.io/rossoctl/moca "$SBX_IMAGE"
+    [[ -z "$COMBINED" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SBX_SANDBOX_IMAGE"
   } >"$GEN/kustomization.yaml"
+}
+
+# The literal in-cluster addresses ocp-combined writes against its placeholder namespace
+# (patch-addressing.yaml), as strategic-merge patches for this run's namespace. Printed inside
+# write_overlay's `patches:` list. Each names the overlay's own namespace (COMBINED_PLACEHOLDER_NS):
+# a strategic merge patch matches an object by the namespace it had before this overlay renamed it.
+COMBINED_PLACEHOLDER_NS='moca-sbx-combined'
+combined_addresses() {
+  [[ "$NS" != "$COMBINED_PLACEHOLDER_NS" ]] || return 0
+  printf '  - patch: |-\n'
+  printf '      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: moca-supervisor, namespace: %s }\n' "$COMBINED_PLACEHOLDER_NS"
+  printf '      spec: { template: { spec: { containers: [ { name: supervisor, env: [\n'
+  printf '        { name: SH_RELAY_ADDR, value: "sandbox-relay-exec.%s.svc:9444" },\n' "$NS"
+  printf '        { name: SH_CONTROL_PLANE_URL, value: "http://moca-control-plane.%s.svc:8080" } ] } ] } } }\n' "$NS"
+  printf '  - patch: |-\n'
+  printf '      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: moca-control-plane, namespace: %s }\n' "$COMBINED_PLACEHOLDER_NS"
+  printf '      spec: { template: { spec: { containers: [ { name: control-plane, env: [\n'
+  printf '        { name: SH_SANDBOX_NAMESPACE, value: "%s" } ] } ] } } }\n' "$NS"
+  printf '  - patch: |-\n'
+  printf '      apiVersion: apps/v1\n      kind: StatefulSet\n      metadata: { name: moca-sandbox, namespace: %s }\n' "$COMBINED_PLACEHOLDER_NS"
+  printf '      spec: { template: { spec: { containers: [ { name: sandbox, env: [\n'
+  printf '        { name: RELAY_ADDR, value: "sandbox-relay-attach.%s.svc:9443" } ] } ] } } }\n' "$NS"
 }
 
 # The API Route's operator certificate, patched onto the live Route rather than put in the overlay:
@@ -715,7 +839,7 @@ write_overlay() {
 api_route_cert() {
   local dir
   if [[ -z "${SBX_API_TLS_CERT:-}" ]]; then
-    kc patch route sbx-api -n "$NS" --type=merge -p '{"spec":{"tls":{"certificate":null,"key":null}}}' >/dev/null
+    kc patch route "$API_ROUTE" -n "$NS" --type=merge -p '{"spec":{"tls":{"certificate":null,"key":null}}}' >/dev/null
     return 0
   fi
   dir="$(mktemp -d)"
@@ -724,7 +848,7 @@ api_route_cert() {
     chmod 700 "$dir"
     jq -n --rawfile c "$SBX_API_TLS_CERT" --rawfile k "$SBX_API_TLS_KEY" \
       '{spec: {tls: {certificate: $c, key: $k}}}' >"$dir/patch.json"
-    kc patch route sbx-api -n "$NS" --type=merge --patch-file="$dir/patch.json" >/dev/null
+    kc patch route "$API_ROUTE" -n "$NS" --type=merge --patch-file="$dir/patch.json" >/dev/null
   )
 }
 
@@ -735,6 +859,7 @@ apply_stack() {
   kc rollout status deployment/sandbox-relay -n "$NS" --timeout=300s
   remove_exec_token
   kc rollout status deployment/moca-control-plane -n "$NS" --timeout=300s
+  [[ -z "$COMBINED" ]] || kc rollout status deployment/moca-supervisor -n "$NS" --timeout=300s
 }
 
 write_bundles() {
@@ -875,11 +1000,17 @@ main() {
   ensure_store_secrets
   route_cert moca-relay-tls "$SBX_ATTACH_HOST" "${SBX_ATTACH_TLS_CERT:-}" "${SBX_ATTACH_TLS_KEY:-}" "$GEN/attach-ca.crt"
   route_cert sbx-exec-tls "$SBX_EXEC_HOST" "${SBX_EXEC_TLS_CERT:-}" "${SBX_EXEC_TLS_KEY:-}" "$GEN/exec-ca.crt"
+  # Combined: the supervisor's passthrough Route (Moca Pi turns) terminates TLS in its sidecar.
+  [[ -z "$COMBINED" ]] || route_cert moca-supervisor-tls "$SBX_MOCA_HOST" "${SBX_MOCA_TLS_CERT:-}" "${SBX_MOCA_TLS_KEY:-}" "$GEN/moca-ca.crt"
   ensure_settings
   write_overlay
   apply_stack
   write_bundles
-  log "SBX0 ready: api https://$SBX_API_HOST  attach https://$SBX_ATTACH_HOST:443  exec https://$SBX_EXEC_HOST:443"
+  if [[ -n "$COMBINED" ]]; then
+    log "combined control plane ready: api https://$SBX_API_HOST  moca https://$SBX_MOCA_HOST  attach https://$SBX_ATTACH_HOST:443  exec https://$SBX_EXEC_HOST:443"
+  else
+    log "SBX0 ready: api https://$SBX_API_HOST  attach https://$SBX_ATTACH_HOST:443  exec https://$SBX_EXEC_HOST:443"
+  fi
 }
 
 main "$@"
