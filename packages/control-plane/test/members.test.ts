@@ -70,9 +70,10 @@ describe('the bootstrap (spec §3)', () => {
         subject: ENV_ADMIN,
         enrolled: true,
         source: 'env',
+        storeEnrolled: false,
         roles: [{ role: 'admin', source: 'env', until: null, by: null }],
       },
-      { subject: ALLOWED, enrolled: true, source: 'env', roles: [] },
+      { subject: ALLOWED, enrolled: true, source: 'env', storeEnrolled: false, roles: [] },
     ]);
     expect(await codeOf(() => call(d, 'listSubjects', who(ALLOWED)))).toBe('forbidden');
   });
@@ -92,6 +93,45 @@ describe('the bootstrap (spec §3)', () => {
     expect(await codeOf(() => call(d, 'grantAdmin', a, { subject: ENV_ADMIN }, {}))).toBe(
       'bootstrap_subject',
     );
+  });
+
+  it('answers an enroll of a settings subject unchanged, and writes no store enrollment', async () => {
+    const d = setup();
+    const a = who(ENV_ADMIN);
+    for (const subject of [ALLOWED, ENV_ADMIN]) {
+      const r = (await call(d, 'enrollSubject', a, { subject }, { enrolled: true })).body as {
+        source: string;
+        storeEnrolled: boolean;
+        record: string | null;
+      };
+      expect(r).toMatchObject({ source: 'env', storeEnrolled: false, record: null });
+    }
+    expect(await d.provenance.chain('members')).toEqual([]);
+    // Once the settings drop ALLOWED, nothing in the store keeps it enrolled.
+    const dropped = new MembersStore({
+      dir: (d.members as unknown as { path: string }).path.replace(/\/members\.json$/, ''),
+      provenance: d.provenance,
+      bootstrap: { allowed: [], admins: [ENV_ADMIN] },
+    });
+    expect(await dropped.storeEnrolled(ALLOWED)).toBe(false);
+    expect((await dropped.list(nowS())).map((v) => v.subject)).toEqual([ENV_ADMIN]);
+  });
+
+  it('shows the store enrollment apart from an admin role (storeEnrolled)', async () => {
+    const d = setup();
+    const a = who(ENV_ADMIN);
+    await call(d, 'grantAdmin', a, { subject: CAROL }, {});
+    const view = async () =>
+      (
+        (await call(d, 'listSubjects', a)).body as { subjects: Record<string, unknown>[] }
+      ).subjects.find((s) => s.subject === CAROL);
+    // Enrolled by its role only: an enroll still has something to write.
+    expect(await view()).toMatchObject({ enrolled: true, source: 'api', storeEnrolled: false });
+    const r = (await call(d, 'enrollSubject', a, { subject: CAROL }, { enrolled: true })).body as {
+      record: string | null;
+    };
+    expect(r.record).toMatch(/^sha256:/);
+    expect(await view()).toMatchObject({ enrolled: true, storeEnrolled: true });
   });
 
   it('refuses a malformed subject and a missing store', async () => {

@@ -413,15 +413,22 @@ components:
             tools: { type: array, items: { type: string } }
     Subject:
       type: object
-      required: [subject, enrolled, source, roles]
+      required: [subject, enrolled, source, storeEnrolled, roles]
       properties:
         subject:
           { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
-        enrolled: { type: boolean }
+        enrolled:
+          type: boolean
+          description: enrolled by any route (the settings, the members store, or an admin role)
         source:
           type: string
           enum: [env, api]
           description: "`env`: the deployment's settings; `api`: the members store"
+        storeEnrolled:
+          type: boolean
+          description: |
+            Whether the members store itself enrolls it, apart from the settings and any role: what an
+            unenroll changes, and what keeps the subject enrolled once the settings drop it.
         roles:
           type: array
           items:
@@ -1745,7 +1752,10 @@ paths:
       summary: Enroll a subject (an admin)
       description: |
         Body `{"enrolled": true}`. Writes a `member` record on the `members` provenance stream, naming
-        the admin. Enrolled at the subject's next request. Enrolling one already enrolled writes nothing.
+        the admin. Enrolled at the subject's next request. Enrolling one already enrolled writes nothing,
+        and so does enrolling one the settings enroll (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS): it is
+        answered unchanged (`record: null`), so the store never holds an enrollment hidden behind the
+        settings.
       security: [{ sessionToken: [] }]
       parameters:
         - name: subject

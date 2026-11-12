@@ -411,7 +411,7 @@ function subjectLine(s: SbxSubject): string {
   );
   return [
     sanitizeRemote(s.subject),
-    `${s.enrolled ? 'enrolled' : 'not enrolled'} (${s.source})`,
+    `${s.enrolled ? 'enrolled' : 'not enrolled'} (${s.source}${s.source === 'env' && s.storeEnrolled ? ', api too' : ''})`,
     ...roles,
   ].join('  ');
 }
@@ -436,8 +436,9 @@ const roleOf = (s: SbxSubject | undefined) => {
 
 /**
  * Whether the subject read is already in the state the action asks for, so the write should change
- * nothing (`record: null`); undefined where the list cannot tell (an unenroll of a subject that is
- * also an admin, whose own enrollment the list folds into its role).
+ * nothing (`record: null`); undefined where the list cannot tell. Enrollment compares the store's
+ * own enrollment (`storeEnrolled`), not `enrolled`, which folds in the settings and an admin role:
+ * the control plane answers an enroll of a settings subject unchanged, and refuses its unenroll.
  */
 function alreadyThere(
   action: 'enroll' | 'unenroll' | 'grant' | 'revoke',
@@ -446,9 +447,9 @@ function alreadyThere(
 ): boolean | undefined {
   switch (action) {
     case 'enroll':
-      return s?.enrolled === true;
+      return s?.source === 'env' || s?.storeEnrolled === true;
     case 'unenroll':
-      return s?.roles.length ? undefined : !(s?.enrolled === true && s.source === 'api');
+      return s?.source === 'env' ? undefined : s?.storeEnrolled !== true;
     case 'grant':
       return roleOf(s) === `admin until ${until ?? 'no expiry'}`;
     case 'revoke':

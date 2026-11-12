@@ -49,6 +49,11 @@ export interface MemberView {
   enrolled: boolean;
   /** `env`: from the deployment's settings (SH_ALLOWED_SUBJECTS / SH_ADMIN_SUBJECTS); `api`: this store. */
   source: 'env' | 'api';
+  /**
+   * Whether the store itself enrolls the subject, apart from the settings and any role: what an
+   * unenroll would change, and what keeps the subject enrolled after the settings drop it.
+   */
+  storeEnrolled: boolean;
   roles: { role: string; source: 'env' | 'api'; until: number | null; by: string | null }[];
 }
 
@@ -221,6 +226,7 @@ export class MembersStore {
         subject,
         enrolled,
         source: envEnrolled || envAdmin ? 'env' : 'api',
+        storeEnrolled: m?.enrolled === true,
         roles,
       });
     }
@@ -234,6 +240,7 @@ export class MembersStore {
         subject,
         enrolled: false,
         source: 'api',
+        storeEnrolled: false,
         roles: [],
       }
     );

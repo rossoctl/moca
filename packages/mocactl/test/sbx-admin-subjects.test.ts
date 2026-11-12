@@ -8,6 +8,7 @@ const SUBJECT = {
   subject: 'github:9',
   enrolled: true,
   source: 'api',
+  storeEnrolled: true,
   roles: [{ role: 'admin', source: 'api', until: 1_800_000_000, by: 'github:1' }],
 };
 
@@ -23,8 +24,10 @@ describe('mocactl sbx admin subjects', () => {
               subject: 'github:1',
               enrolled: true,
               source: 'env',
+              storeEnrolled: false,
               roles: [{ role: 'admin', source: 'env', until: null, by: null }],
             },
+            { ...SUBJECT, subject: 'github:2', source: 'env', roles: [] },
             SUBJECT,
           ],
         },
@@ -34,10 +37,11 @@ describe('mocactl sbx admin subjects', () => {
     expect(await sbxMain(['admin', 'subjects'], env, io, opts)).toBe(0);
     const out = io.outs.join('');
     expect(out).toContain('github:1  enrolled (env)  admin (env)');
+    expect(out).toContain('github:2  enrolled (env, api too)\n');
     expect(out).toContain('github:9  enrolled (api)  admin (api, until 2027-01-15T08:00:00Z)');
     io.outs.length = 0;
     expect(await sbxMain(['admin', 'subjects', '--json'], env, io, opts)).toBe(0);
-    expect(JSON.parse(io.outs.join(''))).toHaveLength(2);
+    expect(JSON.parse(io.outs.join(''))).toHaveLength(3);
   });
 
   it('enrolls, unenrolls, grants (with --until) and revokes, with the right requests', async () => {
@@ -73,6 +77,34 @@ describe('mocactl sbx admin subjects', () => {
     expect(cp.calls.at(-1)).toMatchObject({ body: {} });
     expect(await sbxMain(['admin', 'subjects', 'revoke', 'github:9'], env, io, opts)).toBe(0);
     expect(cp.calls.at(-1)).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('compares an enroll with the store enrollment, not the folded one (no false race)', async () => {
+    const { home, env, io } = setup();
+    let listed: Record<string, unknown>;
+    let record: string | null;
+    const cp = fakeCp({
+      'GET /v1/subjects': () => ({ status: 200, body: { subjects: [listed] } }),
+      'PUT /v1/subjects/github%3A9': () => ({
+        status: 200,
+        body: { ...listed, enrolled: true, storeEnrolled: true, record },
+      }),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    const enroll = () => sbxMain(['admin', 'subjects', 'enroll', 'github:9'], env, io, opts);
+    // A settings subject: the control plane answers it unchanged.
+    listed = { ...SUBJECT, source: 'env', storeEnrolled: false, roles: [] };
+    record = null;
+    expect(await enroll()).toBe(0);
+    // Enrolled by an API admin grant only: the enroll writes the store enrollment.
+    listed = { ...SUBJECT, storeEnrolled: false };
+    record = 'sha256:a';
+    expect(await enroll()).toBe(0);
+    expect(io.errs.join('\n')).not.toContain('changed by someone else');
+    // Read as store-enrolled, yet this write changed it: a real race, reported.
+    listed = { ...SUBJECT, storeEnrolled: true };
+    expect(await enroll()).toBe(1);
+    expect(io.errs.join('\n')).toContain('changed by someone else');
   });
 
   it('reports a 403 plainly and makes no second call (never retried as another role)', async () => {

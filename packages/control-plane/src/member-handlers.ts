@@ -66,6 +66,11 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
     if (asRecord(ctx.body).enrolled !== true)
       throw new CpError('invalid_request', 'the body is {"enrolled": true}');
     const nowS = seconds(deps);
+    // A subject the settings enroll is already enrolled: answer it unchanged (record null) and write
+    // nothing, as unenroll refuses it. A store enrollment under it would be hidden behind
+    // `source: env` and keep the subject enrolled after the settings drop it.
+    if (members.bootstrap.allowed.includes(subject) || members.bootstrap.admins.includes(subject))
+      return { status: 200, body: { ...(await members.view(subject, nowS)), record: null } };
     const record = await members.change((doc) => {
       const m = (doc.members[subject] ??= blank(subject, p.sub, nowS));
       if (m.enrolled) return null;

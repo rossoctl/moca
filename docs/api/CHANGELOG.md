@@ -16,7 +16,9 @@ additive; without `SH_PROVENANCE_DIR` nothing changes.
   revoke), on both route profiles. Any admin reads the list; only an admin named in
   `SH_ADMIN_SUBJECTS` changes it (`403 forbidden` otherwise). Each change answers the subject with
   the `record` it wrote (null when nothing changed). With no store the routes answer
-  `400 invalid_request`.
+  `400 invalid_request`. A `Subject` carries `storeEnrolled` (the store's own enrollment, apart from
+  the settings and any role); enrolling a subject the settings enroll writes nothing
+  (`record: null`).
 - A subject on these routes is `github:<numeric id>` or `oidc:<provider sub>` (the sub pattern the
   OIDC login verifies); `test:<n>` and anything else is `400 invalid_request`. New `Subject` schema.
 - New error codes `bootstrap_subject` (409: unenrolling or revoking a subject the settings enroll or

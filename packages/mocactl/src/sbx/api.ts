@@ -46,6 +46,8 @@ export interface SbxSubject {
   subject: string;
   enrolled: boolean;
   source: 'env' | 'api';
+  /** Whether the API's store itself enrolls it (apart from the settings and any role). */
+  storeEnrolled: boolean;
   roles: { role: string; source: 'env' | 'api'; until: number | null; by: string | null }[];
 }
 

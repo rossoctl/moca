@@ -160,7 +160,10 @@ write.
 
 It takes effect at the subject's next request. A subject in `SBX_ALLOWED_SUBJECTS` or
 `SBX_ADMIN_SUBJECTS` can't be unenrolled or revoked this way (`409 bootstrap_subject`): change the
-settings for those. An admin can't revoke its own role.
+settings for those. Enrolling one of them writes nothing (it is already enrolled). Before removing a
+subject from the settings, check its `storeEnrolled` in `mocactl sbx admin subjects --json`
+(`enrolled (env, api too)` in the list): if true, the store still enrolls it, so unenroll it through
+the API once the settings no longer name it. An admin can't revoke its own role.
 A subject holding an admin grant can't be unenrolled while it does (`409 admin_granted`): revoke
 the role first.
 

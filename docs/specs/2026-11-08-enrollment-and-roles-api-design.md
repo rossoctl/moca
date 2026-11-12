@@ -71,7 +71,7 @@ two cluster writes for one API call.
 | Route                                       | Body               | Effect                                                                                                                                                  | Record                          |
 | ------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
 | `GET /v1/subjects`                          |                    | every enrolled subject, with roles and `source: env \| api`                                                                                             |                                 |
-| `PUT /v1/subjects/{subject}`                | `{enrolled: true}` | enroll                                                                                                                                                  | `member` (enrolled, before)     |
+| `PUT /v1/subjects/{subject}`                | `{enrolled: true}` | enroll (a subject the settings enroll is answered unchanged, `record: null`)                                                                            | `member` (enrolled, before)     |
 | `DELETE /v1/subjects/{subject}`             |                    | unenroll (refused for a bootstrap subject: `409 bootstrap_subject`; for a subject holding an admin grant, which keeps it enrolled: `409 admin_granted`) | `member` (unenrolled, before)   |
 | `PUT /v1/subjects/{subject}/roles/admin`    | `{until?}`         | grant admin (`until` optional)                                                                                                                          | `role` (granted, until, before) |
 | `DELETE /v1/subjects/{subject}/roles/admin` |                    | revoke admin (refused for a bootstrap admin and for oneself)                                                                                            | `role` (revoked, before)        |
@@ -139,6 +139,10 @@ two cluster writes for one API call.
   admin, or `control-plane` for an `expired`, which is written once, by the first request that sees
   the lapse. The two kinds belong to the `members` stream only, and it holds no other kind; both
   verifiers check it.
+- **The store's own enrollment** is shown apart (`storeEnrolled` in each `Subject`): `enrolled`
+  folds in the settings and an admin role. An enroll of a subject the settings enroll writes
+  nothing, so the store never holds an enrollment hidden behind `source: env` that would keep the
+  subject enrolled after the settings drop it.
 - **Decided here:** a grant to a subject not yet enrolled is allowed: the admin role enrolls it, as a
   bootstrap admin is. Re-granting an unexpired grant with the same `until` writes nothing; with
   another `until` it writes a new `granted` record.
