@@ -613,6 +613,19 @@ func (w *frameWriter) sealAndWriteEnd(end End) error {
 	return WriteJSON(w.rw, KindEnd, end)
 }
 
+// notice writes one stderr frame from the agent itself, as ServeConn's clock message is
+// written: the line goes out in full past the stream's cap, which a command may already
+// have filled, and is not counted against it. Nothing is written once the terminal frame
+// has gone out.
+func (w *frameWriter) notice(msg string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sealed {
+		return
+	}
+	_ = WriteFrame(w.rw, KindStderr, []byte(msg))
+}
+
 func (w *frameWriter) stdoutWriter() io.Writer { return writerFunc(w.stdout) }
 func (w *frameWriter) stderrWriter() io.Writer { return writerFunc(w.stderr) }
 

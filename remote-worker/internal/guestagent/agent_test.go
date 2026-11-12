@@ -733,3 +733,34 @@ func TestAgentCorrectsClockOnEveryRequestWhileStillWrong(t *testing.T) {
 			"a latch would have suppressed the second, restore-shaped correction", got)
 	}
 }
+
+// The agent's own stderr notice (the lease OOM hint, G3) is one stderr frame written past
+// the stream's cap, and never after the terminal frame.
+func TestFrameWriterNoticeIsNotCappedAndNotAfterTheSeal(t *testing.T) {
+	var buf bytes.Buffer
+	w := &frameWriter{rw: &buf, cap: 4}
+	w.stderr([]byte("123456"))
+	w.notice("hint\n")
+	if err := w.sealAndWriteEnd(End{}); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	sealedAt := buf.Len()
+	w.notice("late\n")
+	if buf.Len() != sealedAt {
+		t.Fatalf("%d bytes were written after the terminal frame", buf.Len()-sealedAt)
+	}
+	var got []string
+	for buf.Len() > 0 {
+		k, p, err := ReadFrame(&buf)
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		got = append(got, fmt.Sprintf("%#x:%s", byte(k), p))
+	}
+	if len(got) != 3 || got[0] != fmt.Sprintf("%#x:1234", byte(KindStderr)) || got[1] != fmt.Sprintf("%#x:hint\n", byte(KindStderr)) {
+		t.Fatalf("frames = %q, want the capped stderr, the notice in full, then End", got)
+	}
+	if w.droppedStderr != 2 {
+		t.Fatalf("droppedStderr = %d, want 2: the notice is not counted against the cap", w.droppedStderr)
+	}
+}

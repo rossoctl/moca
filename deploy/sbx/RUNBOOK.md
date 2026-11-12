@@ -112,6 +112,11 @@ says so, and `install-host.sh --janitor` with the new janitor bundle after a cha
 `SBX_API_HOST` or `SBX_API_CA_FILE`. `status.sh --host` warns when a host's installed janitor wait
 no longer exceeds the token lifetime plus 30 s.
 
+**A worker installed before the jail path was keyed by a digest of the id** has its jail at
+`/srv/sbx/jail/<id>`; a reinstall moves it to `/srv/sbx/jail/j<12 hex of the id>`. Re-running
+`install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
+path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
+
 ## 3. Changing the sandbox lifetime
 
 `SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,
