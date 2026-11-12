@@ -22,7 +22,12 @@ Async turns: the owner-scoped submission API
   the turn id it read off the queue and gets back the credential resolved from the turn record. No
   credential and no bearer token ever travels in the work queue (MI1 §6.5). A pure read — it does not
   move the turn to `running`. The `turnId` must be the `t-<uuid>` shape the control plane mints;
-  anything else is 400 `invalid_request`, refused before Redis is read.
+  anything else is 400 `invalid_request`, refused before Redis is read. The response also carries
+  the `envelope` the worker runs, with the turn's `sessionId` attached, so a claim is one round trip.
+- New GET /metrics, admin-only: `counters.async_quota_refusals`, the count of submissions refused
+  with 429 `async_quota_exhausted`. The control plane reports it because it is the side that refuses
+  them — a worker never sees a submission that was never enqueued (§7). Process-local and reset by a
+  restart; with more than one replica each request reports one replica's share.
 - New error codes `turn_not_cancellable` (409, cancelling a turn that is not queued),
   `turn_not_claimable` (409, claiming a cancelled or terminal turn), `turn_not_found` (404),
   `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held),
@@ -32,6 +37,13 @@ Async turns: the owner-scoped submission API
   leaves no record, no queue entry and no quota slot behind (§4.2).
 - `async: true` on the harness's own turn route stays removed and still answers 400 `async_removed`;
   these routes are its replacement.
+
+Upgrade note: `LEAF_RESULT_TTL_SECONDS` is now read by the harness tier through the control plane's
+own strict parse, because both write the same result keys and a drained turn's result must outlive
+nothing less than its record. A value that is not a positive integer refuses to BOOT there, where a
+lenient `parseInt` used to read it as `NaN` and fail every result write instead. Surrounding
+whitespace is trimmed, so an env file's trailing space or CRLF still boots; blank still means the
+default (86400).
 
 Interim, and named as such: /internal/turn-credentials returns a resolved credential rather than the
 MI1 S2 grants, there is no `turn_exp`, and `MOCA_TENANCY=multi` refuses async at both the submission

@@ -1,8 +1,8 @@
-import { afterAll, beforeAll } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { TurnStore } from '../src/turn-store.js';
-import { turnKey } from '../src/turn-record.js';
+import { turnKey, type TurnRecord } from '../src/turn-record.js';
 import type { CpRedisLike } from '../src/ownership.js';
 import { turnStoreContract } from './helpers/turn-store-contract.js';
 
@@ -50,3 +50,62 @@ async function isolated() {
 }
 
 turnStoreContract('redis', isolated);
+
+const rec = (over: Partial<TurnRecord> = {}): TurnRecord => ({
+  turnId: 't-race',
+  owner: 'github:1234',
+  tenant: 'github:1234',
+  sessionId: 's-1',
+  cfg: '',
+  credentialName: 'anthropic',
+  caps: {},
+  idempotencyKey: 's-1',
+  envelope: {},
+  state: 'queued',
+  attempts: 0,
+  createdAt: 1,
+  ...over,
+});
+
+/**
+ * The races the CAS exists for, against real Redis -- NOT in the contract suite, because what is
+ * being tested is that two interleaved transitions land on ONE server. Both tests lean on node-redis
+ * issuing every command for a client in call order on one socket: the two transitions' reads are
+ * both on the wire before either write, which is exactly the get-then-write gap `CAS_STATE_LUA`
+ * closes. Without it both tests pass twice over -- two winners, two terminal writes.
+ */
+describe('TurnStore CAS races (redis)', () => {
+  it('lets exactly ONE of two concurrent finalizes win', async () => {
+    const { store, now, done } = await isolated();
+    await store.create(rec());
+    // Both read `queued`; the second's write must be refused, or both would release the idempotency
+    // key and both would re-arm the TTL on a record the other had already made terminal.
+    const outcomes = await Promise.all([
+      store.finalize('t-race', 'done', now),
+      store.finalize('t-race', 'failed', now + 1),
+    ]);
+    expect(outcomes.filter((o) => o === 'ok')).toHaveLength(1);
+    expect(outcomes).toEqual(['ok', 'refused']);
+    expect((await store.get('t-race'))?.state).toBe('done');
+    // The winner alone removed the open-set member, so the quota slot is freed exactly once.
+    expect(await store.countOpen('github:1234')).toBe(0);
+    await done();
+  });
+
+  it('refuses a cancel whose read saw `queued` but whose write lands after a claim', async () => {
+    const { store, now, done } = await isolated();
+    await store.create(rec({ turnId: 't-cancel' }));
+    // `cancel` is started FIRST, so its HGETALL is on the wire before `markRunning`'s EVAL: it reads
+    // `queued` and then tries to write a record that has since gone `running`. Only the CAS catches
+    // that -- cancel's own `rec.state !== 'queued'` check already passed. Without it the turn would
+    // read `cancelled` while a worker was running it, which §4.5 forbids.
+    const [cancelled, claim] = await Promise.all([
+      store.cancel('t-cancel', now),
+      store.markRunning('t-cancel', 1),
+    ]);
+    expect(claim).toBe('ok');
+    expect(cancelled).toBe('conflict');
+    expect((await store.get('t-cancel'))?.state).toBe('running');
+    await done();
+  });
+});

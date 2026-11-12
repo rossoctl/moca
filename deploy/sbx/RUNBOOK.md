@@ -334,10 +334,13 @@ only the hosts on the allowlist; everything else is refused with a named error (
 never a timeout. No credential is involved.
 
 - **The allowlist** is `MOCA_EGRESS_ALLOW` in `/etc/sbx/moca-egress.env`, a comma-separated list of
-  hosts. It is seeded on the first install with `api.github.com,github.com,codeload.github.com,objects.githubusercontent.com`
+  hosts. It is seeded on the first install from `deploy/sbx/egress-allow.env` beside the installer
   (or from `MOCA_EGRESS_ALLOW` in the installer's environment, on the first write only) and is never
-  overwritten by a re-run. To change it, edit the file and run `sudo systemctl restart moca-egress`;
-  open tunnels end, new ones work at once. The same restart is needed after rebuilding the binary.
+  overwritten by a re-run. To change it on one host, edit `/etc/sbx/moca-egress.env` and run
+  `sudo systemctl restart moca-egress`; to change the default for new hosts, edit
+  `deploy/sbx/egress-allow.env` in the repo (see its header for the format and the entry groups).
+  Open tunnels end on the restart, new ones work at once. The same restart is needed after
+  rebuilding the binary.
 - **Another install's `moca-egress.service`.** A host that also runs `deploy/microvm`'s P6 worker
   already has one. If `/etc/systemd/system/moca-egress.service` exists and `/etc/sbx/manifest` has no
   `egress unit` line for it, `install-host.sh` logs

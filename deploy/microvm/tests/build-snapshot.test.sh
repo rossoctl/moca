@@ -1865,8 +1865,8 @@ check "the field comes after hash (outside it)" \
   "$(awk '/"hash"/{h=NR} /egress_ca_sha256/{e=NR} END{print (h<e)?"yes":"no"}' "$mw/with.json")" "yes"
 check "the manifest's kernel_release is the probed guest kernel" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_release"])' "$mw/without.json")" "6.1.155-guest"
-check "the Firecracker manifest's features are [lease-v1]" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1']"
+check "the Firecracker manifest's features are [lease-v1, balloon-fpr-v1]" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1', 'balloon-fpr-v1']"
 # CHV cannot serve a lease: chvWrapCommand mounts the workspace inside every Run.
 check "the Cloud Hypervisor manifest's features are []" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/chv.json")" "[]"
@@ -1875,6 +1875,41 @@ check "the with-flag manifest is valid JSON" \
 check "assemble_rootfs calls install_egress_ca only when the flag is set" \
   "$(fn_body assemble_rootfs | grep -cF '[ -n "$EGRESS_CA" ] && install_egress_ca')" "1"
 rm -rf "$EGT"
+
+echo "== balloon-fpr-v1: the Firecracker golden snapshot carries a reporting-only balloon"
+# Spec §6 "Free-page reporting" and §16 item 5: one golden snapshot, for every mode, with a
+# virtio-balloon that only reports freed pages (nothing ever inflates it). The device must be
+# configured pre-boot, so the PUT sits between /machine-config and InstanceStart; a restored
+# VM gets it back from the snapshot, so verify_restore_firecracker never sends it.
+#
+# A recorder, not a grep: boot_quiesce_snapshot_firecracker's own api_put/api_patch
+# statements (comments stripped, continuation lines joined) run against stubs that log
+# each call's method, path and EXPANDED body, so the order and the exact JSON are what
+# Firecracker would receive.
+BT="$(mktemp -d "${TMPDIR:-/tmp}/bs-balloon-test.XXXXXX")"
+# shellcheck disable=SC2016 # the stubs and the grep pattern are literal, not expanded here
+{
+  printf '%s\n' 'api_put() { printf "PUT %s %s\n" "$2" "$3" >>"$REC"; }' \
+    'api_patch() { printf "PATCH %s %s\n" "$2" "$3" >>"$REC"; }' \
+    "REC='$BT/calls'; api_sock=/run/api.sock; GUEST_RAM_MB=256"
+  printf '%s\n' "$fc_build_body" | grep -v '^[[:space:]]*#' | sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' |
+    grep -E '^[[:space:]]*api_(put|patch) "\$api_sock"'
+} >"$BT/run.sh"
+bash "$BT/run.sh" >"$BT/out" 2>&1
+balloon_call='PUT /balloon {"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}'
+mc_n=$(grep -n '^PUT /machine-config ' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+bl_n=$(grep -nxF "$balloon_call" "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+start_n=$(grep -nxF 'PUT /actions {"action_type":"InstanceStart"}' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+check "the Firecracker build sends PUT /balloon exactly once, with the reporting-only body" \
+  "$(grep -c '^PUT /balloon ' "$BT/calls" 2>/dev/null)|$(grep -cxF "$balloon_call" "$BT/calls" 2>/dev/null)" "1|1"
+check "PUT /balloon comes right after /machine-config and right before InstanceStart" \
+  "$([ -n "$mc_n" ] && [ -n "$bl_n" ] && [ -n "$start_n" ] &&
+    [ "$bl_n" -eq $((mc_n + 1)) ] && [ "$start_n" -eq $((bl_n + 1)) ] && echo yes || echo no)" "yes"
+check "the restore path never configures the balloon (it comes back from the snapshot)" \
+  "$(fn_body verify_restore_firecracker | grep -c '/balloon')" "0"
+check "the Cloud Hypervisor arm is unchanged (no balloon)" \
+  "$(fn_body boot_quiesce_snapshot_cloud_hypervisor | grep -ci 'balloon')" "0"
+rm -rf "$BT"
 
 echo "== lease-v1 image"
 # Lease mode (one VM, many Execs, each as uid 7000 in its own cgroup) needs cgroup2

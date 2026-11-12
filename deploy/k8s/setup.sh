@@ -36,13 +36,18 @@
 # Secrets and PVCs with it), SH_WORKLOAD_STORAGE_CLASSES (with SH_WORKLOAD_SANDBOXES=1: the
 # StorageClasses a mounted workload's PVC may use, comma-separated <class>:rwo or <class>:rwx -- rwx
 # only for a class that supports ReadWriteMany; empty, the default, allows the cluster's default
-# class as rwo; workload sandboxes spec §5.4, §6.3), SH_SOURCE_ONLY=1 (define the functions and
-# stop, for tests).
+# class as rwo; workload sandboxes spec §5.4, §6.3), SH_ASYNC_DRAIN=1 (every target: each P6 worker
+# also drains the async leaf queue, so turns submitted with POST /v1/turns run; off when unset or
+# empty; async fan-out spec §9.2), LEAF_RESULT_TTL_SECONDS (every target: how long a leaf result is
+# kept, whole seconds; empty means the default, 86400 -- read by BOTH the control plane and the
+# supervisor from this one key, so the async turn record and the result it describes expire
+# together), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
 # SH_SANDBOX_DEFAULT_TIER (not kind), SH_SANDBOX_EGRESS_EXCEPT, SH_MODEL_CATALOG_HOSTS,
-# SH_WORKLOAD_SANDBOXES, SH_WORKLOAD_STORAGE_CLASSES and, on ocp-single, SH_ROUTE_DOMAIN and
+# SH_WORKLOAD_SANDBOXES, SH_WORKLOAD_STORAGE_CLASSES, SH_ASYNC_DRAIN, LEAF_RESULT_TTL_SECONDS
+# and, on ocp-single, SH_ROUTE_DOMAIN and
 # --tls-secret it is not given; an
 # explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on
 # a command line -- values travel through pipes and through the environment of the one jq that
@@ -221,10 +226,19 @@ parse_args() {
     is_kind || [[ "$TARGET" == ocp-single ]] ||
       die "SH_PUBLIC_HARNESS_URL applies only to port-forward-reached stacks (kind, kind-ci, ocp-single); got --target $TARGET"
   fi
-  # The token lifetimes: validated here when given; a stored one is checked in write_settings.
+  # The async drain knob: 1 or empty, as SH_WORKLOAD_SANDBOXES is. The worker also reads `true` and
+  # `yes` as on (leaf-drain-loop.ts truthy), but every example writes 1, and a value this refuses
+  # that the worker would take costs an operator one re-run -- while `SH_ASYNC_DRAIN=ture` silently
+  # leaving the queue undrained costs a debugging session.
+  case "${SH_ASYNC_DRAIN-}" in
+  '' | 1) ;;
+  *) die "SH_ASYNC_DRAIN='$SH_ASYNC_DRAIN' must be 1 (every worker drains the async leaf queue) or empty (off)" ;;
+  esac
+  # The token lifetimes and the leaf-result TTL: validated here when given; a stored one is checked
+  # in write_settings.
   local ttl
-  for ttl in SH_API_TOKEN_TTL_SECONDS SH_SESSION_TOKEN_TTL_SECONDS; do
-    valid_ttl "${!ttl-}" || die "$ttl='${!ttl}' must be a whole number of seconds, 1 to 8 digits (empty: the control plane's default)"
+  for ttl in SH_API_TOKEN_TTL_SECONDS SH_SESSION_TOKEN_TTL_SECONDS LEAF_RESULT_TTL_SECONDS; do
+    valid_ttl "${!ttl-}" || die "$ttl='${!ttl}' must be a whole number of seconds, 1 to 8 digits (empty: the default)"
   done
   # The catalog allow-list: validated here when given; a stored one is checked in write_settings.
   # The control plane refuses to BOOT on a URL, port or path (main.ts catalogHostsEnv), so a typo
@@ -1075,11 +1089,12 @@ hand_patched_catalog_hosts() {
 # the Route host every run (load_setup_inputs refuses a given value once ROUTE_DOMAIN resolves on).
 # SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack
 # (its sticky input lives in moca-setup). They are written even when '' so every stack hashes the
-# same ten keys; an empty token lifetime is the control plane's default, and an empty catalog
-# allow-list its own.
+# same key set; an empty token lifetime is the control plane's default, an empty catalog allow-list
+# its own, an empty LEAF_RESULT_TTL_SECONDS the 86400 both tiers default to, and an empty
+# SH_ASYNC_DRAIN the async drain off.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
-  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope
+  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope drain result_ttl
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then
     CLIENT_ID="$SH_GITHUB_CLIENT_ID"
@@ -1121,6 +1136,12 @@ write_settings() {
   fb="${fb:-false}"
   if [[ -n "${SH_API_TOKEN_TTL_SECONDS+x}" ]]; then api_ttl="$SH_API_TOKEN_TTL_SECONDS"; else api_ttl="$(cm_value "$before" SH_API_TOKEN_TTL_SECONDS)"; fi
   if [[ -n "${SH_SESSION_TOKEN_TTL_SECONDS+x}" ]]; then session_ttl="$SH_SESSION_TOKEN_TTL_SECONDS"; else session_ttl="$(cm_value "$before" SH_SESSION_TOKEN_TTL_SECONDS)"; fi
+  # The async drain and the leaf-result TTL (#389), same sticky convention. Both are read from this
+  # ConfigMap by the SUPERVISOR as well as the control plane (base/supervisor.yaml, optional refs),
+  # which is the whole reason they live here: an operator who exports SH_ASYNC_DRAIN=1 for a re-run
+  # expects the workers to drain, and a key setup.sh never writes leaves them off forever.
+  if [[ -n "${SH_ASYNC_DRAIN+x}" ]]; then drain="$SH_ASYNC_DRAIN"; else drain="$(cm_value "$before" SH_ASYNC_DRAIN)"; fi
+  if [[ -n "${LEAF_RESULT_TTL_SECONDS+x}" ]]; then result_ttl="$LEAF_RESULT_TTL_SECONDS"; else result_ttl="$(cm_value "$before" LEAF_RESULT_TTL_SECONDS)"; fi
   catalog_src='moca-settings'
   if [[ -n "${SH_MODEL_CATALOG_HOSTS+x}" ]]; then
     catalog_hosts="$SH_MODEL_CATALOG_HOSTS"
@@ -1144,6 +1165,13 @@ write_settings() {
     die "moca-settings holds SH_API_TOKEN_TTL_SECONDS='$api_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_API_TOKEN_TTL_SECONDS=) for the default"
   valid_ttl "$session_ttl" ||
     die "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='$session_ttl': re-run with it set to a whole number of seconds, or set but empty (SH_SESSION_TOKEN_TTL_SECONDS=) for the default"
+  # A stored value, like the lifetimes above. The TTL crashes the control plane and every worker at
+  # BOOT if it is not a positive integer (turn-record.ts resultTtlSeconds throws), so a bad stored
+  # one must stop here rather than after the apply.
+  valid_ttl "$result_ttl" ||
+    die "moca-settings holds LEAF_RESULT_TTL_SECONDS='$result_ttl': re-run with it set to a whole number of seconds, or set but empty (LEAF_RESULT_TTL_SECONDS=) for the default"
+  [[ -z "$drain" || "$drain" == 1 ]] ||
+    die "moca-settings holds SH_ASYNC_DRAIN='$drain': re-run with it set to 1, or set but empty (SH_ASYNC_DRAIN=) to turn the async drain off"
   valid_catalog_hosts "$catalog_hosts" ||
     die "$catalog_src holds SH_MODEL_CATALOG_HOSTS='$catalog_hosts': re-run with it set to comma-separated bare hostnames, or set but empty (SH_MODEL_CATALOG_HOSTS=) for the control plane's default"
   # Valid but long: a stray extra digit must not mint near-permanent bearer tokens unnoticed.
@@ -1156,12 +1184,14 @@ write_settings() {
     --arg catalog_hosts "$catalog_hosts" --arg test_users "$TEST_USERS" \
     --arg idp "$idp" --arg oidc_issuer "$oidc_issuer" --arg oidc_client_id "$oidc_client_id" \
     --arg oidc_redirect "$oidc_redirect" --arg oidc_scope "$oidc_scope" \
+    --arg drain "$drain" --arg result_ttl "$result_ttl" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
       SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
       SH_API_TOKEN_TTL_SECONDS: $api_ttl, SH_SESSION_TOKEN_TTL_SECONDS: $session_ttl,
       SH_MODEL_CATALOG_HOSTS: $catalog_hosts, SH_TEST_USERS: $test_users,
       SH_IDENTITY_PROVIDER: $idp, SH_OIDC_ISSUER: $oidc_issuer, SH_OIDC_CLIENT_ID: $oidc_client_id,
-      SH_OIDC_REDIRECT_URI: $oidc_redirect, SH_OIDC_SCOPE: $oidc_scope}')"
+      SH_OIDC_REDIRECT_URI: $oidc_redirect, SH_OIDC_SCOPE: $oidc_scope,
+      SH_ASYNC_DRAIN: $drain, LEAF_RESULT_TTL_SECONDS: $result_ttl}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null

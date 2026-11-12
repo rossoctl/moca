@@ -3,6 +3,7 @@ package vmpool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -112,7 +113,7 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 				TeardownFailed: e.TeardownFailed,
 			}, nil
 		case ga.KindError:
-			return Result{}, fmt.Errorf("%w: %s", ErrGuest, payload)
+			return Result{}, &guestError{msg: string(payload)}
 		default:
 			// An unknown kind is not something to skip past: it means the two sides
 			// disagree about the protocol, and continuing would report a plausible
@@ -120,6 +121,22 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 			return Result{}, refusal(RefuseShortResponse, "unknown guest frame kind %#x", byte(kind))
 		}
 	}
+}
+
+// guestError is ErrGuest with the agent's KindError message, kept as a field so that
+// guestTimedOut can read it; its text is the "%w: %s" it always was.
+type guestError struct{ msg string }
+
+func (e *guestError) Error() string { return ErrGuest.Error() + ": " + e.msg }
+
+func (e *guestError) Unwrap() error { return ErrGuest }
+
+// guestTimedOut reports whether err is the agent's report that the command's own timeout
+// fired (ga.TimeoutMessage): the guest killed the command, emptied its cgroup and
+// answered, so its VM is as fit for the next lease Exec as after an exit (runLease).
+func guestTimedOut(err error) bool {
+	var ge *guestError
+	return errors.As(err, &ge) && ga.IsTimeoutMessage(ge.msg)
 }
 
 // guestRequest is the request frame's content for c.

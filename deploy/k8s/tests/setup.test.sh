@@ -439,12 +439,13 @@ expect_out 'no SH_GITHUB_CLIENT_ID'
 grep -q "^kubectl --context kind-moca apply -k $REPO/deploy/k8s/.generated/kind\$" "$MOCK_LOG" || fail 'not applied from the generated overlay'
 grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the generated overlay does not build on overlays/kind'
 [[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] || fail 'kind advertises the wrong harness URL'
-# The control plane's configMapKeyRefs are not optional, bar the two tier keys and the catalog
-# allow-list: a missing key stops the pod opaquely. Those and the token lifetimes are written on
-# every run too ('' when untiered, defaulted or empty, as here), so the hash input is the same fifteen
-# keys on every stack (SH_TEST_USERS is '0' unless an operator asked for test users, ADR-0045).
-[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS"]' ]] ||
-  fail 'moca-settings must hold exactly the fifteen keys the control plane and the supervisor reference'
+# The control plane's configMapKeyRefs are not optional, bar the two tier keys, the catalog
+# allow-list and the two async keys: a missing key stops the pod opaquely. Those and the token
+# lifetimes are written on every run too ('' when untiered, defaulted or empty, as here), so the
+# hash input is the same seventeen keys on every stack (SH_TEST_USERS is '0' unless an operator asked
+# for test users, ADR-0045).
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["LEAF_RESULT_TTL_SECONDS","SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_ASYNC_DRAIN","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS"]' ]] ||
+  fail 'moca-settings must hold exactly the seventeen keys the control plane and the supervisor reference'
 [[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]] || fail 'kind is never tiered'
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
@@ -1337,8 +1338,8 @@ jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace
 for k in SH_SINGLE_NAMESPACE SH_ROUTE_DOMAIN SH_TLS_SECRET SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_COUNT; do
   setup_cm moca-single | jq -e --arg k "$k" '.data | has($k)' >/dev/null || fail "ocp-single with Routes: moca-setup lacks $k"
 done
-[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 15 ]] ||
-  fail 'ocp-single with Routes: moca-settings does not hold exactly fifteen keys'
+[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 17 ]] ||
+  fail 'ocp-single with Routes: moca-settings does not hold exactly seventeen keys'
 [[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == https://moca.example.test ]] ||
   fail 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is not the supervisor Route'
 [[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
@@ -1516,6 +1517,50 @@ jq '.data.SH_SESSION_TOKEN_TTL_SECONDS = "5m"' "$MOCK_STATE/moca__ConfigMap__moc
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
 expect_out "moca-settings holds SH_SESSION_TOKEN_TTL_SECONDS='5m'"
 pass 'a malformed token lifetime is refused, given (before any apply) or stored'
+
+# #389: the async drain and the leaf-result TTL. Both are referenced by base/supervisor.yaml, so a
+# setup.sh that did not write them left `SH_ASYNC_DRAIN=1 deploy/k8s/setup.sh` doing nothing at all.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ASYNC_DRAIN=1 LEAF_RESULT_TTL_SECONDS=7200; expect_ok --target kind --skip-build)
+[[ "$(setting SH_ASYNC_DRAIN)" == 1 && "$(setting LEAF_RESULT_TTL_SECONDS)" == 7200 ]] ||
+  fail 'SH_ASYNC_DRAIN and LEAF_RESULT_TTL_SECONDS were not written to moca-settings'
+h_async="$(settings_hash)"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(setting SH_ASYNC_DRAIN)" == 1 && "$(setting LEAF_RESULT_TTL_SECONDS)" == 7200 ]] ||
+  fail 'a re-run without the async settings dropped them'
+[[ "$(settings_hash)" == "$h_async" ]] || fail 'an unchanged re-run changed the settings hash'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ASYNC_DRAIN=; expect_ok --target kind --skip-build)
+[[ -z "$(setting SH_ASYNC_DRAIN)" && "$(setting LEAF_RESULT_TTL_SECONDS)" == 7200 ]] ||
+  fail 'SH_ASYNC_DRAIN= did not turn only the drain off'
+# The supervisor rolls on the change, or the workers keep draining with the old setting.
+[[ "$(settings_hash)" != "$h_async" ]] || fail 'turning the drain off did not change the settings hash'
+grep -q 'key: SH_ASYNC_DRAIN' "$REPO/deploy/k8s/base/supervisor.yaml" &&
+  grep -q 'key: LEAF_RESULT_TTL_SECONDS' "$REPO/deploy/k8s/base/supervisor.yaml" &&
+  grep -q 'key: LEAF_RESULT_TTL_SECONDS' "$REPO/deploy/k8s/base/control-plane.yaml" ||
+  fail 'the supervisor and the control plane do not read the async settings from moca-settings'
+pass 'SH_ASYNC_DRAIN and LEAF_RESULT_TTL_SECONDS are sticky settings; empty is off/the default; a change rolls'
+
+# Both are validated, given and stored: a typo'd TTL crashloops every tier at boot, and a typo'd
+# drain flag would silently leave the queue undrained.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ASYNC_DRAIN=ture; expect_fail --target kind --skip-build)
+expect_out "SH_ASYNC_DRAIN='ture'"
+! grep -q '^kubectl .*apply' "$MOCK_LOG" || fail "SH_ASYNC_DRAIN='ture' reached kubectl apply"
+(export SH_GITHUB_CLIENT_ID=Iv1.a LEAF_RESULT_TTL_SECONDS=1d; expect_fail --target kind --skip-build)
+expect_out "LEAF_RESULT_TTL_SECONDS='1d'"
+(export SH_GITHUB_CLIENT_ID=Iv1.a LEAF_RESULT_TTL_SECONDS=0; expect_fail --target kind --skip-build)
+expect_out "LEAF_RESULT_TTL_SECONDS='0'"
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+jq '.data.LEAF_RESULT_TTL_SECONDS = "0"' "$MOCK_STATE/moca__ConfigMap__moca-settings.json" >"$TMP/cm" &&
+  mv "$TMP/cm" "$MOCK_STATE/moca__ConfigMap__moca-settings.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out "moca-settings holds LEAF_RESULT_TTL_SECONDS='0'"
+jq '.data.LEAF_RESULT_TTL_SECONDS = "" | .data.SH_ASYNC_DRAIN = "on"' "$MOCK_STATE/moca__ConfigMap__moca-settings.json" >"$TMP/cm" &&
+  mv "$TMP/cm" "$MOCK_STATE/moca__ConfigMap__moca-settings.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out "moca-settings holds SH_ASYNC_DRAIN='on'"
+pass 'a malformed SH_ASYNC_DRAIN or LEAF_RESULT_TTL_SECONDS is refused, given (before any apply) or stored'
 
 # The catalog allow-list: a sticky setting like the others.
 reset_state

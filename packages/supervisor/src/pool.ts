@@ -29,6 +29,14 @@ export type WorkerToSupervisor =
       leasesHeld?: number;
       leasePoolSize?: number;
       fileOpP95Ms?: number;
+      /** §7's async metrics. Advisory on the same terms as the rest of this row. The two gauge
+       * fields are sent by slot 0 only (§9.2). */
+      asyncClaims?: number;
+      asyncReclaims?: number;
+      asyncDeadLetters?: number;
+      asyncClaimDeniedFull?: number;
+      asyncQueueDepth?: number;
+      asyncOldestAgeMs?: number;
     };
 
 /**
@@ -51,6 +59,18 @@ export interface WorkerTelemetry {
 export interface TelemetryAggregates {
   readonly leaseSaturation: number;
   readonly fileOpP95Ms: number;
+  /** §7's four async counts, summed over the workers that reported them. */
+  readonly asyncClaims: number;
+  readonly asyncReclaims: number;
+  readonly asyncDeadLetters: number;
+  readonly asyncClaimDeniedFull: number;
+  /**
+   * Queue depth and oldest-entry age, from SLOT 0 ONLY (§9.2). They describe Redis, not a worker,
+   * and §7 wants them once per deployment; this package cannot query Redis itself. NaN while slot 0
+   * is restarting -- the accepted cost recorded in that decision.
+   */
+  readonly asyncQueueDepth: number;
+  readonly asyncOldestAgeMs: number;
 }
 
 /** The narrow slice of `ChildProcess` the pool uses, so tests can hand it a fake. */
@@ -108,6 +128,12 @@ interface Slot {
   leasesHeld: number;
   leasePoolSize: number;
   fileOpP95Ms: number;
+  asyncClaims: number;
+  asyncReclaims: number;
+  asyncDeadLetters: number;
+  asyncClaimDeniedFull: number;
+  asyncQueueDepth: number;
+  asyncOldestAgeMs: number;
 }
 
 export class WorkerPool {
@@ -190,7 +216,24 @@ export class WorkerPool {
 
     const ops = this.slots.map((s) => s.fileOpP95Ms).filter((n) => Number.isFinite(n));
     const fileOpP95Ms = ops.length === 0 ? Number.NaN : Math.max(...ops);
-    return { leaseSaturation, fileOpP95Ms };
+
+    // Summed over the workers that reported, which for a COUNT makes "nobody reported" and
+    // "nothing happened" the same answer -- both are zero claims. (A gauge could not be collapsed
+    // this way, which is why the two below are read from one slot instead.)
+    const sum = (pick: (s: Slot) => number): number =>
+      this.slots.reduce((a, s) => a + (Number.isFinite(pick(s)) ? pick(s) : 0), 0);
+    const zero = this.slots[0];
+
+    return {
+      leaseSaturation,
+      fileOpP95Ms,
+      asyncClaims: sum((s) => s.asyncClaims),
+      asyncReclaims: sum((s) => s.asyncReclaims),
+      asyncDeadLetters: sum((s) => s.asyncDeadLetters),
+      asyncClaimDeniedFull: sum((s) => s.asyncClaimDeniedFull),
+      asyncQueueDepth: zero?.asyncQueueDepth ?? Number.NaN,
+      asyncOldestAgeMs: zero?.asyncOldestAgeMs ?? Number.NaN,
+    };
   }
 
   handOff(preferred: number, socket: Socket, head?: Buffer): number | undefined {
@@ -341,6 +384,12 @@ export class WorkerPool {
       leasesHeld: NaN,
       leasePoolSize: NaN,
       fileOpP95Ms: NaN,
+      asyncClaims: NaN,
+      asyncReclaims: NaN,
+      asyncDeadLetters: NaN,
+      asyncClaimDeniedFull: NaN,
+      asyncQueueDepth: NaN,
+      asyncOldestAgeMs: NaN,
     };
     this.slots[id] = slot;
 
@@ -390,6 +439,13 @@ export class WorkerPool {
         if (msg.leasesHeld !== undefined) slot.leasesHeld = msg.leasesHeld;
         if (msg.leasePoolSize !== undefined) slot.leasePoolSize = msg.leasePoolSize;
         if (msg.fileOpP95Ms !== undefined) slot.fileOpP95Ms = msg.fileOpP95Ms;
+        if (msg.asyncClaims !== undefined) slot.asyncClaims = msg.asyncClaims;
+        if (msg.asyncReclaims !== undefined) slot.asyncReclaims = msg.asyncReclaims;
+        if (msg.asyncDeadLetters !== undefined) slot.asyncDeadLetters = msg.asyncDeadLetters;
+        if (msg.asyncClaimDeniedFull !== undefined)
+          slot.asyncClaimDeniedFull = msg.asyncClaimDeniedFull;
+        if (msg.asyncQueueDepth !== undefined) slot.asyncQueueDepth = msg.asyncQueueDepth;
+        if (msg.asyncOldestAgeMs !== undefined) slot.asyncOldestAgeMs = msg.asyncOldestAgeMs;
         return;
       }
       // Exhaustively narrowed to `{ type: 'load'; inFlight: number }` by the four returns

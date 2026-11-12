@@ -123,6 +123,15 @@ services:
       SH_EXCHANGE_TOKEN:
       # `false` keeps plain `curl /turn` working for a trial; `true` makes every turn need a token.
       SH_REQUIRE_AUTH: ${SH_REQUIRE_AUTH:-false}
+      # #389: 1 makes every worker also drain the async leaf queue. Needs the control-plane profile
+      # (nothing else can mint a turn) and passes through only when .env sets it; empty is off.
+      # Shares SH_TURNS_PER_WORKER with sync /turn, so a deep queue can occupy the whole trial.
+      # The explicit :- default (unlike the bare SH_EXCHANGE_TOKEN: above) keeps the key PRESENT as
+      # '' rather than null when .env is silent, which the compose test's svc_env probe needs to see.
+      SH_ASYNC_DRAIN: ${SH_ASYNC_DRAIN:-}
+      # The result TTL the turn record's own TTL is derived from (+1 h margin). Set on both the
+      # supervisor and the control plane or neither: this worker writes its own async leaf results.
+      LEAF_RESULT_TTL_SECONDS:
     ports:
       # Loopback only. The admin /metrics listener (SH_ADMIN_PORT, 8081) is unauthenticated and
       # stays unpublished; reach it with `docker compose exec supervisor`.
