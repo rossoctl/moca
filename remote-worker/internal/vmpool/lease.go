@@ -26,6 +26,24 @@ import (
 // A lease VM is NOT counted in rp.inFlight: it is the third accounting class
 // (leaseCommittedLocked, leaseChargeLocked), and an idle lease VM holds no concurrency slot.
 
+// LeaseTimeoutSlack is how much later than the Exec's budget the host gives up on a
+// lease Exec (PR #763 review, ruling R8b). The guest's own timeout, armed from what is left
+// of the budget when Run starts (leaseGuestTimeoutS), fires first: the guest kills the
+// Exec's cgroup and answers, and the lease is kept. Only a guest that has not answered
+// within the slack too is taken for dead. Per-Exec Execs get no slack.
+const LeaseTimeoutSlack = 5 * time.Second
+
+// leaseGuestTimeoutS is the timeout_s a lease Exec's guest gets when Run starts at now:
+// what is left of the budget until deadline, rounded up to whole seconds, and at least 1 s.
+// The gate wait, a cold restore and Resume have spent the rest.
+func leaseGuestTimeoutS(deadline, now time.Time) uint32 {
+	left := deadline.Sub(now)
+	if left <= time.Second {
+		return 1
+	}
+	return uint32((left + time.Second - 1) / time.Second)
+}
+
 // vmLease is a run's held VM in lease mode. Every field is guarded by pool.mu, but
 // only the holder of the run's execGate may detach it (endLeaseLocked).
 type vmLease struct {
@@ -223,10 +241,11 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // once: the guest's latch refuses the launcher's per-Exec mount command after the
 // first lease Exec -- and installs the lease. The Run carries Lease and, on the first
 // Exec after root wrote the workspace, NormaliseWorkspace. A TeardownFailed result, a
-// Run error or a timeout ends the lease; otherwise its lastEnd moves to now and its
-// footprint is sampled, both before the gate is released.
+// Run error, the host's deadline or an abort ends the lease; otherwise, the guest's own
+// timeout included (runLease), its lastEnd moves to now and its footprint is sampled,
+// both before the gate is released. deadline is when the Exec's budget ends.
 func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode Mode, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time) (Result, error) {
 	p.mu.Lock()
 	rp := p.runs[key] // pinned by routeExec, so neither the sweep nor Reclaim removed it
 	p.mu.Unlock()
@@ -308,7 +327,7 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 			return Result{}, err
 		}
 	}
-	return p.runLease(ctx, runCtx, rp, vm, e, out, ph, timedOut, timeoutS)
+	return p.runLease(ctx, runCtx, rp, vm, e, out, ph, timedOut, timeoutS, deadline)
 }
 
 // startLease acquires, raises the cgroup of, resumes and installs a new lease VM. Caller
@@ -426,9 +445,16 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 	return vm, nil
 }
 
-// runLease runs one command in rp's lease VM. Caller holds rp's gate.
+// runLease runs one command in rp's lease VM. Caller holds rp's gate. deadline is when
+// the Exec's budget ends; the host's own deadline (runCtx) is LeaseTimeoutSlack later.
+//
+// The guest's report that its own timeout fired (guestTimedOut) keeps the lease (ruling
+// R8b): the guest killed the Exec's cgroup and emptied it before answering, as after an
+// exit, so the Exec fails with the timeout and the next one runs in the same VM. What
+// ends the lease is a guest that did not answer by the host's deadline, a transport
+// error, teardown_failed, or an abort (agent_dead in v1).
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time) (Result, error) {
 	p.mu.Lock()
 	l := rp.lease
 	if cut := l.cut; cut != "" {
@@ -463,7 +489,7 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	res, runErr := vm.Run(execCtx, Command{
 		Command:            e.Command,
 		Stdin:              e.Stdin,
-		TimeoutS:           timeoutS,
+		TimeoutS:           leaseGuestTimeoutS(deadline, t0),
 		Streaming:          e.Streaming,
 		CapBytes:           OutputCapBytes,
 		Lease:              true,
@@ -473,14 +499,17 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		ph.Run = p.clk.Now().Sub(t0)
 	}
 	cErr := p.classify(ctx, timedOut, timeoutS)
+	// The guest answered with its own timeout: the command is dead, its cgroup empty.
+	guestTimeout := guestTimedOut(runErr)
 
 	var reason LeaseEndReason
 	switch {
 	case res.TeardownFailed:
 		reason = LeaseEndTeardownFailed
-	case timedOut.Load(), runErr != nil:
-		// The agent may have survived (a lease timeout does not kill it), but a VM
-		// whose last Exec ended without an End is not one to run the next Exec in.
+	case timedOut.Load(), runErr != nil && !guestTimeout:
+		// The host's deadline (the guest did not answer within the budget and the slack),
+		// a transport error, an abort, or a guest error: the agent may have survived, but
+		// a VM whose last Exec ended without its answer is not one to run the next in.
 		reason = LeaseEndAgentDead
 	}
 
@@ -498,8 +527,9 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		// cancellation produced, is why the lease ends.
 		reason = cut
 	}
-	if normalise && runErr == nil {
-		// An End arrived, so the guest got past the normalisation it runs first.
+	if normalise && (runErr == nil || guestTimeout) {
+		// An End arrived, or the guest's own timeout, which it arms only after the
+		// command starts: either way the guest got past the normalisation it runs first.
 		s := rp.state
 		s.RootWrote = false
 		if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
@@ -545,6 +575,11 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	}
 	if cErr != nil {
 		return res, cErr
+	}
+	if guestTimeout {
+		// The error a host-side timeout gives, as every lease timeout returned before the
+		// guest's own was kept apart: the caller's contract is unchanged.
+		return res, fmt.Errorf("%w:%d", ErrTimeout, timeoutS)
 	}
 	return res, runErr
 }

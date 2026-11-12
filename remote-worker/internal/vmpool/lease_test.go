@@ -518,7 +518,9 @@ func TestRunErrorEndsTheLeaseAgentDead(t *testing.T) {
 			errc <- err
 		}()
 		<-entered
-		clk.Advance(6 * time.Second)
+		// The host's deadline in lease mode: the budget plus LeaseTimeoutSlack, past which
+		// a guest that has not answered is taken for dead (lease_timeout_test.go).
+		clk.Advance(5*time.Second + LeaseTimeoutSlack)
 		if err := <-errc; !errors.Is(err, ErrTimeout) {
 			t.Fatalf("err = %v, want ErrTimeout", err)
 		}

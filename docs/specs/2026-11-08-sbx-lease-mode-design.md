@@ -307,6 +307,10 @@ both lease levels:
 with the reason, the mode, the lease age and, at level 2, the tracked processes (id, name, exit state).
 Like every SBX record, it has no command text.
 
+A lease Exec's timeout keeps the lease: the guest kills the Exec's cgroup and reports the timeout,
+and the next Exec runs in the same guest. In v1 an abort (the caller cancels the Exec) ends the lease
+with `agent_dead`, as does a guest that has not answered a few seconds after the Exec's timeout.
+
 ## 5. Notices
 
 The MCP server cannot push into the harness, so a notice travels with the next response:

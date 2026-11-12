@@ -371,12 +371,13 @@ func leaseEndDrivers() []leaseEndDriver {
 		}},
 		{reason: LeaseEndAgentDead, end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 			t.Helper()
-			// An Exec past its timeout ends without an End: the VM is not one to run the next
-			// Exec in, whether or not the agent survived.
-			e := gateLease("sleep 30", 1)
-			e.TimeoutS = 2
-			if _, _, _, err := g.exec(key, e); err == nil {
-				t.Fatal("an Exec past its 2 s timeout returned no error")
+			// An aborted Exec ends without an End: the VM is not one to run the next Exec in,
+			// whether or not the agent survived. (A timeout no longer does: the guest's own
+			// timeout fires first and keeps the lease, TestGateLeaseTimeoutKeepsTheLease.)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := g.p.Exec(ctx, key, gateLease("sleep 30", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
+				t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
 			}
 			return g
 		}},
@@ -997,6 +998,41 @@ poll:
 	}
 	t.Logf("LeaseBytes: %d MiB before, %d MiB peak, %d MiB %s after the Exec (bound %d MiB)",
 		before>>20, peak>>20, now>>20, time.Since(start).Round(100*time.Millisecond), bound>>20)
+}
+
+// TestGateLeaseTimeoutKeepsTheLease: a lease Exec past its timeout is killed by the guest,
+// which answers with its own timeout, and the lease is kept: the next Exec runs in the
+// same VM with the agent alive as PID 1 and nothing of the timed-out command left
+// (PR #763 review, ruling R8b).
+func TestGateLeaseTimeoutKeepsTheLease(t *testing.T) {
+	requireKVM(t)
+	g := newLeaseGate(t, nil)
+	const key = "lease-timeout"
+	mustSetMode(t, g.p, key, ModeLease, 1)
+	g.run(t, key, gateLease("echo kept > /tmp/marker", 1))
+	v := g.leaseVM(t, key)
+
+	e := gateLease("sleep 300 & sleep 300", 1)
+	e.TimeoutS = 2
+	start := time.Now()
+	if _, _, _, err := g.exec(key, e); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("an Exec past its 2 s timeout: err = %v, want ErrTimeout", err)
+	}
+	if took := time.Since(start); took > 2*time.Second+LeaseTimeoutSlack {
+		t.Fatalf("the timed-out Exec returned after %s, want before the host's deadline (2 s + %s)", took, LeaseTimeoutSlack)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("after the timeout: the lease runs in another VM")
+	}
+	check := `cat /proc/1/comm /tmp/marker
+for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = sleep ] && echo sleep-left; done
+echo checked`
+	if got := g.run(t, key, gateLease(check, 1)); got != "agent\nkept\nchecked\n" {
+		t.Fatalf("after the timeout: %q, want the agent as PID 1, /tmp kept and no sleep left", got)
+	}
+	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none: a timeout ends the Exec, not the lease", s.LeaseEnds)
+	}
 }
 
 // TestGateLeaseExecCaps: a fork bomb and an OOM inside a lease Exec each end that Exec

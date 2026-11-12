@@ -357,7 +357,7 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	if timedOut {
 		// Not dead, unlike the parked shell's timeout: there is no long-lived shell
 		// whose state the timeout could corrupt, and the cgroup is gone.
-		return End{}, fmt.Errorf("timeout:%d", req.TimeoutS)
+		return End{}, errors.New(TimeoutMessage(req.TimeoutS))
 	}
 	return end, nil
 }

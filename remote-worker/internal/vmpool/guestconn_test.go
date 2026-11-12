@@ -139,6 +139,33 @@ func TestRunOverConnSurfacesAGuestError(t *testing.T) {
 	}
 }
 
+// PR #763 review (F2): the agent's report that a command's own timeout fired is a guest
+// error like any other on the wire, and guestTimedOut tells it apart; the error text is
+// unchanged.
+func TestRunOverConnMarksTheGuestsOwnTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		payload string
+		timeout bool
+	}{
+		{ga.TimeoutMessage(7), true},
+		{"guest-agent: this agent is dead", false},
+	} {
+		conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+			_ = ga.WriteFrame(rw, ga.KindError, []byte(tc.payload))
+		})
+		_, err := runOverConn(context.Background(), conn, Command{Command: "true", CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+		if !errors.Is(err, ErrGuest) || err.Error() != "vmpool: guest error: "+tc.payload {
+			t.Fatalf("%q: err = %v, want ErrGuest with the message unchanged", tc.payload, err)
+		}
+		if got := guestTimedOut(err); got != tc.timeout {
+			t.Errorf("%q: guestTimedOut = %v, want %v", tc.payload, got, tc.timeout)
+		}
+	}
+	if guestTimedOut(ErrAborted) || guestTimedOut(nil) {
+		t.Error("guestTimedOut is true for an error the guest did not send")
+	}
+}
+
 func TestRunOverConnReportsDroppedBytes(t *testing.T) {
 	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
 		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{ExitCode: 0, DroppedStdout: 4096, DroppedStderr: 12})

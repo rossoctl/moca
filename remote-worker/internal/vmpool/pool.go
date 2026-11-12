@@ -331,11 +331,13 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var timedOut atomic.Bool
-	tm := p.clk.AfterFunc(time.Duration(timeoutS)*time.Second, func() {
+	fire := func() {
 		timedOut.Store(true)
 		cancel()
-	})
-	defer tm.Stop()
+	}
+	deadline := p.clk.Now().Add(time.Duration(timeoutS) * time.Second)
+	tm := p.clk.AfterFunc(time.Duration(timeoutS)*time.Second, fire)
+	defer func() { tm.Stop() }() // the timer live at return: a lease Exec re-arms it
 
 	if p.cfg.LeaseEnabled {
 		// Lease mode (lease.go). With LeaseEnabled false -- every worker without the
@@ -345,7 +347,13 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 			return Result{}, err
 		}
 		if mode != ModePerExec {
-			return p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS)
+			// The host's deadline moves LeaseTimeoutSlack past the budget, so the guest's
+			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). A timer
+			// that has already fired stays fired: the Exec is timed out either way.
+			if tm.Stop() {
+				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
+			}
+			return p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline)
 		}
 		if endFirst {
 			// A per-Exec Exec on a key that holds a lease: the lease ends (mode_change)
