@@ -28,13 +28,39 @@ export type ToolResultFrame = {
   isError: boolean;
   preview: string;
 };
-export type DoneFrame = { type: 'done'; sessionId: string; stopReason: string; usage?: Usage };
+/** Where the turn ran (`TurnResult.sandbox`): for a seeded template, the seed's origin. */
+export type TurnPlacement = {
+  id: string;
+  tier: string;
+  seed?: { source: 'build' | 'declared'; buildId?: string };
+  workspaceReset?: unknown;
+};
+/** A templated session's workspace patch after the turn (session-templates spec §5.1). */
+export type TurnWorkspace = {
+  baseline?: string;
+  patch?: string;
+  patchBase64?: string;
+  patchSha256?: string;
+  patchBytes?: number;
+  patchRefused?: 'too_large';
+  error?: string;
+};
+export type DoneFrame = {
+  type: 'done';
+  sessionId: string;
+  stopReason: string;
+  usage?: Usage;
+  sandbox?: TurnPlacement;
+  workspace?: TurnWorkspace;
+};
 export type ErrorFrame = {
   type: 'error';
   sessionId: string;
   stopReason: string;
   errorMessage?: string;
   usage?: Usage;
+  sandbox?: TurnPlacement;
+  workspace?: TurnWorkspace;
   abortReason?: AbortReason;
 };
 export type WorkspaceResetFrame = {

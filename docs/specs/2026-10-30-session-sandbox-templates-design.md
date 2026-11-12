@@ -118,13 +118,21 @@ leaf fails with `SandboxPoolEmptyError`, which names no template.
 
 ## 5. The seed
 
+**Where the seed comes from** (2026-11-06): on a deployment with a template store (the combined
+control plane), a session pinned to a `sha256:` build gets **that build's own `spec.seed`**, which
+every build carries (lifecycle spec §3.2), so a self-serve template, which is in no env list, is
+seeded too; a build with no seed sends none. Otherwise the seed is the declared one in
+`SH_SANDBOX_TEMPLATES`. The exchange sends `sandboxSeedSource` (`build` or `declared`) with the
+seed, and the turn's `sandbox.seed` reports it (`{source, buildId}`), so a client can check that
+its workspace was seeded from the build it pinned.
+
 When the session has a template with a seed, `acquireTurnSandbox` runs it in the selected sandbox,
 through the same relay exec client, before the turn's first tool call, **in the session's
 workspace** (the selection's `podCwd`: `/workspace` on a microVM, `/workspace/<sessionId>` on a
 container worker), and only if that workspace is not seeded yet:
 
     cd <workspace> && flock .moca-seed.lock bash -c \
-      '[ -e .moca-seeded ] || { bash -c <seed> >.moca-seed.log 2>&1 && <exclude> && touch .moca-seeded; }'
+      '[ -e .moca-seeded ] || { bash -c <seed> >.moca-seed.log 2>&1 && <baseline> && <exclude> && touch .moca-seeded; }'
 
 - **The marker** (`.moca-seeded`) lives in the workspace, so it travels with it: a session that keeps
   its sandbox is seeded once; a workspace reset (a new, empty workspace) is seeded again.
@@ -137,14 +145,42 @@ container worker), and only if that workspace is not seeded yet:
   cannot trip the output cap; only the exit code is read. The log is in the agent's own workspace, so
   the agent can read it: **a seed must not print a secret** (a clone token, say).
 - **Out of a repository's patch:** when the workspace is a git repository (a seeded checkout), the seed
-  adds `/.moca-seeded`, `/.moca-seed.log` and `/.moca-seed.lock` to its `info/exclude` (`<exclude>`
-  above, each once; best-effort, a workspace without git is unaffected), so a patch taken with `git
-add -A` or `git status --porcelain`, or an agent that commits everything, never carries them.
+  adds `/.moca-seeded`, `/.moca-seed.log`, `/.moca-seed.lock` and `/.moca-baseline` to its
+  `info/exclude` (`<exclude>` above, each once; best-effort, a workspace without git is unaffected),
+  so a patch taken with `git add -A` or `git status --porcelain`, or an agent that commits
+  everything, never carries them.
 - **The lease is renewed** while the seed runs, as for the turn, since a seed (a clone, an install) may
   outlast the lease TTL. The worker's timeout is 600 s.
 - **A failed seed** fails the turn with `SandboxSeedError` (a 500, not retryable: the template's image
   cannot serve the session), naming the template, the exit code or the error, and the log. The lease
   is returned.
+- **The baseline** (`<baseline>` above): right after the seed, `git rev-parse --verify -q HEAD` is
+  written to `.moca-baseline` in the workspace, the commit a turn's patch is taken against (§5.1).
+  Best effort: a seed that leaves no repository leaves no baseline, and still seeds.
+
+### 5.1 The patch, after each turn
+
+A client of a Moca Pi session has no exec on its workspace (the relay's exec route takes sandbox
+tokens only), so the harness hands the end state back: **after every turn of a templated session
+that leased its sandbox**, before the lease is returned, one exec in the session's workspace:
+
+    BASE=$(cat .moca-baseline || git rev-parse HEAD); GIT_INDEX_FILE=<tmp>/index
+    git read-tree $BASE && git add -A -- . ':(exclude).moca-*' ':(exclude).sh-config'
+    git diff --cached --binary $BASE
+
+the same diff a stock agent's runner takes (a throwaway index, so the workspace's own index is
+untouched; the agent's own commits do not hide its work, since the base is the seed's commit). It is
+`TurnResult.workspace` (also on the terminal `done` and `error` frames, so `mocactl run --json`
+prints it):
+
+- `baseline`, the base commit; `patch`, the whole diff (or `patchBase64` when it is not UTF-8);
+  `patchSha256` (`sha256:<hex>` of its bytes) and `patchBytes`;
+- over `SH_TURN_PATCH_MAX_BYTES` (default 4 MiB, at most the transport's 8 MiB output cap) the patch
+  is **left out, never cut**: `patchRefused: 'too_large'`, with its sha256 and size;
+- a capture that fails (no repository, no baseline, an exec error) is `{ error }`, and **never fails
+  the turn**.
+
+An injected sandbox (a leaf's) is its caller's, and a leaf takes its own patch: neither gets one here.
 
 ## 6. User surface
 
@@ -156,6 +192,9 @@ add -A` or `git status --porcelain`, or an agent that commits everything, never 
   `Retry-After`, up to 10 minutes.
 - `mocactl run` refuses an empty `--session` (a script whose id lookup came back empty) and says why
   it waits on a capacity refusal, up to a bound.
+- The JSON turn result's `sandbox` gains `seed` (`{source, buildId?}`) when a seed applied; the
+  result gains `workspace` (§5.1). Both ride on the terminal `done` and `error` frames too, so
+  `mocactl run --json` prints them.
 
 ## 7. Configuration and deployment
 

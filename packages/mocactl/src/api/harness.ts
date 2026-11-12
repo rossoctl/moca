@@ -1,5 +1,5 @@
 import { ApiError, TurnCancelledError, errorFromResponse, networkError } from './errors.js';
-import { isTerminal, type TurnFrame } from './frames.js';
+import { isTerminal, type TurnFrame, type TurnPlacement, type TurnWorkspace } from './frames.js';
 import { readSse, toFrame } from './sse-parser.js';
 import type {
   AttachArgs,
@@ -82,17 +82,25 @@ export class HarnessClient implements HarnessApi {
         response?: string;
         stopReason?: string;
         errorMessage?: string;
+        sandbox?: TurnPlacement;
+        workspace?: TurnWorkspace;
       };
       if (r.response) yield { type: 'text', delta: r.response };
       const stopReason = r.stopReason ?? 'end_turn';
+      // Where it ran and a templated session's patch ride on the terminal frame, as when streamed.
+      const facts = {
+        ...(r.sandbox ? { sandbox: r.sandbox } : {}),
+        ...(r.workspace ? { workspace: r.workspace } : {}),
+      };
       yield r.errorMessage || !CLEAN_STOP_REASONS.has(stopReason)
         ? {
             type: 'error',
             sessionId: r.sessionId ?? sessionId,
             stopReason,
             errorMessage: r.errorMessage,
+            ...facts,
           }
-        : { type: 'done', sessionId: r.sessionId ?? sessionId, stopReason };
+        : { type: 'done', sessionId: r.sessionId ?? sessionId, stopReason, ...facts };
       return;
     }
     yield* this.frames(res, signal, onEventId);

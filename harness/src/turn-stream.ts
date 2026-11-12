@@ -1,6 +1,6 @@
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type { LeafUsage } from './run-leaf.js';
-import type { TurnResult } from './run-turn.js';
+import type { TurnResult, TurnWorkspace } from './run-turn.js';
 
 /** Why the registry aborted a detachable turn (turn-reattach spec §5); absent for any other end. */
 export type AbortReasonCode =
@@ -28,13 +28,22 @@ export type TurnStreamFrame =
       tier: string;
       reason: 'detached' | 'retiered';
     }
-  | { type: 'done'; sessionId: string; stopReason: string; usage?: LeafUsage }
+  | {
+      type: 'done';
+      sessionId: string;
+      stopReason: string;
+      usage?: LeafUsage;
+      sandbox?: TurnResult['sandbox'];
+      workspace?: TurnWorkspace;
+    }
   | {
       type: 'error';
       sessionId: string;
       stopReason: string;
       errorMessage?: string;
       usage?: LeafUsage;
+      sandbox?: TurnResult['sandbox'];
+      workspace?: TurnWorkspace;
       abortReason?: AbortReasonCode;
     };
 
@@ -118,6 +127,10 @@ export function terminalFrame(result: TurnResult): TurnStreamFrame {
       sessionId: result.sessionId,
       stopReason: result.stopReason,
       ...(result.usage ? { usage: result.usage } : {}),
+      // Where the turn ran and a templated session's patch (session-templates spec §5.1), so a
+      // streamed client ends with them as a sync one does.
+      ...(result.sandbox ? { sandbox: result.sandbox } : {}),
+      ...(result.workspace ? { workspace: result.workspace } : {}),
     };
   }
   return {
@@ -126,5 +139,7 @@ export function terminalFrame(result: TurnResult): TurnStreamFrame {
     stopReason: result.stopReason,
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
     ...(result.usage ? { usage: result.usage } : {}),
+    ...(result.sandbox ? { sandbox: result.sandbox } : {}),
+    ...(result.workspace ? { workspace: result.workspace } : {}),
   };
 }

@@ -3,7 +3,17 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SandboxSeedError, SEED_MARKER, seedWorkspace } from '../src/run-turn.js';
+import { createHash } from 'node:crypto';
+import {
+  buildPatchCaptureScript,
+  captureTurnPatch,
+  DEFAULT_PATCH_MAX_BYTES,
+  patchMaxBytes,
+  SandboxSeedError,
+  SEED_BASELINE,
+  SEED_MARKER,
+  seedWorkspace,
+} from '../src/run-turn.js';
 
 /**
  * The template seed (session-templates spec §5), run through a fake transport that executes the
@@ -95,7 +105,7 @@ describe('seedWorkspace', () => {
     );
     expect(status.split('\n').filter(Boolean)).toEqual(['?? app.py']);
     const exclude = readFileSync(join(ws, '.git', 'info', 'exclude'), 'utf8').split('\n');
-    for (const f of ['/.moca-seeded', '/.moca-seed.log', '/.moca-seed.lock'])
+    for (const f of ['/.moca-seeded', '/.moca-seed.log', '/.moca-seed.lock', '/.moca-baseline'])
       expect(exclude.filter((l) => l === f)).toHaveLength(1);
   });
 
@@ -297,5 +307,247 @@ describe('acquireTurnSandbox seeds a templated session (session-templates spec �
     const r = await acquire({ id: 'py312', seed: 'false' }, 1);
     await expect(r.got).rejects.toBeInstanceOf(SandboxSeedError);
     expect(r.released).toEqual(['py-1']);
+  });
+});
+
+describe('the seed baseline and the patch capture (session-templates spec §5.1)', () => {
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], {
+      cwd,
+      stdio: 'pipe',
+    });
+
+  /** A scratch repository at one commit, as an image builder's source checkout is. */
+  function repo() {
+    const src = scratch();
+    git(src, 'init', '-q');
+    execFileSync('bash', ['-c', 'printf "a\\nb\\n" > f.txt; printf "x" > keep.txt'], { cwd: src });
+    git(src, 'add', '-A');
+    git(src, 'commit', '-qm', 'base');
+    return src;
+  }
+
+  /** Runs under real bash, returning stdout as the transport does. */
+  const bashOut = {
+    exec: async (command: string) => {
+      try {
+        const stdout = execFileSync('bash', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] });
+        return { stdout, exitCode: 0, truncated: false };
+      } catch (e) {
+        const x = e as { status: number; stdout: Buffer };
+        return { stdout: x.stdout ?? Buffer.alloc(0), exitCode: x.status, truncated: false };
+      }
+    },
+  };
+
+  it('the seed records the baseline commit beside the marker', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ws }).toString().trim();
+    expect(readFileSync(join(ws, SEED_BASELINE), 'utf8').trim()).toBe(head);
+    // The baseline is one of the seed's own files: a stock `git status` does not show it.
+    const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+      cwd: ws,
+      encoding: 'utf8',
+    });
+    expect(status).toBe('');
+  });
+
+  it('a seed that leaves no repository still seeds, with no baseline', async () => {
+    const ws = scratch();
+    await seedWorkspace(realBash, 'py312', 'echo hi > f', ws);
+    expect(existsSync(join(ws, '.moca-seeded'))).toBe(true);
+    expect(existsSync(join(ws, SEED_BASELINE))).toBe(false);
+  });
+
+  it("captures the end state against the baseline: edits, new files, deletions; Moca's files left out", async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    execFileSync('bash', ['-c', 'printf "a\\nB\\n" > f.txt; rm keep.txt; echo new > n.txt'], {
+      cwd: ws,
+    });
+    // The agent committing its work must not hide it: the base is the seed's commit, not HEAD.
+    git(ws, 'add', 'n.txt');
+    git(ws, 'commit', '-qm', 'agent');
+    const w = await captureTurnPatch(bashOut, ws, 1 << 20);
+    expect(w.error).toBeUndefined();
+    expect(w.baseline).toBe(readFileSync(join(ws, SEED_BASELINE), 'utf8').trim());
+    expect(w.patch).toContain('+B');
+    expect(w.patch).toContain('deleted file mode');
+    expect(w.patch).toContain('n.txt');
+    expect(w.patch).not.toContain('.moca-');
+    expect(w.patchBytes).toBe(Buffer.byteLength(w.patch!, 'utf8'));
+    expect(w.patchSha256).toBe(
+      'sha256:' + createHash('sha256').update(w.patch!, 'utf8').digest('hex'),
+    );
+    // The workspace's own index is untouched (a throwaway index): `git status` still shows the edits.
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: ws }).toString()).toContain(
+      'f.txt',
+    );
+    // The patch applies to the baseline as a stock agent's does.
+    const check = scratch();
+    execFileSync('bash', ['-c', `cp -a ${src}/. .`], { cwd: check });
+    execFileSync('git', ['apply', '--check', '-'], { cwd: check, input: w.patch });
+  });
+
+  it('an unchanged workspace is an empty patch, not an error', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    const w = await captureTurnPatch(bashOut, ws, 1 << 20);
+    expect(w).toMatchObject({ patch: '', patchBytes: 0 });
+  });
+
+  it('over the cap the patch is refused whole, never truncated', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    execFileSync('bash', ['-c', 'head -c 4000 /dev/zero | tr "\\0" a > big.txt'], { cwd: ws });
+    const w = await captureTurnPatch(bashOut, ws, 1000);
+    expect(w.patchRefused).toBe('too_large');
+    expect(w.patch).toBeUndefined();
+    expect(w.patchBytes).toBeGreaterThan(1000);
+    expect(w.patchSha256).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it('a binary change is carried whole, as base64 when it is not UTF-8', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    execFileSync('bash', ['-c', "printf '\\377\\376\\000' > bin.dat"], { cwd: ws });
+    const w = await captureTurnPatch(bashOut, ws, 1 << 20);
+    expect(w.patch ?? Buffer.from(w.patchBase64!, 'base64').toString('latin1')).toContain(
+      'GIT binary patch',
+    );
+  });
+
+  it('no repository, a failed exec or a truncated output is reported, never thrown', async () => {
+    const ws = scratch();
+    expect((await captureTurnPatch(bashOut, ws, 1 << 20)).error).toContain('no baseline commit');
+    expect(
+      (
+        await captureTurnPatch(
+          { exec: async () => Promise.reject(new Error('relay down')) },
+          ws,
+          10,
+        )
+      ).error,
+    ).toContain('relay down');
+    expect(
+      await captureTurnPatch(
+        { exec: async () => ({ stdout: Buffer.alloc(0), exitCode: null, truncated: true }) },
+        ws,
+        10,
+      ),
+    ).toEqual({ patchRefused: 'too_large' });
+  });
+
+  it('the cap is SH_TURN_PATCH_MAX_BYTES, defaulting to 4 MiB, never over the output cap', () => {
+    expect(patchMaxBytes({})).toBe(DEFAULT_PATCH_MAX_BYTES);
+    expect(patchMaxBytes({ SH_TURN_PATCH_MAX_BYTES: '1000' })).toBe(1000);
+    expect(patchMaxBytes({ SH_TURN_PATCH_MAX_BYTES: 'x' })).toBe(DEFAULT_PATCH_MAX_BYTES);
+    expect(patchMaxBytes({ SH_TURN_PATCH_MAX_BYTES: String(64 << 20) })).toBeLessThan(8 << 20);
+  });
+
+  it("the capture script names the baseline file and excludes Moca's own files", () => {
+    const c = buildPatchCaptureScript('/workspace');
+    expect(c).toContain(SEED_BASELINE);
+    expect(c).toContain("':(exclude).moca-*'");
+    expect(c).toContain('git diff --cached --binary "$BASE"');
+    expect(c).toContain('GIT_INDEX_FILE');
+  });
+});
+
+describe('the seed origin on the placement', () => {
+  it('names the pinned build when the seed came from it', async () => {
+    const { acquireTurnSandbox } = await import('../src/run-turn.js');
+    const rec = {
+      sandboxId: 'py-1',
+      labels: { 'moca.dev/template': 'example-repo', 'moca.dev/build': 'sha256:' + 'b'.repeat(64) },
+      capabilities: [],
+      capacityMax: 4,
+      transport: 'grpc' as const,
+    };
+    const transport = {
+      exec: async () => ({ stdout: Buffer.alloc(0), exitCode: 0, truncated: false }),
+      close: async () => {},
+      fastTier: 'per-call-exec' as const,
+    };
+    const deps = {
+      records: { put: async () => {}, remove: async () => {}, list: async () => [rec] },
+      lease: {
+        load: async () => 0,
+        acquire: async () => true,
+        heartbeat: async () => {},
+        release: async () => {},
+      },
+      makeExecClient: () => ({}) as never,
+      makeTransport: () => transport,
+      affinity: {
+        get: async () => null,
+        claim: async (_s: string, e: { sandboxId: string; tier: string }) => e,
+        replace: async () => {},
+        detachedSince: async (_id: string, now: number) => now,
+      },
+    };
+    const env = {
+      KAGENTI_SANDBOX_POOL_SELECTOR: 'app=sbx',
+      SH_SANDBOX_DISCOVERY: 'records',
+      SH_REMOTE_SANDBOX: '1',
+    } as NodeJS.ProcessEnv;
+    const build = 'sha256:' + 'b'.repeat(64);
+    const got = await acquireTurnSandbox(undefined, env, '/h', 's-1', deps, undefined, {
+      id: 'example-repo',
+      seed: 'true',
+      seedSource: 'build',
+      build,
+    });
+    expect(got.placement?.seed).toEqual({ source: 'build', buildId: build });
+    const old = await acquireTurnSandbox(undefined, env, '/h', 's-2', deps, undefined, {
+      id: 'example-repo',
+      seed: 'true',
+      build,
+    });
+    expect(old.placement?.seed).toEqual({ source: 'declared' });
+    const none = await acquireTurnSandbox(undefined, env, '/h', 's-3', deps, undefined, {
+      id: 'example-repo',
+      build,
+    });
+    expect(none.placement?.seed).toBeUndefined();
+  });
+});
+
+describe('withWorkspacePatch: which turns carry a patch', () => {
+  const result = { sessionId: 's', response: '', stopReason: 'stop' };
+  const commands: string[] = [];
+  const transport = {
+    exec: async (c: string) => {
+      commands.push(c);
+      return { stdout: Buffer.from('abc\ndiff\n'), exitCode: 0, truncated: false };
+    },
+  } as never;
+  const sandbox = { transport, podCwd: '/workspace/s-1' };
+
+  it('a leased turn on a templated session: captured in its workspace', async () => {
+    commands.length = 0;
+    const { withWorkspacePatch } = await import('../src/run-turn.js');
+    const r = await withWorkspacePatch(result, { leased: true, sandbox }, 'example-repo', {});
+    expect(r.workspace).toMatchObject({ baseline: 'abc', patch: 'diff\n', patchBytes: 5 });
+    expect(commands[0].startsWith("cd '/workspace/s-1' ")).toBe(true);
+  });
+
+  it('no template, an injected sandbox, or none: unchanged, nothing run', async () => {
+    commands.length = 0;
+    const { withWorkspacePatch } = await import('../src/run-turn.js');
+    expect(await withWorkspacePatch(result, { leased: true, sandbox }, undefined, {})).toBe(result);
+    expect(await withWorkspacePatch(result, { leased: false, sandbox }, 'example-repo', {})).toBe(
+      result,
+    );
+    expect(
+      await withWorkspacePatch(result, { leased: true, sandbox: null }, 'example-repo', {}),
+    ).toBe(result);
+    expect(commands).toEqual([]);
   });
 });

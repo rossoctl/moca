@@ -673,20 +673,63 @@ components:
         stopReason: { type: string }
         errorMessage: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
-        sandbox:
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
+    TurnPlacement:
+      type: object
+      description: Where the turn ran; `workspaceReset` explains why earlier files are gone.
+      properties:
+        id: { type: string }
+        tier: { type: string }
+        seed:
           type: object
-          description: Where the turn ran; `workspaceReset` explains why earlier files are gone.
+          description: |
+            A seeded template's seed origin (session-templates spec §5): `build`, the pinned
+            build's own `spec.seed` in the control plane's template store (`buildId` names it), or
+            `declared`, the deployment's SH_SANDBOX_TEMPLATES. Absent when no seed applies.
+          required: [source]
           properties:
-            id: { type: string }
-            tier: { type: string }
-            workspaceReset:
-              type: object
-              description: |
-                Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
-                frame). `retiered`: the sandbox now serves another tier or sandbox template.
-              properties:
-                from: { type: string }
-                reason: { type: string, enum: [detached, retiered] }
+            source: { type: string, enum: [build, declared] }
+            buildId: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        workspaceReset:
+          type: object
+          description: |
+            Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
+            frame). `retiered`: the sandbox now serves another tier or sandbox template.
+          properties:
+            from: { type: string }
+            reason: { type: string, enum: [detached, retiered] }
+    TurnWorkspace:
+      type: object
+      description: |
+        A templated session's workspace after the turn (session-templates spec §5.1), taken in
+        the turn's sandbox before its lease is returned: `git diff --cached --binary` from the
+        seed's baseline commit to everything in the workspace now, staged in a throwaway index
+        (`.moca-*` and `.sh-config` left out). Present on every templated turn that leased its
+        sandbox; a failed capture is `error` alone and never fails the turn.
+      properties:
+        baseline:
+          type: string
+          description: The commit the seed left the workspace at (`.moca-baseline`), else HEAD.
+        patch:
+          type: string
+          description: The whole diff, when it is valid UTF-8. Never truncated.
+        patchBase64:
+          type: string
+          description: The whole diff as base64, in place of `patch`, when it is not valid UTF-8.
+        patchSha256:
+          type: string
+          description: '`sha256:<hex>` of the diff bytes.'
+        patchBytes: { type: integer, description: The diff's length in bytes. }
+        patchRefused:
+          type: string
+          enum: [too_large]
+          description: |
+            The diff is over SH_TURN_PATCH_MAX_BYTES (default 4 MiB, at most the transport's
+            8 MiB output cap): `patch` is left out, never cut.
+        error:
+          type: string
+          description: Why no patch was taken (no baseline commit, a failed exec).
     LeafUsage:
       type: object
       description: Cumulative token usage, for run cost pricing.
@@ -784,6 +827,8 @@ components:
         sessionId: { type: string }
         stopReason: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
     FrameError:
       type: object
       required: [type, sessionId, stopReason]
@@ -794,6 +839,8 @@ components:
         stopReason: { type: string }
         errorMessage: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
         abortReason:
           type: string
           enum: [cancelled, unwatched, restarting, lease_lost, owner_lost]
