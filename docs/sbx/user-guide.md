@@ -689,7 +689,9 @@ eval "$(mocactl sbx env)"
 
 prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS`,
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
-self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token. See
+self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
+--renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
+long-lived client that reads its next token from a pipe. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
 ## 9. Troubleshooting

@@ -54,7 +54,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  .sbx/ (unless --keep-config) (refused while the
                                                  sandbox has changes not yet pulled, unless --force,
                                                  or when that cannot be checked)
-  mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
+  mocactl sbx token [ID] [--renew-every S] [--json]
+                                                 print a fresh sandbox token (15 minutes by default);
+                                                 --renew-every: a new line every S seconds until stopped
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
@@ -143,6 +145,8 @@ export interface SbxDeps {
   claude?: ClaudeDeps;
   /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
   loginHelpers?: LoginHelpers;
+  /** `token --renew-every`'s sleep (default the runtime's). Tests only. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export function resolveSbxUrl(
@@ -290,6 +294,7 @@ const SYNC_FLAGS: [
     | 'cortex'
     | 'keep-config'
     | 'no-browser'
+    | 'renew-every'
   ),
   string[],
 ][] = [
@@ -302,7 +307,19 @@ const SYNC_FLAGS: [
   ['cortex', ['up']],
   ['keep-config', ['rm']],
   ['no-browser', ['login']],
+  ['renew-every', ['token']],
 ];
+
+/** A whole number of seconds, at least 1, for `flag`; null (after saying why) when malformed. */
+function wholeSeconds(io: Io, flag: string, raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    io.err(`sbx: --${flag} must be a whole number of seconds, at least 1 (got '${raw}')`);
+    return null;
+  }
+  return n;
+}
 /** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
 
@@ -354,6 +371,7 @@ export async function sbxMain(
         host: { type: 'string', multiple: true },
         kind: { type: 'string' },
         preset: { type: 'string' },
+        'renew-every': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -416,6 +434,8 @@ export async function sbxMain(
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  const renewEvery = wholeSeconds(io, 'renew-every', values['renew-every']);
+  if (renewEvery === null) return SBX_EXIT.usage;
   const credFlag = (['host', 'kind', 'preset'] as const).find((f) => values[f] !== undefined);
   if (credFlag && !(command === 'credentials' && arg === 'add')) {
     io.err(`sbx: --${credFlag} only applies to credentials add\n${SBX_USAGE}`);
@@ -622,7 +642,13 @@ export async function sbxMain(
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
   });
   if (typeof opened === 'number') return opened;
-  const ctx: SbxCtx = { ...opened, io, json: values.json === true, signal: deps.signal };
+  const ctx: SbxCtx = {
+    ...opened,
+    io,
+    json: values.json === true,
+    signal: deps.signal,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  };
 
   switch (command) {
     case 'login':
@@ -670,7 +696,7 @@ export async function sbxMain(
     case 'doctor':
       return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
     case 'token':
-      return cmdToken(ctx, id!);
+      return cmdToken(ctx, id!, renewEvery);
     case 'run':
       return cmdRun(ctx, id!, script!, timeout, deps.execFactory);
     case 'put':
