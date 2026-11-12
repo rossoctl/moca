@@ -32,6 +32,11 @@ const SHARED = [
   'GET /v1/policy',
   'PUT /v1/policy',
   'GET /v1/quota',
+  'POST /v1/hosts/{host}/inventory',
+  'POST /v1/hosts/{host}/builds/claim',
+  'GET /v1/hosts/{host}/blobs/{digest}',
+  'POST /v1/hosts/{host}/builds/{build}/log',
+  'POST /v1/hosts/{host}/builds/{build}/report',
 ];
 
 const servers: Server[] = [];

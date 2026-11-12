@@ -71,6 +71,8 @@ import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
+import type { TemplateHost } from './host-config.js';
+import { HOST_HANDLERS, type HostRegistry } from './host-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
 import { TURN_HANDLERS } from './turn-handlers.js';
 import type { Tenancy } from './tenancy.js';
@@ -97,6 +99,8 @@ export function apiIssuer(config: Pick<CpConfig, 'routeProfile'>): string {
 export interface CpConfig {
   /** Which routes this control plane mounts (SBX0 §4.1). Absent means `harness`. */
   routeProfile?: RouteProfile;
+  /** The template hosts (SH_TEMPLATE_HOSTS, template lifecycle spec §6.1); absent or empty: none. */
+  templateHosts?: TemplateHost[];
   apiTokenTtlSeconds: number;
   sessionTokenTtlSeconds: number;
   /** A refresh family dies this long after its last use (`SH_REFRESH_IDLE_TTL_SECONDS`, B14). */
@@ -229,6 +233,8 @@ export interface CpDeps {
    * absent without SH_PROVENANCE_DIR, where templates cannot be created through the API.
    */
   policy?: PolicyStore;
+  /** The template hosts' inventories and limits (§6.1), as their agents last reported them. */
+  hosts?: HostRegistry;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */
@@ -254,6 +260,8 @@ export interface RequestCtx {
   janitorAuthorized?: boolean;
   /** Set by the router for `auth: 'egress'` routes: the host whose token was presented. */
   egressHost?: EgressHost;
+  /** Set by the router for `auth: 'host'` routes: the template host whose token was presented. */
+  host?: string;
 }
 
 export type Handler = (
@@ -1347,6 +1355,7 @@ export const HANDLERS: Record<string, Handler> = {
 
   // SBX0 §5.1: the sandbox resource (sandbox-handlers.ts), mounted on the sandbox profile only.
   ...SANDBOX_HANDLERS,
+  ...HOST_HANDLERS,
   ...EGRESS_HANDLERS,
   ...TURN_HANDLERS,
 };

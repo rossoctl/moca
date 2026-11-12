@@ -69,21 +69,24 @@ describe('§9.3 test 3 — contract drift', () => {
       if (auth === 'exchange') expect(schemes, `${method} ${path}`).toEqual(['exchangeToken']);
       if (auth === 'janitor') expect(schemes, `${method} ${path}`).toEqual(['janitorToken']);
       if (auth === 'egress') expect(schemes, `${method} ${path}`).toEqual(['egress']);
+      if (auth === 'host') expect(schemes, `${method} ${path}`).toEqual(['hostToken']);
     }
-    // Every auth kind the route table uses is one of the five handled above.
+    // Every auth kind the route table uses is one of the six handled above.
     expect([...new Set(ROUTES.map((r) => r.auth))].sort()).toEqual([
       'api',
       'egress',
       'exchange',
+      'host',
       'janitor',
       'none',
     ]);
   });
 
-  it('declares the four security schemes it references', () => {
+  it('declares the five security schemes it references', () => {
     expect(Object.keys(doc().components?.securitySchemes ?? {}).sort()).toEqual([
       'egress',
       'exchangeToken',
+      'hostToken',
       'janitorToken',
       'sessionToken',
     ]);

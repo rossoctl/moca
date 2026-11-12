@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.5.0
+  version: 1.6.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -51,6 +51,13 @@ components:
         One KVM host's egress token (`SH_EGRESS_TOKEN_<ID>`, SBX0.2b §4.2); admits
         POST /v1/egress/credential only. Compared against every configured host; no user,
         admin or janitor token is accepted there.
+    hostToken:
+      type: http
+      scheme: bearer
+      description: |
+        One template host agent's token (`SH_HOST_TOKEN_<ID>`, `SH_TEMPLATE_HOSTS`; template
+        lifecycle spec §6.1); admits the /v1/hosts/{host}/ routes for that host only. Distinct
+        from every egress and janitor token; no user or admin token is accepted there.
   parameters:
     sessionId:
       name: id
@@ -2053,6 +2060,196 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/hosts/{host}/inventory:
+    post:
+      operationId: hostInventory
+      summary: A host agent reports what it holds (by manifest hash) and its limits
+      description: |
+        Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
+        the host in the path must be the one whose token is presented. Body
+        `{holds: [{template, manifestHash}], limits: {activeLimit, idleLimitSeconds,
+        buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
+        inventory in its own process; the agent re-sends it on every poll.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                holds:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      template: { type: string }
+                      manifestHash: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                limits:
+                  type: object
+                  properties:
+                    activeLimit: { type: integer }
+                    idleLimitSeconds: { type: integer }
+                    buildConcurrency: { type: integer }
+                    diskFreeGb: { type: integer }
+                    diskFloorGb: { type: integer }
+      responses:
+        '200':
+          description: recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string }
+                  holds: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/hosts/{host}/builds/claim:
+    post:
+      operationId: hostClaimBuilds
+      summary: A host agent claims up to `max` (at most 4) queued builds, oldest first, subjects in turn
+      description: |
+        Each claimed build moves to `building`, held by this host. Each comes with its template
+        id, handle, image, the spec as template-build.sh reads it, and where to fetch its gate
+        record (`/v1/hosts/{host}/blobs/{sha256}`).
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { max: { type: integer } } }
+      responses:
+        '200':
+          description: the claimed builds (possibly none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [builds]
+                properties:
+                  builds:
+                    type: array
+                    items:
+                      type: object
+                      required: [template, build, image, spec]
+                      properties:
+                        template: { type: string }
+                        build: { type: string }
+                        image: { type: string }
+                        spec: { type: object }
+                        gateRecord: { type: string }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/hosts/{host}/blobs/{digest}:
+    get:
+      operationId: hostBlob
+      summary: A document the store holds by sha256 (a gate record), for a host agent
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: digest, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the document, base64 of its exact bytes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sha256: { type: string }
+                  base64: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/builds/{build}/log:
+    post:
+      operationId: hostBuildLog
+      summary: A host agent appends log entries to a build it claimed (at most 200 a call)
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      level: { type: string, enum: [info, warn, error] }
+                      step: { type: string }
+                      message: { type: string }
+      responses:
+        '200':
+          description: appended
+          content:
+            application/json:
+              schema: { type: object, properties: { appended: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`: no such build claimed by this host'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/builds/{build}/report:
+    post:
+      operationId: hostBuildReport
+      summary: A host agent reports a step of a build it claimed; `built` registers or rejects it
+      description: |
+        `{event: building | probing}`; `{event: failed, step, message}`; or `{event: built,
+        templateRecord, manifest}`, each the host's file (T, S) as a string. On `built` the
+        control plane stores both byte for byte, writes a `build` record, checks them against the
+        create's request (§8.2: image, R's digest, manifest hash and version 2, size, gate
+        record, X12) and registers the build (its id becomes the manifest hash; the template's
+        first takes `default`) or rejects it naming the rule, writing a `check` record either way.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: the build's new status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+                  buildId: { type: string }
+                  rule: { type: string }
+        '400':
+          description: '`invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`: no such build claimed by this host'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes:
     description: |
       Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers

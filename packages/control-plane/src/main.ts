@@ -1,5 +1,7 @@
 import { ProvenanceStore } from './provenance.js';
 import { FilePolicyStore } from './template-policy-store.js';
+import { HostRegistry } from './host-handlers.js';
+import { templateHostsFromEnv } from './host-config.js';
 import type { PolicyStore } from './template-policy.js';
 import {
   FileTemplateCatalog,
@@ -219,6 +221,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
   const config: CpConfig = {
     ...tokenTtlsFromEnv(env),
+    templateHosts: templateHostsFromEnv(env, [env.SH_EXCHANGE_TOKEN ?? ''].filter(Boolean)),
     exchangeToken: required(env, 'SH_EXCHANGE_TOKEN'),
     defaultInferenceEndpoint: env.SH_DEFAULT_INFERENCE_ENDPOINT || undefined,
     modelCatalogHosts: catalogHostsEnv(env),
@@ -291,9 +294,15 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
         'github:/oidc: subjects (SH_ALLOWED_SUBJECTS)',
     );
   }
+  const sandbox = sandboxConfigFromEnv(env);
   const config: CpConfig = {
     routeProfile: 'sandbox',
-    sandbox: sandboxConfigFromEnv(env),
+    sandbox,
+    // Distinct from the janitor's and every egress host's bearer (host-config.ts).
+    templateHosts: templateHostsFromEnv(env, [
+      ...(sandbox.janitorToken ? [sandbox.janitorToken] : []),
+      ...(sandbox.egress?.hosts.map((h) => h.token) ?? []),
+    ]),
     ...tokenTtlsFromEnv(env),
     allowOperatorFallback: false,
     injectorConfigured: false,
@@ -578,6 +587,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     // writes into this same Redis on either profile.
     presence: redisPresenceReader(client as unknown as PresenceRedisLike),
     ...templateCatalogFromEnv(env, config),
+    hosts: new HostRegistry(),
     // github or oidc, per SH_IDENTITY_PROVIDER (identityProviderFromEnv above); the oidc
     // provider additionally carries the browser-callback half the seam defines.
     identity: identityProviderFromEnv(env),
