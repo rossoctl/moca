@@ -328,10 +328,11 @@ export function createRelay(deps: RelayDeps): Relay {
         putPresence(id, session, rec);
         return;
       }
-      // chunk/end/error frames are dispatched to the per-reqId sink registered by routeExec
+      // chunk/end/error/lease frames are dispatched to the per-reqId sink registered by routeExec
       const parked = sandboxId ? sessions.get(sandboxId) : undefined;
       if (!parked) return;
-      const reqId = frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId;
+      const reqId =
+        frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId ?? frame.lease?.reqId;
       if (reqId !== undefined) parked.sinks.get(reqId)?.(toExecEvent(frame));
     });
     /**
@@ -485,5 +486,6 @@ export function createRelay(deps: RelayDeps): Relay {
 export function toExecEvent(frame: WorkerFrame): ExecEvent {
   if (frame.chunk) return { chunk: frame.chunk } as ExecEvent;
   if (frame.end) return { end: frame.end } as ExecEvent;
+  if (frame.lease) return { lease: frame.lease } as ExecEvent;
   return { error: frame.error } as ExecEvent;
 }

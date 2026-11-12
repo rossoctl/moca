@@ -12,6 +12,7 @@ import {
   SandboxWorkerService,
   Stream,
   Exec,
+  LeaseEvent,
   type ExecEvent,
   type ServerFrame,
   type WorkerFrame,
@@ -96,6 +97,7 @@ export type Reply = Array<
   | { chunk: { data: string; stream?: Stream } }
   | { end: { exitCode: number; truncated?: boolean } }
   | { error: { message: string } }
+  | { lease: Omit<Partial<LeaseEvent>, 'reqId'> }
 >;
 
 /**
@@ -137,6 +139,8 @@ export async function worker(
           stream.write({
             end: { reqId, exitCode: f.end.exitCode, truncated: f.end.truncated ?? false },
           } as WorkerFrame);
+        else if ('lease' in f)
+          stream.write({ lease: LeaseEvent.fromPartial({ ...f.lease, reqId }) } as WorkerFrame);
         else stream.write({ error: { reqId, message: f.error.message } } as WorkerFrame);
       }
       return;
@@ -231,6 +235,8 @@ export function exec(
     reqId?: number;
     command?: string;
     workload?: string;
+    /** Exec fields the client sets beyond the defaults (the mode fields, keepalive). */
+    fields?: Partial<Exec>;
   },
 ) {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
@@ -247,6 +253,7 @@ export function exec(
         timeoutS: 5,
         streaming: true,
         workspaceKey: opts.wsk ?? 'sbx-aaaa',
+        ...opts.fields,
       }),
     },
     md,
@@ -280,6 +287,6 @@ export function abort(
 
 /** Every req_id an event carries, whichever oneof it is. */
 export const idsOf = (events: ExecEvent[]) =>
-  events.map((ev) => ev.chunk?.reqId ?? ev.end?.reqId ?? ev.error?.reqId);
+  events.map((ev) => ev.chunk?.reqId ?? ev.end?.reqId ?? ev.error?.reqId ?? ev.lease?.reqId);
 export const stdoutOf = (events: ExecEvent[]) =>
   events.map((ev) => (ev.chunk ? Buffer.from(ev.chunk.data).toString() : '')).join('');

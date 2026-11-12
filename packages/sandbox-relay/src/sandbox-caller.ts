@@ -1,6 +1,6 @@
 import { status, type ServerWritableStream } from '@grpc/grpc-js';
-import type { Exec, ExecEvent, ExecRequest } from '@moca/k8s-sandbox';
-import type { SandboxTokenClaims } from '@moca/control-plane';
+import { SandboxMode, type Exec, type ExecEvent, type ExecRequest } from '@moca/k8s-sandbox';
+import type { SandboxModeName, SandboxTokenClaims } from '@moca/control-plane';
 import type { Relay, RelayTimers } from './relay.js';
 import { workerReqId } from './sandbox-auth.js';
 import {
@@ -11,6 +11,28 @@ import {
   withReqId,
   type PumpResult,
 } from './exec-stream.js';
+
+const EXEC_MODE: Record<SandboxModeName, SandboxMode> = {
+  'per-exec': SandboxMode.SANDBOX_MODE_PER_EXEC,
+  lease: SandboxMode.SANDBOX_MODE_LEASE,
+  'lease+processes': SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+};
+
+/**
+ * An Exec's mode fields, from the verified token (lease-mode spec §8.2). On the sandbox path the
+ * relay is their only setter: whatever the client wrote is overwritten with these, so a client
+ * cannot raise its own lease mode. A token minted before the claims existed was defaulted to
+ * per-exec, 0, 0 by verifySandboxToken.
+ */
+export function claimsToExecMode(
+  claims: Pick<SandboxTokenClaims, 'mode' | 'mode_epoch' | 'idle_timeout_s'>,
+): Pick<Exec, 'mode' | 'modeEpoch' | 'idleTimeoutS'> {
+  return {
+    mode: EXEC_MODE[claims.mode],
+    modeEpoch: claims.mode_epoch,
+    idleTimeoutS: claims.idle_timeout_s,
+  };
+}
 
 /**
  * One audit line per sandbox Exec (SBX0 §3.5), on the relay's refusal channel. Who (`sub`, `sbx`,
@@ -346,7 +368,8 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         call,
         relay,
         sandboxId,
-        { ...e, reqId: wid },
+        // keepalive is the client's opt-in (spec §4); the mode fields are only ever the token's.
+        { ...e, reqId: wid, ...claimsToExecMode(claims) },
         {
           // Never let the worker's id reach the caller: every frame carries the caller's own.
           toCaller: (ev) => withReqId(ev, e.reqId),
