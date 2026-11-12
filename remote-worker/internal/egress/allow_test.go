@@ -1,6 +1,10 @@
 package egress
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestAllowMatchNormalises(t *testing.T) {
 	cases := []struct {
@@ -104,5 +108,40 @@ func TestNormalizeHostHygiene(t *testing.T) {
 	}
 	if e, err := ParseAllow("*.xn--bcher-kva.example"); err != nil || !e[0].Wildcard {
 		t.Errorf("wildcard punycode: %+v %v", e, err)
+	}
+}
+
+// deploy/sbx/egress-allow.env is the default allowlist install-host.sh seeds a host's
+// moca-egress.env from; a bad entry would surface only when moca-egress fails to boot on
+// a host, so it is pinned here instead.
+func TestDefaultAllowlistFile(t *testing.T) {
+	b, err := os.ReadFile("../../../deploy/sbx/egress-allow.env")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Match install-host.sh exactly: sed -n 's/^MOCA_EGRESS_ALLOW=//p' -- the key at
+	// column 0, no trimming -- so an indented line or a CRLF file fails here the same
+	// way it mis-seeds (or falls back) on a host.
+	var line string
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "MOCA_EGRESS_ALLOW="); ok {
+			line = v
+		}
+	}
+	if line == "" {
+		t.Fatal("no MOCA_EGRESS_ALLOW line in deploy/sbx/egress-allow.env")
+	}
+	entries, err := ParseAllow(line)
+	if err != nil {
+		t.Fatalf("ParseAllow: %v", err)
+	}
+	if len(entries) < 10 {
+		t.Fatalf("got %d entries, want the full default list", len(entries))
+	}
+	if !Allowed(entries, "registry.npmjs.org", 443, true) {
+		t.Error("registry.npmjs.org:443 not allowed")
+	}
+	if Allowed(entries, "example.org", 443, true) {
+		t.Error("example.org allowed")
 	}
 }
