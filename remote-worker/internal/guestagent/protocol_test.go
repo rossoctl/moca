@@ -125,3 +125,20 @@ func TestEndTeardownFailedRoundTrip(t *testing.T) {
 		t.Fatalf("end = %+v, want TeardownFailed", e)
 	}
 }
+
+// PR #763 review (F2): the host keeps a lease when the guest reports its own timeout, so
+// the message has one format, and nothing else the agent sends parses as it.
+func TestTimeoutMessage(t *testing.T) {
+	if got := TimeoutMessage(42); got != "timeout:42" {
+		t.Fatalf("TimeoutMessage(42) = %q, want timeout:42", got)
+	}
+	if !IsTimeoutMessage(TimeoutMessage(7)) {
+		t.Fatal("IsTimeoutMessage(TimeoutMessage(7)) = false")
+	}
+	for _, msg := range []string{"", "timeout:", "timeout:x", "timeout:-1", "timeout:5 ", "guest-agent: timeout:5",
+		"guest-agent: the connection closed; the Exec was aborted"} {
+		if IsTimeoutMessage(msg) {
+			t.Errorf("IsTimeoutMessage(%q) = true, want false", msg)
+		}
+	}
+}
