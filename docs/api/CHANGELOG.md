@@ -43,7 +43,9 @@ who submits a gate record, never by anything inside it. Every change is additive
 - `Policy` adds the optional `allowedRepositories`: per registry host (as the policy reads it,
   Docker Hub as `docker.io`), the repositories a create may name there, each an exact path
   (`library/python`) or a prefix (`library/*`), matched on whole path segments; a Docker Hub
-  official name reads as `library/<name>`. New create rule `registry.repository`. A registry with
+  official name reads as `library/<name>`. New create rule `registry.repository`, which also
+  refuses there an image path outside the entries' grammar (uppercase, or an empty, `.` or `..`
+  segment). A registry with
   no list allows every repository, as before; a registry listed there must also be in
   `allowedRegistries`.
 

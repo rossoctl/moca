@@ -266,8 +266,11 @@ export function repositoryAllowed(repo: string, entry: string): boolean {
   return repo === entry;
 }
 
-const REPOSITORY_ENTRY_RE =
-  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?:\/\*)?$/;
+/** A repository path: lowercase segments, each letters and digits separated by `.`, `_` or `-`. */
+const REPOSITORY_PATH = '[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*';
+const REPOSITORY_RE = new RegExp(`^${REPOSITORY_PATH}$`);
+/** An allowlist entry: a repository path, or one ending in `/*` (a prefix). */
+const REPOSITORY_ENTRY_RE = new RegExp(`^${REPOSITORY_PATH}(?:\\/\\*)?$`);
 
 const int = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
 
@@ -319,10 +322,15 @@ export function checkCreate(
     const list = policy.allowedRepositories?.[reg];
     if (list) {
       const repo = repositoryOf(input.image);
+      // The image's path is held to the entries' grammar first: lowercase, no empty, `.` or `..`
+      // segment. The matcher and the build host's puller then read one path the same way.
+      const wellFormed = REPOSITORY_RE.test(repo);
       rule(
         'registry.repository',
-        list.some((e) => repositoryAllowed(repo, e)),
-        `image repository ${repo} is not allowed from registry ${reg} (policy allowedRepositories)`,
+        wellFormed && list.some((e) => repositoryAllowed(repo, e)),
+        wellFormed
+          ? `image repository ${repo} is not allowed from registry ${reg} (policy allowedRepositories)`
+          : `image repository ${repo} is malformed (lowercase path segments of letters and digits, separated by '.', '_' or '-'), from registry ${reg}, which lists its repositories (policy allowedRepositories)`,
       );
     }
   }

@@ -136,7 +136,10 @@ The registry allowlist (`allowedRegistries`) admits a registry host. Where the p
 repositories for it (`allowedRepositories`, keyed by the host as the policy reads it, Docker Hub as
 `docker.io`), the image must come from one of them: an exact path (`library/python`) or a prefix
 (`library/*`), matched on whole path segments; a Docker Hub official name reads as `library/<name>`.
-A registry with no list allows every repository it serves.
+The image's path is first held to the entries' grammar (lowercase segments of letters and digits
+separated by `.`, `_` or `-`; no empty, `.` or `..` segment), so the policy and the build host's
+puller read one path the same way; a path that is not is refused by the same rule. A registry with
+no list allows every repository it serves.
 
 ## 3. Provenance: what must be kept, where
 

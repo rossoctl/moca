@@ -384,7 +384,8 @@ differs from the create's: `M7.spec_id`, `M7.spec_image`), M8, M9; the image pin
 **from an allowed registry** (`allowedRegistries`; a reference with no host is the build host's
 default registry, `<default>`) and, where the policy lists repositories for that registry
 (`allowedRepositories`), from one of them (rule `registry.repository`; whole path segments,
-`prefix/*` for a prefix; a registry with no list allows every repository it serves); the profile's
+`prefix/*` for a prefix; the image's path held to the entries' grammar first, so no uppercase and no
+empty, `.` or `..` segment; a registry with no list allows every repository it serves); the profile's
 size envelope; for `benchmark`, X1, X10-X12, X14 and
 X15 from the spec and the gate record; X10 and X12 whenever the spec names a gate record or skips
 the git identity check, whatever the profile; and the caller's quota (§6.2). A refusal is

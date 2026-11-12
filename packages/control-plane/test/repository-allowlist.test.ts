@@ -109,6 +109,22 @@ describe('the create rule', () => {
     expect(failed(create(`docker.io/library/python@${D}`, DEFAULT_POLICY))).toBe('registry');
   });
 
+  it.each([
+    ['a `..` segment', 'library/../evil/x'],
+    ['a `.` segment', 'library/./python'],
+    ['an empty segment', 'library//python'],
+    ['uppercase', 'Library/Python'],
+    ['a trailing slash', 'library/python/'],
+  ])(
+    'refuses an image path with %s before matching, where the registry lists repositories',
+    (_w, path) => {
+      const p: Policy = { ...HUB, allowedRepositories: { 'docker.io': ['library/*'] } };
+      const r = create(`docker.io/${path}@${D}`, p);
+      expect(failed(r)).toBe('registry.repository');
+      expect(r.failed?.message).toContain('is malformed');
+    },
+  );
+
   it('admits a prefix entry by whole segments', () => {
     const p: Policy = { ...HUB, allowedRepositories: { 'docker.io': ['library/*'] } };
     expect(failed(create(`docker.io/library/node@${D}`, p))).toBeUndefined();
