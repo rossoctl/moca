@@ -1098,3 +1098,53 @@ func TestLeaseTickerArmedOnlyWhenLeaseEnabled(t *testing.T) {
 		t.Fatalf("lease ticker armed on a pool without lease-v1")
 	}
 }
+
+// PR #763 review (F7): a per-Exec-only worker (LeaseEnabled false) does no lease-state
+// I/O when it removes a workspace. A state file planted for the key -- one the retire
+// would delete, and one it would rewrite -- is left exactly as it was.
+func TestPerExecOnlyWorkerLeavesTheStateFileAlone(t *testing.T) {
+	for _, rm := range []struct {
+		name   string
+		remove func(t *testing.T, p *pool, clk *fakeClock)
+	}{
+		{"workspace idle", func(t *testing.T, p *pool, clk *fakeClock) {
+			clk.Advance(5 * time.Minute)
+			waitFor(t, func() bool {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				return p.runs["k"] == nil
+			})
+		}},
+		{"Reclaim", func(t *testing.T, p *pool, clk *fakeClock) {
+			if err := p.Reclaim(t.Context(), "k"); err != nil {
+				t.Fatalf("Reclaim: %v", err)
+			}
+		}},
+	} {
+		for _, body := range []string{`{"root_wrote":true}`, `{"mode":"lease","epoch":3,"known":true}`} {
+			t.Run(rm.name+" "+body, func(t *testing.T) {
+				p, _, clk := leasePool(t, func(c *Config) {
+					c.ManifestFeatures = nil // no lease-v1: LeaseEnabled false
+					c.StandbyIdle = 60 * time.Second
+					c.WorkspaceIdle = 120 * time.Second
+				})
+				if p.cfg.LeaseEnabled {
+					t.Fatal("LeaseEnabled with no lease-v1 feature")
+				}
+				mustExec(t, p, "k", Exec{Command: "one", TimeoutS: 30})
+				path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rm.remove(t, p, clk)
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != body {
+					t.Fatalf("the state file after the removal: %q, %v; want %q untouched", got, err, body)
+				}
+			})
+		}
+	}
+}

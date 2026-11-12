@@ -805,7 +805,9 @@ func (p *pool) Reclaim(ctx context.Context, key string) error {
 	if !busy {
 		if tomb, detachErr = detachWorkspace(rp.dir); detachErr == nil {
 			delete(p.runs, key)
-			retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp)) // as the sweep does: see sweepOnce
+			if p.cfg.LeaseEnabled { // as the sweep does: see sweepOnce
+				retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
+			}
 		}
 	}
 	p.mu.Unlock()
