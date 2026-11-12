@@ -3,7 +3,7 @@ import type { ClaimedTurn } from '@moca/harness/leaf-job-runner';
 import type { LeafEnvelope } from '@moca/harness/run-leaf';
 import { toResultRecord, writeResult, type RedisLike } from '@moca/harness/leaf-result-store';
 import { buildConfig } from './server.js';
-import { validateExchangeBody, type TurnAuth } from './turn-auth.js';
+import { templateAuth, validateExchangeBody, type TurnAuth } from './turn-auth.js';
 
 export interface TurnClaimDeps {
   controlPlaneUrl: string;
@@ -120,6 +120,9 @@ export async function claimTurn(
     ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
       ? { sandboxTier: resolved.sandboxTier }
       : {}),
+    // A templated session's turn runs on its template's workers, pinned to its build and seeded,
+    // queued or not (the dequeue exchange returns them as the session exchange does).
+    ...templateAuth(resolved),
     ...(resolved.model ? { model: resolved.model } : {}),
   };
   // `buildConfig` never reads `auth.configRef` -- the sync path merges it into the envelope

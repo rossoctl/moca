@@ -84,9 +84,9 @@ templates`). Omitted: `''`, no template.
 
 `TurnAuth` gains `sandboxTemplate` and `sandboxSeed`; `executeTurn` passes them to
 `acquireTurnSandbox`, which passes `opts.template` to `selectPoolSandbox` and runs the seed (§5).
-Leaf paths and unauthenticated turns pass no template. The async turn exchange
-(`POST /internal/turn-credentials`, ADR-0047) does not carry the template in this change: an async
-drain that runs a templated session's turns must add it there first.
+Unauthenticated turns pass no template. The async turn exchange (`POST /internal/turn-credentials`,
+ADR-0047) returns the session's template, seed, seed source and build as the session exchange does
+(2026-11-12), so a queued turn of a templated session runs on its hands (§5.2).
 
 ### 3.5 Affinity
 
@@ -111,10 +111,12 @@ unchanged on the wire. Everything else in P6.3 §4 is unchanged.
 The template filter needs no deployment setting: a deployment whose workers carry no template label
 is unaffected.
 
-**Leaves and unauthenticated turns** pass no template, so they too run only on untemplated
-workers. A deployment that templates some workers must keep at least one untemplated worker (per
-tier it uses) for them, as the tier design keeps a default tier; with every worker templated, a
-leaf fails with `SandboxPoolEmptyError`, which names no template.
+**Verdict and solve leaves and unauthenticated turns** pass no template, so they run only on
+untemplated workers. A deployment that templates some workers must keep at least one untemplated
+worker (per tier it uses) for them, as the tier design keeps a default tier; with every worker
+templated, such a leaf fails with `SandboxPoolEmptyError`, which names no template. A **prompt
+leaf** of a templated session (a queued turn, or a `/v1/runs` prompt run under its token) passes
+the session's template and build (§5.2).
 
 ## 5. The seed
 
@@ -181,6 +183,25 @@ prints it):
   the turn**.
 
 An injected sandbox (a leaf's) is its caller's, and a leaf takes its own patch: neither gets one here.
+
+### 5.2 Queued turns
+
+A queued turn (`POST /v1/sessions/{id}/turns`, ADR-0047) runs as a prompt leaf on whichever worker
+drains it, with the credential and config the dequeue exchange returns. That exchange returns
+`sandboxTemplate`, `sandboxSeed`, `sandboxSeedSource` and `sandboxBuildId` as the session exchange
+does. They are read from the session, not copied onto the turn record, and are a pin all the same:
+a session's template and build are written once, at creation, and no route changes them. The
+worker's claim carries them into the leaf's config, and the prompt leaf then:
+
+- selects only workers of the template, pinned to the build (§4), and fails closed as a turn does;
+- seeds the leased workspace with the same `seedWorkspace` (§5) before the turn, while it renews
+  its lease; a failed seed fails the leaf (`failed`, `error`), and the lease is returned;
+- after a turn that responded, takes the patch with the same capture (§5.1) before it returns the
+  lease, and its result (`responded`) carries `workspace` and, when a seed applied, `seed`
+  (`{source, buildId?}`), as `GET /v1/sessions/{id}/turns/{turnId}`'s `result` and as a `/v1/runs`
+  prompt run's result. A leaf that fails or is aborted carries no patch.
+
+The leaf's workspace is keyed by the leaf's session id, as before; a seed is per workspace (§5).
 
 ## 6. User surface
 

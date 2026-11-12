@@ -5,6 +5,8 @@ import {
   placeholderFor,
   refuseMisdirectedSecret,
   resolveInference,
+  sessionSeed,
+  sessionTemplate,
   sessionTier,
   type CredentialMode,
   type ExchangeResponse,
@@ -178,6 +180,15 @@ export async function exchangeTurnCredential(
   // (M2/#388 -- the record is this issue's, so #389 cannot pin what it does not carry), not reading
   // them from a different place here.
   const tier = sessionTier(rec, deps.config.sandboxTiers);
+  // The session's sandbox template, its seed and its build, exactly as the session exchange returns
+  // them (session-templates spec §3.4, combined control plane spec §3.4), so a queued turn of a
+  // templated session runs on that template's workers, pinned to its build, and seeded. Read from
+  // the session, not copied onto the turn record, and that is a pin all the same: a session's
+  // template and build are written once, at creation, and no route changes them, so the record of
+  // a turn queued an hour ago and the session now agree. A template the deployment no longer
+  // declares is still sent, without a seed, so the turn is refused rather than run untemplated.
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
   return {
     turnId: turn.turnId,
     mode,
@@ -193,6 +204,12 @@ export async function exchangeTurnCredential(
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(turn.cfg ? { configRef: turn.cfg } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
+    ...(template ? { sandboxTemplate: template.id } : {}),
+    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
+    // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
+    ...(template && rec.sandboxBuildId?.startsWith('sha256:')
+      ? { sandboxBuildId: rec.sandboxBuildId }
+      : {}),
     ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
   };
 }

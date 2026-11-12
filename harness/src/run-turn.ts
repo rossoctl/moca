@@ -325,7 +325,7 @@ export async function acquireTurnSandbox(
 }
 
 /** A seeded template's TurnSeed: an absent source is a control plane from before it was sent. */
-function seedOrigin(t: { seedSource?: 'build' | 'declared'; build?: string }): TurnSeed {
+export function seedOrigin(t: { seedSource?: 'build' | 'declared'; build?: string }): TurnSeed {
   const source = t.seedSource ?? 'declared';
   return { source, ...(source === 'build' && t.build ? { buildId: t.build } : {}) };
 }

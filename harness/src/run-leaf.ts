@@ -28,15 +28,21 @@ import {
   buildSwebenchSolvePrompt,
 } from './swebench-setup.js';
 import {
+  captureTurnPatch,
   executeTurn,
+  patchMaxBytes,
   resolveModelSelection,
   requireModel,
   applyModelGateway,
   oauthAuthStorage,
+  seedOrigin,
+  seedWorkspace,
   sumBranchUsage,
   turnLoaderInputs,
   type TurnConfig,
   type TurnResult,
+  type TurnSeed,
+  type TurnWorkspace,
 } from './run-turn.js';
 import { BufferedRedisBackend } from './buffered-redis-backend.js';
 import { flushExtension } from './flush-extension.js';
@@ -203,7 +209,18 @@ export type LeafResult =
   | { status: 'paused'; gateId: number; gate: { summary: string; proposed_action: string } }
   | { status: 'aborted' }
   | { status: 'solved'; patch: string; usage?: LeafUsage }
-  | { status: 'responded'; text: string; usage?: LeafUsage }
+  | {
+      status: 'responded';
+      text: string;
+      usage?: LeafUsage;
+      /**
+       * A templated session's prompt leaf (a queued turn): the seed's origin and the workspace's
+       * patch after the turn, as an interactive turn's `sandbox.seed` and `workspace`
+       * (session-templates spec §5.1). Absent for an untemplated session.
+       */
+      seed?: TurnSeed;
+      workspace?: TurnWorkspace;
+    }
   | {
       status: 'failed';
       // `owner_lost` is written only by the run-lease reaper (#558): the worker holding the run
@@ -504,6 +521,7 @@ async function runPromptLeaf(
   const promptTimings = leaseTimings(process.env);
   const workload = env.internalContext?.workload;
   const ownerScope = env.internalContext?.ownerScope;
+  const template = config?.sandboxTemplate || undefined;
   // Checked before selection, unlike the rest of internalContext: they decide which sandbox to lease.
   // An owner scope is required with a workload, and meaningless without one.
   if (
@@ -524,6 +542,10 @@ async function runPromptLeaf(
       ttlMs: promptTimings.ttlMs,
       remoteSandbox: process.env.SH_REMOTE_SANDBOX === '1',
       tier: config?.sandboxTier,
+      // A templated session's leaf runs on its template's workers, pinned to its build, as its
+      // interactive turns do (session-templates spec §4): a queued turn of it included.
+      ...(template ? { template } : {}),
+      ...(template && config?.sandboxBuildId ? { build: config.sandboxBuildId } : {}),
       agentWritesInContext: env.internalContext !== undefined && contextMode(env) !== 'read-only',
       ...(workload ? { workload, ownerScope } : {}),
     });
@@ -583,6 +605,11 @@ async function runPromptLeaf(
         // leaf. The lease's TTL expiring is the safe outcome -- the sandbox returns to the pool.
         void lease.heartbeat().catch(() => {});
       }, promptTimings.heartbeatMs);
+    }
+    // The template's seed, once per workspace, before the turn's first tool call (session-templates
+    // spec §5), while the heartbeat above renews the lease. A failed seed fails the leaf.
+    if (selected && template && config?.sandboxSeed) {
+      await seedWorkspace(selected.transport, template, config.sandboxSeed, selected.podCwd);
     }
     if (env.internalContext) {
       const { revision, cacheScope, loadBundle, writable, mount } = env.internalContext;
@@ -678,7 +705,28 @@ async function runPromptLeaf(
     if (r.stopReason === 'aborted') return { status: 'aborted' };
     if (r.stopReason === 'error')
       return { status: 'failed', reason: 'error', message: r.errorMessage };
-    return { status: 'responded', text: r.response, usage: r.usage };
+    if (!selected || !template) return { status: 'responded', text: r.response, usage: r.usage };
+    // A templated session's end state, taken in the session's workspace while the lease is still
+    // held (spec §5.1). A failed capture is `{ error }` and never fails the leaf.
+    const workspace = await captureTurnPatch(
+      selected.transport,
+      selected.podCwd,
+      patchMaxBytes(process.env),
+    );
+    return {
+      status: 'responded',
+      text: r.response,
+      usage: r.usage,
+      ...(config?.sandboxSeed
+        ? {
+            seed: seedOrigin({
+              seedSource: config.sandboxSeedSource,
+              build: config.sandboxBuildId,
+            }),
+          }
+        : {}),
+      workspace,
+    };
   } catch (err) {
     // A throw from the turn must not escape past the finally: a lease held past a crashed turn
     // shrinks pool capacity until its TTL expires.

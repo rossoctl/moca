@@ -349,24 +349,32 @@ export async function resolveTurnAuth(
     ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
       ? { sandboxTier: resolved.sandboxTier }
       : {}),
-    // As for the tier: only a non-empty string is a template; the seed only beside one.
-    ...(typeof resolved.sandboxTemplate === 'string' && resolved.sandboxTemplate
+    ...templateAuth(resolved),
+    ...(resolved.model ? { model: resolved.model } : {}),
+  };
+}
+
+/**
+ * The session's sandbox template, seed and build from a validated exchange body, for TurnAuth: the
+ * session exchange's and the dequeue exchange's alike, so a queued turn runs on the hands an
+ * interactive one would. As for the tier, only a non-empty string is a template; the seed, its
+ * source and the build only beside one.
+ */
+export function templateAuth(
+  resolved: ExchangeResponse,
+): Pick<TurnAuth, 'sandboxTemplate' | 'sandboxSeed' | 'sandboxSeedSource' | 'sandboxBuildId'> {
+  if (typeof resolved.sandboxTemplate !== 'string' || !resolved.sandboxTemplate) return {};
+  return {
+    sandboxTemplate: resolved.sandboxTemplate,
+    ...(typeof resolved.sandboxSeed === 'string' && resolved.sandboxSeed
       ? {
-          sandboxTemplate: resolved.sandboxTemplate,
-          ...(typeof resolved.sandboxSeed === 'string' && resolved.sandboxSeed
-            ? {
-                sandboxSeed: resolved.sandboxSeed,
-                ...(resolved.sandboxSeedSource
-                  ? { sandboxSeedSource: resolved.sandboxSeedSource }
-                  : {}),
-              }
-            : {}),
-          ...(typeof resolved.sandboxBuildId === 'string' && resolved.sandboxBuildId
-            ? { sandboxBuildId: resolved.sandboxBuildId }
-            : {}),
+          sandboxSeed: resolved.sandboxSeed,
+          ...(resolved.sandboxSeedSource ? { sandboxSeedSource: resolved.sandboxSeedSource } : {}),
         }
       : {}),
-    ...(resolved.model ? { model: resolved.model } : {}),
+    ...(typeof resolved.sandboxBuildId === 'string' && resolved.sandboxBuildId
+      ? { sandboxBuildId: resolved.sandboxBuildId }
+      : {}),
   };
 }
 

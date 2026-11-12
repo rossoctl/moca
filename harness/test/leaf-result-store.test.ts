@@ -134,6 +134,15 @@ describe('toResultRecord — responded', () => {
     );
     expect(rec.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 1, total: 18 });
   });
+  it("carries a templated session's seed origin and workspace patch, and nothing for others", () => {
+    const seed = { source: 'build' as const, buildId: 'sha256:' + 'b'.repeat(64) };
+    const workspace = { baseline: 'abc', patch: 'diff\n', patchSha256: 'sha256:x', patchBytes: 5 };
+    const rec = toResultRecord({ status: 'responded', text: 't', seed, workspace }, 'run-1', 't');
+    expect(rec).toMatchObject({ seed, workspace });
+    const plain = toResultRecord({ status: 'responded', text: 't' }, 'run-1', 't');
+    expect(plain).not.toHaveProperty('seed');
+    expect(plain).not.toHaveProperty('workspace');
+  });
   it('defaults text to null for non-prompt results', () => {
     expect(toResultRecord({ status: 'aborted' }, 'run-1', 't').text).toBeNull();
   });

@@ -978,6 +978,16 @@ components:
             status: { type: string, enum: [responded] }
             text: { type: string }
             usage: { $ref: '#/components/schemas/LeafUsage' }
+            seed:
+              description: |
+                A templated session's prompt run only: the seed's origin (session-templates spec
+                §5.2), as `TurnPlacement.seed`.
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, enum: [build, declared] }
+                buildId: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+            workspace: { $ref: '#/components/schemas/TurnWorkspace' }
         - type: object
           required: [status, reason]
           properties:

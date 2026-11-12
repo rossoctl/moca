@@ -251,6 +251,17 @@ components:
             text: { type: string }
             gate: { type: object }
             reason: { type: string }
+            seed:
+              type: object
+              description: |
+                `responded` on a templated session only: where its workspace's seed came from
+                (`source`: `build` or `declared`; `buildId` with `build`), session-templates spec §5.2
+            workspace:
+              type: object
+              description: |
+                `responded` on a templated session only: the workspace's patch after the turn, the
+                data plane's `TurnWorkspace` (harness-openapi.yaml): `baseline`, `patch` or
+                `patchBase64`, `patchSha256`, `patchBytes`, or `patchRefused`, or `error`
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -3038,6 +3049,26 @@ paths:
                     description: |
                       the tier this turn runs in, from the SESSION (the turn record does not copy
                       it); absent whenever the deployment declares no tiers
+                  sandboxTemplate:
+                    type: string
+                    description: |
+                      as on /internal/credentials: the session's sandbox template, so a queued turn
+                      of a templated session runs only on its workers (session-templates spec §5.2).
+                      From the session, whose template and build are written once, at creation.
+                      Sent even when the deployment no longer declares it (fail closed)
+                  sandboxSeed:
+                    type: string
+                    description: as on /internal/credentials; only beside sandboxTemplate
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: as on /internal/credentials; only beside sandboxSeed
+                  sandboxBuildId:
+                    type: string
+                    pattern: '^sha256:[0-9a-f]{64}$'
+                    description: |
+                      as on /internal/credentials: the build the session is pinned to; only beside
+                      sandboxTemplate, for a manifest-hash build
                   model:
                     type: object
                     description: |
