@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.9.0
+  version: 1.10.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -2918,8 +2918,15 @@ paths:
                     type: string
                     description: |
                       the template's seed, a bash command the data plane runs once per workspace;
-                      present only beside sandboxTemplate, while the deployment declares it with a
-                      seed
+                      present only beside sandboxTemplate. For a session pinned to a manifest-hash
+                      build through the template store, that build's own `spec.seed` (none when the
+                      build has none); otherwise the deployment's declared seed, while it declares one
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: |
+                      where sandboxSeed came from, sent with it: `build` (the pinned build's spec) or
+                      `declared` (SH_SANDBOX_TEMPLATES). The turn reports it as `sandbox.seed`
                   sandboxBuildId:
                     type: string
                     pattern: '^sha256:[0-9a-f]{64}$'

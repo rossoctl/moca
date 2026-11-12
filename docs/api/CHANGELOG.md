@@ -3,6 +3,32 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.10.0
+
+A session's seed from its build, its workspace's patch, its records, and its queued turns on its
+template ([#751](https://github.com/rossoctl/moca/issues/751)), per the
+[session templates spec](../specs/2026-10-30-session-sandbox-templates-design.md) §5-§5.2 and the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §7.1.
+Additive.
+
+- POST /internal/credentials: for a session pinned to a manifest-hash build through the template
+  store, `sandboxSeed` is that build's own `spec.seed` (none when the build has none), and
+  `sandboxSeedSource` (`build` or `declared`) is sent with any seed.
+- POST /internal/turn-credentials returns `sandboxTemplate`, `sandboxSeed`, `sandboxSeedSource` and
+  `sandboxBuildId` as POST /internal/credentials does, so a queued turn of a templated session runs
+  on its template's workers, pinned to its build, and seeded.
+- GET /v1/sessions/{id}/turns/{turnId}: a `responded` result of a templated session carries
+  `workspace` (the patch after the turn) and, with a seed, `seed` (`{source, buildId?}`).
+- With a template store, a session whose template resolved through it writes a `session` record on
+  `template/<id>` at creation (`state: created`, with its build, manifest hash and lease) and at
+  delete (`state: terminated`, `reason: deleted`, `endedAt`).
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.3.0: a templated
+session's turn result (and its terminal `done` and `error` frames) carries `workspace`
+(`TurnWorkspace`: the patch from the seed's baseline commit, whole or refused over
+`SH_TURN_PATCH_MAX_BYTES`, never cut) and `sandbox.seed`; a `/v1/runs` prompt run of a templated
+session runs on its template and its `responded` result carries both too.
+
 ## 1.9.0
 
 Sessions and sandboxes from one combined control plane
