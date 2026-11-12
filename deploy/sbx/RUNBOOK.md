@@ -161,6 +161,8 @@ write.
 It takes effect at the subject's next request. A subject in `SBX_ALLOWED_SUBJECTS` or
 `SBX_ADMIN_SUBJECTS` can't be unenrolled or revoked this way (`409 bootstrap_subject`): change the
 settings for those. An admin can't revoke its own role.
+A subject holding an admin grant can't be unenrolled while it does (`409 admin_granted`): revoke
+the role first.
 
 **What this changes for an operator:**
 

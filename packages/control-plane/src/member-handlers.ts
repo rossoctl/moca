@@ -89,6 +89,13 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
         `${subject} is enrolled by the deployment's settings (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS); remove it there`,
       );
     const nowS = seconds(deps);
+    // An admin is enrolled whatever its enrollment says, so an unenroll that left a live admin
+    // grant in place would answer 200 and change nothing the subject can do: refuse it instead.
+    if ((await members.rolesNow(subject, nowS)).includes('admin'))
+      throw new CpError(
+        'admin_granted',
+        `${subject} holds the admin role, which keeps it enrolled: revoke the role first`,
+      );
     const record = await members.change((doc) => {
       const m = doc.members[subject];
       if (!m?.enrolled) return null;

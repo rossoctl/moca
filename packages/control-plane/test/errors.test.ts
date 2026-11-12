@@ -36,6 +36,7 @@ const EXPECTED: Record<CpErrorCode, number> = {
   template_not_found: 404,
   bootstrap_subject: 409,
   self_revoke: 409,
+  admin_granted: 409,
   digest_mismatch: 400,
   bundle_quota_exceeded: 429,
   config_bundle_not_found: 404,

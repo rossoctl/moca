@@ -112,6 +112,7 @@ components:
             - template_not_found
             - bootstrap_subject
             - self_revoke
+            - admin_granted
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -1761,7 +1762,9 @@ paths:
       description: |
         Writes a `member` record. The subject is refused at its next request (`403 not_enrolled`); its
         live sandboxes run to their expiry and its templates keep their owner. A subject enrolled by
-        the settings can't be unenrolled here: `409 bootstrap_subject`.
+        the settings can't be unenrolled here: `409 bootstrap_subject`. A subject holding an admin grant
+        is enrolled by it, so unenrolling it would change nothing: `409 admin_granted` (revoke the role
+        first).
       security: [{ sessionToken: [] }]
       parameters:
         - name: subject
@@ -1795,7 +1798,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`bootstrap_subject`: enrolled by SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS'
+          description: '`bootstrap_subject`: enrolled by SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS; `admin_granted`: it holds an admin grant (revoke it first)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
