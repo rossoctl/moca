@@ -1,7 +1,7 @@
 // Command sbx is a static client for one sandbox/v1 workspace: the Go twin of
 // docs/api/examples/sbx.py, for a coding agent whose shell may run only `sbx run` and `sbx put`.
 // It needs nothing in the agent's container (no python, no grpcio), so it can be bind-mounted into
-// any image; autobench-moca's AM4 mounts it into its agent-testbed containers. The workspace is
+// any image (a benchmark runner, for one, mounts it into each agent's own container). The workspace is
 // seeded on the server side, so there is no `push`.
 package main
 
