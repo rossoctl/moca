@@ -951,3 +951,74 @@ func leaseCut(p *pool, l *vmLease) LeaseEndReason {
 	defer p.mu.Unlock()
 	return l.cut
 }
+
+// PR #763 review (F9): a client acknowledges an event by its At, and a JS client's Date
+// holds milliseconds. Every event is minted at millisecond precision -- the start, an end,
+// and the worker_restart end the next process records -- so an acknowledgement carrying
+// that millisecond clears it.
+func TestAckWithAMillisecondTimeClearsTheEvent(t *testing.T) {
+	jsDate := func(at time.Time) time.Time { return time.UnixMilli(at.UnixMilli()).UTC() }
+	ackClears := func(t *testing.T, p *pool, what string) {
+		t.Helper()
+		ev := p.LeaseStatus("k").Pending
+		if ev == nil {
+			t.Fatalf("%s: no pending event", what)
+		}
+		if ev.At.Nanosecond()%int(time.Millisecond) != 0 {
+			t.Errorf("%s: At = %s, want whole milliseconds", what, ev.At.Format(time.RFC3339Nano))
+		}
+		p.AckLeaseEvent("k", jsDate(ev.At))
+		if got := p.LeaseStatus("k").Pending; got != nil {
+			t.Fatalf("%s: pending after a millisecond ack = %+v, want none", what, got)
+		}
+	}
+	root := t.TempDir()
+	clk := newFakeClock()
+	clk.Advance(1234567 * time.Nanosecond) // a clock between two milliseconds
+	p, _ := leasePoolOn(t, root, clk)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	ackClears(t, p, "the start")
+
+	clk.Advance(time.Second + 7*time.Microsecond)
+	if err := p.EndLease("k", LeaseEndReset); err != nil {
+		t.Fatalf("EndLease: %v", err)
+	}
+	ackClears(t, p, "the reset end")
+
+	clk.Advance(3 * time.Microsecond)
+	mustExec(t, p, "k", leaseExec("two", 1))
+	p.AckLeaseEvent("k", p.LeaseStatus("k").Pending.At) // the start, acknowledged
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	clk.Advance(time.Second + 11*time.Microsecond)
+	p, _ = leasePoolOn(t, root, clk)
+	ackClears(t, p, "the worker_restart end")
+}
+
+// PR #763 review (F10, with ruling R19's same-epoch case): a same-epoch SetMode down to
+// lease keeps a lease+processes lease at level 1, and an Exec still carrying
+// lease+processes at that epoch neither raises it back (R18's re-level uses the served
+// mode) nor starts at level 2.
+func TestSameEpochDowngradeIsNotUndoneByAnExec(t *testing.T) {
+	p, _, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLeaseProcesses, 3)
+	l2 := Exec{Command: "one", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 3}
+	mustExec(t, p, "k", l2)
+	if l := leaseAlive(t, p, "after the level-2 Exec"); l.mode != ModeLeaseProcesses {
+		t.Fatalf("lease mode = %s, want %s", l.mode, ModeLeaseProcesses)
+	}
+	mustSetMode(t, p, "k", ModeLease, 3)
+	mustExec(t, p, "k", l2)
+	if l := leaseAlive(t, p, "after a level-2 Exec at the downgrade's epoch"); l.mode != ModeLease {
+		t.Fatalf("lease mode = %s, want %s: the Exec undid a same-epoch downgrade", l.mode, ModeLease)
+	}
+	if err := p.EndLease("k", LeaseEndReset); err != nil {
+		t.Fatalf("EndLease: %v", err)
+	}
+	mustExec(t, p, "k", l2)
+	if l := leaseAlive(t, p, "a fresh lease"); l.mode != ModeLease {
+		t.Fatalf("fresh lease mode = %s, want %s", l.mode, ModeLease)
+	}
+}

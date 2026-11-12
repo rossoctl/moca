@@ -87,6 +87,11 @@ type LeaseEvent struct {
 	Age    time.Duration
 }
 
+// leaseEventAt is the At of an event minted at now: now to the millisecond (PR #763
+// review). A client acknowledges an event by its At (AckLeaseEvent), and a JS client's
+// Date holds milliseconds, so a finer At could never be acknowledged from one.
+func leaseEventAt(now time.Time) time.Time { return now.Truncate(time.Millisecond) }
+
 // leaseEventJSON is LeaseEvent's on-disk shape: Age in whole milliseconds as age_ms.
 type leaseEventJSON struct {
 	State  string         `json:"state"`
@@ -135,6 +140,9 @@ func (c Config) leaseIdle(e Exec) time.Duration {
 //   - an unknown epoch (file missing or unreadable) runs per-Exec and stores nothing:
 //     with the file lost, a pre-downgrade token would otherwise count as newer, so only
 //     SetMode restores the mode;
+//   - at an equal epoch, the lower of the Exec's mode and the stored one (per-exec <
+//     lease < lease+processes; PR #763 review): defence in depth for a downgrade, so a
+//     token minted before a same-epoch SetMode cannot keep the higher mode;
 //   - otherwise the Exec's mode, and a newer epoch is stored.
 func (p *pool) effectiveModeLocked(rp *runPool, e Exec) (Mode, error) {
 	s := p.leaseStateLocked(rp)
@@ -153,6 +161,8 @@ func (p *pool) effectiveModeLocked(rp *runPool, e Exec) (Mode, error) {
 			return 0, fmt.Errorf("vmpool: store mode epoch for %q: %w", rp.key, err)
 		}
 		rp.state = next
+	case e.Mode != s.Mode:
+		return min(e.Mode, s.Mode), nil
 	}
 	return e.Mode, nil
 }
@@ -250,9 +260,11 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 // relevelLeaseForExecLocked applies a lease level change that reached the worker on the
 // Exec about to run in l, rather than through SetMode (spec §8.2, ruling R18): an upgrade
 // lease -> lease+processes "takes effect from the next Exec that carries the new epoch",
-// and a downgrade whose LeaseControl was lost "lands at the next Exec". routeExec has
-// already stored the Exec's epoch and mode, and execLease's stale-mode check passed, so
-// m is the stored mode. A no-op when l already runs at m. A change to per-exec never
+// and a downgrade whose LeaseControl was lost "lands at the next Exec". m is the mode
+// routeExec served (effectiveModeLocked): the Exec's own when its epoch was newer, which
+// routeExec stored, and the lower of the Exec's and the stored one at an equal epoch, so
+// an Exec never re-levels a lease above a same-epoch downgrade. execLease's stale-mode
+// check has passed. A no-op when l already runs at m. A change to per-exec never
 // gets here: routeExec sends that Exec down the per-Exec path, which ends the lease
 // (mode_change). Caller holds p.mu and rp's gate, with l live and started.
 func (p *pool) relevelLeaseForExecLocked(rp *runPool, l *vmLease, m Mode) {

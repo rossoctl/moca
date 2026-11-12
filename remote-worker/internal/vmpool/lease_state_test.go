@@ -169,6 +169,35 @@ func TestEffectiveModeNewerEpochIsStored(t *testing.T) {
 	}
 }
 
+// PR #763 review (F10): at an equal epoch, an Exec whose mode differs from the stored one
+// runs at the lower of the two (per-exec < lease < lease+processes). Defence in depth for
+// a downgrade: a token minted at the epoch of a later same-epoch SetMode cannot keep the
+// higher mode. Nothing is stored.
+func TestEffectiveModeEqualEpochServesTheLowerMode(t *testing.T) {
+	for _, tc := range []struct {
+		stored, exec, want Mode
+	}{
+		{ModeLease, ModeLeaseProcesses, ModeLease},
+		{ModePerExec, ModeLease, ModePerExec},
+		{ModePerExec, ModeLeaseProcesses, ModePerExec},
+		{ModeLeaseProcesses, ModeLease, ModeLease},
+		{ModeLease, ModePerExec, ModePerExec},
+		{ModeLease, ModeLease, ModeLease},
+	} {
+		p, root := leaseTestPool(t)
+		if err := saveLeaseState(root, "k", leaseState{Mode: tc.stored, Epoch: 3, Known: true}); err != nil {
+			t.Fatal(err)
+		}
+		m, err := effectiveMode(t, p, "k", Exec{Mode: tc.exec, ModeEpoch: 3})
+		if err != nil || m != tc.want {
+			t.Errorf("stored %s, Exec %s at the same epoch: effectiveMode = %v, %v; want %s", tc.stored, tc.exec, m, err, tc.want)
+		}
+		if s := loadLeaseState(root, "k"); s.Mode != tc.stored || s.Epoch != 3 {
+			t.Errorf("stored %s, Exec %s: state = %+v, want it unchanged", tc.stored, tc.exec, s)
+		}
+	}
+}
+
 func TestSetModeRestoresAfterLoss(t *testing.T) {
 	p, root := leaseTestPool(t)
 	if err := p.SetMode("k", ModeLease, 7); err != nil {

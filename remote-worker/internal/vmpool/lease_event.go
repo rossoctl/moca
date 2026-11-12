@@ -232,7 +232,7 @@ func (p *pool) endLeasesOpenAtStart() {
 		}
 		age := now.Sub(o.Started)
 		s.Open = nil
-		s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: LeaseEndWorkerRestart, At: now, Mode: o.Mode, Age: age}
+		s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: LeaseEndWorkerRestart, At: leaseEventAt(now), Mode: o.Mode, Age: age}
 		if err := saveLeaseState(root, key, s); err != nil {
 			// The next lease start overwrites the open record: this notice is lost, not
 			// safety (the same trade as startLease's failed save).

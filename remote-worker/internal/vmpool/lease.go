@@ -413,7 +413,7 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 	if s.Pending == nil || s.Pending.State != leaseEventEnd {
 		// The start is the notice only when no end is pending: "guest restarted" already
 		// tells the client the next Exec runs in a fresh guest (spec §5).
-		s.Pending = &LeaseEvent{State: leaseEventStart, At: now, Mode: mode}
+		s.Pending = &LeaseEvent{State: leaseEventStart, At: leaseEventAt(now), Mode: mode}
 	}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
 		// Not fatal: the open record only lets the next process report this lease's
@@ -606,7 +606,7 @@ func (p *pool) endLeaseLocked(rp *runPool, reason LeaseEndReason) *leaseVictim {
 	age := now.Sub(l.started)
 	s := p.leaseStateLocked(rp)
 	s.Open = nil
-	s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: reason, At: now, Mode: l.mode, Age: age}
+	s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: reason, At: leaseEventAt(now), Mode: l.mode, Age: age}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
 		log.Printf("vmpool: lease end for %q: %v", rp.key, err)
 	}
