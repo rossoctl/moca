@@ -19,7 +19,8 @@ check() {
   jq -e '.id | test("^[a-z0-9][a-z0-9-]{0,30}$")' "$spec" >/dev/null || fail "$name: id (M7)"
   jq -e '.image | test("^[^\\s@]+@sha256:[0-9a-f]{64}$")' "$spec" >/dev/null ||
     fail "$name: image not pinned by digest (M1)"
-  jq -e '(.guest_mb // .guest_ram_mb) as $g | ($g | type) == "number" and $g >= 128 and
+  jq -e '(has("guest_mb") and has("guest_ram_mb") | not) and
+    (.guest_mb // .guest_ram_mb) as $g | ($g | type) == "number" and $g >= 128 and
     (.vcpus | type) == "number" and .vcpus >= 1 and .vcpus <= 32' "$spec" >/dev/null ||
     fail "$name: guest size or vcpus (M7)"
   jq -e '(.egress | type) == "boolean" and (.seed | type) == "string" and

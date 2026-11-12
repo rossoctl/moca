@@ -154,7 +154,7 @@ POST /v1/templates
 {
   "id": "django-django-11133",
   "image": "<repository>@sha256:…",
-  "spec": { "guest_mb": 4096, "vcpus": 2, "workspace_mb": 2048, "egress": false,
+  "spec": { "guest_ram_mb": 4096, "vcpus": 2, "workspace_mb": 2048, "egress": false,
             "tools": ["bash", "git", "python3", "rg"], "seed": "…",
             "probe": { "cmd": "…", "timeout_s": 900, "expect_rc": 0, "expect": ["…"] },
             "probe_status": "vm", "source_record_digest": "sha256:…",
@@ -171,7 +171,9 @@ POST /v1/templates
 The spec is a template spec (`moca-sbx-template-spec/1`; the samples in
 `deploy/sbx/template-onboarding/examples/` are a default sandbox image and a SWE-bench instance,
 spec and gate record), with `workspace_mb`, the size of the sandbox's `/workspace` image, within the
-profile's envelope. An `id` or `image` in the spec must equal the create's (M7, §8.1). The gate
+profile's envelope. The guest size is `guest_ram_mb`, the key the build tool reads; its alias
+`guest_mb` is accepted alone and stored as `guest_ram_mb`, and a spec with both is refused (M7), so
+the policy and the build never read two different sizes. An `id` or `image` in the spec must equal the create's (M7, §8.1). The gate
 record is sent as the file's own bytes, since its sha256 is what the policy trusts; it is stored with
 the provenance records (§7.2) and checked (§8). `POST /v1/templates/{id}/builds` starts a new build
 of an existing template of the caller's (a new image or spec); same body, same answer. A build has a

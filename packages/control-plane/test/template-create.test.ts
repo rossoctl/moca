@@ -23,7 +23,7 @@ const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf
 const GATE = readFileSync(join(EX, 'django__django-11133.gate-record.json'), 'utf8');
 const GATE_SHA = `sha256:${sha256Hex(Buffer.from(GATE, 'utf8'))}`;
 const { id: ID, image: IMAGE, schema: _s, notes: _n, ...REST } = SPEC;
-const spec = { ...REST, guest_mb: REST.guest_ram_mb };
+const spec = REST;
 const benchmarkPolicy: Policy = { ...DEFAULT_POLICY, trustedGateRecords: [GATE_SHA] };
 
 let seq = 0;
@@ -122,7 +122,13 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       { image: IMAGE.replace('images/', 'evil.example.com/x/') },
       'registry',
     ],
-    ['8 GiB on a benchmark', { spec: { ...spec, guest_mb: 8192 } }, 'envelope'],
+    ['8 GiB on a benchmark', { spec: { ...spec, guest_ram_mb: 8192 } }, 'envelope'],
+    [
+      'both guest-size keys, the policy reading one and the build the other',
+      { spec: { ...spec, guest_mb: 4096, guest_ram_mb: 16_384 } },
+      'M7.guest',
+    ],
+    ['both guest-size keys, even equal', { spec: { ...spec, guest_mb: 4096 } }, 'M7.guest'],
     ['an unknown profile', { profile: 'gold' }, 'profile'],
     [
       'a root identity into an image refusing commits',
@@ -331,6 +337,20 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     expect((await more(admin).catch((x) => x)).extra).toEqual({ quota: 'buildsQueued' });
     const qa = (await HANDLERS.getQuota!(ctx({ principal: admin }), d)).body as Body;
     expect(qa.buildsQueued.used).toBe(0);
+  });
+
+  it('stores the guest_mb alias as guest_ram_mb, the key the build reads, and reuses across the two', async () => {
+    const d = stored();
+    const { guest_ram_mb, ...rest } = spec;
+    const r = await create(d, body({ spec: { ...rest, guest_mb: guest_ram_mb } }));
+    expect(r.status).toBe(202);
+    const rec = (await d.provenance!.chain(`template/${ID}`)).find((x) => x.kind === 'create')!;
+    expect(rec.body.spec).toMatchObject({ guest_ram_mb: 4096 });
+    expect(rec.body.spec).not.toHaveProperty('guest_mb');
+    const doc = (await d.templates!.get(ID))!;
+    expect(doc.builds[0].request?.spec).toMatchObject({ guest_ram_mb: 4096 });
+    expect(doc.builds[0].request?.spec).not.toHaveProperty('guest_mb');
+    expect((await create(d)).body).toMatchObject({ reused: true });
   });
 
   it('holds the quotas under concurrent creates for different ids', async () => {

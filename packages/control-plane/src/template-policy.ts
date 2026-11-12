@@ -174,11 +174,17 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     IMAGE_RE.test(input.image ?? '') && policy.allowedRegistries.includes(registryOf(input.image)),
     `image registry ${IMAGE_RE.test(input.image ?? '') ? registryOf(input.image) : '?'} is not allowed (policy allowedRegistries)`,
   );
-  const guest = s.guest_mb ?? s.guest_ram_mb;
+  // The guest size has one key the build tool reads, guest_ram_mb, and an alias, guest_mb. A spec
+  // with both is refused (even equal): the policy checks one number and the build uses one, never
+  // two that could differ. The stored spec takes guest_ram_mb (normalizeSpec).
+  const bothGuest = s.guest_mb !== undefined && s.guest_ram_mb !== undefined;
+  const guest = bothGuest ? undefined : (s.guest_ram_mb ?? s.guest_mb);
   rule(
     'M7.guest',
-    int(guest) && guest >= 128,
-    'spec.guest_mb must be a whole number of MiB, at least 128',
+    !bothGuest && int(guest) && guest >= 128,
+    bothGuest
+      ? 'spec takes guest_ram_mb or its alias guest_mb, not both'
+      : 'spec.guest_ram_mb (or guest_mb) must be a whole number of MiB, at least 128',
   );
   rule('M7.vcpus', int(s.vcpus) && s.vcpus >= 1 && s.vcpus <= 32, 'spec.vcpus must be 1-32');
   rule(
@@ -360,6 +366,17 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     ...(failed ? { failed } : {}),
     ...(gateSha ? { gateRecordSha256: gateSha, gateTrusted: trusted } : {}),
   };
+}
+
+/**
+ * The spec as the build tool reads it: the guest size under guest_ram_mb, the one key the build
+ * reads, when the client sent the alias guest_mb. Applied after checkCreate passed (which refuses
+ * a spec with both), and before the spec is stored, recorded or compared for reuse.
+ */
+export function normalizeSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  if (spec.guest_mb === undefined || spec.guest_ram_mb !== undefined) return spec;
+  const { guest_mb, ...rest } = spec;
+  return { ...rest, guest_ram_mb: guest_mb };
 }
 
 /** Validates a policy document an admin PUTs; returns the problems (empty = valid). */

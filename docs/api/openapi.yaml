@@ -445,7 +445,8 @@ components:
           type: object
           description: |
             a template spec (`moca-sbx-template-spec/1`; samples in
-            deploy/sbx/template-onboarding/examples/): guest_mb (or guest_ram_mb), vcpus,
+            deploy/sbx/template-onboarding/examples/): guest_ram_mb (or its alias guest_mb, never
+            both: M7.guest; stored as guest_ram_mb), vcpus,
             workspace_mb?, egress, seed, probe, tools, description, and optionally guest_home,
             skip_git_identity_check, guest_home_gitconfig, probe_status, source_record_digest. An
             `id` or `image` in it must equal the create's own (M7.spec_id, M7.spec_image)
