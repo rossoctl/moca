@@ -351,12 +351,30 @@ event for each sandbox until a client has seen it.
   Host page cache for a VM's own disk reads is charged to that cgroup. A lease VM whose guest is full
   therefore has no room for the host to cache its workspace, and the VM that follows it when the lease
   ends reads from disk: in E17a a grep in such a VM took about 2 s, where a per-`Exec` VM, whose short
-  life left the host cache in place, took 390 ms (§17). Lease VMs get `memory.max` =
-  `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB). The measured charge counts it when used
-  (`memory.current`), so it costs admission only what the host actually caches. Free-page reporting
-  removes most of the pressure; the headroom covers the time before the guest frees.
-- **Headroom target.** `SH_LEASE_RECLAIM_FREE_MB` (default: 2 × `PerVMBytes` + 2 GiB, about
-  4 GiB at 1 GiB guests, so that two per-`Exec` VMs always fit). When MemAvailable falls below it, or an admission
+  life left the host cache in place, took 388 ms (§17). Lease VMs get `memory.max` =
+  `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB). Free-page reporting removes most of the
+  pressure; the headroom covers the time before the guest frees.
+  - **Charge bound.** The measured charge counts the headroom only when the host uses it
+    (`memory.current`), but at `SH_LEASE_HEADROOM` it can reach 1.25 × (`PerVMBytes` +
+    `SH_LEASE_PAGECACHE_MB`): about 1.6 GiB at 1 GiB guests (1.25 × (1056 + 256) MiB) and about
+    680 MiB at SBX0's 256 MiB guests (1.25 × (288 + 256) MiB). That is above a per-`Exec` VM's
+    `PerVMBytes`. Reclaim covers it, and the headroom target below is sized against it.
+  - **Not from the cgroup pool.** Per-`Exec` VMs reuse cgroups from a free list written once with
+    `memMax` = `PerVMBytes` (`remote-worker/internal/vmpool/cgroup_pool.go`). That is safe because a
+    reused per-`Exec` cgroup inherits about 1 MiB of charge. A lease cgroup has a different `memory.max`,
+    and host page cache charged to it stays charged after its VM exits, so handing it back would give a
+    per-`Exec` VM up to about 256 MiB of inherited charge under a `PerVMBytes` bound. Lease cgroups are
+    therefore never taken from or returned to the pool: the worker creates one for each lease and
+    removes it when the lease ends. After removal, page cache still charged to it counts only against
+    the parent slice until the host reclaims it, never against another VM's cgroup. Leases are few and
+    long-lived (the pool exists for per-`Exec`'s create/destroy rate), so the cost is one `mkdir` and
+    one `rmdir` per lease. The plan that builds lease VMs (plan 3) carries this, with a test that a
+    per-`Exec` VM after a lease starts with the pool's usual charge.
+- **Headroom target.** `SH_LEASE_RECLAIM_FREE_MB` (default, v0.2: 2 × `PerVMBytes` + max(2 GiB,
+  2 × (the lease charge bound above − `SH_LEASE_START_MB`)); about 4.9 GiB at 1 GiB guests
+  (2 × 1056 MiB + 2 × (1640 − 192) MiB) and about 2.6 GiB at 256 MiB guests). Two per-`Exec` VMs always
+  fit, and so does the growth of two busy lease VMs from their start estimate to their bound between
+  samples, which reclaim cannot catch because a busy lease is never reclaimed. When MemAvailable falls below it, or an admission
   would go over the budget, the worker ends the lease **idle longest** (level 1 or 2 alike) with
   reason `memory_reclaim`. It repeats until it is back above the target. A lease with an Exec in flight
   is never reclaimed for memory.
@@ -642,8 +660,8 @@ over the venv, two to five short commands and `analyze.py` again, at 9.5% duty.
 | `pytest`                | 61.2 s            | 61.0 s            | 0%   | Compute                                                                     |
 
 - **Per-`Exec` already gets a warm cache from the host.** A per-`Exec` VM reads the workspace through
-  the host page cache, so its second grep took 390 ms against 2.2 s for the first touch of a fresh
-  workspace. A warm lease guest took 115 ms. The lease's cache gain is that difference, not the cold
+  the host page cache, so its later greps took 388 ms against 2.2 s for the first touch of a fresh
+  workspace. A warm lease guest took 112 ms (medians of the 20-call class probes, E17 calibration). The lease's cache gain is that difference, not the cold
   read.
 - **A lease keeps a file set warm only across a whole turn.** On the corpus's think gaps (median
   18 s, p90 234 s), 32% of greps ran in the guest that ran the previous grep. 25% were the first grep

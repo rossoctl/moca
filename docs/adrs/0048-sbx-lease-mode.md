@@ -134,7 +134,9 @@ revision changes four decisions and adds two:
   before the build of plans 2–5. _(user, 2026-11-11 and 2026-11-12)_
 - **New decision 18: page-cache headroom for lease VMs.** A lease VM's cgroup gets `memory.max` =
   `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB), so a full guest does not leave the
-  workspace uncached on the host for the VM that follows it. _(E17a: about 2 s against 390 ms for the
+  workspace uncached on the host for the VM that follows it. Lease cgroups are created per lease and
+  never come from or go back to the per-`Exec` cgroup pool, and the reclaim headroom target is sized
+  against the larger lease charge bound (spec §6). _(E17a: about 2 s against 388 ms for the
   same grep)_
 - **New decision 19: level 2's latency case is sized before its security review**, by a short E17
   extension (a `process_start` REPL re-queried by later Execs). E17a cannot measure it. _(E17a)_
