@@ -7,7 +7,8 @@ resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (pa
 [`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
 
 This page is the install reference. Day-to-day operation (users, templates, key rotation, outages,
-disk, status and upgrades) is [the runbook](RUNBOOK.md); users have
+disk, status and upgrades) is [the runbook](RUNBOOK.md); onboarding a template from a container
+image is the template onboarding folder, `deploy/sbx/template-onboarding/`; users have
 [the user guide](../../docs/sbx/user-guide.md); the security gate's checklist is
 [the security review](../../docs/sbx/security-review.md).
 
@@ -147,6 +148,15 @@ in `/etc/sbx/moca-egress.env`) before the first worker: [the runbook](RUNBOOK.md
 a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace data under
 `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
 it.
+
+**A template's snapshot and worker from a container image** are what
+`deploy/sbx/template-onboarding/template-build.sh` (on the KVM host: the snapshot, checked in a
+microVM, and a template record) and `template-register.sh` (on the operator's machine: the record
+into `SBX_WORKERS` and the templates file) do, as [the runbook's §5](RUNBOOK.md#5-adding-updating-and-removing-a-template)
+describes. Size `--budget-mb` for the commands that may run at once on the template, not for one
+session ([the runbook's §9](RUNBOOK.md#9-limits-operators-must-know)). After a template change,
+`deploy/sbx/templates-check.sh` checks that each template's sandboxes run on its own worker
+([the runbook's §14](RUNBOOK.md#14-checking-the-templates)).
 
 **The janitor** frees the workspaces of ended sandboxes (spec §8.3). Install it once per host, from
 the bundle `setup.sh` writes to `deploy/sbx/.generated/janitor`:
