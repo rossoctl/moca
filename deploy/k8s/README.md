@@ -257,6 +257,20 @@ default `SH_ROUTING_POLICY`), the workers already share nothing but Redis, so mo
 kind of concurrency. With `stickyBySession`, affinity holds only within one pod: the Service spreads
 connections across pods without looking at the session.
 
+**Async fan-out is `replicas` × `SH_WORKERS` wide, and nothing autoscales it.** With
+`SH_ASYNC_DRAIN=1` (section 14) every worker also runs a drain loop, and a loop takes **one** queued
+leaf at a time: the default W=2 on one pod runs two async leaves at once however deep the queue
+gets, and the rest wait. `SH_TURNS_PER_WORKER` does not widen that — it only gates whether a worker
+claims at all.
+
+**No autoscaler ships, by design.** KEDA's queue-depth scaling went with the Knative path
+([ADR-0041](../../docs/adrs/0041-deprecate-knative-keda-deployment.md)) and nothing replaced it.
+The drain shares one admission budget with interactive turns, so queue depth is the wrong signal to
+size the front door by: a scale-up on a deep queue adds interactive capacity nobody asked for, and a
+scale-down evicts pods holding leaves mid-run. Instead, watch `async_queue_depth` and
+`async_oldest_age_ms` on the admin port (section 14 — depth alone cannot tell a deep fast queue from
+a stalled shallow one), alert on them, and set `replicas` yourself.
+
 **The relay stays at one replica** (`strategy: Recreate`). It is presence-only: each Attach stream
 is held by one process, so two replicas would split the sandboxes between them and an exec could
 reach the wrong one.
@@ -386,7 +400,8 @@ These are the container tier's non-claims, the same as on the VM
 [`.github/workflows/k8s-e2e.yml`](../../.github/workflows/k8s-e2e.yml), job `k8s-kind-e2e`, runs on
 pushes to `main` and on pull requests touching `deploy/k8s/**`, the mock model, `packages/**`,
 `harness/**`, `remote-worker/**`, `pi-fork`, the Dockerfile or the lockfile. It installs kind
-v0.33.0 (checked by sha256), runs `setup.sh --target kind-ci --build`, then
+v0.33.0 (checked by sha256), runs `SH_ASYNC_DRAIN=1 setup.sh --target kind-ci --build` — the drain is
+opt-in (section 14) and the smoke's async claims skip themselves without it — then
 `K8S_LIVE_SMOKE=1 smoke.sh --target kind-ci` under `pipefail`, so a failed claim fails the job. On
 failure it uploads the artifact `k8s-kind-e2e-logs`: pods, `describe`, every container's log,
 events, the smoke's output and its kept log directory, with every token header file deleted first.
@@ -1226,3 +1241,121 @@ connection count.
 Tested on OpenShift 4.x (IBM Cloud ROKS, `--target ocp-single`, edit-only namespace rights),
 2026-10-26: N=10 passed in both CLI and `--api` modes, with ten distinct `test:N` subjects and ten
 credential names in the audit stream.
+
+## 14. Async fan-out, opt-in (`SH_ASYNC_DRAIN`)
+
+An orchestrator that wants to dispatch many leaves and collect them later submits them to the
+**control plane** and polls; it does not hold a connection per leaf. This is archetype A
+([dispatch archetypes](../../docs/concepts/dispatch-archetypes.md)), the KEDA `ScaledObject`'s
+replacement, decided in [ADR-0047](../../docs/adrs/0047-p6-async-fan-out-in-worker-drain.md).
+
+**The consumer is not a new workload.** No Deployment, no `--role=leaf` pod, no autoscaler: with the
+knob on, each of the supervisor's ordinary `--role=turn` workers also runs a drain loop that claims
+one queued turn at a time and runs it through the same `runLeaf` a synchronous `/v1/runs` uses. Both
+things it needs are already on the pod — `SH_CONTROL_PLANE_URL` and the `SH_EXCHANGE_TOKEN` file
+(section 5) — so turning it on takes no other wiring.
+
+### 14.1 Turn it on
+
+`SH_ASYNC_DRAIN` is a sticky `setup.sh` input, like the token lifetimes (section 2). Set it on a
+re-run; `moca-settings` keeps it afterwards, and the settings hash on the pod template rolls the
+supervisor as part of the same apply, so nothing needs restarting by hand:
+
+```bash
+SH_ASYNC_DRAIN=1 deploy/k8s/setup.sh --target kind --skip-build
+```
+
+Only `1` and empty are accepted — `SH_ASYNC_DRAIN=true` is refused rather than read as off, because
+a typo that silently costs you the whole feature is worse than one re-run. To turn it off again,
+pass it **set but empty** (`SH_ASYNC_DRAIN= deploy/k8s/setup.sh …`); leaving it unset keeps whatever
+the ConfigMap holds.
+
+**Check that it armed,** on the admin port:
+
+```bash
+kubectl --context kind-moca -n moca port-forward svc/moca-supervisor 18081:8081 &
+curl -s http://127.0.0.1:18081/metrics | jq '{async_queue_depth, async_oldest_age_ms}'
+```
+
+A **number** (even `0`) means worker slot 0's drain loop is running and reporting. `"NaN"` means it
+never reported — the knob is off, or a prerequisite was missing and the worker said so and stayed
+off rather than failing: `kubectl -n moca logs deploy/moca-supervisor | grep '\[async\]'`. The drain
+also refuses to arm under `MOCA_TENANCY=multi`, because the control plane answers `501
+async_tenancy_unsupported` there and a loop that claimed would only refuse forever.
+
+### 14.2 Submit and collect
+
+All three routes are on the control plane and take an **api** token — the one a `mocactl login`
+returns — not a session token:
+
+```bash
+# 202 {"sessionId":"…","turnId":"t-…"} -- the queue carries the turn id and nothing else.
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"async":true,"kind":"prompt","prompt":"summarise README.md","idempotencyKey":"job-1"}' \
+  "$CP/v1/sessions/$SID/turns"
+
+# {"turnId","state","attempts"} always; "result" only once state is terminal, because a result
+# written by a worker that then died is withheld until the reaper has ruled on it.
+curl -s -H "Authorization: Bearer $TOKEN" "$CP/v1/sessions/$SID/turns/$TURN_ID"
+
+# Cancel one that is still queued (409 turn_not_cancellable once a worker has it).
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" "$CP/v1/sessions/$SID/turns/$TURN_ID"
+```
+
+`idempotencyKey` **defaults to the session id**, so N async turns on one session collapse into the
+first one's turn. Fanning out N leaves means N sessions, or N distinct keys.
+
+`GET /runs/status` on the harness never reports an async turn, and does not fail either: it reads
+the session-wide result key, which an async turn never writes, so it answers `queued` forever — or,
+if that session also ran a synchronous `/v1/runs` leaf, returns **that** leaf's result, which looks
+like an answer. Poll the turn route above.
+
+### 14.3 Watch
+
+On the admin port's `/metrics`, under `counters` (counts, so missing and zero mean the same thing)
+and as two top-level gauges:
+
+| Reading                   | Means                                                                            |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| `async_claims`            | leaves claimed by this pod's workers since they started                          |
+| `async_reclaims`          | of those, the ones redelivered after a worker died holding one (90 s idle floor) |
+| `async_dead_letters`      | of those, the ones that exhausted their attempts                                 |
+| `async_claim_denied_full` | claims this pod's workers refused because their admission cap was full           |
+| `async_queue_depth`       | queued turns, from slot 0 only                                                   |
+| `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                                  |
+
+The four counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
+reached, each worker counts in its own memory, and a worker that respawns starts its own count at
+zero. At `replicas` > 1 (section 4) add the pods up yourself. The two gauges describe the one shared
+queue, so every pod's slot 0 reports the same numbers.
+
+Read the last two as a pair. Depth alone cannot tell a deep queue that is draining fast from a
+shallow one that is stalled; a rising `async_oldest_age_ms` at a flat depth is the stall.
+`async_queue_depth` is also the signal to size `replicas` by — section 4 says why nothing does that
+for you.
+
+### 14.4 Limits
+
+- **`MOCA_TENANCY=single` only.** Under `multi` the control plane refuses submission with `501
+async_tenancy_unsupported` and the drain does not arm. Lifting that needs MI1 S2's grants and token
+  endpoint (ADR-0047 §9's M2).
+- **Two leaves per pod at the default W.** The loop is sequential; see section 4 for the width rule
+  and why no autoscaler ships.
+- **Caps are not enforced yet.** A submission may carry `caps`, and they are recorded, but
+  `turn_exp` and `MOCA_TURN_MAX_S` are M2.
+- **The scheduled on-ramp has no equivalent.** Archetype C went with the KEDA path and has no P6
+  design ([#536](https://github.com/rossoctl/moca/issues/536)).
+
+### 14.5 Smoke
+
+`smoke.sh` claims 13 and 14 cover this path, and skip with a `note` on a stack whose
+`moca-settings` has the knob off. Claim 13 fans five leaves out over a stack that can run two at
+once and requires all five to reach a result; claim 14 deletes the supervisor pod under a running
+leaf and requires that leaf to finish on a second delivery (`attempts` ≥ 2), which is the
+redelivery acceptance of [#389](https://github.com/rossoctl/moca/issues/389) on this path. CI brings
+its Kind stack up with `SH_ASYNC_DRAIN=1`, so both run on every `k8s-kind-e2e` (section 8).
+
+Claim 14 **assumes one supervisor pod**, as claim 9 does: it picks the pod before submitting the
+leaf, and cannot learn which pod's drain then claimed it. Above `replicas: 1` claims 9 and 14 skip
+with a `note` rather than delete a pod that may be holding nothing. If you raised `replicas`
+(section 4) and want the redelivery claim back, scale the supervisor to one for the run.

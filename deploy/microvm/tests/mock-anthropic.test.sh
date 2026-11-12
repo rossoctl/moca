@@ -60,7 +60,7 @@ check "400" "$(post '{"model":"mock-p4","stream":true,"messages":[{"role":"user"
 
 echo "== the K8s smoke scripts (#423) are scripted, and do not disturb the P4 ones"
 for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN K8S-SMOKE-P4-WRITE K8S-SMOKE-P4-READ \
-  K8S-SMOKE-WHERE-1 K8S-SMOKE-WHERE-2; do
+  K8S-SMOKE-WHERE-1 K8S-SMOKE-WHERE-2 K8S-SMOKE-ASYNC K8S-SMOKE-ASYNC-SLOW; do
   code="$(post '{"model":"mock-k8s","stream":true,"messages":[{"role":"user","content":"run it. '"$m"'"}]}')"
   check "$m step 0 is 200" "$code" "200"
   check "$m step 0 is a bash tool_use" "$(grep -c '"name":"bash"' "$TMP/body")" "1"
@@ -72,6 +72,10 @@ for m in K8S-SMOKE-WRITE K8S-SMOKE-AGAIN K8S-SMOKE-RESEARCH K8S-SMOKE-DRAIN K8S-
   case "$m" in
     K8S-SMOKE-WHERE-1) check "$m step 0 holds its lease (sleep 2)" "$(grep -c 'sleep 2; echo' "$TMP/body")" "1" ;;
     K8S-SMOKE-WHERE-2) check "$m step 0 is a bare echo" "$(grep -c 'sleep' "$TMP/body")" "0" ;;
+    # ASYNC-SLOW contains ASYNC, so a first-match lookup hands the slow prompt the fast script. The
+    # k8s claim 14 then has nothing to interrupt when it deletes the pod, and fails saying so.
+    K8S-SMOKE-ASYNC) check "$m step 0 is the fast leaf, not the slow one" "$(grep -c 'sleep' "$TMP/body")" "0" ;;
+    K8S-SMOKE-ASYNC-SLOW) check "$m step 0 outlasts the drain grace (sleep 40)" "$(grep -c 'sleep 40' "$TMP/body")" "1" ;;
   esac
 done
 code="$(post '{"model":"mock-k8s","stream":true,"messages":[
