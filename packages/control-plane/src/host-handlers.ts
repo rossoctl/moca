@@ -316,10 +316,11 @@ function registrationResults(
 
 export const HOST_HANDLERS: Record<string, Handler> = {
   /**
-   * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
-   * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
-   * live lease. A worker is never stopped under a live sandbox: it drains first, so a build with
-   * one is in neither list.
+   * The wanted state (§6.3, §6.5): `run`, the registered builds this host holds that are leased
+   * and placed on it (the same placement activate judges by), in start order; `stop`, the ones it
+   * holds with no live lease and no idle grace; `starting`, those placed but not yet attached; and
+   * `graced`, those kept running through their idle grace (see wantedAnswer). A worker is never
+   * stopped under a live sandbox: it drains first, so a build with one is in no stop list.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
