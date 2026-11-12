@@ -1660,6 +1660,14 @@ boot_quiesce_snapshot_firecracker() {
     "{\"vsock_id\":\"vsock0\",\"guest_cid\":3,\"uds_path\":\"/vsock.sock\"}"
   api_put "$api_sock" /machine-config \
     "{\"mem_size_mib\":$GUEST_RAM_MB,\"vcpu_count\":1}"
+  # balloon-fpr-v1 (spec §6 "Free-page reporting", §16 item 5): a virtio-balloon in free-page
+  # reporting mode only. amount_mib 0 and nothing ever inflates it; the guest reports the
+  # pages it frees and the host drops them, so an idle lease is charged its working set, not
+  # its peak. Pre-boot like every device here, and so in the snapshot: one golden snapshot
+  # for every mode (per-Exec latency measured unchanged with it on the E15 rig), and a
+  # restored VM keeps reporting, so verify_restore_firecracker never sends it. Validated
+  # against the real Firecracker v1.17.0 binary.
+  api_put "$api_sock" /balloon '{"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}'
   api_put "$api_sock" /actions '{"action_type":"InstanceStart"}'
 
   wait_for_agent "$vsock_uds" "$console_log"
@@ -1912,10 +1920,11 @@ write_manifest() {
 
   # lease-v1 on the Firecracker arm only: Cloud Hypervisor's Run mounts the virtiofs
   # workspace inside every command (chvWrapCommand), which a lease Exec, uid 7000 with
-  # no capabilities, cannot do.
+  # no capabilities, cannot do. balloon-fpr-v1 likewise: only boot_quiesce_snapshot_
+  # firecracker configures the reporting balloon.
   features_json=""
   if [ "$VMM" = firecracker ]; then
-    features_json='"lease-v1"'
+    features_json='"lease-v1", "balloon-fpr-v1"'
   fi
 
   cat >"$STAGE/manifest.json" <<MANIFEST

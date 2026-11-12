@@ -628,6 +628,34 @@ func TestLeaseBannerReportsResolvedValues(t *testing.T) {
 	}
 }
 
+// A lease-v1 snapshot without the reporting balloon still serves leases, but the guest
+// never returns freed pages, so measured charge follows peaks (spec §6): warn, never refuse.
+func TestBalloonWarningOnlyForALeaseImageWithoutTheBalloon(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []string
+		warn     bool
+	}{
+		{"no features", nil, false},
+		{"lease-v1 and balloon-fpr-v1", []string{vmpool.FeatureLeaseV1, vmpool.FeatureBalloonFPRV1}, false},
+		{"balloon-fpr-v1 alone", []string{vmpool.FeatureBalloonFPRV1}, false},
+		{"lease-v1 alone", []string{vmpool.FeatureLeaseV1}, true},
+	} {
+		w := balloonWarning(tc.features)
+		if (w != "") != tc.warn {
+			t.Errorf("%s: balloonWarning = %q, want warning=%v", tc.name, w, tc.warn)
+			continue
+		}
+		if tc.warn {
+			for _, want := range []string{"WARNING", "lease-v1", "balloon-fpr-v1", "peak"} {
+				if !strings.Contains(w, want) {
+					t.Errorf("%s: warning %q lacks %q", tc.name, w, want)
+				}
+			}
+		}
+	}
+}
+
 // The lease fields are omitempty: a worker that never served a lease (every per-Exec
 // worker) serves /stats with exactly the keys it served before lease mode existed, and a
 // lease worker reports its lease VMs, their commitment and its ends by reason.

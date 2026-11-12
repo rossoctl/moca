@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -314,6 +315,20 @@ func leaseBanner(cfg vmpool.Config) string {
 		c.LeaseIdleDefault, c.LeaseIdleCeiling, c.LeaseMaxDuration, c.LeaseMaxDurationProcesses,
 		c.LeaseGraceLimit, c.LeaseStartBytes>>20, strconv.FormatFloat(c.LeaseHeadroom, 'g', -1, 64),
 		c.LeasePageCacheBytes>>20, c.LeaseReclaimFreeBytes>>20)
+}
+
+// balloonWarning is the start-up warning for a lease-v1 snapshot built without the
+// reporting balloon (balloon-fpr-v1): lease mode still works, but the guest never returns
+// the pages it frees, so a lease's measured charge follows its peak, not its working set
+// (spec §6). Rebuilding the snapshot with the current build-snapshot.sh adds the balloon.
+func balloonWarning(features []string) string {
+	if !slices.Contains(features, vmpool.FeatureLeaseV1) || slices.Contains(features, vmpool.FeatureBalloonFPRV1) {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: the snapshot advertises %s without %s: lease mode works, but "+
+		"guests never report freed pages, so measured lease charge follows each lease's peak, not "+
+		"its working set (spec §6). Rebuild the snapshot with build-snapshot.sh to add the balloon.",
+		vmpool.FeatureLeaseV1, vmpool.FeatureBalloonFPRV1)
 }
 
 // effectiveWorkspaceIdle is what the pool will use: poolConfig leaves the field zero when unset,
@@ -871,6 +886,9 @@ func main() {
 		standbyHeadroomLabel(cfg), cfg.HostMemFloorBytes>>20,
 		effectiveWorkspaceIdle(cfg), leaseBanner(cfg), labels)
 	if w := slotBudgetWarning(cfg, maxConcurrent); w != "" {
+		log.Printf("microvm-worker: %s", w)
+	}
+	if w := balloonWarning(cfg.ManifestFeatures); w != "" {
 		log.Printf("microvm-worker: %s", w)
 	}
 
