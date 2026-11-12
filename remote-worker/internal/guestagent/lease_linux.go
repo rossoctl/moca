@@ -347,12 +347,21 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	wg.Wait()
 	_ = stdoutR.Close()
 	_ = stderrR.Close()
+	// Read before the cgroup goes: its memory.events goes with it.
+	oomKills := c.oomKills()
 	// The cgroup is empty, so rmdir succeeds; if it somehow does not, the leftover is
 	// an empty, unused directory and the next Exec gets a fresh e<seq> regardless.
 	_ = c.remove()
 	if aborted {
 		// The host is gone; ServeConn's write of this fails harmlessly.
 		return End{}, errors.New("guest-agent: the connection closed; the Exec was aborted")
+	}
+	if oomKills > 0 {
+		// After the removal, so the root's memory.current is what the lease holds without
+		// this Exec: its tmpfs files reparented to the root, its own pages freed.
+		if hint := leaseMemoryHintFor(lo.CgroupRoot, oomKills); hint != "" {
+			w.notice(hint)
+		}
 	}
 	if timedOut {
 		// Not dead, unlike the parked shell's timeout: there is no long-lived shell
@@ -462,6 +471,41 @@ func (c *execCgroup) fd() int { return int(c.dir.Fd()) }
 // forked or reparented: cgroup membership, unlike the process tree, cannot be escaped.
 func (c *execCgroup) kill() error {
 	return os.WriteFile(filepath.Join(c.path, "cgroup.kill"), []byte("1"), 0)
+}
+
+// oomKills is the cgroup's memory.events oom_kill count: how many of its processes the
+// OOM killer took, whichever cgroup's limit was hit (the event is charged to the victim's
+// cgroup). 0 when it cannot be read: the count only feeds a hint (leaseMemoryHintFor).
+func (c *execCgroup) oomKills() int64 {
+	raw, err := os.ReadFile(filepath.Join(c.path, "memory.events"))
+	if err != nil {
+		return 0
+	}
+	n, err := parseMemoryEventsOOMKill(raw)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// leaseMemoryHintFor is leaseMemoryHint (lease_caps.go) over the cgroup root's
+// memory.current and memory.max, for an Exec whose cgroup counted oomKills and has been
+// removed. "" when either file cannot be read, or the root is uncapped.
+func leaseMemoryHintFor(root string, oomKills int64) string {
+	if oomKills <= 0 {
+		return ""
+	}
+	var v [2]int64
+	for i, f := range []string{"memory.current", "memory.max"} {
+		raw, err := os.ReadFile(filepath.Join(root, f))
+		if err != nil {
+			return ""
+		}
+		if v[i], err = parseCgroupBytes(raw); err != nil {
+			return ""
+		}
+	}
+	return leaseMemoryHint(oomKills, v[0], v[1])
 }
 
 func (c *execCgroup) remove() error {

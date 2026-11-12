@@ -1269,3 +1269,43 @@ func TestAgentOomScoreAdj(t *testing.T) {
 		t.Errorf("a failed write logged %q, want it to contain %q", logs.String(), want)
 	}
 }
+
+// PR #763 second review (G3): the cgroupfs reads behind the lease OOM hint, on a fake
+// cgroup tree (no root needed): the Exec cgroup's memory.events oom_kill, read before it
+// is removed, then the root's memory.current against its memory.max.
+func TestLeaseMemoryHintReadsTheCgroupFiles(t *testing.T) {
+	root := t.TempDir()
+	e := filepath.Join(root, "e1")
+	if err := os.Mkdir(e, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(e, "memory.events"), "low 0\nhigh 0\nmax 4\noom 1\noom_kill 1\noom_group_kill 0\n")
+	if n := (&execCgroup{path: e}).oomKills(); n != 1 {
+		t.Fatalf("oomKills = %d, want 1", n)
+	}
+	if n := (&execCgroup{path: filepath.Join(root, "e2")}).oomKills(); n != 0 {
+		t.Fatalf("oomKills of a cgroup with no memory.events = %d, want 0", n)
+	}
+
+	write(filepath.Join(root, "memory.current"), "314572800\n")
+	write(filepath.Join(root, "memory.max"), "419430400\n")
+	if got := leaseMemoryHintFor(root, 1); !strings.Contains(got, "300 MiB is still held in the lease") {
+		t.Fatalf("hint = %q, want one naming the 300 MiB the lease holds", got)
+	}
+	if got := leaseMemoryHintFor(root, 0); got != "" {
+		t.Fatalf("hint with no OOM kill = %q, want none", got)
+	}
+	write(filepath.Join(root, "memory.max"), "max\n")
+	if got := leaseMemoryHintFor(root, 1); got != "" {
+		t.Fatalf("hint with an uncapped root = %q, want none", got)
+	}
+	if got := leaseMemoryHintFor(filepath.Join(root, "missing"), 1); got != "" {
+		t.Fatalf("hint with unreadable root files = %q, want none", got)
+	}
+}

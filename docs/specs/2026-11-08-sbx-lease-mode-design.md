@@ -155,7 +155,11 @@ The rootfs is mounted read-only in every mode (`build-snapshot.sh:1530` boot arg
 `is_read_only: true`). Outside `/workspace`, only the tmpfs mounts `/tmp` and `/var` are writable.
 Package installs survive a lease only if they target one of those or the workspace (for example
 `pip install --target /tmp/deps`). The tmpfs files are guest RAM. They raise the VM's
-`memory.current` and are not freed until the lease ends, so §6 and E17 count them.
+`memory.current` and are not freed until the lease ends, so §6 and E17 count them. They also count
+against the cap on the agent's cgroup tree, so later Execs of the lease run out of memory sooner
+until the files are deleted. An Exec killed for memory while the lease still holds a quarter or more
+of that cap gets a line on its stderr from the agent, saying how much the lease holds and that files
+in `/tmp` and `/var` count.
 
 **Execs stay serial for each sandbox**, as today. `process_*` calls are Execs for that rule.
 

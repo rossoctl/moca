@@ -1064,7 +1064,8 @@ echo checked`
 // it is OOM-killed inside the cgroup tree (the root's memory.events oom count rises);
 // with only the e<seq> capped it would start from zero over the tmpfs charge and run the
 // guest into a global OOM, which a guest whose one other process is PID 1 at -1000 does
-// not survive.
+// not survive. The OOM-killed Exec's stderr carries the guest agent's hint that the lease
+// still holds that memory (PR #763 second review, G3).
 func TestGateLeaseExecCaps(t *testing.T) {
 	requireKVM(t)
 	g := newLeaseGate(t, nil)
@@ -1134,6 +1135,12 @@ while True: b.append(b"x" * (16 << 20))'`, 1))
 		t.Fatalf("tmpfs: exit %d, teardown_failed %v, want a non-zero exit and a clean teardown", res.ExitCode, res.TeardownFailed)
 	}
 	t.Logf("tmpfs: exit %d, stderr %.300q", res.ExitCode, stderr)
+	// PR #763 second review (G3): the guest agent says why, so the user can tell the
+	// lease's leftover files from the command's own appetite.
+	if !strings.Contains(stderr, "guest-agent: this command was killed for memory; ") ||
+		!strings.Contains(stderr, " MiB is still held in the lease (files in /tmp and /var count against its memory until deleted)") {
+		t.Fatalf("tmpfs: stderr %q, want the guest agent's hint that the lease's files hold its memory", stderr)
+	}
 	if got := g.run(t, key, gateLease("cat /proc/1/comm", 1)); got != "agent\n" {
 		t.Fatalf("after the tmpfs case: PID 1 is %q, want the agent", got)
 	}

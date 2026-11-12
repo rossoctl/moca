@@ -59,3 +59,59 @@ func TestExecCgroupCapFiles(t *testing.T) {
 		}
 	}
 }
+
+// PR #763 second review (G3): an Exec OOM-killed while the lease still holds a quarter or
+// more of the cgroup root's memory.max -- files left in /tmp or /var -- gets a stderr hint
+// that tells "your /tmp is full" apart from "your command used too much memory".
+func TestLeaseMemoryHint(t *testing.T) {
+	const mib = 1 << 20
+	want300 := "guest-agent: this command was killed for memory; 300 MiB is still held in the lease " +
+		"(files in /tmp and /var count against its memory until deleted)\n"
+	for _, tc := range []struct {
+		name                       string
+		oomKills, current, rootMax int64
+		want                       string
+	}{
+		{"no OOM kill", 0, 300 * mib, 400 * mib, ""},
+		{"three quarters held", 1, 300 * mib, 400 * mib, want300},
+		{"exactly a quarter", 2, 100 * mib, 400 * mib, strings.Replace(want300, "300 MiB", "100 MiB", 1)},
+		{"just under a quarter", 1, 100*mib - 1, 400 * mib, ""},
+		{"root uncapped or unreadable", 1, 300 * mib, 0, ""},
+	} {
+		if got := leaseMemoryHint(tc.oomKills, tc.current, tc.rootMax); got != tc.want {
+			t.Errorf("%s: leaseMemoryHint(%d, %d, %d) = %q, want %q", tc.name, tc.oomKills, tc.current, tc.rootMax, got, tc.want)
+		}
+	}
+}
+
+func TestParseMemoryEventsOOMKill(t *testing.T) {
+	events := "low 0\nhigh 0\nmax 12\noom 1\noom_kill 2\noom_group_kill 0\n"
+	if n, err := parseMemoryEventsOOMKill([]byte(events)); err != nil || n != 2 {
+		t.Fatalf("parseMemoryEventsOOMKill = %d, %v; want 2 (oom_kill, not oom or oom_group_kill)", n, err)
+	}
+	for _, bad := range []string{"", "oom 1\n", "oom_kill x\n", "oom_kill -1\n", "oom_kill\n"} {
+		if n, err := parseMemoryEventsOOMKill([]byte(bad)); err == nil {
+			t.Errorf("parseMemoryEventsOOMKill(%q) = %d, nil; want an error", bad, n)
+		}
+	}
+}
+
+func TestParseCgroupBytes(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"419430400\n", 419430400, true},
+		{"0\n", 0, true},
+		{"max\n", 0, false}, // no limit: nothing to compare with
+		{"", 0, false},
+		{"-5\n", 0, false},
+		{"12 MiB\n", 0, false},
+	} {
+		got, err := parseCgroupBytes([]byte(tc.in))
+		if (err == nil) != tc.ok || got != tc.want {
+			t.Errorf("parseCgroupBytes(%q) = %d, %v; want %d, ok %v", tc.in, got, err, tc.want, tc.ok)
+		}
+	}
+}
