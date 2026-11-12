@@ -45,6 +45,13 @@ export interface ExchangeResponse {
    */
   sandboxTier?: string;
   /**
+   * The session's sandbox template and its seed (session-templates spec §3.3), which the data plane
+   * filters sandboxes on and seeds a new workspace with. Both absent when the session names no
+   * template or the deployment declares none, so that response is unchanged.
+   */
+  sandboxTemplate?: string;
+  sandboxSeed?: string;
+  /**
    * The session's model and the limits snapshotted when it was chosen (per-session model spec
    * §4.5). Absent when the session names none, so that response is unchanged.
    */
@@ -84,6 +91,23 @@ export function sessionTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers'])
  */
 export function viewTier(rec: SessionRecord, tiers: CpConfig['sandboxTiers']): string | null {
   return sessionTier(rec, tiers) || null;
+}
+
+/**
+ * The template a session runs on (session-templates spec §3.3): its stored one, always, with the
+ * seed while the deployment still declares it. FAIL CLOSED: unlike a tier, there is no default
+ * template to fall back to, so a template dropped from SH_SANDBOX_TEMPLATES (or the variable unset)
+ * is still named. The data plane then finds no worker of it and refuses the turn
+ * (SandboxPoolEmptyError naming the template) rather than quietly moving a benchmark session to an
+ * untemplated worker on an empty workspace.
+ */
+export function sessionTemplate(
+  rec: SessionRecord,
+  templates: CpConfig['sessionTemplates'],
+): { id: string; seed?: string } | undefined {
+  if (!rec.sandboxTemplate) return undefined;
+  const t = templates?.find((x) => x.id === rec.sandboxTemplate);
+  return { id: rec.sandboxTemplate, ...(t?.seed ? { seed: t.seed } : {}) };
 }
 
 /**
@@ -385,6 +409,7 @@ export async function exchangeCredential(
   }
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,
@@ -396,6 +421,8 @@ export async function exchangeCredential(
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(rec.configRef ? { configRef: rec.configRef } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
+    ...(template ? { sandboxTemplate: template.id } : {}),
+    ...(template?.seed ? { sandboxSeed: template.seed } : {}),
     ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
   };
 }

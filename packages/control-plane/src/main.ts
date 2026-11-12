@@ -33,7 +33,11 @@ import { resolveVersion } from './version.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
 import { parseSandboxTiers } from './sandbox-tiers.js';
-import { routeProfileFromEnv, sandboxConfigFromEnv } from './sandbox-config.js';
+import {
+  routeProfileFromEnv,
+  sandboxConfigFromEnv,
+  sessionTemplatesFromEnv,
+} from './sandbox-config.js';
 import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 import { readTenancy } from './tenancy.js';
 import { TurnStore } from './turn-store.js';
@@ -229,6 +233,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     sandboxNamespace: env.SH_SANDBOX_NAMESPACE || 'default',
     publicHarnessUrl: urlEnv(env, 'SH_PUBLIC_HARNESS_URL'),
     sandboxTiers: parseSandboxTiers(env),
+    sessionTemplates: sessionTemplatesFromEnv(env),
     // A quarter of the total: four subjects, not two, to fill it, and still room for one
     // incompressible max-size bundle (~10.7 MiB stored).
     bundleSubjectBytes: byteBudgetEnv(env, 'SH_BUNDLE_SUBJECT_BYTES', 16 * 1024 * 1024),

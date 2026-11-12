@@ -77,6 +77,11 @@ export interface SessionRecord {
    */
   sandboxTier?: string;
   /**
+   * The session's sandbox template, chosen once at creation (session-templates spec §3.3). Absent
+   * (or '') when the session named none: it then runs only on untemplated workers.
+   */
+  sandboxTemplate?: string;
+  /**
    * The model this session's turns run on (per-session model spec §4.4). '' or absent means the
    * deployment default. Changed by PATCH /v1/sessions/{id}, unlike the fields above.
    */
@@ -188,6 +193,7 @@ export class OwnershipIndex {
         configRef: rec.configRef ?? '',
         tombstone: rec.tombstone ? '1' : '0',
         sandboxTier: rec.sandboxTier ?? '',
+        sandboxTemplate: rec.sandboxTemplate ?? '',
         model: rec.model ?? '',
         modelLimits: rec.modelLimits ? JSON.stringify(rec.modelLimits) : '',
       }),
@@ -213,6 +219,7 @@ export class OwnershipIndex {
       configRef: h.configRef ? h.configRef : null,
       tombstone: h.tombstone === '1',
       sandboxTier: h.sandboxTier,
+      ...(h.sandboxTemplate ? { sandboxTemplate: h.sandboxTemplate } : {}),
       ...(h.model ? { model: h.model } : {}),
       ...(readLimits(h.modelLimits) ? { modelLimits: readLimits(h.modelLimits) } : {}),
     };
