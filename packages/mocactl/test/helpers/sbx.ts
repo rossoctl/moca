@@ -21,7 +21,9 @@ export const URL_ = 'https://sbx-api.example.invalid';
 export const SBX = 'sbx-0123456789abcdef0123456789';
 
 export type Req = { method: string; path: string; body: unknown; auth?: string };
-export type Handler = (req: Req) => { status: number; body?: unknown } | Error;
+export type Handler = (
+  req: Req,
+) => { status: number; body?: unknown; headers?: Record<string, string> } | Error;
 
 /** A scripted control plane: one handler per "METHOD /path", recording every call. */
 export function fakeCp(routes: Record<string, Handler>) {
@@ -41,7 +43,7 @@ export function fakeCp(routes: Record<string, Handler>) {
     if (r instanceof Error) throw r;
     return new Response(r.body === undefined ? null : JSON.stringify(r.body), {
       status: r.status,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...r.headers },
     });
   }) as typeof fetch;
   return { fetchImpl, calls };

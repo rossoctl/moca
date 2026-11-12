@@ -393,7 +393,9 @@ caller's lease (as `activate`, recorded with `reason: first_use`; its refusals `
 `activate: false` starts nothing. No sandbox record is kept while waiting, so a wait never uses the
 live-sandbox cap. The gate applies whenever template hosts are configured, also before any of them
 has reported: until a host's first inventory, an attached worker serves and an absent one is
-refused, not left to wait at the relay. Without template hosts nothing changes.
+refused, not left to wait at the relay. Without template hosts nothing changes. `mocactl sbx create`
+and `sbx up` wait out a `template_not_active` after its `Retry-After` for up to 10 minutes, saying
+why; `mocactl sbx templates activate ID --wait` before a batch avoids the first wait.
 
 Known limits: the budget a worker is installed with still caps how many commands it runs at once
 (it is sized at install, not from the lease); a first use waits for one worker start, seconds to

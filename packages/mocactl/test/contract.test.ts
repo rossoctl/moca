@@ -119,6 +119,18 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/templates/{id}/builds/{build}',
     reads: ['buildId', 'status', 'readiness', 'capacity', 'tags', 'spec'],
   },
+  // `sbx templates activate` and `deactivate` (template lifecycle spec §6.3).
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/activate',
+    reads: ['templateId', 'buildId', 'leaseUntil', 'host'],
+    sends: ['build', 'leaseSeconds'],
+  },
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/deactivate',
+    reads: ['templateId', 'released'],
+  },
 ];
 
 // The fields of each Sandbox and template `mocactl sbx ls` / `templates` print.
@@ -314,6 +326,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.mintSandboxToken('ID');
     await c.getTemplate('TID');
     await c.getTemplateBuild('TID', 'BID');
+    await c.activateTemplate('TID', {});
+    await c.deactivateTemplate('TID');
     const seen = calls.map(
       (k) =>
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
@@ -337,6 +351,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'mintSandboxToken',
         'getTemplate',
         'getTemplateBuild',
+        'activateTemplate',
+        'deactivateTemplate',
       ]),
     );
   });

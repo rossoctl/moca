@@ -37,7 +37,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
-import { cmdShowTemplate } from './templates.js';
+import { cmdActivate, cmdDeactivate, cmdShowTemplate } from './templates.js';
 import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
@@ -50,6 +50,13 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates show ID [--build BUILD] [--json]
                                                  a template and its builds (status, readiness, tags),
                                                  or one build with its spec (--json)
+  mocactl sbx templates activate ID [--build BUILD] [--lease S] [--wait [--timeout S]] [--json]
+                                                 take or renew your activation lease on a build (tag
+                                                 default, or BUILD; S seconds, 60-86400); a host agent
+                                                 starts its worker. --wait: until it is active, saying
+                                                 why it waits (default 1800 s; exit 5 on a timeout)
+  mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
+                                                 its worker drains and stops
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -354,6 +361,8 @@ export async function sbxMain(
         json: { type: 'boolean' },
         sandbox: { type: 'string' },
         timeout: { type: 'string' },
+        lease: { type: 'string' },
+        wait: { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
         'max-push': { type: 'string' },
@@ -417,9 +426,23 @@ export async function sbxMain(
     io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.timeout !== undefined && command !== 'run') {
-    io.err(`sbx: --timeout only applies to run\n${SBX_USAGE}`);
+  const activating = command === 'templates' && arg === 'activate';
+  if (values.timeout !== undefined && command !== 'run' && !(activating && values.wait)) {
+    io.err(`sbx: --timeout only applies to run and templates activate --wait\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
+  }
+  if ((values.lease !== undefined || values.wait !== undefined) && !activating) {
+    io.err(`sbx: --lease and --wait only apply to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  let leaseSeconds: number | undefined;
+  if (values.lease !== undefined) {
+    const raw = values.lease.trim();
+    leaseSeconds = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 60 || leaseSeconds > 86_400) {
+      io.err(`sbx: --lease must be a whole number of seconds, 60 to 86400 (got '${values.lease}')`);
+      return SBX_EXIT.usage;
+    }
   }
   const flagMisuse = SYNC_FLAGS.find(
     ([flag, cmds]) => values[flag] !== undefined && !cmds.includes(command),
@@ -450,17 +473,22 @@ export async function sbxMain(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates show ID [--build BUILD]` (template lifecycle spec §4); bare `templates` lists them.
-  if (command === 'templates' && arg !== undefined && arg !== 'show') {
+  // `templates show ID [--build BUILD]` (template lifecycle spec §4), `templates activate ID` and
+  // `templates deactivate ID` (§6.3); bare `templates` lists them.
+  const TEMPLATE_COMMANDS = ['show', 'activate', 'deactivate'];
+  if (command === 'templates' && arg !== undefined && !TEMPLATE_COMMANDS.includes(arg)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(arg)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (command === 'templates' && arg === 'show' && (extra.length !== 1 || !extra[0]!.trim())) {
-    io.err(`sbx: templates show takes one template ID\n${SBX_USAGE}`);
+  if (command === 'templates' && arg !== undefined && (extra.length !== 1 || !extra[0]!.trim())) {
+    io.err(`sbx: templates ${arg} takes one template ID\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.build !== undefined && !(command === 'templates' && arg === 'show')) {
-    io.err(`sbx: --build only applies to templates show\n${SBX_USAGE}`);
+  if (
+    values.build !== undefined &&
+    !(command === 'templates' && (arg === 'show' || arg === 'activate'))
+  ) {
+    io.err(`sbx: --build only applies to templates show and templates activate\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.build !== undefined && !values.build.trim()) {
@@ -484,7 +512,7 @@ export async function sbxMain(
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
-    (command === 'templates' && arg === 'show') ||
+    (command === 'templates' && arg !== undefined) ||
     command === 'claude' ||
     command === 'codex' ||
     (command === 'credentials'
@@ -665,6 +693,14 @@ export async function sbxMain(
       return cmdLogout(ctx);
     case 'templates':
       if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
+      if (arg === 'activate')
+        return cmdActivate(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(leaseSeconds !== undefined ? { leaseSeconds } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
+      if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
       return cmdTemplates(ctx);
     case 'create':
       return cmdCreate(

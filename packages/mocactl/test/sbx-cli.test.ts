@@ -16,6 +16,7 @@ import { cmdLogin, devicePrompt } from '../src/headless.js';
 import { buildRuntime } from '../src/runtime.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
+import { createWaitingForActivation } from '../src/sbx/commands.js';
 import { readBoundSandbox } from '../src/sbx/state.js';
 import { fakeCp, LOGIN, sandbox, SBX, setup, TOKEN, URL_, type Handler } from './helpers/sbx.js';
 
@@ -284,6 +285,85 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(io.outs.join('')).toContain(SBX);
     expect(io.errs.join('')).toContain(new Date(1_800_604_800 * 1000).toISOString());
+  });
+
+  it('waits while the template activates (§6.4): retries a 409 template_not_active after its Retry-After', async () => {
+    const { home, env, io } = setup();
+    let n = 0;
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () =>
+        ++n < 3
+          ? {
+              status: 409,
+              body: {
+                error: 'template_not_active',
+                message: "template 'node22' is activating; its activation has started",
+                readiness: 'activating',
+              },
+              headers: { 'retry-after': '30' },
+            }
+          : { status: 201, body: sandbox() },
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    const s = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    );
+    expect(s.id).toBe(SBX);
+    expect(n).toBe(3);
+    expect(slept).toEqual([30_000, 30_000]);
+    expect(io.errs.join('')).toContain(
+      "sbx: template 'node22' is activating; its activation has started; retrying in 30 s",
+    );
+  });
+
+  it('gives up waiting for an activation after 10 minutes, with the refusal', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 409,
+        body: { error: 'template_not_active', message: 'activating', readiness: 'activating' },
+        headers: { 'retry-after': '30' },
+      }),
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      t += ms;
+    };
+    rt.now = () => t;
+    const err = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: 'template_not_active' });
+    // 10 minutes of 30 s waits: the first try and 20 retries.
+    expect(cp.calls.length).toBe(21);
+  });
+
+  it('does not wait on any other refusal of a create', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 409,
+        body: { error: 'no_active_slot', message: 'full', readiness: 'unavailable' },
+        headers: { 'retry-after': '60' },
+      }),
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    const err = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: 'no_active_slot' });
+    expect(cp.calls.length).toBe(1);
   });
 
   it('creates from the default template without --template (spec §6.1), and refuses a malformed --label', async () => {

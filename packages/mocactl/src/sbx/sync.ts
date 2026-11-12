@@ -19,7 +19,7 @@ import {
   type AgentopExec,
 } from './agentop.js';
 import type { SbxSandbox } from './api.js';
-import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
+import { createWaitingForActivation, failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import {
   execFailed,
   openExec,
@@ -284,7 +284,7 @@ async function findOrCreate(
       c.io.err(`reusing ${sanitizeRemote(mine[0].id)}, this repository's sandbox`);
       return { sandbox: mine[0], reused: true };
     }
-    const s = await c.api.createSandbox({
+    const s = await createWaitingForActivation(c, {
       template: f.template ?? DEFAULT_TEMPLATE,
       ...(f.name ? { name: f.name } : {}),
       labels: { project: rid },
