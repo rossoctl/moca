@@ -125,7 +125,8 @@ credential, no bearer token — and the worker rebuilds the envelope from the re
 drain loop that does so **runs on P6 today**, opt-in behind `SH_ASYNC_DRAIN` and
 `MOCA_TENANCY=single`; see [dispatch archetypes](../concepts/dispatch-archetypes.md). Its result is
 written per turn and read back with `GET /v1/sessions/{id}/turns/{turnId}`, so `/runs/status` — this
-route's own status endpoint — never answers for an async turn. Cron still has no P6 equivalent
+route's own status endpoint — never reports an async turn: it answers `queued` forever, or returns
+the session's last synchronous result as if it were the answer. Cron still has no P6 equivalent
 ([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ## Spec drift

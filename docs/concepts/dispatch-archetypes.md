@@ -45,8 +45,10 @@ interactive turns, rather than a separate process or a `--role=leaf` worker (tha
 and unimplemented). A worker claims one queued turn at a time, runs it through the same `runLeaf` the
 synchronous route uses, and writes the result under that turn's own key, read back by
 `GET /v1/sessions/{id}/turns/{turnId}`. The data plane's `GET /runs/status` is deliberately
-untouched and never answers for an async turn (spec §10): it reads the session-wide result key, and
-an async result is written per turn.
+untouched (spec §10) and never _reports_ an async turn, which is worse than failing: it reads the
+session-wide result key, which an async turn never writes, so it answers `{"status":"queued"}`
+forever — or, if that session ever ran a synchronous `/v1/runs` leaf, returns **that** leaf's result,
+which looks like a real answer. Poll the turn route, not this one.
 
 **Running it.** Three things, none of them a new service:
 
