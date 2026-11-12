@@ -18,6 +18,7 @@ const ENV_ALLOWLIST = [
   'SH_PERSISTENT_EXEC',
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_MODEL',
+  'SH_ASYNC_DRAIN',
 ] as const;
 
 /** The exact JSON plan 2's `worker_metrics()` parses. Wire names are snake_case. */
@@ -38,9 +39,17 @@ export interface MetricsBody {
     readonly spurious_refusals: number;
     /** Header blocks that exceeded the pre-read cap, so those connections lost affinity. */
     readonly head_truncations: number;
+    // §7. Counts, so a missing reading and a zero reading mean the same thing here.
+    readonly async_claims: number;
+    readonly async_reclaims: number;
+    readonly async_dead_letters: number;
+    readonly async_claim_denied_full: number;
   };
   readonly lease_saturation: number | 'NaN';
   readonly file_op_p95_ms: number | 'NaN';
+  // Gauges, so NaN rather than 0 until slot 0 reports: 0 would read as "the queue is empty".
+  readonly async_queue_depth: number | 'NaN';
+  readonly async_oldest_age_ms: number | 'NaN';
   /** Echoed so a run record can prove which model tier and policy produced it (§5.3 pin 1). */
   readonly env: Readonly<Record<string, string>>;
 }
@@ -72,9 +81,17 @@ export function metricsBody(pool: WorkerPool, env: NodeJS.ProcessEnv): MetricsBo
       over_admission: c.overAdmission,
       spurious_refusals: c.spuriousRefusals,
       head_truncations: c.headTruncations,
+      // §7. Counts, so a missing reading and a zero reading mean the same thing here.
+      async_claims: agg.asyncClaims,
+      async_reclaims: agg.asyncReclaims,
+      async_dead_letters: agg.asyncDeadLetters,
+      async_claim_denied_full: agg.asyncClaimDeniedFull,
     },
     lease_saturation: num(agg.leaseSaturation),
     file_op_p95_ms: num(agg.fileOpP95Ms),
+    // Gauges, so NaN rather than 0 until slot 0 reports: 0 would read as "the queue is empty".
+    async_queue_depth: num(agg.asyncQueueDepth),
+    async_oldest_age_ms: num(agg.asyncOldestAgeMs),
     env: picked,
   };
 }

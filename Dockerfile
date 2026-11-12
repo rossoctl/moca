@@ -15,6 +15,7 @@ COPY packages/control-plane/package.json ./packages/control-plane/
 COPY packages/supervisor/package.json ./packages/supervisor/
 COPY packages/provisioner/package.json ./packages/provisioner/
 COPY packages/config-bundle/package.json ./packages/config-bundle/
+COPY packages/work-queue/package.json ./packages/work-queue/
 COPY harness/package.json ./harness/
 
 # Copy pi-fork (uses npm, not pnpm — has its own package-lock.json)

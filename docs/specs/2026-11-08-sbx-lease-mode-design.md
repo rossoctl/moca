@@ -1,7 +1,10 @@
 # SBX0.3 — Lease mode for `mocactl sbx` sandboxes — Design
 
-Version: 0.1 — November 8, 2026 (draft for review)
-Status: Design. Not approved. Nothing is built.
+Version: 0.2 — November 12, 2026 (draft for review)
+Status: Design. Not approved. Plan 1 (guest agent and image, #706) is built; nothing else is.
+v0.2 folds in E17a's calibration (§1.1, §17): level 1 is re-scoped (§2), free-page reporting moves
+into v1 (§6, §14), lease VMs get page-cache headroom in their cgroup (§6), and the idle timeout and
+the memory model are set together (§4).
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
 registered in [the milestone registry](README.md).
 Decision record: [ADR-0048](../adrs/0048-sbx-lease-mode.md), which revises
@@ -49,6 +52,12 @@ test suite. Each run starts with a cold guest, and the slowdown grows with host 
   "egress wedged" relay reconnect, a suspected rig artefact (a no-wedge re-judge is pending). Memory
   did not bind. Resident VM memory flattens at a median of about 150 MiB after about 2 h (p95 about
   230 MiB). 256 live VMs used 36.5 GiB (`e16/results/vm-age/long-rung.md`).
+- **E17a calibration, cache-heavy Python (`pycache`, N = 1, 2026-11-11).** Warm lease (E15 resident
+  patch, 300 s) against per-`Exec`, median per command class: short commands (`grep`, `sed`, `head` on
+  project files) 53 → 6 ms (−89%); `import numpy, pandas, scipy, sklearn` 755 → 454 ms (−40%);
+  `analyze.py` (dataset parse plus a KMeans fit) 15.6 → 14.4 s (−8%); `pytest` 61.2 → 61.0 s (0%);
+  `grep -r` over the venv's sources: 1.96 → 2.00 s in realistic turns, 388 → 112 ms back to back.
+  Every lease VM reached its 1024 MiB cgroup ceiling after its first `analyze.py` (§17).
 - **What binds resident density is policy, not memory.** Admission charges every VM that is executing
   or restoring its full guest RAM plus overhead, about 1 GiB (`runningCommittedLocked`,
   `remote-worker/internal/vmpool/budget.go:418-425`, against `SH_MAX_COMMITTED_MB`).
@@ -104,22 +113,25 @@ deletedAt?` (`packages/control-plane/src/sandbox-store.ts:9-23`). It has no mode
 
 ## 2. Decision summary
 
-| Topic             | Decision                                                                                                                                            | Source                      |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| Levels            | Two opt-in levels over per-`Exec`: `lease` (warm guest, processes killed at the end of each Exec) and `lease+processes` (tracked processes survive) | user                        |
-| Level 1           | Processes are killed at the end of each Exec. Keeping processes is an explicit property, never a side effect                                        | user                        |
-| Level 2 survivors | Only processes started through `process_start` (strict rule)                                                                                        | user                        |
-| Exec privilege    | In lease mode, Execs and tracked processes run as an unprivileged uid with no capabilities; the agent stays root (§3.3)                             | our call (PR #698 review)   |
-| Idle              | Measured from the last Exec end. A keepalive never resets it                                                                                        | our call                    |
-| Idle timeout      | Default 300 s, owner-settable up to an operator ceiling                                                                                             | our call (E15 resident-300) |
-| Keepalive         | The MCP server sends one while the harness runs. Loss for 120 s ends the lease                                                                      | our call                    |
-| Maximum duration  | Reaching it marks the lease **expiring**. It ends at the next idle, or at the hard grace limit                                                      | user                        |
-| Memory pressure   | Reclaim the lease idle longest, level 1 or 2 alike, and notify                                                                                      | user                        |
-| Admission         | Lease VMs are charged measured memory. Reclaim is the safety net                                                                                    | user                        |
-| Balloon           | Not in v1. Measured in E17                                                                                                                          | user                        |
-| Mode switch       | On a live sandbox, by the owner, through `mocactl` only. The agent gets no tool for it                                                              | user                        |
-| Default mode      | `per-exec`                                                                                                                                          | user (assessment Phase 1)   |
-| Experiment        | E17, a separate spec in moca-experiments                                                                                                            | user                        |
+| Topic               | Decision                                                                                                                                                     | Source                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| Levels              | Two opt-in levels over per-`Exec`: `lease` (warm guest, processes killed at the end of each Exec) and `lease+processes` (tracked processes survive)          | user                         |
+| Level 1             | Processes are killed at the end of each Exec. Keeping processes is an explicit property, never a side effect                                                 | user                         |
+| Level 2 survivors   | Only processes started through `process_start` (strict rule)                                                                                                 | user                         |
+| Exec privilege      | In lease mode, Execs and tracked processes run as an unprivileged uid with no capabilities; the agent stays root (§3.3)                                      | our call (PR #698 review)    |
+| Idle                | Measured from the last Exec end. A keepalive never resets it                                                                                                 | our call                     |
+| Idle timeout        | Default 300 s, owner-settable up to an operator ceiling                                                                                                      | our call (E15 resident-300)  |
+| Keepalive           | The MCP server sends one while the harness runs. Loss for 120 s ends the lease                                                                               | our call                     |
+| Maximum duration    | Reaching it marks the lease **expiring**. It ends at the next idle, or at the hard grace limit                                                               | user                         |
+| Memory pressure     | Reclaim the lease idle longest, level 1 or 2 alike, and notify                                                                                               | user                         |
+| Admission           | Lease VMs are charged measured memory. Reclaim is the safety net                                                                                             | user                         |
+| Level 1 target      | Short and import-bound commands, and capacity at mid duty (E15). Not long compute, and not page-cache reuse that per-`Exec` already gets from the host (§17) | E17a (v0.2)                  |
+| Free-page reporting | In v1 for lease VMs: the guest returns freed pages, so an idle lease is charged its working set, not its peak (§6). No target-driven balloon                 | E17a (v0.2), was "not in v1" |
+| Lease cgroup        | `memory.max` = `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB), so a full guest leaves room for the host to cache the workspace (§6)                | E17a (v0.2)                  |
+| Balloon             | No target-driven balloon (inflate on demand) in v1                                                                                                           | user                         |
+| Mode switch         | On a live sandbox, by the owner, through `mocactl` only. The agent gets no tool for it                                                                       | user                         |
+| Default mode        | `per-exec`                                                                                                                                                   | user (assessment Phase 1)    |
+| Experiment          | E17, a separate spec in moca-experiments                                                                                                                     | user                         |
 
 ## 3. Modes
 
@@ -256,12 +268,12 @@ both lease levels:
      └────────────────────── ended: VM destroyed, workspace kept ◀─────────────────────
 ```
 
-| Setting          | Meaning                                              | Default                    | Who sets it                                        |
-| ---------------- | ---------------------------------------------------- | -------------------------- | -------------------------------------------------- |
-| `idle_timeout`   | No Exec in flight and none ended for this long → end | 300 s                      | owner, ≤ operator ceiling (default ceiling 1800 s) |
-| `max_duration`   | From lease start → **expiring**                      | level 1: 8 h; level 2: 4 h | operator                                           |
-| `grace_limit`    | From expiring → end even if busy                     | 30 min                     | operator                                           |
-| `keepalive_loss` | No keepalive for this long → end                     | 120 s                      | operator                                           |
+| Setting          | Meaning                                              | Default                        | Who sets it                                        |
+| ---------------- | ---------------------------------------------------- | ------------------------------ | -------------------------------------------------- |
+| `idle_timeout`   | No Exec in flight and none ended for this long → end | 300 s (revisited in E17b, §17) | owner, ≤ operator ceiling (default ceiling 1800 s) |
+| `max_duration`   | From lease start → **expiring**                      | level 1: 8 h; level 2: 4 h     | operator                                           |
+| `grace_limit`    | From expiring → end even if busy                     | 30 min                         | operator                                           |
+| `keepalive_loss` | No keepalive for this long → end                     | 120 s                          | operator                                           |
 
 - **Idle is measured from the last Exec end.** A keepalive proves that the harness runs. It never
   proves that anyone is working, so it never resets idle. With a user away and the harness open, the
@@ -280,6 +292,13 @@ both lease levels:
   idle. Only Execs do.
 - **The next Exec after any end** runs in a fresh guest, with a lease-start notice. The first Exec pays
   one cold start.
+- **Idle timeout and memory are one setting (v0.2).** A lease keeps a file set warm only if it
+  survives from one use of that set to the next, which in an agent session is a whole turn, not one
+  gap. On E17a's corpus a 300 s timeout kept 91% of calls in a live guest, but only 32% of greps found
+  the guest that ran the previous grep (§17). A longer timeout raises that share and holds each idle
+  lease's memory longer. With free-page reporting (§6) an idle lease holds its working set, so the
+  trade-off is priced in working-set memory, not in guest RAM. E17b measures both at 300 s and at a
+  longer timeout before the default changes.
 
 ### 4.1 End reasons
 
@@ -318,8 +337,45 @@ event for each sandbox until a client has seen it.
     It is never re-priced to `PerVMBytes`. This reuses #644's footprinter and its cache. A lease VM's
     growth during a long Exec is caught by the next sample and by reclaim, not by a reservation.
   - Per-`Exec` VMs keep the full `PerVMBytes` charge.
-- **Headroom target.** `SH_LEASE_RECLAIM_FREE_MB` (default: 2 × `PerVMBytes` + 2 GiB, about
-  4 GiB at 1 GiB guests, so that two per-`Exec` VMs always fit). When MemAvailable falls below it, or an admission
+- **Free-page reporting (v0.2).** Lease VMs run with the virtio-balloon device in free-page reporting
+  mode only (Firecracker v1.17.0: `"free_page_reporting": true`; Cloud Hypervisor:
+  `free_page_reporting=on`; §16 item 5): the guest reports pages it has freed, and the host drops them. Nothing inflates
+  the balloon. Without it, E17a's lease VMs stayed at their 1024 MiB ceiling for the whole lease after
+  one `analyze.py` (pandas frames and a KMeans fit that the guest had already freed), so measured charge
+  came out equal to the full charge on the workload this mode targets. Reported pages leave
+  `memory.current`, so the measured charge above follows the working set. Free page _hinting_ and a
+  deflate-on-OOM policy are not needed. Firecracker and both guest kernels support it, and a restored VM
+  returned 650 of 734 MiB within 15 s in a test (§16 item 5).
+- **Page-cache headroom in the lease cgroup (v0.2).** Each VM's cgroup has `memory.max` =
+  `PerVMBytes` (guest RAM + VMM overhead, `remote-worker/internal/vmpool/cgroup.go` `writeMemoryMax`).
+  Host page cache for a VM's own disk reads is charged to that cgroup. A lease VM whose guest is full
+  therefore has no room for the host to cache its workspace, and the VM that follows it when the lease
+  ends reads from disk: in E17a a grep in such a VM took about 2 s, where a per-`Exec` VM, whose short
+  life left the host cache in place, took 388 ms (§17). Lease VMs get `memory.max` =
+  `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB). Free-page reporting removes most of the
+  pressure; the headroom covers the time before the guest frees.
+  - **Charge bound.** The measured charge counts the headroom only when the host uses it
+    (`memory.current`), but at `SH_LEASE_HEADROOM` it can reach 1.25 × (`PerVMBytes` +
+    `SH_LEASE_PAGECACHE_MB`): about 1.6 GiB at 1 GiB guests (1.25 × (1056 + 256) MiB) and about
+    680 MiB at SBX0's 256 MiB guests (1.25 × (288 + 256) MiB). That is above a per-`Exec` VM's
+    `PerVMBytes`. Reclaim covers it, and the headroom target below is sized against it.
+  - **Not from the cgroup pool.** Per-`Exec` VMs reuse cgroups from a free list written once with
+    `memMax` = `PerVMBytes` (`remote-worker/internal/vmpool/cgroup_pool.go`). That is safe because a
+    reused per-`Exec` cgroup inherits about 1 MiB of charge. A lease cgroup has a different
+    `memory.max`, and host page cache charged to it stays charged after its VM exits, so handing it
+    back would give a per-`Exec` VM up to about 256 MiB of inherited charge under a `PerVMBytes`
+    bound. A lease VM therefore takes its cgroup out of the pool. It starts as a pooled standby, so
+    when it becomes a lease VM the worker raises its `memory.max`, and when the lease ends the worker
+    removes the cgroup instead of returning it. After removal, page cache still charged to it counts
+    only against the parent slice until the host reclaims it, never against another VM's cgroup.
+    Leases are few and long-lived (the pool exists for per-`Exec`'s create/destroy rate), so the cost
+    is one `rmdir` and one fresh `mkdir` per lease. The plan that builds lease VMs (plan 2) carries
+    this, with a test that a per-`Exec` VM after a lease starts with the pool's usual charge.
+- **Headroom target.** `SH_LEASE_RECLAIM_FREE_MB` (default, v0.2: 2 × `PerVMBytes` + max(2 GiB,
+  2 × (the lease charge bound above − `SH_LEASE_START_MB`)); about 4.9 GiB at 1 GiB guests
+  (2 × 1056 MiB + 2 × (1640 − 192) MiB) and about 2.6 GiB at 256 MiB guests). Two per-`Exec` VMs always
+  fit, and so does the growth of two busy lease VMs from their start estimate to their bound between
+  samples, which reclaim cannot catch because a busy lease is never reclaimed. When MemAvailable falls below it, or an admission
   would go over the budget, the worker ends the lease **idle longest** (level 1 or 2 alike) with
   reason `memory_reclaim`. It repeats until it is back above the target. A lease with an Exec in flight
   is never reclaimed for memory.
@@ -333,10 +389,10 @@ event for each sandbox until a client has seen it.
 
 - **Guards unchanged.** `SH_HOST_MEM_FLOOR_MB`, the worker's cgroup `MemoryHigh`/`MemoryMax` and
   swap-off stay as the hard stops below reclaim.
-- **No balloon in v1.** A guest gives back no memory it has touched. A lease VM that fills its page
-  cache grows toward its guest RAM (1 GiB) and stays there until its lease ends. Reclaim handles it.
-  E17 measures how common this is. A Firecracker balloon with free-page reporting is the follow-up if
-  E17 says so.
+- **No target-driven balloon in v1.** Free-page reporting (above) returns memory the guest freed. Memory
+  the guest still holds, its own page cache included, stays until the lease ends or reclaim takes the
+  lease. E17a found the guest cache small next to the freed peak (about 470 MiB cached against a
+  1024 MiB peak after `analyze.py` and `pytest`). E17b measures what reporting leaves.
 
 ## 7. Level 2: tracked processes
 
@@ -461,10 +517,14 @@ E17 is a separate spec in moca-experiments (`e17/SPEC.md`). In summary:
 - **E17b, after the build:** the shipped lease mode with measured admission, reclaim and notices, at
   the default and low-duty points and a memory-squeeze point.
 
-Pass criteria (proposals; E17 seals the numbers):
+Pass criteria (sealed in `e17/predictions.json`, 2026-11-12; E17 v0.5):
 
-1. **Capacity.** Lease (300 s) `N_max` ≥ per-`Exec` `N_max` at both the default and the low-duty point.
-2. **Latency.** On the cache-heavy workload the median warm command is at least 20% faster than per-`Exec`.
+1. **Capacity.** Lease (300 s) `N_max` ≥ per-`Exec` `N_max` at the default point (E15 metal: 128
+   against 80, reused). At low duty E16 stands (a tie).
+2. **Latency (per class, E17 v0.4).** At `pycache` N = 1 and N = 128, the median warm short command,
+   stack import and venv grep are each at least 50% faster than per-`Exec`; compute is reported. E17a
+   predicts this fails on the import (40%) and the grep (§17). An E17a miss goes to the user before
+   the build.
 3. **Reclaim.** At the squeeze point, no memory guard trips, no OOM kill, no refused Exec while an idle
    lease existed, and every reclaim has its notice.
 4. **Notices.** Every lease end in every E17b rung reaches the client with the right reason.
@@ -522,7 +582,8 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
 ## 14. Scope — explicitly not building
 
 - Memory snapshot, suspend or resume of a lease. A lease that ends loses its memory.
-- A Firecracker balloon or free-page reporting (follow-up, if E17 says so).
+- A target-driven Firecracker balloon (inflating it to take memory back). Free-page reporting is in
+  v1 (§6).
 - Port forwarding to the laptop, PTYs, interactive processes, stdin to a tracked process.
 - Concurrent Execs in one sandbox.
 - Lease mode for the MOCA harness's own P4 path (`harness/src/sandbox-lease.ts`). SBX sandboxes only.
@@ -574,3 +635,94 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    both sizes (E17 §6).
 4. **Per-`Exec` under the same unprivileged uid.** §3.3 keeps per-`Exec` as root in v1. Moving it to
    the Exec uid would give one guest model and one workspace ownership. The security review decides.
+5. **Free-page reporting support (v0.2; checked 2026-11-12).**
+   - **Firecracker v1.17.0** (pinned by P4 and by the E15 rig; also what the SBX0 host runs) has it:
+     `"free_page_reporting": true` on `PUT /balloon`. Reported ranges are `madvise(MADV_DONTNEED)`d.
+     It carries no preview label. Free-page _hinting_ is a developer preview with a documented
+     memory-corruption race, and v1 does not use it (`docs/ballooning.md` at v1.17.0).
+   - **Guest kernels:** the SBX0 kernel (6.18.51, the `default-p41-ca-gh` snapshot) and the E15 rig's
+     (`vmlinux-6.18.44`) both build in `CONFIG_VIRTIO_BALLOON`, `CONFIG_MEMORY_BALLOON`,
+     `CONFIG_PAGE_REPORTING` and `CONFIG_BALLOON_COMPACTION` (embedded config read on both hosts). No
+     kernel change.
+   - **It can only be enabled before boot.** A restored VM has the devices of its snapshot, so the
+     balloon has to be in the golden snapshot. That changes `vmstate` for every VM, per-`Exec` included.
+     Per-`Exec` VMs would then report too: that frees their memory sooner, and a reused free page faults
+     back in from the memory file. **Decided (user, 2026-11-12): one golden snapshot with the balloon,** for every mode. Per-`Exec` VMs report too, and their latency was checked against a snapshot without the balloon (2026-11-12, `sbx` worker, rounds A B A B): `true` 83 → 85 ms median (n = 80), `python3 -c pass` 103 → 103 ms, touching 256 MiB 403 → 403 ms. No measurable cost.
+   - **Restore backend.** VMs restore with the `File` backend (`build-snapshot.sh:2092`): a
+     `MAP_PRIVATE` mapping of the memory file, with written pages copy-on-write anonymous memory. A
+     reported range then drops its private copy and falls back to the shared memory file. The host gets
+     the memory back, and the free page's contents are of no concern to the guest (no page poisoning:
+     `CONFIG_INIT_ON_FREE_DEFAULT_ON` is not set).
+   - **Restored VMs keep reporting (tested 2026-11-12, E15 rig).** A test snapshot was built with
+     `PUT /balloon {"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}` before
+     `InstanceStart` (one added line in `build-snapshot.sh`). It was restored by the worker with the
+     `File` backend, beside a control snapshot without the balloon. In each, a guest process touched
+     700 MiB and exited, and the VM cgroup's `memory.current` was read:
+
+     | After the process exited | Control (no balloon) | Free-page reporting |
+     | ------------------------ | -------------------- | ------------------- |
+     | before the allocation    | 13 MiB               | 13 MiB              |
+     | at exit                  | 734 MiB              | 734 MiB             |
+     | +5 s                     | 734 MiB              | 227 MiB             |
+     | +15 s, +30 s, +60 s      | 734 MiB              | 81 MiB              |
+
+     The guest saw the balloon (`virtio_balloon` bound, `page_reporting_order` 9, that is 2 MiB
+     blocks). Both guests showed about 890 MB free afterwards, so only the host side differed. Nothing
+     is open for plan 2 here.
+6. **Level 2 is the latency case (v0.2; sized 2026-11-12).** E17a shows what a warm guest saves without
+   process state: the VM start and the interpreter start-up, not the work. A spike on the E15 rig
+   sized level 2 with one persistent Python server, standing in for `process_start` because the
+   resident patch kills nothing. It ran on E17a's workspace (256 MiB of CSV, 6.0 M rows), and the
+   same queries ran per-`Exec` and at level 1:
+
+   | Query                                            | Per-`Exec` | Level 1      | Level 2           |
+   | ------------------------------------------------ | ---------- | ------------ | ----------------- |
+   | Re-query: group means + one median over all rows | 6.5 s      | 5.4 s (−17%) | **0.25 s (−96%)** |
+   | Recompute: KMeans on the 200k-row sample         | 17.4 s     | 16.5 s (−5%) | **11.2 s (−36%)** |
+
+   The server paid the import and parse once (5.4 s to ready) and held about 500 MB of a 1 GiB guest.
+   That memory is live, so free-page reporting cannot return it: a level-2 lease is charged its working
+   set, and guest RAM bounds how much state a tracked process can keep. A first run that took
+   quantiles over all six columns was OOM-killed in the guest, the server included. Level 2's
+   `memory_reclaim` and OOM notices (§5) are therefore not corner cases. Results: moca-experiments
+   `e17/results/followups/`.
+
+## 17. E17a findings (v0.2)
+
+From moca-experiments `e17/` (spec v0.5, predictions sealed 2026-11-12, results in
+`e17/results/calibration/v0.4/`). E17a uses the E15 resident patch as the lease stand-in, at N = 1 on
+the E15 metal host (m7i.metal-24xl, 1024 MiB guests), on a synthetic cache-heavy Python session: per
+turn `analyze.py` (256 MiB CSV, KMeans), `pytest` (~60 s of numeric tests), a stack import, a `grep -r`
+over the venv, two to five short commands and `analyze.py` again, at 9.5% duty.
+
+| Command class           | Per-`Exec` median | Warm lease median | Gain | Why                                                                         |
+| ----------------------- | ----------------- | ----------------- | ---- | --------------------------------------------------------------------------- |
+| Short (`grep`, `sed`)   | 53 ms             | 6 ms              | 89%  | A VM start is most of its cost                                              |
+| Stack import            | 755 ms            | 454 ms            | 40%  | ~450 ms is Python unpacking and initialising the stack; no cache removes it |
+| `grep -r` over the venv | 1960 ms           | 2000 ms           | −2%  | See below                                                                   |
+| `analyze.py`            | 15.6 s            | 14.4 s            | 8%   | Compute                                                                     |
+| `pytest`                | 61.2 s            | 61.0 s            | 0%   | Compute                                                                     |
+
+- **Per-`Exec` already gets a warm cache from the host.** A per-`Exec` VM reads the workspace through
+  the host page cache, so its later greps took 388 ms against 2.2 s for the first touch of a fresh
+  workspace. A warm lease guest took 112 ms (medians of the 20-call class probes, E17 calibration). The lease's cache gain is that difference, not the cold
+  read.
+- **A lease keeps a file set warm only across a whole turn.** On the corpus's think gaps (median
+  18 s, p90 234 s), 32% of greps ran in the guest that ran the previous grep. 25% were the first grep
+  of the workspace (2 s in both modes), and 43% ran in a guest that replaced one ended by the idle
+  timeout.
+- **Those 43% paid the cold read again.** The ended guest had filled its 1024 MiB cgroup, which left no
+  room for the host's cache of its workspace (§6). In a check where the ended guest had run only two
+  greps, its successor's grep took 0.49 s.
+- **Lease VMs filled guest RAM after one heavy command.** Every lease VM peaked at 1023.98 MiB; the
+  guest still had about 800 MiB available, because the peak was memory the guest had freed. That is
+  what free-page reporting returns (§6).
+- **Capacity at the default point is unchanged:** E15 metal, per-`Exec` 80, lease (300 s) 128. That
+  workload's VMs stay near 150 MiB; on cache-heavy workloads without free-page reporting, a lease is
+  charged about its full guest RAM.
+
+**At N = 128 (2026-11-12) the picture holds:** short commands 0.91, import 0.42, grep 0.01, `analyze.py`
+0.09, `pytest` 0.02. Neither arm's rung holds: heavy calls ran 10–20% slower than at N = 1 in both
+modes at about 15% host CPU. 79% of lease VMs peaked above 900 MiB. Criterion 2 therefore fails at
+both N, as E17a predicted, and E17a misses (moca-experiments `e17/results/E17A-REPORT.md`). The
+revisions in v0.2 follow from these findings and are tested in E17b.

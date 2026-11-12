@@ -186,6 +186,26 @@ export {
   type ResolvedInference,
 } from './exchange.js';
 export { exchangeTurnCredential, type TurnExchangeResponse } from './turn-exchange.js';
+export { TurnStore, type TurnStoreOptions } from './turn-store.js';
+export {
+  isTerminalState,
+  TURN_STATES,
+  isMintedTurnId,
+  turnKey,
+  resultTtlSeconds,
+  TURN_RECORD_TTL_MARGIN_SECONDS,
+  type TurnCaps,
+  type TurnRecord,
+  type TurnState,
+} from './turn-record.js';
+export {
+  LEAF_QUEUE_GROUP,
+  LEAF_QUEUE_STREAM,
+  MemoryTurnQueue,
+  RedisTurnQueue,
+  type TurnQueue,
+} from './turn-queue.js';
+export { asyncCounters, countAsync, resetAsyncCounters, type AsyncCounter } from './counters.js';
 export { buildHandler, startControlPlane } from './server.js';
 export {
   CREDENTIAL_STORES,

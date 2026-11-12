@@ -24,8 +24,9 @@
 #   - The binary is the operator's, like microvm-worker: a missing /usr/local/bin/moca-egress is
 #     refused before anything is written or systemd is touched.
 #   - $SBX_ENV_DIR/moca-egress.env (the allowlist; no secret, 0644) is written ONLY when absent,
-#     seeded from MOCA_EGRESS_ALLOW in the environment or else the GitHub hosts, so an operator's
-#     edit survives a re-run. Restart moca-egress by hand after editing it or rebuilding the binary.
+#     seeded from MOCA_EGRESS_ALLOW in the environment or else deploy/sbx/egress-allow.env beside
+#     this script, so an operator's edit survives a re-run. Restart moca-egress by hand after
+#     editing it or rebuilding the binary.
 #   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK and installs no egress unit.
 #
 # Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
@@ -64,7 +65,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
 : "${MOCA_EGRESS_READY_TIMEOUT:=30}"
-: "${DEFAULT_EGRESS_ALLOW:=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com}"
+# LEGACY_EGRESS_ALLOW is the GitHub-only default from before egress-allow.env existed: the
+# fallback for a copy of this script without the file (default_egress_allow warns when it is
+# used), and, in remove_egress, a seed an older script wrote still counts as unedited.
+LEGACY_EGRESS_ALLOW='api.github.com,github.com,codeload.github.com,objects.githubusercontent.com'
+# The default guest-egress allowlist: the MOCA_EGRESS_ALLOW= line of egress-allow.env beside this
+# script (a systemd EnvironmentFile, so comments are allowed), resolved lazily from egress_seed.
+default_egress_allow() {
+  local v
+  v="$(sed -n 's/^MOCA_EGRESS_ALLOW=//p' "$SCRIPT_DIR/egress-allow.env" 2>/dev/null | tail -1)" || v=''
+  if [[ -n "$v" ]]; then
+    printf '%s\n' "$v"
+  else
+    printf 'deploy/sbx/install-host.sh: no MOCA_EGRESS_ALLOW line in %s; falling back to the GitHub hosts\n' \
+      "$SCRIPT_DIR/egress-allow.env" >&2
+    printf '%s\n' "$LEGACY_EGRESS_ALLOW"
+  fi
+}
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
 # spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
 # the image size defaults to microvm-worker's own.
@@ -135,7 +152,12 @@ egress_forget() {
   mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"
 }
 
-egress_seed() { printf 'MOCA_EGRESS_ALLOW=%s\n' "${MOCA_EGRESS_ALLOW:-$DEFAULT_EGRESS_ALLOW}"; }
+# egress_seed: what a fresh moca-egress.env is seeded with. MOCA_EGRESS_ALLOW from the
+# environment wins, then DEFAULT_EGRESS_ALLOW, then default_egress_allow (the file, or the
+# legacy GitHub hosts with a warning). Resolved here, lazily, so that warning prints only
+# when the default is actually consumed: a --no-egress run, or one with MOCA_EGRESS_ALLOW
+# exported, never seeds and so never warns.
+egress_seed() { printf 'MOCA_EGRESS_ALLOW=%s\n' "${MOCA_EGRESS_ALLOW:-${DEFAULT_EGRESS_ALLOW:-$(default_egress_allow)}}"; }
 
 # wait_egress_ready: the worker's startup probe Registers over moca-egress's control socket, so a
 # moca-egress that exits at boot (a bad moca-egress.env) would otherwise surface much later, as the
@@ -513,8 +535,10 @@ remove_shared_units() {
 # only while the unit still has the content this script wrote (another install, such as the P6
 # setup-microvm.sh, may have replaced it and its worker depends on it). The env file is the operator's
 # allowlist: it goes only if it still hashes to what was seeded (a manifest without a digest falls back
-# to comparing with the seed). A moca-egress.service the manifest does not list was never ours.
-# An `egress <kind>` this script does not know (a later version's) is left alone, line and file.
+# to comparing with the seed -- or with the legacy GitHub-only seed, which an older script's fresh
+# install wrote and which is not an operator's edit). A moca-egress.service the manifest does not list
+# was never ours. An `egress <kind>` this script does not know (a later version's) is left alone, line
+# and file.
 remove_egress() {
   local kind path sha
   [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
@@ -534,7 +558,8 @@ remove_egress() {
       if [[ ! -f "$path" ]]; then
         :
       elif [[ -n "$sha" && "$(sha256_of "$path")" != "$sha" ]] ||
-        [[ -z "$sha" && "$(cat "$path")" != "$(egress_seed)" ]]; then
+        [[ -z "$sha" && "$(cat "$path")" != "$(egress_seed)" &&
+          "$(cat "$path")" != "MOCA_EGRESS_ALLOW=$LEGACY_EGRESS_ALLOW" ]]; then
         log "kept $path (edited)"
       else
         rm -f "$path"
