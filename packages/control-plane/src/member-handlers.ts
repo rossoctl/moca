@@ -2,7 +2,7 @@ import { CpError } from './errors.js';
 import { asRecord, isAdmin, requireEnrolledPrincipal, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
-import { ADMIN, type MembersStore } from './members.js';
+import { ADMIN, MAX_GRANT_SECONDS, type MembersStore } from './members.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -123,10 +123,18 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
     const subject = subjectParam(ctx);
     const raw = asRecord(ctx.body).until;
     const nowS = seconds(deps);
-    if (raw !== undefined && raw !== null && !(Number.isSafeInteger(raw) && (raw as number) > nowS))
+    if (
+      raw !== undefined &&
+      raw !== null &&
+      !(
+        Number.isSafeInteger(raw) &&
+        (raw as number) > nowS &&
+        (raw as number) <= nowS + MAX_GRANT_SECONDS
+      )
+    )
       throw new CpError(
         'invalid_request',
-        'until must be a whole number of epoch seconds in the future (or absent: no expiry)',
+        'until must be a whole number of epoch seconds (not milliseconds) in the future, at most 366 days ahead (or absent: no expiry)',
       );
     const until = typeof raw === 'number' ? raw : undefined;
     if (members.bootstrap.admins.includes(subject))

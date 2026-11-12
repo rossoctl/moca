@@ -12,8 +12,8 @@ additive; without `SH_PROVENANCE_DIR` nothing changes.
 
 - New GET /v1/subjects (every enrolled subject with its roles, each with `source: env | api`),
   PUT and DELETE /v1/subjects/{subject} (enroll with `{"enrolled": true}`, unenroll), and PUT and
-  DELETE /v1/subjects/{subject}/roles/admin (grant, with an optional `until` in epoch seconds;
-  revoke), on both route profiles. Any admin reads the list; only an admin named in
+  DELETE /v1/subjects/{subject}/roles/admin (grant, with an optional `until` in epoch seconds, at
+  most 366 days ahead; revoke), on both route profiles. Any admin reads the list; only an admin named in
   `SH_ADMIN_SUBJECTS` changes it (`403 forbidden` otherwise). Each change answers the subject with
   the `record` it wrote (null when nothing changed). With no store the routes answer
   `400 invalid_request`. A `Subject` carries `storeEnrolled` (the store's own enrollment, apart from

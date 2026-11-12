@@ -157,5 +157,12 @@ describe('parseUntil', () => {
     expect(parseUntil('0m', 0)).toBeUndefined();
     expect(parseUntil('1w', 0)).toBeUndefined();
     expect(parseUntil('-5', 0)).toBeUndefined();
+    // At most 366 days ahead, so epoch milliseconds are refused.
+    expect(parseUntil('366d', 0)).toBe(366 * 86_400);
+    expect(parseUntil('367d', 0)).toBeUndefined();
+    expect(parseUntil(String(1_800_000_000_000), 1_700_000_000)).toBeUndefined();
+    expect(parseUntil(String(1_700_000_000 + 366 * 86_400), 1_700_000_000)).toBe(
+      1_700_000_000 + 366 * 86_400,
+    );
   });
 });

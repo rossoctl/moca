@@ -149,7 +149,7 @@ access: `403`), each change a record on the `members` provenance stream:
 ```bash
 mocactl sbx admin subjects                                   # who is enrolled, and how
 mocactl sbx admin subjects enroll github:<id>                # or unenroll; oidc:<sub> too
-mocactl sbx admin subjects grant github:<id> --until 1h      # a temporary admin: lapses by itself
+mocactl sbx admin subjects grant github:<id> --until 1h      # a temporary admin: lapses by itself (366d at most)
 mocactl sbx admin subjects revoke github:<id>
 ```
 

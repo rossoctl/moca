@@ -320,13 +320,18 @@ describe('the admin role (spec §3, §6)', () => {
     expect(await codeOf(() => call(d, 'listTemplates', who(CAROL)))).toBe('not_enrolled');
   });
 
-  it('refuses an until that is not a future whole number of seconds', async () => {
+  it('refuses an until that is not a future whole number of seconds within 366 days', async () => {
     const d = setup();
-    for (const until of [nowS() - 1, nowS(), 1.5, 'tomorrow']) {
+    // Epoch milliseconds (a pasted Date.now()) and anything past 366 days are refused too.
+    const max = nowS() + 366 * 86_400;
+    for (const until of [nowS() - 1, nowS(), 1.5, 'tomorrow', now, max + 1]) {
       expect(
         await codeOf(() => call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, { until })),
       ).toBe('invalid_request');
     }
+    const ok = (await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, { until: max }))
+      .body as { roles: { until: number | null }[] };
+    expect(ok.roles[0]!.until).toBe(max);
   });
 
   it('keeps a grant across a restart (a new store over the same directory)', async () => {

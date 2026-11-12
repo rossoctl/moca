@@ -1848,7 +1848,8 @@ paths:
       summary: Grant the admin role, optionally until a time (an admin)
       description: |
         Only an admin named in the settings (SH_ADMIN_SUBJECTS) may grant it; an API-granted admin
-        is refused `403 forbidden`. An optional `until` (epoch seconds, in the future) makes it
+        is refused `403 forbidden`. An optional `until` (epoch seconds, in the future and at most 366
+        days ahead, so a value in milliseconds is refused `400 invalid_request`) makes it
         lapse by itself; the first request that
         sees it lapsed writes a `role` record `expired`, once. A grant writes a `role` record
         `granted`, naming the admin and `until`. Effective at the subject's next request.
@@ -1869,7 +1870,7 @@ paths:
                 until:
                   {
                     type: [integer, 'null'],
-                    description: 'epoch seconds; absent or null: no expiry',
+                    description: 'epoch seconds, at most 366 days ahead; absent or null: no expiry',
                   }
       responses:
         '200':

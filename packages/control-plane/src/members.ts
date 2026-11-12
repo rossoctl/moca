@@ -18,6 +18,13 @@ import type { ProvenanceStore } from './provenance.js';
 
 export const ADMIN = 'admin';
 
+/**
+ * The furthest ahead a grant's `until` may be: 366 days. A value in milliseconds (a pasted
+ * `Date.now()`) would otherwise be accepted as a date tens of thousands of years away, a
+ * "temporary" admin that never lapses. For a longer grant, give none (no expiry) and revoke it.
+ */
+export const MAX_GRANT_SECONDS = 366 * 86_400;
+
 export interface RoleGrant {
   role: typeof ADMIN;
   /** Epoch seconds; absent: no expiry. */
