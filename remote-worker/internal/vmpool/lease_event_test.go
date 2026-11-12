@@ -776,18 +776,68 @@ func TestPendingEndSurvivesWorkspaceRemoval(t *testing.T) {
 			if info.Pending == nil || info.Pending.Reason != LeaseEndIdle || !info.Pending.At.Equal(ended.At) {
 				t.Fatalf("pending after the workspace removal = %+v, want the idle end %+v", info.Pending, ended)
 			}
-			if info.Mode != ModePerExec || info.EpochKnown || info.State != LeaseNone {
-				t.Fatalf("status = %+v, want per-exec, epoch unknown, no lease", info)
+			// The mode and epoch are the control plane's, not the tree's: they stay (F3).
+			if info.Mode != ModeLease || !info.EpochKnown || info.State != LeaseNone {
+				t.Fatalf("status = %+v, want lease, epoch known, no lease running", info)
 			}
 			s := loadLeaseState(p.cfg.WorkspaceRoot, "k")
-			if s.Known || s.Epoch != 0 || s.Mode != ModePerExec || s.Open != nil || s.RootWrote || s.Pending == nil {
-				t.Fatalf("file = %+v, want only the pending event", s)
+			if !s.Known || s.Epoch != 1 || s.Mode != ModeLease || s.Open != nil || !s.RootWrote || s.Pending == nil {
+				t.Fatalf("file = %+v, want lease at epoch 1, root_wrote, the pending event", s)
 			}
 
-			// Acknowledged, the file has nothing left to say and goes.
+			// Acknowledged, the event goes and the mode stays.
 			p.AckLeaseEvent("k", ended.At)
-			if _, err := os.Stat(leaseStatePath(p.cfg.WorkspaceRoot, "k")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("state file after acknowledging its only event: %v, want it gone", err)
+			if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending != nil || !s.Known || s.Mode != ModeLease || s.Epoch != 1 {
+				t.Fatalf("file after acknowledging its event = %+v, want the mode and epoch, nothing pending", s)
+			}
+		})
+	}
+}
+
+// PR #763 review (F3): a lease sandbox whose workspace was reclaimed while idle (over
+// lunch) is still a lease sandbox. Its next Exec at the same epoch starts a lease, and
+// normalises the new tree; an older epoch is still refused stale-mode.
+func TestLeaseModeSurvivesAnIdleWorkspaceReclaim(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(t *testing.T, p *pool, clk *fakeClock)
+	}{
+		{"workspace idle", func(t *testing.T, p *pool, clk *fakeClock) { clk.Advance(200 * time.Second) }},
+		{"Reclaim", func(t *testing.T, p *pool, clk *fakeClock) {
+			if err := p.Reclaim(t.Context(), "k"); err != nil {
+				t.Fatalf("Reclaim: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, lc, clk := leasePool(t, func(c *Config) {
+				c.StandbyIdle = 60 * time.Second
+				c.WorkspaceIdle = 120 * time.Second
+			})
+			mustSetMode(t, p, "k", ModeLease, 2)
+			e := leaseExecIdle("one", 30*time.Second)
+			e.ModeEpoch = 2
+			mustExec(t, p, "k", e)
+			clk.Advance(31 * time.Second)
+			leaseEnded(t, p, lc, LeaseEndIdle)
+			waitFor(t, func() bool { return pinnedCount(p, "k") == 0 })
+			tc.remove(t, p, clk)
+			waitFor(t, func() bool {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				return p.runs["k"] == nil
+			})
+
+			if _, err := p.Exec(t.Context(), "k", leaseExec("stale", 1), &capturingSink{}); ReasonOf(err) != RefuseStaleMode {
+				t.Fatalf("Exec at epoch 1 after the reclaim: err = %v, want %s", err, RefuseStaleMode)
+			}
+			mustExec(t, p, "k", leaseExec("two", 2))
+			if liveLease(p, "k") == nil {
+				t.Fatalf("Exec at epoch 2 after the reclaim started no lease (state %+v)", loadLeaseState(p.cfg.WorkspaceRoot, "k"))
+			}
+			cmds := lc.commands()
+			if last := cmds[len(cmds)-1]; !last.Lease || !last.NormaliseWorkspace {
+				t.Fatalf("the first Exec in the new tree = %+v, want a lease Exec that normalises", last)
 			}
 		})
 	}

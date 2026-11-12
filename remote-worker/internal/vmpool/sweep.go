@@ -92,10 +92,9 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 				b.dirs = append(b.dirs, tomb)
 			}
 			delete(p.runs, key)
-			// The key's lease state goes with its workspace, in the same critical
-			// section: a re-created run starts with an unknown epoch, which only SetMode
-			// restores (spec §8.2), never with the old tree's mode. An unacknowledged
-			// event stays (retireLeaseState).
+			// The key's lease state is retired with its workspace, in the same critical
+			// section: the mode and epoch stay, root_wrote is set for the new tree, and an
+			// unacknowledged event stays (retireLeaseState).
 			retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
 			continue
 		}

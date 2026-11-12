@@ -158,7 +158,7 @@ func (p *pool) effectiveModeLocked(rp *runPool, e Exec) (Mode, error) {
 }
 
 // leaseStateLocked returns rp's state, reading the file on the run's first use. A run
-// lives exactly as long as its workspace, and the file is reset with the workspace
+// lives exactly as long as its workspace, and the file is retired with the workspace
 // (retireLeaseState), so the cache can never outlive what it caches. Caller holds p.mu.
 func (p *pool) leaseStateLocked(rp *runPool) leaseState {
 	if !rp.stateLoaded {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -930,9 +931,11 @@ func TestWorkspaceIdleNeverReclaimsALeasedRun(t *testing.T) {
 		_, err := os.Stat(dir)
 		return errors.Is(err, os.ErrNotExist)
 	})
-	// Ruling R9: the unacknowledged idle end outlives the tree; nothing else does.
-	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Known || s.Open != nil || s.Pending == nil || s.Pending.Reason != LeaseEndIdle {
-		t.Fatalf("state file after the workspace reclaim = %+v, want only the pending idle end", s)
+	// Ruling R9: the unacknowledged idle end outlives the tree, and so do the mode and
+	// epoch (PR #763 review, F3); the open lease does not, and root_wrote is set.
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); !s.Known || s.Mode != ModeLease || !s.RootWrote || s.Open != nil ||
+		s.Pending == nil || s.Pending.Reason != LeaseEndIdle {
+		t.Fatalf("state file after the workspace reclaim = %+v, want the mode, root_wrote and the pending idle end", s)
 	}
 }
 
@@ -993,40 +996,64 @@ func TestLeaseExecDuringIdleEndGetsAFreshVM(t *testing.T) {
 	}
 }
 
-func TestWorkspaceReclaimRemovesTheStateFile(t *testing.T) {
+// PR #763 review (F3): removing a workspace retires its state file. The mode and epoch are
+// the control plane's, not the tree's, so they stay; root_wrote is set, because the next
+// tree's history is unknown (ruling R7). A file with nothing worth keeping -- no known
+// epoch and no pending event -- is deleted.
+func TestWorkspaceReclaimRetiresTheStateFile(t *testing.T) {
 	perExec := Exec{Command: "one", TimeoutS: 30, Mode: ModePerExec, ModeEpoch: 1}
-	t.Run("workspace idle", func(t *testing.T) {
+	removals := []struct {
+		name   string
+		remove func(t *testing.T, p *pool, clk *fakeClock)
+	}{
+		{"workspace idle", func(t *testing.T, p *pool, clk *fakeClock) {
+			clk.Advance(5 * time.Minute)
+			waitFor(t, func() bool {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				return p.runs["k"] == nil
+			})
+		}},
+		{"Reclaim", func(t *testing.T, p *pool, clk *fakeClock) {
+			if err := p.Reclaim(t.Context(), "k"); err != nil {
+				t.Fatalf("Reclaim: %v", err)
+			}
+		}},
+	}
+	idlePool := func(t *testing.T) (*pool, *fakeClock) {
 		p, _, clk := leasePool(t, func(c *Config) {
 			c.StandbyIdle = 60 * time.Second
 			c.WorkspaceIdle = 120 * time.Second
 		})
-		mustSetMode(t, p, "k", ModePerExec, 1)
-		mustExec(t, p, "k", perExec)
-		path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("state file before the reclaim: %v", err)
-		}
-		clk.Advance(5 * time.Minute)
-		waitFor(t, func() bool {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			return p.runs["k"] == nil
+		return p, clk
+	}
+	for _, rm := range removals {
+		t.Run(rm.name+": the mode and epoch stay", func(t *testing.T) {
+			p, clk := idlePool(t)
+			mustSetMode(t, p, "k", ModePerExec, 1)
+			mustExec(t, p, "k", perExec)
+			rm.remove(t, p, clk)
+			s := loadLeaseState(p.cfg.WorkspaceRoot, "k")
+			if !s.Known || s.Mode != ModePerExec || s.Epoch != 1 || !s.RootWrote || s.Open != nil || s.Pending != nil {
+				t.Fatalf("state after the removal = %+v, want per-exec at epoch 1, known, root_wrote", s)
+			}
 		})
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("state file after WorkspaceIdle: %v, want it gone", err)
-		}
-	})
-	t.Run("Reclaim", func(t *testing.T) {
-		p, _, _ := leasePool(t, nil)
-		mustSetMode(t, p, "k", ModePerExec, 1)
-		mustExec(t, p, "k", perExec)
-		if err := p.Reclaim(t.Context(), "k"); err != nil {
-			t.Fatalf("Reclaim: %v", err)
-		}
-		if _, err := os.Stat(leaseStatePath(p.cfg.WorkspaceRoot, "k")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("state file after Reclaim: %v, want it gone", err)
-		}
-	})
+		t.Run(rm.name+": nothing to keep", func(t *testing.T) {
+			p, clk := idlePool(t)
+			mustExec(t, p, "k", Exec{Command: "one", TimeoutS: 30}) // the run, with no state of its own
+			path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"root_wrote":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rm.remove(t, p, clk)
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("an unknown state with nothing pending after the removal: %v, want the file gone", err)
+			}
+		})
+	}
 }
 
 // Close destroys every lease VM. It records no end in-process: each file keeps its open

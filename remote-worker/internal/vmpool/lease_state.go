@@ -121,19 +121,25 @@ func loadLeaseStateIfAny(root, key string) leaseState {
 	return loadLeaseState(root, key)
 }
 
-// retireLeaseState is what removing key's workspace does to its state file. With an
-// event pending, the file is rewritten to hold that event only (ruling R9: spec §5 keeps
-// the last end event until a client has seen it): Known false, so the mode is per-exec
-// and the epoch unknown until SetMode, exactly as for a deleted file, and RootWrote false,
-// which unknown state already treats as true (ruling R7). With nothing pending it is
-// deleted.
+// retireLeaseState is what removing key's workspace does to its state file (PR #763
+// review). The mode, the epoch and Known are the control plane's, not the tree's, so they
+// stay: a lease sandbox whose workspace was reclaimed while idle is still one, and epochs
+// only go up, so keeping them cannot weaken stale-mode. RootWrote is set, since the new
+// tree's history is unknown (ruling R7), and Open is cleared: a run with a live lease is
+// busy and never has its workspace removed. A pending event stays (ruling R9: spec §5
+// keeps the last end event until a client has seen it). With nothing worth keeping -- no
+// known epoch and nothing pending -- the file is deleted.
 func retireLeaseState(root, key string, s leaseState) {
-	if s.Pending == nil {
+	if !s.Known && s.Pending == nil {
 		removeLeaseState(root, key)
 		return
 	}
-	if err := saveLeaseState(root, key, leaseState{Pending: s.Pending}); err != nil {
-		log.Printf("vmpool: keep the pending lease event for %q: %v", key, err)
+	kept := leaseState{Pending: s.Pending}
+	if s.Known {
+		kept.Mode, kept.Epoch, kept.Known, kept.RootWrote = s.Mode, s.Epoch, true, true
+	}
+	if err := saveLeaseState(root, key, kept); err != nil {
+		log.Printf("vmpool: retire the lease state for %q: %v", key, err)
 	}
 }
 
