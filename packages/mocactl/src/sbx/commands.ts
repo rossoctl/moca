@@ -6,10 +6,10 @@ import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import { saveConfig, storedLoginUrl } from '../config.js';
+import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
-import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
+import type { SandboxApiClient, SbxDiscovery, SbxQuota, SbxSandbox } from './api.js';
 import { sandboxFailureText, type ExecFactory } from './exec.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -397,6 +397,114 @@ export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
       lines.push(['SBX_CA_FILE', writeCa(dir, `${id}-exec-ca.crt`, t.execCa)]);
     }
     for (const [k, v] of lines) c.io.out(`export ${k}=${q(v)}\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** The API token issuer each profile's control plane mints under (control-plane token.ts). */
+const ISSUER_BY_PROFILE: Record<string, string> = {
+  sandbox: 'sbx-control-plane-api',
+};
+
+/** A JWT's `iss`, read WITHOUT verifying it: only to compare. */
+function jwtIssuer(token: string): string | undefined {
+  try {
+    const c = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as {
+      iss?: unknown;
+    };
+    return typeof c.iss === 'string' ? c.iss : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Before an admin write: the login must be for this control plane, and its token minted under the
+ * issuer this control plane's profile mints under -- a login for one deployment pointed at another
+ * is refused here, before the read and the write. A token whose `iss` cannot be read (not a JWT) is
+ * left to the control plane to judge. Returns the refusal line.
+ */
+export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
+  const auth = c.rt.auth;
+  if (!auth) return undefined;
+  if (!sameControlPlane(auth.controlPlaneUrl, c.url))
+    return `the login is for ${sanitizeRemote(auth.controlPlaneUrl)}, not ${sanitizeRemote(c.url)}`;
+  const iss = jwtIssuer(auth.apiToken);
+  if (iss === undefined) return undefined;
+  const d: SbxDiscovery = await c.api.sandboxDiscovery();
+  const want = ISSUER_BY_PROFILE[d.profile ?? ''];
+  if (want !== undefined && iss !== want)
+    return `the login was issued by '${sanitizeRemote(iss)}', but ${sanitizeRemote(c.url)} (profile ${sanitizeRemote(d.profile ?? 'harness')}) issues '${want}': it is another deployment's login`;
+  return undefined;
+}
+
+/** The loud failure of an admin write: the value changed between this command's read and its write. */
+function raced(c: SbxCtx, what: string, read: string, before: string, now: string): number {
+  c.io.err(
+    `sbx: ${what} was changed by someone else between read and write: ${read} / ${before} / ${now} ` +
+      '(read / before this write / now): check it, and write again if need be',
+  );
+  return SBX_EXIT.failed;
+}
+
+/** Canonical JSON (keys sorted), to compare a value read with an answer's `before`. */
+function canonical(v: unknown): string {
+  const sort = (x: unknown): unknown =>
+    Array.isArray(x)
+      ? x.map(sort)
+      : x && typeof x === 'object'
+        ? Object.fromEntries(
+            Object.keys(x as object)
+              .sort()
+              .map((k) => [k, sort((x as Record<string, unknown>)[k])]),
+          )
+        : x;
+  return JSON.stringify(sort(v ?? null));
+}
+
+const quotaText = (q: SbxQuota | null | undefined) =>
+  q
+    ? `templates ${q.templates}, builds queued ${q.buildsQueued}, active ${q.active}`
+    : 'the default';
+
+/**
+ * `sbx templates quota TARGET (--templates N --builds-queued N --active N | --clear)` (template
+ * lifecycle spec §5.2; admins). Names the control plane it writes to and refuses a login issued for
+ * another deployment; reads the current value first (`GET /v1/policy`), writes, then compares the
+ * answer's `before` with the read: a difference is a concurrent write, reported loudly (exit 1).
+ * Prints old -> new and the new policy's digest and record.
+ */
+export async function cmdSetQuota(
+  c: SbxCtx,
+  target: string,
+  quota: SbxQuota | null,
+): Promise<number> {
+  try {
+    const mismatch = await loginMismatch(c);
+    if (mismatch) {
+      c.io.err(`sbx: refused: ${mismatch}`);
+      return SBX_EXIT.failed;
+    }
+    c.io.err(`sbx: admin write to ${sanitizeRemote(c.url)}`);
+    const pol = (await c.api.getPolicy()).policy;
+    const read = target === 'default' ? pol.quota : (pol.quotaBySubject?.[target] ?? null);
+    const r = await c.api.putQuota(target, quota);
+    if (c.json) c.io.out(JSON.stringify({ ...r, read }) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.target)}: ${quotaText(read)} -> ${quota === null ? 'the default' : quotaText(quota)}` +
+          ` (policy ${sanitizeRemote(r.policy)}, record ${sanitizeRemote(r.record)})\n`,
+      );
+    if (canonical(r.before) !== canonical(read))
+      return raced(
+        c,
+        `${sanitizeRemote(target)}'s quota`,
+        quotaText(read),
+        quotaText(r.before),
+        quotaText(r.quota),
+      );
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

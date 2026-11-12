@@ -41,6 +41,16 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** A template quota (openapi Quota, template lifecycle spec §6.2). */
+export type SbxQuota = { templates: number; buildsQueued: number; active: number };
+
+/** The policy as `GET /v1/policy` answers it, as much of it as a quota write reads (§8). */
+export interface SbxPolicyView {
+  policy: { quota: SbxQuota; quotaBySubject?: Record<string, SbxQuota> };
+  digest: string;
+  record: string;
+}
+
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
@@ -154,6 +164,26 @@ export class SandboxApiClient extends ControlPlaneClient {
       : this.json('POST', `/v1/templates/${t}/retire`, {
           body: opts.reason !== undefined ? { reason: opts.reason } : {},
         });
+  }
+
+  /** The deployment's template policy (`GET /v1/policy`): its quotas, among the rest. */
+  getPolicy(): Promise<SbxPolicyView> {
+    return this.json('GET', '/v1/policy');
+  }
+
+  /** Set a subject's quota, or the default; null removes a subject's override (§5.2; admins). */
+  putQuota(
+    target: string,
+    quota: SbxQuota | null,
+  ): Promise<{
+    target: string;
+    subject: string;
+    quota: SbxQuota | null;
+    before: SbxQuota | null;
+    policy: string;
+    record: string;
+  }> {
+    return this.json('PUT', `/v1/quota/${encodeURIComponent(target)}`, { body: quota });
   }
 
   createSandbox(body: {
