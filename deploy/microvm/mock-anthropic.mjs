@@ -20,6 +20,16 @@ const SCRIPTS = {
     done: 'done-read',
   },
   'P4-SMOKE-SLEEP': { steps: ['sleep 90; echo slept'], done: 'done-sleep' },
+  // Session templates (docs/specs/2026-10-30-session-sandbox-templates-design.md §8): what the turn's
+  // workspace holds before the agent writes anything -- the template's seeded repository and its
+  // marker on a templated worker, an empty workspace on an untemplated one.
+  'TPL-SMOKE-LOOK': {
+    steps: [
+      'pwd; ls -A | head -5; test -e .moca-seeded && echo seeded-yes || echo seeded-no; ' +
+        'git log --oneline -1 2>/dev/null || echo no-repo; echo template-turn >> turns.txt; wc -l < turns.txt',
+    ],
+    done: 'done-tpl-look',
+  },
   // deploy/k8s/smoke.sh (#423). Each smoke prompt ALSO spells out its command in words, so a real
   // model can run the same smoke; the mock keys on the marker alone.
   'K8S-SMOKE-WRITE': {
