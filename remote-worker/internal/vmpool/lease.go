@@ -32,14 +32,17 @@ type vmLease struct {
 	mode          Mode
 	started       time.Time     // the lease's first Exec, after Resume
 	lastEnd       time.Time     // the last Exec's end: idle is measured from here (spec §4)
-	idle          time.Duration // the resolved idle timeout (Config.leaseIdle)
-	keepalive     bool          // the keepalive-loss rule applies (spec §4)
+	idle          time.Duration // the resolved idle timeout (Config.leaseIdle), from the latest Exec
+	keepalive     bool          // the keepalive-loss rule applies (spec §4); never turns off
 	lastKeepalive time.Time
-	expiring      bool  // past its maximum duration (Task 4)
+	expiring      bool  // past its maximum duration (sweepLeasesLocked)
 	charge        int64 // the last LeaseBytes sample
 	sampled       bool  // charge holds a sample
 	running       bool  // an Exec is inside Run
 	cancel        context.CancelFunc
+	// cut is set by the lease sweep when it cancels the running Exec (grace_limit): the
+	// Exec's own unwind then ends the lease with this reason and returns ErrLeaseEnded.
+	cut LeaseEndReason
 }
 
 // leaseVictim is a lease VM detached from its run, its key's execGate held by
@@ -49,6 +52,11 @@ type leaseVictim struct {
 	vm     VM
 	gate   chan struct{}
 	reason LeaseEndReason
+	// rp is set for a victim of the lease sweep, which pins the run until the VM is
+	// destroyed (destroySweptLeases): the sweep holds the gate but is no Exec, and an
+	// unpinned run with no lease would not be busy, so WorkspaceIdle or Reclaim could
+	// remove the tree under the dying VM.
+	rp *runPool
 }
 
 // routeExec decides how a lease-enabled pool serves e: the effective mode, and for a
@@ -228,12 +236,24 @@ func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode M
 		// Close cannot take a gate this Exec holds, so this lease VM is this Exec's to
 		// destroy, or it would outlive the pool.
 		v = p.detachLeaseLocked(rp)
+	} else if l != nil && !p.clk.Now().Before(p.leaseGraceDeadline(l)) {
+		// Past the grace limit, and the lease sweep has not run since: this Exec would
+		// run only to be cut at the next tick. The lease ends here, and the Exec starts
+		// a fresh one.
+		v, l = p.endLeaseLocked(rp, LeaseEndGraceLimit), nil
+	} else if l != nil {
+		// Each Exec carries the owner's current idle timeout, and a keepalive client's
+		// Exec turns the keepalive rule on, for good (spec §4).
+		l.idle = p.cfg.leaseIdle(e)
+		if e.Keepalive {
+			l.keepalive, l.lastKeepalive = true, p.clk.Now()
+		}
 	}
 	p.mu.Unlock()
+	if v != nil {
+		p.destroyLeaseVM(key, v.vm)
+	}
 	if closed {
-		if v != nil {
-			p.destroyLeaseVM(key, v.vm)
-		}
 		return Result{}, ErrClosed
 	}
 
@@ -327,9 +347,11 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 	now := p.clk.Now()
 	l := rp.lease
 	l.mode, l.started, l.lastEnd = mode, now, now
-	l.idle, l.keepalive = p.cfg.leaseIdle(e), e.Keepalive
+	l.idle = p.cfg.leaseIdle(e)
 	if e.Keepalive {
-		l.lastKeepalive = now
+		// Not l.keepalive = e.Keepalive: a Keepalive that reached the lease while it was
+		// being started has already turned the rule on.
+		l.keepalive, l.lastKeepalive = true, now
 	}
 	s := p.leaseStateLocked(rp)
 	s.Open = &openLease{VMID: vmID(vm), Mode: mode, Started: now}
@@ -366,7 +388,7 @@ func (p *pool) startLease(ctx, runCtx context.Context, key string, rp *runPool, 
 // runLease runs one command in rp's lease VM. Caller holds rp's gate.
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32) (Result, error) {
-	// cancel lets the lease sweep cut this Exec at the grace limit (Task 4).
+	// cancel lets the lease sweep cut this Exec at the grace limit (sweepLeasesLocked).
 	execCtx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 	p.mu.Lock()
@@ -409,6 +431,12 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	if live {
 		l.running, l.cancel = false, nil
 	}
+	cut := l.cut
+	if cut != "" {
+		// The sweep cancelled this Run at the grace limit: that, not the Run error the
+		// cancellation produced, is why the lease ends.
+		reason = cut
+	}
 	if normalise && runErr == nil {
 		// An End arrived, so the guest got past the normalisation it runs first.
 		s := rp.state
@@ -448,6 +476,11 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 				p.mu.Unlock()
 			}
 		}
+	}
+	if cut != "" && (runErr != nil || cErr != nil) {
+		// Spec §4: "An Exec in flight then fails with a lease_ended(grace_limit) error,
+		// not a generic failure." A Run that finished despite the cut keeps its result.
+		return res, &LeaseEndedError{Reason: cut}
 	}
 	if cErr != nil {
 		return res, cErr
@@ -516,9 +549,144 @@ func (p *pool) destroyLeaseVictims(vs []*leaseVictim) {
 
 // destroyLeaseVM tears a lease VM down synchronously; the caller holds its gate. Not
 // pool.destroy: a lease VM holds no inFlight charge, and its run gets no replenishment.
-func (p *pool) destroyLeaseVM(key string, vm VM) {
-	if err := vm.Destroy(); err != nil {
+// The error is counted and logged here; only Close has a use for it.
+func (p *pool) destroyLeaseVM(key string, vm VM) error {
+	err := vm.Destroy()
+	if err != nil {
 		p.counters.destroyFailed()
 		log.Printf("vmpool: destroy lease VM for %q: %v", key, err)
 	}
+	return err
+}
+
+// destroySweptLeases is destroyLeaseVictims for the lease sweep's victims: it also drops
+// the pin the sweep took, once the gate is released.
+func (p *pool) destroySweptLeases(vs []*leaseVictim) {
+	for _, v := range vs {
+		p.destroyLeaseVM(v.key, v.vm)
+		<-v.gate
+		p.unpin(v.rp)
+	}
+}
+
+// leaseMaxDuration is how long a lease in mode m runs before it expires (spec §4): level
+// 2's tracked processes get the shorter LeaseMaxDurationProcesses.
+func (c Config) leaseMaxDuration(m Mode) time.Duration {
+	if m == ModeLeaseProcesses {
+		return c.LeaseMaxDurationProcesses
+	}
+	return c.LeaseMaxDuration
+}
+
+// leaseGraceDeadline is when l ends even mid-Exec: its maximum duration, then the grace
+// limit an expiring lease runs on (spec §4). Caller holds p.mu.
+func (p *pool) leaseGraceDeadline(l *vmLease) time.Time {
+	return l.started.Add(p.cfg.leaseMaxDuration(l.mode) + p.cfg.LeaseGraceLimit)
+}
+
+// sweepLeasesLocked is the lease ticker's walk (spec §4): it marks leases past their
+// maximum duration expiring, and ends each lease that is due, returning the victims for
+// destroySweptLeases. Caller holds p.mu, on a pool that is not closed.
+//
+// A lease ends here only after a non-blocking send on its run's gate succeeds, as the
+// E15 resident sweep did: a held gate means an Exec is running in the VM or about to,
+// so the lease is not idle whatever its clocks say, and the sweep never waits on it.
+// The gate stays held, and the run pinned, until the VM is destroyed, so an Exec that
+// arrives meanwhile waits and then starts a fresh lease (Review Focus 1).
+//
+// grace_limit is the one reason that ends a lease whose gate is held: the sweep cancels
+// the running Exec (l.cut, l.cancel), and that Exec's own unwind in runLease ends the
+// lease and destroys the VM under the gate it already holds.
+func (p *pool) sweepLeasesLocked(now time.Time) []*leaseVictim {
+	var out []*leaseVictim
+	for _, rp := range p.runs {
+		l := rp.lease
+		if l == nil || l.started.IsZero() {
+			// No lease, or one startLease is still installing under its gate.
+			continue
+		}
+		if !now.Before(l.started.Add(p.cfg.leaseMaxDuration(l.mode))) {
+			l.expiring = true
+		}
+		graceOver := !now.Before(p.leaseGraceDeadline(l))
+		if l.running {
+			if graceOver && l.cut == "" {
+				l.cut = LeaseEndGraceLimit
+				l.cancel() // a context cancel: it runs no caller code under p.mu
+			}
+			continue
+		}
+		reason := p.leaseEndDueLocked(l, now, graceOver)
+		if reason == "" {
+			continue
+		}
+		select {
+		case rp.execGate <- struct{}{}:
+		default:
+			continue // an Exec holds the gate: not idle, and never waited on
+		}
+		v := p.endLeaseLocked(rp, reason)
+		rp.pinned++
+		v.rp = rp
+		out = append(out, v)
+	}
+	return out
+}
+
+// leaseEndDueLocked is the reason l's clocks say it ends at now, or "" (spec §4). Idle is
+// measured from the last Exec's end, and a keepalive never resets it; the keepalive-loss
+// rule applies only once the lease opted in. An expiring lease ends at its next idle as
+// max_duration, and at the grace limit whatever its idle clock says. Caller holds p.mu.
+func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) LeaseEndReason {
+	switch {
+	case graceOver:
+		return LeaseEndGraceLimit
+	case l.keepalive && now.Sub(l.lastKeepalive) >= p.cfg.LeaseKeepaliveLoss:
+		return LeaseEndKeepaliveLost
+	case now.Sub(l.lastEnd) < l.idle:
+		return ""
+	case l.expiring:
+		return LeaseEndMaxDuration
+	}
+	return LeaseEndIdle
+}
+
+// closeLeasesLocked detaches, for Close, every lease VM whose gate is free, taking the
+// gate. No end is recorded: each state file keeps its open lease, so the next process
+// reports the end as worker_restart (spec §8.4, Task 5). A lease whose gate is held
+// belongs to an Exec, which sees p.closed and destroys the VM itself (execLease,
+// runLease). Caller holds p.mu, with p.closed set.
+func (p *pool) closeLeasesLocked() []*leaseVictim {
+	var out []*leaseVictim
+	for _, rp := range p.runs {
+		if rp.lease == nil {
+			continue
+		}
+		select {
+		case rp.execGate <- struct{}{}:
+		default:
+			continue
+		}
+		out = append(out, p.detachLeaseLocked(rp))
+	}
+	return out
+}
+
+// Keepalive records a keepalive for key's live lease (spec §4): it turns the
+// keepalive-loss rule on, for the rest of the lease, and restarts its clock. It never
+// resets idle: a keepalive proves the harness runs, not that anyone is working. Without
+// a live lease it is a no-op.
+func (p *pool) Keepalive(key string) error {
+	if err := checkKey(key); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return ErrClosed
+	}
+	if rp := p.runs[key]; rp != nil && rp.lease != nil {
+		rp.lease.keepalive, rp.lease.lastKeepalive = true, p.clk.Now()
+	}
+	return nil
 }

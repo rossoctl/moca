@@ -105,6 +105,10 @@ type Pool interface {
 	// refuses an epoch below a known one (stale-mode), and a lease mode on a worker
 	// that cannot serve it (lease-unsupported). Spec §8.2.
 	SetMode(key string, m Mode, epoch uint64) error
+	// Keepalive records a keepalive for key's live lease: the keepalive-loss rule then
+	// applies until the lease ends. It never resets the idle clock, and without a live
+	// lease it is a no-op. Spec §4.
+	Keepalive(key string) error
 	// Close stops the sweep and destroys everything. Beyond spec §4.1's listing:
 	// §6 requires a shutdown that leaves no orphan VMs.
 	Close() error
@@ -129,7 +133,11 @@ type pool struct {
 
 	// ticker is spec §4.2's second sweep trigger: the per-Exec sweep alone cannot
 	// reclaim a run whose last Exec was also its last (Task 6).
-	ticker      Timer
+	ticker Timer
+	// leaseTicker ends leases on time (lease.go, sweepLeasesLocked): idle, keepalive
+	// loss, maximum duration, grace limit. Armed only when LeaseEnabled, and apart from
+	// ticker, so the per-Exec sweep's timing is the same with lease mode on or off.
+	leaseTicker Timer
 	reclaimQ    chan reclaimBatch
 	reclaimDone sync.WaitGroup
 	// reaper is nil unless Config.DeferReapWorkers > 0. When set, destroy hands each VM's
@@ -194,6 +202,9 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	go p.reclaimLoop()
 	p.mu.Lock()
 	p.armTickerLocked()
+	if cfg.LeaseEnabled {
+		p.armLeaseTickerLocked()
+	}
 	p.mu.Unlock()
 	return p, nil
 }
@@ -769,6 +780,7 @@ func (p *pool) Reclaim(ctx context.Context, key string) error {
 	if !busy {
 		if tomb, detachErr = detachWorkspace(rp.dir); detachErr == nil {
 			delete(p.runs, key)
+			removeLeaseState(p.cfg.WorkspaceRoot, key) // as the sweep does: see sweepOnce
 		}
 	}
 	p.mu.Unlock()
@@ -836,6 +848,12 @@ func (p *pool) Close() error {
 	if p.ticker != nil {
 		p.ticker.Stop()
 	}
+	if p.leaseTicker != nil {
+		p.leaseTicker.Stop()
+	}
+	// Every lease VM whose gate is free, gate taken; the rest are destroyed by the Exec
+	// holding the gate. Their state files keep the open lease (worker_restart, Task 5).
+	leases := p.closeLeasesLocked()
 	var victims []VM
 	for _, rp := range p.runs {
 		victims = append(victims, rp.ready...)
@@ -878,6 +896,12 @@ func (p *pool) Close() error {
 				firstErr = err
 			}
 		}
+	}
+	for _, v := range leases {
+		if err := p.destroyLeaseVM(v.key, v.vm); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		<-v.gate
 	}
 
 	// p.closed is now true, and every sweep checks it under p.mu before sending on

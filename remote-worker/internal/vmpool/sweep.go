@@ -13,6 +13,9 @@ import (
 type reclaimBatch struct {
 	vms  []VM
 	dirs []string
+	// leases are lease VMs the lease sweep ended, each with its run's execGate held and
+	// the run pinned; doReclaim releases both only after the VM is destroyed.
+	leases []*leaseVictim
 }
 
 // sweepOnce walks every run and detaches what has aged out, under the lock,
@@ -89,6 +92,10 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 				b.dirs = append(b.dirs, tomb)
 			}
 			delete(p.runs, key)
+			// The key's lease state goes with its workspace, in the same critical
+			// section: a re-created run starts with an unknown epoch, which only SetMode
+			// restores (spec §8.2), never with the old tree's mode.
+			removeLeaseState(p.cfg.WorkspaceRoot, key)
 			continue
 		}
 		// RunActive -> RunParked: drop the standbys, KEEP the workspace. RAM is
@@ -131,6 +138,8 @@ func (p *pool) sweep(now time.Time) {
 }
 
 func (p *pool) doReclaim(b reclaimBatch) {
+	// Leases first: an Exec may be waiting on each one's gate.
+	p.destroySweptLeases(b.leases)
 	for _, vm := range b.vms {
 		if err := vm.Destroy(); err != nil {
 			p.counters.destroyFailed()
@@ -177,6 +186,49 @@ func (p *pool) armTickerLocked() {
 		p.sweep(p.clk.Now())
 		p.mu.Lock()
 		p.armTickerLocked()
+		p.mu.Unlock()
+	})
+}
+
+// sweepLeases is the lease ticker's body: sweepLeasesLocked ends the leases that are due,
+// and their VMs are destroyed on the reclaim goroutine -- or inline when its queue is
+// full, as sweep does -- each under its run's gate. A closed pool ends no lease: Close
+// has detached the idle ones and kept their open records for worker_restart.
+func (p *pool) sweepLeases(now time.Time) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	vs := p.sweepLeasesLocked(now)
+	if len(vs) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	b := reclaimBatch{leases: vs}
+	select {
+	case p.reclaimQ <- b: // under p.mu, with p.closed false: see sweep
+		p.mu.Unlock()
+	default:
+		p.mu.Unlock()
+		p.doReclaim(b)
+	}
+}
+
+// armLeaseTickerLocked schedules the next lease sweep and re-arms from inside its own
+// callback, as armTickerLocked does, on its own period: LeaseScanInterval, which
+// normalizeLease forces positive (the same load-bearing guarantee armTickerLocked's
+// comment explains). It is a second ticker rather than a shorter ReclaimScanInterval so
+// that the per-Exec sweep runs on exactly the schedule it has without lease mode. New
+// arms it only when LeaseEnabled. Caller holds p.mu.
+func (p *pool) armLeaseTickerLocked() {
+	if p.closed {
+		return
+	}
+	p.leaseTicker = p.clk.AfterFunc(p.cfg.LeaseScanInterval, func() {
+		p.sweepLeases(p.clk.Now())
+		p.mu.Lock()
+		p.armLeaseTickerLocked()
 		p.mu.Unlock()
 	})
 }
