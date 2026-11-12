@@ -646,7 +646,7 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    - **It can only be enabled before boot.** A restored VM has the devices of its snapshot, so the
      balloon has to be in the golden snapshot. That changes `vmstate` for every VM, per-`Exec` included.
      Per-`Exec` VMs would then report too: that frees their memory sooner, and a reused free page faults
-     back in from the memory file. **Decided (user, 2026-11-12): one golden snapshot with the balloon,** for every mode. Per-`Exec` VMs report too, and their latency is checked against a snapshot without the balloon before plan 3 ships it.
+     back in from the memory file. **Decided (user, 2026-11-12): one golden snapshot with the balloon,** for every mode. Per-`Exec` VMs report too, and their latency was checked against a snapshot without the balloon (2026-11-12, `sbx` worker, rounds A B A B): `true` 83 → 85 ms median (n = 80), `python3 -c pass` 103 → 103 ms, touching 256 MiB 403 → 403 ms. No measurable cost.
    - **Restore backend.** VMs restore with the `File` backend (`build-snapshot.sh:2092`): a
      `MAP_PRIVATE` mapping of the memory file, with written pages copy-on-write anonymous memory. A
      reported range then drops its private copy and falls back to the shared memory file. The host gets
@@ -668,11 +668,23 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
      The guest saw the balloon (`virtio_balloon` bound, `page_reporting_order` 9, that is 2 MiB
      blocks). Both guests showed about 890 MB free afterwards, so only the host side differed. Nothing
      is open for plan 3 here.
-6. **Level 2 is the latency case, and E17 does not measure it (v0.2).** E17a shows what a warm guest
-   saves without process state: VM start and interpreter start-up, not the work. The large saving is a
-   process that keeps its state: an interpreter with the stack imported and the dataset loaded, a
-   language server, a dev server. A short E17 extension (a REPL kept by `process_start`, re-queried
-   by later Execs) would size it before level 2's security review.
+6. **Level 2 is the latency case (v0.2; sized 2026-11-12).** E17a shows what a warm guest saves without
+   process state: the VM start and the interpreter start-up, not the work. A spike on the E15 rig
+   sized level 2 with one persistent Python server, standing in for `process_start` because the
+   resident patch kills nothing. It ran on E17a's workspace (256 MiB of CSV, 6.0 M rows), and the
+   same queries ran per-`Exec` and at level 1:
+
+   | Query                                            | Per-`Exec` | Level 1      | Level 2           |
+   | ------------------------------------------------ | ---------- | ------------ | ----------------- |
+   | Re-query: group means + one median over all rows | 6.5 s      | 5.4 s (−17%) | **0.25 s (−96%)** |
+   | Recompute: KMeans on the 200k-row sample         | 17.4 s     | 16.5 s (−5%) | **11.2 s (−36%)** |
+
+   The server paid the import and parse once (5.4 s to ready) and held about 500 MB of a 1 GiB guest.
+   That memory is live, so free-page reporting cannot return it: a level-2 lease is charged its working
+   set, and guest RAM bounds how much state a tracked process can keep. A first run that took
+   quantiles over all six columns was OOM-killed in the guest, the server included. Level 2's
+   `memory_reclaim` and OOM notices (§5) are therefore not corner cases. Results: moca-experiments
+   `e17/results/followups/`.
 
 ## 17. E17a findings (v0.2)
 

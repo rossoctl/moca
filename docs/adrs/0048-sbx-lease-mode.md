@@ -138,8 +138,10 @@ revision changes four decisions and adds two:
   never come from or go back to the per-`Exec` cgroup pool, and the reclaim headroom target is sized
   against the larger lease charge bound (spec §6). _(E17a: about 2 s against 388 ms for the
   same grep)_
-- **New decision 19: level 2's latency case is sized before its security review**, by a short E17
-  extension (a `process_start` REPL re-queried by later Execs). E17a cannot measure it. _(E17a)_
+- **New decision 19: level 2 is the latency case, sized before its security review.** A persistent
+  interpreter on E17a's workspace answered a re-query in 0.25 s against 6.5 s per-`Exec` (5.4 s at
+  level 1) and a recompute in 11.2 s against 17.4 s, holding about 500 MB of a 1 GiB guest (spec §16
+  item 6). _(spike, 2026-11-12)_
 
 ### Alternatives considered
 
