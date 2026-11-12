@@ -66,6 +66,7 @@ import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { ProvenanceStore } from './provenance.js';
+import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
@@ -213,6 +214,14 @@ export interface CpDeps {
    * template's chain.
    */
   provenance?: ProvenanceStore;
+  /**
+   * The template catalog (template lifecycle spec §3.1), opened with `provenance` when
+   * SH_PROVENANCE_DIR is set. Absent: built from the sandbox profile's SH_SANDBOX_TEMPLATES, as
+   * before the catalog existed.
+   */
+  templates?: TemplateCatalog;
+  /** The relay's presence records, which template readiness is derived from (§3.3). */
+  presence?: PresenceReader;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */

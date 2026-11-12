@@ -369,15 +369,49 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: HARNESS,
     operationId: 'exchangeTurnCredential',
   },
-  // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
+  // Template lifecycle spec §4: the templates, one template, its builds, one build, its tags. On
+  // BOTH profiles (§4.1), so a session's brain and a sandbox client read the same templates.
   {
     method: 'GET',
     path: '/v1/templates',
     auth: 'api',
     sessionScoped: false,
-    profiles: SANDBOX,
+    profiles: BOTH,
     operationId: 'listTemplates',
   },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getTemplate',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/builds',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'listTemplateBuilds',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/builds/{build}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getTemplateBuild',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/tags',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'listTemplateTags',
+  },
+  // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {
     method: 'POST',
     path: '/v1/sandboxes',

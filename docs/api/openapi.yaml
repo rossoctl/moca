@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.3.0
+  version: 1.4.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -109,6 +109,7 @@ components:
             - no_credential
             - quota_exceeded
             - unknown_template
+            - template_not_found
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -265,7 +266,20 @@ components:
       type: object
       description: A sandbox (SBX0 §5.1). Times are epoch seconds.
       required:
-        [id, owner, name, template, state, reason, createdAt, expiresAt, terminatedAt, labels]
+        [
+          id,
+          owner,
+          name,
+          template,
+          buildId,
+          templateManifestHash,
+          state,
+          reason,
+          createdAt,
+          expiresAt,
+          terminatedAt,
+          labels,
+        ]
       additionalProperties: false
       properties:
         id:
@@ -278,6 +292,18 @@ components:
           pattern: '^[a-z0-9][a-z0-9-]{0,62}$'
           description: unique among the owner's live sandboxes; null when unnamed
         template: { type: string }
+        buildId:
+          type: [string, 'null']
+          description: |
+            the build the template reference (id, id:tag or id@<build id>) resolved to at creation,
+            kept for the sandbox's life (template lifecycle spec §3.2): `sha256:<manifest hash>`, or
+            `imported:<12 hex>` for a template imported from SH_SANDBOX_TEMPLATES; null on a sandbox
+            created before builds were recorded
+        templateManifestHash:
+          type: [string, 'null']
+          description: |
+            the snapshot's manifest hash (the build id of a built build); null for a template
+            imported from SH_SANDBOX_TEMPLATES, which names no snapshot
         state: { type: string, enum: [ready, terminated] }
         reason:
           type: [string, 'null']
@@ -298,6 +324,90 @@ components:
           propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
           additionalProperties: { type: string }
           description: free-form string pairs (at most 16; each value at most 256 UTF-8 bytes)
+    Template:
+      type: object
+      description: A template (template lifecycle spec §3.2, §4)
+      required: [id, description, tools, owner, visibility, onboarding, readiness, tags, builds]
+      properties:
+        id: { type: string }
+        description: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+          description: the default build's tools
+        owner:
+          type: [string, 'null']
+          description: the owning subject; null for a template the deployment declared
+        visibility:
+          type: string
+          enum: [private, deployment]
+          description: '`private`: listed and served only to its owner and admins'
+        onboarding:
+          type: [string, 'null']
+          description: "`registered` once any build is; else the newest build's status"
+        readiness:
+          type: [string, 'null']
+          description: the default build's readiness
+          enum: [active, inactive, unknown, null]
+        tags:
+          type: object
+          additionalProperties: { type: string }
+          description: tag -> buildId; `default` is what a bare id names
+        builds:
+          type: array
+          items: { $ref: '#/components/schemas/TemplateBuild' }
+    TemplateBuild:
+      type: object
+      description: One build of a template, an immutable snapshot (template lifecycle spec §3.2, §3.3)
+      required:
+        [buildId, status, profile, readiness, capacity, lastUsedAt, tags, createdAt, provenance]
+      properties:
+        buildId: { type: string, description: '`sha256:<manifest hash>` or `imported:<12 hex>`' }
+        status:
+          type: string
+          enum: [queued, building, probing, built, registered, rejected, failed, retired]
+          description: |
+            its onboarding state (template lifecycle spec §3.3); a build imported from
+            SH_SANDBOX_TEMPLATES is `registered`
+        profile: { type: string, description: the policy profile; `imported` for the env list's }
+        readiness:
+          type: [string, 'null']
+          enum: [active, inactive, unknown, null]
+          description: |
+            for a registered build (§3.3), from facts: `active` the relay holds an attached
+            presence record for its worker; `inactive` it holds none; `unknown` the relay's
+            presence could not be read; null for a build that is not registered. Later states
+            (`activating`, `deactivating`, `unavailable`, `retired`) come with activation and retire
+        capacity:
+          type: [object, 'null']
+          description: for an active build
+          required: [running, inUse]
+          properties:
+            running: { type: integer, description: the sandboxes its worker advertises at once }
+            inUse:
+              type: [integer, 'null']
+              description: |
+                its live sandboxes now; null on the harness profile, which holds no sandbox
+                records (sessions name a template, not a worker)
+        lastUsedAt:
+          type: [integer, 'null']
+          description: |
+            epoch seconds of the newest sandbox created on it (retained records included); null
+            when it has none, and on the harness profile
+        tags: { type: array, items: { type: string } }
+        createdAt: { type: integer, description: epoch seconds }
+        provenance:
+          type: [string, 'null']
+          description: the digest of the provenance record that created it (with SH_PROVENANCE_DIR)
+        spec:
+          type: object
+          description: on GET /v1/templates/{id} and the builds routes only
+          properties:
+            guest_mb: { type: integer }
+            vcpus: { type: integer }
+            workspace_mb: { type: integer }
+            seed: { type: string }
+            tools: { type: array, items: { type: string } }
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -1397,31 +1507,154 @@ paths:
   /v1/templates:
     get:
       operationId: listTemplates
-      summary: The templates a sandbox may be created from
+      summary: The templates a sandbox may be created from, with their builds and readiness
       description: |
-        Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane
-        answers 404 (SBX0 §4.1). Enrolled subjects and admins only (`403 not_enrolled`, §4.2).
+        Both profiles (template lifecycle spec §4.1): a sandbox client and a session's brain read
+        the same templates. On the sandbox profile, enrolled subjects and admins only
+        (`403 not_enrolled`, SBX0 §4.2); on the harness profile, any logged-in subject, and a
+        deployment that declares no templates lists none. Each template adds its owner,
+        visibility, onboarding state, readiness, tags and builds (template lifecycle spec §3, §4);
+        the first three fields are unchanged, so an older client reads the list as before. With
+        SH_PROVENANCE_DIR, templates are the store's (SH_SANDBOX_TEMPLATES imported into it once);
+        a `private` one is listed only to its owner and admins.
       security: [{ sessionToken: [] }]
       responses:
         '200':
-          description: the deployment's templates (SH_SANDBOX_TEMPLATES), without their worker ids
+          description: the visible templates, without their worker ids
           content:
             application/json:
               schema:
                 type: object
-                required: [templates]
+                required: [templates, hosts]
                 properties:
                   templates:
                     type: array
+                    items: { $ref: '#/components/schemas/Template' }
+                  hosts:
+                    type: array
+                    description: |
+                      per KVM host, its limits and use, as its host agent reports them (template
+                      lifecycle spec §6.2). Always empty here: a later issue adds the host agent
+                      and defines the items. Empty means no host has reported, never that there
+                      is no limit
                     items:
                       type: object
-                      required: [id, description, tools]
+                      required: [id]
                       properties:
                         id: { type: string }
-                        description: { type: string }
-                        tools: { type: array, items: { type: string } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/templates/{id}:
+    get:
+      operationId: getTemplate
+      summary: One template, its builds with their specs (the seed included)
+      description: |
+        Both profiles (§4.1). `404 template_not_found` for an unknown id and for a `private`
+        template the caller does not own: the existence check (template lifecycle spec §3.2).
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the template; each build carries its `spec`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds:
+    get:
+      operationId: listTemplateBuilds
+      summary: A template's builds, newest first, each with its spec
+      description: Both profiles (§4.1). `404 template_not_found` as for GET /v1/templates/{id}.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the builds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [builds]
+                properties:
+                  builds:
+                    type: array
+                    items: { $ref: '#/components/schemas/TemplateBuild' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}:
+    get:
+      operationId: getTemplateBuild
+      summary: One build of a template, with its spec
+      description: |
+        Both profiles (§4.1). The build id is `sha256:<manifest hash>`, or `imported:<12 hex>` for
+        a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it.
+        `404 template_not_found` for an unknown template or build.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the build
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateBuild' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/tags:
+    get:
+      operationId: listTemplateTags
+      summary: A template's tags, each with the build it names and when and by whom it was set
+      description: Both profiles (§4.1). `404 template_not_found` as for GET /v1/templates/{id}.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the tags, sorted by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tags]
+                properties:
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, buildId, assignedAt, assignedBy]
+                      properties:
+                        tag: { type: string }
+                        buildId: { type: string }
+                        assignedAt: { type: integer, description: epoch seconds }
+                        assignedBy:
+                          type: [string, 'null']
+                          description: a subject; null when the deployment set it
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes:
     description: |
       Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers
@@ -1441,7 +1674,12 @@ paths:
               type: object
               required: [template]
               properties:
-                template: { type: string, description: a template id from GET /v1/templates }
+                template:
+                  type: string
+                  description: |
+                    a template from GET /v1/templates, as `id` (its `default` tag), `id:tag` or
+                    `id@<build id>`: resolved to one registered build at creation and kept for the
+                    sandbox's life (template lifecycle spec §3.2)
                 name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
                 labels:
                   type: object
@@ -1456,7 +1694,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Sandbox' }
         '400':
-          description: '`invalid_json`, `invalid_request`, or `unknown_template`'
+          description: |
+            `invalid_json`, `invalid_request`, or `unknown_template` (an unknown id, tag or build,
+            or one the caller cannot see)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

@@ -14,6 +14,11 @@ export interface SandboxRecord {
   name: string;
   template: string;
   worker: string;
+  /**
+   * The build the template reference resolved to at creation (template lifecycle spec §9): its
+   * manifest hash, or an imported build's id; absent on a record from before tracing.
+   */
+  buildId?: string;
   wsk: string;
   labels: Record<string, string>;
   /** Epoch seconds. */

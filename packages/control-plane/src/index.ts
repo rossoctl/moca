@@ -194,6 +194,7 @@ export {
   depsFromEnv,
   portFromEnv,
   redisClientOptions,
+  templateCatalogFromEnv,
   verifyKeysFromEnv,
   type CredentialStoreKind,
 } from './main.js';
@@ -212,3 +213,18 @@ export {
   type StreamHead,
   type VerifyResult,
 } from './provenance.js';
+export {
+  FileTemplateCatalog,
+  MemoryTemplateCatalog,
+  PRESENCE_KEY,
+  TEMPLATE_DOC_SCHEMA,
+  importedBuildId,
+  redisPresenceReader,
+  resolveBuild,
+  type OnboardingStatus,
+  type PresenceReader,
+  type PresenceRecord,
+  type TemplateBuild,
+  type TemplateCatalog,
+  type TemplateDoc,
+} from './template-catalog.js';

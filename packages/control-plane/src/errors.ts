@@ -31,6 +31,7 @@ export const CP_ERROR_CODES = [
   'name_conflict',
   'quota_exceeded',
   'unknown_template',
+  'template_not_found',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -87,6 +88,8 @@ const STATUS: Record<CpErrorCode, number> = {
   name_conflict: 409,
   quota_exceeded: 429,
   unknown_template: 400,
+  // 404: GET /v1/templates/{id} names no template the caller can see (template lifecycle spec §4).
+  template_not_found: 404,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.

@@ -1,3 +1,10 @@
+import { ProvenanceStore } from './provenance.js';
+import {
+  FileTemplateCatalog,
+  redisPresenceReader,
+  type PresenceRedisLike,
+  type TemplateCatalog,
+} from './template-catalog.js';
 import { createClient } from 'redis';
 import type { BundleRedisLike } from '@moca/config-bundle';
 import { fileURLToPath } from 'node:url';
@@ -481,6 +488,32 @@ export function redisClientOptions(url: string) {
   return { url, socket: { reconnectStrategy: redisReconnectStrategy } };
 }
 
+/**
+ * `SH_PROVENANCE_DIR` (template lifecycle spec §3.1, §7.2), either profile: a directory on the
+ * control plane's persistent volume holding the provenance store and the template catalog, opened
+ * together. Set, the catalog is the store (SH_SANDBOX_TEMPLATES imported into it once, each import
+ * a provenance `create` record); unset, templates come from SH_SANDBOX_TEMPLATES at every start, as
+ * before, and nothing is recorded. Each store checks its directory writable here, so a missing or
+ * read-only volume fails the start, not the first write.
+ */
+export function templateCatalogFromEnv(
+  env: NodeJS.ProcessEnv,
+  config: CpConfig,
+): { templates?: TemplateCatalog; provenance?: ProvenanceStore } {
+  const dir = env.SH_PROVENANCE_DIR;
+  if (!dir) return {};
+  if (!dir.startsWith('/')) throw new Error('SH_PROVENANCE_DIR must be an absolute path');
+  const provenance = new ProvenanceStore({ dir });
+  return {
+    templates: new FileTemplateCatalog({
+      dir,
+      declared: config.sandbox?.templates ?? [],
+      provenance,
+    }),
+    provenance,
+  };
+}
+
 export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
@@ -545,6 +578,10 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     ...(sandboxProfile
       ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
       : {}),
+    // Readiness (template lifecycle spec §3.3) from the relay's presence records, which the relay
+    // writes into this same Redis on either profile.
+    presence: redisPresenceReader(client as unknown as PresenceRedisLike),
+    ...templateCatalogFromEnv(env, config),
     // github or oidc, per SH_IDENTITY_PROVIDER (identityProviderFromEnv above); the oidc
     // provider additionally carries the browser-callback half the seam defines.
     identity: identityProviderFromEnv(env),

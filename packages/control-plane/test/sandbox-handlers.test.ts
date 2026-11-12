@@ -47,6 +47,9 @@ describe('sandbox handlers (SBX0 §5)', () => {
       owner: 'github:1234',
       name: 'web',
       template: 'node22',
+      // Template lifecycle spec §9: the build it runs on (an imported build has no manifest hash).
+      buildId: b.buildId,
+      templateManifestHash: null,
       state: 'ready',
       reason: null,
       createdAt: NOW,
@@ -57,6 +60,8 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(b.id).toMatch(/^sbx-[0-9a-f]{26}$/);
     const rec = await d.sandboxes!.get(b.id as string, NOW);
     expect(rec).toMatchObject({ worker: 'sbx_node22', wsk: b.id, tenant: 'github:1234' });
+    expect(b.buildId).toMatch(/^imported:[0-9a-f]{12}$/);
+    expect(rec?.buildId).toBe(b.buildId);
   });
 
   it('shows an unnamed sandbox as name null', async () => {
@@ -142,12 +147,14 @@ describe('sandbox handlers (SBX0 §5)', () => {
     }
   });
 
-  it('lists templates without their worker ids', async () => {
+  it('lists templates without their worker ids, keeping the original three fields', async () => {
     const r = await HANDLERS.listTemplates!(ctx({ principal: alice }), sbxDeps());
-    expect((r.body as { templates: object[] }).templates).toEqual([
+    const ts = (r.body as { templates: Record<string, unknown>[] }).templates;
+    expect(ts.map(({ id, description, tools }) => ({ id, description, tools }))).toEqual([
       { id: 'default', description: 'bash, git, Python 3', tools: ['bash', 'git', 'python3'] },
       { id: 'node22', description: 'Node 22', tools: ['node'] },
     ]);
+    expect(JSON.stringify(ts)).not.toContain('sbx_default');
   });
 
   it("hides another user's sandbox behind 404, on get, delete and token", async () => {
@@ -224,6 +231,70 @@ describe('sandbox handlers (SBX0 §5)', () => {
       now: NOW,
     });
     expect(c).toMatchObject({ sub: 'github:1234', sbx: id, wrk: 'sbx_node22', wsk: id });
+  });
+
+  it("routes each sandbox to its own template's worker", async () => {
+    const d = sbxDeps();
+    const py = await create(d, alice, { template: 'default' });
+    const node = await create(d, alice, { template: 'node22' });
+    const wrk = async (id: unknown) =>
+      ((await HANDLERS.mintSandboxToken!(on(alice, id), d)).body as { wrk: string }).wrk;
+    expect(await wrk(py.id)).toBe('sbx_default');
+    expect(await wrk(node.id)).toBe('sbx_node22');
+  });
+
+  it('keeps a sandbox on the worker it was created with when its template moves (a versioned update)', async () => {
+    const d = sbxDeps();
+    const old = await create(d, alice, { template: 'node22' });
+    // The operator points node22 at a new worker: a new control plane with the new list, the same store.
+    const moved = {
+      ...d,
+      config: {
+        ...d.config,
+        sandbox: {
+          ...d.config.sandbox!,
+          templates: d.config.sandbox!.templates.map((t) =>
+            t.id === 'node22' ? { ...t, worker: 'sbx_node22_v2' } : t,
+          ),
+        },
+      },
+    };
+    const fresh = await create(moved, alice, { template: 'node22' });
+    const mint = async (id: unknown) =>
+      (await HANDLERS.mintSandboxToken!(on(alice, id), moved)).body as { wrk: string };
+    expect((await mint(old.id)).wrk).toBe('sbx_node22');
+    expect((await mint(fresh.id)).wrk).toBe('sbx_node22_v2');
+    // Both still read as the same template, and the janitor sees each on its own worker.
+    expect([old.template, fresh.template]).toEqual(['node22', 'node22']);
+    const b = (await HANDLERS.janitorSandboxes!(ctx({ janitorAuthorized: true }), moved)).body as {
+      live: { wsk: string; wrk: string }[];
+    };
+    expect(b.live).toEqual(
+      expect.arrayContaining([
+        { wsk: old.id, wrk: 'sbx_node22' },
+        { wsk: fresh.id, wrk: 'sbx_node22_v2' },
+      ]),
+    );
+  });
+
+  it('keeps minting for a sandbox whose template was removed, and refuses new creates', async () => {
+    const d = sbxDeps();
+    const old = await create(d, alice, { template: 'node22' });
+    const removed = {
+      ...d,
+      config: {
+        ...d.config,
+        sandbox: {
+          ...d.config.sandbox!,
+          templates: d.config.sandbox!.templates.filter((t) => t.id !== 'node22'),
+        },
+      },
+    };
+    expect(await codeOf(() => create(removed, alice, { template: 'node22' }))).toBe(
+      'unknown_template',
+    );
+    const r = await HANDLERS.mintSandboxToken!(on(alice, old.id), removed);
+    expect((r.body as { wrk: string }).wrk).toBe('sbx_node22');
   });
 
   it('returns the exec CA when one is configured, and caps a token at the sandbox expiry', async () => {
@@ -365,16 +436,17 @@ describe('every link of a sandbox is a record digest (template lifecycle §7.1)'
     ]);
     expect(chain[0].body).toEqual({
       sandboxId: sb.id,
-      buildId: null,
+      // An imported build: its id, and no manifest hash (the env list names no snapshot).
+      buildId: sb.buildId,
       templateManifestHash: null,
-      // No activation lease exists for a fixed template; a lease, when one does, is a digest.
+      // No activation lease exists yet; a lease, when one does, is a digest.
       lease: null,
       state: 'created',
       expiresAt: sb.expiresAt,
     });
     expect(chain[1].body).toEqual({
       sandboxId: sb.id,
-      buildId: null,
+      buildId: sb.buildId,
       state: 'terminated',
       reason: 'deleted',
       expiresAt: sb.expiresAt,

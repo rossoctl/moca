@@ -9,6 +9,14 @@ import {
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import {
+  MemoryTemplateCatalog,
+  resolveBuild,
+  type TemplateBuild,
+  type TemplateCatalog,
+  type TemplateDoc,
+} from './template-catalog.js';
+import {
+  isLive,
   viewOf,
   type SandboxRecord,
   type SandboxStore,
@@ -18,7 +26,8 @@ import { mintSandboxToken } from './sandbox-token.js';
 import type { TokenClaims } from './token.js';
 
 /**
- * The sandbox resource's handlers (SBX0 spec §5.1), mounted on the `sandbox` route profile only.
+ * The sandbox resource's handlers (SBX0 spec §5.1), mounted on the `sandbox` route profile only,
+ * and the template reads (template lifecycle spec §4), mounted on both.
  * Only TYPES come from handlers.ts, which spreads this table into HANDLERS: a runtime import back
  * would be a module cycle.
  */
@@ -88,6 +97,10 @@ function sandboxBody(v: SandboxView) {
     owner: v.owner,
     name: v.name || null,
     template: v.template,
+    // The exact build it runs on (template lifecycle spec §9): its manifest hash when the build has
+    // one; null on a record from before tracing.
+    buildId: v.buildId ?? null,
+    templateManifestHash: v.buildId?.startsWith('sha256:') ? v.buildId : null,
     state: v.state,
     reason: v.reason ?? null,
     createdAt: v.createdAt,
@@ -125,10 +138,11 @@ const audit = (deps: CpDeps, subject: string, sandboxId: string, decision: strin
   auditBestEffort(deps, decision, sandboxId, { subject, sandboxId, decision });
 
 /**
- * A sandbox's start on its template's chain (template lifecycle spec §7.1). Templates here are the
- * fixed SH_SANDBOX_TEMPLATES list, with no builds and no activation leases, so `buildId`,
- * `templateManifestHash` and `lease` are null; the template store and activation fill them in, the
- * lease as the digest of the `activate` record it came from. A no-op without a provenance store.
+ * A sandbox's start on its template's chain (template lifecycle spec §7.1): the build its reference
+ * resolved to, and that build's manifest hash (null for a build imported from SH_SANDBOX_TEMPLATES,
+ * which names no snapshot). There are no activation leases yet, so `lease` is null; activation
+ * fills it in, as the digest of the `activate` record the lease came from. A no-op without a
+ * provenance store.
  */
 async function sandboxCreated(deps: CpDeps, rec: SandboxRecord, subject: string): Promise<void> {
   if (!deps.provenance) return;
@@ -138,8 +152,8 @@ async function sandboxCreated(deps: CpDeps, rec: SandboxRecord, subject: string)
     subject,
     body: {
       sandboxId: rec.id,
-      buildId: null,
-      templateManifestHash: null,
+      buildId: rec.buildId ?? null,
+      templateManifestHash: rec.buildId?.startsWith('sha256:') ? rec.buildId : null,
       lease: null,
       state: 'created',
       expiresAt: rec.expiresAt,
@@ -166,7 +180,7 @@ async function sandboxEnded(
     subject,
     body: {
       sandboxId: rec.id,
-      buildId: null,
+      buildId: rec.buildId ?? null,
       state: 'terminated',
       reason,
       expiresAt: rec.expiresAt,
@@ -198,17 +212,191 @@ async function recordExpiries(deps: CpDeps, recs: SandboxRecord[], nowS: number)
   }
 }
 
+/**
+ * The catalog (template lifecycle spec §3.1); built from the env list when none is wired: the
+ * sandbox profile's SH_SANDBOX_TEMPLATES. A harness control plane without a store declares none, and
+ * its catalog is empty.
+ */
+function catalog(deps: CpDeps): TemplateCatalog {
+  return deps.templates ?? new MemoryTemplateCatalog(deps.config.sandbox?.templates ?? []);
+}
+
+const canSee = (d: TemplateDoc, p: TokenClaims): boolean =>
+  d.visibility === 'deployment' || d.owner === p.sub || isAdmin(p);
+
+async function visibleTemplates(deps: CpDeps, p: TokenClaims): Promise<TemplateDoc[]> {
+  return (await catalog(deps).list()).filter((d) => canSee(d, p));
+}
+
+/** 404 for a template the caller cannot see, as for one that does not exist (no existence oracle). */
+async function visibleTemplate(deps: CpDeps, p: TokenClaims, id: string): Promise<TemplateDoc> {
+  const d = await catalog(deps).get(id);
+  if (!d || !canSee(d, p)) throw new CpError('template_not_found', 'no such template');
+  return d;
+}
+
+/**
+ * What readiness is derived from (§3.3): attached workers, and, where this control plane holds
+ * sandbox records (the sandbox profile), the live sandboxes per worker and the latest creation
+ * on each. The harness profile's sessions name a template, not a worker, so there `inUse` and
+ * `lastUsed` are null (not zero): unknown, until use records exist (spec §7.1 `use`).
+ */
+interface ReadinessFacts {
+  /** worker sandbox id -> its advertised capacity; present = attached to the relay. */
+  attached: Map<string, number> | null;
+  inUse: Map<string, number> | null;
+  /** worker -> epoch seconds of the newest sandbox created on it, retained records included. */
+  lastUsed: Map<string, number> | null;
+}
+
+async function readinessFacts(deps: CpDeps): Promise<ReadinessFacts> {
+  let attached: Map<string, number> | null = null;
+  if (deps.presence) {
+    try {
+      attached = new Map((await deps.presence.list()).map((r) => [r.sandboxId, r.capacityMax]));
+    } catch {
+      // Presence unreadable: readiness is unknown, not inactive (a client must not act on a guess).
+      attached = null;
+    }
+  }
+  if (deps.config.routeProfile !== 'sandbox' || !deps.sandboxes) {
+    return { attached, inUse: null, lastUsed: null };
+  }
+  const inUse = new Map<string, number>();
+  const lastUsed = new Map<string, number>();
+  const now = seconds(deps);
+  for (const r of await deps.sandboxes.listAll(now)) {
+    if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
+    lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
+  }
+  return { attached, inUse, lastUsed };
+}
+
+/**
+ * One build on the wire (openapi TemplateBuild), never its worker. Readiness, for a registered
+ * build: `active` while the relay holds its worker's presence record, `inactive` without one,
+ * `unknown` when presence cannot be read; null for a build that is not registered.
+ */
+function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
+  const readiness =
+    b.status !== 'registered'
+      ? null
+      : f.attached === null
+        ? 'unknown'
+        : f.attached.has(b.worker)
+          ? 'active'
+          : 'inactive';
+  return {
+    buildId: b.buildId,
+    status: b.status,
+    profile: b.profile,
+    readiness,
+    capacity:
+      readiness === 'active'
+        ? {
+            running: f.attached?.get(b.worker) ?? 0,
+            inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
+          }
+        : null,
+    lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
+    tags: Object.entries(d.tags)
+      .filter(([, id]) => id === b.buildId)
+      .map(([t]) => t)
+      .sort(),
+    createdAt: b.createdAt,
+    provenance: b.provenance ?? null,
+    ...(full ? { spec: b.spec } : {}),
+  };
+}
+
+/** One template on the wire (openapi Template): today's three fields first, then its builds. */
+function templateBody(d: TemplateDoc, f: ReadinessFacts, full: boolean) {
+  const def = resolveBuild(d, {});
+  return {
+    id: d.id,
+    description: d.description,
+    tools: def?.spec.tools ?? [],
+    owner: d.owner,
+    visibility: d.visibility,
+    onboarding: d.builds.some((b) => b.status === 'registered')
+      ? 'registered'
+      : (d.builds[0]?.status ?? null),
+    readiness: def ? buildBody(d, def, f, false).readiness : null,
+    tags: { ...d.tags },
+    builds: d.builds.map((b) => buildBody(d, b, f, full)),
+  };
+}
+
+/**
+ * A sandbox's template reference (§3.2, §4): `id`, `id:tag` or `id@<build id>`, resolved to one
+ * registered build and its worker at creation, and kept for the sandbox's life. An unknown id, tag
+ * or build, one the caller cannot see, or a build not registered is `400 unknown_template`, as an
+ * unknown id always was. A build not attached is not refused here: its first Exec waits on the
+ * relay, as before.
+ */
+async function resolveForUse(
+  deps: CpDeps,
+  p: TokenClaims,
+  ref: string,
+): Promise<{ id: string; worker: string; buildId: string }> {
+  const at = ref.indexOf('@');
+  const colon = at < 0 ? ref.indexOf(':') : -1;
+  const id = at >= 0 ? ref.slice(0, at) : colon >= 0 ? ref.slice(0, colon) : ref;
+  const r =
+    at >= 0 ? { build: ref.slice(at + 1) } : colon >= 0 ? { tag: ref.slice(colon + 1) } : {};
+  const d = await catalog(deps).get(id);
+  const b = d && canSee(d, p) ? resolveBuild(d, r) : null;
+  if (!d || !b || b.status !== 'registered' || !b.worker) {
+    throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
+  }
+  return { id: d.id, worker: b.worker, buildId: b.buildId };
+}
+
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
+  // The template reads (template lifecycle spec §4), on both route profiles (§4.1): on `harness`
+  // requireEnrolled admits any logged-in subject. The worker id is deployment plumbing; a client
+  // names a template, never a worker.
   listTemplates: async (ctx, deps) => {
-    requireEnrolled(ctx, deps);
-    const { cfg } = service(deps);
-    // The worker id is deployment plumbing; a client names a template, never a worker.
-    const templates = cfg.templates.map(({ id, description, tools }) => ({
-      id,
-      description,
-      tools,
-    }));
-    return { status: 200, body: { templates } };
+    const p = requireEnrolled(ctx, deps);
+    const docs = await visibleTemplates(deps, p);
+    const live = await readinessFacts(deps);
+    const templates = docs.map((d) => templateBody(d, live, false));
+    // Per-host limits and use (§4, §6.2) are reported by a host agent, which a later issue adds:
+    // an empty list means "no host reports", never "no limit".
+    return { status: 200, body: { templates, hosts: [] } };
+  },
+
+  listTemplateTags: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
+    const tags = Object.entries(d.tags)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([tag, buildId]) => {
+        const m = d.tagsMeta?.[tag];
+        return { tag, buildId, assignedAt: m?.at ?? d.createdAt, assignedBy: m?.by ?? d.owner };
+      });
+    return { status: 200, body: { tags } };
+  },
+
+  getTemplate: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
+    return { status: 200, body: templateBody(d, await readinessFacts(deps), true) };
+  },
+
+  listTemplateBuilds: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
+    const live = await readinessFacts(deps);
+    return { status: 200, body: { builds: d.builds.map((b) => buildBody(d, b, live, true)) } };
+  },
+
+  getTemplateBuild: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    const d = await visibleTemplate(deps, p, ctx.params.id ?? '');
+    const b = d.builds.find((x) => x.buildId === (ctx.params.build ?? ''));
+    if (!b) throw new CpError('template_not_found', 'no such build of this template');
+    return { status: 200, body: buildBody(d, b, await readinessFacts(deps), true) };
   },
 
   createSandbox: async (ctx, deps) => {
@@ -217,10 +405,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const b = asRecord(ctx.body);
     if (typeof b.template !== 'string')
       throw new CpError('invalid_request', 'template is required');
-    const template = cfg.templates.find((t) => t.id === b.template);
-    if (!template) {
-      throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
-    }
+    const template = await resolveForUse(deps, p, b.template);
     if (b.name !== undefined && (typeof b.name !== 'string' || !NAME_RE.test(b.name))) {
       throw new CpError('invalid_request', `name must match ${NAME_RE}`);
     }
@@ -236,6 +421,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       name: (b.name as string | undefined) ?? '',
       template: template.id,
       worker: template.worker,
+      buildId: template.buildId,
       wsk: id,
       labels,
       createdAt: now,

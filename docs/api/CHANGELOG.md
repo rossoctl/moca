@@ -3,6 +3,34 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.4.0
+
+The template store and its read API ([#736](https://github.com/rossoctl/moca/issues/736)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §3-§4.
+Every change is additive.
+
+- GET /v1/templates mounts on both route profiles (it was `sandbox` only), so a Moca Pi brain and a
+  stock agent read the same templates. Its first fields (`id`, `description`, `tools`) are unchanged;
+  each template adds `owner` (null for one the deployment declared), `visibility`, `onboarding`,
+  `readiness`, `tags` and `builds`, and the list adds a `hosts` block, empty until a later issue's
+  host agent reports.
+- New GET /v1/templates/{id}, GET /v1/templates/{id}/builds, GET /v1/templates/{id}/builds/{build}
+  (each build with its own `spec`, seed included) and GET /v1/templates/{id}/tags (each tag's build,
+  and when and by whom it was set), on both profiles.
+- New `Template` and `TemplateBuild` schemas. A build's `readiness` comes from the relay's presence
+  records: `active` with its `capacity`, `inactive`, or `unknown` when presence cannot be read.
+  An imported build's id is `imported:<12 hex>`; a built one's is `sha256:<manifest hash>`.
+- POST /v1/sandboxes takes `template` as `id`, `id:tag` or `id@<build id>`, resolved to one
+  registered build at creation and kept for the sandbox's life; an unknown one is still
+  `400 unknown_template`. The `Sandbox` schema adds `buildId` and `templateManifestHash` (null for an
+  imported build, which names no snapshot).
+- New error code `template_not_found` (404): an unknown template or build, or a `private` template
+  the caller does not own.
+- `SH_PROVENANCE_DIR` keeps the templates in a store on a persistent volume, with the provenance
+  records ([#730](https://github.com/rossoctl/moca/issues/730)): `SH_SANDBOX_TEMPLATES` is imported
+  into an empty store once and ignored after that. Unset, templates come from the env list at every
+  start, as before.
+
 ## 1.3.0
 
 Async turns: the owner-scoped submission API
