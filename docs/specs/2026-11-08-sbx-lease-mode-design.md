@@ -344,8 +344,8 @@ event for each sandbox until a client has seen it.
   one `analyze.py` (pandas frames and a KMeans fit that the guest had already freed), so measured charge
   came out equal to the full charge on the workload this mode targets. Reported pages leave
   `memory.current`, so the measured charge above follows the working set. Free page _hinting_ and a
-  deflate-on-OOM policy are not needed. Firecracker and both guest kernels support it (§16 item 5); one
-  restore test remains before plan 3.
+  deflate-on-OOM policy are not needed. Firecracker and both guest kernels support it, and a restored VM
+  returned 650 of 734 MiB within 15 s in a test (§16 item 5).
 - **Page-cache headroom in the lease cgroup (v0.2).** Each VM's cgroup has `memory.max` =
   `PerVMBytes` (guest RAM + VMM overhead, `remote-worker/internal/vmpool/cgroup.go` `writeMemoryMax`).
   Host page cache for a VM's own disk reads is charged to that cgroup. A lease VM whose guest is full
@@ -653,10 +653,22 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
      reported range then drops its private copy and falls back to the shared memory file. The host gets
      the memory back, and the free page's contents are of no concern to the guest (no page poisoning:
      `CONFIG_INIT_ON_FREE_DEFAULT_ON` is not set).
-   - **Open:** Firecracker's documentation does not say whether a restored balloon keeps reporting. One
-     empirical test settles it before plan 3: build a snapshot with the balloon, restore it with the
-     `File` backend, allocate and free about 600 MiB in the guest, and check that the VM's
-     `memory.current` falls back.
+   - **Restored VMs keep reporting (tested 2026-11-12, E15 rig).** A test snapshot was built with
+     `PUT /balloon {"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}` before
+     `InstanceStart` (one added line in `build-snapshot.sh`). It was restored by the worker with the
+     `File` backend, beside a control snapshot without the balloon. In each, a guest process touched
+     700 MiB and exited, and the VM cgroup's `memory.current` was read:
+
+     | After the process exited | Control (no balloon) | Free-page reporting |
+     | ------------------------ | -------------------- | ------------------- |
+     | before the allocation    | 13 MiB               | 13 MiB              |
+     | at exit                  | 734 MiB              | 734 MiB             |
+     | +5 s                     | 734 MiB              | 227 MiB             |
+     | +15 s, +30 s, +60 s      | 734 MiB              | 81 MiB              |
+
+     The guest saw the balloon (`virtio_balloon` bound, `page_reporting_order` 9, that is 2 MiB
+     blocks). Both guests showed about 890 MB free afterwards, so only the host side differed. Nothing
+     is open for plan 3 here, apart from the one-snapshot-or-two choice above.
 6. **Level 2 is the latency case, and E17 does not measure it (v0.2).** E17a shows what a warm guest
    saves without process state: VM start and interpreter start-up, not the work. The large saving is a
    process that keeps its state: an interpreter with the stack imported and the dataset loaded, a
