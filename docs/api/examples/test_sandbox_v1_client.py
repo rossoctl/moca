@@ -7,8 +7,10 @@ import base64
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -17,7 +19,7 @@ import grpc
 
 import sbx
 from sandbox.v1 import sandbox_pb2
-from sandbox_v1_client import Sandbox, SandboxBusy, SandboxError, TokenExpiredDuringExec, TokenSource
+from sandbox_v1_client import RefusedAtCapacity, Sandbox, SandboxBusy, SandboxError, TokenExpiredDuringExec, TokenSource
 
 
 def jwt(exp: int, iat: int | None = None) -> str:
@@ -426,8 +428,10 @@ class SbxCliTest(unittest.TestCase):
         self.assertEqual(code, 124)
         self.assertIn("timed out", err)
 
-    def test_a_busy_sandbox_exits_125_saying_so(self):
-        code, err = self.run_sbx([FakeRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED, "sandbox busy: 2 Execs already in flight")])
+    def test_a_busy_sandbox_with_retries_off_exits_125_saying_so(self):
+        # SBX_BUSY_RETRY_S=0: the behaviour without the retry.
+        with mock.patch.dict("os.environ", {"SBX_BUSY_RETRY_S": "0"}):
+            code, err = self.run_sbx([FakeRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED, "sandbox busy: 2 Execs already in flight")])
         self.assertEqual(code, 125)
         self.assertIn("sandbox busy", err)
 
@@ -450,6 +454,104 @@ class SbxCliTest(unittest.TestCase):
     def test_a_machinery_failure_exits_125(self):
         code, _ = self.run_sbx([FakeRpcError(grpc.StatusCode.UNKNOWN, "no live worker for sandbox 'sbx_py312'")])
         self.assertEqual(code, 125)
+
+
+BUDGET = "memory-budget: promoting a standby would re-price it from 33554432 to 4328521728 committed bytes"
+
+
+class RefusalTest(unittest.TestCase):
+    def test_a_worker_refusal_before_any_output_is_refused_at_capacity(self):
+        for msg, cls in ((BUDGET, "memory_budget"), ("max-runs: 64", "max_runs"), ("busy: queue full", "queue_full")):
+            stub = FakeStub([error(msg), FakeRpcError(grpc.StatusCode.UNKNOWN, msg)])
+            with self.assertRaises(RefusedAtCapacity) as e:
+                sandbox(stub, fresh_tokens()).exec("true")
+            self.assertEqual((e.exception.refused, e.exception.reason), (cls, msg))
+
+    def test_the_relay_busy_is_refused_at_capacity_too(self):
+        stub = FakeStub([FakeRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED, "sandbox busy: 2")])
+        with self.assertRaises(SandboxBusy) as e:
+            sandbox(stub, fresh_tokens()).exec("true")
+        self.assertEqual(e.exception.refused, "relay_busy")
+
+    def test_a_refusal_after_output_is_a_machinery_failure(self):
+        stub = FakeStub([chunk(b"x"), error(BUDGET), FakeRpcError(grpc.StatusCode.UNKNOWN, BUDGET)])
+        with self.assertRaises(SandboxError) as e:
+            sandbox(stub, fresh_tokens()).exec("true")
+        self.assertNotIsInstance(e.exception, RefusedAtCapacity)
+
+    def test_resource_exhausted_that_is_not_sandbox_busy_is_a_machinery_failure(self):
+        stub = FakeStub([FakeRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED, "grpc: received message larger than max")])
+        with self.assertRaises(SandboxError) as e:
+            sandbox(stub, fresh_tokens()).exec("true")
+        self.assertNotIsInstance(e.exception, RefusedAtCapacity)
+
+
+class SbxRetryTest(unittest.TestCase):
+    def run_sbx(self, scripts, env=None, sleep=None):
+        stub = FakeStub(*scripts)
+        slept = []
+        out, err = io.TextIOWrapper(io.BytesIO()), io.TextIOWrapper(io.BytesIO())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "calls.jsonl")
+        with mock.patch.object(sbx, "sandbox", lambda: sandbox(stub, fresh_tokens())), \
+                mock.patch.object(sbx, "jitter", lambda d: d), \
+                mock.patch.dict("os.environ", {"SBX_LOG": path, **(env or {})}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sbx.run("cmd", sleep=sleep or slept.append)
+        err.flush()
+        with open(path) as f:
+            recs = [json.loads(line) for line in f]
+        return code, err.buffer.getvalue().decode(), slept, stub, recs
+
+    def test_refused_then_ok_retries_with_a_new_req_id(self):
+        code, err, slept, stub, recs = self.run_sbx(
+            [[error(BUDGET), FakeRpcError(grpc.StatusCode.UNKNOWN, BUDGET)],
+             [FakeRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED, "sandbox busy: 2")],
+             [end(0)]])
+        self.assertEqual(code, 0)
+        self.assertEqual(slept, [1.0, 2.0])
+        ids = [c[0].exec.req_id for c in stub.calls]
+        self.assertEqual(len(set(ids)), 3)
+        self.assertIn("memory_budget: nothing ran; retrying", err)
+        self.assertEqual([r.get("refused") for r in recs], ["memory_budget", "relay_busy", None])
+        self.assertNotIn("busy_wait_ms", recs[0])
+        self.assertEqual((recs[-1]["exit"], recs[-1]["busy_wait_ms"], recs[-1]["attempt"]), (0, 3000, 3))
+
+    def test_refusals_exhaust_the_budget_and_exit_75(self):
+        code, err, slept, stub, recs = self.run_sbx([[error(BUDGET), FakeRpcError(grpc.StatusCode.UNKNOWN, BUDGET)]] * 8)
+        self.assertEqual(code, 75)
+        self.assertEqual(sum(slept), 30.0)
+        self.assertEqual(len(stub.calls), len(slept) + 1)
+        self.assertIn("gave up after 7 attempts / 30s", err)
+        self.assertEqual((recs[-1]["exit"], recs[-1]["busy_wait_ms"], recs[-1]["refused"]), (75, 30000, "memory_budget"))
+
+    def test_retries_off_is_the_old_behaviour_exit_125(self):
+        code, _, slept, stub, _ = self.run_sbx([[error(BUDGET), FakeRpcError(grpc.StatusCode.UNKNOWN, BUDGET)]],
+                                               env={"SBX_BUSY_RETRY_S": "0"})
+        self.assertEqual((code, slept, len(stub.calls)), (125, [], 1))
+
+    def test_a_failure_that_may_have_run_is_never_retried(self):
+        code, _, slept, stub, _ = self.run_sbx([[chunk(b"x"), error(BUDGET), FakeRpcError(grpc.StatusCode.UNKNOWN, BUDGET)]])
+        self.assertEqual((code, slept, len(stub.calls)), (125, [], 1))
+
+    def test_an_interrupt_during_the_wait_exits_130(self):
+        def interrupt(_):
+            raise KeyboardInterrupt
+        code, err, _, stub, recs = self.run_sbx([[error("busy: queue full"), FakeRpcError(grpc.StatusCode.UNKNOWN, "busy: queue full")]],
+                                                sleep=interrupt)
+        self.assertEqual((code, len(stub.calls)), (130, 1))
+        self.assertIn("interrupted while waiting to retry", err)
+        self.assertEqual(recs[-1]["exit"], 130)
+
+    def test_a_bad_budget_is_refused(self):
+        stub = FakeStub([end(0)])
+        err = io.StringIO()
+        with mock.patch.object(sbx, "sandbox", lambda: sandbox(stub, fresh_tokens())), \
+                mock.patch.dict("os.environ", {"SBX_BUSY_RETRY_S": "-1"}), contextlib.redirect_stderr(err):
+            self.assertEqual(sbx.run("cmd"), 2)
+        self.assertIn("SBX_BUSY_RETRY_S", err.getvalue())
+        self.assertEqual(stub.calls, [])
 
 
 if __name__ == "__main__":

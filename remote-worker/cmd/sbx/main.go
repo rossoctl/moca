@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -69,7 +70,10 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// does, so an interrupted agent leaves no command running in the VM.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// cur is the req_id of the Exec in flight: a retry after a refusal at capacity takes a new one (call).
+	var cur atomic.Uint64
 	id := reqID()
+	cur.Store(id)
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -77,10 +81,10 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer acancel()
 			actx = metadata.AppendToOutgoingContext(actx, "authorization", "Bearer "+cfg.token)
-			_, _ = client.Abort(actx, &pb.AbortRequest{SandboxId: cfg.sandboxID, ReqId: id})
+			_, _ = client.Abort(actx, &pb.AbortRequest{SandboxId: cfg.sandboxID, ReqId: cur.Load()})
 			cancel()
 		}
 	}()
 	defer signal.Stop(sigs)
-	return callID(ctx, client, cfg, id, op, command, data, stdout, stderr, time.Now)
+	return call(ctx, client, cfg, id, op, command, data, stdout, stderr, callEnv{now: time.Now, sleep: sleepCtx, newID: reqID, jitter: jitterOf, cur: &cur})
 }
