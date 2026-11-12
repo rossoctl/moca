@@ -1,0 +1,418 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+)
+
+const usage = `sbx: a command-line client for one sandbox/v1 workspace (the Go twin of docs/api/examples/sbx.py).
+
+Meant for a coding agent whose shell tool is restricted to ` + "`sbx ...`" + `: every command runs in a fresh
+microVM over the workspace, and nothing runs on the local machine. See docs/api/sandbox-v1-direct-client.md.
+
+    sbx run [COMMAND...]      run COMMAND (or, with no arguments, the script on stdin) in /workspace
+    sbx put PATH              write stdin to PATH in the workspace (parent directories created)
+    sbx pull                  print every change since the baseline commit as a git patch
+
+Environment: SBX_ADDR, SBX_SANDBOX_ID, SBX_WORKSPACE_KEY, and SBX_TOKEN or SBX_TOKEN_FILE.
+Optional: SBX_TIMEOUT (seconds per command, default 600; as in sbx.py, cut to what a JWT token has left before its
+exp, less 60 s, so the command times out before the relay cancels it at exp), SBX_LOG (append one JSON line per call),
+SBX_DIAL_ADDR (ip:port to connect to instead of looking up SBX_ADDR's host: the caller resolved it once; TLS still
+verifies, and requests still name, SBX_ADDR's host),
+SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (with SBX_TLS: an extra CA, PEM,
+added to the system roots, e.g. a sandbox token grant's execCa).
+` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed
+(or that the command outlived its token), 128 + n that signal n killed it.
+Unlike sbx.py, this client dials plaintext unless SBX_TLS=1, and reads no SBX_TOKEN_CMD (so the exports of
+` + "`mocactl sbx env`" + ` are not enough: give SBX_TOKEN or SBX_TOKEN_FILE).
+There is no ` + "`sbx push`" + `: this client is for a workspace seeded on the server side.
+`
+
+// pull is sbx.py's PULL, byte for byte, so a patch collected either way is the same diff.
+const pull = "cd /workspace && git add -A -N . && git diff --binary HEAD"
+
+// config is everything a call needs besides the command; read once from the environment.
+type config struct {
+	addr, sandboxID, key, token string
+	timeoutS                    uint32
+	logPath                     string
+	// tls dials the exec endpoint over TLS (SBX_TLS=1), as SBX0's exec Route is; caPEM is an EXTRA root
+	// (SBX_CA_FILE: the token grant's execCa, when the Route's certificate is self-issued), added to the
+	// system roots, never replacing them -- as sandbox-client's caBundle does.
+	tls   bool
+	caPEM []byte
+	// dialAddr (SBX_DIAL_ADDR), when set, is an ip:port the caller resolved SBX_ADDR's host to once, so a run of
+	// many calls does not look the name up per call (behind a slow resolver, a lookup per call cost about 20 s)
+	dialAddr string
+}
+
+func configFrom(getenv func(string) string, readFile func(string) ([]byte, error)) (config, error) {
+	c := config{
+		addr:      getenv("SBX_ADDR"),
+		sandboxID: getenv("SBX_SANDBOX_ID"),
+		key:       getenv("SBX_WORKSPACE_KEY"),
+		token:     getenv("SBX_TOKEN"),
+		logPath:   getenv("SBX_LOG"),
+		timeoutS:  600,
+	}
+	for name, v := range map[string]string{"SBX_ADDR": c.addr, "SBX_SANDBOX_ID": c.sandboxID, "SBX_WORKSPACE_KEY": c.key} {
+		if v == "" {
+			return c, fmt.Errorf("%s is not set", name)
+		}
+	}
+	if c.token == "" {
+		path := getenv("SBX_TOKEN_FILE")
+		if path == "" {
+			return c, errors.New("neither SBX_TOKEN nor SBX_TOKEN_FILE is set")
+		}
+		b, err := readFile(path)
+		if err != nil {
+			return c, fmt.Errorf("reading SBX_TOKEN_FILE: %w", err)
+		}
+		c.token = strings.TrimSpace(string(b))
+	}
+	switch v := getenv("SBX_TLS"); v {
+	case "", "0":
+	case "1":
+		c.tls = true
+	default:
+		return c, fmt.Errorf("SBX_TLS must be 1 or 0, got %q", v)
+	}
+	if path := getenv("SBX_CA_FILE"); path != "" {
+		if !c.tls {
+			return c, errors.New("SBX_CA_FILE is set but SBX_TLS is not 1")
+		}
+		b, err := readFile(path)
+		if err != nil {
+			return c, fmt.Errorf("reading SBX_CA_FILE: %w", err)
+		}
+		if !x509.NewCertPool().AppendCertsFromPEM(b) {
+			return c, errors.New("SBX_CA_FILE holds no PEM certificate")
+		}
+		c.caPEM = b
+	}
+	if a := getenv("SBX_DIAL_ADDR"); a != "" {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil || net.ParseIP(host) == nil || port == "" {
+			return c, fmt.Errorf("SBX_DIAL_ADDR must be ip:port, got %q", a)
+		}
+		c.dialAddr = a
+	}
+	if s := getenv("SBX_TIMEOUT"); s != "" {
+		// ParseUint takes the whole string: Sscanf's %d would read "1e3" as 1 and "10s" as 10.
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil || n == 0 {
+			return c, fmt.Errorf("SBX_TIMEOUT must be a whole number of seconds from 1 to %d, got %q", uint32(1<<32-1), s)
+		}
+		c.timeoutS = uint32(n)
+	}
+	return c, nil
+}
+
+// reqID is random and below 2^53: the proto says uint64, but the relay decodes it as a
+// JavaScript number and refuses anything larger (sandbox_v1_client.py, EXPERIMENTS §6.2).
+func reqID() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	return binary.LittleEndian.Uint64(b[:]) & (1<<53 - 1)
+}
+
+// result is one finished Exec, buffered like the Python client's: nothing is written until End.
+type result struct {
+	stdout, stderr []byte
+	exitCode       int32
+	truncated      bool
+	timedOut       bool // the command ran out of SBX_TIMEOUT: the worker's in-stream ExecError "timeout:<n>"
+}
+
+// timeoutMessage is the worker's whole ExecError text for a command that ran out of its timeout,
+// as sbx.py's TIMEOUT_MESSAGE.fullmatch checks it; any other ExecError is a sandbox failure.
+var timeoutMessage = regexp.MustCompile(`^timeout:\d+$`)
+
+// execOnce runs one command. An error is the machinery failing (VM boot, worker gone, a timeout,
+// a refused token), never the command's own exit status, which comes back in result.
+func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, command string, stdin []byte) (result, error) {
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+cfg.token)
+	stream, err := c.Exec(ctx, &pb.ExecRequest{
+		SandboxId: cfg.sandboxID,
+		Exec: &pb.Exec{
+			ReqId:        id,
+			Command:      command,
+			Stdin:        stdin,
+			TimeoutS:     cfg.timeoutS,
+			Streaming:    true,
+			WorkspaceKey: cfg.key,
+		},
+	})
+	if err != nil {
+		return result{}, rpcErr(err)
+	}
+	var r result
+	for {
+		ev, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return result{}, errors.New("exec failed: the stream ended without an End event")
+		}
+		if err != nil {
+			return result{}, rpcErr(err)
+		}
+		switch {
+		case ev.GetChunk() != nil:
+			ch := ev.GetChunk()
+			if ch.GetStream() == pb.Stream_STREAM_STDERR {
+				r.stderr = append(r.stderr, ch.GetData()...)
+			} else {
+				r.stdout = append(r.stdout, ch.GetData()...)
+			}
+		case ev.GetEnd() != nil:
+			r.exitCode, r.truncated = ev.GetEnd().GetExitCode(), ev.GetEnd().GetTruncated()
+			return r, nil
+		case ev.GetError() != nil:
+			if timeoutMessage.MatchString(ev.GetError().GetMessage()) {
+				r.timedOut = true // the output so far is kept and written, as sbx.py does
+				return r, nil
+			}
+			return result{}, fmt.Errorf("exec failed: %s", ev.GetError().GetMessage())
+		}
+	}
+}
+
+func rpcErr(err error) error {
+	if s, ok := status.FromError(err); ok {
+		if s.Code() == codes.DeadlineExceeded && tokenExpiry(s.Message()) {
+			// The relay cancels an Exec at its token's exp: name that case, in sbx.py's words.
+			msg := s.Message()
+			if msg == "" {
+				msg = "sandbox token expired during the Exec"
+			}
+			return fmt.Errorf("%s: the command outlived its token and was cancelled; give it a shorter timeout", msg)
+		}
+		return fmt.Errorf("exec failed: %s: %s", upperSnake(s.Code().String()), s.Message())
+	}
+	return fmt.Errorf("exec failed: %v", err)
+}
+
+// tokenExpiry says a DEADLINE_EXCEEDED is the relay cancelling the Exec at its token's exp ("sandbox token expired
+// during the Exec"); the client sets no deadline of its own, so an empty message is taken as that case too, as sbx.py does.
+func tokenExpiry(msg string) bool {
+	m := strings.ToLower(msg)
+	return m == "" || (strings.Contains(m, "token") && strings.Contains(m, "expir"))
+}
+
+// marginS is sbx.py's MARGIN_S: an Exec's timeout leaves this much of the token's life spare, so the worker's
+// own timeout fires before the relay cancels the Exec at the token's exp.
+const marginS = 60
+
+// tokenTimes is the token's (iat, exp), read without verifying, as sandbox_v1_client.py's _times_of: the relay
+// verifies, the client only schedules. (0, 0) when the token is not a JWT or has no exp.
+func tokenTimes(token string) (iat, exp int64) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0, 0
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return 0, 0
+	}
+	var claims struct {
+		Iat *float64 `json:"iat"`
+		Exp *float64 `json:"exp"`
+	}
+	if json.Unmarshal(b, &claims) != nil || claims.Exp == nil {
+		return 0, 0
+	}
+	if claims.Iat != nil {
+		iat = int64(*claims.Iat)
+	}
+	return iat, int64(*claims.Exp)
+}
+
+// capTimeout is sbx.py's rule for a static token (Sandbox._prepare): the requested timeout is cut to the token's
+// lifetime (exp - iat) less 60 s, and then to what it has left at now (exp - now, rounded up) less 60 s, never
+// below 1 s; capped says it was cut. A token whose exp cannot be read is not capped.
+func capTimeout(token string, requested uint32, now time.Time) (timeout uint32, capped bool) {
+	iat, exp := tokenTimes(token)
+	t := int64(requested)
+	if iat > 0 && exp > iat {
+		if limit := max(1, exp-iat-marginS); t > limit {
+			t, capped = limit, true
+		}
+	}
+	if exp != 0 {
+		left := float64(exp) - float64(now.UnixNano())/1e9
+		if float64(t+marginS) > left {
+			// ceil: a token minted this instant keeps its full cap
+			if cut := max(1, int64(math.Ceil(left))-marginS); cut < t {
+				t, capped = cut, true
+			}
+		}
+	}
+	return uint32(t), capped
+}
+
+// upperSnake spells a gRPC code the way grpcio's Python enum names it (PermissionDenied ->
+// PERMISSION_DENIED), so the two clients' failure messages read the same.
+func upperSnake(name string) string {
+	var b strings.Builder
+	for i, r := range name {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			b.WriteByte('_')
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToUpper(b.String())
+}
+
+// call runs one command and turns its outcome into the process's exit code, writing output and
+// the SBX_LOG line the way sbx.py does: the timeout is capped to the token first (capTimeout), with a
+// line on stderr when it was; 124 for a timeout (the output so far is written), 125 for any other
+// sandbox failure, 128 + n for a command killed by signal n (exit code -n), else the
+// command's own code.
+func callID(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op, command string, stdin []byte, stdout, stderr io.Writer, now func() time.Time) int {
+	started := now()
+	var capped bool
+	cfg.timeoutS, capped = capTimeout(cfg.token, cfg.timeoutS, started)
+	r, err := execOnce(ctx, c, cfg, id, command, stdin)
+	var code int
+	if err != nil {
+		code = 125
+		fmt.Fprintf(stderr, "sbx: %s\n", err.Error())
+	} else {
+		_, _ = stdout.Write(r.stdout)
+		_, _ = stderr.Write(r.stderr)
+		if capped {
+			fmt.Fprintf(stderr, "sbx: timeout capped at %d s, the sandbox token's lifetime minus 60 s\n", cfg.timeoutS)
+		}
+		if r.truncated {
+			fmt.Fprintln(stderr, "sbx: stdout exceeded 8 MiB and was cut")
+		}
+		switch {
+		case r.timedOut:
+			code = 124
+			fmt.Fprintf(stderr, "sbx: command timed out after %d s\n", cfg.timeoutS)
+		case r.exitCode < 0:
+			code = 128 - int(r.exitCode) // killed by signal n: 128 + n, as sbx.py
+		default:
+			code = int(r.exitCode)
+		}
+	}
+	logCall(cfg.logPath, op, started, now(), code)
+	return code
+}
+
+// logCall appends sbx.py's SBX_LOG record, {t, op, ms, exit}, with t in epoch seconds at the end.
+func logCall(path, op string, started, ended time.Time, code int) {
+	if path == "" {
+		return
+	}
+	line, _ := json.Marshal(struct {
+		T    float64 `json:"t"`
+		Op   string  `json:"op"`
+		Ms   int64   `json:"ms"`
+		Exit int     `json:"exit"`
+	}{float64(ended.UnixNano()) / 1e9, op, ended.Sub(started).Round(time.Millisecond).Milliseconds(), code})
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
+}
+
+// quote is sbx.py's single-quote shell quoting.
+func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// stdin modes: `sbx run` with no arguments runs stdin as the script; `sbx put` sends stdin as the
+// file's bytes; everything else reads no stdin.
+const (
+	noStdin = iota
+	stdinIsScript
+	stdinIsData
+)
+
+// parse maps argv to (op, command, stdin mode), or an exit code when there is nothing to run:
+// the help text exits 0 for -h and 2 without arguments, as sbx.py's does.
+func parse(args []string) (op, command string, mode int, exit int, ok bool) {
+	if len(args) == 0 {
+		return "", "", noStdin, 2, false
+	}
+	switch cmd, rest := args[0], args[1:]; {
+	case cmd == "-h" || cmd == "--help":
+		return "", "", noStdin, 0, false
+	case cmd == "run" && len(rest) == 0:
+		return "run", "", stdinIsScript, 0, true
+	case cmd == "run":
+		return "run", strings.Join(rest, " "), noStdin, 0, true
+	case cmd == "put" && len(rest) == 1:
+		q := quote(rest[0])
+		return "put", fmt.Sprintf(`mkdir -p "$(dirname -- %s)" && cat > %s`, q, q), stdinIsData, 0, true
+	case cmd == "pull" && len(rest) == 0:
+		return "pull", pull, noStdin, 0, true
+	}
+	return "", "", noStdin, 2, false
+}
+
+// dial keeps the Python client's 16 MiB receive limit; the worker cuts stdout at 8 MiB. Plaintext unless the
+// config asks for TLS (SBX0's exec Route); with TLS, the server is verified against the system roots plus the
+// config's extra CA, and its name against the address's host. With a dial address the connection goes to that
+// ip:port with no lookup, while the TLS server name and the :authority stay SBX_ADDR's.
+func dial(c config) (*grpc.ClientConn, error) {
+	creds, err := transportCreds(c)
+	if err != nil {
+		return nil, err
+	}
+	opts := append(grpcOpts(), grpc.WithTransportCredentials(creds))
+	if c.dialAddr == "" {
+		return grpc.NewClient(c.addr, opts...)
+	}
+	// grpc-go refuses an authority that differs from the TLS server name, which is the host without its port
+	return grpc.NewClient("passthrough:///"+c.dialAddr, append(opts, grpc.WithAuthority(serverName(c.addr)))...)
+}
+
+// serverName is the address's host, the name a TLS server certificate is verified against.
+func serverName(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+func transportCreds(c config) (credentials.TransportCredentials, error) {
+	if !c.tls {
+		return insecure.NewCredentials(), nil
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool() // no system pool on this platform: the extra CA alone, still verified
+	}
+	if len(c.caPEM) > 0 && !roots.AppendCertsFromPEM(c.caPEM) {
+		return nil, errors.New("SBX_CA_FILE holds no PEM certificate")
+	}
+	return credentials.NewTLS(&tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12, ServerName: serverName(c.addr)}), nil
+}
