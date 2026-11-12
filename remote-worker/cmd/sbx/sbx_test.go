@@ -233,3 +233,25 @@ func TestConfig(t *testing.T) {
 		t.Fatal("unreadable token file: want an error")
 	}
 }
+
+func TestTimeoutFromEnv(t *testing.T) {
+	env := map[string]string{"SBX_ADDR": "a", "SBX_SANDBOX_ID": "s", "SBX_WORKSPACE_KEY": "k", "SBX_TOKEN": "t"}
+	getenv := func(k string) string { return env[k] }
+	for _, good := range []struct {
+		s    string
+		want uint32
+	}{{"", 600}, {"1", 1}, {"1800", 1800}, {"4294967295", 1<<32 - 1}} {
+		env["SBX_TIMEOUT"] = good.s
+		cfg, err := configFrom(getenv, os.ReadFile)
+		if err != nil || cfg.timeoutS != good.want {
+			t.Errorf("SBX_TIMEOUT=%q: timeoutS=%d err=%v, want %d", good.s, cfg.timeoutS, err, good.want)
+		}
+	}
+	// Each of these once parsed as a number: "1e3" as 1, "10s" as 10, " 5" as 5.
+	for _, bad := range []string{"0", "-1", "+5", "1e3", "10s", "1.5", " 5", "5 ", "abc", "4294967296"} {
+		env["SBX_TIMEOUT"] = bad
+		if _, err := configFrom(getenv, os.ReadFile); err == nil || !strings.Contains(err.Error(), "SBX_TIMEOUT") {
+			t.Errorf("SBX_TIMEOUT=%q: err=%v, want a refusal naming SBX_TIMEOUT", bad, err)
+		}
+	}
+}

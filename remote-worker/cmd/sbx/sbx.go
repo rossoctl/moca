@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,11 +119,12 @@ func configFrom(getenv func(string) string, readFile func(string) ([]byte, error
 		c.dialAddr = a
 	}
 	if s := getenv("SBX_TIMEOUT"); s != "" {
-		var n uint32
-		if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n == 0 {
-			return c, fmt.Errorf("SBX_TIMEOUT must be a positive integer, got %q", s)
+		// ParseUint takes the whole string: Sscanf's %d would read "1e3" as 1 and "10s" as 10.
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil || n == 0 {
+			return c, fmt.Errorf("SBX_TIMEOUT must be a whole number of seconds from 1 to %d, got %q", uint32(1<<32-1), s)
 		}
-		c.timeoutS = n
+		c.timeoutS = uint32(n)
 	}
 	return c, nil
 }
