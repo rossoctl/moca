@@ -1,7 +1,7 @@
 import { CpError } from './errors.js';
 import { asRecord, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import { recordDigest } from './provenance.js';
+import { buildRecordOf, recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
 import { liveLeases, place, type HostView } from './activation.js';
 import { isLive } from './sandbox-store.js';
@@ -22,9 +22,11 @@ import { isLive } from './sandbox-store.js';
  * policy (§8.2) and registers or rejects the build, automatically, with a `check` record.
  *
  *   GET  /v1/hosts/{host}/wanted             the builds this host should run (leased and placed on
- *                                            it), and those it holds that it should stop (no lease
- *                                            left, no live sandbox)
- *   POST /v1/hosts/{host}/workers/report     {buildId, event: attached | refused | detached, reason?}
+ *                                            it), those it holds that it should stop (no lease
+ *                                            left, no live sandbox), and the retired ones it should
+ *                                            remove (worker and snapshot, no live sandbox)
+ *   POST /v1/hosts/{host}/workers/report     {buildId, event: attached | refused | detached |
+ *                                            removed, reason?}
  *
  * Readiness itself is never taken from a report: `active` is the relay's attached record (§3.3).
  * The worker reports are provenance: who ran what, where, when.
@@ -202,8 +204,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
    * live lease, and the retired ones it holds (§5.1: no longer wanted, never run again). A worker
-   * is never stopped under a live sandbox: it drains first, so a build with one is in neither list.
-   * Removing a retired build's worker and snapshot from the host is not asked here.
+   * is never stopped under a live sandbox: it drains first, so a build with one is in no list.
+   * `remove` (§6.1 step 7): the retired builds it holds with no live sandbox, listed in `stop` too,
+   * so the agent stops a running worker before it uninstalls it and deletes the snapshot.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -218,13 +221,18 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     }
     const run: Record<string, unknown>[] = [];
     const stop: Record<string, unknown>[] = [];
+    const remove: Record<string, unknown>[] = [];
     for (const d of docs) {
       for (const b of d.builds) {
         if (!mine || mine.holds[b.buildId] === undefined) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
-        // A retired build has no lease and is never placed: its worker stops once it is idle.
+        // A retired build has no lease and is never placed: once its worker is idle it is stopped,
+        // then removed from the host with its snapshot. Never one with a live sandbox.
         if (b.status === 'retired') {
-          if (b.worker && !busy.has(b.worker)) stop.push(entry);
+          if (b.worker && !busy.has(b.worker)) {
+            stop.push(entry);
+            remove.push(entry);
+          }
           continue;
         }
         if (b.status !== 'registered') continue;
@@ -232,45 +240,71 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) stop.push(entry);
       }
     }
-    return { status: 200, body: { run, stop } };
+    return { status: 200, body: { run, stop, remove } };
   },
 
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
    * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
-   * `deactivate` record by the host. Readiness still comes from the relay.
+   * `deactivate` record by the host. Or a retired build's worker and snapshot removed from the host
+   * (`removed`, §6.1 step 7): a `retire` record by the host citing the build record, and the host no
+   * longer holds it (its `heldBy` drops the host at once; the next inventory says the same).
+   * Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
     const { cat, prov } = catalogOf(deps);
     const b = asRecord(ctx.body);
     const event = b.event;
-    if (event !== 'attached' && event !== 'refused' && event !== 'detached') {
-      throw new CpError('invalid_request', 'event must be attached, refused or detached');
+    if (
+      event !== 'attached' &&
+      event !== 'refused' &&
+      event !== 'detached' &&
+      event !== 'removed'
+    ) {
+      throw new CpError('invalid_request', 'event must be attached, refused, detached or removed');
     }
     const buildId = typeof b.buildId === 'string' ? b.buildId : '';
-    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too.
+    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too; `removed` is
+    // taken for a retired build only.
     const ok = (x: { status: string }) =>
-      x.status === 'registered' || (event === 'detached' && x.status === 'retired');
+      event === 'removed'
+        ? x.status === 'retired'
+        : x.status === 'registered' || (event === 'detached' && x.status === 'retired');
     const doc = (await cat.list()).find((d) =>
       d.builds.some((x) => x.buildId === buildId && ok(x)),
     );
-    if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
+    const mine = deps.hosts?.get(host);
+    if (!doc || mine?.holds[buildId] === undefined) {
       throw new CpError(
         'not_found',
-        event === 'detached'
-          ? 'no registered or retired build this host holds'
-          : 'no registered build this host holds',
+        event === 'removed'
+          ? 'no retired build this host holds'
+          : event === 'detached'
+            ? 'no registered or retired build this host holds'
+            : 'no registered build this host holds',
       );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
     await prov.append({
       stream: `template/${doc.id}`,
-      kind: event === 'detached' ? 'deactivate' : 'activate',
+      kind: event === 'removed' ? 'retire' : event === 'detached' ? 'deactivate' : 'activate',
       subject: `host:${host}`,
-      body: { buildId, event, ...(reason ? { reason } : {}) },
+      body: {
+        buildId,
+        event,
+        ...(event === 'removed' ? { buildRecord: await buildRecordOf(prov, doc.id, buildId) } : {}),
+        ...(reason ? { reason } : {}),
+      },
     });
+    // The snapshot is gone from the host: it no longer holds the build, so `heldBy` drops it now
+    // rather than at the agent's next inventory.
+    if (event === 'removed') {
+      const holds = { ...mine!.holds };
+      delete holds[buildId];
+      deps.hosts!.set(host, { ...mine!, holds });
+    }
     return { status: 200, body: { recorded: event } };
   },
 

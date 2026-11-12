@@ -3,6 +3,22 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.9.0
+
+The host agent removes a retired build's worker and snapshot
+([#743](https://github.com/rossoctl/moca/issues/743)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 step 7.
+Every change is additive.
+
+- GET /v1/hosts/{host}/wanted gains `remove`: the retired builds the host holds with no live sandbox
+  on their worker, each also in `stop`. The agent stops a running worker, then uninstalls it
+  (`install-host.sh --uninstall`), deletes the snapshot and its template record, and reports it. A
+  worker with a live sandbox is in no list.
+- POST /v1/hosts/{host}/workers/report takes `removed` for a retired build the host holds: a `retire`
+  record by `host:<id>` with `event: removed` and `buildRecord` (the digest of the build's `build`
+  record). The host no longer holds the build, so TemplateBuild's `heldBy` drops it at once, before
+  the host's next inventory.
+
 ## 1.8.0
 
 Retire a template, or one build of it ([#749](https://github.com/rossoctl/moca/issues/749)), per the

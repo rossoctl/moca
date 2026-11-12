@@ -733,9 +733,9 @@ describe('retire (§5.1)', () => {
     expect((await wanted(d, 'host-1')).run).toHaveLength(1);
     await retire(d, 't1');
     const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
-    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [entry] });
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [entry], remove: [entry] });
     // A host that does not hold it is told nothing about it.
-    expect(await wanted(d, 'host-2')).toEqual({ run: [], stop: [] });
+    expect(await wanted(d, 'host-2')).toEqual({ run: [], stop: [], remove: [] });
     // The stop is reported as for any worker; a start of a retired build is not taken.
     await HANDLERS.hostWorkerReport!(
       asHost('host-1', {}, { buildId: hash('1'), event: 'detached' }),
@@ -754,6 +754,69 @@ describe('retire (§5.1)', () => {
         ),
       ),
     ).toBe('not_found');
+  });
+
+  it('asks the holding host to remove a retired build, and records the removal (§6.1 step 7)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 2);
+    await inventory(d, 'host-2', {}, 2);
+    expect((await wanted(d, 'host-1')).remove).toEqual([]);
+    await retire(d, 't1');
+    const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect((await wanted(d, 'host-1')).remove).toEqual([entry]);
+    expect((await wanted(d, 'host-2')).remove).toEqual([]);
+    const held = async () =>
+      (
+        (
+          await HANDLERS.getTemplateBuild!(
+            ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+            d,
+          )
+        ).body as Body
+      ).heldBy;
+    expect(await held()).toEqual(['host-1']);
+    // `removed` for a build not retired, or one this host does not hold, is refused.
+    const removed = (host: string, buildId: string) =>
+      HANDLERS.hostWorkerReport!(asHost(host, {}, { buildId, event: 'removed' }), d);
+    expect(await refusal(() => removed('host-1', hash('2')))).toBe('not_found');
+    expect(await refusal(() => removed('host-2', hash('1')))).toBe('not_found');
+    const r = await removed('host-1', hash('1'));
+    expect((r.body as Body).recorded).toBe('removed');
+    // A `retire` record by the host, citing the build record; the build no longer held by it.
+    const chain = await d.provenance!.chain('template/t1');
+    const buildRec = chain.find((x) => x.kind === 'build' && (x.body as Body).outcome === 'built')!;
+    expect(chain.at(-1)).toMatchObject({
+      kind: 'retire',
+      subject: 'host:host-1',
+      body: { buildId: hash('1'), event: 'removed', buildRecord: recordDigestOf(buildRec) },
+    });
+    expect(await held()).toEqual([]);
+    expect((await wanted(d, 'host-1')).remove).toEqual([]);
+    // The other build this host holds is untouched; the next inventory says the same.
+    await inventory(d, 'host-1', { [hash('2')]: 't2' }, 2);
+    expect(await held()).toEqual([]);
+    expect((await wanted(d, 'host-1')).remove).toEqual([]);
+  });
+
+  it('never asks for the removal of a retired build with a live sandbox', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const sb = (await sandbox(d, 't1')).body as Body;
+    // Retired under a live sandbox, as a create racing the retire leaves it (§5.1 known limits).
+    await d.templates!.update!('t1', async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'retired' as const, leases: [] })),
+    }));
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [], remove: [] });
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [entry], remove: [entry] });
   });
 
   it("reports a retired build's capacity while its worker still runs, and null once it stops", async () => {
