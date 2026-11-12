@@ -728,7 +728,7 @@ check "its own workspace and jail roots" "$(val SH_WORKSPACE_ROOT "$TE") $(val S
   "$TPLROOT/$KEY/workspaces $TPLROOT/$KEY/jail"
 check "the same token in the worker env and the relay env" "$(val SANDBOX_TOKEN "$TE")" "$(val "SH_RELAY_TOKEN_$SID" "$TR")"
 check "a token unlike the main worker's" "$([ "$(val SANDBOX_TOKEN "$TE")" != "$(val SANDBOX_TOKEN "$TMP/etc/microvm-worker.env")" ] && echo yes)" "yes"
-check "both env files are 0600" "$(stat -f '%Lp' "$TE" 2>/dev/null || stat -c '%a' "$TE") $(stat -f '%Lp' "$TR" 2>/dev/null || stat -c '%a' "$TR")" "600 600"
+check "both env files are 0600" "$(mode "$TE") $(mode "$TR")" "600 600"
 check "the relay loads its token through its own drop-in" "$(grep -c "^EnvironmentFile=$TR$" "$TMP/units/sh-relay.service.d/51-moca-$SID.conf")" "1"
 check "the instance loads its env through its drop-in" "$(grep -c "^EnvironmentFile=$TE$" "$TMP/units/microvm-worker@$SID.service.d/50-moca-template.conf")" "1"
 check "the token is never in argv" "$(grep -c "$(val SANDBOX_TOKEN "$TE")" "$MOCK_LOG")" "0"
