@@ -108,6 +108,8 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/sandboxes/{id}/token',
     reads: ['token', 'expiresAt', 'execEndpoint', 'wrk', 'wsk', 'execCa'],
   },
+  // `mocactl sbx egress`; its --ndjson reads the same route's NDJSON body.
+  { method: 'get', path: '/v1/sandboxes/{id}/egress', reads: ['events', 'next', 'summary'] },
   // `sbx templates show` and `create --seed` (template lifecycle spec §4).
   {
     method: 'get',
@@ -300,6 +302,17 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     },
   );
 
+  it('the egress summary holds the fields sbx egress prints', () => {
+    const s = resolveSchema(openapi.components.schemas.EgressSummary);
+    for (const f of ['byHost', 'total', 'dropped', 'complete', 'sha256'])
+      expect(Object.keys(s.properties)).toContain(f);
+    const host = s.properties.byHost.additionalProperties;
+    for (const f of ['count', 'decisions', 'bytesUp', 'bytesDown'])
+      expect(Object.keys(host.properties)).toContain(f);
+    const op = openapi.paths['/v1/sandboxes/{id}/egress'].get;
+    expect(Object.keys(op.responses['200'].content)).toContain('application/x-ndjson');
+  });
+
   it('the Sandbox items and templates hold the fields ls and templates print', () => {
     const sandbox = resolveSchema(openapi.components.schemas.Sandbox);
     for (const f of SBX_SANDBOX_READS) expect(Object.keys(sandbox.properties)).toContain(f);
@@ -315,7 +328,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 12 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 14 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -324,6 +337,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.getSandbox('ID');
     await c.deleteSandbox('ID');
     await c.mintSandboxToken('ID');
+    await c.sandboxEgress('ID');
+    await c.sandboxEgressNdjson('ID');
     await c.getTemplate('TID');
     await c.getTemplateBuild('TID', 'BID');
     await c.activateTemplate('TID', {});
@@ -349,6 +364,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'getSandbox',
         'deleteSandbox',
         'mintSandboxToken',
+        'sandboxEgress',
+        'sandboxEgressNdjson',
         'getTemplate',
         'getTemplateBuild',
         'activateTemplate',

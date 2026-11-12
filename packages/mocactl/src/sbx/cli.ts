@@ -10,6 +10,7 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
 import {
   cmdCreate,
+  cmdEgress,
   cmdEnv,
   cmdLogin,
   cmdLogout,
@@ -71,6 +72,11 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  or when that cannot be checked)
   mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
+  mocactl sbx egress [ID] [--json | --ndjson | --verify]
+                                                 what the sandbox reached through its host's egress
+                                                 proxy: per host, and whether the log is complete;
+                                                 --ndjson prints the log whose sha256 its end record names;
+                                                 --verify checks the log's sha256 and count against it
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';
@@ -278,7 +284,7 @@ const NO_JSON = new Set([
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
-const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
+const TAKES_ID_ARG = new Set(['rm', 'token', 'env', 'egress']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
 const TAKES_SANDBOX_FLAG = new Set([
   'run',
@@ -359,6 +365,8 @@ export async function sbxMain(
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
         json: { type: 'boolean' },
+        ndjson: { type: 'boolean' },
+        verify: { type: 'boolean' },
         sandbox: { type: 'string' },
         timeout: { type: 'string' },
         lease: { type: 'string' },
@@ -411,6 +419,7 @@ export async function sbxMain(
     'pull',
     'doctor',
     'credentials',
+    'egress',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -424,6 +433,18 @@ export async function sbxMain(
   }
   if (values.sandbox !== undefined && !TAKES_SANDBOX_FLAG.has(command)) {
     io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if ((values.ndjson || values.verify) && command !== 'egress') {
+    io.err(`sbx: --ndjson and --verify only apply to egress\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.ndjson && values.json) {
+    io.err(`sbx: egress takes --json or --ndjson, not both\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.verify && values.ndjson) {
+    io.err(`sbx: egress takes --ndjson or --verify, not both\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   const activating = command === 'templates' && arg === 'activate';
@@ -507,8 +528,8 @@ export async function sbxMain(
     }
     maxPush = n * 2 ** 20;
   }
-  // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token
-  // and env at most one ID; every other command no argument at all.
+  // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token,
+  // env and egress at most one ID; every other command no argument at all.
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
@@ -742,6 +763,8 @@ export async function sbxMain(
       return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
     case 'token':
       return cmdToken(ctx, id!);
+    case 'egress':
+      return cmdEgress(ctx, id!, values.ndjson === true, values.verify === true);
     case 'run':
       return cmdRun(ctx, id!, script!, timeout, deps.execFactory);
     case 'put':

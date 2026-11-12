@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 // sandbox-client's POSIX single quotes: safe to `eval`, whatever the control plane sent.
@@ -332,6 +333,88 @@ export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {})
     }
     return failed(c, err);
   }
+}
+
+/**
+ * `sbx egress`: a sandbox's egress, as its KVM host's proxy logged it. Text: the
+ * summary per host, then whether the log is complete and its digest. `--json`: every event and the
+ * summary, read page by page. `--ndjson`: the log exactly as served, whose sha256 the summary and the
+ * sandbox's end record name (verify-provenance.py --egress checks a saved copy).
+ */
+export async function cmdEgress(
+  c: SbxCtx,
+  id: string,
+  ndjson: boolean,
+  verify = false,
+): Promise<number> {
+  try {
+    if (verify) return await verifyEgress(c, id);
+    if (ndjson) {
+      const body = await c.api.sandboxEgressNdjson(id);
+      if (c.io.outBytes) c.io.outBytes(Buffer.from(body, 'utf8'));
+      else c.io.out(body);
+      return SBX_EXIT.ok;
+    }
+    let page = await c.api.sandboxEgress(id, { limit: 1000 });
+    const summary = page.summary;
+    if (c.json) {
+      const events = [...page.events];
+      while (page.next !== null) {
+        page = await c.api.sandboxEgress(id, { after: page.next, limit: 1000 });
+        events.push(...page.events);
+      }
+      c.io.out(JSON.stringify({ events, summary }) + '\n');
+      return SBX_EXIT.ok;
+    }
+    const hosts = Object.entries(summary.byHost).sort(([a], [b]) => (a < b ? -1 : 1));
+    for (const [host, h] of hosts) {
+      const decisions = Object.entries(h.decisions)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([d, n]) => `${sanitizeRemote(d)} ${n}`)
+        .join(', ');
+      c.io.out(
+        `${sanitizeRemote(host || '-').padEnd(40)} ${String(h.count).padStart(6)}  ` +
+          `up ${h.bytesUp} B, down ${h.bytesDown} B  (${decisions})\n`,
+      );
+    }
+    c.io.out(
+      `${summary.total} events; ` +
+        (summary.complete ? 'complete' : `INCOMPLETE: ${summary.dropped} dropped`) +
+        `; ${sanitizeRemote(summary.sha256)}\n`,
+    );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
+ * `sbx egress ID --verify`: the log as served, its sha256 and line
+ * count checked against the summary's, which is what the sandbox's end record names (as
+ * verify-provenance.py --egress checks a saved copy against the record). Exit 0 only when both match.
+ */
+async function verifyEgress(c: SbxCtx, id: string): Promise<number> {
+  const summary = (await c.api.sandboxEgress(id, { limit: 1 })).summary;
+  const body = await c.api.sandboxEgressNdjson(id);
+  const sha256 = `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
+  const lines = body.split('\n').filter((l) => l !== '').length;
+  const ok = sha256 === summary.sha256 && lines === summary.total;
+  if (c.json)
+    c.io.out(
+      JSON.stringify({
+        verified: ok,
+        sha256,
+        lines,
+        summary: { sha256: summary.sha256, total: summary.total, complete: summary.complete },
+      }) + '\n',
+    );
+  else
+    c.io.out(
+      ok
+        ? `verified: ${lines} events, ${sanitizeRemote(sha256)}${summary.complete ? '' : `; INCOMPLETE: ${summary.dropped} dropped`}\n`
+        : `NOT verified: the log served is ${lines} events, ${sanitizeRemote(sha256)}; the summary names ${summary.total}, ${sanitizeRemote(summary.sha256)}\n`,
+    );
+  return ok ? SBX_EXIT.ok : SBX_EXIT.failed;
 }
 
 export async function cmdToken(c: SbxCtx, id: string): Promise<number> {
