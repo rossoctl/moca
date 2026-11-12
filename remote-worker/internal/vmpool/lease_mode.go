@@ -196,7 +196,7 @@ func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
 	if err != nil || !endLease {
 		return err
 	}
-	return p.endLeaseWaiting(key, LeaseEndModeChange)
+	return p.endLeaseWaiting(key, LeaseEndModeChange, true)
 }
 
 // setModeLocked is SetMode under p.mu: it stores the mode and reports whether a lease

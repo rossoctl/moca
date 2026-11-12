@@ -435,6 +435,58 @@ func TestEndingALeaseIsBoundedByTheGraceLimit(t *testing.T) {
 	}
 }
 
+// Review I1: after the grace cut, EndLease ends the lease it was called for and only that
+// one. A lease Exec queued behind the cut Exec starts a fresh lease, which EndLease leaves
+// alone, and EndLease returns at the grace limit rather than after that Exec.
+func TestEndLeaseAfterTheCutEndsOnlyThatLease(t *testing.T) {
+	logs := captureLog(t)
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	entered, release := blockRuns(lc)
+	long := Exec{Command: "long", TimeoutS: MaxExecTimeoutS, Mode: ModeLease, ModeEpoch: 1}
+	errA := execAsync(p, "k", long)
+	recvWithin(t, entered, "Exec a's Run")
+	first := vmID(leaseAlive(t, p, "during Exec a").vm)
+	errB := execAsync(p, "k", long)
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // b waits on the gate
+
+	endc := make(chan error, 1)
+	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
+	go func() { endc <- p.EndLease("k", LeaseEndReset) }()
+	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	clk.Advance(p.cfg.LeaseGraceLimit)
+
+	var le *LeaseEndedError
+	if err := recvWithin(t, errA, "the cut Exec a"); !errors.As(err, &le) || le.Reason != LeaseEndReset {
+		t.Fatalf("Exec a: %v, want lease_ended(reset)", err)
+	}
+	if err := recvWithin(t, endc, "EndLease at the grace limit"); err != nil {
+		t.Fatalf("EndLease: %v", err)
+	}
+	recvWithin(t, entered, "Exec b's Run, in a fresh lease")
+	second := leaseAlive(t, p, "while Exec b runs")
+	if vmID(second.vm) == first || !second.running {
+		t.Fatalf("live lease = %s (running %v), want b's fresh lease, not %s", vmID(second.vm), second.running, first)
+	}
+	if n := p.Stats().LeaseEnds[LeaseEndReset]; n != 1 {
+		t.Fatalf("LeaseEnds[reset] = %d, want 1", n)
+	}
+	if n := strings.Count(logs.String(), "reason=reset"); n != 1 {
+		t.Fatalf("reset audit lines = %d, want 1", n)
+	}
+
+	close(release)
+	if err := recvWithin(t, errB, "Exec b"); err != nil {
+		t.Fatalf("Exec b: %v", err)
+	}
+	if l := leaseAlive(t, p, "after Exec b"); l != second {
+		t.Fatal("Exec b's lease did not survive EndLease")
+	}
+	if n := p.Stats().LeaseEnds[LeaseEndReset]; n != 1 {
+		t.Fatalf("LeaseEnds[reset] after Exec b = %d, want 1", n)
+	}
+}
+
 // A lease Exec that passed its epoch check before a downgrade, then waited on the gate, is
 // refused stale-mode once it holds the gate: it never starts or reuses a lease under the
 // lower mode.
@@ -467,9 +519,10 @@ func TestDowngradeRefusesALeaseExecQueuedBehindIt(t *testing.T) {
 	}
 }
 
-// lease+processes -> lease keeps the lease (plan 5 stops the tracked processes).
+// lease+processes -> lease keeps the lease (plan 5 stops the tracked processes) and runs
+// it at level 1 from then on (ruling R11).
 func TestDowngradeToLeaseKeepsTheLease(t *testing.T) {
-	p, lc, _ := leasePool(t, nil)
+	p, lc, clk := leasePool(t, nil)
 	mustSetMode(t, p, "k", ModeLeaseProcesses, 1)
 	mustExec(t, p, "k", Exec{Command: "one", TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: 1})
 	vm := vmID(leaseAlive(t, p, "after the first Exec").vm)
@@ -480,6 +533,27 @@ func TestDowngradeToLeaseKeepsTheLease(t *testing.T) {
 	}
 	if ev := p.LeaseStatus("k").Pending; ev == nil || ev.State != "start" {
 		t.Fatalf("pending = %+v, want the start, no end", ev)
+	}
+	// Ruling R11: the lease now runs at level 1, on disk too, and level 1's maximum
+	// duration applies, counted from the original start.
+	if l := leaseAlive(t, p, "after the downgrade"); l.mode != ModeLease {
+		t.Fatalf("lease mode = %s, want lease", l.mode)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Open == nil || s.Open.Mode != ModeLease {
+		t.Fatalf("file = %+v, want the open lease recorded at mode lease", s)
+	}
+	step := 240 * time.Second
+	e := leaseExec("work", 2)
+	execEvery(t, p, clk, e, step, int(4*time.Hour/step)+1)
+	if leaseExpiring(p) {
+		t.Fatal("expiring at level 2's 4 h after a downgrade to lease")
+	}
+	execEvery(t, p, clk, e, step, int(4*time.Hour/step))
+	if !leaseExpiring(p) {
+		t.Fatal("not expiring at level 1's 8 h")
+	}
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want the one lease throughout", n)
 	}
 }
 

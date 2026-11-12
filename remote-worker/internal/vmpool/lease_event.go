@@ -101,8 +101,10 @@ func (p *pool) AckLeaseEvent(key string, at time.Time) {
 }
 
 // EndLease ends key's lease for a caller's reason: reset (the reset tool, mocactl sbx
-// reset) or sandbox_deleted. It waits for an Exec in flight, up to LeaseGraceLimit
-// (endLeaseWaiting). Without a lease it is a no-op.
+// reset) or sandbox_deleted. It waits for an Exec in flight; at LeaseGraceLimit that Exec
+// is cut and fails lease_ended(<reason>), so EndLease returns by LeaseGraceLimit plus the
+// cut Exec's unwind (endLeaseWaiting). Without a live lease it is a no-op: a lease that
+// starts after the call is not this call's to end.
 func (p *pool) EndLease(key string, reason LeaseEndReason) error {
 	if err := checkKey(key); err != nil {
 		return err
@@ -111,28 +113,36 @@ func (p *pool) EndLease(key string, reason LeaseEndReason) error {
 		return fmt.Errorf("vmpool: EndLease for %q: reason %q is not one a caller ends a lease with (%s, %s)",
 			key, reason, LeaseEndReset, LeaseEndSandboxDeleted)
 	}
-	return p.endLeaseWaiting(key, reason)
+	return p.endLeaseWaiting(key, reason, false)
 }
 
-// endLeaseWaiting ends key's lease for reason under its run's gate: after the Exec in
-// flight, if any, returns. At LeaseGraceLimit that Exec is cut, as the grace limit cuts
-// one (l.cut): its unwind ends the lease with reason and it returns lease_ended(reason).
-// A gate held by an Exec that is not inside Run (a cold start) is waited out. The run is
-// pinned meanwhile, as routeExec pins it, so the entry whose gate this waits on stays.
+// endLeaseWaiting ends key's lease for reason: the lease live when it is called, and only
+// that one. It waits for the gate, so for the Exec in flight to return. At LeaseGraceLimit
+// it cuts the lease (l.cut): the Exec inside Run is cancelled, and its unwind ends the
+// lease with reason; a lease no Exec is running in ends at the next gate holder's check
+// (execLease, runLease, or the lease sweep). From then on it waits for the lease to be
+// gone, not for the gate: an Exec queued behind the cut one may start a fresh lease, and
+// neither that lease nor that Exec's duration is this call's. So it returns by
+// LeaseGraceLimit plus the cut Exec's unwind. The run is pinned meanwhile, as routeExec
+// pins it, so the entry whose gate this waits on stays.
 //
-// A run with no lease but a pin is waited on too: the pin may be a lease Exec about to
-// install one.
-func (p *pool) endLeaseWaiting(key string, reason LeaseEndReason) error {
+// starting (SetMode's downgrade) also covers a run with no lease yet but a pin: that pin
+// may be a lease Exec inside startLease, which passed its epoch check before the
+// downgrade. Its lease, once installed, is the one to end; any lease found under the gate
+// is, because every later lease Exec is refused stale-mode (execLease). Until such a
+// lease exists there is nothing to cut, and the wait is the starting Exec's.
+func (p *pool) endLeaseWaiting(key string, reason LeaseEndReason, starting bool) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return ErrClosed
 	}
 	rp := p.runs[key]
-	if rp == nil || (rp.lease == nil && rp.pinned == 0) {
+	if rp == nil || (rp.lease == nil && (!starting || rp.pinned == 0)) {
 		p.mu.Unlock()
 		return nil
 	}
+	target := rp.lease // nil only when starting
 	rp.pinned++
 	p.mu.Unlock()
 	defer p.unpin(rp)
@@ -140,26 +150,43 @@ func (p *pool) endLeaseWaiting(key string, reason LeaseEndReason) error {
 	graceOver := make(chan struct{})
 	tm := p.clk.AfterFunc(p.cfg.LeaseGraceLimit, func() { close(graceOver) })
 	defer tm.Stop()
-	select {
-	case rp.execGate <- struct{}{}:
-	case <-graceOver:
-		p.mu.Lock()
-		if l := rp.lease; l != nil && l.running && l.cut == "" {
-			l.cut = reason
-			l.cancel() // a context cancel: it runs no caller code under p.mu
+	grace := (<-chan struct{})(graceOver)
+	for {
+		var gone <-chan struct{} // nil, so never ready, until there is a target
+		if target != nil {
+			gone = target.gone
 		}
-		p.mu.Unlock()
-		rp.execGate <- struct{}{}
+		select {
+		case rp.execGate <- struct{}{}:
+			p.mu.Lock()
+			var v *leaseVictim
+			if l := rp.lease; l != nil && (l == target || target == nil) {
+				v = p.endOrDetachLocked(rp, reason)
+			}
+			p.mu.Unlock()
+			if v == nil {
+				<-rp.execGate
+				return nil
+			}
+			p.destroyLeaseVictims([]*leaseVictim{v})
+			return nil
+		case <-gone:
+			return nil // ended under someone else's gate: the cut Exec, the sweep, Close
+		case <-grace:
+			grace = nil
+			p.mu.Lock()
+			if target == nil {
+				target = rp.lease
+			}
+			if l := target; l != nil && rp.lease == l && l.cut == "" {
+				l.cut = reason
+				if l.running {
+					l.cancel() // a context cancel: it runs no caller code under p.mu
+				}
+			}
+			p.mu.Unlock()
+		}
 	}
-	p.mu.Lock()
-	v := p.endOrDetachLocked(rp, reason)
-	p.mu.Unlock()
-	if v == nil {
-		<-rp.execGate
-		return nil
-	}
-	p.destroyLeaseVictims([]*leaseVictim{v})
-	return nil
 }
 
 // peekLeaseStateLocked is key's state without the missing-file log line: rp's cached

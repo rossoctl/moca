@@ -104,6 +104,10 @@ type Pool interface {
 	// SetMode records a verified LeaseControl set_mode for key: {m, epoch}, known. It
 	// refuses an epoch below a known one (stale-mode), and a lease mode on a worker
 	// that cannot serve it (lease-unsupported). Spec §8.2.
+	//
+	// A downgrade to per-exec ends a live lease (mode_change) before SetMode returns, so
+	// it BLOCKS for the Exec in flight: up to LeaseGraceLimit (30 min by default), after
+	// which that Exec is cut, plus its unwind. lease+processes -> lease keeps the lease.
 	SetMode(key string, m Mode, epoch uint64) error
 	// Keepalive records a keepalive for key's live lease: the keepalive-loss rule then
 	// applies until the lease ends. It never resets the idle clock, and without a live
@@ -116,8 +120,9 @@ type Pool interface {
 	// AckLeaseEvent clears key's pending lease event whose At equals at; a newer one
 	// stays. Spec §5: the worker keeps the last end event until a client has seen it.
 	AckLeaseEvent(key string, at time.Time)
-	// EndLease ends key's lease for reset or sandbox_deleted, and refuses any other
-	// reason. It waits for an Exec in flight, up to LeaseGraceLimit. Spec §8.3.
+	// EndLease ends key's live lease for reset or sandbox_deleted, and refuses any other
+	// reason. It BLOCKS for the Exec in flight: up to LeaseGraceLimit, after which that
+	// Exec is cut with lease_ended(<reason>), plus its unwind. Spec §8.3.
 	EndLease(key string, reason LeaseEndReason) error
 	// Close stops the sweep and destroys everything. Beyond spec §4.1's listing:
 	// §6 requires a shutdown that leaves no orphan VMs.
@@ -540,7 +545,7 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 			}
 			rp.ready = rp.ready[:n-1]
 			if lease {
-				rp.lease = &vmLease{vm: vm}
+				rp.lease = newVMLease(vm)
 			} else {
 				rp.inFlight++
 			}
@@ -634,7 +639,7 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 		// observe, and busy() never reads false in between — a gap there would let a
 		// sweep reclaim the workspace of a VM that is about to run in it.
 		if lease {
-			rp.lease = &vmLease{vm: vm}
+			rp.lease = newVMLease(vm)
 		} else {
 			rp.inFlight++
 		}
