@@ -743,8 +743,8 @@ workers that start together share the host's disk. So the agent starts at most
   (0600).
 - **What it bounds:** each start's wait, not the total. The disk sets the total, at any width.
   Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
-  125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): one cold start alone
-  took about 37 s, a wave of four about 3-4 minutes, and with 28 started at once the last attached
+  125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): cold starts one at a
+  time took 78 s on average (at most 120 s), a wave of four about 3-4 minutes, and with 28 started at once the last attached
   after more than twenty minutes. Raise the limit only on a faster disk.
 - **What the agent reports:** `startConcurrency` and `startSeconds` in the inventory's limits.
   `startSeconds` is the mean of its last 10 cold starts, start to attach, to within the 15 s poll

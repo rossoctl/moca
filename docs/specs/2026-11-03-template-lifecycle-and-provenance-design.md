@@ -470,8 +470,8 @@ has N workers read N memory files at the same time, so each start takes about
 soon as its last lease ended, so a template used again minutes later started cold again.
 
 Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
-125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): one cold start alone
-took about 37 s, a wave of four about 3-4 minutes, and with 28 started at once the last attached
+125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): cold starts one at a time
+took 78 s on average (at most 120 s), a wave of four about 3-4 minutes, and with 28 started at once the last attached
 after more than twenty minutes. Width does not raise the disk's throughput: a start limit bounds
 each start's wait and makes the line visible; it does not shorten the total.
 
