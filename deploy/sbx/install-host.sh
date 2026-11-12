@@ -116,6 +116,26 @@ valid_id() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$1" != DIR ]]; }
 
 record() { mkdir -p "$SBX_ENV_DIR"; touch "$SBX_ENV_DIR/manifest"; grep -qxF "$1" "$SBX_ENV_DIR/manifest" || echo "$1" >>"$SBX_ENV_DIR/manifest"; }
 
+# jail_dir ID -> the worker's jailer --chroot-base-dir. Keyed by a 12-hex digest of the id, not
+# the id: a Unix socket path holds at most 107 bytes, the VM's API socket is
+# <base>/firecracker/vm-<up to 20 digits>/root/run/firecracker.socket (64 bytes after the base), and a
+# worker id can be 52 (sbx_ + a 31-character template + _ + 12 hex). With the id, a long template's
+# worker failed every restore from vm-10 on. The digest keeps two workers apart.
+jail_dir() {
+  local h
+  h="$(printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
+  printf '%s/jail/j%s' "$SBX_SRV" "$h"
+}
+
+# check_jail_path ID: the worst-case API socket path under the worker's jail fits a Unix socket
+# (microvm-worker refuses at start otherwise; here it is refused before anything is written).
+check_jail_path() {
+  local longest
+  longest="$(jail_dir "$1")/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+  ((${#longest} < 108)) ||
+    die "the worker's jail path is too long for a Unix socket (${#longest} bytes: $longest); set a shorter SBX_SRV"
+}
+
 sha256_of() { # sha256_of FILE -> its hex digest
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
@@ -419,6 +439,7 @@ validate_worker() {
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
   [[ "$BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((BUDGET_MB > 1024)) || die '--budget-mb must be a whole number of MiB above 1024 (the unit reserve)'
   check_snapshot_ca
+  check_jail_path "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
 }
 
@@ -431,14 +452,14 @@ install_worker() {
     ca="$SBX_ENV_DIR/workers/$id-relay-ca.crt"
     record "file $ca"
   fi
-  install -d -m 0700 "$SBX_SRV/workspaces/$id" "$SBX_SRV/jail/$id"
+  install -d -m 0700 "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
   (
     umask 077
     {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT"
-      printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$SBX_SRV/jail/$id"
+      printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
@@ -675,7 +696,7 @@ uninstall_worker() {
   log "removed sbx-worker@$id"
   remove_shared_units
   systemctl daemon-reload
-  log "left in place: $SBX_SRV/workspaces/$id and $SBX_SRV/jail/$id (workspace data; remove by hand when no sandbox needs it)"
+  log "left in place: $SBX_SRV/workspaces/$id and $(jail_dir "$id") (workspace data; remove by hand when no sandbox needs it)"
 }
 
 main() {

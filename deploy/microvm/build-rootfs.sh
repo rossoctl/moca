@@ -9,7 +9,12 @@
 # on top; nothing here adds either.
 #
 # Usage:
-#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF]
+#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF] [--require "T1 T2 ..."]
+#
+# --require replaces REQUIRED_TOOLS below with the caller's list, for an image that is not Moca's
+# own sandbox image: a sandbox template's image needs the tools its template lists plus the guest
+# agent's minimum, not Moca's whole toolchain. Without it, every image must carry Moca's list, as
+# before (`gh` there refuses every benchmark image, none of which ships it).
 #
 # Env:
 #   SH_SKIP_PULL  Non-empty: export the copy of IMAGE this host already has instead of pulling it
@@ -30,7 +35,7 @@ OUT=""
 REQUIRED_TOOLS=(bash git rg gh python3 base64 file ls cat)
 
 usage() {
-  echo "usage: $0 --out DIR [--image REF]   (default image: $IMAGE)" >&2
+  echo "usage: $0 --out DIR [--image REF] [--require \"T1 T2 ...\"]   (default image: $IMAGE)" >&2
   exit 1
 }
 
@@ -38,6 +43,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
   --out) OUT="${2:-}"; shift 2 ;;
   --image) IMAGE="${2:-}"; shift 2 ;;
+  --require)
+    [ -n "${2:-}" ] || { echo "build-rootfs.sh: --require needs a list of tools" >&2; usage; }
+    read -r -a REQUIRED_TOOLS <<<"$2"
+    for t in "${REQUIRED_TOOLS[@]}"; do
+      case "$t" in */* | .* | *[!A-Za-z0-9._+-]*) echo "build-rootfs.sh: --require: '$t' is not a tool name" >&2; exit 2 ;; esac
+    done
+    shift 2
+    ;;
   -h | --help) usage ;;
   *) echo "build-rootfs.sh: unknown argument $1" >&2; usage ;;
   esac

@@ -266,9 +266,9 @@ func TestFirecrackerMountsAtAcquireNotAtRestore(t *testing.T) {
 func TestFirecrackerSerializesExecsPerRun(t *testing.T) {
 	// A pure contract assertion, no KVM needed: the pool reads this to decide whether to
 	// hold a per-run Exec mutex, and getting it wrong corrupts an ext4 (spec §4.3). Never
-	// calls Restore, so it constructs no unix socket path and needs no shortUnixSocketDir
-	// style workaround for macOS's sun_path limit.
-	lc, err := NewFirecrackerLauncher(FirecrackerOptions{SnapshotDir: t.TempDir(), JailerBin: "/bin/true", FirecrackerBin: "/bin/true", ChrootBase: t.TempDir()})
+	// calls Restore, so the base is never created; it is short only because construction checks
+	// that the API socket path fits sun_path (macOS's t.TempDir() does not).
+	lc, err := NewFirecrackerLauncher(FirecrackerOptions{SnapshotDir: t.TempDir(), JailerBin: "/bin/true", FirecrackerBin: "/bin/true", ChrootBase: "/srv/jail"})
 	if err != nil {
 		t.Fatalf("NewFirecrackerLauncher: %v", err)
 	}

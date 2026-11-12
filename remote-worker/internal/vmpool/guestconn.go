@@ -2,6 +2,7 @@ package vmpool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -23,6 +24,17 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	cap := c.CapBytes
 	if cap <= 0 {
 		cap = OutputCapBytes
+	}
+	// The whole command travels in ONE request frame, which the guest bounds at
+	// ga.MaxFrame. Refused here, before anything is sent: writing nothing and then
+	// waiting for the guest's answer hung the Exec until the caller's own deadline.
+	// Stdin has no such bound; it is split across frames below.
+	req, err := json.Marshal(guestRequest(c, cap, now))
+	if err != nil {
+		return Result{}, fmt.Errorf("encode request: %w", err)
+	}
+	if len(req) > ga.MaxFrame {
+		return Result{}, fmt.Errorf("%w: %d bytes, the guest takes at most %d in one request; send large content as stdin", ErrCommandTooLarge, len(req), ga.MaxFrame)
 	}
 
 	// Close the connection on cancellation so the blocking read below returns. There
@@ -59,7 +71,15 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	// it is guaranteed to unblock — via the deferred Close above, at the latest — no
 	// later than this call returns.
 	writeErr := make(chan error, 1)
-	go func() { writeErr <- sendRequest(rw, c, cap, now) }()
+	go func() {
+		err := sendRequest(rw, req, c.Stdin)
+		writeErr <- err
+		// A failed write means the guest never got a whole request and will never
+		// answer: close, so the read below returns instead of waiting for it.
+		if err != nil {
+			closeConn()
+		}
+	}()
 
 	for {
 		kind, payload, err := ga.ReadFrame(rw)
@@ -102,12 +122,9 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	}
 }
 
-// sendRequest writes the Request frame, then the stdin frames if any, then ALWAYS
-// the stdin-EOF frame — the guest reads until it sees KindStdinEOF whether or not
-// HasStdin was set, so the host must always send it or a command that only
-// terminates at end-of-input (`base64 -d > file`) hangs forever.
-func sendRequest(w io.Writer, c Command, capBytes int64, now time.Time) error {
-	if err := ga.WriteJSON(w, ga.KindRequest, ga.Request{
+// guestRequest is the request frame's content for c.
+func guestRequest(c Command, capBytes int64, now time.Time) ga.Request {
+	return ga.Request{
 		Command:            c.Command,
 		TimeoutS:           c.TimeoutS,
 		Streaming:          c.Streaming,
@@ -116,12 +133,20 @@ func sendRequest(w io.Writer, c Command, capBytes int64, now time.Time) error {
 		HostUnixNanos:      now.UnixNano(),
 		Lease:              c.Lease,
 		NormaliseWorkspace: c.NormaliseWorkspace,
-	}); err != nil {
+	}
+}
+
+// sendRequest writes the encoded Request frame, then the stdin frames if any, then
+// ALWAYS the stdin-EOF frame — the guest reads until it sees KindStdinEOF whether or
+// not HasStdin was set, so the host must always send it or a command that only
+// terminates at end-of-input (`base64 -d > file`) hangs forever.
+func sendRequest(w io.Writer, req, stdin []byte) error {
+	if err := ga.WriteFrame(w, ga.KindRequest, req); err != nil {
 		return fmt.Errorf("write request: %w", err)
 	}
-	for off := 0; off < len(c.Stdin); off += ga.MaxFrame {
-		end := min(off+ga.MaxFrame, len(c.Stdin))
-		if err := ga.WriteFrame(w, ga.KindStdin, c.Stdin[off:end]); err != nil {
+	for off := 0; off < len(stdin); off += ga.MaxFrame {
+		end := min(off+ga.MaxFrame, len(stdin))
+		if err := ga.WriteFrame(w, ga.KindStdin, stdin[off:end]); err != nil {
 			return fmt.Errorf("write stdin: %w", err)
 		}
 	}
