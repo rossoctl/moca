@@ -56,6 +56,28 @@ describe('isTurnRequest', () => {
     expect(isTurnRequest('POST', '/health')).toBe(false);
     expect(isTurnRequest(undefined, undefined)).toBe(false);
   });
+
+  it.each(['/turn', '/v1/turn', '/runs', '/run-leaf', '/v1/runs'])(
+    'counts POST %s as a turn: every one of them reaches runLeaf',
+    (url) => {
+      expect(isTurnRequest('POST', url)).toBe(true);
+    },
+  );
+
+  it('counts the deprecated /run-leaf, which is still served and still runs a leaf', () => {
+    expect(isTurnRequest('POST', '/run-leaf')).toBe(true);
+  });
+
+  it.each(['/runs', '/v1/runs'])('does not count GET %s: only POST runs a leaf', (url) => {
+    expect(isTurnRequest('GET', url)).toBe(false);
+  });
+
+  it.each(['/runs?x=1', '/v1/runs/', '/runs/extra'])(
+    'does not count %o: server.ts matches the RAW target by equality',
+    (url) => {
+      expect(isTurnRequest('POST', url)).toBe(false);
+    },
+  );
 });
 
 describe('TurnCounter', () => {
@@ -81,6 +103,20 @@ describe('TurnCounter', () => {
     end();
     expect(c.inFlight).toBe(0);
     expect(seen).toEqual([1, 0]);
+  });
+
+  it('swallows a throwing onChange: the slot is still released and the count still correct', () => {
+    // The real onChange is process.send, which throws ERR_IPC_CHANNEL_CLOSED on a closed
+    // channel; a throw here must not strand start()'s releaser or corrupt the count.
+    const onChange = vi.fn(() => {
+      throw new Error('ERR_IPC_CHANNEL_CLOSED');
+    });
+    const c = new TurnCounter(onChange);
+    const end = c.start();
+    expect(c.inFlight).toBe(1);
+    expect(() => end()).not.toThrow();
+    expect(c.inFlight).toBe(0);
+    expect(onChange).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -348,6 +384,59 @@ describe('startStatsReporter', () => {
     const n = sent.length;
     await new Promise((r) => setTimeout(r, 20));
     expect(sent.length).toBe(n);
+  });
+
+  it('carries all six async fields onto the stats message when asyncStats reports them', async () => {
+    const sent: WorkerToSupervisor[] = [];
+    const stop = startStatsReporter({
+      send: (m) => sent.push(m),
+      intervalMs: 5,
+      lag: () => 1,
+      rss: () => 1,
+      asyncStats: () => ({
+        asyncClaims: 3,
+        asyncReclaims: 1,
+        asyncDeadLetters: 0,
+        asyncClaimDeniedFull: 1,
+        asyncQueueDepth: 12,
+        asyncOldestAgeMs: 4_000,
+      }),
+    });
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    stop();
+    expect(sent[0]).toMatchObject({
+      type: 'stats',
+      asyncClaims: 3,
+      asyncReclaims: 1,
+      asyncDeadLetters: 0,
+      asyncClaimDeniedFull: 1,
+      asyncQueueDepth: 12,
+      asyncOldestAgeMs: 4_000,
+    });
+  });
+
+  it('carries none of the six async keys when asyncStats is omitted or reports undefined', async () => {
+    const sent: WorkerToSupervisor[] = [];
+    const stop = startStatsReporter({
+      send: (m) => sent.push(m),
+      intervalMs: 5,
+      lag: () => 1,
+      rss: () => 1,
+      asyncStats: () => undefined,
+    });
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    stop();
+    const keys = Object.keys(sent[0]!);
+    for (const k of [
+      'asyncClaims',
+      'asyncReclaims',
+      'asyncDeadLetters',
+      'asyncClaimDeniedFull',
+      'asyncQueueDepth',
+      'asyncOldestAgeMs',
+    ]) {
+      expect(keys).not.toContain(k);
+    }
   });
 });
 

@@ -21,8 +21,9 @@ metal, or plain Kubernetes.
 
 The result is a **leaf-session backend**: an external orchestrator dispatches isolated units of
 agent work ("leaves") over a simple HTTP + shared-volume contract — sync turns, detachable
-streaming turns, and human-gated runs, with async fan-out and scheduled dispatch owed P6
-follow-ups ([ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md)).
+streaming turns, human-gated runs, and opt-in async fan-out
+([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md)), with scheduled dispatch still
+owed a P6 follow-up ([ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md)).
 
 ## Maturity
 
@@ -201,10 +202,12 @@ The pipeline archetypes describe how an orchestrator dispatches leaves:
 
 B is served by the P6 runtime today. Archetypes A (async fan-out) and C (scheduled dispatch) ran
 only on the earlier scale-to-zero deployment, removed in November 2026
-([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and **neither runs on P6 yet**.
-Async fan-out has a decision record and design
-([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md)) and is tracked in
-[#686](https://github.com/rossoctl/moca/issues/686); scheduled dispatch has no design yet
+([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)). **A now runs on P6**: a drain
+loop in the ordinary turn worker, opt-in behind `SH_ASYNC_DRAIN=1` and `MOCA_TENANCY=single`
+([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md),
+[#686](https://github.com/rossoctl/moca/issues/686)) — see
+[dispatch archetypes](docs/concepts/dispatch-archetypes.md) for the operator steps and the two
+limits. Scheduled dispatch has no design yet
 ([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ---
@@ -288,7 +291,7 @@ Start at the [documentation map](docs/index.md).
 
 This is explorative work and every deployment path is Preview (see [Maturity](#maturity)). The
 warm-worker-pool runtime, durable resume, sandbox isolation (container and microVM tiers), and the
-multi-user control plane are built. Async fan-out and scheduled dispatch do not run on P6 yet —
-async fan-out is designed (ADR-0047) and awaiting implementation. Interfaces may change.
+multi-user control plane are built. Async fan-out runs opt-in behind `SH_ASYNC_DRAIN` under single
+tenancy (ADR-0047); scheduled dispatch does not run on P6 yet. Interfaces may change.
 
 Licensed under the [Apache License 2.0](LICENSE).
