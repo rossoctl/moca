@@ -21,8 +21,10 @@ import { subjectHash } from './subject-document.js';
  *
  * Subjects appear in key names only as subjectHash, as ownerKey does, so the keyspace names no logins.
  *
- * Narrow on purpose, as RefreshRedisLike is: CpRedisLike's fake cannot run Lua, so this takes only
- * what it calls, and test/sandbox-redis.test.ts runs it against a real Redis.
+ * Narrow on purpose, as RefreshRedisLike is: this takes only what it calls, and
+ * test/sandbox-redis.test.ts runs it against a real Redis -- which is where its Lua is exercised.
+ * (`CpRedisLike` now carries `eval` too, but its fake only recognises the one script `TurnStore`
+ * sends; it interprets no Lua, so these quotas could not be run through it.)
  */
 export interface SandboxRedisLike {
   eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<unknown>;

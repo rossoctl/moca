@@ -190,7 +190,9 @@ async function fakeWorker(result: Record<string, unknown>): Promise<{
   // worker that skipped this call would leave the record in `queued` forever. Asserting the state
   // after the exchange (below) is what pins that division.
   await d.turns!.markRunning(loaded.turnId, 1);
-  await client.set(`leaf:result:${loaded.sessionId}`, JSON.stringify(result), { EX: 300 });
+  await client.set(`leaf:result:${loaded.sessionId}:${loaded.turnId}`, JSON.stringify(result), {
+    EX: 300,
+  });
   await d.turns!.finalize(
     loaded.turnId,
     result.status === 'solved' ? 'solved' : 'done',
@@ -414,9 +416,15 @@ describe('async turn, end to end (#387 acceptance)', () => {
         headers: auth(ALICE),
       })
     ).json();
+    // A result for this turn, as a worker that finished before the DELETE would have left it. The
+    // key carries the turn id, so `cascadeDelete`'s fixed key list cannot name it -- only
+    // `deleteSessionTurns`, which enumerates the session's open turns, reaches it.
+    const resultKey = `leaf:result:${sid}:${turnId}`;
+    await client.set(resultKey, JSON.stringify({ status: 'done' }), { EX: 300 });
     expect((await request('DELETE', `/v1/sessions/${sid}`, { headers: auth(ALICE) })).status).toBe(
       204,
     );
+    expect(await client.exists(resultKey)).toBe(0);
     // The entry OUTLIVES the session: DELETE cannot reach into the stream, so a worker will still
     // pick this id up, and without a refusal a deleted session's queued leaves would each run and
     // each spend the owner's credential.

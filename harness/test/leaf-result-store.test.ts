@@ -29,6 +29,11 @@ describe('resultKey', () => {
   it('namespaces by leaf session id', () => {
     expect(resultKey('run-1-i1')).toBe('leaf:result:run-1-i1');
   });
+
+  it('adds the turn id when given one, so sibling async turns do not share a key', () => {
+    expect(resultKey('sess-1', 't-1')).toBe('leaf:result:sess-1:t-1');
+    expect(resultKey('sess-1', 't-1')).not.toBe(resultKey('sess-1', 't-2'));
+  });
 });
 
 describe('toResultRecord', () => {

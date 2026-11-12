@@ -110,6 +110,39 @@ Decisions taken during design, each recorded in the spec with its section:
     sandbox runs `per-exec` until a control-plane-signed `LeaseControl set_mode` arrives. A stale
     token's epoch is not trusted as "higher". _(our call, from the PR #698 review)_
 
+### Revision 2026-11-12: E17a calibration
+
+E17a (moca-experiments `e17/`, predictions sealed 2026-11-12) measured the E15 resident patch against
+per-`Exec` on a cache-heavy Python session at N = 1 on the E15 metal host. A warm guest saved 89% on
+short commands and 40% on a stack import, and 0–8% on the dataset analysis and the test suite. A
+`grep -r` over the venv gained nothing in realistic turns. Per-`Exec` already reads the workspace
+through the host page cache, and a lease guest keeps a file set warm only when it lives through a
+whole turn. Every lease VM filled its 1024 MiB cgroup after one heavy command (spec §17). This
+revision changes four decisions and adds two:
+
+- **Decision 7 is replaced.** Lease VMs run with virtio-balloon free-page reporting in v1, so the guest
+  returns memory it has freed and the measured charge (decision 6) follows the working set. A
+  target-driven balloon stays out of v1. The balloon is in the one golden snapshot, so per-`Exec` VMs report too (user, 2026-11-12). _(E17a: without it, measured charge equals the full charge on
+  the target workload)_
+- **Decision 14 is narrowed.** Level 1 serves short and import-bound commands and capacity at mid duty
+  (E15). It is not a page-cache accelerator for long compute, and it gains little where per-`Exec`
+  already has the host's cache. The cache-heavy, in-memory case is level 2's. _(E17a)_
+- **Decision 3's default (300 s) is kept and re-examined in E17b**, together with the memory model: a
+  longer timeout keeps more file sets warm and holds each idle lease's working set longer. _(E17a)_
+- **Decision 13's criteria are the sealed E17 ones** (`e17/predictions.json`): criterion 2 is per command
+  class at 50%. E17a predicts that it fails on the import and the grep. That miss goes to the user
+  before the build of plans 2–5. _(user, 2026-11-11 and 2026-11-12)_
+- **New decision 18: page-cache headroom for lease VMs.** A lease VM's cgroup gets `memory.max` =
+  `PerVMBytes` + `SH_LEASE_PAGECACHE_MB` (default 256 MiB), so a full guest does not leave the
+  workspace uncached on the host for the VM that follows it. Lease cgroups are created per lease and
+  never come from or go back to the per-`Exec` cgroup pool, and the reclaim headroom target is sized
+  against the larger lease charge bound (spec §6). _(E17a: about 2 s against 388 ms for the
+  same grep)_
+- **New decision 19: level 2 is the latency case, sized before its security review.** A persistent
+  interpreter on E17a's workspace answered a re-query in 0.25 s against 6.5 s per-`Exec` (5.4 s at
+  level 1) and a recompute in 11.2 s against 17.4 s, holding about 500 MB of a 1 GiB guest (spec §16
+  item 6). _(spike, 2026-11-12)_
+
 ### Alternatives considered
 
 - **Keep per-`Exec` only (ADR-0035 as it stands):** leaves internal users with no warm environment

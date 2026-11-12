@@ -340,3 +340,39 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(await codeOf(() => exchangeTurnCredential('t-1', noStore))).toBe('internal_error');
   });
 });
+
+describe('the envelope in the response', () => {
+  it('returns the stored envelope with the record session id attached', async () => {
+    const d = exDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid, {
+      envelope: { item: { item_id: 'i-1', file: 'a.ts', pattern: 'x' } },
+    });
+    const res = await exchangeTurnCredential(turnId, d);
+    expect(res.envelope).toEqual({
+      item: { item_id: 'i-1', file: 'a.ts', pattern: 'x' },
+      sessionId: sid,
+    });
+  });
+
+  it('the record session id wins over one stored in the envelope', async () => {
+    const d = exDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid, {
+      envelope: { kind: 'prompt', prompt: 'go', sessionId: 'not-this-one' },
+    });
+    const res = await exchangeTurnCredential(turnId, d);
+    expect(res.envelope.sessionId).toBe(sid);
+  });
+
+  it('carries no credential of any kind', async () => {
+    const d = exDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid);
+    const res = await exchangeTurnCredential(turnId, d);
+    const keys = Object.keys(res.envelope);
+    expect(keys).not.toContain('credentialName');
+    expect(keys).not.toContain('anthropicAuthToken');
+    expect(JSON.stringify(res.envelope)).not.toContain(res.anthropicAuthToken);
+  });
+});
