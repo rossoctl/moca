@@ -10,6 +10,7 @@ import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
 import {
+  hostManaged,
   lastLeaseEnd,
   liveLeases,
   place,
@@ -22,9 +23,11 @@ import {
   type StartQueue,
 } from './activation.js';
 import { activationLock } from './activation-lock.js';
-import { graceBusy, hostViewsOf } from './host-handlers.js';
+import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
+import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
+  normalizeSpec,
   policyDigest,
   policyProblems,
   TEMPLATE_ID_RE,
@@ -292,10 +295,10 @@ interface ReadinessFacts {
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
-  // The workers with a live sandbox are never graced (§6.5; read only with a grace).
-  const busy = await graceBusy(deps, hosts, nowS);
+  // The workers with a live sandbox: they drain and keep their slot, and are never graced (§6.5).
+  const busy = await busyWorkers(deps, nowS);
   const list = hosts.length > 0 ? (docs ?? (await catalog(deps).list())) : [];
-  const placement = hosts.length > 0 ? place(list, hosts, nowS, busy ? { busy } : {}) : null;
+  const placement = hosts.length > 0 ? place(list, hosts, nowS, busy) : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -450,7 +453,12 @@ function policyStore(deps: CpDeps): PolicyStore {
 /** `b-` and the same 26 random hex characters a sandbox id takes (sandboxId: a UUID's fixed nibbles dropped). */
 const buildHandle = (raw: string): string => `b-${sandboxId(raw).slice('sbx-'.length)}`;
 
-/** The quota counters for one subject (§6.2): templates owned, builds queued or building. */
+/**
+ * The quota counters for one subject (§6.2). `templates`: the templates it owns with a build
+ * registered or on its way there (a template whose builds all failed, were cancelled or were
+ * retired holds no slot, so a failure never locks a subject out). `buildsQueued`: its builds not
+ * yet built (queued, building or probing), the host work it has in flight.
+ */
 async function usage(
   cat: TemplateCatalog,
   subject: string,
@@ -459,10 +467,23 @@ async function usage(
   let buildsQueued = 0;
   for (const d of await cat.list()) {
     if (d.owner !== subject) continue;
-    if (d.builds.some((b) => b.status !== 'retired')) templates++;
-    buildsQueued += d.builds.filter((b) => b.status === 'queued' || b.status === 'building').length;
+    if (d.builds.some((b) => REUSABLE.has(b.status))) templates++;
+    buildsQueued += d.builds.filter((b) => CANCELLABLE.has(b.status)).length;
   }
   return { templates, buildsQueued };
+}
+
+/**
+ * One quota check and write at a time per subject (§6.2), per catalog. The catalog serializes
+ * per template id only, and the quota counts across every id a subject owns: without this, two
+ * creates for different ids would both read the same use and both pass. Taken outside the
+ * catalog's id lock, always in that order.
+ */
+const quotaLocks = new WeakMap<TemplateCatalog, SubjectQueue>();
+function quotaLock(cat: TemplateCatalog): SubjectQueue {
+  let q = quotaLocks.get(cat);
+  if (!q) quotaLocks.set(cat, (q = new SubjectQueue()));
+  return q;
 }
 
 /**
@@ -509,14 +530,28 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
     results: result.results as unknown as Record<string, unknown>[],
   };
   if (!result.passed) {
-    // A refusal of a well-formed id is recorded on its template's stream, but only on a stream the
-    // caller may write: an id no template holds yet, the caller's own, or (adding a build) any as an
-    // admin. A refusal on someone else's id is only answered, so no subject grows another's stream.
-    // An id the rule refuses has no stream to record on, and is only answered too.
+    // A refusal is recorded on its template's stream only when the template exists and the caller
+    // may write its stream: its own, or (adding a build) any as an admin. A refusal on an id no
+    // template holds writes one audit line instead (the capped audit stream), naming the subject,
+    // the id and the failed rules: a provenance record would let any enrolled subject open
+    // streams without bound, which no quota counts. A refusal on someone else's id is only
+    // answered, so no subject grows another's stream; and an id the rule refuses has no stream
+    // to record on.
     if (TEMPLATE_ID_RE.test(id)) {
       const cur = await cat.get(id);
-      if (!cur || cur.owner === p.sub || (existing && isAdmin(p)))
+      if (cur && (cur.owner === p.sub || (existing && isAdmin(p))))
         await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+      else if (!cur)
+        await auditBestEffort(deps, 'template_create_refused', id, {
+          subject: p.sub,
+          templateId: id,
+          decision: 'template_create_refused',
+          reason: 'policy_refused',
+          rules: result.results
+            .filter((r) => !r.passed)
+            .map((r) => r.rule)
+            .join(','),
+        });
     }
     const f = result.failed!;
     throw new CpError('policy_refused', f.message ?? f.rule, undefined, { rule: f.rule });
@@ -524,95 +559,104 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   const now = seconds(deps);
   const handle = buildHandle(deps.newId());
   const quota = pol.quota;
-  const want = reuseKey(b.image as string, spec, result.profile, result.gateRecordSha256);
+  const built = normalizeSpec(spec);
+  const want = reuseKey(b.image as string, built, result.profile, result.gateRecordSha256);
   let reused: TemplateBuild | undefined;
-  const doc = await cat.update(id, async (cur) => {
-    if (existing && !cur) throw new CpError('template_not_found', 'no such template');
-    if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
-      // 404 for a private template, 409 for a visible one: never an existence oracle for private.
-      throw cur.visibility === 'private' && !isAdmin(p)
-        ? new CpError('template_not_found', 'no such template')
-        : new CpError('template_exists', `template '${id}' belongs to another subject`);
-    }
-    // §3.2: the same inputs are the same build. One registered, or still on its way there, is
-    // answered instead of a second build (two creates would otherwise queue two builds that
-    // register under one manifest hash).
-    reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
-    if (reused) return cur!;
-    const u = await usage(cat, p.sub);
-    if (!cur && u.templates >= quota.templates) {
-      throw new CpError(
-        'quota_exceeded',
-        `at most ${quota.templates} templates per subject`,
-        undefined,
-        { quota: 'templates' },
-      );
-    }
-    if (u.buildsQueued >= quota.buildsQueued) {
-      throw new CpError(
-        'quota_exceeded',
-        `at most ${quota.buildsQueued} builds queued per subject`,
-        undefined,
-        { quota: 'buildsQueued' },
-      );
-    }
-    if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
-    const created = await prov.append({
-      stream,
-      kind: 'create',
-      subject: p.sub,
-      body: {
-        image: b.image as string,
-        // A round trip through JSON: what the client sent, as the wire carries it (no undefined).
-        spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
-        profile: result.profile,
-        handle,
-        ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
-      },
-    });
-    if (result.gateRecordSha256) {
-      await prov.append({
+  // The quota is the template's owner's: an admin adding a build to another's template uses the
+  // owner's buildsQueued, not its own. The owner's lock is held around the check and the write
+  // (quotaLock). A template's owner never changes, so reading it before the lock is safe; a new id
+  // another subject takes meanwhile is refused inside, before any quota is read.
+  const charged = (await cat.get(id))?.owner ?? p.sub;
+  const doc = await quotaLock(cat).run(charged, () =>
+    cat.update(id, async (cur) => {
+      if (existing && !cur) throw new CpError('template_not_found', 'no such template');
+      if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
+        // 404 for a private template, 409 for a visible one: never an existence oracle for private.
+        throw cur.visibility === 'private' && !isAdmin(p)
+          ? new CpError('template_not_found', 'no such template')
+          : new CpError('template_exists', `template '${id}' belongs to another subject`);
+      }
+      // §3.2: the same inputs are the same build. One registered, or still on its way there, is
+      // answered instead of a second build (two creates would otherwise queue two builds that
+      // register under one manifest hash).
+      reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
+      if (reused) return cur!;
+      const u = await usage(cat, charged);
+      if (!cur && u.templates >= quota.templates) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${quota.templates} templates per subject`,
+          undefined,
+          { quota: 'templates' },
+        );
+      }
+      if (u.buildsQueued >= quota.buildsQueued) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${quota.buildsQueued} builds queued per subject`,
+          undefined,
+          { quota: 'buildsQueued' },
+        );
+      }
+      if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
+      const created = await prov.append({
         stream,
-        kind: 'gate',
+        kind: 'create',
         subject: p.sub,
         body: {
-          record_sha256: result.gateRecordSha256,
-          // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
-          // X1). The policy record in force names what the trust was at create, after any change.
-          source: result.gateTrusted ? 'trusted' : 'client',
-          policy: policyRecord,
+          image: b.image as string,
+          // A round trip through JSON: what the client sent, as the wire carries it (no undefined),
+          // with the guest size under the key the build reads (normalizeSpec).
+          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+          profile: result.profile,
+          handle,
+          ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
         },
       });
-    }
-    await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
-    const build: TemplateBuild = {
-      buildId: handle,
-      handle,
-      status: 'queued',
-      profile: result.profile,
-      worker: '',
-      spec: buildSpec(spec),
-      createdAt: now,
-      queuedAtMs: deps.now(),
-      provenance: created.digest,
-      request: {
-        image: b.image as string,
-        spec: JSON.parse(JSON.stringify(spec)) as Record<string, unknown>,
-        ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
-      },
-    };
-    const base: TemplateDoc = cur ?? {
-      schema: TEMPLATE_DOC_SCHEMA,
-      id,
-      owner: p.sub,
-      visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
-      description: String(spec.description ?? ''),
-      tags: {},
-      builds: [],
-      createdAt: now,
-    };
-    return { ...base, builds: [build, ...base.builds] };
-  });
+      if (result.gateRecordSha256) {
+        await prov.append({
+          stream,
+          kind: 'gate',
+          subject: p.sub,
+          body: {
+            record_sha256: result.gateRecordSha256,
+            // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
+            // X1). The policy record in force names what the trust was at create, after any change.
+            source: result.gateTrusted ? 'trusted' : 'client',
+            policy: policyRecord,
+          },
+        });
+      }
+      await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+      const build: TemplateBuild = {
+        buildId: handle,
+        handle,
+        status: 'queued',
+        profile: result.profile,
+        worker: '',
+        spec: buildSpec(built),
+        createdAt: now,
+        queuedAtMs: deps.now(),
+        provenance: created.digest,
+        request: {
+          image: b.image as string,
+          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+          ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
+        },
+      };
+      const base: TemplateDoc = cur ?? {
+        schema: TEMPLATE_DOC_SCHEMA,
+        id,
+        owner: p.sub,
+        visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
+        description: String(built.description ?? ''),
+        tags: {},
+        builds: [],
+        createdAt: now,
+      };
+      return { ...base, builds: [build, ...base.builds] };
+    }),
+  );
   if (reused) {
     await auditBestEffort(deps, 'template_build_reused', id, {
       subject: p.sub,
@@ -682,7 +726,7 @@ function buildReuseKey(x: TemplateBuild): string | undefined {
 /** What a build keeps of its spec: the fields a client reads back (§4). */
 function buildSpec(spec: Record<string, unknown>): TemplateBuild['spec'] {
   const n = (v: unknown) => (typeof v === 'number' ? v : undefined);
-  const guest = n(spec.guest_mb ?? spec.guest_ram_mb);
+  const guest = n(spec.guest_ram_mb); // normalizeSpec has put the alias guest_mb here
   return {
     ...(guest !== undefined ? { guest_mb: guest } : {}),
     ...(n(spec.vcpus) !== undefined ? { vcpus: n(spec.vcpus) } : {}),
@@ -740,20 +784,20 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /**
- * Per host: its limits, its use (builds placed on it now) and its disk (§4, §6.2), as its agent
- * last reported them, and, from an agent that reports it, its memory: the figures, the effective
- * floor, the use and headroom placement counts, and the brake (pressure or a stale inventory) that
- * stops new starts; from an agent that reports them, its start limit, measured start time and start
- * line, and its idle grace with the builds in it (§6.5). Empty when no host has reported, never
- * meaning "no limit".
+ * Per host: its limits, its use (the workers placement counts on it: placed, running, draining) and
+ * its disk (§4, §6.2), as its agent last reported them, and, from an agent that reports it, its
+ * memory: the figures, the effective floor, the use and headroom placement counts, and the brake
+ * (pressure or a stale inventory) that stops new starts; from an agent that reports them, its start
+ * limit, measured start time and start line, and its idle grace with the builds in it (§6.5, apart
+ * from `used`). Empty when no host has reported, never meaning "no limit"; a host silent for over
+ * HOST_STALE_S is left out, as placement leaves it out.
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
-  const used = new Map<string, number>();
-  for (const h of f.placement?.placed.values() ?? []) used.set(h, (used.get(h) ?? 0) + 1);
+  const used = f.placement?.used ?? new Map<string, number>();
   const graced = new Map<string, number>();
   for (const g of f.placement?.graced.values() ?? [])
     graced.set(g.host, (graced.get(g.host) ?? 0) + 1);
-  return (deps.hosts?.all() ?? []).map(([id, h]) => {
+  return freshHosts(deps).map(([id, h]) => {
     const q = f.queue?.byHost.get(id);
     const start = h.start
       ? {
@@ -804,8 +848,8 @@ const leasedBy = (docs: TemplateDoc[], subject: string, nowS: number): TemplateB
 
 /**
  * Activate (§6.3): take or renew this subject's lease on a registered build, by `tag` (default
- * `default`) or `build`, `leaseSeconds` long (default the largest idle limit its hosts report, else
- * 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
+ * `default`) or `build`, `leaseSeconds` long (default the largest idle limit of the hosts that hold it, clamped
+ * to 60-86400, else 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
  * registered build or no host holds it, no_active_slot (Retry-After) when every holder is full,
  * quota_exceeded over the subject's active quota; on a refusal no lease is kept.
  */
@@ -827,12 +871,24 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
       { readiness: 'unavailable' },
     );
   }
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const r = await takeLease(deps, p, d0, target, b.leaseSeconds, 'owner');
   return {
     status: 200,
     body: { templateId: d0.id, buildId: target.buildId, leaseUntil: r.until, host: r.host },
   };
 }
+
+/**
+ * The refusal of a lease on a build no host can hold (activation.ts hostManaged): one imported from
+ * SH_SANDBOX_TEMPLATES, whose worker the deployment runs. It needs no activation: a sandbox is
+ * created on it whenever its worker is attached, as on a deployment without host agents.
+ */
+const deploymentRun = (id: string) =>
+  new CpError(
+    'invalid_request',
+    `template '${id}' is run by the deployment (SH_SANDBOX_TEMPLATES); it takes no activation lease`,
+  );
 
 /**
  * Takes or renews `p`'s lease on `target` (§6.3) and records it, or refuses with no lease kept:
@@ -847,6 +903,7 @@ async function takeLease(
   leaseSeconds: unknown,
   reason: 'owner' | 'first_use',
 ): Promise<{ until: number; host: string | null }> {
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const { cat } = writable(deps);
   return activationLock(cat).run('activation', () =>
     takeLeaseLocked(deps, p, d0, target, leaseSeconds, reason),
@@ -866,14 +923,26 @@ async function takeLeaseLocked(
   const nowS = seconds(deps);
   const DAY = 86_400;
   const hosts = hostViewsOf(deps);
-  const defaultLease =
-    Math.max(...hosts.map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds), 0) || 3600;
-  const want =
-    typeof leaseSeconds === 'number' && Number.isSafeInteger(leaseSeconds)
-      ? leaseSeconds
-      : defaultLease;
-  if (want < 60 || want > DAY)
-    throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+  // An explicit leaseSeconds is the client's, range-checked. The default is the largest idle limit
+  // of the hosts that hold this build (3600 when none reports one), clamped into the range: a
+  // host's SBX_IDLE_LIMIT_S outside it never refuses a request that named no lease.
+  let want: number;
+  if (leaseSeconds !== undefined && leaseSeconds !== null) {
+    if (
+      typeof leaseSeconds !== 'number' ||
+      !Number.isSafeInteger(leaseSeconds) ||
+      leaseSeconds < 60 ||
+      leaseSeconds > DAY
+    ) {
+      throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+    }
+    want = leaseSeconds;
+  } else {
+    const idle = hosts
+      .filter((h) => h.holds[target.buildId] !== undefined)
+      .map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds);
+    want = Math.min(DAY, Math.max(60, Math.max(0, ...idle) || 3600));
+  }
   const { policy: pol } = await policy.current();
   const docs = await cat.list();
   // A renewal does not count against itself.
@@ -909,13 +978,13 @@ async function takeLeaseLocked(
       : { ...d, builds: d.builds.map((x) => (x.buildId === target.buildId ? withLease(x) : x)) },
   );
   // A graced worker gives its slot up to this lease (it is not `placed`, so never "displaced"
-  // below); the workers with a live sandbox are never graced.
-  const busy = await graceBusy(deps, hosts, nowS);
-  const pl = place(trial, hosts, nowS, busy ? { busy } : {});
+  // below); the workers with a live sandbox drain, keep their slot, and are never graced.
+  const busy = await busyWorkers(deps, nowS);
+  const pl = place(trial, hosts, nowS, busy);
   // A held build is never evicted to make room (§6.3): placement breaks a tie of equal `since` (whole
   // seconds) by buildId, so a lease taken in the same second as a placed one could otherwise sort
   // ahead of it and push it off its host. Such a lease waits, as one that does not fit.
-  const before = place(docs, hosts, nowS, busy ? { busy } : {});
+  const before = place(docs, hosts, nowS, busy);
   const displaced = [...before.placed.keys()].find(
     (x) => x !== target.buildId && !pl.placed.has(x),
   );
@@ -938,10 +1007,18 @@ async function takeLeaseLocked(
     );
   }
   if (why === 'no_slot' || why === 'memory' || displaces) {
+    // Retry-After: the soonest a slot (or the memory) on one of this build's holders can free, that
+    // is the soonest another build placed on one of them loses its last live lease. Other hosts'
+    // builds, and other subjects' leases on a build that stays leased, free nothing here. 60 s when
+    // no leased build holds those slots (draining workers, whose end no lease tells).
+    const holders = new Set(
+      hosts.filter((h) => h.holds[target.buildId] !== undefined).map((h) => h.id),
+    );
     const free = Math.min(
       ...trial
         .flatMap((d) => d.builds)
-        .flatMap((x) => liveLeases(x, nowS).map((l) => l.until - nowS)),
+        .filter((x) => x.buildId !== target.buildId && holders.has(pl.placed.get(x.buildId) ?? ''))
+        .map((x) => Math.max(...liveLeases(x, nowS).map((l) => l.until)) - nowS),
     );
     // A memory refusal says so; one at the active limit answers exactly as before.
     throw new CpError(
@@ -1042,9 +1119,10 @@ export const FIRST_USE_RETRY_S = 30;
  * agent starts its worker; the retry succeeds once it is attached. No sandbox record is kept while
  * waiting, so a wait never uses the caller's live-sandbox cap. Without host agents (workers run
  * by the deployment, SH_TEMPLATE_HOSTS unset) nothing changes: the create succeeds as before.
- * With hosts configured but none reported yet (a fresh deploy, a restart, a host down), readiness
- * is the worker's presence alone: an attached worker serves, and an absent one is refused rather
- * than left to wait at the relay.
+ * With hosts configured but none reported within HOST_STALE_S (a fresh deploy, a restart, every
+ * host down), readiness is the worker's presence alone: an attached worker serves, and an absent one is refused rather
+ * than left to wait at the relay. A build imported from SH_SANDBOX_TEMPLATES (no snapshot, so no
+ * host ever holds it) is never gated: the deployment runs its worker.
  */
 async function requireActive(
   deps: CpDeps,
@@ -1053,13 +1131,20 @@ async function requireActive(
   activate: boolean,
 ): Promise<void> {
   if (hostViewsOf(deps).length === 0 && !deps.config.templateHosts?.length) return;
+  // A build imported from SH_SANDBOX_TEMPLATES is the deployment's to run, never a host's: no gate,
+  // as on a deployment without host agents.
+  if (!hostManaged(t.build)) return;
   let facts = await readinessFacts(deps);
   const readiness = readinessOf(t.build, facts.nowS, facts.placement, facts.attached);
   if (readiness === 'active') return;
   let now = readiness;
   let started = false;
+  // A caller that already holds a live lease on the build (a retry of its own first use, say) is
+  // only told to wait: no renewal and no new `activate` record on every retry.
+  const leased = liveLeases(t.build, facts.nowS).some((l) => l.subject === p.sub);
   if (
     activate &&
+    !leased &&
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {
     // Its refusals (no_active_slot, quota_exceeded, template_unavailable) answer as activate's.

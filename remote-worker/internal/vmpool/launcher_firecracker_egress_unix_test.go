@@ -71,7 +71,7 @@ func (b *recordingBinder) log() []string {
 // jailer's argv is "--id <id> ...", so the script derives the jail from $2.
 func egressLauncher(t *testing.T, b EgressBinder) (Launcher, string, string) {
 	t.Helper()
-	base := shortdir.New(t, "fceg", len("/firecracker/vm-6/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fceg", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 	marker := filepath.Join(base, "jailer-marker")
 	jailer := filepath.Join(base, "jailer")
 	script := "#!/bin/sh\njail=" + base + "/firecracker/$2/root\n" +
@@ -366,7 +366,7 @@ func TestLauncherFromEnvWiresEgressFromControlSock(t *testing.T) {
 // A jailer (or a Firecracker) that fails says why on stdout/stderr; the restore's error carries
 // the tail of it, instead of only the socket timeout.
 func TestFirecrackerRestoreErrorCarriesTheJailerOutput(t *testing.T) {
-	base := shortdir.New(t, "fcout", len("/firecracker/vm-6/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fcout", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 	jailer := filepath.Join(base, "jailer")
 	script := "#!/bin/sh\necho 'jailer: Failed to chroot: Os { code: 2 }' >&2\necho second line\nexit 1\n"
 	if err := os.WriteFile(jailer, []byte(script), 0o755); err != nil {

@@ -15,9 +15,9 @@
 #                                                 so an activation waits seconds, not behind a build)
 #
 # The wanted state (GET /v1/hosts/<id>/wanted): `run` lists the leased builds placed on this host,
-# `stop` the ones it holds with no lease and no live sandbox. The agent starts each `run` worker whose
-# sbx-worker@<id> unit is installed and not active, and stops each `stop` worker whose unit is active,
-# reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
+# `stop` the ones it holds with no lease and no live sandbox (or that another host is placed on). The
+# agent stops each `stop` worker whose unit is active, then starts each `run` worker whose
+# sbx-worker@<id> unit is installed and not active, reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
 # /v1/hosts/<id>/workers/report. Readiness is the relay's attached record, never these reports. A
 # lock ($SBX_SRV/.activation.lock, flock) keeps a build poll and a --wanted-only run from applying
 # the wanted state at once: the one that does not get it skips, saying so.
@@ -90,7 +90,10 @@
 # redacted (see redact()), the full log stays in $SBX_SRV/agent-logs (0700), and a template record or
 # manifest that names SBX_REGISTRY is not sent (the build fails `leak_refused`). A failure's reason
 # leads with a code a client can branch on: pull_failed, probe_failed, disk_floor, spec_refused,
-# build_failed or leak_refused.
+# build_failed or leak_refused; or agent_error, when the agent cannot carry on with a build it
+# claimed (a gate record fetch that failed or does not match its digest, a report not accepted, no
+# template record or manifest after the build). Every claimed build is reported failed, best
+# effort, on any way out short of `built`.
 #
 # The start limit (§6.5), in activation(): a cold worker reads and pins its whole memory file before
 # it attaches, and starts at once share the disk, so the agent starts at most SBX_START_CONCURRENCY
@@ -282,17 +285,21 @@ memory_report() {
         memfileMismatch: ($m | split("\n") | map(select(length > 0)) | unique)}' >"$WORK/memory.json"
 }
 
-# The snapshots this host holds, by manifest hash, as template-build.sh's records name them; its
-# limits, with its start limit, measured start time and idle grace; and its memory.
+# The snapshots this host holds, by manifest hash, as template-build.sh's records name them, each
+# with whether its worker's unit is running (the control plane counts running workers against
+# SBX_ACTIVE_LIMIT and keeps a running build on this host); its limits, with its start limit,
+# measured start time and idle grace; and its memory.
 inventory() {
-  local f out="$WORK/inventory.json" mem='{}' secs
+  local f w r out="$WORK/inventory.json" mem='{}' secs
   if memory_report; then mem="$(jq -c '{memory: .}' "$WORK/memory.json")" || mem='{}'; fi
   secs="$(start_seconds)"
   {
     printf '{"holds":['
     local sep=''
     while IFS= read -r f; do
-      printf '%s%s' "$sep" "$(jq -c '{template: .id, manifestHash: .manifest_hash}' "$f")"
+      w="$(jq -r '.worker // ""' "$f")" r=false
+      if [[ "$w" =~ $WORKER_RE ]] && systemctl is-active --quiet "sbx-worker@$w.service"; then r=true; fi
+      printf '%s%s' "$sep" "$(jq -c --argjson r "$r" '{template: .id, manifestHash: .manifest_hash, running: $r}' "$f")"
       sep=','
     done < <(held_records)
     printf '],"limits":{"activeLimit":%d,"idleLimitSeconds":%d,"buildConcurrency":%d,"diskFreeGb":%d,"diskFloorGb":%d,"startConcurrency":%d,"idleGraceSeconds":%d%s}}' \
@@ -332,25 +339,38 @@ log_tail() { # log_tail HANDLE FILE: the build log's last 200 lines, redacted, a
   api POST "/v1/hosts/$SBX_HOST_ID/builds/$1/log" "$WORK/log.json" >/dev/null || error "log upload for $1 failed"
 }
 
+# fail_claimed HANDLE STEP WHY: a claimed build that the agent cannot carry on with is reported
+# failed (best effort), so it does not stay `building`, and count against its owner's queue, until
+# cancelled by hand. WHY is the agent's own fixed wording, never a build's output.
+fail_claimed() {
+  FAILED=$((FAILED + 1))
+  report "$1" "$(jq -cn --arg s "$2" --arg m "agent_error: $3" '{event: "failed", step: $s, message: $m}')" >/dev/null ||
+    error "report failed for $1 failed"
+  say "{\"agent\":\"failed\",\"build\":\"$1\",\"step\":\"$2\",\"code\":\"agent_error\",\"why\":$(jq -Rn --arg w "$3" '$w')}"
+}
+
 build_one() { # build_one JOB_JSON
   local job="$1" handle tpl spec gate args=() rc=0 snap rec
   handle="$(jq -r .build <<<"$job")" tpl="$(jq -r .template <<<"$job")"
-  [[ "$handle" =~ $HANDLE_RE && "$tpl" =~ $TEMPLATE_ID_RE ]] || { error 'the control plane handed out a malformed job'; return; }
+  # A malformed handle cannot be reported on; a good handle with a malformed template id is
+  # claimed, so it is reported failed.
+  [[ "$handle" =~ $HANDLE_RE ]] || { error 'the control plane handed out a malformed job'; return; }
   CLAIMED=$((CLAIMED + 1))
+  [[ "$tpl" =~ $TEMPLATE_ID_RE ]] || { fail_claimed "$handle" job 'the job names a malformed template id'; return; }
   say "{\"agent\":\"claimed\",\"template\":\"$tpl\",\"build\":\"$handle\"}"
   spec="$WORK/$handle.spec.json"
   jq '.spec' <<<"$job" >"$spec"
   gate="$(jq -r '.gateRecord // empty' <<<"$job")"
   if [[ -n "$gate" ]]; then
     local d="${gate##*/}"
-    [[ "$d" =~ $DIGEST_RE && "$gate" == "/v1/hosts/$SBX_HOST_ID/blobs/$d" ]] || { error "malformed gate record path for $handle"; return; }
-    api GET "$gate" | jq -r .base64 | base64 --decode >"$WORK/$handle.gate.json" || { error "gate record fetch for $handle failed"; return; }
+    [[ "$d" =~ $DIGEST_RE && "$gate" == "/v1/hosts/$SBX_HOST_ID/blobs/$d" ]] || { fail_claimed "$handle" gate 'the job names a malformed gate record path'; return; }
+    api GET "$gate" | jq -r .base64 | base64 --decode >"$WORK/$handle.gate.json" || { fail_claimed "$handle" gate 'the gate record fetch failed'; return; }
     # The bytes must be the ones the policy trusted: their sha256 is the name.
-    [[ "sha256:$(sha256sum "$WORK/$handle.gate.json" | cut -d' ' -f1)" == "$d" ]] || { error "gate record for $handle does not match its digest"; return; }
+    [[ "sha256:$(sha256sum "$WORK/$handle.gate.json" | cut -d' ' -f1)" == "$d" ]] || { fail_claimed "$handle" gate 'the gate record does not match its digest'; return; }
     args+=(--gate-record "$WORK/$handle.gate.json")
   fi
   [[ -z "${SBX_REGISTRY:-}" ]] || args+=(--registry "$SBX_REGISTRY")
-  report "$handle" '{"event":"building"}' >/dev/null || { error "report building for $handle failed"; return; }
+  report "$handle" '{"event":"building"}' >/dev/null || { fail_claimed "$handle" report 'the building report was not accepted'; return; }
   "$SBX_TEMPLATE_BUILD" "$spec" --kernel "$SBX_KERNEL" ${args[@]+"${args[@]}"} >"$WORK/$handle.log" 2>&1 || rc=$?
   # The full, unredacted log stays on the host (root-only), for whoever runs it; only redacted text
   # leaves (log_tail, the failure report).
@@ -361,7 +381,9 @@ build_one() { # build_one JOB_JSON
   if ((rc != 0)); then
     FAILED=$((FAILED + 1))
     local last
-    last="$(grep -v '^[[:space:]]*$' "$WORK/$handle.log" | tail -n 1 | redact | cut -c1-500)"
+    # A build that died with no output (killed, out of memory) leaves no non-blank line: grep then
+    # exits 1, which pipefail and errexit would turn into the end of the whole poll.
+    last="$( { grep -v '^[[:space:]]*$' "$WORK/$handle.log" || true; } | tail -n 1 | redact | cut -c1-500)"
     # A fixed code a client can branch on, from template-build.sh's own wording; then the redacted line.
     local code=build_failed
     case "$last" in
@@ -384,9 +406,13 @@ build_one() { # build_one JOB_JSON
   digest="$(jq -r .image "$spec")"
   digest="${digest##*@sha256:}"
   rec="$SBX_SRV/templates/$tpl-${digest:0:12}.json"
-  [[ -f "$rec" ]] || { error "no template record for $handle at $rec"; return; }
-  snap="$SBX_SRV/snapshots/$(jq -r .snapshot "$rec")"
-  [[ -f "$snap/manifest.json" ]] || { error "no manifest for $handle"; return; }
+  [[ -f "$rec" ]] || { fail_claimed "$handle" report 'template-build.sh wrote no template record'; return; }
+  # A record that is not JSON or names no snapshot must not end the poll under errexit.
+  local name
+  name="$(jq -r '.snapshot // empty' "$rec" 2>/dev/null)" || name=''
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { fail_claimed "$handle" report 'the template record names no snapshot'; return; }
+  snap="$SBX_SRV/snapshots/$name"
+  [[ -f "$snap/manifest.json" ]] || { fail_claimed "$handle" report 'the snapshot has no manifest'; return; }
   # T and S go byte for byte (the control plane checks T against the create and hashes S), so they
   # cannot be redacted: one that names this host's registry is not sent at all.
   if [[ -n "${SBX_REGISTRY:-}" ]] && grep -qF -- "$SBX_REGISTRY" "$rec" "$snap/manifest.json"; then
@@ -398,7 +424,7 @@ build_one() { # build_one JOB_JSON
   fi
   local out
   out="$(report "$handle" "$(jq -cn --rawfile t "$rec" --rawfile s "$snap/manifest.json" '{event: "built", templateRecord: $t, manifest: $s}')")" ||
-    { error "report built for $handle failed"; return; }
+    { fail_claimed "$handle" report 'the built report was not accepted'; return; }
   BUILT=$((BUILT + 1))
   say "{\"agent\":\"reported\",\"build\":\"$handle\",\"outcome\":$(jq -c . <<<"$out")}"
 }
@@ -500,6 +526,20 @@ activation() {
     : >"$WORK/graced.ids"
   if [[ -f "$SBX_SRV/graced" ]]; then cp "$SBX_SRV/graced" "$WORK/graced.prev"; else : >"$WORK/graced.prev"; fi
   (umask 077 && cat "$WORK/graced.ids" >"$SBX_SRV/graced.tmp") && mv -f "$SBX_SRV/graced.tmp" "$SBX_SRV/graced"
+  # Stops first, so a slot (or the memory) a stopped worker frees is free before a start uses it.
+  while IFS=$'\t' read -r w b; do
+    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to stop is malformed'; continue; }
+    unit="sbx-worker@$w.service"
+    systemctl is-active --quiet "$unit" || continue
+    if systemctl stop "$unit"; then
+      # A stop of a worker the idle grace kept is logged as such: a wanted build needed
+      # its slot, its grace ended, or its build was released with stopNow.
+      STOPPED=$((STOPPED + 1)); worker_report "$b" detached; say "{\"agent\":\"stopped\",\"worker\":\"$w\"$(! grep -qxF -- "$b" "$WORK/graced.prev" || printf ',"was":"graced"')}"
+    else
+      error "stop $unit failed"
+    fi
+  done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
+  # The start book after the stops: a worker stopped just now is no longer starting.
   start_book "$now" "$has"
   slots=$((SBX_START_CONCURRENCY - INFLIGHT))
   while IFS=$'\t' read -r w b; do
@@ -542,18 +582,6 @@ activation() {
     say "{\"agent\":\"queued\",\"workers\":$queued,\"why\":\"$INFLIGHT starting, SBX_START_CONCURRENCY $SBX_START_CONCURRENCY: started in a later run\"}"
   fi
   ((graced == 0)) || GRACE_SUMMARY=",\"graced\":$graced"
-  while IFS=$'\t' read -r w b; do
-    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to stop is malformed'; continue; }
-    unit="sbx-worker@$w.service"
-    systemctl is-active --quiet "$unit" || continue
-    if systemctl stop "$unit"; then
-      # A stop of a worker the idle grace kept is logged as such: a wanted build needed
-      # its slot, its grace ended, or its build was released with stopNow.
-      STOPPED=$((STOPPED + 1)); worker_report "$b" detached; say "{\"agent\":\"stopped\",\"worker\":\"$w\"$(! grep -qxF -- "$b" "$WORK/graced.prev" || printf ',"was":"graced"')}"
-    else
-      error "stop $unit failed"
-    fi
-  done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
   exec 9>&-
 }
 

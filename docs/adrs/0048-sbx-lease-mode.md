@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-08-sbx-lease-mode-design.md`](../specs/2026-11-08-sbx-lease-mode-design.md)
-- **Experiment:** E17, rossoctl/moca-experiments `e17/SPEC.md`
+- **Experiment:** E17, rossoctl/moca-experiments `experiments/e17-lease/SPEC.md`
 - **Revises:** [ADR-0035](0035-per-exec-microvm-warm-standby.md)'s 2026-10-08 revision ("per-`Exec`
   is the tier's only mode"), for SBX sandboxes only. ADR-0035's per-`Exec` guarantees, its gates and
   its read-coalescing exception are unchanged.
