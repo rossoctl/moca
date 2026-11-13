@@ -189,7 +189,9 @@ opens provenance streams without bound), and nothing is queued. Over a quota
 (§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
 or were cancelled holds no slot, and takes one again, checked like a new id, when it gets a new
 build; builds queued, building or probing at once, charged to the
-template's owner even when an admin adds the build) is `429 quota_exceeded` naming which
+template's owner even when an admin adds the build; template ids owned in any status, checked for a
+new id only, so a create-then-cancel loop cannot open documents and provenance streams without
+bound) is `429 quota_exceeded` naming which
 (`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
 for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
@@ -373,7 +375,8 @@ naming who), and each create names one, or gets the policy's default.
 The policy (`moca-template-policy/1`, `packages/control-plane/src/template-policy.ts`) is kept beside
 the template store (`<SH_PROVENANCE_DIR>/policy.json`, `template-policy-store.ts`) and holds the
 profiles, the allowed registries, the trusted gate records (by sha256) and the per-subject quotas
-(`templates`, `buildsQueued`, `active`). Until an admin sets one, the default policy applies, and it
+(`templates`, `buildsQueued`, `active`, and `owned`, the template ids owned in any status, 200 when
+a policy does not set it). Until an admin sets one, the default policy applies, and it
 is recorded on first use, so every `check` cites a `policy` record that exists. `GET /v1/policy`
 shows it, its digest and its record.
 

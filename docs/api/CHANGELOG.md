@@ -26,12 +26,14 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
   size envelope, allowed registries, trusted gate records by sha256, quotas) and `PolicyView`
   schemas. The default policy has a `base` and a `benchmark` profile.
 - New GET /v1/quota: the caller's limits and use (`templates`, owned with a build registered or on
-  its way there, a new build of one that holds no slot checked like a new id; `buildsQueued`, queued, building or probing; `active`), and on the sandbox profile
-  the live-sandbox cap (`sandboxes`).
+  its way there, a new build of one that holds no slot checked like a new id; `buildsQueued`,
+  queued, building or probing; `active`; `owned`, template ids owned in any status, a failed or
+  cancelled-only one included, 200 when the policy does not set it), and on the sandbox profile the
+  live-sandbox cap (`sandboxes`).
 - New error codes `policy_refused` (422, with `rule`, the gating rule's id from
   `deploy/sbx/template-onboarding/governance/GATING-RULES.md`) and `template_exists` (409: ids are
   unique per deployment, the first creator owns one). `quota_exceeded` on a create names the quota
-  (`quota`: `templates` or `buildsQueued`). The `Error` schema adds `rule` and `quota`.
+  (`quota`: `templates`, `buildsQueued` or `owned`). The `Error` schema adds `rule` and `quota`.
 - `TemplateBuild` adds `handle` (the create's handle; equal to `buildId` for an imported build) and
   `reason` (why a build failed or was rejected), and GET /v1/templates/{id}/builds/{build} also
   finds a build by its handle.

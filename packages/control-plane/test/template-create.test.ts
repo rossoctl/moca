@@ -8,6 +8,7 @@ import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import {
   checkCreate,
+  DEFAULT_OWNED,
   DEFAULT_POLICY,
   policyProblems,
   PROFILE_RULES,
@@ -500,6 +501,40 @@ describe('POST /v1/templates/{id}/builds/{build}/cancel (§5.1)', () => {
     expect(more.status).toBe(202);
   });
 
+  it('bounds the template ids a subject owns in any status: a create-then-cancel loop stops', async () => {
+    const d = stored({
+      ...benchmarkPolicy,
+      quota: { templates: 1, buildsQueued: 1, active: 1, owned: 2 },
+    });
+    await cancel(d, handleOf(await create(d)));
+    const hb = handleOf(await create(d, body({ id: 'loop-b' })));
+    await HANDLERS.cancelTemplateBuild!(
+      ctx({ principal: alice, params: { id: 'loop-b', build: hb } }),
+      d,
+    );
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q).toMatchObject({
+      templates: { used: 0 },
+      buildsQueued: { used: 0 },
+      owned: { limit: 2, used: 2 },
+    });
+    expect((await create(d, body({ id: 'loop-c' })).catch((x) => x)).extra).toEqual({
+      quota: 'owned',
+    });
+    expect(await d.templates!.get('loop-c')).toBeNull();
+    expect(await d.provenance!.chain('template/loop-c')).toEqual([]);
+    // The subject's own ids still take new builds: owned counts new ids only.
+    expect((await create(d, body({ spec: { ...spec, description: 'again' } }))).status).toBe(202);
+  });
+
+  it('applies the default owned quota to a policy that does not set one', async () => {
+    const { owned: _o, ...quota } = DEFAULT_POLICY.quota;
+    const d = stored({ ...benchmarkPolicy, quota });
+    await create(d);
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.owned).toEqual({ limit: DEFAULT_OWNED, used: 1 });
+  });
+
   it('refuses another subject, an unknown build, and a build already failed', async () => {
     const d = stored();
     const h = handleOf(await create(d));
@@ -558,6 +593,12 @@ describe('policy and quota routes', () => {
         policyProblems(withBench({ ...bench, envelope: { ...bench.envelope, exact } })).join(),
       ).toMatch(/exact/);
     expect(PROFILE_RULES).toEqual(DEFAULT_POLICY.profiles.benchmark!.requires);
+    const { owned: _o, ...noOwned } = DEFAULT_POLICY.quota;
+    expect(policyProblems({ ...DEFAULT_POLICY, quota: noOwned })).toEqual([]);
+    for (const owned of [-1, 1.5, '200', null])
+      expect(
+        policyProblems({ ...DEFAULT_POLICY, quota: { ...DEFAULT_POLICY.quota, owned } }).join(),
+      ).toMatch(/owned/);
   });
 
   it('fails closed on a stored policy naming an unknown rule id, until an admin sets a valid one', async () => {
