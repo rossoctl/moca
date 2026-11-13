@@ -191,7 +191,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Internal       | `POST /internal/credentials` (session token → credential) and `POST /internal/turn-credentials` (queued turn id → credential, at dequeue): data plane only, both authenticated with `SH_EXCHANGE_TOKEN` |
 | Templates      | `GET /v1/templates`, `GET /v1/templates/{id}`, `GET /v1/templates/{id}/builds[/{build}]`, `GET /v1/templates/{id}/tags`: both route profiles (API 1.4.0)                                                |
 | Self-serve     | `POST /v1/templates`, `POST /v1/templates/{id}/builds`, `POST /v1/templates/{id}/builds/{build}/cancel`, `GET` and `PUT /v1/policy`, `GET /v1/quota`: both route profiles (API 1.5.0)                   |
-| Host agents    | `POST /v1/hosts/{host}/inventory`, `/builds/claim`, `/builds/{build}/log` and `/report`, `GET /v1/hosts/{host}/blobs/{digest}`: a host's own bearer, both route profiles (API 1.7.0)                    |
+| Host agents    | `POST /v1/hosts/{host}/inventory`, `/builds/claim`, `/builds/{build}/log` and `/report`, `GET /v1/hosts/{host}/blobs/{digest}`: a host's own bearer, both route profiles (API 1.8.0)                    |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -219,7 +219,7 @@ is queued, and a refusal is 422 `policy_refused` naming the gating rule
 (409 `template_exists`); quotas are per subject (429 `quota_exceeded` naming which; `GET /v1/quota` shows them). A create
 with the same inputs as a build of the caller's own template answers that build, `reused: true`.
 
-The host routes came with API 1.7.0. A KVM host's agent (`deploy/sbx/host-agent.sh`) claims queued builds, builds them
+The host routes came with API 1.8.0. A KVM host's agent (`deploy/sbx/host-agent.sh`) claims queued builds, builds them
 with `template-build.sh` and reports them, with its own bearer (`SH_TEMPLATE_HOSTS`, `SH_HOST_TOKEN_<ID>`); the control
 plane registers a built build or rejects it, by policy, naming the rule. A client follows its build by the create's handle
 through `queued`, `building`, `probing` and `registered` (or `failed` with `reason.step`, `rejected` with `reason.rule`).

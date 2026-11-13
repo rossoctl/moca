@@ -37,6 +37,10 @@ describe('the route table', () => {
         'POST /internal/credentials',
         // The dequeue-time credential exchange (async fan-out spec §5.4).
         'POST /internal/turn-credentials',
+        // MI1 §6.2's grant lifecycle. Unmounted unless MOCA_GRANT_SIGNING_KEY is set, so these two
+        // are declared here but 404 on a deployment with no grant ring.
+        'POST /internal/turn-grants',
+        'POST /internal/grants/refresh',
         'GET /healthz',
         'GET /readyz',
         // §7's async_quota_refusals: the control plane's own /metrics (async fan-out spec §7).
@@ -93,14 +97,24 @@ describe('the route table', () => {
     expect(auth('POST', '/v1/auth/revoke-all')).toBe('api');
     expect(auth('POST', '/internal/credentials')).toBe('exchange');
     expect(auth('POST', '/internal/turn-credentials')).toBe('exchange');
-    // Both internal routes, and ONLY those two, take the shared bearer. The list is pinned rather
-    // than counted: a third route that quietly joined this auth kind would be reachable by anything
+    // The grant lifecycle rides the same bearer because it is the same control-plane-to-worker hop
+    // (MI1 §6.2); what makes it safer than the exchanges is that a grant is a capability spent at an
+    // enforcement point, not a secret.
+    expect(auth('POST', '/internal/turn-grants')).toBe('exchange');
+    expect(auth('POST', '/internal/grants/refresh')).toBe('exchange');
+    // These internal routes, and ONLY these, take the shared bearer. The list is pinned rather
+    // than counted: a route that quietly joined this auth kind would be reachable by anything
     // in the harness pod, which is the one property the exchange bearer cannot defend on its own.
     expect(
       ROUTES.filter((r) => r.auth === 'exchange')
         .map((r) => r.operationId)
         .sort(),
-    ).toEqual(['exchangeCredential', 'exchangeTurnCredential']);
+    ).toEqual([
+      'exchangeCredential',
+      'exchangeTurnCredential',
+      'issueTurnGrants',
+      'refreshTurnGrants',
+    ]);
     // A client reads it before it has logged in; it carries no per-subject data.
     expect(auth('GET', '/v1/discovery')).toBe('none');
     // The host janitor's read takes its own bearer and never a user's token (SBX0 §8.3).
