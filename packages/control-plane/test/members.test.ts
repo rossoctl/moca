@@ -1,5 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  ftruncateSync,
+  futimesSync,
+  mkdtempSync,
+  openSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -394,10 +403,17 @@ describe('per-request evaluation from one read (spec §8)', () => {
     const d = setup();
     await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, {});
     const file = (d.members as unknown as { path: string }).path;
-    const { mtime } = statSync(file);
     expect(await d.members.membershipNow(CAROL, nowS())).toMatchObject({ roles: ['admin'] });
-    writeFileSync(file, JSON.stringify({ members: {} }));
-    utimesSync(file, mtime, mtime);
+    // One handle for the read of the times, the rewrite and the reset of the times.
+    const fd = openSync(file, 'r+');
+    try {
+      const { mtime, atime } = fstatSync(fd);
+      ftruncateSync(fd, 0);
+      writeSync(fd, JSON.stringify({ members: {} }), 0);
+      futimesSync(fd, atime, mtime);
+    } finally {
+      closeSync(fd);
+    }
     expect(await d.members.membershipNow(CAROL, nowS())).toMatchObject({ roles: [] });
   });
 
