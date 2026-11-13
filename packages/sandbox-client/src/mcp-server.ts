@@ -65,6 +65,12 @@ export interface SandboxMcpOptions {
   lease: LeaseCall;
   /** The sandbox's mode at start, for the tool and rule texts (default per-exec). */
   mode?: SandboxModeName;
+  /**
+   * The mode claim of the latest sandbox token minted, undefined before the first mint. When set it
+   * decides, over the record, whether `reset` and `sandbox_info` ask the lease at all: the record
+   * read at start may be stale, a token is minted from the record as it is now.
+   */
+  leaseMode?: () => SandboxModeName | undefined;
   /** Called once per call. A recorder that throws never fails the call. */
   record?: (r: CallRecord) => void;
   /** How long a call may wait behind this server's running one before it is refused as busy. */
@@ -268,9 +274,9 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   let lastEnd: LeaseEvent | undefined;
 
   /**
-   * The lease fields of `sandbox_info` for the record's current mode. A per-exec sandbox has no
-   * lease to ask about (P4-R9: the default deployment's worker would refuse the status). A failed
-   * status is shown, never a failed tool.
+   * The lease fields of `sandbox_info` for the current mode (the latest token's, else the
+   * record's). A per-exec sandbox has no lease to ask about (P4-R9: the default deployment's worker
+   * would refuse the status). A failed status is shown, never a failed tool.
    */
   const leaseInfo = async (current: SandboxModeName): Promise<string[]> => {
     const lines = [`mode: ${current}`];
@@ -298,7 +304,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const info = async (): Promise<string> => {
     const got = await o.info();
     const cur = typeof got === 'string' ? { text: got, mode } : got;
-    return [cur.text, ...(await leaseInfo(cur.mode))].join('\n');
+    return [cur.text, ...(await leaseInfo(o.leaseMode?.() ?? cur.mode))].join('\n');
   };
 
   /**
@@ -328,7 +334,13 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     return lines;
   };
 
-  const tools = sandboxTools({ info, workspace: ws, mode, lease: o.lease });
+  const tools = sandboxTools({
+    info,
+    workspace: ws,
+    mode,
+    lease: o.lease,
+    currentMode: () => o.leaseMode?.() ?? mode,
+  });
   const byName = new Map(tools.map((t) => [t.name, t]));
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
   const server = new Server(

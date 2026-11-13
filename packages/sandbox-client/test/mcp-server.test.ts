@@ -720,6 +720,42 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(ops).toEqual(['status']);
   });
 
+  it("the latest minted token's mode decides over the record's", async () => {
+    const f = leaseFake(ACTIVE);
+    let minted: 'per-exec' | 'lease' | undefined;
+    const { client } = await connect({
+      exec: async () => res(),
+      lease: f.lease,
+      leaseMode: () => minted,
+    });
+    // No token yet: the start record (per-exec) decides.
+    expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
+    expect(f.ops).toEqual([]);
+    minted = 'lease';
+    expect(text(await call(client, 'reset', {}))).toBe(
+      'lease ended (reset): the next command starts a new guest',
+    );
+    expect(f.ops).toEqual(['status', 'reset']);
+    expect(text(await call(client, 'sandbox_info', {}))).toContain(
+      '\nmode: lease\nlease: active\n',
+    );
+    // And back: a per-exec token beats a lease record.
+    minted = 'per-exec';
+    const g = leaseFake(ACTIVE);
+    const { client: c2 } = await connect({
+      exec: async () => res(),
+      lease: g.lease,
+      mode: 'lease',
+      info: async () => ({ text: 'template default', mode: 'lease' }),
+      leaseMode: () => minted,
+    });
+    expect(text(await call(c2, 'sandbox_info', {}))).toContain(
+      '\nmode: per-exec\nlease: none (per-exec)\n',
+    );
+    expect(text(await call(c2, 'reset', {}))).toBe('no lease to reset');
+    expect(g.ops).toEqual([]);
+  });
+
   it('reset on a per-exec sandbox makes no lease call', async () => {
     const f = leaseFake(ACTIVE);
     const { client } = await connect({ exec: async () => res(), lease: f.lease });

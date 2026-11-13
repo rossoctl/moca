@@ -242,9 +242,11 @@ export function sandboxTools(o: {
   mode?: SandboxModeName;
   /** `reset`'s lease calls. Without them, `reset` fails as unavailable. */
   lease?: LeaseCall;
+  /** The mode `reset` acts on, asked at each call (default `mode`): it may change mid-session. */
+  currentMode?: () => SandboxModeName;
 }): SandboxTool[] {
   const ws = o.workspace ?? WORKSPACE;
-  const leased = (o.mode ?? 'per-exec') !== 'per-exec';
+  const leased = (o.mode ?? 'per-exec') !== 'per-exec'; // the texts' mode
   const at = (p: string): string => (posix.isAbsolute(p) ? posix.normalize(p) : posix.join(ws, p));
   const rel = (line: string): string =>
     line.startsWith(`${ws}/`) ? line.slice(ws.length + 1) : line;
@@ -667,7 +669,7 @@ export function sandboxTools(o: {
     inputSchema: { type: 'object', properties: {} },
     async run() {
       // A per-exec sandbox has no lease (and its worker may have no lease calls): nothing to ask.
-      if (!leased) return ok(RESET_NONE_TEXT);
+      if ((o.currentMode?.() ?? o.mode ?? 'per-exec') === 'per-exec') return ok(RESET_NONE_TEXT);
       // Only a live lease has a guest to end; asking first keeps a reset of nothing a no-op.
       if ((await lease('status')).state === 'none') return ok(RESET_NONE_TEXT);
       await lease('reset');

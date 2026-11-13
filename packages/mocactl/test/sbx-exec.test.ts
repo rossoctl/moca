@@ -918,7 +918,10 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
    * A lease sandbox's MCP session: each token mint takes the next of `modes` (the last repeats);
    * a `remint` command forces a mint, as the exec client's retry does.
    */
-  function leaseSession(modes: string[], over: { keepalive?: () => Promise<void> } = {}) {
+  function leaseSession(
+    modes: string[],
+    over: { keepalive?: () => Promise<void>; record?: string } = {},
+  ) {
     const { home, env, io } = setup();
     let minted = 0;
     const cp = fakeCp({
@@ -926,7 +929,10 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
         status: 200,
         body: { ...TOKEN, token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!) },
       }),
-      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'lease' }) }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({
+        status: 200,
+        body: sandbox({ mode: over.record ?? 'lease' }),
+      }),
     });
     const flags: boolean[] = [];
     const ops: string[] = [];
@@ -1040,6 +1046,30 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     };
     expect(reset.content[0]!.text).toBe(RESET_ENDED_TEXT);
     expect(m.ops).toEqual(['status', 'status', 'reset']);
+    await m.client.close();
+    await m.served;
+  });
+
+  it("reset and sandbox_info follow the latest minted token's mode over the start record", async () => {
+    // The owner upgraded after the server started: the record it read said per-exec.
+    const m = leaseSession(['lease'], { record: 'per-exec' });
+    await m.connect();
+    const reset = async () =>
+      (
+        (await m.client.callTool({ name: 'reset', arguments: {} })) as {
+          content: { text: string }[];
+        }
+      ).content[0]!.text;
+    expect(await reset()).toBe('no lease to reset'); // no token yet: the record decides
+    expect(m.ops).toEqual([]);
+    await m.bash('echo'); // the first mint carries lease
+    expect(await reset()).toBe(RESET_ENDED_TEXT);
+    expect(m.ops).toEqual(['status', 'reset']);
+    const info = (await m.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(info.content[0]!.text).toContain('\nmode: lease\nlease: active\n');
+    expect(m.ops).toEqual(['status', 'reset', 'status']);
     await m.client.close();
     await m.served;
   });

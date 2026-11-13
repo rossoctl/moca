@@ -57,7 +57,9 @@ export async function serveSbxMcp(
   const s = await c.api.getSandbox(id);
   const mode = recordMode(s);
   let conn: Promise<OpenedExec> | undefined;
-  /** The latest minted token's mode claim is a lease mode. */
+  /** The latest minted token's mode claim (undefined before the first mint). */
+  let tokenMode: SandboxModeName | undefined;
+  /** That claim is a lease mode. */
   let leased = false;
   let beat: ReturnType<typeof setInterval> | undefined;
   let closed = false;
@@ -85,7 +87,8 @@ export async function serveSbxMcp(
       });
   };
   const onToken = (t: SbxToken) => {
-    leased = jwtMode(t.token) !== 'per-exec';
+    tokenMode = jwtMode(t.token);
+    leased = tokenMode !== 'per-exec';
     if (!leased) stopBeat();
     else if (!beat && !closed) beat = setInterval(keepalive, KEEPALIVE_MS);
   };
@@ -118,6 +121,7 @@ export async function serveSbxMcp(
     info,
     lease,
     mode,
+    leaseMode: () => tokenMode,
     record: (r) => recordCall(c.rt.paths.stateDir, id, r),
     expiresAt: s.expiresAt,
     version: VERSION,
