@@ -565,7 +565,10 @@ that is not bound here.
 
   `run -- CMD…` quotes each argument, so it runs exactly what you typed: use stdin or
   `-- sh -c '…'` for pipes, variables and globs. It exits with the command's own code, 124 when the
-  command timed out, and 125 when the sandbox itself failed. Like `ssh`, it passes the remote
+  command timed out, and 125 when the sandbox itself failed. A command the sandbox refused before
+  starting it, for want of capacity (busy, or the template's worker at its memory budget), is sent
+  again after a short backoff, up to `MOCACTL_SBX_BUSY_RETRIES` times (default 4, at most 20, 0 for none):
+  nothing ran, so it still runs at most once. Refused every time, `run` (and `put`) exits 75; interrupted while waiting, 130. Like `ssh`, it passes the remote
   side's terminal escape sequences through to your terminal.
 
 - **Write a file into the sandbox** from stdin:
