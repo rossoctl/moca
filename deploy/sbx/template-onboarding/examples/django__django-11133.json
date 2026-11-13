@@ -1,0 +1,26 @@
+{
+  "schema": "moca-sbx-template-spec/1",
+  "id": "django-django-11133",
+  "image": "images/moca-microvm@sha256:3d3e705ff379defc6684c220f97fc8701df4e06fce8fa8841c13d3ff8cef7746",
+  "guest_ram_mb": 4096,
+  "vcpus": 2,
+  "guest_home": "/tmp/home",
+  "skip_git_identity_check": true,
+  "egress": false,
+  "seed": "cp -a /opt/testbed-src/. /workspace/",
+  "description": "SWE-bench django__django-11133 (lite) at its baseline bc348023edb4; seed with: cp -a /opt/testbed-src/. /workspace/",
+  "tools": ["bash", "git", "python3", "rg"],
+  "etc_hosts_sha256": "672f53473c9c6f189f2c658dcd4ab1eb0f2a42df241333787b8897cde4ed4fdf",
+  "proved_in_vm": true,
+  "probe_status": "vm",
+  "source_record_digest": "sha256:3d3e705ff379defc6684c220f97fc8701df4e06fce8fa8841c13d3ff8cef7746",
+  "notes": [
+    "the probe's cmd uses `source`: run it through bash -c, as moca's guest agent does; the guest's /bin/sh is dash, so a client wrapping it in sh -c fails"
+  ],
+  "probe": {
+    "cmd": "source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed && export LANG=en_US.UTF-8 && export LANGUAGE=en_US:en && export LC_ALL=en_US.UTF-8 && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 basic",
+    "timeout_s": 900,
+    "expect_rc": 0,
+    "expect": ["^OK\\b"]
+  }
+}

@@ -8,6 +8,7 @@ import {
 } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  Exec,
   SandboxExecClient,
   SandboxWorkerService,
   type ExecEvent,
@@ -82,14 +83,14 @@ function exec(
     {
       sandboxId,
       workload: '',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: 1,
         command: 'echo hi',
         stdin: new Uint8Array(),
         timeoutS: 5,
         streaming: true,
         workspaceKey: 'k',
-      },
+      }),
     },
     md,
   );

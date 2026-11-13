@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSnapshot(t *testing.T, dir string, mutate func(*Manifest)) string {
@@ -147,8 +148,8 @@ func TestBalloonFeatureConstant(t *testing.T) {
 	}
 }
 
-// Features is outside the hash, like egress_ca_sha256: ComputeHash covers kernel,
-// rootfs and agent only, so a snapshot that predates the field still verifies.
+// Features is outside the hash in both hash versions: a snapshot that predates the
+// field still verifies.
 func TestManifestHashIgnoresFeatures(t *testing.T) {
 	without := writeSnapshot(t, t.TempDir(), nil)
 	with := writeSnapshot(t, t.TempDir(), func(m *Manifest) { m.Features = []string{FeatureLeaseV1} })
@@ -160,7 +161,15 @@ func TestManifestHashIgnoresFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Hash != b.Hash || b.ComputeHash() != a.ComputeHash() {
+	ha, err := a.ComputeHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hb, err := b.ComputeHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Hash != b.Hash || ha != hb {
 		t.Fatalf("hash changed with Features: %s vs %s", a.Hash, b.Hash)
 	}
 	if err := b.Verify(with); err != nil {
@@ -204,3 +213,165 @@ func TestProbeFailsWhenNoVMCanBeRestored(t *testing.T) {
 }
 
 var errNoKVM = os.ErrPermission
+
+// writeV1Snapshot writes a manifest as build-snapshot.sh did before hash version 2: the
+// hash over kernel + rootfs + agent only, no hash_version, vmstate and memfile unhashed.
+func writeV1Snapshot(t *testing.T) string {
+	t.Helper()
+	img := writeSnapshot(t, t.TempDir(), func(m *Manifest) {
+		m.HashVersion, m.VMStateSHA256, m.MemfileSHA256 = 0, "", ""
+		m.Hash, _ = m.ComputeHash()
+	})
+	return img
+}
+
+func TestManifestV1StillVerifies(t *testing.T) {
+	img := writeV1Snapshot(t)
+	b, _ := os.ReadFile(filepath.Join(img, "manifest.json"))
+	if strings.Contains(string(b), "hash_version") {
+		t.Fatalf("a version-1 manifest must not carry hash_version: %s", b)
+	}
+	m, err := LoadManifest(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.VerifyWith(img, VerifyOptions{Memfile: true}); err != nil {
+		t.Fatalf("a version-1 snapshot (built before hash version 2) must keep verifying: %v", err)
+	}
+}
+
+func TestManifestV2HashCoversEveryField(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		edit  func(*Manifest)
+	}{
+		{"image", func(m *Manifest) { m.Image = "other" }},
+		{"vmm", func(m *Manifest) { m.VMM = "cloud-hypervisor" }},
+		{"instance_type", func(m *Manifest) { m.InstanceType = "example.metal" }},
+		{"kernel_release", func(m *Manifest) { m.Kernel = "6.1.0" }},
+		{"guest_ram_mb", func(m *Manifest) { m.GuestRAMMB = 4096 }},
+		{"vcpus", func(m *Manifest) { m.VCPUs = 2 }},
+		{"capabilities", func(m *Manifest) { m.Capabilities = append(m.Capabilities, "gh") }},
+		{"built_at", func(m *Manifest) { m.BuiltAt = m.BuiltAt.Add(time.Second) }},
+		{"vmstate_sha256", func(m *Manifest) { m.VMStateSHA256 = "sha256:00" }},
+		{"memfile_sha256", func(m *Manifest) { m.MemfileSHA256 = "sha256:00" }},
+		{"ch_config_sha256", func(m *Manifest) { m.CHConfigSHA256 = "sha256:00" }},
+		{"egress_ca_sha256", func(m *Manifest) { m.EgressCASHA256 = "sha256:00" }},
+		{"source_image_digest", func(m *Manifest) { m.SourceImageDigest = "sha256:00" }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			img := writeSnapshot(t, t.TempDir(), tc.edit) // edited AFTER Fill: the hash is stale
+			m, err := LoadManifest(img)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A file digest edited in the manifest is caught by its file check first (or, for a
+			// digest of a file that is absent, by opening it); every other field by the hash.
+			if err := m.Verify(img); err == nil {
+				t.Fatalf("an edited %s was accepted", tc.field)
+			}
+			if tc.field != "vmstate_sha256" && tc.field != "ch_config_sha256" {
+				if err := m.Verify(img); !strings.Contains(err.Error(), "does not match") {
+					t.Fatalf("an edited %s: err = %v, want the hash mismatch", tc.field, err)
+				}
+			}
+		})
+	}
+}
+
+// TestProbeTearsDownItsVMOnEveryFailurePath pins the probe's teardown (#797): a probe that
+// fails is followed at once by the worker's exit, so a VM it restored and did not destroy is
+// left running beside the next start's sweep. Every way Probe can fail AFTER a VM exists must
+// destroy it before returning. (The restore failure itself creates no VM here; the
+// Firecracker launcher's own teardown on that path is pinned in
+// TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears.)
+func TestProbeTearsDownItsVMOnEveryFailurePath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*fakeLauncher)
+	}{
+		{"resume fails", func(lc *fakeLauncher) {
+			lc.setResumeFn(func(*fakeVM, context.Context) error { return errNoKVM })
+		}},
+		{"guest does not answer", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{}, errNoKVM })
+		}},
+		{"true exits non-zero", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{ExitCode: 1}, nil })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, lc, _ := testPool(t)
+			tc.stage(lc)
+			if err := p.Probe(context.Background()); err == nil {
+				t.Fatal("Probe succeeded despite the staged failure")
+			}
+			if lc.createdCount() != 1 || lc.liveCount() != 0 {
+				t.Fatalf("created=%d live=%d after a failed Probe, want 1 and 0 — the probe left its VM behind",
+					lc.createdCount(), lc.liveCount())
+			}
+		})
+	}
+}
+
+func TestManifestV2ChecksVMStateAlwaysAndMemfileOnRequest(t *testing.T) {
+	img := writeSnapshot(t, t.TempDir(), nil)
+	overwrite := func(name, body string) {
+		t.Helper()
+		_ = os.Chmod(filepath.Join(img, name), 0o644)
+		if err := os.WriteFile(filepath.Join(img, name), []byte(body), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, _ := LoadManifest(img)
+	if m.HashVersion != HashVersionAll || m.VMStateSHA256 == "" || m.MemfileSHA256 == "" {
+		t.Fatalf("Fill must write version 2 with both digests: %+v", m)
+	}
+	overwrite("memfile", "other-memory")
+	if err := m.Verify(img); err != nil {
+		t.Fatalf("the default check must not read the memfile: %v", err)
+	}
+	if err := m.VerifyWith(img, VerifyOptions{Memfile: true}); err == nil || !strings.Contains(err.Error(), "memfile") {
+		t.Fatalf("err = %v, want the memfile named", err)
+	}
+	overwrite("vmstate", "other-state")
+	if err := m.Verify(img); err == nil || !strings.Contains(err.Error(), "vmstate") {
+		t.Fatalf("err = %v, want the vmstate named", err)
+	}
+}
+
+func TestManifestRefusesAnUnknownHashVersion(t *testing.T) {
+	img := writeSnapshot(t, t.TempDir(), func(m *Manifest) { m.HashVersion = 3 })
+	m, _ := LoadManifest(img)
+	if err := m.Verify(img); err == nil || !strings.Contains(err.Error(), "hash_version 3") {
+		t.Fatalf("err = %v, want the unknown version named", err)
+	}
+}
+
+func TestManifestV2RefusesALineBreakInAField(t *testing.T) {
+	m := Manifest{HashVersion: HashVersionAll, Image: "a\nkernel:sha256:forged"}
+	if _, err := m.ComputeHash(); err == nil {
+		t.Fatal("a field holding a newline was hashed; it could forge a line")
+	}
+}
+
+// TestManifestV2HashMatchesBuildSnapshot pins the line format build-snapshot.sh prints:
+// the shell side's test computes the same digest from the same fields.
+func TestManifestV2HashMatchesBuildSnapshot(t *testing.T) {
+	built, _ := time.Parse(time.RFC3339, "2026-11-03T00:00:00Z")
+	m := Manifest{HashVersion: HashVersionAll, Image: "i", VMM: "firecracker", InstanceType: "t",
+		Kernel: "k", GuestRAMMB: 256, VCPUs: 1, Capabilities: []string{"git", "bash"}, BuiltAt: built,
+		KernelSHA256: "sha256:k", RootfsSHA256: "sha256:r", AgentSHA256: "sha256:a",
+		VMStateSHA256: "sha256:v", MemfileSHA256: "sha256:m", SourceImageDigest: "sha256:s"}
+	got, err := m.ComputeHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "sha256:" + manifestV2Golden
+	if got != want {
+		t.Fatalf("hash = %s, want %s (the line format changed: change build-snapshot.sh with it)", got, want)
+	}
+}
+
+// manifestV2Golden: sha256 of the version-2 lines for the fields above.
+const manifestV2Golden = "8387ae48e6ec1a40d345607eee9ccf1d2e5bd8ae64ae3bb2ec9d6227f0e59b93"

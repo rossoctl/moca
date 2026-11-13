@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.3.0
+  version: 1.9.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -92,6 +92,7 @@ components:
             - token_required
             - token_invalid
             - token_expired
+            - grant_invalid
             - invalid_grant
             - subject_conflict
             - unauthorized
@@ -109,6 +110,11 @@ components:
             - no_credential
             - quota_exceeded
             - unknown_template
+            - template_not_found
+            - template_exists
+            - policy_refused
+            - mode_not_allowed
+            - self_attested
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -143,6 +149,66 @@ components:
         reason:
           type: string
           description: 'sandbox_terminated only: deleted | expired'
+        rule:
+          type: string
+          description: |
+            policy_refused only: the gating rule the create failed (profile, M1, registry, M7.id,
+            M7.guest, M7.vcpus, M7.workspace, M7.home, M7.egress, M7.seed, M7.probe, M7.tools,
+            M7.description, M7.skip_git_identity_check, M7.guest_home_gitconfig, M7.spec_id,
+            M7.spec_image, M8, M9, envelope, gate.json, X1, X1.trusted, X1.image, X10, X10.record,
+            X11, X12, X14, X15; deploy/sbx/template-onboarding/governance/GATING-RULES.md)
+        quota:
+          type: string
+          enum: [templates, buildsQueued, owned]
+          description: 'quota_exceeded on a template create: which quota'
+    TurnGrants:
+      type: object
+      description: |
+        One turn's pair of session grants (MI1 §6.1). Returned by both `/internal/turn-grants` and
+        `/internal/grants/refresh`, which is what makes refresh a drop-in for the caller.
+
+        Each grant is a compact Ed25519 JWS with header `typ: moca-grant+jwt`, signed with the
+        control plane's GRANT ring — a different key from the session-token signer, so a session
+        token can never pass as a grant even where an `aud` check is forgotten. The inference half
+        carries `aud: moca-inference` and claims `iss sub tenant sid cred iat exp jti turn_exp`; the
+        sandbox half carries `aud: moca-sandbox` and `iss sub tenant sid cfg egress iat exp jti
+        turn_exp`. `cred` is a credential NAME (`''` when the session named none) and `egress` a
+        list of names — NO SECRET VALUE IS EVER IN A GRANT (§7.2). Each half gets its own `jti`:
+        they are separate capabilities presented to separate enforcement points.
+
+        `moca-sandbox` is also `sandbox-token.ts`'s audience, so `aud` alone does not distinguish a
+        sandbox token from a sandbox grant; `typ` does, and every verifier pins its own.
+      required: [inferenceGrant, sandboxGrant, turnExp, exp]
+      properties:
+        inferenceGrant: { type: string, description: 'compact JWS, aud moca-inference' }
+        sandboxGrant:
+          type: string
+          description: |
+            compact JWS, aud moca-sandbox. Its `egress` claim lists the session OWNER's
+            `sandbox-egress` credential names as of this mint — by name, never by value — so one
+            added mid-turn appears at the next refresh. The token endpoint narrows them to the
+            destination's own hosts, which makes the claim an upper bound rather than a grant of
+            access to every name in it.
+        turnExp:
+          type: integer
+          description: |
+            epoch SECONDS; the absolute cap on this turn (turn start + `MOCA_TURN_MAX_S`, default
+            1800). Carried forward unchanged by every refresh, so refreshing cannot extend a turn.
+            A refresh past it is refused with `401 grant_invalid`. A fresh call to
+            `/internal/turn-grants` does start a new window — `turnExp` is anchored to the call, and
+            no turn is yet identified to anchor to — so it caps a turn's refresh chain, not a
+            session.
+        exp:
+          type: integer
+          description: |
+            epoch SECONDS; when both grants expire, `min(iat + MOCA_GRANT_TTL_S, turnExp)` with
+            `MOCA_GRANT_TTL_S` defaulting to 300. Workers refresh at half-life. With no revocation
+            list built (§6.2 builds none deliberately), this lifetime IS the revocation latency.
+        cfg:
+          type: string
+          description: |
+            the config-bundle digest bound to the session, echoing the sandbox grant's `cfg` claim;
+            absent when the session binds no bundle
     Session:
       type: object
       required: [sessionId, owner, tenant, createdAt, state, turns]
@@ -265,7 +331,23 @@ components:
       type: object
       description: A sandbox (SBX0 §5.1). Times are epoch seconds.
       required:
-        [id, owner, name, template, state, reason, createdAt, expiresAt, terminatedAt, labels]
+        [
+          id,
+          owner,
+          name,
+          template,
+          buildId,
+          templateManifestHash,
+          state,
+          reason,
+          createdAt,
+          expiresAt,
+          terminatedAt,
+          labels,
+          mode,
+          idleTimeoutS,
+          modeEpoch,
+        ]
       additionalProperties: false
       properties:
         id:
@@ -278,6 +360,18 @@ components:
           pattern: '^[a-z0-9][a-z0-9-]{0,62}$'
           description: unique among the owner's live sandboxes; null when unnamed
         template: { type: string }
+        buildId:
+          type: [string, 'null']
+          description: |
+            the build the template reference (id, id:tag or id@<build id>) resolved to at creation,
+            kept for the sandbox's life (template lifecycle spec §3.2): `sha256:<manifest hash>`, or
+            `imported:<12 hex>` for a template imported from SH_SANDBOX_TEMPLATES; null on a sandbox
+            created before builds were recorded
+        templateManifestHash:
+          type: [string, 'null']
+          description: |
+            the snapshot's manifest hash (the build id of a built build); null for a template
+            imported from SH_SANDBOX_TEMPLATES, which names no snapshot
         state: { type: string, enum: [ready, terminated] }
         reason:
           type: [string, 'null']
@@ -298,6 +392,316 @@ components:
           propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
           additionalProperties: { type: string }
           description: free-form string pairs (at most 16; each value at most 256 UTF-8 bytes)
+        mode:
+          type: string
+          enum: [per-exec, lease, lease+processes]
+          description: |
+            How the worker runs the sandbox's Execs (lease-mode spec §8.1); `per-exec` unless the
+            owner picked a lease mode. Sandbox tokens carry it as the `mode` claim.
+        idleTimeoutS:
+          type: integer
+          minimum: 0
+          description: the owner's lease idle timeout in seconds; 0 means the worker's default
+        modeEpoch:
+          type: integer
+          minimum: 0
+          description: |
+            raised by 1 on every PUT /v1/sandboxes/{id}/mode, so a worker can refuse an Exec whose
+            token carries an older mode (`stale_mode`). A sandbox created `per-exec` starts at 0, one
+            created in a lease mode at 1
+    Template:
+      type: object
+      description: A template (template lifecycle spec §3.2, §4)
+      required: [id, description, tools, owner, visibility, onboarding, readiness, tags, builds]
+      properties:
+        id: { type: string }
+        description: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+          description: the default build's tools
+        owner:
+          type: [string, 'null']
+          description: the owning subject; null for a template the deployment declared
+        visibility:
+          type: string
+          enum: [private, deployment]
+          description: |
+            `private`: listed and served only to its owner and admins. In effect: `private` while
+            any registered build is self-attested now (a trust removal narrows a template on the
+            next read), else as set
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: '`self` when any registered build is self-attested now'
+        onboarding:
+          type: [string, 'null']
+          description: "`registered` once any build is; else the newest build's status"
+        readiness:
+          type: [string, 'null']
+          description: the default build's readiness
+          enum: [active, inactive, unknown, null]
+        tags:
+          type: object
+          additionalProperties: { type: string }
+          description: tag -> buildId; `default` is what a bare id names
+        builds:
+          type: array
+          items: { $ref: '#/components/schemas/TemplateBuild' }
+    TemplateBuild:
+      type: object
+      description: One build of a template, an immutable snapshot (template lifecycle spec §3.2, §3.3)
+      required:
+        [buildId, status, profile, readiness, capacity, lastUsedAt, tags, createdAt, provenance]
+      properties:
+        buildId: { type: string, description: '`sha256:<manifest hash>` or `imported:<12 hex>`' }
+        status:
+          type: string
+          enum: [queued, building, probing, built, registered, rejected, failed, retired]
+          description: |
+            its onboarding state (template lifecycle spec §3.3); a build imported from
+            SH_SANDBOX_TEMPLATES is `registered`
+        profile: { type: string, description: the policy profile; `imported` for the env list's }
+        readiness:
+          type: [string, 'null']
+          enum: [active, inactive, unknown, null]
+          description: |
+            for a registered build (§3.3), from facts: `active` the relay holds an attached
+            presence record for its worker; `inactive` it holds none; `unknown` the relay's
+            presence could not be read; null for a build that is not registered. Later states
+            (`activating`, `deactivating`, `unavailable`, `retired`) come with activation and retire
+        capacity:
+          type: [object, 'null']
+          description: for an active build
+          required: [running, inUse]
+          properties:
+            running: { type: integer, description: the sandboxes its worker advertises at once }
+            inUse:
+              type: [integer, 'null']
+              description: |
+                its live sandboxes now; null on the harness profile, which holds no sandbox
+                records (sessions name a template, not a worker)
+        lastUsedAt:
+          type: [integer, 'null']
+          description: |
+            epoch seconds of the newest sandbox created on it (retained records included); null
+            when it has none, and on the harness profile
+        tags: { type: array, items: { type: string } }
+        createdAt: { type: integer, description: epoch seconds }
+        provenance:
+          type: [string, 'null']
+          description: the digest of the provenance record that created it (with SH_PROVENANCE_DIR)
+        handle:
+          type: string
+          description: |
+            the `b-<26 hex>` handle the create answered, by which the build is followed until it is
+            built (then its buildId is its manifest hash); equal to buildId for an imported build
+        reason:
+          type: [object, 'null']
+          description: on a `failed` or `rejected` build, why; null otherwise
+          required: [message]
+          properties:
+            message: { type: string }
+            step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
+            rule: { type: string, description: the gating rule, on a rejection }
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: |
+            Recomputed on every read from the current policy: `self` when the build was created on
+            a selfAttest profile with a gate record trustedGateRecords does not list now, whether or
+            not it was listed at create; `deployment` otherwise (a promotion or removal of the
+            record changes it, nothing rewritten)
+        gateFloorCheckedOffline:
+          type: [boolean, 'null']
+          description: |
+            Its gate record's `gate.floor_checked_offline` (true for a curated family record, which
+            predates the field); false only on a profile that allows it (`general-self`); null with
+            no gate record
+        gateFloorMetOffline:
+          type: boolean
+          description: |
+            Present only for a gate from a `network_needed` contract: its `gate.floor_met_offline`,
+            whether the offline run met the floor anyway
+        spec:
+          type: object
+          description: on GET /v1/templates/{id} and the builds routes only
+          properties:
+            guest_mb: { type: integer }
+            vcpus: { type: integer }
+            workspace_mb: { type: integer }
+            seed: { type: string }
+            tools: { type: array, items: { type: string } }
+    TemplateCreate:
+      type: object
+      required: [image, spec]
+      properties:
+        id: { type: string, description: 'the template id (lowercased); ignored on /{id}/builds' }
+        image:
+          type: string
+          description: >-
+            [host[:port]/]path@sha256:<64 hex>, in the distribution reference grammar (lowercase
+            path components, no tag beside the digest), from an allowed registry (hosts compare
+            case-insensitively)
+        spec:
+          type: object
+          description: |
+            a template spec (`moca-sbx-template-spec/1`; samples in
+            deploy/sbx/template-onboarding/examples/): guest_ram_mb (or its alias guest_mb, never
+            both: M7.guest; stored as guest_ram_mb), vcpus,
+            workspace_mb?, egress, seed, probe, tools, description, and optionally guest_home,
+            skip_git_identity_check, guest_home_gitconfig, probe_status, source_record_digest. An
+            `id` or `image` in it must equal the create's own (M7.spec_id, M7.spec_image)
+        profile: { type: string, description: a policy profile; the policy's default when absent }
+        gateRecord:
+          type: string
+          description: the image's gate record file, byte for byte (its sha256 is what the policy trusts)
+        visibility:
+          type: string
+          enum: [private, deployment]
+          description: a new template's visibility; default `deployment`
+    TemplateQueued:
+      type: object
+      required: [templateId, buildId, build, status]
+      properties:
+        templateId: { type: string }
+        buildId:
+          type: [string, 'null']
+          description: null until registered; then the manifest hash (a reused registered build)
+        build:
+          type: string
+          description: the build to follow (its provisional handle b-<26 hex>, or its buildId once registered)
+        status:
+          type: string
+          enum: [queued, building, probing, built, registered]
+          description: "`queued` for a new build; a reused build's own status"
+        reused:
+          type: boolean
+          description: |
+            true when the create matched a build of the caller's template with the same inputs
+            (image, spec, profile, gate record's sha256) that is registered or on its way there
+            (§3.2): that build is answered, and no second one is queued. Absent for a new build
+    LimitUse:
+      type: object
+      required: [limit, used]
+      properties:
+        limit: { type: integer }
+        used: { type: integer }
+    Policy:
+      type: object
+      description: The template policy (template lifecycle spec §8); schema moca-template-policy/1
+      required: [schema, profiles, defaultProfile, allowedRegistries, trustedGateRecords, quota]
+      properties:
+        schema: { type: string, enum: [moca-template-policy/1] }
+        profiles:
+          type: object
+          description: profile name -> its rules; `base` must exist
+          additionalProperties:
+            type: object
+            required: [requires, envelope]
+            properties:
+              requires:
+                type: array
+                items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
+                description: gating rule ids beyond the base rules; an unknown id is refused
+              selfAttest:
+                type: boolean
+                description: |
+                  A gate record the policy does not trust still passes X1.trusted when the creating
+                  subject submitted it, for that subject's own templates only. The build is
+                  self-attested: private, its commits always refused (X12.self), never
+                  deployment-visible until an admin adds the record's sha256 to trustedGateRecords.
+                  Absent: false. The default policy holds `benchmark-self` and `general-self`
+              selfAttestEgress:
+                type: boolean
+                description: |
+                  On a self-attested record only, whether spec.egress may be true (the KVM host's
+                  allowlisted egress, never unrestricted). Absent: false. `benchmark-self` keeps it
+                  false (benchmark integrity); `general-self` sets it
+              requireOfflineGate:
+                type: boolean
+                description: |
+                  Whether the gate's test floor must have been checked offline (X1.offline). A
+                  general-gate record (the schema GET /v1/policy names as `gateRecordSchema`) needs
+                  `gate.floor_checked_offline: true` (fail closed); a curated family record predates
+                  the field and passes without it. Absent: true on a profile that requires X1;
+                  `general-self` sets it false
+              envelope:
+                type: object
+                required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
+                properties:
+                  maxGuestMb: { type: integer }
+                  maxVcpus: { type: integer }
+                  maxWorkspaceMb: { type: integer }
+                  exact:
+                    type: object
+                    required: [guestMb, vcpus]
+                    properties:
+                      guestMb: { type: integer, minimum: 1 }
+                      vcpus: { type: integer, minimum: 1 }
+        defaultProfile: { type: string }
+        allowedRegistries:
+          type: array
+          items: { type: string }
+          description: |
+            registry hosts. `<default>` is a reference with no host, which the build host pulls from
+            its own configured registry; Docker Hub is `docker.io` (`index.docker.io` reads as it)
+        allowedRepositories:
+          type: object
+          additionalProperties:
+            type: array
+            minItems: 1
+            items: { type: string }
+          description: |
+            Optional, per registry (a key of `allowedRegistries`): the repositories an image may come
+            from there, each an exact path (`library/python`) or a prefix (`library/*`), matched on
+            whole path segments. A registry with no entry allows every repository it serves. A Docker
+            Hub official name (`python`) reads as `library/python`. From a listed registry, an
+            image path outside the entries' grammar (uppercase, or an empty, `.` or `..` segment)
+            is refused too. A refusal is rule `registry.repository`.
+        trustedGateRecords:
+          type: array
+          items: { type: string }
+          description: sha256 digests of the gate records the benchmark profile trusts
+        quota: { $ref: '#/components/schemas/Quota' }
+    Quota:
+      type: object
+      required: [templates, buildsQueued, active]
+      properties:
+        templates:
+          type: integer
+          minimum: 0
+          description: >-
+            templates a subject owns with a build registered or on its way there (a template whose
+            builds all failed, were cancelled or retired is not counted, and a new build of it is
+            checked against this quota like a new id)
+        buildsQueued:
+          type: integer
+          minimum: 0
+          description: >-
+            builds of a subject's templates not yet built (queued, building or probing), charged to
+            the template's owner
+        active: { type: integer, minimum: 0 }
+        owned:
+          type: integer
+          minimum: 0
+          description: >-
+            template ids a subject owns in any status (a failed or cancelled-only template too),
+            checked for a new id only; 200 when the policy does not set it
+    PolicyView:
+      type: object
+      required: [policy, digest, record]
+      properties:
+        policy: { $ref: '#/components/schemas/Policy' }
+        digest: { type: string, description: the sha256 of the policy itself }
+        record: { type: string, description: the provenance policy record's digest }
+        gateRecordSchema:
+          type: string
+          description: |
+            The general-gate record schema this deployment reads (`SH_GATE_RECORD_SCHEMA`, default
+            `moca-gate-record/1`): a record of it needs `gate.floor_checked_offline: true` for
+            X1.offline. On GET /v1/policy only; absent from an older control plane, read as the
+            default
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -1427,29 +1831,664 @@ paths:
   /v1/templates:
     get:
       operationId: listTemplates
-      summary: The templates a sandbox may be created from
+      summary: The templates a sandbox may be created from, with their builds and readiness
       description: |
-        Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane
-        answers 404 (SBX0 §4.1). Enrolled subjects and admins only (`403 not_enrolled`, §4.2).
+        Both profiles (template lifecycle spec §4.1): a sandbox client and a session's brain read
+        the same templates. On the sandbox profile, enrolled subjects and admins only
+        (`403 not_enrolled`, SBX0 §4.2); on the harness profile, any logged-in subject, and a
+        deployment that declares no templates lists none. Each template adds its owner,
+        visibility, onboarding state, readiness, tags and builds (template lifecycle spec §3, §4);
+        the first three fields are unchanged, so an older client reads the list as before. With
+        SH_PROVENANCE_DIR, templates are the store's (SH_SANDBOX_TEMPLATES imported into it once);
+        a `private` one is listed only to its owner and admins.
       security: [{ sessionToken: [] }]
       responses:
         '200':
-          description: the deployment's templates (SH_SANDBOX_TEMPLATES), without their worker ids
+          description: the visible templates, without their worker ids
           content:
             application/json:
               schema:
                 type: object
-                required: [templates]
+                required: [templates, hosts]
                 properties:
                   templates:
                     type: array
+                    items: { $ref: '#/components/schemas/Template' }
+                  hosts:
+                    type: array
+                    description: |
+                      per KVM host, its limits and use, as its host agent reports them (template
+                      lifecycle spec §6.2). Always empty here: a later issue adds the host agent
+                      and defines the items. Empty means no host has reported, never that there
+                      is no limit
                     items:
                       type: object
-                      required: [id, description, tools]
+                      required: [id]
                       properties:
                         id: { type: string }
-                        description: { type: string }
-                        tools: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+    post:
+      operationId: createTemplate
+      summary: Create a template (or a new build of your own), self-serve; policy decides
+      description: |
+        Template lifecycle spec §4, §8.1. Any enrolled client (sandbox profile) or logged-in
+        subject (harness profile). Needs SH_PROVENANCE_DIR (else `400 invalid_request`). The create
+        is checked against the deployment's policy (GET /v1/policy) before anything is queued: a
+        refusal is `422 policy_refused` with `rule`, the gating rule's id
+        (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
+        template's stream when the template exists and is the caller's (an admin's, adding a
+        build); a refusal on a new id writes an audit-log line instead, and one on another subject's
+        id is only answered. Ids are unique per deployment: another subject's id is
+        `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
+        `429 quota_exceeded` with `quota` (`templates`, `buildsQueued` or `owned`). An admitted create
+        writes `create`, `gate` (with a gate record) and `check` records and queues the build for
+        a build host; follow it at `build`. A create whose inputs match a build of the caller's
+        template that is registered or on its way (§3.2) queues nothing and answers that build with
+        `reused: true`: `200` when it is registered, `202` while it is not. A failed or rejected
+        build is never reused.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateCreate' }
+      responses:
+        '200':
+          description: a registered build of the same inputs, reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '202':
+          description: queued (or a reused build not yet registered)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '400':
+          description: '`invalid_request` (also: this deployment stores no templates)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: "`template_not_found`: another subject's private template"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`policy_refused`, with `rule`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`, with `quota`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}:
+    get:
+      operationId: getTemplate
+      summary: One template, its builds with their specs (the seed included)
+      description: |
+        Both profiles (§4.1). `404 template_not_found` for an unknown id and for a `private`
+        template the caller does not own: the existence check (template lifecycle spec §3.2).
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the template; each build carries its `spec`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      operationId: updateTemplate
+      summary: Change a template's description or visibility (the owner, or an admin)
+      description: |
+        Template lifecycle spec §5.1. `private` hides it from other subjects (they get 404, as for an
+        id that does not exist) and refuses their new use; their sandboxes and sessions already made
+        keep running. Each field that changes writes a `visibility` record (`field`, the new value
+        and the one before); a field already at its value changes nothing.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                visibility: { type: string, enum: [private, deployment] }
+                description:
+                  type: string
+                  maxLength: 1024
+                  description: no lone surrogate (a provenance record cannot hold one)
+      responses:
+        '200':
+          description: changed (or already so)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, visibility, description, changes]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  visibility: { type: string, enum: [private, deployment] }
+                  description: { type: string }
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      required: [field, value, before, record]
+                      properties:
+                        field: { type: string, enum: [visibility, description] }
+                        value: { type: string }
+                        before: { type: string }
+                        record: { type: string, description: the visibility record written }
+        '400':
+          description: '`invalid_request`: no field, a bad value (a description holding a lone surrogate is one), or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: `visibility: deployment` for a template with a self-attested build,
+            registered or on its way there, until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds:
+    get:
+      operationId: listTemplateBuilds
+      summary: A template's builds, newest first, each with its spec
+      description: Both profiles (§4.1). `404 template_not_found` as for GET /v1/templates/{id}.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the builds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [builds]
+                properties:
+                  builds:
+                    type: array
+                    items: { $ref: '#/components/schemas/TemplateBuild' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      operationId: createTemplateBuild
+      summary: A new build of your own template (a new image or spec); as POST /v1/templates
+      description: |
+        The template must exist (`404 template_not_found`) and be the caller's
+        (`409 template_exists`; an admin may add a build to any template); otherwise exactly
+        POST /v1/templates, the body's `id` ignored, build reuse included.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateCreate' }
+      responses:
+        '200':
+          description: a registered build of the same inputs, reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '202':
+          description: queued (or a reused build not yet registered)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '400':
+          description: '`invalid_request` (also: this deployment stores no templates)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: "`template_not_found`: no such template, or another subject's private one"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`policy_refused`, with `rule`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`, with `quota`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}:
+    get:
+      operationId: getTemplateBuild
+      summary: One build of a template, with its spec, by build id or by the create's handle
+      description: |
+        Both profiles (§4.1). The build id is `sha256:<manifest hash>`, or `imported:<12 hex>` for
+        a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it. A build
+        created through the API is also found by the `b-<26 hex>` handle its create answered.
+        `404 template_not_found` for an unknown template or build.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the build
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateBuild' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}/cancel:
+    post:
+      operationId: cancelTemplateBuild
+      summary: Withdraw a build not yet built (the owner)
+      description: |
+        Template lifecycle spec §5.1. The template's owner, or an admin, cancels a `queued`,
+        `building` or `probing` build: it becomes `failed` with `reason.step` `cancelled`, and a
+        `build` record (outcome `cancelled`) names who did it. A failed build takes no further
+        report from a build host, so it never registers. Another subject: `403 forbidden`; an
+        unknown build: `404 template_not_found`; any other status: `400 invalid_request`.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, build, status]
+                properties:
+                  templateId: { type: string }
+                  build: { type: string, description: the build's handle }
+                  status: { type: string, enum: [failed] }
+        '400':
+          description: '`invalid_request`: the build is not queued, building or probing, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: not the template's owner"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/tags:
+    post:
+      operationId: moveTemplateTags
+      summary: Move tags onto a registered build (the owner, or an admin)
+      description: |
+        Template lifecycle spec §3.2, §5.1: tags are labels on builds, moved without rebuilding.
+        After the move, `id:tag` (and the bare `id`, for `default`) resolves to the new build for
+        new sandboxes and sessions; those already created keep their build. Each tag that changes
+        writes a `tag` record (the new build and the one before); a tag already on the build
+        changes nothing (`record: null`). A build that is not registered: `400 invalid_request`.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags, build]
+              properties:
+                tags:
+                  type: array
+                  minItems: 1
+                  maxItems: 16
+                  uniqueItems: true
+                  items: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,30}$' }
+                build: { type: string, description: a build id or handle of this template }
+      responses:
+        '200':
+          description: moved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, buildId, tags]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  buildId: { type: string }
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, buildId, before, record]
+                      properties:
+                        tag: { type: string }
+                        buildId: { type: string }
+                        before:
+                          type: [string, 'null']
+                          description: the build it named until now; null if new
+                        record:
+                          type: [string, 'null']
+                          description: the tag record written; null if unchanged
+        '400':
+          description: '`invalid_request`: bad tags, a build that is not registered, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      operationId: listTemplateTags
+      summary: A template's tags, each with the build it names and when and by whom it was set
+      description: Both profiles (§4.1). `404 template_not_found` as for GET /v1/templates/{id}.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the tags, sorted by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tags]
+                properties:
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, buildId, assignedAt, assignedBy]
+                      properties:
+                        tag: { type: string }
+                        buildId: { type: string }
+                        assignedAt: { type: integer, description: epoch seconds }
+                        assignedBy:
+                          type: [string, 'null']
+                          description: a subject; null when the deployment set it
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/tags/{tag}:
+    delete:
+      operationId: removeTemplateTag
+      summary: Remove a tag (the owner, or an admin); its build stays
+      description: |
+        Template lifecycle spec §5.1. The tag goes; the build it named is not deleted and stays
+        addressable by its build id. `default` is moved, never removed (`400 invalid_request`): the
+        bare `id` must resolve. A `tag` record (`buildId: null`, the one before) names the caller.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tag, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: removed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, tag, buildId, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  tag: { type: string }
+                  buildId: { type: 'null' }
+                  before: { type: string }
+                  record: { type: string }
+        '400':
+          description: '`invalid_request`: the default tag, a tag name not matching `^[a-z0-9][a-z0-9-]{0,30}$`, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such tag on it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/owner:
+    put:
+      operationId: transferTemplateOwner
+      summary: Transfer a template to another enrolled subject (an admin)
+      description: |
+        Template lifecycle spec §5.2. The new owner gets every owner action and its quota counts the
+        template from now on; sandboxes and sessions already made keep their subjects. An `owner`
+        record names the admin, the new owner and the one before; a transfer to the current owner
+        changes nothing (`record: null`). The new owner must be enrolled (on the sandbox profile:
+        SH_ALLOWED_SUBJECTS, or an admin). A template the deployment declared (imported from
+        SH_SANDBOX_TEMPLATES, no owner) is handed to a subject the same way, `before: null`; its id
+        then belongs to that subject, who can build, tag and edit it. A restart does not re-import it.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner]
+              properties:
+                owner:
+                  type: string
+                  description: github:<numeric id> or oidc:<provider sub>; never test:<n>
+                  pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$'
+      responses:
+        '200':
+          description: transferred (or already theirs)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, owner, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: the admin }
+                  owner: { type: string }
+                  before: { type: [string, 'null'], description: null for a declared template }
+                  record:
+                    { type: [string, 'null'], description: the owner record; null if unchanged }
+        '400':
+          description: '`invalid_request`: a malformed or unenrolled subject, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: the template has a self-attested build, registered or on its way
+            there: it keeps its owner until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/policy:
+    get:
+      operationId: getPolicy
+      summary: The deployment's template policy (profiles, envelopes, registries, trusted gate records, quotas)
+      description: |
+        Template lifecycle spec §8. Both profiles; any enrolled client. Its `record` is the
+        provenance `policy` record every `check` cites; `digest` is the sha256 of the policy
+        itself. Until an admin sets one, the default policy applies, recorded on first use. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: the policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyView' }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+    put:
+      operationId: putPolicy
+      summary: Set the template policy (an admin); recorded
+      description: |
+        The policy is stored as sent, after validation (each problem named), and a new `policy`
+        record names the admin who set it. Enforced on the next create. When it removes a gate
+        record's sha256 from trustedGateRecords, the builds that become self-attested on a
+        deployment-visible template make that template private on read; they are named as
+        `narrowed` in the answer and in the `policy` record, so the narrowing is never silent.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Policy' }
+      responses:
+        '200':
+          description: the policy as set, and `narrowed` when a trust removal narrowed templates
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/PolicyView' }
+                  - type: object
+                    properties:
+                      narrowed:
+                        type: array
+                        items:
+                          type: object
+                          required: [template, buildId]
+                          properties:
+                            template: { type: string }
+                            buildId: { type: string }
+        '400':
+          description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden` (not an admin) or `not_enrolled`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/quota:
+    get:
+      operationId: getQuota
+      summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
+      description: |
+        The policy's quotas and the caller's use: templates owned (with a build registered or on its
+        way there), builds queued, building or probing, templates held active (0 until activation
+        exists), and template ids owned in any status (`owned`). On the sandbox profile, `sandboxes` is
+        SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's
+        live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: limits and use
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject, templates, buildsQueued, active, owned]
+                properties:
+                  subject: { type: string }
+                  templates: { $ref: '#/components/schemas/LimitUse' }
+                  buildsQueued: { $ref: '#/components/schemas/LimitUse' }
+                  active: { $ref: '#/components/schemas/LimitUse' }
+                  owned: { $ref: '#/components/schemas/LimitUse' }
+                  sandboxes: { $ref: '#/components/schemas/LimitUse' }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
   /v1/sandboxes:
@@ -1471,7 +2510,12 @@ paths:
               type: object
               required: [template]
               properties:
-                template: { type: string, description: a template id from GET /v1/templates }
+                template:
+                  type: string
+                  description: |
+                    a template from GET /v1/templates, as `id` (its `default` tag), `id:tag` or
+                    `id@<build id>`: resolved to one registered build at creation and kept for the
+                    sandbox's life (template lifecycle spec §3.2)
                 name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
                 labels:
                   type: object
@@ -1479,19 +2523,41 @@ paths:
                   propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
                   additionalProperties: { type: string }
                   description: at most 16 pairs; each value at most 256 UTF-8 bytes
+                mode:
+                  type: string
+                  enum: [per-exec, lease, lease+processes]
+                  description: |
+                    default `per-exec`. A lease mode must be listed in SH_SANDBOX_MODES_ALLOWED
+                    (default `per-exec`: no lease mode), else 403 `mode_not_allowed`; `per-exec`
+                    always is.
+                idleTimeoutS:
+                  type: integer
+                  minimum: 30
+                  description: |
+                    the lease idle timeout in seconds, at most SH_SANDBOX_IDLE_CEILING_S (default
+                    1800). Omit it for the worker's default (stored as 0); an explicit 0 is refused
+                    (400).
       responses:
         '201':
-          description: the new sandbox, ready
+          description: |
+            the new sandbox, ready: mode epoch 0 for `per-exec`, 1 for a lease mode, which the worker
+            serves per-Exec until the first LeaseControl set_mode (POST .../mode-token mints one)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Sandbox' }
         '400':
-          description: '`invalid_json`, `invalid_request`, or `unknown_template`'
+          description: |
+            `invalid_json`, `invalid_request`, or `unknown_template` (an unknown id, tag or build,
+            or one the caller cannot see)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '403':
+          description: '`not_enrolled`, or `mode_not_allowed`: the deployment does not allow that mode'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: '`name_conflict`: the caller already has a live sandbox with that name'
           content:
@@ -1602,7 +2668,10 @@ paths:
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
         404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
-        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). No request body.
+        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). A sandbox whose lease
+        mode SH_SANDBOX_MODES_ALLOWED no longer lists is first set to `per-exec` at the next epoch,
+        and the `idle_timeout_s` claim is clamped to SH_SANDBOX_IDLE_CEILING_S (lease-mode spec
+        §8.1). No request body.
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       responses:
@@ -1624,6 +2693,114 @@ paths:
                   execCa:
                     type: [string, 'null']
                     description: the exec Route's CA (PEM) when self-issued, else null
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}/mode:
+    put:
+      operationId: setSandboxMode
+      summary: Change a sandbox's mode
+      description: |
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken: a sandbox token is
+        refused (401). Every accepted call raises `modeEpoch` by 1, the same mode included, and is
+        audited as `sandbox_mode_changed` (who, the old mode, the new mode, the epoch). Sandbox
+        tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
+        that mode and epoch for the client's `LeaseControl set_mode`, through which a downgrade takes
+        effect at once (lease-mode spec §8.2).
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [per-exec, lease, lease+processes]
+                  description: |
+                    a lease mode must be listed in SH_SANDBOX_MODES_ALLOWED, else 403
+                    `mode_not_allowed`; `per-exec` is always allowed
+                idleTimeoutS:
+                  type: integer
+                  minimum: 30
+                  description: |
+                    at most SH_SANDBOX_IDLE_CEILING_S. Omit it for the worker's default (stored as
+                    0, not the previous value); an explicit 0 is refused (400).
+      responses:
+        '200':
+          description: the sandbox as changed, and a set-mode token for its new epoch
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandbox, setModeToken]
+                properties:
+                  sandbox: { $ref: '#/components/schemas/Sandbox' }
+                  setModeToken:
+                    type: string
+                    description: 'JWT, typ moca-sandbox-mode+jwt, valid 300 s'
+        '400':
+          description: '`invalid_json` or `invalid_request` (an unknown mode, an idle timeout out of range)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `mode_not_allowed`: the deployment does not allow that mode'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}/mode-token:
+    post:
+      operationId: mintSandboxModeToken
+      summary: Mint a set-mode token for the current mode and epoch
+      description: |
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken. Raises nothing:
+        it signs the mode and epoch the record holds now, for a client to re-send `LeaseControl
+        set_mode` when the worker reports the epoch unknown (lease-mode spec §8.2). The exception
+        is a lease mode SH_SANDBOX_MODES_ALLOWED no longer lists: the sandbox is first set to
+        `per-exec` at the next epoch, as the sandbox token mint does (§8.1). The `idle_timeout_s`
+        claim is clamped to SH_SANDBOX_IDLE_CEILING_S. No request body.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      responses:
+        '200':
+          description: a set-mode token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setModeToken]
+                properties:
+                  setModeToken:
+                    type: string
+                    description: 'JWT, typ moca-sandbox-mode+jwt, valid 300 s'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1914,13 +3091,18 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in, from the SESSION (the turn record does not copy
-                      it); absent whenever the deployment declares no tiers
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |
-                      the session's model and the limits recorded when it was chosen; absent when the
-                      session names none, and the worker then uses its deployment default
+                      the model the TURN RECORD pinned at submission, with the limits recorded when
+                      it was chosen; absent when the submission named none, and the worker then uses
+                      its deployment default. Pinned, so switching the session's model while this
+                      turn is still queued does not move it onto the new one.
                     required: [id]
                     properties:
                       id: { type: string }
@@ -1982,6 +3164,143 @@ paths:
           description: |
             `redis_unavailable` when the record cannot be read, or `credential_unavailable` when the
             credential store cannot be reached. Retryable, unlike the 404.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /internal/turn-grants:
+    post:
+      operationId: issueTurnGrants
+      summary: Data-plane only — mint a turn's two session grants
+      description: |
+        Not part of the public surface. MI1 §6.2's turn-start call: the worker presents the session
+        token it was handed with the turn plus the shared `SH_EXCHANGE_TOKEN`, and receives the
+        turn's two grants.
+
+        A GRANT IS NOT A CREDENTIAL. It is a short-lived signed capability that must be spent at an
+        enforcement point — `cred` names the session's inference credential and `egress` lists its
+        `sandbox-egress` credential names (§7.2); no secret value is ever returned. That is the
+        difference from `/internal/credentials`, which §6.2 says this route eventually replaces.
+
+        **Mounted only when `MOCA_GRANT_SIGNING_KEY` is configured.** Without it the path is
+        genuinely unrouted and answers `404 not_found` before the body is parsed (ADR-0045).
+        Nothing redeems a grant yet — the `moca-egress` inference listener and the token endpoint
+        (§6.3, §8.6) are later slices — so `/internal/credentials` and `/internal/turn-credentials`
+        both stay exactly as they are, and the async tenancy gate stays shut.
+      security: [{ exchangeToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: |
+                    the SESSION token presented by the caller. An api token is refused with
+                    `token_invalid`: the grants are about one session, and a session token is the
+                    only kind that names one.
+      responses:
+        '200':
+          description: the turn's two grants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnGrants' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `session_not_found` for an unknown session, a session the presented token's subject does
+            not own, and a tombstoned one — one answer for all three, so this route is no more of an
+            existence oracle than `/internal/credentials`. Also a bare `not_found` when the
+            deployment configured no grant signing key, in which case the path is not mounted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: |
+            `internal_error`: the audit write failed with an untyped error. The grant is refused
+            rather than issued off the books — that audit entry is the only record a capability
+            left the control plane.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`redis_unavailable`: the session record or the audit stream is unreachable.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /internal/grants/refresh:
+    post:
+      operationId: refreshTurnGrants
+      summary: Data-plane only — re-mint a turn's grants with a later expiry
+      description: |
+        Not part of the public surface. MI1 §6.2's mid-turn call: the worker presents a grant it
+        already holds — either audience — plus the shared `SH_EXCHANGE_TOKEN`, and receives both
+        halves again with a new `exp`. Workers refresh at half-life.
+
+        `turnExp` is carried forward UNCHANGED, because it is an absolute cap: refreshing cannot
+        extend a turn no matter how many times it happens. Past `turnExp` the refresh is refused
+        outright rather than clamped, and a tombstoned session stops refreshing (§6.2).
+
+        The claims are re-derived from the session record rather than copied from the presented
+        grant. §6.2 says "same claims, new exp", but an inference grant carries no `cfg`/`egress`
+        and a sandbox grant no `cred`, so echoing cannot reconstruct the other half — and
+        re-reading makes a mid-turn credential or bundle change take effect at the next refresh,
+        which is strictly tighter.
+
+        **Mounted only when `MOCA_GRANT_SIGNING_KEY` is configured**, as above.
+      security: [{ exchangeToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grant]
+              properties:
+                grant:
+                  type: string
+                  description: |
+                    either of the turn's current grants. A separate field from the issue route's
+                    `token` deliberately: the two carry different credentials to different
+                    verifiers, and a worker that confused them gets an `invalid_request` naming the
+                    field rather than a `grant_invalid` naming nothing.
+      responses:
+        '200':
+          description: the same two grants with a new `exp` and an unchanged `turnExp`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnGrants' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: |
+            `unauthorized` when the shared bearer is missing or wrong. `grant_invalid` for EVERY way
+            the presented grant can fail: bad signature, `alg: none` or any non-EdDSA alg, wrong
+            `typ` (a session token presented here), wrong `aud`, unknown `kid`, past `exp`, or past
+            `turnExp`. One code on purpose (§6.3): the caller's only move on any of them is to
+            re-exchange at `/internal/turn-grants`, so splitting the code the way the session
+            token's `token_invalid`/`token_expired` are split would buy a caller nothing. The
+            `message` does name the failed check, for the operator reading the log — the route is
+            behind the shared bearer, so no untrusted holder of a tampered grant reaches it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            `session_not_found` for an unknown, unowned or tombstoned session — the same answer the
+            issue route gives. Also a bare `not_found` when no grant signing key is configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: '`internal_error`: the audit write failed with an untyped error.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`redis_unavailable`: the session record or the audit stream is unreachable.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

@@ -21,7 +21,7 @@ exits 2. Some flags are always rejected (exit 2) outside their command: `--consu
 `--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
 outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
 `subagents`; `--label` outside `spawn`; `--out` outside `get`; `--workload` outside `spawn`;
-`--prompt-file` outside `spawn`;
+`--prompt-file` outside `spawn`; `--record` outside `run`;
 `--context`, `--name`, `--sandboxes` and `--mount` outside `workloads create`; and `--all` outside `logout`. Other flags a
 command does not use are not rejected and may be ignored.
 
@@ -71,7 +71,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl logout [--all]`                                                                                                          | Ends this login on the server (`POST /v1/auth/revoke`); `--all` ends all of yours (`/v1/auth/revoke-all`). The local file is cleared anyway                                                                                                                                                                                                                                                                              |
 | `mocactl auth token [--json]`                                                                                                     | Prints a valid API token for scripts, refreshing if needed. `--json`: `{"token","expiresAt","subject"}`                                                                                                                                                                                                                                                                                                                  |
 | `mocactl doctor [--json]`                                                                                                         | Seven ordered checks that stop at the first failure (below). Exit 1 if any fails                                                                                                                                                                                                                                                                                                                                         |
-| `mocactl run "prompt" [--session ID \| --new] [--option k=v ...] [--config DIGEST] [--json]`                                      | Runs a turn. Continues `--session`, or starts a new session (`--new`, the default)                                                                                                                                                                                                                                                                                                                                       |
+| `mocactl run "prompt" [--session ID \| --new] [--option k=v ...] [--config DIGEST] [--json] [--record F]`                         | Runs a turn. Continues `--session`, or starts a new session (`--new`, the default)                                                                                                                                                                                                                                                                                                                                       |
 | `mocactl promote DIR [--dry-run] [--json]`                                                                                        | Builds a config bundle from `DIR/.claude` and uploads it (`POST /v1/config-bundles`). See [Promoting](../guides/promote-claude-workflow.md)                                                                                                                                                                                                                                                                              |
 | `mocactl bundles list [--json]`                                                                                                   | Lists the bundles you own, newest first (`GET /v1/config-bundles`). See below                                                                                                                                                                                                                                                                                                                                            |
 | `mocactl bundles delete DIGEST [--json]`                                                                                          | Deletes a bundle you promoted (`DELETE /v1/config-bundles/{digest}`). `DIGEST` must be `sha256:` plus 64 hex characters                                                                                                                                                                                                                                                                                                  |
@@ -100,6 +100,41 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 - Text mode streams the reply to stdout, and reports a `workspace_reset` to stderr.
 - `--json` emits NDJSON: a first line `{"type":"session","sessionId":...}`, then one raw
   [turn frame](http-api.md#streaming-frames) per line.
+- `--record F` appends one NDJSON line per HTTP attempt, to the control plane and to the harness
+  (the login's refresh included), in the format below, with `command: "run"` and `endpoint`
+  (`control-plane` or `harness`; `other` for a request under neither, its host unwritten). Kept:
+  the path below that endpoint's base URL, the status, the session's id, model and times, the
+  sandbox placement, `patchSha256` and `patchBytes`. Kept as their length: the prompt, the reply, a
+  frame's text, the patch, a transcript, a message and other free text, a person's display name, a
+  credential's hosts and endpoint. `--record` on any other top-level command exits 2.
+
+### `--record F`
+
+`mocactl run` and every `mocactl sbx` command that calls the API, except `sbx token`, `sbx login`,
+`sbx logout` and `sbx credentials` (they handle a secret on purpose, and exit 2), take `--record F`.
+It appends one JSON line per HTTP attempt to `F`:
+
+| Field                                 | What it holds                                                                                                                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `command`, `invocation`               | The command (`run`, `sbx create`, …) and a UUID for this run of it                                                                                                                                                                                           |
+| `seq`, `try`                          | The line's number in this invocation; 1, 2, … for the same method and path in a row (a retry)                                                                                                                                                                |
+| `method`, `path`                      | The path relative to the endpoint's base URL, with its query; never the scheme or host                                                                                                                                                                       |
+| `status` or `error`                   | The HTTP status, or a transport error's code or class (never its message)                                                                                                                                                                                    |
+| `request`, `answer`                   | The JSON bodies, redacted (below); a body that is not JSON as its `length`                                                                                                                                                                                   |
+| `requestAt`, `answerAt`, `retryAfter` | UTC times with milliseconds, and the `Retry-After` header when there is one                                                                                                                                                                                  |
+| `stream`, `event: "stream_end"`       | A streamed answer (SSE or NDJSON) passes through live: its line has `stream: true` at the headers, and a `stream_end` line for the same `seq` gives `bytes`, `sha256`, `frames`, `endedAt`, and `error` or `closedBy: "reader"` when it did not end normally |
+
+Never written: a token, a host or a URL. Token fields (`token`, `refreshToken`, `refresh_token`,
+`sessionToken`, `apiToken`, `accessToken`), a gate record, a credential's `secret`, and any string
+shaped like a JWT or a refresh token, under any field, are replaced by their `sha256:`; `execEndpoint`,
+`execCa`, `harnessUrl`, a reason's `message`, a log, and any string that is an absolute URL by
+`{"length": N}`. `F` is created `0600` and opened for appending; an existing `F` readable or
+writable by anyone else, or not a regular file, exits 2 before any request. Each line is written
+whole in one write; a line longer than `PIPE_BUF` takes a lock file `F.lock`, so several processes
+can append to one record. `sbx run`, `put`, `push` and `pull` reach the sandbox over gRPC, which is
+not recorded: the record holds their control-plane calls (the sandbox read, the token mint).
+`sbx claude` and `sbx codex` record their own calls only, not those of the `mocactl sbx mcp`
+server the agent starts.
 
 ### `workloads list`
 

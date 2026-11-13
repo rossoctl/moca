@@ -9,7 +9,17 @@
 # on top; nothing here adds either.
 #
 # Usage:
-#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF]
+#   sudo deploy/microvm/build-rootfs.sh --out /srv/rootfs/moca-sandbox [--image REF] [--source-name NAME] [--require "T1 T2 ..."]
+#
+# --source-name is the reference /etc/moca-rootfs-source records as `image=` (default: --image). A
+# guest's agent can read that file, so a caller pulling from a private registry (template-build.sh
+# with --registry) passes the spec's own host-free reference, never the pull reference: the
+# registry host never reaches the guest. The `digest=` line is the pulled image's.
+#
+# --require replaces REQUIRED_TOOLS below with the caller's list, for an image that is not Moca's
+# own sandbox image: a sandbox template's image needs the tools its template lists plus the guest
+# agent's minimum, not Moca's whole toolchain. Without it, every image must carry Moca's list, as
+# before (`gh` there refuses every benchmark image, none of which ships it).
 #
 # Env:
 #   SH_SKIP_PULL  Non-empty: export the copy of IMAGE this host already has instead of pulling it
@@ -24,13 +34,14 @@ set -euo pipefail
 
 IMAGE="${SANDBOX_IMAGE:-ghcr.io/rossoctl/moca-remote-worker:latest}"
 OUT=""
+SOURCE_NAME=""
 # The container tier's Hello.capabilities (cmd/worker's `probed`) plus the two coreutils the
 # harness's own file ops call. A tree missing one of these would boot, snapshot, advertise less,
 # and then fail the first tool call that needs it -- so refuse here instead.
 REQUIRED_TOOLS=(bash git rg gh python3 base64 file ls cat)
 
 usage() {
-  echo "usage: $0 --out DIR [--image REF]   (default image: $IMAGE)" >&2
+  echo "usage: $0 --out DIR [--image REF] [--source-name NAME] [--require \"T1 T2 ...\"]   (default image: $IMAGE)" >&2
   exit 1
 }
 
@@ -38,6 +49,17 @@ while [ $# -gt 0 ]; do
   case "$1" in
   --out) OUT="${2:-}"; shift 2 ;;
   --image) IMAGE="${2:-}"; shift 2 ;;
+  --source-name)
+    [ -n "${2:-}" ] || { echo "build-rootfs.sh: --source-name needs a name" >&2; usage; }
+    SOURCE_NAME="$2"; shift 2 ;;
+  --require)
+    [ -n "${2:-}" ] || { echo "build-rootfs.sh: --require needs a list of tools" >&2; usage; }
+    read -r -a REQUIRED_TOOLS <<<"$2"
+    for t in "${REQUIRED_TOOLS[@]}"; do
+      case "$t" in */* | .* | *[!A-Za-z0-9._+-]*) echo "build-rootfs.sh: --require: '$t' is not a tool name" >&2; exit 2 ;; esac
+    done
+    shift 2
+    ;;
   -h | --help) usage ;;
   *) echo "build-rootfs.sh: unknown argument $1" >&2; usage ;;
   esac
@@ -103,11 +125,54 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# NEVER WRITE THROUGH THE IMAGE'S SYMLINKS. $OUT is an untrusted image's filesystem and this runs
+# as root, so a directory in it can be a symlink out of it (an absolute one resolves on THIS host),
+# and an rm, mkdir or redirect through it would change the build host's files. build-snapshot.sh's
+# tree_write_target guards its own writes the same way.
+#
+# refuse_tree: the tree is not one this script may finish, so it is removed (rm -rf removes a
+# symlink, never its target) and the build fails.
+refuse_tree() {
+  echo "build-rootfs.sh: $1" >&2
+  rm -rf "$OUT"
+  exit 1
+}
+# tree_dir_inside DIR [make]: exits unless the tree's DIR resolves inside the tree. It checks the
+# deepest part of DIR that exists first, then (with `make`) creates the rest and checks DIR itself,
+# because mkdir -p follows symlinks. Without `make`, a DIR that does not exist passes: nothing in it
+# can be removed.
+tree_dir_inside() {
+  local dir="$1" make="${2:-}" tree probe real d
+  tree="$(cd -P "$OUT" && pwd)"
+  probe="$dir"
+  while [ "$probe" != . ] && [ ! -e "$OUT/$probe" ] && [ ! -L "$OUT/$probe" ]; do
+    probe="$(dirname "$probe")"
+  done
+  for d in "$probe" "$dir"; do
+    if [ "$d" = "$dir" ]; then
+      if [ -n "$make" ]; then mkdir -p "$OUT/$dir"; elif [ ! -e "$OUT/$dir" ] && [ ! -L "$OUT/$dir" ]; then return 0; fi
+    fi
+    real="$(cd -P "$OUT/$d" 2>/dev/null && pwd)" || real="unresolvable"
+    case "$real/" in
+      "$tree"/*) ;;
+      *) refuse_tree "the image's /$d resolves outside the tree ($real); refusing to change files through it" ;;
+    esac
+  done
+}
+
 # The container tier's own worker binary is inert in a guest (the guest agent is the executor,
-# installed by build-snapshot.sh), so it has no business in the image the VM trusts.
+# installed by build-snapshot.sh), so it has no business in the image the VM trusts. rm -f removes
+# a symlink itself, so only its directory needs the check.
+tree_dir_inside usr/local/bin
 rm -f "$OUT/usr/local/bin/remote-worker"
 # Mount points init and the kernel need; an exported container tree may lack them.
-mkdir -p "$OUT/dev" "$OUT/proc" "$OUT/sys"
-printf 'image=%s\ndigest=%s\n' "$IMAGE" "$digest" >"$OUT/etc/moca-rootfs-source"
+for d in dev proc sys; do tree_dir_inside "$d" make; done
+# The provenance file: its directory must resolve inside the tree, and the file must not be a
+# symlink (its target is unknown, and the redirect would truncate the build host's file).
+tree_dir_inside etc make
+if [ -L "$OUT/etc/moca-rootfs-source" ]; then
+  refuse_tree "the image's /etc/moca-rootfs-source is a symlink ($(readlink "$OUT/etc/moca-rootfs-source")); refusing to write through it"
+fi
+printf 'image=%s\ndigest=%s\n' "${SOURCE_NAME:-$IMAGE}" "$digest" >"$OUT/etc/moca-rootfs-source"
 
-echo "build-rootfs.sh: $OUT is ready (from $IMAGE @ $digest)"
+echo "build-rootfs.sh: $OUT is ready (from ${SOURCE_NAME:-$IMAGE} @ $digest)"

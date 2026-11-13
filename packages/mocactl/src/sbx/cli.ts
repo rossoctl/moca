@@ -10,13 +10,17 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
 import {
   cmdCreate,
+  cmdEditTemplate,
   cmdEnv,
   cmdLogin,
   cmdLogout,
   cmdLs,
   cmdRm,
+  cmdTagTemplate,
   cmdTemplates,
   cmdToken,
+  cmdTransferTemplate,
+  cmdUntagTemplate,
   failRefresh,
   SBX_EXIT,
   type SbxCtx,
@@ -32,11 +36,30 @@ import {
   listCredentials,
   listPresets,
 } from './credentials.js';
-import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
+import {
+  busyRetries,
+  cmdMcp,
+  cmdPut,
+  cmdRun,
+  parseTimeout,
+  workspacePath,
+  type RunRetry,
+} from './run.js';
 import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
+import { openCallRecord, type CallRecorder } from './call-record.js';
+import {
+  cmdCancelBuild,
+  cmdCreateTemplates,
+  cmdDryRun,
+  cmdFollowTemplate,
+  cmdPolicy,
+  cmdQuota,
+  cmdShowTemplate,
+  readCreateInputs,
+} from './templates.js';
 import { cortexMode } from './agent-config.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
@@ -44,9 +67,51 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  log in with the GitHub device flow (the URL is remembered;
                                                  in a local terminal: copies the code, opens the browser)
   mocactl sbx logout                             end the sandbox-service login (deletes sbx-auth.json)
-  mocactl sbx templates [--json]                 the templates a sandbox can be created from
-  mocactl sbx create [--template ID] [--name N] [--label k=v ...] [--json]
-                                                 create a sandbox (template: default); prints its id
+  mocactl sbx templates [--json]                 the templates a sandbox can be created from, with
+                                                 their readiness and tags
+  mocactl sbx quota [--json]                     your template quotas and use, and your live-sandbox cap
+  mocactl sbx policy [--json]                    the deployment's template policy: profiles (envelope,
+                                                 egress, rules), allowed registries, quotas, digest
+  mocactl sbx templates create --spec F [--spec F ...] [--id ID] [--image REF] [--profile P]
+                               [--visibility private|deployment] [--gate-record F] [--dry-run]
+                               [--timeout S] [--json]
+                                                 create a template (or a new build of your own) from a
+                                                 spec, or from a gate record's template block; id and
+                                                 image default to the spec's; the gate record (one
+                                                 --spec, at most 1 MiB) is sent byte for byte.
+                                                 Several --spec: one create each, waiting
+                                                 for a queue slot while your buildsQueued quota is full
+                                                 (up to S, default 3600). An id already yours: a new
+                                                 build of it (the same inputs: that build, reused).
+                                                 --dry-run: reads the policy, then its checks that
+                                                 need only the inputs; nothing created
+  mocactl sbx templates build ID --spec F [--image REF] [--profile P] [--gate-record F] [--dry-run]
+                               [--timeout S] [--json]
+                                                 a new build of your template ID
+  mocactl sbx templates show ID [--build BUILD] [--json]
+                                                 a template and its builds (status, readiness, tags,
+                                                 why a build failed), or one build with its spec (--json)
+  mocactl sbx templates follow ID [--build BUILD] [--timeout S] [--json]
+                                                 poll a build (default: the newest) until registered,
+                                                 failed, rejected or cancelled; exit 0 only on
+                                                 registered, 1 on any other end, 5 past S (default
+                                                 3600), 130 on Ctrl-C (the build goes on)
+  mocactl sbx templates cancel ID --build BUILD [--json]
+                                                 withdraw a queued, building or probing build
+  mocactl sbx templates tag ID TAG... --build BUILD [--json]
+                                                 move tags onto a registered build of a template you
+                                                 own; sandboxes made earlier keep their build
+  mocactl sbx templates untag ID TAG [--json]    remove a tag; its build stays (never default)
+  mocactl sbx templates edit ID [--visibility private|deployment] [--description TEXT] [--json]
+                                                 change who sees it, or its description
+  mocactl sbx templates transfer ID SUBJECT [--json]
+                                                 make SUBJECT (github:<id> or oidc:<sub>) its owner
+                                                 (admins only)
+  mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
+                                                 create a sandbox (template: default); prints its id;
+                                                 --seed: run the served build's seed, then check
+                                                 /workspace is a clean tree (its HEAD becomes the
+                                                 baseline pull and rm measure changes from)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx rm [ID] [--keep-config] [--force] [--json]
                                                  delete a sandbox; for the bound one, also take
@@ -54,15 +119,21 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  .sbx/ (unless --keep-config) (refused while the
                                                  sandbox has changes not yet pulled, unless --force,
                                                  or when that cannot be checked)
-  mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
+  mocactl sbx token [ID] [--renew-every S] [--json]
+                                                 print a fresh sandbox token (15 minutes by default);
+                                                 --renew-every: a new line every S seconds until stopped
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';
                                                  exit: the command's code; 124 timed out or killed;
-                                                 125 sandbox failure; S defaults to, and is capped at,
-                                                 the sandbox token's lifetime minus 60 s)
+                                                 125 sandbox failure; 75 refused before it started,
+                                                 every try (retried MOCACTL_SBX_BUSY_RETRIES times,
+                                                 default 4, at most 20; nothing ran); 130
+                                                 interrupted; S defaults to, and is capped at, the
+                                                 sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
+                                                 (a refusal before start: retried, 75, as run's)
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
   mocactl sbx claude [-- CLAUDE_ARGS ...]        run Claude Code on this sandbox's MCP tools, for
                                                  one run (--mcp-config + --strict-mcp-config,
@@ -113,10 +184,13 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx credentials delete NAME            delete one
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1)
+--record F (every command that calls the API but token, login, logout and credentials): one
+NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
-exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable`;
+exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out,
+130 interrupted (Ctrl-C)`;
 
 export interface SbxDeps {
   signal?: AbortSignal;
@@ -131,6 +205,15 @@ export interface SbxDeps {
   readStdinBytes?: (limit?: number) => Promise<Buffer>;
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
+  /**
+   * The template commands' and `token --renew-every`'s waits, and `run`'s wait between tries
+   * after a refusal before start (default: the runtime's sleep).
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** `run`'s jitter, 0 to 1 (default Math.random). */
+  random?: () => number;
+  /** The template commands' and `--record`'s clock, epoch ms (default: the runtime's). */
+  now?: () => number;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
   claudeVersion?: () => Promise<string | undefined> | string | undefined;
   /** Cortex's agentop, for `up --cortex` and `doctor` in Cortex mode (default: the one on PATH). */
@@ -191,6 +274,15 @@ export function openSbxRuntime(
   });
   // `url` is never empty here, so the runtime always built its client through the factory.
   return { rt, api: api! };
+}
+
+/** `run`'s and `put`'s retry after a refusal before start. */
+function runRetry(env: NodeJS.ProcessEnv, deps: SbxDeps, ctx: SbxCtx): RunRetry {
+  return {
+    retries: busyRetries(env),
+    sleep: deps.sleep ?? ctx.rt.sleep,
+    ...(deps.random ? { random: deps.random } : {}),
+  };
 }
 
 /**
@@ -262,6 +354,20 @@ const NO_JSON = new Set([
 ]);
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
+/**
+ * The commands `--record F` is refused on: a token printed on purpose, the login itself, and
+ * credentials, whose secrets are the request.
+ */
+const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
+/** The `templates` owner's and admin's subcommands (lifecycle spec §5.1-§5.2). */
+const TEMPLATE_ADMIN_SUBS = ['tag', 'untag', 'edit', 'transfer'];
+/** The `templates` subcommands; their arguments are checked one by one in sbxMain. */
+const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel', ...TEMPLATE_ADMIN_SUBS];
+/** The `templates` subcommands that take one template ID. */
+const TEMPLATE_ONE_ID = ['build', 'show', 'follow', 'cancel', 'edit'];
+/** The `templates` subcommands that take --build, and those that take --timeout (a wait). */
+const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag'];
+const TAKES_TIMEOUT = ['follow', 'create', 'build'];
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -290,10 +396,13 @@ const SYNC_FLAGS: [
     | 'cortex'
     | 'keep-config'
     | 'no-browser'
+    | 'renew-every'
+    | 'seed'
   ),
   string[],
 ][] = [
   ['force', ['push', 'rm']],
+  ['seed', ['create']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
   ['apply', ['pull']],
@@ -302,7 +411,19 @@ const SYNC_FLAGS: [
   ['cortex', ['up']],
   ['keep-config', ['rm']],
   ['no-browser', ['login']],
+  ['renew-every', ['token']],
 ];
+
+/** A whole number of seconds, at least 1, for `flag`; null (after saying why) when malformed. */
+function wholeSeconds(io: Io, flag: string, raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    io.err(`sbx: --${flag} must be a whole number of seconds, at least 1 (got '${raw}')`);
+    return null;
+  }
+  return n;
+}
 /** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
 
@@ -327,6 +448,21 @@ export async function sbxMain(
   io: Io,
   deps: SbxDeps = {},
 ): Promise<number> {
+  const opened: { recorder?: CallRecorder } = {};
+  try {
+    return await sbxMainWith(argv, env, io, deps, opened);
+  } finally {
+    opened.recorder?.close();
+  }
+}
+
+async function sbxMainWith(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  io: Io,
+  deps: SbxDeps,
+  record: { recorder?: CallRecorder },
+): Promise<number> {
   let parsed;
   try {
     parsed = parseArgs({
@@ -336,6 +472,10 @@ export async function sbxMain(
       options: {
         'control-plane-url': { type: 'string' },
         template: { type: 'string' },
+        build: { type: 'string' },
+        description: { type: 'string' },
+        visibility: { type: 'string' },
+        seed: { type: 'boolean' },
         name: { type: 'string' },
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
@@ -354,6 +494,14 @@ export async function sbxMain(
         host: { type: 'string', multiple: true },
         kind: { type: 'string' },
         preset: { type: 'string' },
+        'renew-every': { type: 'string' },
+        record: { type: 'string' },
+        spec: { type: 'string', multiple: true },
+        id: { type: 'string' },
+        image: { type: 'string' },
+        profile: { type: 'string' },
+        'gate-record': { type: 'string' },
+        'dry-run': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -390,6 +538,8 @@ export async function sbxMain(
     'pull',
     'doctor',
     'credentials',
+    'quota',
+    'policy',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -405,8 +555,39 @@ export async function sbxMain(
     io.err(`sbx: --sandbox does not apply to ${command}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.timeout !== undefined && command !== 'run') {
-    io.err(`sbx: --timeout only applies to run\n${SBX_USAGE}`);
+  // `templates SUB`: the template subcommand, for the flags that apply to some of them only.
+  const sub = command === 'templates' ? arg : undefined;
+  if (
+    values.timeout !== undefined &&
+    command !== 'run' &&
+    !(sub !== undefined && TAKES_TIMEOUT.includes(sub))
+  ) {
+    io.err(
+      `sbx: --timeout only applies to run and templates ${TAKES_TIMEOUT.join(', ')}\n${SBX_USAGE}`,
+    );
+    return SBX_EXIT.usage;
+  }
+  const createFlag = (['spec', 'image', 'profile', 'gate-record', 'dry-run'] as const).find(
+    (f) => values[f] !== undefined,
+  );
+  if (createFlag && !(sub === 'create' || sub === 'build')) {
+    io.err(`sbx: --${createFlag} only applies to templates create and build\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.id !== undefined && sub !== 'create') {
+    io.err(`sbx: --id only applies to templates create\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.visibility !== undefined && !(sub === 'create' || sub === 'edit')) {
+    io.err(`sbx: --visibility only applies to templates create and edit\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if ((sub === 'create' || sub === 'build') && !values.spec?.length) {
+    io.err(`sbx: templates ${sub} needs --spec F\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'build' && (values.spec?.length ?? 0) > 1) {
+    io.err(`sbx: templates build takes one --spec\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   const flagMisuse = SYNC_FLAGS.find(
@@ -416,6 +597,12 @@ export async function sbxMain(
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  if (values.record !== undefined && NO_RECORD.has(command)) {
+    io.err(`sbx: ${command} takes no --record (it would record a secret)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  const renewEvery = wholeSeconds(io, 'renew-every', values['renew-every']);
+  if (renewEvery === null) return SBX_EXIT.usage;
   const credFlag = (['host', 'kind', 'preset'] as const).find((f) => values[f] !== undefined);
   if (credFlag && !(command === 'credentials' && arg === 'add')) {
     io.err(`sbx: --${credFlag} only applies to credentials add\n${SBX_USAGE}`);
@@ -438,6 +625,71 @@ export async function sbxMain(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  // `templates SUB ...` (template lifecycle spec §4), and the owner's and admin's actions
+  // (§5.1-§5.2); bare `templates` lists them.
+  if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
+    io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub !== undefined && TEMPLATE_ADMIN_SUBS.includes(sub) && extra.some((x) => !x.trim())) {
+    io.err(`sbx: templates ${sub} takes no empty argument\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'create' && extra.length > 0) {
+    io.err(`sbx: templates create takes no ID (the spec names it, or --id)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (
+    sub !== undefined &&
+    TEMPLATE_ONE_ID.includes(sub) &&
+    (extra.length !== 1 || !extra[0]!.trim())
+  ) {
+    io.err(`sbx: templates ${sub} takes one template ID\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if ((sub === 'untag' || sub === 'transfer') && extra.length !== 2) {
+    io.err(
+      `sbx: templates ${sub} takes a template ID and ${sub === 'untag' ? 'a TAG' : 'a SUBJECT'}\n${SBX_USAGE}`,
+    );
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && extra.length < 2) {
+    io.err(`sbx: templates tag takes a template ID and at least one TAG\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.build !== undefined && !(sub !== undefined && TAKES_BUILD.includes(sub))) {
+    io.err(`sbx: --build only applies to templates ${TAKES_BUILD.join(', ')}\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'cancel' && values.build === undefined) {
+    io.err(`sbx: templates cancel needs --build BUILD\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && values.build === undefined) {
+    io.err(`sbx: templates tag needs --build BUILD\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.description !== undefined && sub !== 'edit') {
+    io.err(`sbx: --description only applies to templates edit\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'edit' && values.visibility === undefined && values.description === undefined) {
+    io.err(`sbx: templates edit needs --visibility or --description\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (
+    sub === 'edit' &&
+    values.visibility !== undefined &&
+    values.visibility !== 'private' &&
+    values.visibility !== 'deployment'
+  ) {
+    io.err(`sbx: --visibility must be private or deployment\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.build !== undefined && !values.build.trim()) {
+    io.err(`sbx: --build needs a build id (see mocactl sbx templates show ID)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
   let maxPush: number | undefined;
   if (values['max-push'] !== undefined) {
     const raw = values['max-push'].trim();
@@ -455,6 +707,7 @@ export async function sbxMain(
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
+    (command === 'templates' && arg !== undefined) ||
     command === 'claude' ||
     command === 'codex' ||
     (command === 'credentials'
@@ -534,8 +787,27 @@ export async function sbxMain(
       .map((h) => h.trim())
       .filter(Boolean),
   });
-  const timeout = parseTimeout(io, values.timeout);
-  if (timeout === null) return SBX_EXIT.usage;
+  const timeoutRaw = parseTimeout(io, values.timeout);
+  if (timeoutRaw === null) return SBX_EXIT.usage;
+  const timeout: number | undefined = timeoutRaw;
+  // A create's files are read before any request: an unreadable spec is a usage error.
+  let createInputs: Exclude<ReturnType<typeof readCreateInputs>, string> | undefined;
+  if (sub === 'create' || sub === 'build') {
+    const read = readCreateInputs(values.spec!, {
+      ...(values.id !== undefined ? { id: values.id } : {}),
+      // `build ID`: the template is ID; the route ignores the body's id, the checks use ID.
+      ...(sub === 'build' ? { id: extra[0]! } : {}),
+      ...(values.image !== undefined ? { image: values.image } : {}),
+      ...(values.profile !== undefined ? { profile: values.profile } : {}),
+      ...(values.visibility !== undefined ? { visibility: values.visibility } : {}),
+      ...(values['gate-record'] !== undefined ? { gateRecord: values['gate-record'] } : {}),
+    });
+    if (typeof read === 'string') {
+      io.err(`sbx: ${read}`);
+      return SBX_EXIT.usage;
+    }
+    createInputs = read;
+  }
   let script: string | undefined;
   if (command === 'run') {
     // Each word quoted: `run -- grep 'a b' f` runs exactly that, and `$HOME` stays literal. Shell
@@ -617,12 +889,35 @@ export async function sbxMain(
   // and the environment still win (R5j).
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
   const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
+  // --record F: every HTTP attempt this command makes, the login's refresh included, so the record
+  // is opened (or refused) before the runtime's clients exist. Exec calls are gRPC, not recorded.
+  if (values.record !== undefined) {
+    const r = openCallRecord(values.record, `sbx ${command}`, deps.now);
+    if ('error' in r) {
+      io.err(`sbx: ${r.error}`);
+      return SBX_EXIT.usage;
+    }
+    record.recorder = r;
+    const base = resolveSbxUrl(
+      flagUrl,
+      env,
+      loadConfig(resolvePaths(env, deps.home ?? homedir())).config,
+    );
+    deps = { ...deps, fetchImpl: r.wrap(deps.fetchImpl ?? fetch, base ?? 'http://invalid') };
+  }
   const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
     login: OWN_LOGIN.has(command),
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
   });
   if (typeof opened === 'number') return opened;
-  const ctx: SbxCtx = { ...opened, io, json: values.json === true, signal: deps.signal };
+  const ctx: SbxCtx = {
+    ...opened,
+    io,
+    json: values.json === true,
+    signal: deps.signal,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+  };
 
   switch (command) {
     case 'login':
@@ -633,10 +928,40 @@ export async function sbxMain(
       );
     case 'logout':
       return cmdLogout(ctx);
+    case 'quota':
+      return cmdQuota(ctx);
+    case 'policy':
+      return cmdPolicy(ctx);
     case 'templates':
+      if (arg === 'create' || arg === 'build') {
+        if (values['dry-run']) return cmdDryRun(ctx, createInputs!);
+        return cmdCreateTemplates(ctx, createInputs!, {
+          ...(arg === 'build' ? { build: extra[0]! } : {}),
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
+      }
+      if (arg === 'follow')
+        return cmdFollowTemplate(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
+      if (arg === 'cancel') return cmdCancelBuild(ctx, extra[0]!, values.build!);
+      if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
+      if (arg === 'tag') return cmdTagTemplate(ctx, extra[0]!, extra.slice(1), values.build!);
+      if (arg === 'untag') return cmdUntagTemplate(ctx, extra[0]!, extra[1]!);
+      if (arg === 'edit')
+        return cmdEditTemplate(ctx, extra[0]!, {
+          ...(values.visibility !== undefined ? { visibility: values.visibility } : {}),
+          ...(values.description !== undefined ? { description: values.description } : {}),
+        });
+      if (arg === 'transfer') return cmdTransferTemplate(ctx, extra[0]!, extra[1]!);
       return cmdTemplates(ctx);
     case 'create':
-      return cmdCreate(ctx, createBody!);
+      return cmdCreate(
+        ctx,
+        createBody!,
+        values.seed ? { ...(deps.execFactory ? { factory: deps.execFactory } : {}) } : undefined,
+      );
     case 'ls':
       return cmdLs(ctx, values.all === true);
     case 'rm': {
@@ -670,11 +995,11 @@ export async function sbxMain(
     case 'doctor':
       return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
     case 'token':
-      return cmdToken(ctx, id!);
+      return cmdToken(ctx, id!, renewEvery);
     case 'run':
-      return cmdRun(ctx, id!, script!, timeout, deps.execFactory);
+      return cmdRun(ctx, id!, script!, timeout, deps.execFactory, runRetry(env, deps, ctx));
     case 'put':
-      return cmdPut(ctx, id!, target!, content!, deps.execFactory);
+      return cmdPut(ctx, id!, target!, content!, deps.execFactory, runRetry(env, deps, ctx));
     case 'mcp':
       return cmdMcp(ctx, id!, deps.mcpTransport, deps.execFactory);
     case 'claude':

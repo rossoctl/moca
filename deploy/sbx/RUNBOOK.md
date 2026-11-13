@@ -49,7 +49,19 @@ gitignored).
    ssh <host> rm -r sbx-<id>
    ```
 
-   It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`).
+   It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`). The worker's guest
+   RAM (`SH_GUEST_RAM_MB`) is taken from the snapshot's `manifest.json` (`guest_ram_mb`), never set
+   by hand: a snapshot without it is refused. `--budget-mb` (default 8192) must hold at least one
+   session, (guest RAM + 32) × 3 + 1024 MiB at the unit's standby depth of 2: 13408 MiB for a
+   4096 MiB guest. A smaller budget is refused, naming the minimum. The worker runs
+   `SBX_WORKER_BIN` (default `/usr/local/libexec/sbx/microvm-worker`, [README](README.md#2-kvm-host-side)).
+   When `<image>` was built by `deploy/sbx/template-onboarding/template-build.sh`, its template record
+   (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
+   `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
+   for another worker is refused before anything is written.
+   On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
+   the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
+   agent's wanted state instead of starting all of them.
 
 6. **The janitor,** once per KVM host:
 
@@ -82,9 +94,12 @@ and no sandbox profile; 1b added the control-plane inputs (`SBX_API_HOST`, `SBX_
 ## 2. Upgrading
 
 **An image upgrade** (a new `SBX_IMAGE`): set it in `<env file>` and re-run `setup.sh`. A changed
-image, or any changed setting, rolls the control plane and the relay. Workers keep running, and
-reattach when the relay comes back; Execs running through the old relay pod end with it (the worker
-kills a dropped stream's Execs), so apply changes when nothing long is running.
+image rolls the control plane and the relay, and so does a change to what the relay reads (the
+token issuer, `SBX_MAX_INFLIGHT`, the signing keyset, the attach or exec certificate). Workers keep
+running, and reattach when the relay comes back; Execs running through the old relay pod end with it
+(the worker kills a dropped stream's Execs), so apply those when nothing long is running. Any other
+setting (templates, subjects, quotas, lifetimes) rolls the control plane alone, and running Execs
+carry on.
 
 **From 1a:** unset `SBX_CLIENTS` (the run refuses it), move `SBX_IMAGE` off the team-only 1a image,
 and run with `SBX_ACK_HOSTS=1`, because every 1a worker bundle lacks the workspace idle time and
@@ -98,11 +113,39 @@ Then re-run `install-host.sh` with the new bundle for every worker (step 5 of §
 bundle. The run deletes the static client tokens and removes the relay's harness exec token. **1a
 workspaces are not migrated:** tell 1a users to pull their work out first.
 
+**Redis's image and its data.** Since #670 the base runs Valkey 9, which **cannot read RDB format
+12**, the format Redis 7.4 writes. On a namespace whose data a Redis 7.4 wrote, Valkey's AOF load
+aborts (`Can't handle RDB format version 12`) and `redis-0` crash-loops, taking the control plane
+down with it. Until a migration exists, keep such a namespace on Redis 7: set `SBX_REDIS_IMAGE` to
+the digest it ran, e.g.
+`docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`
+(the pin before #670). With `SBX_REDIS_IMAGE` unset, `setup.sh` now refuses, before it applies
+anything, when the namespace's `redis` StatefulSet runs an image other than Valkey, and names that
+image. Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
+`dump.rdb` and `appendonlydir`). The StatefulSet is OrderedReady: a `redis-0` that crash-loops on
+the old revision is never replaced, so `setup.sh`'s rollout wait times out. Then delete the pod
+(`kubectl -n <namespace> delete pod redis-0`; its PVC stays) and re-run `setup.sh`.
+
+**Redis's memory limit.** `setup.sh`'s `redis.conf` sets `maxmemory 200mb` with
+`maxmemory-policy noeviction`, under the container's 256 MiB limit: a full Redis refuses writes (the
+control plane answers `503 redis_unavailable`) and evicts nothing, instead of being OOM-killed with
+every session and sandbox record. A new namespace gets it at Redis's first start. An existing one
+does not: the Secret's change does not restart `redis-0` (the StatefulSet has no settings hash), so
+apply it live, `kubectl -n <namespace> exec redis-0 -c redis -- redis-cli CONFIG SET maxmemory
+209715200` and `… CONFIG SET maxmemory-policy noeviction` (`REDISCLI_AUTH` is set in the container),
+or let the next restart read the file. Check with `CONFIG GET maxmemory`. A namespace that raises
+the container's memory limit should raise `maxmemory` with it.
+
 **A host bundle change.** Re-run `install-host.sh` with the new worker bundle whenever `setup.sh`
 says so, and `install-host.sh --janitor` with the new janitor bundle after a change to
 `SBX_JANITOR_WAIT_MINUTES`, `SBX_TOKEN_TTL_MINUTES` (its default wait follows the lifetime),
 `SBX_API_HOST` or `SBX_API_CA_FILE`. `status.sh --host` warns when a host's installed janitor wait
 no longer exceeds the token lifetime plus 30 s.
+
+**A worker installed before the jail path was keyed by a digest of the id** has its jail at
+`/srv/sbx/jail/<id>`; a reinstall moves it to `/srv/sbx/jail/j<12 hex of the id>`. Re-running
+`install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
+path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
 
 ## 3. Changing the sandbox lifetime
 
@@ -141,21 +184,82 @@ Edit the list and re-run `setup.sh`. The control plane rolls with the new list:
 Admins (`SBX_ADMIN_SUBJECTS`) may list, read and delete every sandbox, but never mint a token for
 another user's: they cannot run commands in another user's code.
 
-## 5. Adding a template
+## 5. Adding, updating and removing a template
 
-1. Build its snapshot on the KVM host (§1 step 3), named `<image>`.
+The template onboarding folder, `deploy/sbx/template-onboarding/` (its `GUIDE.md` and
+`ONBOARDING.md`), is the long form, with the tools that do the steps below: `template-build.sh` (the
+snapshot, checked in a microVM) and `template-register.sh` (the two lists).
+
+A template is an id clients choose (`mocactl sbx create --template <id>`, `POST /v1/sandboxes
+{template}`), served by one worker running one snapshot. A sandbox keeps the worker it was created
+on for its whole life, whatever later happens to its template's entry.
+
+**Adding a template:**
+
+1. Build its snapshot on the KVM host (§1 step 3), named `<image>`. An image built from a container
+   image for a benchmark (one that refuses agent commits, with a read-only rootfs) usually needs
+   `build-snapshot.sh --skip-git-identity-check --guest-home /tmp/home`, and `--vcpus N
+--guest-ram-mb M` for its size ([P4-ON-P6](../microvm/P4-ON-P6.md#build-the-golden-snapshot)).
 2. Pick a worker id (`^[A-Za-z_][A-Za-z0-9_]*$`, say `sbx_node22`) and add it to `SBX_WORKERS`.
 3. Add its entry, `{ "id", "worker", "description", "tools" }`, to `SBX_TEMPLATES_FILE`. One
    template per worker; every worker in the list.
-4. Re-run `setup.sh`: it mints the worker's token and writes its bundle.
+4. Re-run `setup.sh`: it mints the worker's token and writes its bundle. It rolls the control
+   plane but not the relay (§2), so running `Exec`s on every template carry on.
 5. Install the worker with that bundle and `--snapshot <image>` (§1 step 5). A new worker's token
    reaches the relay when the kubelet syncs the Secret, about a minute, so its first attaches may be
-   refused; `install-host.sh` waits.
+   refused; `install-host.sh` waits. Pass `--budget-mb` for a guest larger than 256 MiB (§1 step 5,
+   and §9 for concurrent use).
+6. Check it with `deploy/sbx/templates-check.sh` (§14).
 
-Removing a template is the reverse: drop it from both, re-run `setup.sh` (which revokes the worker's
-token and deletes its bundle; it cannot attach again), then
-`sudo <checkout>/deploy/sbx/install-host.sh --uninstall <id>` on its host. Its sandboxes stop
-working at once (no worker serves them): tell their owners to pull first.
+**Updating a template** (a new image or snapshot) is versioned: never re-point a worker that serves
+sandboxes at another snapshot, or their commands change environment mid-work. Instead:
+
+1. Build the new snapshot under a new `<image>` name.
+2. Add a new worker id for it (say `sbx_node22_v2`) to `SBX_WORKERS`, keeping the old one.
+3. Change the template's `worker` in `SBX_TEMPLATES_FILE` to the new id. The old worker serves no
+   template now, but stays in `SBX_WORKERS`, so it keeps its token and its sandboxes keep working.
+4. Re-run `setup.sh`, install the new worker (steps 4-5 above), and check it (step 6). New sandboxes
+   of the template go to the new worker; existing ones stay on the old.
+5. Retire the old worker once it serves no live sandbox: `GET /v1/janitor/sandboxes` (the janitor's
+   token) lists each live sandbox with its `wrk`, and `mocactl sbx ls --all` (an admin) shows their
+   templates. Then remove it as below.
+
+Both workers hold their snapshot's memory file in RAM (it is the guest's whole RAM image) until the
+old one is retired, so the host needs room for both.
+
+**Removing a template** (or a retired worker) is the reverse of adding one: drop it from both lists,
+re-run `setup.sh` (which revokes the worker's token and deletes its bundle; it cannot attach again),
+then `sudo <checkout>/deploy/sbx/install-host.sh --uninstall <id>` on its host. Its sandboxes stop
+working at once (no worker serves them): tell their owners to pull first. With egress credentials on
+(`SBX_EGRESS_CREDENTIALS=1`), a worker that serves no template is no egress worker, so its
+remaining sandboxes get no stored credential (as if their owners had none) and credentialed hosts
+answer them `401` until it is retired.
+
+**One control plane process per template store** (a deployment with `SBX_TEMPLATE_STORE=1`):
+activation's quota and placement check and its lease write run under a lock inside the control
+plane process, which is enough because one process owns the store: the Deployment runs one replica,
+and the template store's volume is ReadWriteOnce with `strategy: Recreate`, so no second pod writes
+it, even during a rollout. Keep it that way. A control plane with more than one replica, or a
+rolling update, on one store would need a store-level lock.
+
+**Self-serve templates and the policy** (a deployment with a template store and host agents, "The
+template host agent" below): clients create their own templates with `POST /v1/templates`, gated by
+the stored policy (`GET /v1/policy`), which only an admin changes (`PUT /v1/policy`, a `policy`
+record). What an operator sets there:
+
+- **Profiles**, the gate a create names: `base` (no gate record), `benchmark` (a gate record an admin
+  trusts in `trustedGateRecords`), and the self-attested `benchmark-self` (offline) and
+  `general-self` (the KVM host's allowlisted egress), which trust a subject's own gate record for its
+  own templates only. A new image's default policy gains new profiles, but a stored policy does not:
+  add them with one `PUT /v1/policy`, the whole policy as read plus the change.
+- **Images:** `allowedRegistries` (`<default>` is the KVM host's own `SBX_REGISTRY`) and, per
+  registry, `allowedRepositories`. Docker Hub is `docker.io`. **On a rollback to an image older than
+  the repository allowlist, take `docker.io` out of `allowedRegistries` first:** an older image
+  ignores `allowedRepositories`, so it would admit every Docker Hub repository.
+- **Quotas:** `quota`, and `quotaBySubject` for an override.
+- **What clients see of it:** `mocactl sbx policy`, `mocactl sbx quota` and `mocactl sbx hosts`;
+  they create, follow and activate their templates with `mocactl sbx templates`
+  ([the user guide](../../docs/sbx/user-guide.md), §8).
 
 ## 6. Rotating the signing key
 
@@ -172,8 +276,8 @@ deploy/sbx/setup.sh --env-file <env file>
 
 Remove that one key only: `moca-mu1` also holds the janitor's token (`SH_JANITOR_TOKEN`), which
 deleting the whole Secret would rotate too. The run generates a new key, publishes its public half
-as the whole keyset, and rolls the relay and the control plane (the settings hash covers the
-keyset). `setup.sh` does not keep the old key beside the new one, and nothing else does.
+as the whole keyset, and rolls the relay and the control plane (both pods' settings hashes cover
+the keyset). `setup.sh` does not keep the old key beside the new one, and nothing else does.
 
 What users see: `mocactl` mints a fresh sandbox token for its calls, and re-mints once when the
 relay refuses a token before the call started, so sessions carry on with the new key. A token
@@ -324,14 +428,27 @@ adds each command's first 200 bytes as `cmd`.
   slower delete, and needs a janitor reinstall (§2).
 - **Disk is not admission-controlled on the worker.** The quotas are the disk control: `setup.sh`
   refuses `SBX_MAX_TOTAL` × `SBX_WORKSPACE_IMAGE_MB` over 80 % of `SBX_WORKSPACE_FS_GIB`.
+- **A worker's budget is sized for concurrent use, not for one session.** `install-host.sh`'s
+  smallest `--budget-mb` holds one session at the unit's standby depth of 2, (guest RAM + 32) × 3 +
+  1024 MiB (13408 MiB for a 4096 MiB guest). A **running** VM is charged its full guest size and a
+  paused standby only its dirty pages, so that minimum fits about two running VMs: a third command
+  at once on the template is refused at admission before it starts (`memory-budget: …`, "template
+  busy" to users). Size it for the commands that may run at once on the template, (guest RAM + 32) ×
+  running VMs + 1024 MiB: for example 17536 MiB for four 4096 MiB VMs (two agents on one template,
+  each with a command and a standby being promoted). The static clients (`remote-worker/cmd/sbx`,
+  `docs/api/examples/sbx.py`) retry such a refusal and exit 75 if every try is refused. The
+  worker's start-up warning (slots × per-VM size against the budget) is expected at any budget below
+  its slot count.
 
 ## Guest egress
 
 `install-host.sh` installs and starts one `moca-egress` per host (`moca-egress.service`) before the
 worker, and wires every template worker to its control socket
-(`MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock` in the worker env). A sandbox can then reach
-only the hosts on the allowlist; everything else is refused with a named error (`destination_denied`),
-never a timeout. No credential is involved.
+(`MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock` in the worker env), with a drop-in
+`sbx-worker@<id>.service.d/egress.conf` that orders the worker after `moca-egress`. A `--no-egress`
+worker gets neither, so it never starts a `moca-egress.service` that the host has. A sandbox can
+then reach only the hosts on the allowlist; everything else is refused with a named error
+(`destination_denied`), never a timeout. No credential is involved.
 
 - **The allowlist** is `MOCA_EGRESS_ALLOW` in `/etc/sbx/moca-egress.env`, a comma-separated list of
   hosts. It is seeded on the first install from `deploy/sbx/egress-allow.env` beside the installer
@@ -375,7 +492,9 @@ before systemd is touched.
 **Fresh host** (no worker installed):
 
 1. `sudo deploy/sbx/install-host.sh --egress-ca-out` (generates the CA).
-2. `deploy/microvm/build-snapshot.sh --egress-ca /etc/sbx/egress/ca.crt --out /srv/sbx/snapshots/<image>`.
+2. `deploy/microvm/build-snapshot.sh --egress-ca /etc/sbx/egress/ca.crt --out /srv/sbx/snapshots/<image>`,
+   or for a template, `template-build.sh SPEC --egress-ca /etc/sbx/egress/ca.crt ...`
+   (`deploy/sbx/template-onboarding/ONBOARDING.md`).
 3. `sudo deploy/sbx/install-host.sh WORKER_BUNDLE --snapshot <image>`.
 4. `sudo deploy/sbx/install-host.sh --egress .generated/egress/<host id>`.
 
@@ -403,6 +522,37 @@ A re-run keeps the CA. To rotate it, delete `/etc/sbx/egress/ca.crt` and `ca.key
 then rebuild every snapshot (step 2). `--uninstall-egress` removes the drop-in, token and api CA and
 keeps the CA, because existing snapshots were built with it.
 
+## Snapshot read-ahead
+
+A worker's cold start reads its snapshot's memory file (4 GiB for a 4 GiB guest) from `/srv/sbx`.
+On a network block volume whose largest request is 128 KiB (`max_hw_sectors_kb`), the kernel's
+default read-ahead of 128 KiB keeps too few reads in flight to reach the volume's throughput. One
+measurement (one KVM host, a network volume rated 750 MiB/s and 3,000 IOPS, page cache dropped):
+one reader of the memory files got 227 MiB/s at `read_ahead_kb` 128, 730 MiB/s at 512 and about
+850 MiB/s at 1024, and four readers 435 and about 779 MiB/s (128, 512). Eight cold worker starts
+posted at once, four at a time, were all active after 100.7 s at 128 (about 420 MiB/s) and after
+62.2 s at 512 (736-742 MiB/s, the volume's limit), with the same 4.0 GiB read per start. Every
+read stayed 128 KiB, at about 5,900-6,900 reads/s at 512 and above (about 5,950 in the cold starts): what bound it was reads in flight, not IOPS.
+
+So `install-host.sh` sets the read-ahead of the device holding `/srv/sbx` to `SBX_READ_AHEAD_KB`
+(default 512 KiB, at most 16384) and installs `sbx-read-ahead.service`, a oneshot enabled at boot
+(a sysfs write does not survive a reboot) that the workers start after. It is enabled whatever
+`SBX_WORKER_AT_BOOT` says: on a host whose workers a host agent starts, the boot still sets the
+read-ahead before the agent starts any. It finds the device by path
+at every run: a partition's read-ahead is its disk's, an LVM or dm device has its own. The value the
+device had before the first install is kept in `/etc/sbx/read-ahead.orig`, and the last worker's
+uninstall writes it back. A `/srv/sbx` on no block device (tmpfs, overlay), or a value the device
+does not take, is a warning in the install output and in `journalctl -u sbx-read-ahead`, never a
+failed install.
+
+- **Check it:** `findmnt -no SOURCE --target /srv/sbx` names the device; for a disk or a dm device,
+  `cat /sys/block/<dev>/queue/read_ahead_kb` (for a partition, its disk's).
+- **It is device-wide.** Everything else on that volume (another Moca tier, other sandboxes, the
+  host's own files if `/srv/sbx` is on the root disk) reads ahead as much. Read-ahead changes the
+  size of the reads, not how many bytes a cold start reads; on local NVMe a smaller value may do.
+- **Turn it off:** re-run a worker's install with `SBX_READ_AHEAD_KB=0`. That writes the recorded
+  value back and removes the unit. A later install without `SBX_READ_AHEAD_KB=0` sets it again.
+
 ## 10. A KVM-host outage
 
 **What users see.** Every sandbox whose template runs on the host fails: `mocactl sbx run` and the
@@ -420,6 +570,23 @@ pulled.
 **What to check.** `status.sh` (`workers not attached`), then on the host `status.sh --host` and
 `journalctl -u sbx-worker@<id>`. A worker that crash-looped into `failed` is brought back by
 re-running its `install-host.sh` (it resets the failed state).
+
+**A VM left behind by a stopped worker.** A worker's Firecracker VMs run in `pool-N` cgroups under
+its slice, `/sys/fs/cgroup/sbx.slice/sbx-<id>.slice`, beside the unit's own cgroup, so stopping the
+unit does not kill them. The unit's `ExecStopPost=` does: after every exit (a stop, a crash, a stop
+timeout) `/usr/local/libexec/sbx-reap-vms.sh <id>` kills each `pool-N` cgroup of that slice and waits
+up to 10 s for it to empty, logging `sbx-reap-vms:` lines to `journalctl -u sbx-worker@<id>`. A
+`still populated` line there, or a host installed before the step existed, can leave a VM holding its
+guest memory until that worker next starts. With the worker stopped, find one by its cgroup:
+
+```bash
+grep -H . /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-*/cgroup.procs   # any pid here is a leaked VM
+for p in $(pgrep -x firecracker); do echo "$p $(cut -d: -f3 "/proc/$p/cgroup")"; done   # every VM's cgroup
+```
+
+and reap it with `sudo /usr/local/libexec/sbx-reap-vms.sh <id>` (or
+`echo 1 | sudo tee /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-<n>/cgroup.kill`). Never while the
+worker runs: its `pool-N` cgroups then hold its live sandboxes' VMs.
 
 ## 11. The disk filling up
 
@@ -442,8 +609,8 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 ```
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
-also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
-installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is left; remove it by hand.
+also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
+installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
 
@@ -573,3 +740,41 @@ What each step does:
 What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
 fixed the test by the shortest route, or tried its local tools first and was denied. The
 `no network in the guest` claim is not one of its steps (`docs/sbx/security-review.md` §2).
+
+## 14. Checking the templates
+
+`deploy/sbx/templates-check.sh` checks that a client chooses the template its sandbox runs on: the
+list, a create of each template, each sandbox's token naming its own template's worker, a command in
+each answering on its template's image, a token refused at another template's worker, and `sbx up`
+refusing a bound sandbox of another template. Run it after adding or updating a template. Like the
+smoke, it reads only the environment, never prints a token, and deletes only the sandboxes it
+created; without `SBX_LIVE_CHECK=1` it does nothing.
+
+```bash
+SBX_LIVE_CHECK=1 SBX_API_URL=https://<api host> \
+  SBX_CHECK_HOME_A=<home A> SBX_CHECK_HOME_B=<home B> SBX_CHECK_TEMPLATES=default,<template> \
+  SBX_CHECK_PROBE_<TEMPLATE>='<a command that prints yes only on that template>' \
+  deploy/sbx/templates-check.sh
+```
+
+The two `HOME`s are two enrolled users' logins, prepared as for the smoke (§13). Each
+`SBX_CHECK_PROBE_<ID>` (the id upper-cased, dashes as underscores) runs in every template's
+sandboxes: it must print `yes` in its own template's and anything else in the others'. For a
+SWE-bench template, for example, check the testbed's baseline commit and the testbed's Python.
+`SBX_CHECK_EXEC=0` checks the control plane alone, before any worker is installed. The direct-client
+check (a token sent to another template's worker) needs `SBX_CHECK_PYTHON`, a Python 3.10+ with
+`grpcio` and `grpcio-tools`, and is a SKIP without it. `--help` lists every input and check. It runs
+on bash 3.2 too.
+
+```
+ok 1 - list: default, <template> (no worker ids)
+ok 2 - create: one sandbox per template, each recording its template; an unknown template is refused (…)
+ok 3 - routing: each template's sandboxes go to its own worker: default->… <template>->…; two default sandboxes share it, with their own workspaces
+ok 4 - hands: each sandbox answers on its template's image: …
+ok 5 - isolation: a default sandbox's token sent to <template>'s worker (…) is PERMISSION_DENIED
+ok 6 - isolation: user B gets 'no such sandbox' for user A's default sandbox (env and token)
+ok 7 - up: a repository bound to a default sandbox refuses sbx up --template <template>
+```
+
+It exits 0 when every check is `ok` or skipped, 1 when any is `not ok` (the line gives the
+reason), and 2 on a usage or settings error, before any sandbox is touched.

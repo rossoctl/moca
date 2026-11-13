@@ -49,6 +49,7 @@ import {
 } from './exchange.js';
 import { MODEL_ID_RE } from './models.js';
 import { exchangeTurnCredential } from './turn-exchange.js';
+import { issueTurnGrants, refreshTurnGrants } from './grant-exchange.js';
 import { isMintedTurnId } from './turn-record.js';
 import {
   catalogAllowList,
@@ -66,6 +67,9 @@ import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
+import type { ProvenanceStore } from './provenance.js';
+import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
+import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
@@ -160,6 +164,16 @@ export interface CpConfig {
    * §5.1). A non-terminal record has no TTL at all, which is the invariant TurnStore owns.
    */
   turnRecordTtlSeconds: number;
+  /**
+   * `MOCA_GRANT_TTL_S`, default 300 (MI1 §15): how long a session grant lives before the worker
+   * must refresh it. Short on purpose -- with no revocation list, this IS the revocation latency.
+   */
+  grantTtlS: number;
+  /**
+   * `MOCA_TURN_MAX_S`, default 1800 (MI1 §15): the deployment-wide ceiling on one turn. A turn may
+   * ask for less through its caps and never for more; the clamp is at mint (`grant.ts`'s `turnExp`).
+   */
+  turnMaxS: number;
 }
 
 export interface CpDeps {
@@ -207,6 +221,25 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /**
+   * The template provenance store (template lifecycle spec §7). Absent, nothing is recorded and no
+   * handler's behavior changes; when present, a sandbox's create and end are recorded on its
+   * template's chain.
+   */
+  provenance?: ProvenanceStore;
+  /**
+   * The template catalog (template lifecycle spec §3.1), opened with `provenance` when
+   * SH_PROVENANCE_DIR is set. Absent: built from the sandbox profile's SH_SANDBOX_TEMPLATES, as
+   * before the catalog existed.
+   */
+  templates?: TemplateCatalog;
+  /** The relay's presence records, which template readiness is derived from (§3.3). */
+  presence?: PresenceReader;
+  /**
+   * The deployment's template policy (§8), stored with the catalog and recorded in `provenance`;
+   * absent without SH_PROVENANCE_DIR, where templates cannot be created through the API.
+   */
+  policy?: PolicyStore;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */
@@ -215,6 +248,19 @@ export interface CpDeps {
   turnQueue?: TurnQueue;
   /** Reads `leaf:result:<sid>:<turnId>` for the status route (§4.4); absent means no result. */
   leafResults?: ResultRedisLike;
+  /**
+   * The GRANT ring's private half (MI1 §6.1), a SEPARATE key from `signer` so a session token can
+   * never pass as a grant. Present only when `MOCA_GRANT_SIGNING_KEY` is set, and its absence is
+   * what 404s both grant routes (ADR-0045's shape, `server.ts`'s `grants` feature).
+   */
+  grantSigner?: { kid: string; signJws(typ: string, claims: object): string };
+  /**
+   * The public halves used to verify a grant presented at `/internal/grants/refresh`: the grant
+   * signer's own key, plus `MOCA_GRANT_PUBLIC_KEYS` during a rotation window. Set together with
+   * `grantSigner`; the refresh route is the control plane's only grant verifier, since workers
+   * receive grants over the authenticated exchange and never verify them.
+   */
+  grantVerifyKeys?: Map<string, KeyObject>;
 }
 
 /** `deps.log` with the production default; keeps the field optional on `CpDeps`. */
@@ -1292,6 +1338,33 @@ export const HANDLERS: Record<string, Handler> = {
     // the control plane wrote at the authenticated enqueue, which is what makes a queue entry
     // carrying one id sufficient (§5.1) and a queue entry carrying a credential unnecessary (§6.5).
     return { status: 200, body: await exchangeTurnCredential(turnId, deps) };
+  },
+
+  issueTurnGrants: async (ctx, deps) => {
+    // Same shape as the two exchanges above: the router is the only layer that sees headers, so a
+    // handler reached without its mark is a routing bug and 401 is the safe answer.
+    if (!ctx.exchangeAuthorized) {
+      throw new CpError('unauthorized', 'exchange authentication failed');
+    }
+    const token = asRecord(ctx.body).token;
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new CpError('invalid_request', 'token is required');
+    }
+    return { status: 200, body: await issueTurnGrants(token, deps) };
+  },
+
+  refreshTurnGrants: async (ctx, deps) => {
+    if (!ctx.exchangeAuthorized) {
+      throw new CpError('unauthorized', 'exchange authentication failed');
+    }
+    // `grant`, not `token`: the two fields carry different credentials to different verifiers, and a
+    // worker that sent a session token here would otherwise get a confusing grant_invalid instead of
+    // being told it used the wrong field.
+    const grant = asRecord(ctx.body).grant;
+    if (typeof grant !== 'string' || grant.length === 0) {
+      throw new CpError('invalid_request', 'grant is required');
+    }
+    return { status: 200, body: await refreshTurnGrants(grant, deps) };
   },
 
   /**

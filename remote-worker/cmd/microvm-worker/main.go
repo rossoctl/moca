@@ -409,6 +409,36 @@ func launcherFor(kind vmpool.VMMKind, get func(string) string, snapDir string, p
 	}
 }
 
+// sweptJailWait bounds settleSweep's wait for VMMs the orphan sweep killed to stop answering
+// on their API sockets. The same few seconds as the sweep's own wait for them to exit
+// (vmpool's sweepExitWait), for the same teardown.
+const sweptJailWait = 5 * time.Second
+
+// settleSweep decides whether the worker may go on to Probe after an orphan sweep (#797).
+//
+// A cgroup the sweep reports as stuck still holds a process SIGKILL has not ended, so the
+// start fails naming it: going on would place the probe's VM in a pooled cgroup name the
+// stuck one still holds. Otherwise, when the sweep removed anything, it waits (bounded) for
+// every jail's API socket to have no listener — heldJails is vmpool.WaitForHeldJails in
+// production — because a killed VMM can still be answering there while the kernel tears it
+// down, and Probe's first Restore would then be refused by the launcher's collision guard,
+// failing a start that a short wait would have let through. A socket still held when
+// the wait ends fails the start too, naming the VM ids.
+func settleSweep(res vmpool.SweepResult, heldJails func(time.Duration) []string) error {
+	if len(res.Stuck) > 0 {
+		return fmt.Errorf("orphan sweep: VM cgroup(s) %v still hold a process that has not exited after SIGKILL; "+
+			"refusing to start beside it", res.Stuck)
+	}
+	if res.Swept == 0 {
+		return nil
+	}
+	if held := heldJails(sweptJailWait); len(held) > 0 {
+		return fmt.Errorf("orphan sweep: a live VMM still answers on the API socket of VM id(s) %v %s after the sweep; "+
+			"refusing to probe into a collision", held, sweptJailWait)
+	}
+	return nil
+}
+
 // --- Item 5 (fix round): verify the manifest's recorded InstanceType against the
 // running host. This is ADDITIVE to the existing verify+pin+probe block in main():
 // man.Verify above only checks the snapshot's own internal hashes, never the host
@@ -692,6 +722,11 @@ func diagStatsMux(statsFn func() vmpool.Stats, maxConcurrent int) *http.ServeMux
 }
 
 func main() {
+	// Arguments select a one-shot mode (runCLI: -verify-snapshot DIR); the worker itself
+	// takes none, it is configured by its environment.
+	if len(os.Args) > 1 {
+		os.Exit(runCLI(os.Args[1:], os.Getenv, os.Stderr))
+	}
 	// Opt-in profiling. OFF unless SH_DIAG_PPROF names a bind address, because pprof
 	// serves goroutine dumps, heap contents and command lines to anyone who can reach
 	// it -- bind loopback (127.0.0.1:6060) and reach it over ssh, never 0.0.0.0.
@@ -738,11 +773,29 @@ func main() {
 	// the live stream (remote-worker/DESIGN.md:29-30): a worker that registers and then
 	// discovers it cannot restore has already been given work. Spec §6: fail at start,
 	// not on a user's first request.
-	if err := man.Verify(snapDir); err != nil {
+	// SH_VERIFY_MEMFILE=1 re-hashes the memory file too (a version-2 manifest): a full read
+	// of the guest's RAM image, so off by default; the build hashes it.
+	// The verify cache (verifyCachePath; SH_VERIFY_CACHE=0 turns it off) spares the
+	// re-hash of a file whose identity is unchanged since a full hash on this host matched
+	// the manifest; the comparison with the manifest is made either way.
+	verifyCache, err := verifyCachePath(get, snapDir)
+	if err != nil {
+		log.Fatalf("microvm-worker: %v", err)
+	}
+	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1", Cache: verifyCache}); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
 	if err := verifyInstanceType(get, man.InstanceType, detectHostInstanceType); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
+	}
+	// SH_TEMPLATE_RECORD: the template record this worker serves (template-build.sh's),
+	// checked against the snapshot and the worker's own identity. Unset: no check, as before.
+	if rec := get("SH_TEMPLATE_RECORD"); rec != "" {
+		if err := verifyTemplateRecord(rec, man, env(get, "SH_SNAPSHOT_IMAGE", "default"),
+			get("SANDBOX_ID"), strings.TrimSpace(get("SANDBOX_TEMPLATE"))); err != nil {
+			log.Fatalf("microvm-worker: %v", err)
+		}
+		log.Printf("microvm-worker: template record %s matches the snapshot (manifest %s, image %s)", rec, man.Hash, man.SourceImageDigest)
 	}
 	unpin, err := vmpool.PinMemoryFile(filepath.Join(snapDir, "memfile"))
 	if err != nil {
@@ -807,6 +860,9 @@ func main() {
 	} else {
 		log.Printf("microvm-worker: orphan sweep: swept %d VM cgroup(s) from a previous incarnation; left alone %d non-VM cgroup(s) %v",
 			res.Swept, len(res.Skipped), res.Skipped)
+		if err := settleSweep(res, func(d time.Duration) []string { return vmpool.WaitForHeldJails(lc, d) }); err != nil {
+			log.Fatalf("microvm-worker: %v", err)
+		}
 	}
 
 	if err := pool.Probe(context.Background()); err != nil {
