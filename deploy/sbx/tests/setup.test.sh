@@ -44,6 +44,12 @@ case "$1 $2" in
     { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
+'get statefulset')
+  # A StatefulSet in MOCK_STATE/statefulset-NAME.json (none by default: a fresh namespace).
+  [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
+  f="$MOCK_STATE/statefulset-$3.json"
+  [[ ! -f "$f" ]] || cat "$f"
+  exit 0 ;;
 'create secret')
   # create secret tls NAME -n NS --cert=F --key=F --dry-run=client -o json
   name="$4" cert='' key=''
@@ -935,3 +941,40 @@ reset_state
 grep -q 'SBX_REDIS_IMAGE must be pinned by digest' "$TMP/out" || fail 'the refusal does not say why'
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing SBX_REDIS_IMAGE'
 pass 'SBX_REDIS_IMAGE renders Redis by digest in place of Valkey; an unpinned one is refused before anything is applied'
+
+# 17. An existing Redis 7 namespace is never switched to Valkey by default (#811): Valkey 9 cannot read
+# RDB format 12, and redis-0 would crash-loop. Refused before anything is applied, unless
+# SBX_REDIS_IMAGE says which image to keep; a fresh namespace, or one on Valkey, is unaffected.
+VK='docker.io/valkey/valkey:9-alpine@sha256:'"$(printf '%064d' 2)"
+redis_sts() {
+  jq -n --arg i "$1" '{apiVersion: "apps/v1", kind: "StatefulSet", metadata: {name: "redis"},
+    spec: {template: {spec: {containers: [{name: "redis", image: $i}]}}}}' >"$MOCK_STATE/statefulset-redis.json"
+}
+for unset_it in 'unset SBX_REDIS_IMAGE' 'export SBX_REDIS_IMAGE='; do
+  reset_state
+  redis_sts "$R7"
+  ! run_setup eval "$unset_it" || fail "switched a Redis 7 namespace to Valkey ($unset_it)"
+  grep -qF "$R7" "$TMP/out" || fail "the Redis 7 refusal does not name the current image ($unset_it)"
+  grep -q 'set SBX_REDIS_IMAGE to that image pinned by digest' "$TMP/out" || fail 'the Redis 7 refusal does not say to set SBX_REDIS_IMAGE'
+  grep -q 'RUNBOOK.md §2' "$TMP/out" || fail 'the Redis 7 refusal does not point to RUNBOOK §2'
+  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing to switch Redis 7 to Valkey'
+  [[ ! -f "$K" ]] || fail 'applied an overlay before refusing to switch Redis 7 to Valkey'
+done
+reset_state
+redis_sts "$R7"
+run_setup export SBX_REDIS_IMAGE="$R7" || fail "SBX_REDIS_IMAGE set to the running Redis 7 was refused: $(cat "$TMP/out")"
+grep -qx '    newName: docker.io/redis' "$K" || fail 'SBX_REDIS_IMAGE did not reach the overlay'
+reset_state
+redis_sts "$VK"
+run_setup true || fail "a namespace already on Valkey was refused: $(cat "$TMP/out")"
+reset_state
+redis_sts 'docker.io/valkey/valkey:9-alpine'
+run_setup true || fail "a namespace on an unpinned Valkey was refused: $(cat "$TMP/out")"
+reset_state
+run_setup true || fail "a fresh namespace (no redis StatefulSet) was refused: $(cat "$TMP/out")"
+grep -q 'kubectl get statefulset redis -n moca-sbx-test' "$MOCK_LOG" || fail 'setup.sh never read the redis StatefulSet'
+reset_state
+redis_sts "$VK"
+! run_setup export MOCK_FAIL_GET=redis || fail 'carried on past a failing kubectl get of the redis StatefulSet'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something after a failing kubectl get of the redis StatefulSet'
+pass 'refuses to switch an existing non-Valkey redis StatefulSet to Valkey without SBX_REDIS_IMAGE, naming its image; Valkey, a fresh namespace or SBX_REDIS_IMAGE proceed'
