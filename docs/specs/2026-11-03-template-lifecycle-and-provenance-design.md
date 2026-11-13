@@ -313,9 +313,13 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   build reads `retired` and its worker no longer runs: a retired build whose worker still holds a
   presence record reports `capacity`, as an active one does, and `capacity` is null once its host
   has stopped it (after the wanted state's `stop`); when the relay's presence cannot be read it
-  reports `running: null`, and `--wait` keeps waiting rather than take that as stopped. Without host agents (`heldBy` null) there is
-  nothing to wait for. Past `--timeout` (default 300 s) it exits 5. Waiting for the snapshot's
-  removal from every host (`heldBy` empty) comes with the host's removal step (#743). A sandbox
+  reports `running: null`, and `--wait` keeps waiting rather than take that as stopped. Only a host
+  that holds the build stops its worker, so a build no host holds has nothing to wait for: without
+  host agents (`heldBy` null), or with none holding it (`heldBy` empty, such as an imported
+  template whose worker an operator runs), `--wait` returns at once and says that a worker still
+  running is not host-managed, to be stopped where it runs. Past `--timeout` (default 300 s) it
+  exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty) comes with the
+  host's removal step (#743). A sandbox
   command refused `template_retired` says that the template or build is never served again.
 
 Known limits:

@@ -242,9 +242,12 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
  * (every build of it) or build B, and print each build retired. With --wait, then read each build
  * until it is `retired` and its worker no longer runs (`capacity` null: the host stopped it, after
  * the wanted state's `stop`), saying so while it still runs; `running` null, presence unreadable,
- * is waited out too, never taken as stopped. `heldBy` null, or absent from an older
- * control plane, means no host agents: nothing to wait for. A wait past --timeout (default
- * RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty)
+ * is waited out too, never taken as stopped. Only a host agent that holds the build stops its
+ * worker (the wanted state's `stop` lists the builds a host holds), so a build no host holds has
+ * nothing to wait for: `heldBy` null (no host agents; or absent, from an older control plane) or
+ * empty (no host holds it, such as an imported template whose worker an operator runs). Then a
+ * worker that still runs is said to be not host-managed, to be stopped where it runs. A wait past
+ * --timeout (default RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host
  * comes with the host's removal step (#743).
  */
 export async function cmdRetire(
@@ -277,10 +280,17 @@ export async function cmdRetire(
         } catch (err) {
           if (!transient(err)) throw err;
         }
-        const noAgents = b !== undefined && (b.heldBy === null || b.heldBy === undefined);
-        if (b && b.status === 'retired' && (noAgents || b.capacity === null)) {
+        if (b && b.status === 'retired' && b.capacity === null) {
           c.io.err(
             `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, its worker stopped`,
+          );
+          break;
+        }
+        // No host holds it (heldBy null, absent or empty): no host agent will stop its worker.
+        if (b && b.status === 'retired' && (b.heldBy ?? []).length === 0) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired; no host agent ` +
+              'holds it, so its worker is not host-managed: stop it where it runs',
           );
           break;
         }

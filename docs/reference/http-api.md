@@ -241,7 +241,8 @@ is refused 409 `build_in_use` while a live sandbox runs on the build, and is ide
 `retire` record naming the caller, the status before and the build's `build` record. A retire cannot be undone: a new
 build of the template is the way back. Each build lists `heldBy`, the hosts still holding its snapshot, and a retired
 build reports `capacity` while its worker still runs (null once its host has stopped it). `mocactl sbx templates retire
---wait` waits for that stop; waiting for the snapshot's removal from every host (`heldBy` empty) comes with
+--wait` waits for that stop, and returns at once for a build no host holds (`heldBy` null or empty: no host agent
+stops its worker); waiting for the snapshot's removal from every host (`heldBy` empty) comes with
 [#743](https://github.com/rossoctl/moca/issues/743).
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
