@@ -82,13 +82,28 @@ export class HostRegistry {
   }
 }
 
-/** The hosts as their agents last reported (§6.1), as placement reads them. */
+/**
+ * A host whose last inventory is older than this is left out of placement, of the hosts block and of
+ * the default lease until it reports again: three of the build poll's two-minute intervals (the
+ * --wanted-only timer re-sends it every 15 s). A host whose agent died or was removed then takes no
+ * new placement and no activeLimit slot, and a deployment whose every host is silent reads
+ * readiness from the workers' presence alone, as before any host reported.
+ */
+export const HOST_STALE_S = 360;
+
+/** The hosts as their agents last reported (§6.1), as placement reads them: fresh ones only. */
 export function hostViewsOf(deps: CpDeps): HostView[] {
-  return (deps.hosts?.all() ?? []).map(([id, h]) => ({
+  return freshHosts(deps).map(([id, h]) => ({
     id,
     holds: h.holds,
     activeLimit: h.limits.activeLimit,
   }));
+}
+
+/** The hosts whose last inventory is at most HOST_STALE_S old, by id. */
+export function freshHosts(deps: CpDeps): [string, HostState][] {
+  const nowS = seconds(deps);
+  return (deps.hosts?.all() ?? []).filter(([, h]) => nowS - h.at <= HOST_STALE_S);
 }
 
 function catalogOf(deps: CpDeps) {

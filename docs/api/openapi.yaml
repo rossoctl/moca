@@ -1741,7 +1741,8 @@ paths:
                     description: |
                       per KVM host, its limits and use, as its host agent last reported them
                       (template lifecycle spec §6.2). Empty means no host has reported, never that
-                      there is no limit
+                      there is no limit. A host whose last inventory is over 6 minutes old is left
+                      out, here and in placement, until it reports again
                     items:
                       type: object
                       required: [id, active, idleLimitSeconds, disk]
@@ -2232,7 +2233,8 @@ paths:
         the host in the path must be the one whose token is presented. Body
         `{holds: [{template, manifestHash}], limits: {activeLimit, idleLimitSeconds,
         buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
-        inventory in its own process; the agent re-sends it on every poll.
+        inventory in its own process; the agent re-sends it on every poll. A host whose last inventory is
+        over 6 minutes old is left out of placement until it reports again.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }

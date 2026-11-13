@@ -349,7 +349,10 @@ use.
 holds its snapshot (by manifest hash) and that is under its `activeLimit`: the one with the fewest
 builds placed, then by id, in the order the leases began (first leased, first placed). A build no
 reporting host holds is not placed (`unavailable`); one whose every holder is full waits
-(`unavailable`), and is never placed by evicting a leased build.
+(`unavailable`), and is never placed by evicting a leased build. A host whose last inventory is
+more than 6 minutes old (three build polls) is left out of placement, of the hosts block and of
+the default lease until it reports again, so a host whose agent died takes no new placement and no
+slot; with every host silent, readiness is the workers' presence alone, as before any reported.
 
 ### 6.3 Leases, aging and the wanted state
 

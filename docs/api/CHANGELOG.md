@@ -39,7 +39,8 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 - Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
   any host reports it is the presence alone, as before.
 - GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}`, `idleLimitSeconds`
-  and `disk {freeGb, floorGb}`.
+  and `disk {freeGb, floorGb}`. A host whose last inventory is over 6 minutes old is left out of
+  it and of placement until it reports again.
 - GET /v1/quota: `active.used` counts the builds the caller holds a live lease on.
 - New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
   Error schema gains `readiness`, and `quota` the value `active`.

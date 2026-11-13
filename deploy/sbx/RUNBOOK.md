@@ -657,7 +657,9 @@ is installed and not active, stops each `stop` worker whose unit is active, and 
 refusal and stop (`attached`, `refused`, `detached`) as provenance; readiness is the relay's
 attached record, never these reports. A worker with a live sandbox is never stopped: it drains
 first. A lock (`/srv/sbx/.activation.lock`) keeps the two units from starting or stopping workers at
-once; the one without it skips, saying so. Size the limits:
+once; the one without it skips, saying so. A host whose last inventory is over 6 minutes old (three
+build polls) is left out of placement and of `GET /v1/templates`' hosts until it reports again, so
+a stopped or removed agent takes no new placement and no slot. Size the limits:
 
 - `SBX_ACTIVE_LIMIT` is how many workers the host runs at once: each pins its snapshot's guest
   memory whole from its start, with its standby VMs, so size it from the host's memory and the

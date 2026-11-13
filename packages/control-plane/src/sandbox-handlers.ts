@@ -10,7 +10,7 @@ import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
 import { hostManaged, liveLeases, place, readinessOf, type Placement } from './activation.js';
-import { hostViewsOf } from './host-handlers.js';
+import { freshHosts, hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
@@ -751,12 +751,13 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 
 /**
  * Per host: its limits, its use (builds placed on it now) and its disk (§4, §6.2), as its agent
- * last reported them. Empty when no host has reported, never meaning "no limit".
+ * last reported them. Empty when no host has reported, never meaning "no limit"; a host silent for
+ * over HOST_STALE_S is left out, as placement leaves it out.
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
   const used = new Map<string, number>();
   for (const h of f.placement?.placed.values() ?? []) used.set(h, (used.get(h) ?? 0) + 1);
-  return (deps.hosts?.all() ?? []).map(([id, h]) => ({
+  return freshHosts(deps).map(([id, h]) => ({
     id,
     active: { limit: h.limits.activeLimit, used: used.get(id) ?? 0 },
     idleLimitSeconds: h.limits.idleLimitSeconds,
@@ -1018,8 +1019,8 @@ export const FIRST_USE_RETRY_S = 30;
  * agent starts its worker; the retry succeeds once it is attached. No sandbox record is kept while
  * waiting, so a wait never uses the caller's live-sandbox cap. Without host agents (workers run
  * by the deployment, SH_TEMPLATE_HOSTS unset) nothing changes: the create succeeds as before.
- * With hosts configured but none reported yet (a fresh deploy, a restart, a host down), readiness
- * is the worker's presence alone: an attached worker serves, and an absent one is refused rather
+ * With hosts configured but none reported within HOST_STALE_S (a fresh deploy, a restart, every
+ * host down), readiness is the worker's presence alone: an attached worker serves, and an absent one is refused rather
  * than left to wait at the relay. A build imported from SH_SANDBOX_TEMPLATES (no snapshot, so no
  * host ever holds it) is never gated: the deployment runs its worker.
  */

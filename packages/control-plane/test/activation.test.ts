@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { place, readinessOf } from '../src/activation.js';
 import { writeError } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
-import { HostRegistry } from '../src/host-handlers.js';
+import { HOST_STALE_S, HostRegistry } from '../src/host-handlers.js';
 import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenance.js';
 import type { SandboxTemplate } from '../src/sandbox-config.js';
 import { FileTemplateCatalog, type TemplateDoc } from '../src/template-catalog.js';
@@ -168,6 +168,7 @@ describe('activation (§6.2-§6.3)', () => {
     for (let i = 0; i < 3; i++) {
       await activate(d, 't1', alice, { leaseSeconds: 86_400 });
       now += 43_200_000;
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
     }
     expect(await readiness(d, 't1')).not.toBe('inactive');
     await expect(activate(d, 't1', alice, { leaseSeconds: 86_401 })).rejects.toMatchObject({
@@ -319,6 +320,32 @@ describe('activation (§6.2-§6.3)', () => {
         disk: { freeGb: 0, floorGb: 0 },
       },
     ]);
+  });
+
+  it('leaves out a host whose last inventory is older than HOST_STALE_S, until it reports again', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    const both = { [hash('1')]: 't1', [hash('2')]: 't2' };
+    await inventory(d, 'host-1', both, 1);
+    await inventory(d, 'host-2', both, 1);
+    now += (HOST_STALE_S - 60) * 1000;
+    await inventory(d, 'host-2', both, 1);
+    now += 61_000;
+    // host-1 is silent past the limit: no placement on it, no slot of its counted, not listed.
+    expect(((await activate(d, 't1')).body as Body).host).toBe('host-2');
+    expect((await activate(d, 't2').catch((x) => x)).code).toBe('no_active_slot');
+    const hb = ((await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body).hosts;
+    expect(hb.map((h: Body) => h.id)).toEqual(['host-2']);
+    // It reports again: back in placement, its slot free for the other build.
+    await inventory(d, 'host-1', both, 1);
+    expect((await activate(d, 't2')).status).toBe(200);
+    // Every host silent: readiness is the workers' presence alone, as before any host reported.
+    now += (HOST_STALE_S + 1) * 1000;
+    attachedNow = ['sbx_t1'];
+    expect(await readiness(d, 't1')).toBe('active');
+    expect(await readiness(d, 't2')).toBe('inactive');
   });
 
   it("records a host's attach and detach reports for a build it holds, and refuses others", async () => {
