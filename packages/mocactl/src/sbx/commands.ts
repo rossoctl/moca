@@ -356,31 +356,39 @@ export async function cmdEgress(
       return SBX_EXIT.ok;
     }
     let page = await c.api.sandboxEgress(id, { limit: 1000 });
-    const summary = page.summary;
     if (c.json) {
       const events = [...page.events];
+      // A server that hands out a `next` it handed out before would loop forever: refused.
+      const seen = new Set<string>();
       while (page.next !== null) {
+        if (seen.has(page.next)) {
+          c.io.err("sbx: the control plane repeated an egress page's next; the log was not read");
+          return SBX_EXIT.failed;
+        }
+        seen.add(page.next);
         page = await c.api.sandboxEgress(id, { after: page.next, limit: 1000 });
         events.push(...page.events);
       }
-      c.io.out(JSON.stringify({ events, summary }) + '\n');
+      // The last page's summary: computed per request, so for a live log it covers the most events.
+      c.io.out(JSON.stringify({ events, summary: page.summary }) + '\n');
       return SBX_EXIT.ok;
     }
+    const summary = page.summary;
     const hosts = Object.entries(summary.byHost).sort(([a], [b]) => (a < b ? -1 : 1));
     for (const [host, h] of hosts) {
       const decisions = Object.entries(h.decisions)
         .sort(([a], [b]) => (a < b ? -1 : 1))
-        .map(([d, n]) => `${sanitizeRemote(d)} ${n}`)
+        .map(([d, n]) => `${sanitizeRemote(d)} ${num(n)}`)
         .join(', ');
       c.io.out(
-        `${sanitizeRemote(host || '-').padEnd(40)} ${String(h.count).padStart(6)}  ` +
-          `up ${h.bytesUp} B, down ${h.bytesDown} B  (${decisions})\n`,
+        `${sanitizeRemote(host || '-').padEnd(40)} ${num(h.count).padStart(6)}  ` +
+          `up ${num(h.bytesUp)} B, down ${num(h.bytesDown)} B  (${decisions})\n`,
       );
     }
     c.io.out(
-      `${summary.total} events; ` +
-        (summary.complete ? 'complete' : `INCOMPLETE: ${summary.dropped} dropped`) +
-        `; ${sanitizeRemote(summary.sha256)}\n`,
+      `${num(summary.total)} events; ` +
+        (summary.complete ? 'complete' : `INCOMPLETE: ${num(summary.dropped)} dropped`) +
+        `; ${sanitizeRemote(String(summary.sha256))}\n`,
     );
     return SBX_EXIT.ok;
   } catch (err) {

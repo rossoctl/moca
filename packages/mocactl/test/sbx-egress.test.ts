@@ -87,6 +87,65 @@ describe('mocactl sbx egress', () => {
     ]);
   });
 
+  it('--json stops on a repeated next, and prints the last page summary', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      [`GET ${PATH}`]: (req) =>
+        req.path.includes('after=1-0')
+          ? { status: 200, body: { events: [E2], next: null, summary: summary({ total: 3 }) } }
+          : { status: 200, body: { events: [E1], next: '1-0', summary: summary() } },
+    });
+    expect(
+      await sbxMain(['egress', SBX, '--json'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
+    expect(JSON.parse(io.outs.join('')).summary.total).toBe(3);
+    io.outs.length = 0;
+    const loop = fakeCp({
+      [`GET ${PATH}`]: () => ({
+        status: 200,
+        body: { events: [E1], next: '1-0', summary: summary() },
+      }),
+    });
+    expect(
+      await sbxMain(['egress', SBX, '--json'], env, io, { home, fetchImpl: loop.fetchImpl }),
+    ).toBe(1);
+    expect(io.errs.join('\n')).toMatch(/repeated an egress page's next/);
+    expect(io.outs.join('')).toBe('');
+    expect(loop.calls.filter((c) => c.path.startsWith(PATH))).toHaveLength(2);
+  });
+
+  it('prints a server number that is not a number as ?, never its text', async () => {
+    const { home, env, io } = setup();
+    const bad = '\u001b]0;x\u0007';
+    const cp = fakeCp({
+      [`GET ${PATH}`]: () => ({
+        status: 200,
+        body: {
+          events: [],
+          next: null,
+          summary: summary({
+            byHost: {
+              'a.example.com': {
+                count: bad,
+                decisions: { tunnel: bad },
+                bytesUp: bad,
+                bytesDown: 1,
+              },
+            },
+            total: bad,
+            dropped: bad,
+            complete: false,
+          }),
+        },
+      }),
+    });
+    expect(await sbxMain(['egress', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const out = io.outs.join('');
+    expect(out).not.toContain('\u001b');
+    expect(out).toMatch(/a\.example\.com +\? {2}up \? B, down 1 B {2}\(tunnel \?\)\n/);
+    expect(out).toContain('? events; INCOMPLETE: ? dropped; ');
+  });
+
   it('--ndjson prints the log byte for byte, so its sha256 is the summary digest', async () => {
     const { home, env, io } = setup();
     const fetchImpl = (async (input: string | URL) => {
