@@ -17,7 +17,7 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
   leased build is never evicted. Each grant is an `activate` record; the lease stores its digest. Refusals keep
   no lease: `409 template_unavailable` (no registered build under that reference, or no reporting
   host holds it), `409 no_active_slot` with `Retry-After` (every holder at its `activeLimit` with
-  leased builds), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
+  leased builds; the wait is until a build placed on one of its holders loses its last lease), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
   record and the lease write run one activation at a time across all templates.
 - New POST /v1/templates/{id}/deactivate `{all?}`: drops the caller's leases on the template (an
   admin with `all: true`, everyone's), answering `{templateId, released}`, with a `deactivate`

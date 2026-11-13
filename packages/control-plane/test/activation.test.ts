@@ -256,6 +256,26 @@ describe('activation (§6.2-§6.3)', () => {
     expect((await activate(d, 't2', bob)).status).toBe(200);
   });
 
+  it("answers Retry-After from the build's own holders: when one of their leased builds loses its last lease", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await registered(d, 't3', hash('3'), 'sbx_t3');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 1);
+    await inventory(d, 'host-2', { [hash('3')]: 't3' }, 1);
+    // A lease ending soon on another host's build frees nothing for t2.
+    expect(((await activate(d, 't3', alice, { leaseSeconds: 60 })).body as Body).host).toBe(
+      'host-2',
+    );
+    // t1 holds host-1's slot until its last lease ends (1200 s), not its first (600 s).
+    await activate(d, 't1', bob, { leaseSeconds: 600 });
+    await activate(d, 't1', alice, { leaseSeconds: 1200 });
+    const e = await activate(d, 't2', bob).catch((x) => x);
+    expect(e.code).toBe('no_active_slot');
+    expect(e.retryAfterS).toBe(1200);
+  });
+
   it('never evicts for a lease taken in the same second: the tie on since does not reorder placement', async () => {
     const d = await setup();
     attachedNow = [];

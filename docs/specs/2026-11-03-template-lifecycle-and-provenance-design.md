@@ -375,8 +375,9 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   refused.
 - **Refusals:** an activation that cannot be placed is refused with no lease kept:
   `409 template_unavailable` (no registered build under the reference, or no reporting host holds
-  it) or `409 no_active_slot` with `Retry-After` (the seconds until the earliest lease ends: every
-  holder is at its `activeLimit` with leased builds).
+  it) or `409 no_active_slot` with `Retry-After` (every holder is at its `activeLimit`; the seconds
+  until the soonest a build placed on one of this build's holders loses its last live lease, or
+  60 when no lease tells, as with draining workers).
 - **One activation at a time:** an activation's quota and placement check, its `activate` record
   and its lease write run one at a time across the deployment (owner activation and first use
   alike), so concurrent activations of different templates cannot together pass a subject's quota

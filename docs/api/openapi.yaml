@@ -2044,7 +2044,9 @@ paths:
         the lease write run under one lock across all templates. Refusals keep no lease:
         `409 template_unavailable` (no registered build under that reference, or no host that
         reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
-        with leased builds, or a lease in the same second as a placed build), `429 quota_exceeded`
+        with leased builds, or a lease in the same second as a placed build; Retry-After is the
+        seconds until a build placed on one of this build's holders loses its last live lease, else
+        60), `429 quota_exceeded`
         with `quota: active`. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:

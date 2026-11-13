@@ -944,10 +944,18 @@ async function takeLeaseLocked(
     });
   }
   if (pl.unplaced.get(target.buildId) === 'no_slot' || displaces) {
+    // Retry-After: the soonest a slot on one of this build's holders can free, that is the soonest
+    // another build placed on one of them loses its last live lease. Other hosts' builds, and other
+    // subjects' leases on a build that stays leased, free nothing here. 60 s when no leased build
+    // holds those slots (draining workers, whose end no lease tells).
+    const holders = new Set(
+      hosts.filter((h) => h.holds[target.buildId] !== undefined).map((h) => h.id),
+    );
     const free = Math.min(
       ...trial
         .flatMap((d) => d.builds)
-        .flatMap((x) => liveLeases(x, nowS).map((l) => l.until - nowS)),
+        .filter((x) => x.buildId !== target.buildId && holders.has(pl.placed.get(x.buildId) ?? ''))
+        .map((x) => Math.max(...liveLeases(x, nowS).map((l) => l.until)) - nowS),
     );
     throw new CpError(
       'no_active_slot',
