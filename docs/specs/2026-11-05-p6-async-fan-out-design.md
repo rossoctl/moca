@@ -301,19 +301,36 @@ credential, no config. Everything authoritative is read from the record at deque
 makes §5.4 possible and what bounds the damage if the queue is ever read by something that should not
 have it.
 
-| Field            | Notes                                                                 |
-| ---------------- | --------------------------------------------------------------------- |
-| `turnId`         | opaque; the only thing in the queue                                   |
-| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)              |
-| `tenant`         | gates M1 (§9)                                                         |
-| `sessionId`      | the session the turn belongs to                                       |
-| `cfg`            | bundle digest, as on the session                                      |
-| `credentialName` | a **name**, resolved server-side at dequeue — never the credential    |
-| `caps`           | tokens, cost, wall-clock (§4.3)                                       |
-| `idempotencyKey` | defaults to `sessionId` (§4.3)                                        |
-| `envelope`       | the `LeafEnvelope` to run                                             |
-| `state`          | below                                                                 |
-| `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4) |
+| Field            | Notes                                                                         |
+| ---------------- | ----------------------------------------------------------------------------- |
+| `turnId`         | opaque; the only thing in the queue                                           |
+| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)                      |
+| `tenant`         | gates M1 (§9)                                                                 |
+| `sessionId`      | the session the turn belongs to                                               |
+| `cfg`            | bundle digest, as on the session                                              |
+| `credentialName` | a **name**, resolved server-side at dequeue — never the credential            |
+| `model`          | the session's model, copied at submission; `''` when it named none            |
+| `modelLimits`    | the catalog's limits for that model, snapshotted with it                      |
+| `sandboxTier`    | the session's **stored** tier, copied at submission; `''` resolved at dequeue |
+| `caps`           | tokens, cost, wall-clock (§4.3)                                               |
+| `idempotencyKey` | defaults to `sessionId` (§4.3)                                                |
+| `envelope`       | the `LeafEnvelope` to run                                                     |
+| `state`          | below                                                                         |
+| `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4)         |
+
+> **`model`, `modelLimits` and `sandboxTier` added by #388's M2.** The first draft of this table
+> copied only `cfg` and `credentialName`, leaving the dequeue to read the model and the tier from the
+> live session. That was a defect, not a split: a `PATCH /v1/sessions/{id}` between submission and
+> dequeue moved an already-queued turn onto the new model, and the session API's own rule — a turn
+> already running keeps its model — cannot cover a turn that has not started, which an async turn may
+> not do for an hour. The tier is pinned as the session **stored** it, which `createSession` has
+> already resolved — so on a deployment that declared tiers, a turn keeps the default that was
+> current when its session was created, and changing `sandboxTiers.default` later does not move it.
+> A record whose tier is `''` (a session created while no tiers were declared, or a record written
+> before this change) is resolved against the session at dequeue, not against the deployment
+> default: for the second case that is what keeps the leaf out of a wrong tier, which would retier
+> the session's sandbox and start its workspace empty. `model` and `modelLimits` are pinned
+> together, since the limits describe that model.
 
 ```
 queued → running → paused | responded | done | solved | failed | cancelled | lost
@@ -440,8 +457,11 @@ worker would then report itself saturated essentially all the time — a one-slo
 interactive `/turn` while its queue sat empty. So `claim()` omits `BLOCK` (`BLOCK 0` means block
 _forever_ in Redis, so omitting is the only non-blocking spelling), and the loop does its own waiting
 after the slot is released: `idleBackoffMs` on `idle`, `errorBackoffMs` after a throw. The price is
-up to `idleBackoffMs` of extra pickup latency on a newly submitted turn, and a few Redis commands a
-second per idle worker.
+up to `idleBackoffMs` of extra pickup latency on a newly submitted turn, and a trickle of Redis
+traffic on an empty queue — at the 250 ms default, about 8 commands a second per worker, multiplied
+by `SH_WORKERS` and by replicas. M1 keeps that a flat poll because M1's deployments are one VM and
+one compose stack against a single Redis; the constant's own comment records when an exponential
+idle backoff becomes worth its pickup-latency cost.
 
 Pull-when-ready, rather than claim-then-queue-internally: an entry claimed but not started is an
 entry no other worker can take, and it is also the window in which a crash costs a reclaim cycle.

@@ -18,6 +18,6 @@ infrastructure, not experiments:
   (`packages/knative-server/test/swebench-sandbox-pool.test.ts`); the former stays for the same
   "deployment manifest, not an experiment" reason, not because a test reads it too.
 
-See [`moca-experiments/experiments/swebench/RUNBOOK.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/swebench/RUNBOOK.md)
+See [`moca-experiments/experiments/e02-e05-harness/swebench/RUNBOOK.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e02-e05-harness/swebench/RUNBOOK.md)
 for how the two halves fit together, and that repo's README for the full "what didn't move and
 why" list.

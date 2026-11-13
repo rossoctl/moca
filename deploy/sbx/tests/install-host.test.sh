@@ -4,7 +4,9 @@
 # workspace data alone, and that moca-egress is installed and wired beside the worker (#623).
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-TMP="$(mktemp -d)"
+# Short: the worker's jail path must fit a Unix socket (install-host.sh checks it), and macOS's
+# default temp directory is too long for that.
+TMP="$(mktemp -d /tmp/ih.XXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
@@ -100,6 +102,56 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
 pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+
+# The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
+# (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
+LONG=sbx_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_0123456789ab
+bash "$INSTALL" "$(bundle $LONG)" --snapshot default >"$TMP/out" 2>&1 || fail "install the longest worker id: $(cat "$TMP/out")"
+jb="$(grep '^SH_CHROOT_BASE=' "$SBX_ENV_DIR/workers/$LONG.env" | cut -d= -f2-)"
+[[ "$jb" =~ ^$SBX_SRV/jail/j[0-9a-f]{12}$ && -d "$jb" ]] || fail "the jail is not $SBX_SRV/jail/j<12 hex>: $jb"
+p="$jb/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+((${#p} < 108)) || fail "the worst-case API socket path is ${#p} bytes"
+[[ "$(grep -h '^SH_CHROOT_BASE=' "$SBX_ENV_DIR"/workers/*.env | sort | uniq -d)" == '' ]] || fail 'two workers share a jail'
+bash "$INSTALL" --uninstall $LONG >"$TMP/out" 2>&1 || fail 'uninstall the longest worker id'
+grep -qF "left in place: $SBX_SRV/workspaces/$LONG and $jb" "$TMP/out" || fail "uninstall does not name the jail: $(cat "$TMP/out")"
+DEEP="$TMP/$(printf 'x%.0s' {1..40})"
+mkdir -p "$DEEP/snapshots/default"
+rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"$TMP/out" 2>&1 || rc=$?
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
+[[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
+pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
+
+# A worker installed before the digest-keyed jail had $SBX_SRV/jail/<id>. A reinstall and an uninstall
+# remove that worker's own old jail (its hard-linked files stay) and say so; another worker's is kept.
+legacy_jail() { # legacy_jail ID: an old jail with a VM chroot holding a hard link to a workspace file
+  mkdir -p "$SBX_SRV/jail/$1/firecracker/vm-1/root" "$SBX_SRV/workspaces/$1"
+  printf 'DATA\n' >"$SBX_SRV/workspaces/$1/ws.img"
+  ln "$SBX_SRV/workspaces/$1/ws.img" "$SBX_SRV/jail/$1/firecracker/vm-1/root/ws.img"
+}
+legacy_jail sbx_default
+legacy_jail sbx_py312
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail "reinstall over a legacy jail: $(cat "$TMP/out")"
+[[ ! -e "$SBX_SRV/jail/sbx_default" ]] || fail 'the reinstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_default " "$TMP/out" || fail "the reinstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_default/ws.img")" == DATA ]] || fail 'the legacy jail removal took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the reinstall removed another worker's legacy jail"
+[[ -d "$(grep '^SH_CHROOT_BASE=' "$A" | cut -d= -f2-)" ]] || fail 'the reinstall has no current jail'
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'reinstall with no legacy jail'
+! grep -q "removed $SBX_SRV/jail/" "$TMP/out" || fail 'a reinstall with no legacy jail says it removed one'
+bash "$INSTALL" "$(bundle sbx_unin)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_unin'
+legacy_jail sbx_unin
+bash "$INSTALL" --uninstall sbx_unin >"$TMP/out" 2>&1 || fail 'uninstall over a legacy jail'
+[[ ! -e "$SBX_SRV/jail/sbx_unin" ]] || fail 'the uninstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_unin " "$TMP/out" || fail "the uninstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_unin/ws.img")" == DATA ]] || fail 'the uninstall took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the uninstall removed another worker's legacy jail"
+# An id shaped like a current jail's name could be another worker's jail: left, and said so.
+mkdir -p "$SBX_SRV/jail/j0123456789ab/firecracker"
+bash "$INSTALL" --uninstall j0123456789ab >"$TMP/out" 2>&1 || fail 'uninstall j0123456789ab'
+[[ -d "$SBX_SRV/jail/j0123456789ab" ]] || fail 'removed a jail named like a current one'
+grep -qF "left in place: $SBX_SRV/jail/j0123456789ab " "$TMP/out" || fail "the jail-shaped id's message is missing: $(cat "$TMP/out")"
+rm -rf "$SBX_SRV/jail/j0123456789ab" "$SBX_SRV/jail/sbx_py312"
+pass "a reinstall and an uninstall remove the worker's own legacy jail <SBX_SRV>/jail/<id>, keep its files' data, and say so"
 
 # A bundle without SH_WORKSPACE_IMAGE_MB gets microvm-worker's default, 2048 MiB.
 bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'
