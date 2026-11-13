@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import * as nodeTls from 'node:tls';
 import { join } from 'node:path';
 import { Server, ServerCredentials, status, type ServerWritableStream } from '@grpc/grpc-js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LeaseEvent,
   LeaseOp,
@@ -37,7 +37,9 @@ afterEach(async () => {
   for (const c of closers.splice(0).reverse()) await c();
 });
 
-type UnaryAnswer<R> = { code: number; details: string } | R;
+/** `HANG`: the handler never answers, so only the client's cancel ends the call. */
+const HANG = Symbol('hang');
+type UnaryAnswer<R> = { code: number; details: string } | typeof HANG | R;
 interface LeaseBehaviour {
   control?: (req: LeaseControlRequest) => UnaryAnswer<LeaseControlResponse>;
   keepalive?: (req: LeaseKeepaliveRequest) => UnaryAnswer<object>;
@@ -52,6 +54,7 @@ function unary<Req, Res>(
   return (c: Unary<Req>, cb: (e: object | null, r?: Res) => void) => {
     calls.push({ req: c.request, auth: c.metadata.get('authorization')[0] as string | undefined });
     const a = answer ? answer(c.request) : ({} as Res);
+    if (a === HANG) return;
     if (a && typeof a === 'object' && 'code' in a && 'details' in a) {
       return cb(Object.assign(new Error(a.details as string), a));
     }
@@ -1055,6 +1058,22 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     await expect(c.leaseControl('set_mode', 'mode.jwt')).rejects.toMatchObject({ code: 'denied' });
     expect(r.controls).toHaveLength(1);
     expect(asks).toEqual([{ force: false, minValidS: 60 }]);
+  });
+
+  it('an abort cancels a lease call: LeaseControlError cancelled (P4-R12)', async () => {
+    const r = await fakeRelay(ok, undefined, { control: () => HANG });
+    const { c } = conn(r.addr);
+    const ac = new AbortController();
+    const p = c.leaseControl('set_mode', 'mode.jwt', { signal: ac.signal });
+    await vi.waitFor(() => expect(r.controls).toHaveLength(1));
+    ac.abort();
+    await expect(p).rejects.toMatchObject({ name: 'LeaseControlError', code: 'cancelled' });
+    // Already aborted: nothing is sent.
+    await expect(c.leaseControl('reset', undefined, { signal: ac.signal })).rejects.toMatchObject({
+      name: 'LeaseControlError',
+      code: 'cancelled',
+    });
+    expect(r.controls).toHaveLength(1);
   });
 
   it('propagates a token source failure from a lease call unchanged, sending nothing', async () => {

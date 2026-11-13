@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
-import { MCP_INSTRUCTIONS } from '@moca/sandbox-client';
+import { sandboxRules, WORKSPACE, type SandboxModeName } from '@moca/sandbox-client';
 import { sbxDirProblem } from './state.js';
 import { parse, parseTree, ParseErrorCode, type Node, type ParseError } from 'jsonc-parser';
 import {
@@ -122,13 +122,18 @@ export const MARK_END = '<!-- sbx:end -->';
  */
 export const GH_TOKEN_STEERING =
   "GH_TOKEN in the sandbox is a placeholder that the host replaces with the user's token; never set, print or ask for a token.";
-export const RULES = [
-  '## Working in the MOCA sandbox',
-  '',
-  MCP_INSTRUCTIONS,
-  '',
-  GH_TOKEN_STEERING,
-].join('\n');
+/**
+ * The block body for a sandbox in `mode` (ruling P4-R11): a lease sandbox's agent is told what a
+ * lease keeps, not that every call is a fresh VM. `up` writes the one for the sandbox's mode.
+ */
+export const rulesFor = (mode: SandboxModeName): string =>
+  ['## Working in the MOCA sandbox', '', sandboxRules(WORKSPACE, mode), '', GH_TOKEN_STEERING].join(
+    '\n',
+  );
+/** The per-exec block body: the server's own instructions (MCP_INSTRUCTIONS) under a heading. */
+export const RULES = rulesFor('per-exec');
+/** Every mode's block body, once: what `doctor` takes as up to date. */
+const ALL_RULES = [...new Set((['per-exec', 'lease', 'lease+processes'] as const).map(rulesFor))];
 
 /** The server name in every file: Claude Code's tools are then `mcp__sandbox__*`. */
 export const SERVER = 'sandbox';
@@ -810,7 +815,8 @@ interface MdPlan {
 }
 
 /** The block, in the file's own line endings. */
-const blockFor = (eol: string) => [MARK_BEGIN, ...RULES.split('\n'), MARK_END].join(eol);
+const blockFor = (eol: string, rules = RULES) =>
+  [MARK_BEGIN, ...rules.split('\n'), MARK_END].join(eol);
 
 /** Where the markers are; refused unless there is no marker or exactly one well-ordered pair. */
 function markers(rel: string, text: string, hint = WRITE_HINT): [number, number] | undefined {
@@ -831,15 +837,15 @@ function markers(rel: string, text: string, hint = WRITE_HINT): [number, number]
   return [b, e + MARK_END.length];
 }
 
-function planMarkdown(root: string, rel: string): MdPlan {
+function planMarkdown(root: string, rel: string, rules: string): MdPlan {
   const t = target(root, rel);
   if (!t.exists) {
-    const after = `${blockFor('\n')}\n`;
+    const after = `${blockFor('\n', rules)}\n`;
     return { t, before: undefined, after, rec: { file: t.rel, mode: 'created' } };
   }
   const text = readFileSync(t.abs, 'utf8');
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const block = blockFor(eol);
+  const block = blockFor(eol, rules);
   const m = markers(t.rel, text);
   if (m) {
     const previous = text.slice(m[0], m[1]);
@@ -987,7 +993,8 @@ const uniq = <T>(xs: T[]): T[] => {
  */
 export function writeAgentConfig(
   root: string,
-  o: { dryRun?: boolean; cortex?: boolean } = {},
+  /** `mode`: the sandbox's, for the CLAUDE.md / AGENTS.md rules (default per-exec). */
+  o: { dryRun?: boolean; cortex?: boolean; mode?: SandboxModeName } = {},
 ): AgentConfigResult {
   const sbxBad = sbxDirProblem(root);
   if (sbxBad) throw new ConfigConflict('.sbx', '.sbx', sbxBad, SBX_DIR_HINT);
@@ -1090,7 +1097,7 @@ export function writeAgentConfig(
   for (const f of ['CLAUDE.md', 'AGENTS.md']) {
     const t = target(root, f);
     if (md.some((p) => p.t.abs === t.abs)) continue;
-    md.push(planMarkdown(root, f));
+    md.push(planMarkdown(root, f, rulesFor(o.mode ?? 'per-exec')));
   }
 
   // Then merge, in memory.
@@ -1466,7 +1473,8 @@ export function checkAgentConfig(root: string): string[] {
       const text = t.exists ? readFileSync(t.abs, 'utf8') : '';
       const mk = markers(t.rel, text, 'mocactl sbx up re-merges it once fixed');
       const body = mk ? text.slice(mk[0], mk[1]).replace(/\r\n/g, '\n') : undefined;
-      if (body !== blockFor('\n')) {
+      // The block for any mode: doctor does not know which one the sandbox is in now.
+      if (!ALL_RULES.some((rules) => body === blockFor('\n', rules))) {
         problems.push(
           `${f}: ${body === undefined ? 'has no' : 'has an out-of-date'} sandbox rules block`,
         );

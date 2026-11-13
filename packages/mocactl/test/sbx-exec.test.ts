@@ -9,6 +9,7 @@ import {
   ExecRefusedError,
   LEASE_RULE,
   LeaseControlError,
+  leaseNotice,
   MAX_STDIN_BYTES,
   RESET_ENDED_TEXT,
   SANDBOX_BUSY_TEXT,
@@ -553,6 +554,60 @@ describe('mocactl sbx run (SBX0 §6.1, §6.5)', () => {
       2,
     );
     expect(await sbxMain(['mcp', 'extra', '--sandbox', SBX], env, io, { home })).toBe(2);
+  });
+});
+
+describe('mocactl sbx run lease notices (spec §5)', () => {
+  const end = {
+    reqId: 0,
+    state: 'end',
+    reason: 'idle',
+    atUnixMs: 1_800_000_100_000,
+    mode: 2,
+    ageMs: 60_000,
+    processes: [],
+    endsByUnixMs: 0,
+  };
+  const start = { ...end, state: 'start', reason: '', atUnixMs: end.atUnixMs + 5 };
+  const runIt = async (s: ReturnType<typeof setup>, answer: () => ExecResult | Error) => {
+    s.io.errs.length = 0;
+    s.io.errB.length = 0;
+    return sbxMain(['run', '--sandbox', SBX, '--', 'true'], s.env, s.io, {
+      home: s.home,
+      fetchImpl: mint().fetchImpl,
+      execFactory: fakeExec(answer).factory,
+    });
+  };
+
+  it('run prints a lease end notice on stderr', async () => {
+    const s = setup();
+    expect(await runIt(s, () => res({ lease: [end, start] }))).toBe(0);
+    const notice = leaseNotice(end, Date.now())!;
+    expect(notice).toContain('[sandbox] guest restarted (idle, ');
+    // The end, once; the start is not shown beside it.
+    expect(s.io.errs).toEqual([notice]);
+    expect(Buffer.concat(s.io.errB).toString()).toBe('err\n');
+    // Seen: the same event on a later result is not shown again (the store in the sbx state dir).
+    expect(await runIt(s, () => res({ lease: [end] }))).toBe(0);
+    expect(s.io.errs).toEqual([]);
+    // An event that came before a failure is shown before the failure's text.
+    const later = { ...end, reason: 'memory_reclaim', atUnixMs: end.atUnixMs + 60_000 };
+    const boom = new ExecMachineryError('sandbox failure: lease_ended(memory_reclaim)');
+    boom.lease = [later];
+    expect(await runIt(s, () => boom)).toBe(125);
+    expect(s.io.errs[0]).toBe(leaseNotice(later, Date.now()));
+    expect(s.io.errs[1]).toMatch(/^sbx: /);
+    // An expiring event is shown on every result: it marks nothing seen.
+    const exp = {
+      ...end,
+      state: 'expiring',
+      reason: 'max_duration',
+      endsByUnixMs: Date.now() + 120_000,
+    };
+    for (let i = 0; i < 2; i++) {
+      expect(await runIt(s, () => res({ lease: [exp] }))).toBe(0);
+      expect(s.io.errs).toEqual([leaseNotice(exp, Date.now())]);
+    }
   });
 });
 

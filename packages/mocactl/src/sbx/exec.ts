@@ -16,8 +16,15 @@ import { sanitizeRemote } from '../core/sanitize.js';
 import type { SandboxApiClient, SbxToken } from './api.js';
 import { failed, type SbxCtx } from './commands.js';
 
-/** A connection's lease calls (spec §8.3), as `SandboxExecConn` has them. */
-export type LeaseControlFn = (op: LeaseOpName, setModeToken?: string) => Promise<LeaseStatusView>;
+/**
+ * A connection's lease calls (spec §8.3), as `SandboxExecConn` has them: an abort of `signal`
+ * cancels the call, a LeaseControlError `cancelled` (P4-R12).
+ */
+export type LeaseControlFn = (
+  op: LeaseOpName,
+  setModeToken?: string,
+  opts?: { signal?: AbortSignal },
+) => Promise<LeaseStatusView>;
 
 /** Builds the gRPC connection; a seam so tests run the commands against a fake. */
 export type ExecFactory = (o: ExecConnOptions) => {

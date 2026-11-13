@@ -182,8 +182,8 @@ export const NO_LEASE = (({ leaseControl, leaseKeepalive }) => ({ leaseControl, 
 );
 
 const b64url = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
-/** An unsigned JWT with the claims mocactl reads (unverified): `iat` and `exp`. */
-export const jwt = (claims: { iat: number; exp: number }) =>
+/** An unsigned JWT with the claims mocactl reads (unverified): `iat`, `exp` and `mode`. */
+export const jwt = (claims: { iat: number; exp: number; mode?: string }) =>
   `${b64url({ alg: 'EdDSA', typ: 'JWT' })}.${b64url({ sbx: SBX, ...claims })}.sig`;
 
 /** The token's lifetime is 900 s (`exp − iat`): the default timeout is 840 s. */

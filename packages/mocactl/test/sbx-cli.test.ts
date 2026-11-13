@@ -17,7 +17,19 @@ import { buildRuntime } from '../src/runtime.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { readBoundSandbox } from '../src/sbx/state.js';
-import { fakeCp, LOGIN, sandbox, SBX, setup, TOKEN, URL_, type Handler } from './helpers/sbx.js';
+import { LeaseControlError } from '@moca/sandbox-client';
+import type { ExecFactory } from '../src/sbx/exec.js';
+import {
+  fakeCp,
+  fakeLease,
+  LOGIN,
+  sandbox,
+  SBX,
+  setup,
+  TOKEN,
+  URL_,
+  type Handler,
+} from './helpers/sbx.js';
 
 const MOCA_URL = 'https://moca-api.example.invalid';
 
@@ -480,8 +492,8 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     const out = io.outs.join('');
-    expect(out).toMatch(new RegExp(`${SBX}\\s+web\\s+node22\\s+ready`));
-    expect(out).toMatch(/sbx-dead\s+-\s+node22\s+terminated \(deleted\)/);
+    expect(out).toMatch(new RegExp(`${SBX}\\s+web\\s+node22\\s+per-exec\\s+ready`));
+    expect(out).toMatch(/sbx-dead\s+-\s+node22\s+per-exec\s+terminated \(deleted\)/);
     expect(out).toContain(new Date(1_800_604_800 * 1000).toISOString());
     await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
     expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
@@ -504,6 +516,94 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       `deleted ${SBX}; tokens already issued stop working within one token lifetime plus 30 s ` +
         '(15.5 minutes by default)',
     );
+  });
+
+  it('rm sends sandbox_deleted before DELETE for a lease sandbox, and not for per-exec', async () => {
+    for (const mode of ['lease', 'lease+processes', 'per-exec']) {
+      const { home, env, io } = setup();
+      const order: string[] = [];
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => {
+          order.push('DELETE');
+          return { status: 200, body: { id: SBX, state: 'terminated', reason: 'deleted' } };
+        },
+      });
+      const lease = fakeLease((op) => {
+        order.push(op);
+        return { mode: 'lease', epochKnown: true, state: 'none', ageMs: 0, idleTimeoutS: 0 };
+      });
+      let closed = 0;
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => void closed++,
+        leaseControl: lease.leaseControl,
+        leaseKeepalive: lease.leaseKeepalive,
+      });
+      expect(
+        await sbxMain(['rm', '--force', SBX], env, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+          execFactory,
+        }),
+      ).toBe(0);
+      expect(order).toEqual(mode === 'per-exec' ? ['DELETE'] : ['sandbox_deleted', 'DELETE']);
+      expect(closed).toBe(mode === 'per-exec' ? 0 : 1);
+    }
+    // Best effort: a lease call that fails, or a record that cannot be read, still deletes.
+    for (const broken of ['lease', 'get'] as const) {
+      const { home, env, io } = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () =>
+          broken === 'get'
+            ? { status: 500, body: { error: 'internal', message: 'boom' } }
+            : { status: 200, body: sandbox({ mode: 'lease' }) },
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 200,
+          body: { id: SBX, state: 'terminated', reason: 'deleted' },
+        }),
+      });
+      const lease = fakeLease(() => new LeaseControlError('unavailable', 'no worker'));
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...lease,
+      });
+      expect(
+        await sbxMain(['rm', '--force', SBX], env, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+          execFactory,
+        }),
+      ).toBe(0);
+      expect(cp.calls.at(-1)).toMatchObject({ method: 'DELETE' });
+      expect(io.errs.join('\n')).toMatch(/^deleted /);
+    }
+  });
+
+  it('ls shows MODE', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox(),
+            sandbox({ id: 'sbx-lease', name: 'l', mode: 'lease+processes', modeEpoch: 2 }),
+          ],
+        },
+      }),
+    });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const lines = io.outs.join('').split('\n');
+    expect(lines[0]).toMatch(new RegExp(`^${SBX}\\s+web\\s+node22\\s+per-exec\\s+ready\\s`));
+    expect(lines[1]).toMatch(/^sbx-lease\s+l\s+node22\s+lease\+processes\s+ready\s/);
   });
 
   it('refuses a malformed sandbox id before any request', async () => {
@@ -852,7 +952,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     const out = io.outs.join('');
-    expect(out).toMatch(/node22\s+terminated\s+\d{4}-/);
+    expect(out).toMatch(/node22\s+per-exec\s+terminated\s+\d{4}-/);
     expect(out).not.toMatch(/expired|\(/);
   });
 

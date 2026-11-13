@@ -302,21 +302,42 @@ export class SandboxExecConn {
    * One lease operation on this sandbox's lease (spec §8.3), under the sandbox token as an Exec.
    * `setModeToken` is sent with `set_mode` only. A failure is a LeaseControlError, after the one
    * token-refusal retry (see the top of the file); a token source failure propagates unchanged.
+   * An abort of `signal` cancels the call (a set_mode or reset may wait up to 31 min): it rejects
+   * with a LeaseControlError `cancelled`, and one already aborted sends nothing (P4-R12).
    */
-  leaseControl = async (op: LeaseOpName, setModeToken?: string): Promise<LeaseStatusView> => {
+  leaseControl = async (
+    op: LeaseOpName,
+    setModeToken?: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<LeaseStatusView> => {
     const req = LeaseControlRequest.fromPartial({
       sandboxId: this.o.sandboxId,
       op: LEASE_OPS[op],
       setModeToken: op === 'set_mode' ? (setModeToken ?? '') : '',
     });
     const backstopMs = op === 'status' ? LEASE_STATUS_BACKSTOP_MS : LEASE_MUTATE_BACKSTOP_MS;
+    const { signal } = opts;
     const res = await this.leaseCall(
       (md) =>
-        new Promise<LeaseControlResponse>((resolve, reject) =>
-          this.client.leaseControl(req, md, { deadline: Date.now() + backstopMs }, (e, r) =>
-            e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(r),
-          ),
-        ),
+        new Promise<LeaseControlResponse>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new LeaseControlError('cancelled', 'the lease call was cancelled'));
+            return;
+          }
+          const call = this.client.leaseControl(
+            req,
+            md,
+            { deadline: Date.now() + backstopMs },
+            (e, r) => {
+              signal?.removeEventListener('abort', cancel);
+              if (e) reject(LeaseControlError.fromStatus(e.code, e.details || e.message));
+              else resolve(r);
+            },
+          );
+          // The cancel ends the call with CANCELLED, which the callback maps to `cancelled`.
+          const cancel = () => call.cancel();
+          signal?.addEventListener('abort', cancel, { once: true });
+        }),
     );
     return leaseStatusView(res.status);
   };

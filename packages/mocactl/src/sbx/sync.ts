@@ -377,7 +377,7 @@ export async function cmdUp(
   if (code !== SBX_EXIT.ok) return code;
   if (!f.noAgentConfig) {
     try {
-      const { changed } = writeAgentConfig(root, { cortex });
+      const { changed } = writeAgentConfig(root, { cortex, mode: s.mode });
       if (cortex) c.io.err(CORTEX_NOTE);
       if (changed.length) {
         c.io.err(`configured Claude Code, OpenCode and IBM Bob: ${changed.join(', ')}`);

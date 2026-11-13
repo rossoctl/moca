@@ -18,6 +18,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
+import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
@@ -333,11 +334,19 @@ export async function cmdCreate(
         `sbx: ${id} is ${s.mode}, not ${body.mode}: the control plane did not take the mode`,
       );
     }
+    let setMode: { outcome: 'applied' } | { outcome: 'pending'; code: string } | undefined;
     if (modeRank(s.mode) > 0) {
       const r = await sendCreatedMode(c, s.id, o.factory).catch((err: unknown) => ({
         outcome: 'failed' as const,
         err,
       }));
+      if (r.outcome === 'failed' && c.signal?.aborted) {
+        // Ctrl-C: the mode is stored, as for a pending set_mode; the seed is not run (P4-R12).
+        const pending = { outcome: 'pending', code: 'cancelled' };
+        c.io.out(c.json ? JSON.stringify({ ...s, setMode: pending }) + '\n' : `${id}\n`);
+        c.io.err(`sbx: ${pendingText(id, 'cancelled')}`);
+        return SBX_EXIT.interrupted;
+      }
       if (r.outcome === 'failed') {
         // The sandbox exists, at its lease mode, served per-Exec: named, so it can be looked at.
         const text = r.err instanceof ApiError ? describeError(r.err) : setModeFailureText(r.err);
@@ -353,14 +362,18 @@ export async function cmdCreate(
           ? `sbx: ${pendingText(id, r.code)}`
           : `mode ${s.mode} (epoch ${s.modeEpoch})`,
       );
+      // In --json too, so a script can tell a lease applied from one pending.
+      setMode =
+        r.outcome === 'pending' ? { outcome: 'pending', code: r.code } : { outcome: 'applied' };
     }
+    const withSetMode = setMode ? { setMode } : {};
     let seeded: SeedResult | undefined;
     if (o.seed) {
       const r = await seedSandbox(c, s, o.factory).catch((err: unknown) =>
         err instanceof ApiError ? Promise.reject(err) : sandboxFailureText(err),
       );
       if (typeof r === 'string') {
-        if (c.json) c.io.out(JSON.stringify({ ...s, seed: { error: r } }) + '\n');
+        if (c.json) c.io.out(JSON.stringify({ ...s, ...withSetMode, seed: { error: r } }) + '\n');
         else c.io.out(`${id}\n`);
         c.io.err(`sbx: ${id}: ${r}`);
         return SBX_EXIT.failed;
@@ -372,8 +385,11 @@ export async function cmdCreate(
           : `seeded ${id}${r.head ? `: a clean tree at ${r.head}` : ''}`,
       );
     }
-    if (c.json) c.io.out(JSON.stringify(seeded ? { ...s, seed: seeded } : s) + '\n');
-    else c.io.out(`${id}\n`);
+    if (c.json) {
+      c.io.out(
+        JSON.stringify({ ...s, ...withSetMode, ...(seeded ? { seed: seeded } : {}) }) + '\n',
+      );
+    } else c.io.out(`${id}\n`);
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
@@ -389,7 +405,7 @@ async function sendCreatedMode(
   const x = await openExec(c.api, id, factory);
   try {
     const { setModeToken } = await c.api.mintSandboxModeToken(id);
-    return await sendSetMode(x, c.api, id, setModeToken);
+    return await sendSetMode(x, c.api, id, setModeToken, c.signal);
   } finally {
     x.close();
   }
@@ -414,6 +430,7 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
         cell(s.id, 30),
         cell(s.name ?? '-', 16),
         cell(s.template, 12),
+        cell(s.mode, 15),
         cell(stateText(s), 22),
         when(s.expiresAt),
         ...(all ? [cell(s.owner)] : []),
@@ -429,11 +446,19 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
 /**
  * `sbx rm`. `goneOk`: the id is the repository's bound sandbox, so one the control plane no longer
  * knows (purged after its retention) is "already gone" (exit 0), and `rm` can still take back
- * the configuration `up` wrote. Any other id's 404 is the failure it was.
+ * the configuration `up` wrote. Any other id's 404 is the failure it was. A lease sandbox's lease
+ * is ended first (`sandbox_deleted`), so its guest does not outlive the record.
  */
-export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {}): Promise<number> {
+export async function cmdRm(
+  c: SbxCtx,
+  id: string,
+  o: { goneOk?: boolean; factory?: ExecFactory } = {},
+): Promise<number> {
+  await endLease(c, id, o.factory);
+  if (c.signal?.aborted) return SBX_EXIT.interrupted;
   try {
     const r = await c.api.deleteSandbox(id);
+    forgetNotices(c.rt.paths.stateDir, id);
     if (c.json) c.io.out(JSON.stringify(r) + '\n');
     // Delete is not immediate (SBX0 §5.4): a token already minted works until it expires, plus the
     // relay's 30 s leeway. The client does not know the deployment's token lifetime, so the default.
@@ -451,6 +476,25 @@ export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {})
       return SBX_EXIT.ok;
     }
     return failed(c, err);
+  }
+}
+
+/**
+ * `LeaseControl sandbox_deleted` for a lease sandbox, before its DELETE (spec §4.1): best-effort,
+ * so any error (the record, the token, the call) is ignored and the DELETE goes ahead. A per-exec
+ * sandbox has no lease, and no call is made.
+ */
+async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
+  try {
+    if (modeRank((await c.api.getSandbox(id)).mode) === 0) return;
+    const x = await openExec(c.api, id, factory);
+    try {
+      await x.leaseControl('sandbox_deleted', undefined, c.signal ? { signal: c.signal } : {});
+    } finally {
+      x.close();
+    }
+  } catch {
+    // Best-effort: the DELETE decides, and reports its own failure.
   }
 }
 

@@ -28,17 +28,20 @@ export type SetModeOutcome =
  * `LeaseControl set_mode` with a set-mode token just minted (spec §8.2). A token is never cached
  * (M8): on PERMISSION_DENIED one fresh token is minted from `POST …/mode-token` and sent once more
  * (ruling R11). UNAVAILABLE or DEADLINE_EXCEEDED is `pending`: the control plane has the mode, and
- * the worker applies it at the next Exec. Any other failure throws its LeaseControlError.
+ * the worker applies it at the next Exec. Any other failure throws its LeaseControlError; an abort
+ * of `signal` (Ctrl-C) is one, `cancelled` (P4-R12).
  */
 export async function sendSetMode(
   conn: { leaseControl: LeaseControlFn },
   cp: Pick<SandboxApiClient, 'mintSandboxModeToken'>,
   id: string,
   token: string,
+  signal?: AbortSignal,
 ): Promise<SetModeOutcome> {
   const send = async (t: string): Promise<SetModeOutcome> => {
     try {
-      return { outcome: 'applied', status: await conn.leaseControl('set_mode', t) };
+      const status = await conn.leaseControl('set_mode', t, signal ? { signal } : {});
+      return { outcome: 'applied', status };
     } catch (err) {
       if (
         err instanceof LeaseControlError &&
