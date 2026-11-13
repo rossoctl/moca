@@ -241,10 +241,12 @@ const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'bui
 /**
  * The build ids and workers of every build that is not retired, in every template. A retired build
  * that shares either with one (the same snapshot built again, a twin in another template, a worker
- * id reused) names a snapshot or worker still needed: it is never stopped or removed for the
- * retire, and its `removed` is refused.
+ * id reused, or one worker id two builds from one image share) names a snapshot or worker still
+ * needed: it is never stopped or removed for the retire (that build's own entries decide whether
+ * the worker runs), its `removed` is refused, and it reports no capacity to wait out
+ * (sandbox-handlers.ts buildBody).
  */
-function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
+export function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
   const ids = new Set<string>();
   const workers = new Set<string>();
   for (const d of docs)
@@ -268,10 +270,12 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
    * live lease, or that it runs while placement keeps them on another host, and the retired ones it
-   * holds (§5.1: no longer wanted, never run again). A worker is never stopped under a live
-   * sandbox: it drains first, so a build with one is in no list. `remove` (§6.1 step 7): the
-   * retired builds it holds with no live sandbox, listed in `stop` too, so the agent stops a
-   * running worker before it uninstalls it and deletes the snapshot. A build imported from
+   * holds (§5.1: no longer wanted, never run again), except one whose snapshot or worker a build
+   * that is not retired shares (liveSnapshots): that build's entries decide. A worker in `run` for
+   * one build is never in `stop` for another that shares its worker id. A worker is never stopped
+   * under a live sandbox: it drains first, so a build with one is in no list. `remove` (§6.1 step
+   * 7): the retired builds it holds with no live sandbox, listed in `stop` too, so the agent stops
+   * a running worker before it uninstalls it and deletes the snapshot. A build imported from
    * SH_SANDBOX_TEMPLATES (not hostManaged) is in no list, retired or not: the deployment runs its
    * worker.
    */
@@ -316,7 +320,11 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
       }
     }
-    return { status: 200, body: { run, stop, remove } };
+    // One worker id can serve two registered builds (two builds of one template from one image):
+    // a worker in `run` for one is never in `stop` for the other, or every poll would stop and
+    // restart it. A retired build in `remove` shares no worker with a build in `run` (liveSnapshots).
+    const runs = new Set(run.map((e) => e.worker));
+    return { status: 200, body: { run, stop: stop.filter((e) => !runs.has(e.worker)), remove } };
   },
 
   /**

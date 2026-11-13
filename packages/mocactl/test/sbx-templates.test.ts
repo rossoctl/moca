@@ -624,6 +624,21 @@ describe('sbx templates retire (§5.1)', () => {
     );
   });
 
+  it('--wait: done at once for a shared build, its worker kept for a build not retired', async () => {
+    // Two builds of one template from one image share a worker id; the other is still wanted.
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: { ...retiredRead(null), shared: true } }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain(
+      `my-python ${HANDLE}: retired; its worker also serves a build that is not retired`,
+    );
+    expect(errs).not.toContain('its worker stopped');
+  });
+
   it('--wait: exits 5 when its worker still runs at --timeout', async () => {
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,

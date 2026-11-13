@@ -245,7 +245,8 @@ build reports `capacity` while its worker still runs (null once its host has sto
 ([#743](https://github.com/rossoctl/moca/issues/743)) each holding host's agent then removes the build's worker and
 snapshot (the wanted state's `remove`) and reports it, a `retire` record by `host:<id>` with `event: removed`, and
 `heldBy` drops the host. `mocactl sbx templates retire --wait` waits for the stop and for `heldBy` to empty, and
-returns at once for a build no host holds (`heldBy` null or empty: no host agent stops its worker).
+returns at once for a build no host holds (`heldBy` null or empty: no host agent stops its worker) and for a `shared`
+one (its snapshot or worker serves a build that is not retired, so its worker is kept running for that build).
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,

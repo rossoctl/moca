@@ -1182,6 +1182,71 @@ describe('retire (§5.1)', () => {
     expect(b).toMatchObject({ status: 'retired', readiness: 'retired', capacity: null });
   });
 
+  it('keeps a silent host in heldBy: the build is still its to stop once it reports', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await retire(d, 't1');
+    // The host stops reporting past HOST_STALE_S (it is left out of placement) while its worker
+    // still runs: it still holds the build, so a waiting client keeps waiting.
+    now += (HOST_STALE_S + 1) * 1000;
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+        d,
+      )
+    ).body as Body;
+    expect(b).toMatchObject({ heldBy: ['host-1'], capacity: { running: 3, inUse: 0 } });
+  });
+
+  it('never lists one worker in run and stop for two registered builds that share it', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    // Build 2 is leased and placed; build 1, unleased, would be stopped, but its worker is build 2's.
+    await activate(d, 't1', alice, { build: hash('2') });
+    expect(await wanted(d, 'host-1')).toEqual({
+      run: [{ template: 't1', buildId: hash('2'), worker: 'sbx_t1' }],
+      stop: [],
+      remove: [],
+    });
+  });
+
+  it('leaves a retired build whose worker a wanted build shares out of stop, with null capacity', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    // Two builds of t1 from one image, other specs: template-build.sh names both workers alike.
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    await activate(d, 't1', alice, { build: hash('2') });
+    await retireBuild(d, 't1', hash('1'));
+    // Build 2 still wants sbx_t1: it runs, and is not stopped (and restarted) on every poll.
+    const two = { template: 't1', buildId: hash('2'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [two], stop: [], remove: [] });
+    const read = async (build: string) =>
+      (await HANDLERS.getTemplateBuild!(ctx({ principal: alice, params: { id: 't1', build } }), d))
+        .body as Body;
+    // Its worker is attached, but kept for build 2: nothing to wait out.
+    expect(await read(hash('1'))).toMatchObject({
+      status: 'retired',
+      shared: true,
+      capacity: null,
+    });
+    expect(await read(hash('2'))).toMatchObject({ readiness: 'active', shared: false });
+    // Once build 2 is retired too, the worker is no longer shared: both stop and remove it.
+    await retireBuild(d, 't1', hash('2'));
+    const one = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [two, one], remove: [two, one] });
+    expect(await read(hash('1'))).toMatchObject({
+      shared: false,
+      capacity: { running: 3, inUse: 0 },
+    });
+  });
+
   it('never retires a build under a live sandbox (409 build_in_use); retires one build alone', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
@@ -1220,6 +1285,99 @@ describe('retire (§5.1)', () => {
     // The sandbox runs on build 2: build 1 retires, build 2 is refused.
     expect((await retireBuild(d, 't1', hash('1'))).status).toBe(200);
     expect(await refusal(() => retireBuild(d, 't1', hash('2')))).toBe('build_in_use');
+  });
+
+  it('judges build_in_use on the template as read under the lock, not the request read', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The retire's first read of t1 is from before build 2 existed.
+    const cat = d.templates!;
+    const get = cat.get.bind(cat);
+    const stale = (await get('t1'))!;
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    await activate(d, 't1', alice, { build: hash('2') });
+    await sandbox(d, `t1@${hash('2')}`);
+    let first = true;
+    cat.get = async (id: string) => {
+      if (first) {
+        first = false;
+        return stale;
+      }
+      return get(id);
+    };
+    // Build 2 serves a live sandbox: the whole template is refused, and nothing is retired.
+    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
+    expect((await get('t1'))!.builds.map((x) => x.status)).toEqual(['registered', 'registered']);
+  });
+
+  it('a sandbox create that resolved the build before a retire is refused 410', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The create reads the template (build registered), then the retire runs to its end before
+    // the create writes its sandbox record.
+    const cat = d.templates!;
+    const get = cat.get.bind(cat);
+    let race = true;
+    cat.get = async (id: string) => {
+      const doc = await get(id);
+      if (race) {
+        race = false;
+        await retire(d, 't1');
+      }
+      return doc;
+    };
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('template_retired');
+    expect(await d.sandboxes!.listAll(Math.floor(now / 1000))).toEqual([]);
+  });
+
+  it('a sandbox create waits for a retire judging use, then is refused 410', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The create arrives once the retire has read the live sandboxes (none), before it retires.
+    // Under the lock the create waits for the retire, then finds the build retired; without it,
+    // the sandbox would be written in between and run on a retired build.
+    const store = d.sandboxes!;
+    const listAll = store.listAll.bind(store);
+    let creating: Promise<unknown> | null = null;
+    let arm = false;
+    store.listAll = async (nowS: number) => {
+      const out = await listAll(nowS);
+      if (arm) {
+        arm = false;
+        creating = refusal(() => sandbox(d, 't1'));
+        await Promise.race([creating, new Promise((r) => setTimeout(r, 200))]);
+      }
+      return out;
+    };
+    arm = true;
+    expect((await retire(d, 't1')).status).toBe(200);
+    expect(await creating).toBe('template_retired');
+    expect(await listAll(Math.floor(now / 1000))).toEqual([]);
+  });
+
+  it('retires nothing when its retire record cannot be written; a retry retires it', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let fail = true;
+    prov.append = async (input) => {
+      if (input.kind === 'retire' && fail) throw new Error('the store is full');
+      return append(input);
+    };
+    await expect(retire(d, 't1')).rejects.toThrow('the store is full');
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    fail = false;
+    const r = (await retire(d, 't1')).body as Body;
+    expect(r.builds[0].record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(
+      (await prov.chain('template/t1')).filter((x) => x.kind === 'retire').map(recordDigestOf),
+    ).toEqual([r.builds[0].record]);
   });
 
   it('judges build_in_use by worker for a sandbox record without a build id', async () => {
