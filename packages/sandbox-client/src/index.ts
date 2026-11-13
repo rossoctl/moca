@@ -20,6 +20,7 @@ export {
   NoticeDedupe,
   leaseNotice,
   leaseStatusView,
+  noticeLines,
   modeName,
   type LeaseControlErrorCode,
   type LeaseState,

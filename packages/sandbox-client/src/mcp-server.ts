@@ -13,7 +13,7 @@ import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 import {
   hhmm,
   LeaseControlError,
-  leaseNotice,
+  noticeLines,
   NoticeDedupe,
   type SandboxModeName,
 } from './lease.js';
@@ -331,19 +331,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const notices = (events: LeaseEvent[]): string[] => {
     const fresh = dedupe.take(events);
     noteEnds(fresh);
-    let lastExpiring = -1;
-    fresh.forEach((ev, i) => {
-      if (ev.state === 'expiring') lastExpiring = i;
-    });
-    const ended = fresh.some((ev) => ev.state === 'end');
-    const lines: string[] = [];
-    fresh.forEach((ev, i) => {
-      if (ev.state === 'start' && ended) return;
-      if (ev.state === 'expiring' && i !== lastExpiring) return;
-      const l = leaseNotice(ev, now());
-      if (l !== undefined) lines.push(l);
-    });
-    return lines;
+    return noticeLines(fresh, now());
   };
 
   const tools = sandboxTools({

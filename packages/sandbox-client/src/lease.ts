@@ -131,6 +131,24 @@ export function leaseNotice(ev: LeaseEvent, nowMs: number): string | undefined {
 }
 
 /**
+ * The notice lines for one result's lease events, already deduped by the caller (spec §5): a start
+ * only when no end is shown with it, and only the last expiring event (one result's Execs may
+ * straddle a minute boundary). The MCP server and mocactl both print these.
+ */
+export function noticeLines(fresh: LeaseEvent[], nowMs: number): string[] {
+  const ended = fresh.some((ev) => ev.state === 'end');
+  const lastExpiring = fresh.map((ev) => ev.state).lastIndexOf('expiring');
+  const lines: string[] = [];
+  fresh.forEach((ev, i) => {
+    if (ev.state === 'start' && ended) return;
+    if (ev.state === 'expiring' && i !== lastExpiring) return;
+    const l = leaseNotice(ev, nowMs);
+    if (l !== undefined) lines.push(l);
+  });
+  return lines;
+}
+
+/**
  * Lease events are best-effort and may repeat (spec §5): this passes each `at_unix_ms` once, for
  * the life of the deduper. An `expiring` event is never deduped, since every result carries it
  * while the lease is expiring, and it marks nothing seen.

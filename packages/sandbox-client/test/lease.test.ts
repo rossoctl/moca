@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LeaseEvent, SandboxMode } from '../src/gen/sandbox/v1/sandbox.js';
-import { NoticeDedupe, leaseNotice } from '../src/lease.js';
+import { NoticeDedupe, leaseNotice, noticeLines } from '../src/lease.js';
 
 // The notice's HH:MM is local time: pin the zone so the copy is exact.
 let tz: string | undefined;
@@ -107,5 +107,29 @@ describe('NoticeDedupe (spec §5: events may repeat)', () => {
     expect(d.take([expiring, expiring])).toEqual([expiring, expiring]);
     const end = ev({ state: 'end', reason: 'max_duration' });
     expect(d.take([end])).toEqual([end]);
+  });
+});
+
+describe('noticeLines (spec §5: one result, its lines)', () => {
+  const end = ev({ state: 'end', reason: 'idle' });
+  const start = ev({ state: 'start', atUnixMs: AT + 1 });
+  const expiring = (endsByUnixMs: number) =>
+    ev({ state: 'expiring', reason: 'max_duration', endsByUnixMs });
+
+  it('hides a start beside an end, and keeps a start alone', () => {
+    expect(noticeLines([end, start], AT)).toEqual([leaseNotice(end, AT)]);
+    expect(noticeLines([start, end], AT)).toEqual([leaseNotice(end, AT)]);
+    expect(noticeLines([start], AT)).toEqual([leaseNotice(start, AT)]);
+  });
+
+  it('keeps only the last expiring event', () => {
+    const a = expiring(AT + 5 * 60_000);
+    const b = expiring(AT + 4 * 60_000);
+    expect(noticeLines([a, b], AT)).toEqual([leaseNotice(b, AT)]);
+  });
+
+  it('drops a state it does not know, and is empty for no events', () => {
+    expect(noticeLines([ev({ state: 'later' })], AT)).toEqual([]);
+    expect(noticeLines([], AT)).toEqual([]);
   });
 });
