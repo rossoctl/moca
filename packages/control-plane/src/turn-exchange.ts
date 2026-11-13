@@ -134,6 +134,12 @@ export async function exchangeTurnCredential(
     refuseMisdirectedSecret(resolved, turn.sessionId);
   }
 
+  // The session's template and seed (read below), resolved before the audit as every refusal is: a
+  // store that cannot answer for the seed refuses the claim (sessionSeed), which leaves the turn
+  // pending, and no credential is recorded as issued and then withheld.
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
+
   const entry = {
     subject: turn.owner,
     sessionId: turn.sessionId,
@@ -198,8 +204,7 @@ export async function exchangeTurnCredential(
   // template and build are written once, at creation, and no route changes them, so the record of
   // a turn queued an hour ago and the session now agree. A template the deployment no longer
   // declares is still sent, without a seed, so the turn is refused rather than run untemplated.
-  const template = sessionTemplate(rec, deps.config.sessionTemplates);
-  const seed = template ? await sessionSeed(rec, deps) : undefined;
+  // Both are resolved above, before the audit.
   return {
     turnId: turn.turnId,
     mode,

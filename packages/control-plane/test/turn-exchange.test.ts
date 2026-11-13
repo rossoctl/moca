@@ -3,6 +3,7 @@ import { HANDLERS } from '../src/handlers.js';
 import { AUDIT_STREAM, OwnershipIndex, sessionKey } from '../src/ownership.js';
 import type { TurnRecord, TurnState } from '../src/turn-record.js';
 import { TurnStore } from '../src/turn-store.js';
+import { exchangeCredential } from '../src/exchange.js';
 import { exchangeTurnCredential } from '../src/turn-exchange.js';
 import { alice, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -437,6 +438,52 @@ describe("the session's sandbox template on the dequeue exchange", () => {
       sandboxSeed: 'cp -a /opt/src/. /workspace/',
       sandboxSeedSource: 'build',
     });
+  });
+
+  it("refuses, issuing nothing, when the store cannot read a pinned session's build", async () => {
+    const d = exDeps({
+      config: { sessionTemplates: [PY312] },
+      templates: {
+        get: async () => {
+          throw new Error('EIO');
+        },
+      } as never,
+    });
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    const created = await HANDLERS.createSession!(
+      ctx({
+        principal: alice,
+        body: { credentials: { inference: 'my-anthropic' }, sandbox: { template: 'py312' } },
+      }),
+      d,
+    );
+    const { sessionId: sid, token } = created.body as { sessionId: string; token: string };
+    await d.fake.redis.hSet(sessionKey(sid), { sandboxBuildId: B });
+    const turnId = await queuedTurn(d, sid);
+    const before = (d.fake.streams.get(AUDIT_STREAM) ?? []).length;
+    const err = console.error;
+    console.error = () => {};
+    try {
+      // Not the declared seed: a self-serve build has none there, so a fallback would run the turn
+      // on an unseeded workspace. A refusal the data plane retries (the claim leaves it pending).
+      expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('internal_error');
+      expect(await codeOf(() => exchangeCredential(token, d))).toBe('internal_error');
+    } finally {
+      console.error = err;
+    }
+    const entries = (d.fake.streams.get(AUDIT_STREAM) ?? []).slice(before);
+    expect(entries.filter((e) => e.decision === 'credential_issued')).toEqual([]);
+  });
+
+  it('falls back to the declared seed when the store holds no such build', async () => {
+    const d = exDeps({
+      config: { sessionTemplates: [PY312] },
+      templates: { get: async () => null } as never,
+    });
+    const sid = await templatedSession(d, 'py312');
+    await d.fake.redis.hSet(sessionKey(sid), { sandboxBuildId: B });
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+    expect(res).toMatchObject({ sandboxSeed: 'echo hi', sandboxSeedSource: 'declared' });
   });
 
   it('still names a template the deployment no longer declares, without a seed (fail closed)', async () => {
