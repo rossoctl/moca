@@ -1,11 +1,14 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { buildJobSpec, HostRegistry } from '../src/host-handlers.js';
 import { templateHostsFromEnv } from '../src/host-config.js';
 import { matchRoute, ROUTES } from '../src/routes.js';
+import { buildHandler } from '../src/server.js';
 import { ProvenanceStore, sha256Hex, verifyExport } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
@@ -419,6 +422,110 @@ describe('host authentication', () => {
     expect(matchRoute('POST', '/v1/hosts/host-1/builds/claim', 'harness')?.route.operationId).toBe(
       'hostClaimBuilds',
     );
+  });
+});
+
+describe('host authentication through the router', () => {
+  const servers: Server[] = [];
+  afterEach(() => servers.splice(0).forEach((s) => s.close()));
+  const H1 = '1'.repeat(64); // notsecret
+  const H2 = '2'.repeat(64); // notsecret
+  const JANITOR = 'j'.repeat(40); // notsecret
+  const EGRESS = 'e'.repeat(64); // notsecret
+
+  async function serve(d: TestDeps): Promise<string> {
+    const server = createServer(buildHandler(d));
+    servers.push(server);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+  async function hostDeps(hosts = true): Promise<TestDeps> {
+    const d = await setup();
+    d.config.exchangeToken = 'x'.repeat(40); // notsecret
+    d.config.sandbox = {
+      ...d.config.sandbox!,
+      janitorToken: JANITOR,
+      egress: { hosts: [{ id: 'kvm', workers: ['sbx_default'], token: EGRESS }], ttlSeconds: 60 },
+    };
+    if (hosts)
+      d.config.templateHosts = [
+        { id: 'host-1', token: H1 },
+        { id: 'host-2', token: H2 },
+      ];
+    return d;
+  }
+  // Every host route, for host H, with a body where it takes one.
+  const calls = (h: string) =>
+    [
+      ['POST', `/v1/hosts/${h}/inventory`, { holds: [] }],
+      ['POST', `/v1/hosts/${h}/builds/claim`, { max: 1 }],
+      ['GET', `/v1/hosts/${h}/blobs/${GATE_SHA}`, undefined],
+      ['POST', `/v1/hosts/${h}/builds/b-${'0'.repeat(26)}/log`, { entries: [] }],
+      ['POST', `/v1/hosts/${h}/builds/b-${'0'.repeat(26)}/report`, { event: 'building' }],
+    ] as const;
+  const send = (base: string, method: string, path: string, body: unknown, token?: string) =>
+    fetch(base + path, {
+      method,
+      headers: {
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  it("admits a host's token on its own routes only: another host's path is 401", async () => {
+    const d = await hostDeps();
+    const base = await serve(d);
+    const own = await send(base, 'POST', '/v1/hosts/host-1/inventory', { holds: [] }, H1);
+    expect(own.status).toBe(200);
+    expect(await own.json()).toMatchObject({ host: 'host-1' });
+    const blob = await send(base, 'GET', `/v1/hosts/host-2/blobs/${GATE_SHA}`, undefined, H2);
+    expect(blob.status).toBe(200);
+    for (const [method, path, body] of calls('host-2')) {
+      const res = await send(base, method, path, body, H1);
+      expect(res.status, `${method} ${path}`).toBe(401);
+      expect(await res.json()).toMatchObject({ error: 'unauthorized' });
+    }
+    // Nothing was claimed by the refused call.
+    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+      .body as Body;
+    expect(t.builds[0].status).toBe('queued');
+  });
+
+  it('answers 401 to no token, a wrong one, a user API token, and the janitor, egress and exchange bearers', async () => {
+    const d = await hostDeps();
+    const user = d.signer.mint({
+      sub: alice.sub,
+      tenant: alice.sub,
+      roles: ['admin'],
+      scope: ['api'],
+      ttlSeconds: 3600,
+      now: Math.floor(NOW_MS / 1000),
+    });
+    const base = await serve(d);
+    for (const token of [
+      undefined,
+      'c'.repeat(64),
+      user,
+      JANITOR,
+      EGRESS,
+      d.config.exchangeToken,
+    ]) {
+      for (const [method, path, body] of calls('host-1')) {
+        const res = await send(base, method, path, body, token);
+        expect(res.status, `${method} ${path}`).toBe(401);
+        expect(await res.json()).toMatchObject({ error: 'unauthorized' });
+      }
+    }
+  });
+
+  it('answers 401 on every host route with no SH_TEMPLATE_HOSTS', async () => {
+    const d = await hostDeps(false);
+    const base = await serve(d);
+    for (const [method, path, body] of calls('host-1')) {
+      const res = await send(base, method, path, body, H1);
+      expect(res.status, `${method} ${path}`).toBe(401);
+    }
   });
 });
 
