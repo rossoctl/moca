@@ -1,8 +1,9 @@
 # deploy/sbx/sbx-worker@.service -- one SBX0 template worker (microvm-worker) per instance; %i is
 # its worker id. Installed by deploy/sbx/install-host.sh, which writes /etc/sbx/workers/%i.env from
-# the bundle deploy/sbx/setup.sh wrote. Mirrors deploy/microvm/microvm-worker.service (read it for
-# why each limit and path is set) with three differences: its own slice, its own paths, no
-# AssertMemory (the budget is per worker, set in the env file).
+# the bundle deploy/sbx/setup.sh wrote (and rewrites /usr/local/libexec when SBX_LIBEXEC_DIR
+# differs). Mirrors deploy/microvm/microvm-worker.service (read it for why each limit and path is
+# set) with four differences: its own slice, its own paths, no AssertMemory (the budget is per
+# worker, set in the env file), and an ExecStopPost= that ends the VMs left in its slice.
 [Unit]
 Description=SBX0 sandbox worker %i (microvm-worker)
 # No dependency on moca-egress.service here: a worker installed with egress gets one from its own
@@ -23,6 +24,11 @@ Slice=sbx-%i.slice
 ExecStart=/usr/local/bin/microvm-worker
 EnvironmentFile=/etc/sbx/workers/%i.env
 KillMode=control-group
+# The worker's VMs are not in this unit's cgroup: jailer puts each in a pool-N cgroup beside it in
+# sbx-%i.slice, so control-group does not reach them. After every exit (clean stop, crash, timeout)
+# this kills the pool-N cgroups of this worker's own slice and waits for them to empty (#795); it
+# never fails the stop. deploy/sbx/reap-vms.sh, installed by install-host.sh.
+ExecStopPost=-/usr/local/libexec/sbx-reap-vms.sh %i
 KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure

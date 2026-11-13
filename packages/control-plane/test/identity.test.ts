@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import {
   GithubOAuthProvider,
+  MEMBER_SUBJECT_RE,
+  SUBJECT_RE,
   TEST_SUBJECT_RE,
   TEST_USERS_MAX,
   TEST_USER_SECRET_MIN_CHARS,
@@ -459,5 +461,19 @@ describe('TestUserProvider', () => {
   it('refuses the device flow: a test user has no browser', async () => {
     expect(await codeOf(() => p().startDeviceAuth())).toBe('unauthorized');
     expect(await codeOf(() => p().completeDeviceAuth())).toBe('unauthorized');
+  });
+});
+
+describe('MEMBER_SUBJECT_RE', () => {
+  it("takes a person's subject from either provider, and never a test user's", () => {
+    for (const ok of ['github:1234', 'oidc:erin@example.test', 'oidc:0a1b2c3d-uuid'])
+      expect(MEMBER_SUBJECT_RE.test(ok), ok).toBe(true);
+    for (const bad of ['test:1', 'github:', 'github:abc', 'oidc:', 'oidc:a b', 'oidc:a:b', 'bob'])
+      expect(MEMBER_SUBJECT_RE.test(bad), bad).toBe(false);
+  });
+
+  it('is SUBJECT_RE without test:<n>', () => {
+    for (const s of ['github:7', 'oidc:x.y', 'test:3', 'oidc:-x'])
+      expect(MEMBER_SUBJECT_RE.test(s), s).toBe(SUBJECT_RE.test(s) && !s.startsWith('test:'));
   });
 });
