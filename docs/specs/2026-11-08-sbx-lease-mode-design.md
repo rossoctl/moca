@@ -504,6 +504,15 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
   It is accepted with `per-exec` too, where it has no effect.
 - **The audit record** is `sandbox_mode_changed` with `fromMode`, `toMode` and `modeEpoch`. The old
   mode comes from the atomic update, not from an earlier read, so it is right under concurrent `PUT`s.
+- **Narrowing the policy downgrades existing sandboxes at their next token mint.** Create and `PUT`
+  check the policy, and so does every mint (a sandbox token, or `mode-token`), so the list stays the
+  switch for sandboxes created before the change. A sandbox whose lease mode the list no longer
+  names is set to `per-exec` through the same atomic update a `PUT` uses, which raises the epoch: the
+  next Exec, carrying the new token, ends the live lease (a same-epoch re-issue would read to the
+  worker as a retry, §8.2). It is audited as `sandbox_mode_changed` with `reason: mode_not_allowed`.
+  Two mints racing may both downgrade, raising the epoch twice. A lowered `SH_SANDBOX_IDLE_CEILING_S`
+  clamps the `idle_timeout_s` claim of every token minted after it; the record and the epoch are
+  unchanged, since the idle timeout travels on every Exec (ruling R12).
 
 ### 8.2 The mode reaches the worker in the token
 

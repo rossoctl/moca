@@ -67,6 +67,13 @@ control plane's list is the only switch. After that gate, an operator opts in to
 `SH_SANDBOX_MODES_ALLOWED=per-exec,lease`. Keep `lease+processes` off until the security review
 covers it.
 
+Narrowing the policy downgrades existing sandboxes at their next token mint, so the list stays the
+switch for sandboxes created before the change. Remove `lease` from `SH_SANDBOX_MODES_ALLOWED` and
+the next sandbox token (or `mode-token`) minted for a lease sandbox first sets it to `per-exec` at a
+new epoch, which ends its live lease at the next Exec; the control-plane audit log shows a
+`sandbox_mode_changed` with `reason: mode_not_allowed`. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps
+the idle timeout of every token minted after it, without changing the sandbox's record.
+
 The relay needs nothing new for lease mode: it verifies set-mode tokens with the sandbox token
 keyset and issuer it already has.
 

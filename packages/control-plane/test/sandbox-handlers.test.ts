@@ -567,7 +567,7 @@ describe('sandbox handlers (SBX0 §5)', () => {
       store.setMode = async (...a) => {
         if (!raced) {
           raced = true;
-          await setMode(id as string, 'lease', 0);
+          await setMode(id as string, 'lease', 0, NOW);
         }
         return setMode(...a);
       };
@@ -635,6 +635,112 @@ describe('sandbox handlers (SBX0 §5)', () => {
       const purged = { ...d, now: () => NOW_MS + 30 * DAY_MS };
       expect(await codeOf(() => put(purged, s.id, { mode: 'lease' }))).toBe('sandbox_not_found');
       expect(await codeOf(() => modeToken(purged, s.id))).toBe('sandbox_not_found');
+    });
+
+    describe('a narrowed policy, at the next mint (review #4559538363)', () => {
+      const opts = { issuer: 'sbx-control-plane', now: NOW };
+      const narrowed = (d: TestDeps, over: object): TestDeps => ({
+        ...d,
+        config: { ...d.config, sandbox: { ...d.config.sandbox!, ...over } },
+      });
+      const sandboxToken = async (d: TestDeps, id: unknown) =>
+        verifySandboxToken(
+          ((await HANDLERS.mintSandboxToken!(on(alice, id), d)).body as { token: string }).token,
+          keysOf(d),
+          opts,
+        );
+      const setModeToken = async (d: TestDeps, id: unknown) =>
+        verifySetModeToken(
+          ((await modeToken(d, id)).body as { setModeToken: string }).setModeToken,
+          keysOf(d),
+          opts,
+        );
+      const modeChanges = (d: TestDeps) =>
+        d.logLines.filter((l) => l.decision === 'sandbox_mode_changed');
+
+      for (const first of ['sandbox token', 'set-mode token'] as const) {
+        it(`downgrades a lease sandbox to per-exec at epoch+1 once its mode is not allowed (${first} first)`, async () => {
+          const d = sbxDeps();
+          const { id } = await create(d, alice, {
+            template: 'default',
+            mode: 'lease',
+            idleTimeoutS: 600,
+          });
+          const n = narrowed(d, { modesAllowed: new Set(['per-exec']) });
+          // A mint before the policy changed is untouched: lease at the create's epoch 1.
+          expect(await sandboxToken(d, id)).toMatchObject({ mode: 'lease', mode_epoch: 1 });
+
+          const a =
+            first === 'sandbox token' ? await sandboxToken(n, id) : await setModeToken(n, id);
+          const b =
+            first === 'sandbox token' ? await setModeToken(n, id) : await sandboxToken(n, id);
+          // A raised epoch, not a same-epoch re-issue, which the worker would treat as a retry.
+          for (const c of [a, b]) expect(c).toMatchObject({ mode: 'per-exec', mode_epoch: 2 });
+          expect(await d.sandboxes!.get(id as string, NOW)).toMatchObject({
+            mode: 'per-exec',
+            modeEpoch: 2,
+          });
+          // Audited once, as the policy's change rather than the owner's.
+          expect(modeChanges(d)).toEqual([
+            {
+              event: 'audit',
+              decision: 'sandbox_mode_changed',
+              subject: 'github:1234',
+              sandboxId: id,
+              reason: 'mode_not_allowed',
+              fromMode: 'lease',
+              toMode: 'per-exec',
+              modeEpoch: 2,
+            },
+          ]);
+          const rows = [...d.streams.values()]
+            .flat()
+            .filter((r) => r.decision === 'sandbox_mode_changed');
+          expect(rows.map((r) => [r.reason, r.fromMode, r.toMode, r.modeEpoch])).toEqual([
+            ['mode_not_allowed', 'lease', 'per-exec', '2'],
+          ]);
+        });
+      }
+
+      it('leaves an allowed mode, and per-exec, as they are', async () => {
+        const d = sbxDeps(withSandbox({ modesAllowed: new Set(['lease', 'lease+processes']) }));
+        const l = await create(d, alice, { template: 'default', mode: 'lease' });
+        const p = await create(d, alice, { template: 'default' });
+        const n = narrowed(d, { modesAllowed: new Set(['lease']) });
+        expect(await sandboxToken(n, l.id)).toMatchObject({ mode: 'lease', mode_epoch: 1 });
+        expect(await setModeToken(n, p.id)).toMatchObject({ mode: 'per-exec', mode_epoch: 0 });
+        const none = narrowed(d, { modesAllowed: new Set() });
+        expect(await sandboxToken(none, p.id)).toMatchObject({ mode: 'per-exec', mode_epoch: 0 });
+        expect(modeChanges(d)).toEqual([]);
+      });
+
+      it('clamps the idle timeout claim to a lowered ceiling, changing neither the record nor the epoch', async () => {
+        const d = sbxDeps();
+        const { id } = await create(d, alice, {
+          template: 'default',
+          mode: 'lease',
+          idleTimeoutS: 1800,
+        });
+        const dflt = await create(d, alice, { template: 'default', mode: 'lease' });
+        const n = narrowed(d, { idleCeilingS: 600 });
+        expect(await sandboxToken(n, id)).toMatchObject({
+          mode: 'lease',
+          mode_epoch: 1,
+          idle_timeout_s: 600,
+        });
+        expect(await setModeToken(n, id)).toMatchObject({
+          mode: 'lease',
+          mode_epoch: 1,
+          idle_timeout_s: 600,
+        });
+        // 0 is the worker's default, not a value above the ceiling.
+        expect(await sandboxToken(n, dflt.id)).toMatchObject({ idle_timeout_s: 0 });
+        expect(await d.sandboxes!.get(id as string, NOW)).toMatchObject({
+          idleTimeoutS: 1800,
+          modeEpoch: 1,
+        });
+        expect(modeChanges(d)).toEqual([]);
+      });
     });
 
     it('mints a set-mode token for the current mode and epoch, raising nothing', async () => {

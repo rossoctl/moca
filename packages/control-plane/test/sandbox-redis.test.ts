@@ -148,7 +148,7 @@ describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
       modeEpoch: 0,
     });
     // ...and its first setMode raises the epoch from 0 to 1.
-    expect(await store.setMode('sbx-legacy', 'lease', 600)).toMatchObject({
+    expect(await store.setMode('sbx-legacy', 'lease', 600, now)).toMatchObject({
       record: { mode: 'lease', idleTimeoutS: 600, modeEpoch: 1 },
       previousMode: 'per-exec',
     });
@@ -170,7 +170,7 @@ describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
       modeEpoch: 3,
     });
     // ...and setMode reports it as it reads: per-exec.
-    expect(await store.setMode('sbx-odd', 'lease', 60)).toMatchObject({
+    expect(await store.setMode('sbx-odd', 'lease', 60, now)).toMatchObject({
       record: { mode: 'lease', modeEpoch: 4 },
       previousMode: 'per-exec',
     });
@@ -193,7 +193,7 @@ describe('RedisSandboxStore mode fields (lease-mode spec §8.1)', () => {
       { perSubject: 1, total: 1, retentionS: 500 },
       now,
     );
-    await store.setMode('sbx-ttl', 'lease', 600);
+    await store.setMode('sbx-ttl', 'lease', 600, now);
     const ttl = await client.ttl(`${prefix}sandbox:sbx-ttl`);
     expect(ttl).toBeGreaterThan(1400);
     expect(ttl).toBeLessThanOrEqual(1500);

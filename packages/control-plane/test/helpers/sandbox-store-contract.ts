@@ -51,17 +51,17 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       const { store, done } = await make();
       const r = rec({ name: 'm', labels: { project: 'x' } });
       await store.create(r, LIMITS, T0);
-      const first = await store.setMode(r.id, 'lease', 600);
+      const first = await store.setMode(r.id, 'lease', 600, T0);
       expect(first).toEqual({
         record: { ...r, mode: 'lease', idleTimeoutS: 600, modeEpoch: 1 },
         previousMode: 'per-exec',
       });
       // Same mode and timeout: a re-sent set-mode still needs a fresh epoch.
-      expect(await store.setMode(r.id, 'lease', 600)).toMatchObject({
+      expect(await store.setMode(r.id, 'lease', 600, T0)).toMatchObject({
         record: { mode: 'lease', idleTimeoutS: 600, modeEpoch: 2 },
         previousMode: 'lease',
       });
-      expect(await store.setMode(r.id, 'per-exec', 0)).toMatchObject({
+      expect(await store.setMode(r.id, 'per-exec', 0, T0)).toMatchObject({
         record: { mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 3 },
         previousMode: 'lease',
       });
@@ -79,8 +79,8 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       const r = rec();
       await store.create(r, LIMITS, T0);
       const out = await Promise.all([
-        store.setMode(r.id, 'lease', 300),
-        store.setMode(r.id, 'lease+processes', 900),
+        store.setMode(r.id, 'lease', 300, T0),
+        store.setMode(r.id, 'lease+processes', 900, T0),
       ]);
       expect(out.map((o) => o?.record.modeEpoch).sort()).toEqual([1, 2]);
       expect((await store.get(r.id, T0))?.modeEpoch).toBe(2);
@@ -93,11 +93,11 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
 
     it('gives undefined from setMode for a missing or deleted sandbox, and changes nothing', async () => {
       const { store, done } = await make();
-      expect(await store.setMode('sbx-missing', 'lease', 600)).toBeUndefined();
+      expect(await store.setMode('sbx-missing', 'lease', 600, T0)).toBeUndefined();
       const r = rec();
       await store.create(r, LIMITS, T0);
       await store.markDeleted(r.id, T0 + 1, LIMITS.retentionS);
-      expect(await store.setMode(r.id, 'lease', 600)).toBeUndefined();
+      expect(await store.setMode(r.id, 'lease', 600, T0)).toBeUndefined();
       expect(await store.get(r.id, T0 + 2)).toMatchObject({
         mode: 'per-exec',
         idleTimeoutS: 0,
@@ -108,11 +108,29 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       await done();
     });
 
+    it('gives undefined from setMode for an expired sandbox, and changes nothing (review #4559538369)', async () => {
+      // As markDeleted reads it: expired AT expiresAt. A PUT that crosses expiry stores nothing.
+      const { store, done } = await make();
+      const r = rec({ expiresAt: T0 + 10 });
+      await store.create(r, LIMITS, T0);
+      expect(await store.setMode(r.id, 'lease', 600, T0 + 9)).toMatchObject({
+        record: { mode: 'lease', modeEpoch: 1 },
+      });
+      expect(await store.setMode(r.id, 'per-exec', 0, T0 + 10)).toBeUndefined();
+      expect(await store.setMode(r.id, 'per-exec', 0, T0 + 11)).toBeUndefined();
+      expect(await store.get(r.id, T0 + 11)).toMatchObject({
+        mode: 'lease',
+        idleTimeoutS: 600,
+        modeEpoch: 1,
+      });
+      await done();
+    });
+
     it('returns a detached record from setMode', async () => {
       const { store, done } = await make();
       const r = rec({ labels: { project: 'p' } });
       await store.create(r, LIMITS, T0);
-      const out = (await store.setMode(r.id, 'lease', 60))!.record;
+      const out = (await store.setMode(r.id, 'lease', 60, T0))!.record;
       out.labels.project = 'mutated';
       out.modeEpoch = 99;
       expect(await store.get(r.id, T0)).toMatchObject({ labels: { project: 'p' }, modeEpoch: 1 });

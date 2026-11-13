@@ -98,13 +98,16 @@ export interface SandboxStore {
   /**
    * Sets mode and idle timeout and raises modeEpoch by 1, atomically, on EVERY call -- the same mode
    * again included. Stores what it is given: the policy bounds are the caller's. Undefined for a
-   * missing or deleted sandbox. `previousMode` is read in the same atomic step, so an audit of the
-   * change names the mode it actually replaced, even when another setMode raced the caller's read.
+   * missing, deleted or expired sandbox (expired at `nowS >= expiresAt`, as markDeleted reads it), so
+   * a PUT that crosses expiry stores, and audits, nothing. `previousMode` is read in the same atomic
+   * step, so an audit of the change names the mode it actually replaced, even when another setMode
+   * raced the caller's read.
    */
   setMode(
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
+    nowS: number,
   ): Promise<SetModeResult | undefined>;
 }
 
@@ -175,15 +178,16 @@ export class MemorySandboxStore implements SandboxStore {
     return 'deleted';
   }
 
-  // No await before the mutation, as in create. No purge: there is no caller clock here, and a
-  // record past its retention is one that is deleted or expired, which the caller refuses anyway.
+  // No await before the mutation, as in create. No purge needed: a record past its retention is
+  // deleted or expired, which isLive refuses here anyway.
   async setMode(
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
+    nowS: number,
   ): Promise<SetModeResult | undefined> {
     const r = this.recs.get(id);
-    if (!r || r.deletedAt !== undefined) return undefined;
+    if (!r || !isLive(r, nowS)) return undefined;
     const previousMode = r.mode;
     r.mode = mode;
     r.idleTimeoutS = idleTimeoutS;

@@ -27,6 +27,11 @@ only on the `sandbox` route profile.
   always allowed.
 - Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
   reads as `per-exec`, epoch 0.
+- Narrowing the policy downgrades existing sandboxes at their next token mint. A sandbox token or
+  `mode-token` minted for a sandbox whose lease mode `SH_SANDBOX_MODES_ALLOWED` no longer lists first
+  sets it to `per-exec` at the next epoch, audited as `sandbox_mode_changed` with the reason
+  `mode_not_allowed`. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps the `idle_timeout_s` claim; the
+  stored `idleTimeoutS` and the epoch are unchanged.
 
 ## 1.5.0
 

@@ -100,13 +100,15 @@ if ARGV[4] == '1' and redis.call('GET', KEYS[3]) == ARGV[3] then redis.call('DEL
 return 'deleted'
 `;
 
-// KEYS: rec. ARGV: mode, idleTimeoutS.
-// HSET and HINCRBY keep the key's EXPIREAT. A hash written before the mode fields has no modeEpoch,
-// which HINCRBY reads as 0. The record is read back in the same script, so the caller sees the epoch
-// it raised and no later one.
+// KEYS: rec. ARGV: mode, idleTimeoutS, now.
+// Refuses a missing, deleted or expired record, the expiry checked here as DELETE checks it, so a
+// PUT that crosses expiry stores nothing. HSET and HINCRBY keep the key's EXPIREAT. A hash written
+// before the mode fields has no modeEpoch, which HINCRBY reads as 0. The record is read back in the
+// same script, so the caller sees the epoch it raised and no later one.
 const SET_MODE = `
 if redis.call('EXISTS', KEYS[1]) == 0 then return false end
 if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 1 then return false end
+if tonumber(ARGV[3]) >= tonumber(redis.call('HGET', KEYS[1], 'expiresAt')) then return false end
 local prev = redis.call('HGET', KEYS[1], 'mode') or ''
 redis.call('HSET', KEYS[1], 'mode', ARGV[1], 'idleTimeoutS', ARGV[2])
 redis.call('HINCRBY', KEYS[1], 'modeEpoch', 1)
@@ -228,12 +230,13 @@ export class RedisSandboxStore implements SandboxStore {
     id: string,
     mode: SandboxModeName,
     idleTimeoutS: number,
+    nowS: number,
   ): Promise<SetModeResult | undefined> {
     return this.guard(async () => {
       // [the mode before the HSET ('' on a legacy hash), ...HGETALL after it]
       const out = (await this.redis.eval(SET_MODE, {
         keys: [this.recKey(id)],
-        arguments: [mode, String(idleTimeoutS)],
+        arguments: [mode, String(idleTimeoutS), String(nowS)],
       })) as string[] | null;
       if (!out) return undefined;
       const [prev, ...flat] = out;

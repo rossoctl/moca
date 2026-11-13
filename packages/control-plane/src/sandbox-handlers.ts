@@ -173,6 +173,61 @@ function requireLive(rec: SandboxRecord, now: number): void {
   }
 }
 
+/**
+ * setMode gave undefined: the sandbox was deleted, expired or purged since the caller's read. Answer
+ * as a read would now: 409 with the reason while it is retained, 404 once it is gone.
+ */
+async function refuseGone(store: SandboxStore, id: string, now: number): Promise<never> {
+  const fresh = await store.get(id, now);
+  if (fresh) requireLive(fresh, now);
+  throw new CpError('sandbox_not_found', 'no such sandbox');
+}
+
+/**
+ * The record as the policy allows it NOW, before a token is minted from it (lease-mode spec §8.1).
+ * SH_SANDBOX_MODES_ALLOWED is the switch: create and PUT check it, but a sandbox outlives a policy
+ * change, so a mint re-checks it too. A lease mode the policy no longer lists is downgraded to
+ * per-exec through the store's atomic setMode, which raises the epoch: the next Exec, carrying the
+ * new token, ends the live lease, where a same-epoch re-issue would read to the worker as a retry
+ * (spec §8.2). Audited as a `sandbox_mode_changed` with reason `mode_not_allowed`, the policy's
+ * change rather than the owner's. The owner's idle timeout is kept: per-exec does not use it.
+ *
+ * Two mints racing here may both downgrade, raising the epoch twice; each audits what it changed,
+ * and both tokens are per-exec. An owner PUT to a mode still allowed, landing between this read and
+ * the setMode, is overwritten with per-exec; the owner can PUT it again. Both are accepted rather
+ * than closed with a conditional setMode, which the store does not have.
+ */
+async function underPolicy(
+  deps: CpDeps,
+  subject: string,
+  rec: SandboxRecord,
+  now: number,
+): Promise<SandboxRecord> {
+  const { cfg, store } = service(deps);
+  if (rec.mode === 'per-exec' || cfg.modesAllowed.has(rec.mode)) return rec;
+  const changed = await store.setMode(rec.id, 'per-exec', rec.idleTimeoutS, now);
+  if (!changed) return refuseGone(store, rec.id, now);
+  const next = changed.record;
+  await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
+    subject,
+    sandboxId: rec.id,
+    decision: 'sandbox_mode_changed',
+    reason: 'mode_not_allowed',
+    fromMode: changed.previousMode,
+    toMode: next.mode,
+    modeEpoch: next.modeEpoch,
+  });
+  return next;
+}
+
+/**
+ * The idle timeout a token carries: the record's, clamped to the ceiling as it is NOW. Lowering
+ * SH_SANDBOX_IDLE_CEILING_S changes neither the record nor the epoch: the idle timeout travels on
+ * every Exec (ruling R12), so the next token is enough. 0, the worker's default, stays 0.
+ */
+const idleClaim = (deps: CpDeps, rec: SandboxRecord): number =>
+  Math.min(rec.idleTimeoutS, service(deps).cfg.idleCeilingS);
+
 /** A set-mode token for the record's mode and epoch, as they are now (spec §8.2). */
 function setModeTokenFor(deps: CpDeps, rec: SandboxRecord, now: number): string {
   return mintSetModeToken(deps.signer, {
@@ -182,7 +237,7 @@ function setModeTokenFor(deps: CpDeps, rec: SandboxRecord, now: number): string 
     wsk: rec.wsk,
     mode: rec.mode,
     modeEpoch: rec.modeEpoch,
-    idleTimeoutS: rec.idleTimeoutS,
+    idleTimeoutS: idleClaim(deps, rec),
     notAfter: rec.expiresAt,
     iss: service(deps).cfg.issuer,
     now,
@@ -1018,10 +1073,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   mintSandboxToken: async (ctx, deps) => {
-    const rec = await assertSandboxOwner(ctx, deps, { admin: false });
+    const read = await assertSandboxOwner(ctx, deps, { admin: false });
     const { cfg } = service(deps);
     const now = seconds(deps);
-    requireLive(rec, now);
+    requireLive(read, now);
+    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
     const { token, exp } = mintSandboxToken(deps.signer, {
       sub: rec.owner,
       tenant: rec.tenant,
@@ -1030,7 +1086,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       wsk: rec.wsk,
       mode: rec.mode,
       modeEpoch: rec.modeEpoch,
-      idleTimeoutS: rec.idleTimeoutS,
+      idleTimeoutS: idleClaim(deps, rec),
       ttlSeconds: cfg.tokenTtlS,
       notAfter: rec.expiresAt,
       iss: cfg.issuer,
@@ -1064,13 +1120,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const b = asRecord(ctx.body);
     const mode = parseMode(b.mode, cfg);
     const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
-    const changed = await store.setMode(rec.id, mode, idleTimeoutS);
-    if (!changed) {
-      // Deleted, or past retention, since the read above: answer as a read would now.
-      const fresh = await store.get(rec.id, now);
-      if (fresh) requireLive(fresh, now);
-      throw new CpError('sandbox_not_found', 'no such sandbox');
-    }
+    const changed = await store.setMode(rec.id, mode, idleTimeoutS, now);
+    // Deleted, expired or past retention since the read above.
+    if (!changed) return refuseGone(store, rec.id, now);
     const next = changed.record;
     await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
       subject: ctx.principal!.sub,
@@ -1092,12 +1144,14 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
 
   /**
    * A set-mode token for the mode and epoch the record holds now, raising nothing: what `mocactl sbx
-   * get` re-sends when the worker reports the epoch unknown (spec §8.2). Owner only, as above.
+   * get` re-sends when the worker reports the epoch unknown (spec §8.2). Owner only, as above. The
+   * one exception is a mode the policy no longer allows, downgraded first (underPolicy).
    */
   mintSandboxModeToken: async (ctx, deps) => {
-    const rec = await assertSandboxOwner(ctx, deps, { admin: false });
+    const read = await assertSandboxOwner(ctx, deps, { admin: false });
     const now = seconds(deps);
-    requireLive(rec, now);
+    requireLive(read, now);
+    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
     return { status: 200, body: { setModeToken: setModeTokenFor(deps, rec, now) } };
   },
 

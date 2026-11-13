@@ -350,7 +350,10 @@ export class OwnershipIndex {
     /** The gating rule ids a policy refusal failed, comma-separated (spec §8.1). */
     rules?: string;
     decision: string;
-    /** The error code of a refusal. */
+    /**
+     * The error code of a refusal; on a `sandbox_mode_changed` the policy made (a mode no longer
+     * allowed, downgraded at a token mint), `mode_not_allowed`.
+     */
     reason?: string;
     model?: string;
     fromModel?: string;
