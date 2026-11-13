@@ -36,7 +36,7 @@
 #     of the sandboxes on its workers, live or just ended) is the list, and an event whose sid is not in
 #     it (a Moca P6 session's, served by the same proxy) is not sent, only counted (egressNotOurs).
 #     An audit_dropped report (a count, no sid) is sent. A control plane whose wanted state has no
-#     egressSids (older than openapi 1.8.0) gets nothing: an error line, no journal read, the cursor kept.
+#     egressSids (older than openapi 1.9.0) gets nothing: an error line, no journal read, the cursor kept.
 #     The list comes from activation()'s read of the wanted state; a run whose activation was skipped
 #     for the lock reads it once itself. That read comes before the journal read, so a sandbox created
 #     in between would be missing from it: a batch with any sid not in the list reads the wanted state
@@ -488,7 +488,7 @@ egress() {
     (umask 077 && api GET "/v1/hosts/$SBX_HOST_ID/wanted" >"$WORK/wanted.json") || { error 'egress: wanted state unreadable; nothing sent'; exec 8>&-; return; }
   fi
   if ! jq -e '.egressSids | type == "array" and all(type == "string")' "$WORK/wanted.json" >/dev/null 2>&1; then
-    error 'egress: the wanted state has no egressSids (a control plane older than openapi 1.8.0); nothing sent, the cursor kept'
+    error 'egress: the wanted state has no egressSids (a control plane older than openapi 1.9.0); nothing sent, the cursor kept'
     exec 8>&-
     return
   fi

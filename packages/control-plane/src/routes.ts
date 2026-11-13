@@ -628,6 +628,26 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: SANDBOX,
     operationId: 'getSandboxEgress',
   },
+  // Lease-mode spec §8.1-§8.2: the owner's user API token only; a sandbox token is refused by typ.
+  {
+    method: 'PUT',
+    path: '/v1/sandboxes/{id}/mode',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    profiles: SANDBOX,
+    operationId: 'setSandboxMode',
+  },
+  {
+    method: 'POST',
+    path: '/v1/sandboxes/{id}/mode-token',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    bodyRequired: false,
+    profiles: SANDBOX,
+    operationId: 'mintSandboxModeToken',
+  },
   // The host janitor's read (SBX0 §8.3): what to keep and what to free, nothing else.
   {
     method: 'GET',

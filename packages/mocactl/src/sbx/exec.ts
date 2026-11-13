@@ -1,5 +1,6 @@
 import {
   execFailureText,
+  ExecMachineryError,
   SandboxExecConn,
   type Exec,
   type ExecConnOptions,
@@ -139,6 +140,22 @@ export async function openExec(
 export const EXIT_SANDBOX_FAILED = 125;
 /** `sbx run`'s exit for a command that timed out or was killed (spec §6.1). */
 export const EXIT_KILLED = 124;
+/**
+ * `sbx run`'s exit when the sandbox refused the command before it started, every try: the
+ * relay's in-flight cap or the template worker's capacity (`memory-budget:`,
+ * `max-runs:`, `busy: queue full`). Nothing ran, so a caller may run it again later. 75 is
+ * sysexits' EX_TEMPFAIL.
+ */
+export const EXIT_BUSY = 75;
+
+/** Whether an Exec failed before its command started, for want of capacity: safe to send again. */
+export function refusedBeforeStart(err: unknown): boolean {
+  return (
+    err instanceof ExecMachineryError &&
+    (err.kind === 'busy' || err.kind === 'template_busy') &&
+    !err.mayHaveRun
+  );
+}
 
 /**
  * The exit for an error from `openExec` or from an Exec: never the command's outcome.
