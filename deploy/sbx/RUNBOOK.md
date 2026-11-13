@@ -104,6 +104,11 @@ says so, and `install-host.sh --janitor` with the new janitor bundle after a cha
 `SBX_API_HOST` or `SBX_API_CA_FILE`. `status.sh --host` warns when a host's installed janitor wait
 no longer exceeds the token lifetime plus 30 s.
 
+**A worker installed before the jail path was keyed by a digest of the id** has its jail at
+`/srv/sbx/jail/<id>`; a reinstall moves it to `/srv/sbx/jail/j<12 hex of the id>`. Re-running
+`install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
+path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
+
 ## 3. Changing the sandbox lifetime
 
 `SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,
@@ -460,7 +465,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
 also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
-installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is left; remove it by hand.
+installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
 

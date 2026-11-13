@@ -10,9 +10,23 @@ import { saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
 import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
+import { sandboxFailureText, type ExecFactory } from './exec.js';
+import { seedSandbox, type SeedResult } from './templates.js';
 
-/** `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2. */
-export const SBX_EXIT = { ok: 0, failed: 1, usage: 2, loginRequired: 3, unreachable: 4 } as const;
+/**
+ * `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2; 5 when a wait
+ * (`templates follow`, a create waiting for a queue slot) ran out of time; 130 when Ctrl-C stopped
+ * it, as `sbx run` and `sbx rm`.
+ */
+export const SBX_EXIT = {
+  ok: 0,
+  failed: 1,
+  usage: 2,
+  loginRequired: 3,
+  unreachable: 4,
+  timedOut: 5,
+  interrupted: 130,
+} as const;
 
 export interface SbxCtx {
   rt: Runtime;
@@ -21,6 +35,9 @@ export interface SbxCtx {
   io: Io;
   json: boolean;
   signal?: AbortSignal;
+  /** The template commands' sleep and clock (default the runtime's); tests pass fakes. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  now?: () => number;
   /**
    * The control-plane URL when it came from `--control-plane-url` or MOCACTL_SBX_URL rather than
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
@@ -53,6 +70,9 @@ export function failRefresh(io: Io, error: unknown): number {
   return SBX_EXIT.unreachable;
 }
 
+/** The 404s the sandbox and template routes answer themselves: a real answer about the id. */
+const OWN_404 = new Set(['sandbox_not_found', 'template_not_found']);
+
 /**
  * One line per failure. A refusal from the control plane is exit 1 with its message; a network
  * failure (status 0) is exit 4; a token the control plane will not take any more is exit 3 --
@@ -72,15 +92,30 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
   } else if (err instanceof ApiError && TOKEN_CODES.has(err.code)) {
     io.err('sbx: your sandbox-service login has expired: run `mocactl sbx login`');
     return SBX_EXIT.loginRequired;
-  } else if (err instanceof ApiError && err.status === 404 && err.code !== 'sandbox_not_found') {
-    // A heuristic: every sandbox route's own 404 is `sandbox_not_found`, so any other 404 (the
-    // server's bare `not_found` for an unmounted route, or a proxy's page) means the URL is not a
-    // sandbox-profile control plane -- a MOCA (harness profile) one, or one from before SBX0.
+  } else if (err instanceof ApiError && err.status === 404 && !OWN_404.has(err.code)) {
+    // A heuristic: every sandbox route's own 404 is `sandbox_not_found` (a template route's
+    // `template_not_found`), so any other 404 (the server's bare `not_found` for an unmounted route,
+    // or a proxy's page) means the URL is not a sandbox-profile control plane -- a MOCA (harness
+    // profile) one, or one from before SBX0.
     io.err('sbx: that control plane has no sandbox routes: is it the sandbox service?');
+  } else if (err instanceof ApiError) {
+    io.err(`sbx: ${refusalText(err)}`);
   } else {
     io.err(`sbx: ${describeError(err)}`);
   }
   return SBX_EXIT.failed;
+}
+
+/**
+ * A refusal in one line, with what the body says beside its code: the policy rule a create failed
+ * (`422 policy_refused`), or the quota it is over (`429 quota_exceeded`). Server text is sanitized
+ * (describeError).
+ */
+export function refusalText(err: ApiError): string {
+  const text = describeError(err);
+  if (err.rule !== undefined) return `refused by policy rule ${sanitizeRemote(err.rule)}: ${text}`;
+  if (err.quota !== undefined) return `over your ${sanitizeRemote(err.quota)} quota: ${text}`;
+  return text;
 }
 
 /**
@@ -171,7 +206,15 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
     if (c.json) c.io.out(JSON.stringify(ts) + '\n');
     else {
       for (const t of ts) {
-        c.io.out(`${sanitizeRemote(t.id).padEnd(16)} ${sanitizeRemote(t.description)}\n`);
+        // Readiness and tags (template lifecycle spec §4) when the control plane sends them; an
+        // older one sends neither, and the line is as before.
+        const ready =
+          typeof t.readiness === 'string' ? `${sanitizeRemote(t.readiness).padEnd(9)} ` : '';
+        const tags = t.tags ? Object.keys(t.tags).sort().map(sanitizeRemote) : [];
+        c.io.out(
+          `${sanitizeRemote(t.id).padEnd(16)} ${ready}${sanitizeRemote(t.description)}` +
+            `${tags.length ? `  tags ${tags.join(',')}` : ''}\n`,
+        );
       }
     }
     return SBX_EXIT.ok;
@@ -180,17 +223,41 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
   }
 }
 
+/**
+ * `sbx create [--template ID[:TAG|@BUILD]] [--seed]`. With --seed, the served build's seed runs as
+ * the new sandbox's first command and the workspace is checked (seedSandbox): a failure there is
+ * exit 1, the sandbox kept and named, so its state can be looked at.
+ */
 export async function cmdCreate(
   c: SbxCtx,
   body: { template: string; name?: string; labels?: Record<string, string> },
+  seed?: { factory?: ExecFactory },
 ): Promise<number> {
   try {
     const s = await c.api.createSandbox(body);
-    if (c.json) c.io.out(JSON.stringify(s) + '\n');
-    else c.io.out(`${sanitizeRemote(s.id)}\n`);
     c.io.err(
       `created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`,
     );
+    let seeded: SeedResult | undefined;
+    if (seed) {
+      const r = await seedSandbox(c, s, seed.factory).catch((err: unknown) =>
+        err instanceof ApiError ? Promise.reject(err) : sandboxFailureText(err),
+      );
+      if (typeof r === 'string') {
+        if (c.json) c.io.out(JSON.stringify({ ...s, seed: { error: r } }) + '\n');
+        else c.io.out(`${sanitizeRemote(s.id)}\n`);
+        c.io.err(`sbx: ${sanitizeRemote(s.id)}: ${r}`);
+        return SBX_EXIT.failed;
+      }
+      seeded = r;
+      c.io.err(
+        r.seed === ''
+          ? `${sanitizeRemote(s.id)}: the template has no seed`
+          : `seeded ${sanitizeRemote(s.id)}${r.head ? `: a clean tree at ${r.head}` : ''}`,
+      );
+    }
+    if (c.json) c.io.out(JSON.stringify(seeded ? { ...s, seed: seeded } : s) + '\n');
+    else c.io.out(`${sanitizeRemote(s.id)}\n`);
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

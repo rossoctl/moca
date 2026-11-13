@@ -654,6 +654,20 @@ export async function sandboxState(
 }
 
 /**
+ * After a template's seed left a clean git tree in the workspace: its HEAD becomes the sbx baseline,
+ * so `pull` returns only what came after the seed, and `rm` sees no unpulled changes (a seed's tree
+ * is the template's, not the caller's work).
+ */
+export async function baselineAtHead(exec: Exec, ws = WORKSPACE, o: SyncOpts = {}): Promise<void> {
+  await must(
+    exec,
+    `cd ${q(ws)} && ${G} rev-parse -q --verify HEAD >/dev/null && ${G} update-ref ${BASELINE_REF} HEAD`,
+    'recording the seed as the baseline',
+    o,
+  );
+}
+
+/**
  * Whether the sandbox holds work a push would discard: changes since the baseline, or files with
  * no baseline at all. An unfinished push holds none (it emptied the workspace first).
  */

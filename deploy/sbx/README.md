@@ -148,7 +148,7 @@ those of that worker's slice and waits for them to empty ([the runbook](RUNBOOK.
 `install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
 `/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
 a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`. Workspace data under
-`/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
+`/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` is kept; remove it by hand when no sandbox needs
 it.
 
 **The janitor** frees the workspaces of ended sandboxes (spec §8.3). Install it once per host, from

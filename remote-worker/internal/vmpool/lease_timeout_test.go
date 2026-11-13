@@ -3,6 +3,7 @@ package vmpool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -46,6 +47,38 @@ func TestLeaseGuestTimeoutKeepsTheLease(t *testing.T) {
 	}
 	if n := lc.count("run vm-1"); n != 3 {
 		t.Fatalf("Runs in vm-1 = %d, want 3", n)
+	}
+	if n := p.Stats().LeaseEnds[LeaseEndAgentDead]; n != 0 {
+		t.Fatalf("LeaseEnds[agent_dead] = %d, want 0", n)
+	}
+}
+
+// A command larger than the guest's one request frame is refused before anything is sent
+// (runOverConn): the caller gets ErrCommandTooLarge and the lease, and its VM, are kept.
+func TestLeaseCommandTooLargeKeepsTheLease(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	mustExec(t, p, "k", leaseExec("one", 1))
+	before := liveLease(p, "k")
+
+	lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) {
+		return Result{}, fmt.Errorf("%w: %d bytes", ErrCommandTooLarge, ga.MaxFrame+1)
+	})
+	_, err := p.Exec(t.Context(), "k", Exec{Command: "big", TimeoutS: 5, Mode: ModeLease, ModeEpoch: 1}, &capturingSink{})
+	if !errors.Is(err, ErrCommandTooLarge) {
+		t.Fatalf("err = %v, want ErrCommandTooLarge", err)
+	}
+	if l := liveLease(p, "k"); l == nil || l != before {
+		t.Fatalf("the lease after an oversized command = %p, want the same lease %p", l, before)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending != nil && s.Pending.State == leaseEventEnd {
+		t.Fatalf("state = %+v (pending %+v), want no end recorded", s, s.Pending)
+	}
+
+	lc.setRunFn(nil)
+	mustExec(t, p, "k", leaseExec("two", 1))
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("Restore calls = %d, want 1: the next Exec runs in the same VM", n)
 	}
 	if n := p.Stats().LeaseEnds[LeaseEndAgentDead]; n != 0 {
 		t.Fatalf("LeaseEnds[agent_dead] = %d, want 0", n)
