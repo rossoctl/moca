@@ -63,6 +63,14 @@ func (f *fakeClient) Abort(context.Context, *pb.AbortRequest, ...grpc.CallOption
 	return &pb.AbortResponse{}, nil
 }
 
+func (f *fakeClient) LeaseControl(context.Context, *pb.LeaseControlRequest, ...grpc.CallOption) (*pb.LeaseControlResponse, error) {
+	return &pb.LeaseControlResponse{}, nil
+}
+
+func (f *fakeClient) LeaseKeepalive(context.Context, *pb.LeaseKeepaliveRequest, ...grpc.CallOption) (*pb.LeaseKeepaliveResponse, error) {
+	return &pb.LeaseKeepaliveResponse{}, nil
+}
+
 func chunk(s pb.Stream, data string) *pb.ExecEvent {
 	return &pb.ExecEvent{Event: &pb.ExecEvent_Chunk{Chunk: &pb.Chunk{Data: []byte(data), Stream: s}}}
 }
@@ -266,6 +274,14 @@ func (s *scriptedClient) Exec(ctx context.Context, in *pb.ExecRequest, o ...grpc
 
 func (s *scriptedClient) Abort(context.Context, *pb.AbortRequest, ...grpc.CallOption) (*pb.AbortResponse, error) {
 	return &pb.AbortResponse{}, nil
+}
+
+func (s *scriptedClient) LeaseControl(context.Context, *pb.LeaseControlRequest, ...grpc.CallOption) (*pb.LeaseControlResponse, error) {
+	return &pb.LeaseControlResponse{}, nil
+}
+
+func (s *scriptedClient) LeaseKeepalive(context.Context, *pb.LeaseKeepaliveRequest, ...grpc.CallOption) (*pb.LeaseKeepaliveResponse, error) {
+	return &pb.LeaseKeepaliveResponse{}, nil
 }
 
 const budgetRefusal = "memory-budget: promoting a standby would re-price it from 33554432 to 4328521728 committed bytes"

@@ -60,7 +60,7 @@ export interface RouteSpec {
    * Mounted only when this feature is on (see RouteFeatures). Absent means always mounted.
    * `requiresEgress` above is the same idea, kept separate because it applies per profile.
    */
-  feature?: 'testUsers';
+  feature?: 'testUsers' | 'grants';
 }
 
 const BOTH: readonly RouteProfile[] = ['harness', 'sandbox'];
@@ -387,6 +387,35 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: HARNESS,
     operationId: 'exchangeTurnCredential',
   },
+  /**
+   * MI1 §6.2's grant lifecycle, on the same shared bearer as the two exchanges above because it is
+   * the same hop. Unmounted unless `MOCA_GRANT_SIGNING_KEY` is set, so a deployment that has not
+   * generated the grant ring 404s both paths rather than 500ing on a missing key -- and 404s them
+   * BEFORE the body is parsed, which is the whole reason ADR-0045 puts the gate here.
+   *
+   * §6.2 says `/internal/turn-grants` "replaces `/internal/credentials`". It does not here: nothing
+   * redeems a grant until the `moca-egress` inference listener exists (§8.6), so retiring the
+   * credential exchange now would break every worker for no gain. Both stay; the replacement ships
+   * with the redeemer.
+   */
+  {
+    method: 'POST',
+    path: '/internal/turn-grants',
+    auth: 'exchange',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'issueTurnGrants',
+    feature: 'grants',
+  },
+  {
+    method: 'POST',
+    path: '/internal/grants/refresh',
+    auth: 'exchange',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'refreshTurnGrants',
+    feature: 'grants',
+  },
   // Template lifecycle spec §4: the templates, one template, its builds, one build, its tags. On
   // BOTH profiles (§4.1), so a session's brain and a sandbox client read the same templates.
   {
@@ -528,6 +557,26 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: SANDBOX,
     operationId: 'mintSandboxToken',
   },
+  // Lease-mode spec §8.1-§8.2: the owner's user API token only; a sandbox token is refused by typ.
+  {
+    method: 'PUT',
+    path: '/v1/sandboxes/{id}/mode',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    profiles: SANDBOX,
+    operationId: 'setSandboxMode',
+  },
+  {
+    method: 'POST',
+    path: '/v1/sandboxes/{id}/mode-token',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    bodyRequired: false,
+    profiles: SANDBOX,
+    operationId: 'mintSandboxModeToken',
+  },
   // The host janitor's read (SBX0 §8.3): what to keep and what to free, nothing else.
   {
     method: 'GET',
@@ -578,6 +627,8 @@ export interface RouteFeatures {
   egress?: boolean;
   /** SH_TEST_USERS > 0: mounts POST /v1/auth/test-token. */
   testUsers?: boolean;
+  /** MOCA_GRANT_SIGNING_KEY is set: mounts the two MI1 §6.2 grant routes. */
+  grants?: boolean;
 }
 
 export function matchRoute(

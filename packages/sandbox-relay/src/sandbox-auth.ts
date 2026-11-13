@@ -4,7 +4,9 @@ import {
   KeysetError,
   parseKeyset,
   verifySandboxToken,
+  verifySetModeToken,
   type SandboxTokenClaims,
+  type SetModeClaims,
 } from '@moca/control-plane';
 
 /**
@@ -21,6 +23,17 @@ export type SandboxVerdict =
  * Never throws per call.
  */
 export type SandboxVerifier = (presented: string | undefined) => SandboxVerdict;
+
+/** The verdict on one presented set-mode token; `reason` as SandboxVerdict's. */
+export type SetModeVerdict =
+  { claims: SetModeClaims; reason?: undefined } | { claims?: undefined; reason: string };
+
+/**
+ * The relay's check of a set_mode's `set_mode_token` (lease-mode spec §8.2): a
+ * `moca-sandbox-mode+jwt` from the same control plane, so a sandbox token cannot stand in for it.
+ * Same keys, issuer and leeway as SandboxVerifier. Never throws per call.
+ */
+export type SetModeVerifier = (presented: string | undefined) => SetModeVerdict;
 
 const KEYSET_VAR = 'SH_SANDBOX_TOKEN_PUBLIC_KEYS';
 
@@ -62,15 +75,40 @@ export function keysetFromEnv(varName: string, raw: string): Map<string, KeyObje
  * naming the variable (§3.3).
  */
 export function makeSandboxTokenVerifier(env: NodeJS.ProcessEnv): SandboxVerifier | undefined {
+  const cfg = sandboxKeys(env);
+  return cfg && verifierOf((t) => verifySandboxToken(t, cfg.keys, { issuer: cfg.issuer }));
+}
+
+/**
+ * The set-mode token verifier, from the same variables as makeSandboxTokenVerifier, with the same
+ * boot errors; undefined when no keyset is set.
+ */
+export function makeSetModeTokenVerifier(env: NodeJS.ProcessEnv): SetModeVerifier | undefined {
+  const cfg = sandboxKeys(env);
+  return cfg && verifierOf((t) => verifySetModeToken(t, cfg.keys, { issuer: cfg.issuer }));
+}
+
+/** SH_SANDBOX_TOKEN_PUBLIC_KEYS and its issuer, or undefined when the keyset is unset or blank. */
+function sandboxKeys(
+  env: NodeJS.ProcessEnv,
+): { keys: Map<string, KeyObject>; issuer: string } | undefined {
   const raw = env[KEYSET_VAR]?.trim();
   if (!raw) return undefined;
   const keys = keysetFromEnv(KEYSET_VAR, raw);
   const issuer = env.SH_SANDBOX_TOKEN_ISSUER?.trim();
   if (!issuer) throw new Error(`SH_SANDBOX_TOKEN_ISSUER is required with ${KEYSET_VAR}`);
+  return { keys, issuer };
+}
+
+function verifierOf<C>(
+  verify: (presented: string) => C,
+): (
+  presented: string | undefined,
+) => { claims: C; reason?: undefined } | { claims?: undefined; reason: string } {
   return (presented) => {
     if (!presented) return { reason: 'no bearer token' };
     try {
-      return { claims: verifySandboxToken(presented, keys, { issuer }) };
+      return { claims: verify(presented) };
     } catch (err) {
       // CpError messages are the verifier's own fixed strings. Anything else is unexpected, and
       // its message could carry input, so it is not logged.

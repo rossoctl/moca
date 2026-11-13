@@ -18,6 +18,7 @@ export const CP_ERROR_CODES = [
   'token_required',
   'token_invalid',
   'token_expired',
+  'grant_invalid',
   'invalid_grant',
   'subject_conflict',
   'unauthorized',
@@ -34,6 +35,7 @@ export const CP_ERROR_CODES = [
   'template_not_found',
   'template_exists',
   'policy_refused',
+  'mode_not_allowed',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -71,6 +73,15 @@ const STATUS: Record<CpErrorCode, number> = {
   token_required: 401,
   token_invalid: 401,
   token_expired: 401,
+  // 401: ONE code for every way a session grant can fail -- bad signature, wrong typ, wrong aud,
+  // unknown kid, past `exp`, past `turn_exp` (MI1 §6.3's checklist item 1). Deliberately not split
+  // the way the session token's token_invalid/token_expired are: a grant is presented by the data
+  // plane, whose only move on any of them is to re-exchange, so a second code would buy it nothing.
+  // Note this does NOT withhold which check failed -- `writeError` below sends `message`, and
+  // verifyGrant's messages name the check. That is deliberate (the route is behind the shared
+  // bearer, and an operator debugging a verifier needs it). Distinct from `invalid_grant` below, which
+  // is OAuth's refresh-token refusal and has nothing to do with session grants despite the name.
+  grant_invalid: 401,
   // 400, as RFC 6749 §5.2 answers a refused grant: the refresh token is unknown, revoked, expired
   // or a replayed predecessor. One code for all four, so a client's only move is "log in again".
   invalid_grant: 400,
@@ -96,6 +107,9 @@ const STATUS: Record<CpErrorCode, number> = {
   template_exists: 409,
   // 422: a create the policy refuses at create (spec §8.1); `rule` names the gating rule.
   policy_refused: 422,
+  // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
+  // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
+  mode_not_allowed: 403,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.

@@ -18,13 +18,19 @@ export {
 export {
   DEFAULT_SANDBOX_ISSUER,
   SANDBOX_CLOCK_LEEWAY_S,
+  SANDBOX_MODE_TOKEN_TTL_S,
+  SANDBOX_MODE_TOKEN_TYP,
   SANDBOX_SCOPE_EXEC,
   SANDBOX_TOKEN_AUDIENCE,
   SANDBOX_TOKEN_TYP,
   mintSandboxToken,
+  mintSetModeToken,
   verifySandboxToken,
+  verifySetModeToken,
   type SandboxMintInput,
   type SandboxTokenClaims,
+  type SetModeClaims,
+  type SetModeMintInput,
 } from './sandbox-token.js';
 export {
   ATTACH_CLOCK_LEEWAY_S,
@@ -148,12 +154,16 @@ export { projectResources, resolveSandbox, type SandboxView } from './resources.
 // The store's SandboxView is aliased: resources.ts's SandboxView (a session's sandbox tier) owns the name.
 export {
   MemorySandboxStore,
+  SANDBOX_MODE_NAMES,
   isLive,
+  isSandboxModeName,
   viewOf,
   type CreateOutcome,
   type DeleteOutcome,
   type SandboxLimits,
+  type SandboxModeName,
   type SandboxRecord,
+  type SetModeResult,
   type SandboxState,
   type SandboxStore,
   type SandboxView as SandboxStoreView,
@@ -178,6 +188,7 @@ export {
   checkStaticBearer,
   exchangeCredential,
   placeholderFor,
+  sessionFromToken,
   refuseMisdirectedSecret,
   resolveInference,
   targetOf,
@@ -186,6 +197,22 @@ export {
   type ResolvedInference,
 } from './exchange.js';
 export { exchangeTurnCredential, type TurnExchangeResponse } from './turn-exchange.js';
+export {
+  DEFAULT_GRANT_ISSUER,
+  GRANT_AUDIENCES,
+  GRANT_TYP,
+  INFERENCE_GRANT_AUDIENCE,
+  SANDBOX_GRANT_AUDIENCE,
+  mintGrants,
+  turnExp,
+  verifyGrant,
+  type GrantAudience,
+  type GrantClaims,
+  type GrantMintInput,
+  type InferenceGrantClaims,
+  type SandboxGrantClaims,
+} from './grant.js';
+export { issueTurnGrants, refreshTurnGrants, type TurnGrantsResponse } from './grant-exchange.js';
 export { TurnStore, type TurnStoreOptions } from './turn-store.js';
 export {
   isTerminalState,

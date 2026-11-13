@@ -1,4 +1,4 @@
-import { SandboxExecService } from '@moca/k8s-sandbox';
+import { Exec, SandboxExecService } from '@moca/k8s-sandbox';
 import { Server, ServerCredentials, type ServerWritableStream } from '@grpc/grpc-js';
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -504,14 +504,14 @@ describe('selectPoolSandbox: the real defaultExecClient (MI1 R5)', () => {
     await new Promise<void>((resolve) => {
       const call = client.exec({
         sandboxId: 'sbx-remote-1',
-        exec: {
+        exec: Exec.fromPartial({
           reqId: 1,
           command: 'true',
           stdin: new Uint8Array(),
           timeoutS: 5,
           streaming: true,
           workspaceKey: '',
-        },
+        }),
       });
       call.on('data', () => {});
       call.on('end', () => resolve());
