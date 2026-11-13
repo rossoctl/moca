@@ -19,6 +19,7 @@ import { hasUnpulled, MAX_FILE, repoId } from '../src/sbx/push.js';
 import {
   LOGIN,
   NEW,
+  NO_LEASE,
   OTHER,
   SBX,
   URL_,
@@ -583,6 +584,7 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
         );
       },
       close: () => {},
+      ...NO_LEASE,
     });
     const run = (argv: string[]) =>
       sbxMain(argv, h.env, h.io, {

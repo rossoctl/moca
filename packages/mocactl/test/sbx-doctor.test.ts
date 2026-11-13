@@ -20,7 +20,17 @@ import {
 } from '../src/sbx/doctor.js';
 import type { ExecFactory } from '../src/sbx/exec.js';
 import { recordCall } from '../src/sbx/recorder.js';
-import { LOGIN, SBX, URL_, cleanupTmp, controlPlane, repo, sandbox, setup } from './helpers/sbx.js';
+import {
+  LOGIN,
+  NO_LEASE,
+  SBX,
+  URL_,
+  cleanupTmp,
+  controlPlane,
+  repo,
+  sandbox,
+  setup,
+} from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -52,7 +62,7 @@ function fakeExec(o: { state?: string; fail?: Error; exitCode?: number } = {}) {
   };
   const factory: ExecFactory = (c) => {
     conns.push(c);
-    return { exec, close: () => void closed++ };
+    return { exec, close: () => void closed++, ...NO_LEASE };
   };
   return { factory, sent, opts, conns, closed: () => closed };
 }
@@ -246,7 +256,13 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       return res({ exitCode: -1, timedOutS: o.timeoutS ?? 300 });
     };
     const t0 = Date.now();
-    const cs = await runDoctor(w.ctx(), w.r, SBX, () => ({ exec, close: () => {} }), CURRENT);
+    const cs = await runDoctor(
+      w.ctx(),
+      w.r,
+      SBX,
+      () => ({ exec, close: () => {}, ...NO_LEASE }),
+      CURRENT,
+    );
     expect(Date.now() - t0).toBeLessThan(5_000);
     expect(asked).toEqual([20]);
     const c = byName(cs, 'changes');

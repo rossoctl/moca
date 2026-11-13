@@ -27,7 +27,18 @@ import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { jwtMode, sandboxTokenFn, type ExecFactory } from '../src/sbx/exec.js';
 import { busyRetries } from '../src/sbx/run.js';
 import { readRecords, recordCall } from '../src/sbx/recorder.js';
-import { jwt, LOGIN, SBX, TOKEN, TOKEN_IAT, fakeCp, sandbox, setup, URL_ } from './helpers/sbx.js';
+import {
+  jwt,
+  LOGIN,
+  NO_LEASE,
+  SBX,
+  TOKEN,
+  TOKEN_IAT,
+  fakeCp,
+  sandbox,
+  setup,
+  URL_,
+} from './helpers/sbx.js';
 
 const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   stdout: Buffer.from('out\n'),
@@ -58,6 +69,7 @@ function fakeExec(answer: (command: string) => ExecResult | Error = () => res())
         return a;
       },
       close: () => void closed++,
+      ...NO_LEASE,
     };
   };
   return { factory, opened, sent, closed: () => closed };

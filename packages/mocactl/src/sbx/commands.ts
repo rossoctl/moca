@@ -9,8 +9,15 @@ import { sanitizeRemote } from '../core/sanitize.js';
 import { saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
-import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
-import { sandboxFailureText, type ExecFactory } from './exec.js';
+import type { SandboxApiClient, SbxDiscovery, SbxSandbox, SbxSandboxCreate } from './api.js';
+import { openExec, sandboxFailureText, type ExecFactory } from './exec.js';
+import {
+  modeRank,
+  pendingText,
+  sendSetMode,
+  setModeFailureText,
+  type SetModeOutcome,
+} from './mode.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
@@ -303,43 +310,88 @@ export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string):
 }
 
 /**
- * `sbx create [--template ID[:TAG|@BUILD]] [--seed]`. With --seed, the served build's seed runs as
- * the new sandbox's first command and the workspace is checked (seedSandbox): a failure there is
- * exit 1, the sandbox kept and named, so its state can be looked at.
+ * `sbx create [--template ID[:TAG|@BUILD]] [--mode M] [--seed]`. A lease mode is stored by the
+ * create at epoch 1, which the worker serves per-Exec until a set_mode makes the epoch known (spec
+ * §8.2): the create answers no set-mode token, so one is minted and sent first, before the seed. A
+ * pending set_mode is a warning (exit 0); a refused one is exit 1, the sandbox kept and named. With
+ * --seed, the served build's seed runs as the new sandbox's first command and the workspace is
+ * checked (seedSandbox): a failure there is exit 1, the sandbox kept and named, so its state can be
+ * looked at.
  */
 export async function cmdCreate(
   c: SbxCtx,
-  body: { template: string; name?: string; labels?: Record<string, string> },
-  seed?: { factory?: ExecFactory },
+  body: SbxSandboxCreate,
+  o: { seed?: boolean; factory?: ExecFactory } = {},
 ): Promise<number> {
   try {
     const s = await c.api.createSandbox(body);
-    c.io.err(
-      `created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`,
-    );
+    const id = sanitizeRemote(s.id);
+    c.io.err(`created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`);
+    // A control plane from before modes ignores the body's mode: say so, never a silent per-exec.
+    if (body.mode !== undefined && s.mode !== body.mode) {
+      c.io.err(
+        `sbx: ${id} is ${s.mode}, not ${body.mode}: the control plane did not take the mode`,
+      );
+    }
+    if (modeRank(s.mode) > 0) {
+      const r = await sendCreatedMode(c, s.id, o.factory).catch((err: unknown) => ({
+        outcome: 'failed' as const,
+        err,
+      }));
+      if (r.outcome === 'failed') {
+        // The sandbox exists, at its lease mode, served per-Exec: named, so it can be looked at.
+        const text = r.err instanceof ApiError ? describeError(r.err) : setModeFailureText(r.err);
+        if (c.json) c.io.out(JSON.stringify({ ...s, setMode: { error: text } }) + '\n');
+        else c.io.out(`${id}\n`);
+        c.io.err(`sbx: ${id}: created, but its mode was not sent`);
+        if (r.err instanceof ApiError) return failed(c, r.err);
+        c.io.err(`sbx: ${text}`);
+        return SBX_EXIT.failed;
+      }
+      c.io.err(
+        r.outcome === 'pending'
+          ? `sbx: ${pendingText(id, r.code)}`
+          : `mode ${s.mode} (epoch ${s.modeEpoch})`,
+      );
+    }
     let seeded: SeedResult | undefined;
-    if (seed) {
-      const r = await seedSandbox(c, s, seed.factory).catch((err: unknown) =>
+    if (o.seed) {
+      const r = await seedSandbox(c, s, o.factory).catch((err: unknown) =>
         err instanceof ApiError ? Promise.reject(err) : sandboxFailureText(err),
       );
       if (typeof r === 'string') {
         if (c.json) c.io.out(JSON.stringify({ ...s, seed: { error: r } }) + '\n');
-        else c.io.out(`${sanitizeRemote(s.id)}\n`);
-        c.io.err(`sbx: ${sanitizeRemote(s.id)}: ${r}`);
+        else c.io.out(`${id}\n`);
+        c.io.err(`sbx: ${id}: ${r}`);
         return SBX_EXIT.failed;
       }
       seeded = r;
       c.io.err(
         r.seed === ''
-          ? `${sanitizeRemote(s.id)}: the template has no seed`
-          : `seeded ${sanitizeRemote(s.id)}${r.head ? `: a clean tree at ${r.head}` : ''}`,
+          ? `${id}: the template has no seed`
+          : `seeded ${id}${r.head ? `: a clean tree at ${r.head}` : ''}`,
       );
     }
     if (c.json) c.io.out(JSON.stringify(seeded ? { ...s, seed: seeded } : s) + '\n');
-    else c.io.out(`${sanitizeRemote(s.id)}\n`);
+    else c.io.out(`${id}\n`);
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
+  }
+}
+
+/** A lease create's set_mode: a token minted for the record's mode and epoch, sent once (M8). */
+async function sendCreatedMode(
+  c: SbxCtx,
+  id: string,
+  factory: ExecFactory | undefined,
+): Promise<SetModeOutcome> {
+  const x = await openExec(c.api, id, factory);
+  try {
+    const { setModeToken } = await c.api.mintSandboxModeToken(id);
+    return await sendSetMode(x, c.api, id, setModeToken);
+  } finally {
+    x.close();
   }
 }
 

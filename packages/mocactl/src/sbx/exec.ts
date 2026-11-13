@@ -1,7 +1,6 @@
 import {
   execFailureText,
   ExecMachineryError,
-  LeaseControlError,
   SandboxExecConn,
   type Exec,
   type ExecConnOptions,
@@ -20,15 +19,12 @@ import { failed, type SbxCtx } from './commands.js';
 /** A connection's lease calls (spec §8.3), as `SandboxExecConn` has them. */
 export type LeaseControlFn = (op: LeaseOpName, setModeToken?: string) => Promise<LeaseStatusView>;
 
-/**
- * Builds the gRPC connection; a seam so tests run the commands against a fake. A fake without the
- * lease calls answers them `unavailable`.
- */
+/** Builds the gRPC connection; a seam so tests run the commands against a fake. */
 export type ExecFactory = (o: ExecConnOptions) => {
   exec: Exec;
   close(): void;
-  leaseControl?: LeaseControlFn;
-  leaseKeepalive?: () => Promise<void>;
+  leaseControl: LeaseControlFn;
+  leaseKeepalive: () => Promise<void>;
 };
 const realFactory: ExecFactory = (o) => {
   const c = new SandboxExecConn(o);
@@ -38,9 +34,6 @@ const realFactory: ExecFactory = (o) => {
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
   };
-};
-const noLeaseCalls = async (): Promise<never> => {
-  throw new LeaseControlError('unavailable', 'this connection has no lease calls');
 };
 
 /** Seconds of token life a held token must keep beyond what the connection asks (spec §6.5). */
@@ -189,8 +182,8 @@ export async function openExec(
   return {
     exec: c.exec,
     close: c.close,
-    leaseControl: c.leaseControl ?? noLeaseCalls,
-    leaseKeepalive: c.leaseKeepalive ?? noLeaseCalls,
+    leaseControl: c.leaseControl,
+    leaseKeepalive: c.leaseKeepalive,
     token: first,
     lifetimeS: grantOf(first).lifetimeS,
   };

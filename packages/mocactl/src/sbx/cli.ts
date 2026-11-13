@@ -7,7 +7,7 @@ import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } fr
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io, LoginHelpers } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
-import { SandboxApiClient } from './api.js';
+import { SandboxApiClient, type SbxSandboxCreate } from './api.js';
 import {
   cmdCreate,
   cmdEditTemplate,
@@ -61,6 +61,7 @@ import {
   readCreateInputs,
 } from './templates.js';
 import { cortexMode } from './agent-config.js';
+import { isModeName, MODE_NAMES, modeRank, UPGRADE_NEEDS_TTY } from './mode.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL] [--no-browser]
@@ -107,11 +108,17 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates transfer ID SUBJECT [--json]
                                                  make SUBJECT (github:<id> or oidc:<sub>) its owner
                                                  (admins only)
-  mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
+  mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed]
+                     [--mode per-exec|lease|lease+processes] [--idle-timeout S] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
                                                  /workspace is a clean tree (its HEAD becomes the
-                                                 baseline pull and rm measure changes from)
+                                                 baseline pull and rm measure changes from);
+                                                 --mode (default per-exec): a lease mode keeps the
+                                                 guest between commands (the deployment must allow
+                                                 it; an upgrade, so only from a terminal), its
+                                                 lease ending after S idle seconds (default: the
+                                                 worker's)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx rm [ID] [--keep-config] [--force] [--json]
                                                  delete a sandbox; for the bound one, also take
@@ -398,11 +405,15 @@ const SYNC_FLAGS: [
     | 'no-browser'
     | 'renew-every'
     | 'seed'
+    | 'mode'
+    | 'idle-timeout'
   ),
   string[],
 ][] = [
   ['force', ['push', 'rm']],
   ['seed', ['create']],
+  ['mode', ['create']],
+  ['idle-timeout', ['create']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
   ['apply', ['pull']],
@@ -428,6 +439,20 @@ function wholeSeconds(io: Io, flag: string, raw: string | undefined): number | u
 const MAX_PUSH_MIB = 4096;
 
 const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) ? 1 : 0)} MiB`;
+
+/**
+ * `--idle-timeout S`: a whole number of seconds, at least 1 (the control plane holds the range,
+ * 30 to its ceiling). Undefined when absent; null, after saying why, when malformed.
+ */
+function parseIdleTimeout(io: Io, raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    io.err(`sbx: --idle-timeout must be a whole number of seconds (got '${sanitizeRemote(raw)}')`);
+    return null;
+  }
+  return n;
+}
 
 function parseLabels(io: Io, raw: string[]): Record<string, string> | undefined {
   const labels: Record<string, string> = {};
@@ -476,6 +501,8 @@ async function sbxMainWith(
         description: { type: 'string' },
         visibility: { type: 'string' },
         seed: { type: 'boolean' },
+        mode: { type: 'string' },
+        'idle-timeout': { type: 'string' },
         name: { type: 'string' },
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
@@ -847,14 +874,28 @@ async function sbxMainWith(
       return SBX_EXIT.usage;
     }
   }
-  let createBody: { template: string; name?: string; labels?: Record<string, string> } | undefined;
+  let createBody: SbxSandboxCreate | undefined;
   if (command === 'create') {
     const labels = parseLabels(io, values.label ?? []);
     if (!labels) return SBX_EXIT.usage;
+    const mode = values.mode;
+    if (mode !== undefined && !isModeName(mode)) {
+      io.err(`sbx: --mode must be one of ${MODE_NAMES.join(', ')} (got '${sanitizeRemote(mode)}')`);
+      return SBX_EXIT.usage;
+    }
+    const idle = parseIdleTimeout(io, values['idle-timeout']);
+    if (idle === null) return SBX_EXIT.usage;
+    // Creating with a lease mode is an upgrade: the user's own act, never an agent's (spec §8.1).
+    if (mode !== undefined && modeRank(mode) > 0 && deps.stdinIsTTY !== true) {
+      io.err(`sbx: ${UPGRADE_NEEDS_TTY}`);
+      return SBX_EXIT.usage;
+    }
     createBody = {
       template: values.template ?? DEFAULT_TEMPLATE,
       ...(values.name ? { name: values.name } : {}),
       ...(Object.keys(labels).length ? { labels } : {}),
+      ...(mode !== undefined ? { mode } : {}),
+      ...(idle !== undefined ? { idleTimeoutS: idle } : {}),
     };
   }
 
@@ -957,11 +998,10 @@ async function sbxMainWith(
       if (arg === 'transfer') return cmdTransferTemplate(ctx, extra[0]!, extra[1]!);
       return cmdTemplates(ctx);
     case 'create':
-      return cmdCreate(
-        ctx,
-        createBody!,
-        values.seed ? { ...(deps.execFactory ? { factory: deps.execFactory } : {}) } : undefined,
-      );
+      return cmdCreate(ctx, createBody!, {
+        seed: values.seed === true,
+        ...(deps.execFactory ? { factory: deps.execFactory } : {}),
+      });
     case 'ls':
       return cmdLs(ctx, values.all === true);
     case 'rm': {
