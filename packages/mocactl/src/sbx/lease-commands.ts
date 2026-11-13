@@ -20,11 +20,12 @@ import { printNotices } from './notices.js';
 
 const withSignal = (c: SbxCtx) => (c.signal ? { signal: c.signal } : {});
 
-/** Whether a lease event is an end for `reason`. */
-const isEnd =
-  (reason: string) =>
-  (ev: LeaseEvent): boolean =>
-    ev.state === 'end' && ev.reason === reason;
+/**
+ * The `at_unix_ms` of the end the command reports itself: the status's pending event, when it is
+ * the end for `reason` (P4-R17). Its identity, so another end with the same text still prints.
+ */
+const ownEnd = (pending: LeaseEvent | undefined, reason: string): number | undefined =>
+  pending?.state === 'end' && pending.reason === reason ? pending.atUnixMs : undefined;
 
 /** A set_mode the worker did not get (spec §8.2): the mode is stored, and lands at the next command. */
 export const modeStoredText = (mode: SandboxModeName, epoch: number, code: string): string =>
@@ -102,9 +103,10 @@ export async function cmdMode(
     // A downgrade ends a live lease (spec §5): its end comes back as the status's pending event,
     // said once (a later set_mode still carries it until a lease Exec does), by the stdout line
     // alone: marked seen with no notice line (P4-R17).
-    const fresh = printNotices(c, id, [r.status.pending], isEnd('mode_change'));
+    const own = ownEnd(r.status.pending, 'mode_change');
+    const fresh = printNotices(c, id, [r.status.pending], own);
     c.io.out(`mode ${s.mode} (epoch ${s.modeEpoch})\n`);
-    if (fresh.some(isEnd('mode_change'))) {
+    if (own !== undefined && fresh.some((ev) => ev.atUnixMs === own)) {
       c.io.out('lease ended (mode_change)\n');
     }
     return SBX_EXIT.ok;
@@ -153,7 +155,7 @@ export async function cmdReset(c: SbxCtx, id: string, factory?: ExecFactory): Pr
     }
     const after = await x.leaseControl('reset', undefined, withSignal(c));
     // The stdout line reports the reset's end: marked seen with no notice line (P4-R17).
-    printNotices(c, id, [before.pending, after.pending], isEnd('reset'));
+    printNotices(c, id, [before.pending, after.pending], ownEnd(after.pending, 'reset'));
     c.io.out('lease ended (reset)\n');
     return SBX_EXIT.ok;
   } catch (err) {

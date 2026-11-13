@@ -651,6 +651,25 @@ describe('mocactl sbx reset (spec §8.3)', () => {
     expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
   });
 
+  it('reset hides only the end it reports: another end of the same reason and minute still prints', async () => {
+    // Two different events (their at_unix_ms differ), with the same reason and the same HH:MM.
+    const earlier = ev({ reason: 'reset', atUnixMs: 1_800_000_100_000 });
+    const own = ev({ reason: 'reset', atUnixMs: earlier.atUnixMs + 1000 });
+    expect(leaseNotice(own, Date.now())).toBe(leaseNotice(earlier, Date.now()));
+    const w = leaseWorld({
+      lease: (op) =>
+        op === 'status' ? { ...ACTIVE, pending: earlier } : { ...APPLIED, pending: own },
+    });
+    expect(await w.run(['reset', SBX])).toBe(0);
+    expect(w.out()).toBe('lease ended (reset)\n');
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([
+      leaseNotice(earlier, Date.now()),
+    ]);
+    // Both marked seen: neither prints again.
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
+  });
+
   it('reset with no lease', async () => {
     const w = leaseWorld({ lease: () => APPLIED });
     expect(await w.run(['reset', SBX])).toBe(0);

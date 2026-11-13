@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { leaseNotice, noticeLines, type LeaseEvent } from '@moca/sandbox-client';
+import { noticeLines, type LeaseEvent } from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { SbxCtx } from './commands.js';
 
@@ -49,15 +49,16 @@ function save(file: string, store: Store): void {
  * The notice lines for `events` not yet seen for sandbox `id`, and records them seen. The lines
  * are sandbox-client's `noticeLines`: a start only when no end is shown with it, only the last
  * `expiring`. An `expiring` event is shown every time (it rides on every lease Exec, spec §5) and
- * marks nothing seen. A `reported` event is marked seen, and counts as shown, but gets no line: the
- * command reports it itself (ruling P4-R17).
+ * marks nothing seen. The `reportedAt` event (its `at_unix_ms`: the event's identity) is marked
+ * seen, and counts as shown, so a start beside it stays hidden, but gets no line: the command
+ * reports it itself (ruling P4-R17). Any other event, whatever its text, is shown as usual.
  */
 export function unseenNotices(
   stateDir: string,
   id: string,
   events: LeaseEvent[],
   nowMs: number,
-  reported: (ev: LeaseEvent) => boolean = () => false,
+  reportedAt?: number,
 ): { lines: string[]; fresh: LeaseEvent[] } {
   if (events.length === 0) return { lines: [], fresh: [] };
   const file = noticesFile(stateDir);
@@ -70,25 +71,30 @@ export function unseenNotices(
     at.add(ev.atUnixMs);
     return true;
   });
-  const hidden = new Set(fresh.filter(reported).map((ev) => leaseNotice(ev, nowMs)));
-  const lines = noticeLines(fresh, nowMs).filter((l) => !hidden.has(l));
+  const own = (ev: LeaseEvent) => ev.state === 'end' && ev.atUnixMs === reportedAt;
+  // The reported end is shown by the command: a start beside it is hidden as beside any end.
+  const ownEnd = fresh.some(own);
+  const lines = noticeLines(
+    fresh.filter((ev) => !own(ev) && !(ownEnd && ev.state === 'start')),
+    nowMs,
+  );
   if (at.size > 0) save(file, { ...store, [id]: Math.max(last, ...at) });
   return { lines, fresh };
 }
 
 /**
  * Prints, on stderr, the notices for `events` the user has not seen for sandbox `id`, and returns
- * the events that were unseen. `reported`: the events the command reports itself (unseenNotices).
+ * the events that were unseen. `reportedAt`: the event the command reports itself (unseenNotices).
  * The reason and process names are the worker's text: sanitized before they reach a terminal.
  */
 export function printNotices(
   c: SbxCtx,
   id: string,
   events: Array<LeaseEvent | undefined>,
-  reported?: (ev: LeaseEvent) => boolean,
+  reportedAt?: number,
 ): LeaseEvent[] {
   const known = events.filter((ev): ev is LeaseEvent => ev !== undefined);
-  const { lines, fresh } = unseenNotices(c.rt.paths.stateDir, id, known, Date.now(), reported);
+  const { lines, fresh } = unseenNotices(c.rt.paths.stateDir, id, known, Date.now(), reportedAt);
   for (const l of lines) c.io.err(sanitizeRemote(l));
   return fresh;
 }
