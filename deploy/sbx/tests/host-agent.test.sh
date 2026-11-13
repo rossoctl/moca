@@ -411,7 +411,7 @@ rm -f "$TMP/state/locked"
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 pass 'with --wanted-only, applies the wanted state and claims nothing; one run at a time applies it'
 
-# 13. The egress step, in --wanted-only runs: off unless moca-egress is enabled (no
+# 15. The egress step, in --wanted-only runs: off unless moca-egress is active (no
 #     journal read, no post, no cursor file); on, it posts the proxy's events exactly as written, in
 #     batches of up to 1000, the token from the 0600 header file; a failed post keeps the cursor and
 #     re-sends the same batch; a non-event line is skipped and never posted. example.com hosts only.
@@ -495,7 +495,7 @@ grep -q 'egress: 1 journal entries of moca-egress have a MESSAGE that is not tex
 [[ "$(<"$TMP/srv/egress.cursor")" == c1009 ]] || fail 'the cursor after an unreadable entry'
 pass 'ships egress events as written, only with moca-egress active (enabled or not), never acting on it; batches of 1000; a failed post keeps the cursor and retries the same batch'
 
-# 14. A 400 invalid_request (a batch the control plane will never take) is set aside, never retried
+# 16. A 400 invalid_request (a batch the control plane will never take) is set aside, never retried
 #     forever: kept 0600 in egress.rejected/, the cursor past it, an error naming it; shipping goes on.
 #     A 404 (an older control plane) and a 503 keep the batch and the cursor, and retry.
 rm -f "$TMP/srv/egress.pending.json" "$TMP/srv/egress.mark" "$TMP/srv/egress.catchup"
@@ -527,7 +527,7 @@ egress_run || fail 'the run after a rejection failed'
 jq -e '.cursor == "c3"' "$TMP/state/egress-posts" >/dev/null || fail 'shipping did not go on after a rejection'
 pass 'a 400 batch is kept in egress.rejected/ (0600) and passed; a 404 or 503 keeps it and retries'
 
-# 15. A stale cursor: one whose entry was rotated away (journalctl exits 0 for it and falls back, so the
+# 17. A stale cursor: one whose entry was rotated away (journalctl exits 0 for it and falls back, so the
 #     agent checks with --cursor first) or one journalctl cannot parse (exit 1). An error, the old cursor
 #     kept as egress.cursor.stale, a restart from this boot, and shipping goes on; entries already sent
 #     (at or before egress.mark) are not sent again. Without a mark, the restart re-sends, and says so.
@@ -559,9 +559,10 @@ grep -q 'no position mark: entries of this boot already sent are sent again, and
 jq -s -e '(map(.events | length) | add) == 4' "$TMP/state/egress-posts" >/dev/null || fail 'the no-mark restart did not re-send'
 pass 'a rotated-away cursor is an error, kept as egress.cursor.stale, restarted from this boot without re-sending; no mark is said'
 
-# 16. Only this host's sandboxes' events leave it: egressSids from the wanted state (one request, the
-#     one activation made); another sid (a Moca P6 session's) is counted as egressNotOurs and never
-#     posted; an audit_dropped report is sent. An older control plane (no egressSids): nothing sent.
+# 18. Only this host's sandboxes' events leave it: egressSids from the wanted state (activation's read,
+#     and one more after the journal read when a batch has a sid not in it); another sid (a Moca P6
+#     session's) is counted as egressNotOurs and never posted; an audit_dropped report is sent. An
+#     older control plane (no egressSids): nothing sent.
 rm -f "$TMP/srv/egress.pending.json" "$TMP/srv/egress.cursor" "$TMP/srv/egress.mark" "$TMP/srv/egress.catchup"
 P6="$(jq -c '.sid = "p6-session-0001" | .host = "api.example.com"' <<<"$EV")"
 DROP='{"time":"2026-11-08T12:00:02Z","via":"moca-egress","vm_id":"","sid":"","host":"","method":"","status":0,"bytes_up":0,"bytes_down":0,"decision":"audit_dropped","dropped":5}'
@@ -614,7 +615,7 @@ grep -q 'the wanted state has no egressSids (a control plane older than openapi 
 printf '{"run":[],"stop":[],"egressSids":["%s"]}' "$SID" >"$TMP/state/wanted-answer"
 pass 'ships only the wanted state egressSids events (read again after the journal for an unknown sid) and drop reports, counts the rest egressNotOurs; nothing without egressSids'
 
-# 17. The time budget: no new batch after EGRESS_BUDGET_S (120 s; 5 s here, by the test copy below,
+# 19. The time budget: no new batch after EGRESS_BUDGET_S (120 s; 5 s here, by the test copy below,
 #     with 3 s posts: SECONDS counts whole seconds, so the margins are wide),
 #     the cursor at the last batch taken; the next run goes on.
 sed 's/EGRESS_BUDGET_S=120$/EGRESS_BUDGET_S=5/' "$A" >"$TMP/host-agent-budget.sh"
