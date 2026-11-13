@@ -142,6 +142,30 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/templates/{id}/builds/{build}',
     reads: ['templateId', 'build', 'buildId', 'record', 'status'],
   },
+  // `sbx templates tag`, `untag`, `edit` and `transfer` (template lifecycle spec §5.1-§5.2).
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/tags',
+    reads: ['templateId', 'subject', 'buildId', 'tags'],
+    sends: ['tags', 'build'],
+  },
+  {
+    method: 'delete',
+    path: '/v1/templates/{id}/tags/{tag}',
+    reads: ['templateId', 'subject', 'tag', 'before', 'record'],
+  },
+  {
+    method: 'patch',
+    path: '/v1/templates/{id}',
+    reads: ['templateId', 'visibility', 'description', 'changes'],
+    sends: ['visibility', 'description'],
+  },
+  {
+    method: 'put',
+    path: '/v1/templates/{id}/owner',
+    reads: ['templateId', 'owner', 'before', 'record'],
+    sends: ['owner'],
+  },
   // `sbx templates activate` and `deactivate` (template lifecycle spec §6.3).
   {
     method: 'post',
@@ -390,7 +414,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 21 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 25 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -401,6 +425,10 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.mintSandboxToken('ID');
     await c.getTemplate('TID');
     await c.getTemplateBuild('TID', 'BID');
+    await c.moveTemplateTags('TID', ['default'], 'BID');
+    await c.removeTemplateTag('TID', 'TAG');
+    await c.updateTemplate('TID', { visibility: 'private' });
+    await c.transferTemplateOwner('TID', 'github:1');
     await c.activateTemplate('TID', {});
     await c.deactivateTemplate('TID');
     await c.retireTemplate('TID');
@@ -415,7 +443,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
           .replace('/ID', '/{id}')
           .replace('/TID', '/{id}')
-          .replace('/BID', '/{build}')}`,
+          .replace('/BID', '/{build}')
+          .replace('/TAG', '/{tag}')}`,
     );
     expect(new Set(seen)).toEqual(new Set(SBX_USED.map((u) => `${u.method} ${u.path}`)));
     // A new method on SandboxApiClient must be called above and listed in SBX_USED.
@@ -433,6 +462,10 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'mintSandboxToken',
         'getTemplate',
         'getTemplateBuild',
+        'moveTemplateTags',
+        'removeTemplateTag',
+        'updateTemplate',
+        'transferTemplateOwner',
         'activateTemplate',
         'deactivateTemplate',
         'retireTemplate',

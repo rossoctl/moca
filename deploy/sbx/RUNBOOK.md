@@ -62,6 +62,9 @@ gitignored).
    (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
    `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
    for another worker is refused before anything is written.
+   On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
+   the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
+   agent's wanted state instead of starting all of them.
 
 6. **The janitor,** once per KVM host:
 
@@ -124,7 +127,9 @@ aborts (`Can't handle RDB format version 12`) and `redis-0` crash-loops, taking 
 down with it. Until a migration exists, keep such a namespace on Redis 7: set `SBX_REDIS_IMAGE` to
 the digest it ran, e.g.
 `docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`
-(the pin before #670). Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
+(the pin before #670). With `SBX_REDIS_IMAGE` unset, `setup.sh` now refuses, before it applies
+anything, when the namespace's `redis` StatefulSet runs an image other than Valkey, and names that
+image. Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
 `dump.rdb` and `appendonlydir`). The StatefulSet is OrderedReady: a `redis-0` that crash-loops on
 the old revision is never replaced, so `setup.sh`'s rollout wait times out. Then delete the pod
 (`kubectl -n <namespace> delete pod redis-0`; its PVC stays) and re-run `setup.sh`.
@@ -543,6 +548,23 @@ pulled.
 `journalctl -u sbx-worker@<id>`. A worker that crash-looped into `failed` is brought back by
 re-running its `install-host.sh` (it resets the failed state).
 
+**A VM left behind by a stopped worker.** A worker's Firecracker VMs run in `pool-N` cgroups under
+its slice, `/sys/fs/cgroup/sbx.slice/sbx-<id>.slice`, beside the unit's own cgroup, so stopping the
+unit does not kill them. The unit's `ExecStopPost=` does: after every exit (a stop, a crash, a stop
+timeout) `/usr/local/libexec/sbx-reap-vms.sh <id>` kills each `pool-N` cgroup of that slice and waits
+up to 10 s for it to empty, logging `sbx-reap-vms:` lines to `journalctl -u sbx-worker@<id>`. A
+`still populated` line there, or a host installed before the step existed, can leave a VM holding its
+guest memory until that worker next starts. With the worker stopped, find one by its cgroup:
+
+```bash
+grep -H . /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-*/cgroup.procs   # any pid here is a leaked VM
+for p in $(pgrep -x firecracker); do echo "$p $(cut -d: -f3 "/proc/$p/cgroup")"; done   # every VM's cgroup
+```
+
+and reap it with `sudo /usr/local/libexec/sbx-reap-vms.sh <id>` (or
+`echo 1 | sudo tee /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-<n>/cgroup.kill`). Never while the
+worker runs: its `pool-N` cgroups then hold its live sandboxes' VMs.
+
 ## 11. The disk filling up
 
 1. `status.sh --host`: the workspace filesystem line, and the janitor's last run.
@@ -564,7 +586,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 ```
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
-also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
+also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
 installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:

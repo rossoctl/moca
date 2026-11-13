@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.10.0
+  version: 1.11.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -1964,6 +1964,69 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      operationId: updateTemplate
+      summary: Change a template's description or visibility (the owner, or an admin)
+      description: |
+        Template lifecycle spec §5.1. `private` hides it from other subjects (they get 404, as for an
+        id that does not exist) and refuses their new use; their sandboxes and sessions already made
+        keep running. Each field that changes writes a `visibility` record (`field`, the new value
+        and the one before); a field already at its value changes nothing.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                visibility: { type: string, enum: [private, deployment] }
+                description:
+                  type: string
+                  maxLength: 1024
+                  description: no lone surrogate (a provenance record cannot hold one)
+      responses:
+        '200':
+          description: changed (or already so)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, visibility, description, changes]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  visibility: { type: string, enum: [private, deployment] }
+                  description: { type: string }
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      required: [field, value, before, record]
+                      properties:
+                        field: { type: string, enum: [visibility, description] }
+                        value: { type: string }
+                        before: { type: string }
+                        record: { type: string, description: the visibility record written }
+        '400':
+          description: '`invalid_request`: no field, a bad value (a description holding a lone surrogate is one), or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds:
     get:
       operationId: listTemplateBuilds
@@ -2223,6 +2286,75 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/tags:
+    post:
+      operationId: moveTemplateTags
+      summary: Move tags onto a registered build (the owner, or an admin)
+      description: |
+        Template lifecycle spec §3.2, §5.1: tags are labels on builds, moved without rebuilding.
+        After the move, `id:tag` (and the bare `id`, for `default`) resolves to the new build for
+        new sandboxes and sessions; those already created keep their build. Each tag that changes
+        writes a `tag` record (the new build and the one before); a tag already on the build
+        changes nothing (`record: null`). A build that is not registered: `400 invalid_request`.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags, build]
+              properties:
+                tags:
+                  type: array
+                  minItems: 1
+                  maxItems: 16
+                  uniqueItems: true
+                  items: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,30}$' }
+                build: { type: string, description: a build id or handle of this template }
+      responses:
+        '200':
+          description: moved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, buildId, tags]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  buildId: { type: string }
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, buildId, before, record]
+                      properties:
+                        tag: { type: string }
+                        buildId: { type: string }
+                        before:
+                          type: [string, 'null']
+                          description: the build it named until now; null if new
+                        record:
+                          type: [string, 'null']
+                          description: the tag record written; null if unchanged
+        '400':
+          description: '`invalid_request`: bad tags, a build that is not registered, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     get:
       operationId: listTemplateTags
       summary: A template's tags, each with the build it names and when and by whom it was set
@@ -2253,6 +2385,107 @@ paths:
                           description: a subject; null when the deployment set it
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/tags/{tag}:
+    delete:
+      operationId: removeTemplateTag
+      summary: Remove a tag (the owner, or an admin); its build stays
+      description: |
+        Template lifecycle spec §5.1. The tag goes; the build it named is not deleted and stays
+        addressable by its build id. `default` is moved, never removed (`400 invalid_request`): the
+        bare `id` must resolve. A `tag` record (`buildId: null`, the one before) names the caller.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tag, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: removed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, tag, buildId, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  tag: { type: string }
+                  buildId: { type: 'null' }
+                  before: { type: string }
+                  record: { type: string }
+        '400':
+          description: '`invalid_request`: the default tag, a tag name not matching `^[a-z0-9][a-z0-9-]{0,30}$`, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such tag on it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/owner:
+    put:
+      operationId: transferTemplateOwner
+      summary: Transfer a template to another enrolled subject (an admin)
+      description: |
+        Template lifecycle spec §5.2. The new owner gets every owner action and its quota counts the
+        template from now on; sandboxes and sessions already made keep their subjects. An `owner`
+        record names the admin, the new owner and the one before; a transfer to the current owner
+        changes nothing (`record: null`). The new owner must be enrolled (on the sandbox profile:
+        SH_ALLOWED_SUBJECTS, or an admin). A template the deployment declared (imported from
+        SH_SANDBOX_TEMPLATES, no owner) is handed to a subject the same way, `before: null`; its id
+        then belongs to that subject, who can build, tag and edit it. A restart does not re-import it.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner]
+              properties:
+                owner:
+                  type: string
+                  description: github:<numeric id> or oidc:<provider sub>; never test:<n>
+                  pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$'
+      responses:
+        '200':
+          description: transferred (or already theirs)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, owner, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: the admin }
+                  owner: { type: string }
+                  before: { type: [string, 'null'], description: null for a declared template }
+                  record:
+                    { type: [string, 'null'], description: the owner record; null if unchanged }
+        '400':
+          description: '`invalid_request`: a malformed or unenrolled subject, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: '`template_not_found`'
           content:

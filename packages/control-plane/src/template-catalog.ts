@@ -120,7 +120,9 @@ export function resolveBuild(
   ref: { tag?: string; build?: string },
 ): TemplateBuild | null {
   if (ref.build !== undefined) return doc.builds.find((b) => b.buildId === ref.build) ?? null;
-  const id = doc.tags[ref.tag ?? 'default'];
+  const tag = ref.tag ?? 'default';
+  // An own property only: `id:constructor` names no tag, not Object.prototype's constructor.
+  const id = Object.hasOwn(doc.tags, tag) ? doc.tags[tag] : undefined;
   return id === undefined ? null : (doc.builds.find((b) => b.buildId === id) ?? null);
 }
 

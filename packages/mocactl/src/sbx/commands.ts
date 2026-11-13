@@ -35,7 +35,10 @@ export interface SbxCtx {
   io: Io;
   json: boolean;
   signal?: AbortSignal;
-  /** The template commands' sleep and clock (default the runtime's); tests pass fakes. */
+  /**
+   * The template commands' sleep and clock, and `token --renew-every`'s sleep (default the
+   * runtime's); tests pass fakes.
+   */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
   /**
@@ -229,6 +232,82 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
   }
 }
 
+/** `sbx templates tag ID TAG... --build B` (lifecycle spec §5.1): move tags onto a build. */
+export async function cmdTagTemplate(
+  c: SbxCtx,
+  id: string,
+  tags: string[],
+  build: string,
+): Promise<number> {
+  try {
+    const r = await c.api.moveTemplateTags(id, tags, build);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      for (const t of r.tags) {
+        const was = !t.record
+          ? ' (unchanged)'
+          : t.before
+            ? ` (was ${sanitizeRemote(t.before)})`
+            : ' (new)';
+        c.io.out(
+          `${sanitizeRemote(r.templateId)}:${sanitizeRemote(t.tag)} -> ${sanitizeRemote(t.buildId)}${was}\n`,
+        );
+      }
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates untag ID TAG` (lifecycle spec §5.1): remove a tag; its build stays. */
+export async function cmdUntagTemplate(c: SbxCtx, id: string, tag: string): Promise<number> {
+  try {
+    const r = await c.api.removeTemplateTag(id, tag);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      c.io.out(
+        `removed ${sanitizeRemote(r.templateId)}:${sanitizeRemote(r.tag)} (was ${sanitizeRemote(r.before)})\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates edit ID [--visibility V] [--description D]` (lifecycle spec §5.1). */
+export async function cmdEditTemplate(
+  c: SbxCtx,
+  id: string,
+  body: { visibility?: string; description?: string },
+): Promise<number> {
+  try {
+    const r = await c.api.updateTemplate(id, body);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else if (r.changes.length === 0) c.io.out(`${sanitizeRemote(r.templateId)}: unchanged\n`);
+    else
+      for (const ch of r.changes)
+        c.io.out(`${sanitizeRemote(r.templateId)}: ${sanitizeRemote(ch.field)} changed\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `sbx templates transfer ID SUBJECT` (lifecycle spec §5.2; admins only). */
+export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string): Promise<number> {
+  try {
+    const r = await c.api.transferTemplateOwner(id, owner);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.templateId)}: owner ${sanitizeRemote(r.owner)}${r.record ? ` (was ${sanitizeRemote(r.before ?? 'none')})` : ' (unchanged)'}\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
 /** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
 export const ACTIVATION_WAIT_MS = 10 * 60_000;
 
@@ -359,14 +438,24 @@ export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {})
   }
 }
 
-export async function cmdToken(c: SbxCtx, id: string): Promise<number> {
+/**
+ * `sbx token`: a fresh sandbox token on stdout. With `renewEveryS`, a new one every S seconds, one
+ * line each, until stopped (the signal; exit 0), so a long-lived client can read its next token
+ * from a pipe rather than run mocactl again.
+ */
+export async function cmdToken(c: SbxCtx, id: string, renewEveryS?: number): Promise<number> {
   try {
-    const t = await c.api.mintSandboxToken(id);
-    c.io.out(
-      (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
-    );
-    return SBX_EXIT.ok;
+    for (;;) {
+      const t = await c.api.mintSandboxToken(id);
+      c.io.out(
+        (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
+      );
+      if (renewEveryS === undefined) return SBX_EXIT.ok;
+      await (c.sleep ?? c.rt.sleep)(renewEveryS * 1000, c.signal);
+      if (c.signal?.aborted) return SBX_EXIT.ok;
+    }
   } catch (err) {
+    if (c.signal?.aborted) return SBX_EXIT.ok;
     return failed(c, err);
   }
 }

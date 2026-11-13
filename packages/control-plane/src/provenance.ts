@@ -86,6 +86,10 @@ export interface ProvenanceExport {
   blobs: { sha256: string; base64: string }[];
 }
 
+/** A string holding a lone surrogate, which canonical JSON refuses (a caller checks input with it). */
+export const LONE_SURROGATE_RE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
  * Canonical JSON: object keys sorted, no whitespace, JSON.stringify's string escapes. Restricted
  * so a second implementation (the stdlib-only Python verifier) produces the same bytes: keys are
@@ -100,7 +104,7 @@ export function canonicalJson(value: unknown): string {
     return JSON.stringify(value);
   }
   if (typeof value === 'string') {
-    if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)) {
+    if (LONE_SURROGATE_RE.test(value)) {
       throw new Error('canonical JSON refuses a string holding a lone surrogate');
     }
     return JSON.stringify(value);

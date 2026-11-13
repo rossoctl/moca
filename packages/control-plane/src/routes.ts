@@ -488,6 +488,41 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     operationId: 'cancelTemplateBuild',
   },
+  // Template lifecycle spec §5.1-§5.2: the owner moves and removes tags and edits the template; an
+  // admin transfers it. On BOTH profiles (§4.1), as the reads.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/tags',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'moveTemplateTags',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/templates/{id}/tags/{tag}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'removeTemplateTag',
+  },
+  {
+    method: 'PATCH',
+    path: '/v1/templates/{id}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'updateTemplate',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/templates/{id}/owner',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'transferTemplateOwner',
+  },
   // Template lifecycle spec §5.1: retire a whole template, or one build of it.
   {
     method: 'POST',

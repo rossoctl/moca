@@ -115,6 +115,15 @@ export interface SbxTemplateFull extends SbxTemplate {
   builds: SbxBuild[];
 }
 
+/** POST /v1/templates/{id}/tags's answer (template lifecycle spec §5.1). */
+export interface SbxTagsMoved {
+  templateId: string;
+  subject: string;
+  buildId: string;
+  /** `before`: the build the tag named until now (null: new); `record`: null when unchanged. */
+  tags: { tag: string; buildId: string; before: string | null; record: string | null }[];
+}
+
 /** What a create answers (openapi TemplateQueued): the build to follow. */
 export interface SbxQueued {
   templateId: string;
@@ -192,6 +201,45 @@ export class SandboxApiClient extends ControlPlaneClient {
       'GET',
       `/v1/templates/${encodeURIComponent(id)}/builds/${encodeURIComponent(build)}`,
     );
+  }
+
+  /** Move tags onto a registered build (lifecycle spec §5.1): `POST /v1/templates/{id}/tags`. */
+  moveTemplateTags(id: string, tags: string[], build: string): Promise<SbxTagsMoved> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/tags`, {
+      body: { tags, build },
+    });
+  }
+
+  /** Remove a tag; its build stays (lifecycle spec §5.1). */
+  removeTemplateTag(
+    id: string,
+    tag: string,
+  ): Promise<{ templateId: string; tag: string; before: string; record: string }> {
+    return this.json(
+      'DELETE',
+      `/v1/templates/${encodeURIComponent(id)}/tags/${encodeURIComponent(tag)}`,
+    );
+  }
+
+  /** Change a template's description or visibility (lifecycle spec §5.1). */
+  updateTemplate(
+    id: string,
+    body: { visibility?: string; description?: string },
+  ): Promise<{
+    templateId: string;
+    visibility: string;
+    description: string;
+    changes: { field: string; value: string; before: string; record: string }[];
+  }> {
+    return this.json('PATCH', `/v1/templates/${encodeURIComponent(id)}`, { body });
+  }
+
+  /** Transfer a template to another subject (lifecycle spec §5.2; admins). */
+  transferTemplateOwner(
+    id: string,
+    owner: string,
+  ): Promise<{ templateId: string; owner: string; before: string | null; record: string | null }> {
+    return this.json('PUT', `/v1/templates/${encodeURIComponent(id)}/owner`, { body: { owner } });
   }
 
   /** Take or renew the caller's activation lease on a build (`POST /v1/templates/{id}/activate`). */
