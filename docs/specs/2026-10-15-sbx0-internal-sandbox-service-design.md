@@ -709,7 +709,9 @@ Nothing else is promised.
 - the shared `SH_WORKSPACE_IDLE`, from the bundle (§5.4);
 - **its own slice, jail directory and workspace root:** `sbx-<worker>.slice` under a parent
   `sbx.slice` (so `SH_PARENT_CGROUP=sbx.slice/sbx-<worker>.slice`), `SH_CHROOT_BASE` and
-  `SH_WORKSPACE_ROOT` under per-worker directories. Never one shared slice: each worker sweeps its
+  `SH_WORKSPACE_ROOT` under per-worker directories (the jail is keyed by 12 hex of the worker id's
+  sha256, `/srv/sbx/jail/j<hex>`, so the VMs' API socket paths fit a Unix socket's 107 bytes for any
+  worker id). Never one shared slice: each worker sweeps its
   parent cgroup for orphans at startup (`vmpool/cgroup.go`), so a restart of one worker would kill
   every other worker's VMs.
 
