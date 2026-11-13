@@ -29,10 +29,11 @@
 #     editing it or rebuilding the binary.
 #   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK and installs no egress unit.
 #
-# Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
+# Touches ONLY its own files: the template unit, its ExecStopPost= helper
+# $SBX_LIBEXEC_DIR/sbx-reap-vms.sh, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
 # worker's directories under $SBX_SRV. Never another install on the same host. Every file it writes
 # is listed in $SBX_ENV_DIR/manifest, and --uninstall is the undo (spec §8.2): it removes the
-# worker's files and, once no worker is left in the manifest, the shared template unit and
+# worker's files and, once no worker is left in the manifest, the shared template unit, its helper,
 # sbx.slice and the moca-egress unit it installed (and its env file, unless the operator edited it). It leaves workspace data in place (the janitor, or the operator, removes that).
 #
 # --egress takes deploy/sbx/.generated/egress (egress.env, egress.token [+ api-ca.crt]) and turns on
@@ -385,14 +386,20 @@ uninstall_egress_credentials() {
   fi
 }
 
+# The template unit, sbx.slice and the unit's ExecStopPost= helper ($SBX_LIBEXEC_DIR/sbx-reap-vms.sh,
+# #795: it ends the VMs a stopped worker left in its slice). All three are shared by every worker, so
+# all three are `unit` lines: remove_shared_units removes them with the last worker.
 install_units() {
-  install -d -m 0755 "$SBX_UNIT_DIR"
+  install -d -m 0755 "$SBX_UNIT_DIR" "$SBX_LIBEXEC_DIR"
   install -m 0644 "$SCRIPT_DIR/sbx.slice" "$SBX_UNIT_DIR/sbx.slice"
-  sed "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" "$SCRIPT_DIR/sbx-worker@.service" \
+  install -m 0755 "$SCRIPT_DIR/reap-vms.sh" "$SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
+  sed -e "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" \
+    -e "s#^ExecStopPost=-/usr/local/libexec/#ExecStopPost=-$SBX_LIBEXEC_DIR/#" "$SCRIPT_DIR/sbx-worker@.service" \
     >"$SBX_UNIT_DIR/sbx-worker@.service"
   chmod 0644 "$SBX_UNIT_DIR/sbx-worker@.service"
   record "unit $SBX_UNIT_DIR/sbx.slice"
   record "unit $SBX_UNIT_DIR/sbx-worker@.service"
+  record "unit $SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE and
@@ -418,6 +425,9 @@ validate_worker() {
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
   [[ "$BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((BUDGET_MB > 1024)) || die '--budget-mb must be a whole number of MiB above 1024 (the unit reserve)'
+  # It goes into a sed replacement and the unit's ExecStopPost= line (install_units).
+  [[ "$SBX_LIBEXEC_DIR" =~ $PLAIN_PATH_RE ]] || die "SBX_LIBEXEC_DIR='$SBX_LIBEXEC_DIR' must be a plain absolute path"
+  [[ -f "$SCRIPT_DIR/reap-vms.sh" ]] || die "no $SCRIPT_DIR/reap-vms.sh beside this script (the unit's ExecStopPost= helper): copy deploy/sbx whole"
   check_snapshot_ca
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
 }
