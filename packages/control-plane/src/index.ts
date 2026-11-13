@@ -250,10 +250,13 @@ export {
 } from './template-catalog.js';
 export {
   DEFAULT_GATE_RECORD_SCHEMA,
+  DEFAULT_OWNED,
   DEFAULT_POLICY,
   POLICY_SCHEMA,
+  PROFILE_RULES,
   TEMPLATE_ID_RE,
   checkCreate,
+  ownedLimit,
   policyDigest,
   policyProblems,
   registryOf,

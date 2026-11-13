@@ -154,7 +154,7 @@ POST /v1/templates
 {
   "id": "django-django-11133",
   "image": "<repository>@sha256:…",
-  "spec": { "guest_mb": 4096, "vcpus": 2, "workspace_mb": 2048, "egress": false,
+  "spec": { "guest_ram_mb": 4096, "vcpus": 2, "workspace_mb": 2048, "egress": false,
             "tools": ["bash", "git", "python3", "rg"], "seed": "…",
             "probe": { "cmd": "…", "timeout_s": 900, "expect_rc": 0, "expect": ["…"] },
             "probe_status": "vm", "source_record_digest": "sha256:…",
@@ -171,7 +171,9 @@ POST /v1/templates
 The spec is a template spec (`moca-sbx-template-spec/1`; the samples in
 `deploy/sbx/template-onboarding/examples/` are a default sandbox image and a SWE-bench instance,
 spec and gate record), with `workspace_mb`, the size of the sandbox's `/workspace` image, within the
-profile's envelope. An `id` or `image` in the spec must equal the create's (M7, §8.1). The gate
+profile's envelope. The guest size is `guest_ram_mb`, the key the build tool reads; its alias
+`guest_mb` is accepted alone and stored as `guest_ram_mb`, and a spec with both is refused (M7), so
+the policy and the build never read two different sizes. An `id` or `image` in the spec must equal the create's (M7, §8.1). The gate
 record is sent as the file's own bytes, since its sha256 is what the policy trusts; it is stored with
 the provenance records (§7.2) and checked (§8). `POST /v1/templates/{id}/builds` starts a new build
 of an existing template of the caller's (a new image or spec); same body, same answer. A build has a
@@ -179,12 +181,20 @@ provisional handle (`b-<26 hex>`) until it is built; then its `buildId` is its m
 the handle still finds it.
 
 The create is checked against the deployment's policy before anything is queued (§8.1): a refusal
-is `422 policy_refused {rule, message}` and a `check` record (written only on a stream the caller
-may write: an id no template holds yet, its own, or as an admin adding a build; a refusal on another
-subject's id is only answered), and nothing is queued. Refusals on the caller's own and on new ids are
-bounded only by the request rate. Over a quota
-(§6.2: templates owned, builds queued or building at once) is `429 quota_exceeded` naming which
-(`quota`). Another subject's id is `409 template_exists` (`404 template_not_found` when that
+is `422 policy_refused {rule, message}` and a `check` record (written only on the stream of a
+template that exists and whose stream the caller may write: its own, or as an admin adding a build;
+a refusal on another subject's id is only answered, and one on an id no template holds writes one
+line to the capped audit log instead, naming the subject, the id and the failed rules, so no subject
+opens provenance streams without bound), and nothing is queued. Over a quota
+(§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
+or were cancelled holds no slot, and takes one again, checked like a new id, when it gets a new
+build; builds queued, building or probing at once, charged to the
+template's owner even when an admin adds the build; template ids owned in any status, checked for a
+new id only, so a create-then-cancel loop cannot open documents and provenance streams without
+bound; retired ids count too, and a retired id is spent, so this is in effect a lifetime cap per
+subject that only an admin raises) is `429 quota_exceeded` naming which
+(`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
+for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
 record) and `check` records (§7.1) and queues the build for a build host (§6.1, a later issue).
 
@@ -366,7 +376,8 @@ naming who), and each create names one, or gets the policy's default.
 The policy (`moca-template-policy/1`, `packages/control-plane/src/template-policy.ts`) is kept beside
 the template store (`<SH_PROVENANCE_DIR>/policy.json`, `template-policy-store.ts`) and holds the
 profiles, the allowed registries, the trusted gate records (by sha256) and the per-subject quotas
-(`templates`, `buildsQueued`, `active`). Until an admin sets one, the default policy applies, and it
+(`templates`, `buildsQueued`, `active`, and `owned`, the template ids owned in any status, 200 when
+a policy does not set it). Until an admin sets one, the default policy applies, and it
 is recorded on first use, so every `check` cites a `policy` record that exists. `GET /v1/policy`
 shows it, its digest and its record.
 
@@ -387,10 +398,12 @@ default registry, `<default>`) and, where the policy lists repositories for that
 `prefix/*` for a prefix; the image's path held to the entries' grammar first, so no uppercase and no
 empty, `.` or `..` segment; a registry with no list allows every repository it serves); the profile's
 size envelope; for `benchmark`, X1, X10-X12, X14 and
-X15 from the spec and the gate record; X10 and X12 whenever the spec names a gate record or skips
-the git identity check, whatever the profile; and the caller's quota (§6.2). A refusal is
-`422 policy_refused {rule, message}` and a `check` record listing every rule and its result; nothing
-is queued. The control plane refuses early, so a refused create costs no host time; the build host
+X15 from the spec and the gate record; whatever the profile, X10 whenever the spec names a gate
+record (with X1's check of that record, or of any gate record sent: it passed, and is for this
+image; only `X1.trusted` is the profile's) and X12 whenever the spec skips the git identity check
+(a skip with no gate record showing commits refused is refused); and the caller's quota (§6.2). A refusal is
+`422 policy_refused {rule, message}` and, on an existing template's stream the caller may write
+(§4), a `check` record listing every rule and its result; nothing is queued. The control plane refuses early, so a refused create costs no host time; the build host
 still applies its own checks, since a host is never trusted to have been asked only valid builds.
 
 ### 8.2 At build and registration

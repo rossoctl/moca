@@ -11,15 +11,34 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 command -v jq >/dev/null || fail 'jq is required'
 
+# M1 as the policy reads it (isPinnedImage in packages/control-plane/src/template-policy.ts): the
+# distribution reference grammar, an optional host[:port]/ (a first component with a `.` or a `:`,
+# or localhost), lowercase path components, no tag, pinned by digest, at most 255 characters before
+# the `@`.
+M1_JQ='(split("@")[0] | length) <= 255 and test("^(?:(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)(?:\\.(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?))+(?::[0-9]+)?|(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?):[0-9]+|localhost(?::[0-9]+)?)/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$")'
+
+# The M1 filter itself, on references the policy's test accepts and refuses.
+D="@sha256:$(printf '0%.0s' {1..64})"
+for ok in "images/x$D" "ghcr.io/a/b-c$D" "GHCR.io/x$D" "localhost:5000/x$D" "a__b/c.d$D"; do
+  jq -en --arg r "$ok" "\$r | $M1_JQ" >/dev/null || fail "M1 refuses $ok"
+done
+for bad in "Images/X$D" "-x$D" "a//b$D" "../x$D" "x:tag$D" "ghcr.io/x:1$D" "x" "x@sha256:abc" \
+  "$(printf 'a%.0s' {1..256})$D"; do
+  ! jq -en --arg r "$bad" "\$r | $M1_JQ" >/dev/null || fail "M1 accepts $bad"
+done
+pass 'the M1 check takes the distribution reference grammar, pinned by digest, no tag'
+
 # check SPEC: the fields the create rules read, each well formed (M1, M7, M8, M9).
 check() {
   local spec="$1" name
   name="$(basename "$spec")"
   jq -e '.schema == "moca-sbx-template-spec/1"' "$spec" >/dev/null || fail "$name is not a spec"
   jq -e '.id | test("^[a-z0-9][a-z0-9-]{0,30}$")' "$spec" >/dev/null || fail "$name: id (M7)"
-  jq -e '.image | test("^[^\\s@]+@sha256:[0-9a-f]{64}$")' "$spec" >/dev/null ||
-    fail "$name: image not pinned by digest (M1)"
-  jq -e '(.guest_mb // .guest_ram_mb) as $g | ($g | type) == "number" and $g >= 128 and
+  jq -e ".image | strings | $M1_JQ" "$spec" >/dev/null ||
+    fail "$name: image not a reference pinned by digest (M1)"
+  # Parenthesized throughout: jq 1.8 parses `a and b as $g | c` differently from 1.6 and 1.7.
+  jq -e '((has("guest_mb") and has("guest_ram_mb")) | not) and
+    ((.guest_mb // .guest_ram_mb) as $g | ($g | type) == "number" and $g >= 128) and
     (.vcpus | type) == "number" and .vcpus >= 1 and .vcpus <= 32' "$spec" >/dev/null ||
     fail "$name: guest size or vcpus (M7)"
   jq -e '(.egress | type) == "boolean" and (.seed | type) == "string" and

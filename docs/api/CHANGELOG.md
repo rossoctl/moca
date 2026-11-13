@@ -48,7 +48,7 @@ who submits a gate record, never by anything inside it. Every change is additive
   refuses there an image path outside the entries' grammar (uppercase, or an empty, `.` or `..`
   segment). A registry with
   no list allows every repository, as before; a registry listed there must also be in
-  `allowedRegistries`.
+  `allowedRegistries`. Its keys compare case-insensitively, as `allowedRegistries` does.
 
 ## 1.5.0
 
@@ -72,15 +72,37 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
   record naming who), with the `Policy` (`moca-template-policy/1`: profiles with their rules and
   size envelope, allowed registries, trusted gate records by sha256, quotas) and `PolicyView`
   schemas. The default policy has a `base` and a `benchmark` profile.
-- New GET /v1/quota: the caller's limits and use (`templates`, `buildsQueued`, `active`), and on the
-  sandbox profile the live-sandbox cap (`sandboxes`).
+- New GET /v1/quota: the caller's limits and use (`templates`, owned with a build registered or on
+  its way there, a new build of one that holds no slot checked like a new id; `buildsQueued`,
+  queued, building or probing; `active`; `owned`, template ids owned in any status, a failed or
+  cancelled-only one included, 200 when the policy does not set it), and on the sandbox profile the
+  live-sandbox cap (`sandboxes`). `owned` counts retired ids too, and a retired id is never served
+  again, so it is in effect a lifetime cap per subject: a user who retires as they go reaches it in
+  time, and only an admin raises it.
 - New error codes `policy_refused` (422, with `rule`, the gating rule's id from
   `deploy/sbx/template-onboarding/governance/GATING-RULES.md`) and `template_exists` (409: ids are
   unique per deployment, the first creator owns one). `quota_exceeded` on a create names the quota
-  (`quota`: `templates` or `buildsQueued`). The `Error` schema adds `rule` and `quota`.
+  (`quota`: `templates`, `buildsQueued` or `owned`). The `Error` schema adds `rule` and `quota`.
 - `TemplateBuild` adds `handle` (the create's handle; equal to `buildId` for an imported build) and
   `reason` (why a build failed or was rejected), and GET /v1/templates/{id}/builds/{build} also
   finds a build by its handle.
+- A refused create is recorded as a `check` provenance record only on an existing template's stream
+  the caller may write; a refusal on an id no template holds writes one audit line instead
+  (`template_create_refused`, with the subject, `templateId` and the failed `rules`).
+
+Upgrade note (the policy fails closed):
+
+- X12 applies under every profile, `base` included: a `skip_git_identity_check: true` that no gate
+  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client sends a gate record
+  showing commits refused (X5: `agent_can_commit: "no"`, `git_identity: "none"`), or drops the skip:
+  the build host's git identity check then needs git with an identity in the image, or no git at all
+  once the build-snapshot change in [#757](https://github.com/rossoctl/moca/pull/757) is in.
+- A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
+  check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
+  numbers, is refused when it is read: every create and every read of the policy or the quota fails
+  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing. So read
+  `GET /v1/policy` and fix it **before** upgrading: afterwards only `PUT /v1/policy` succeeds (the
+  file itself stays readable on the volume).
 
 ## 1.4.0
 

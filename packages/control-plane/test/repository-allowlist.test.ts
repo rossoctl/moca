@@ -29,7 +29,6 @@ const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf
 const { id: _id, image: _image, schema: _s, notes: _n, ...REST } = SPEC;
 const spec = {
   ...REST,
-  guest_mb: REST.guest_ram_mb,
   source_record_digest: undefined,
   skip_git_identity_check: false,
 };
@@ -118,12 +117,24 @@ describe('the create rule', () => {
   ])(
     'refuses an image path with %s before matching, where the registry lists repositories',
     (_w, path) => {
+      // M1's reference grammar refuses it first, so the repository rule is never reached.
       const p: Policy = { ...HUB, allowedRepositories: { 'docker.io': ['library/*'] } };
       const r = create(`docker.io/${path}@${D}`, p);
-      expect(failed(r)).toBe('registry.repository');
-      expect(r.failed?.message).toContain('is malformed');
+      expect(failed(r)).toBe('M1');
+      expect(r.results.map((x) => x.rule)).not.toContain('registry.repository');
     },
   );
+
+  it('reads a registry key in any case, as allowedRegistries does', () => {
+    const p: Policy = {
+      ...HUB,
+      allowedRegistries: ['<default>', 'Docker.IO'],
+      allowedRepositories: { 'Docker.IO': ['library/python'] },
+    };
+    expect(policyProblems(p)).toEqual([]);
+    expect(failed(create(`docker.io/library/python@${D}`, p))).toBeUndefined();
+    expect(failed(create(`docker.io/library/node@${D}`, p))).toBe('registry.repository');
+  });
 
   it('admits a prefix entry by whole segments', () => {
     const p: Policy = { ...HUB, allowedRepositories: { 'docker.io': ['library/*'] } };

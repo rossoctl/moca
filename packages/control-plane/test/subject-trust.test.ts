@@ -23,7 +23,7 @@ const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf
 >; // eslint-disable-line @typescript-eslint/no-explicit-any
 const { id: _id, image: IMAGE, schema: _s, notes: _n, ...REST } = SPEC;
 const DIGEST = IMAGE.slice(IMAGE.indexOf('@') + 1);
-const spec = { ...REST, guest_mb: REST.guest_ram_mb };
+const spec = { ...REST };
 
 /**
  * A record in the general-gate shape (`moca-gate-record/1`, the default SH_GATE_RECORD_SCHEMA): no

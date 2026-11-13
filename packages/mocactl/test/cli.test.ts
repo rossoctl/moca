@@ -39,8 +39,9 @@ describe('main', () => {
       const o = io();
       const build = vi.fn(fakeBuild);
       expect(await main([flag], {}, o, { buildRuntime: build })).toBe(0);
-      // Under vitest (as under tsx) no build defined MOCACTL_VERSION.
-      expect(o.outs.join('')).toBe('dev\n');
+      // Under vitest (as under tsx) no build defined MOCACTL_VERSION: a source checkout names its
+      // commit, and plain `dev` is left where git can't say (a source tarball).
+      expect(o.outs.join('')).toMatch(/^dev(-[0-9a-f]{8}(-dirty)?)?\n$/);
       expect(o.errs).toEqual([]);
       expect(build).not.toHaveBeenCalled();
     }

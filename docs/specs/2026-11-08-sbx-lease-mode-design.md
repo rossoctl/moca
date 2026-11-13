@@ -155,7 +155,11 @@ The rootfs is mounted read-only in every mode (`build-snapshot.sh:1530` boot arg
 `is_read_only: true`). Outside `/workspace`, only the tmpfs mounts `/tmp` and `/var` are writable.
 Package installs survive a lease only if they target one of those or the workspace (for example
 `pip install --target /tmp/deps`). The tmpfs files are guest RAM. They raise the VM's
-`memory.current` and are not freed until the lease ends, so §6 and E17 count them.
+`memory.current` and are not freed until the lease ends, so §6 and E17 count them. They also count
+against the cap on the agent's cgroup tree, so later Execs of the lease run out of memory sooner
+until the files are deleted. An Exec killed for memory while the lease still holds a quarter or more
+of that cap gets a line on its stderr from the agent, saying how much the lease holds and that files
+in `/tmp` and `/var` count.
 
 **Execs stay serial for each sandbox**, as today. `process_*` calls are Execs for that rule.
 
@@ -167,7 +171,9 @@ later with cgroup v2 enabled, and a `cgroup2` mount in init. The current init mo
 
 The guest agent runs each Exec in its own cgroup v2 inside the guest. At the end of the Exec, whether
 it exits, times out or is aborted, the agent writes `cgroup.kill` for that cgroup and waits until it is
-empty before it sends `End`. `setsid`, double forks and re-parenting to init cannot escape a cgroup,
+empty before it sends `End`. On a timeout the agent kills the Exec's cgroup and reports the timeout
+as a `timeout:<n>` error frame instead of `End`; the host keeps the lease only for that frame (§4.1).
+`setsid`, double forks and re-parenting to init cannot escape a cgroup,
 which is why a process group is not enough. This holds only for an Exec that cannot write the cgroup
 tree or reach the agent, so it depends on the privilege model in §3.3. A `process_start` process gets its own cgroup under a
 `tracked/` parent that the end-of-Exec kill does not touch.
@@ -244,6 +250,11 @@ both lease levels:
   - The walk never follows a symlink. It uses `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)` and does not
     cross out of the workspace mount. A root `chown -R` that dereferenced a symlink planted in the
     workspace would otherwise change the owner of its target, for example a file in `/tmp` or `/var`.
+  - The walk is a step of the lease's start, like the restore and the resume: the worker sends the
+    agent a request of its own (`true` with the normalise flag, a 10 min timeout) before the first
+    Exec. The first request's one-time hardening runs in it too. The step is not charged to the
+    Exec's timeout. The flag clears only when the step exits 0; a step that fails fails the lease
+    start, and the next lease Exec takes it again.
   - The walk's time is part of the first Exec's latency. E17 measures it against workspace size.
     Moving per-`Exec` to the Exec uid (§16 item 4) would remove the walk.
 - **Per-`Exec` mode** runs as root today and stays so in v1. It destroys the VM, so root there has no
@@ -306,6 +317,13 @@ both lease levels:
 `worker_restart`, `teardown_failed`, `agent_dead`, `sandbox_deleted`. Every end writes an audit record
 with the reason, the mode, the lease age and, at level 2, the tracked processes (id, name, exit state).
 Like every SBX record, it has no command text.
+
+A lease Exec's timeout keeps the lease: the guest kills the Exec's cgroup and reports the timeout,
+and the next Exec runs in the same guest. In v1 an abort (the caller cancels the Exec) ends the lease
+with `agent_dead`, as does a guest that has not answered a few seconds after the Exec's timeout.
+The budget counts from the Exec's arrival, so a wait behind another Exec of the sandbox and a lease
+start are charged to it. An Exec whose budget is spent before its command starts fails with the
+timeout without running, and the lease is kept.
 
 ## 5. Notices
 

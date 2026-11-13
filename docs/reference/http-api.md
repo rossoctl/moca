@@ -82,19 +82,19 @@ A model-level failure still returns 200 with `stopReason` `error` or `aborted` a
 
 **Errors before any output:**
 
-| Status | Body `error`                                                                            | Meaning                                                                                          |
-| ------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 400    | `read_error`, `invalid_json`, `prompt_required`, `session_mismatch`, `subject_conflict` | Bad request                                                                                      |
-| 401    | `token_required`, `token_invalid`, `token_expired`                                      | Auth                                                                                             |
-| 404    | `session_not_found`                                                                     | A session that does not exist (anonymous calls), or passed through from the credential exchange  |
-| 409    | `turn_in_progress`                                                                      | `SH_TURN_DETACH=1` and a detachable turn is live (authenticated callers also get `turnId`)       |
-| 410    | `config_bundle_not_found`                                                               | The session's config bundle is missing or expired; the turn never runs without its skills        |
-| 503    | `sandbox_unavailable`                                                                   | Sandbox pool saturated, empty, or the session's sandbox is pending (affinity). Has `Retry-After` |
-| 503    | `credential_unavailable`, `redis_unavailable`                                           | Control plane or Redis fault. Has `Retry-After` for 503s                                         |
-| 500    | `internal_error`                                                                        | Never carries error text                                                                         |
+| Status | Body `error`                                                                            | Meaning                                                                                                                                                                                                                                             |
+| ------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `read_error`, `invalid_json`, `prompt_required`, `session_mismatch`, `subject_conflict` | Bad request                                                                                                                                                                                                                                         |
+| 401    | `token_required`, `token_invalid`, `token_expired`                                      | Auth                                                                                                                                                                                                                                                |
+| 404    | `session_not_found`                                                                     | A session that does not exist (anonymous calls), or passed through from the credential exchange                                                                                                                                                     |
+| 409    | `turn_in_progress`                                                                      | `SH_TURN_DETACH=1` and a detachable turn is live (authenticated callers also get `turnId`)                                                                                                                                                          |
+| 410    | `config_bundle_not_found`                                                               | The session's config bundle is missing or expired; the turn never runs without its skills                                                                                                                                                           |
+| 503    | `sandbox_unavailable`                                                                   | Sandbox pool saturated, empty, or the session's sandbox is pending (affinity). Has `Retry-After`, and a `message` naming the cause (a pool, tier, template or sandbox id; for a host's mid-turn refusal a fixed sentence, never the host's figures) |
+| 503    | `credential_unavailable`, `redis_unavailable`                                           | Control plane or Redis fault. Has `Retry-After` for 503s                                                                                                                                                                                            |
+| 500    | `internal_error`                                                                        | Never carries error text                                                                                                                                                                                                                            |
 
-Error bodies are `{error, sessionId?}`, plus a `message` on auth errors and on the `/runs` 501, and
-`turnId` on `turn_in_progress`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
+Error bodies are `{error, sessionId?}`, plus a `message` on auth errors, on the `/turn` 503
+`sandbox_unavailable` and on the `/runs` 501, and `turnId` on `turn_in_progress`. The 503 `Retry-After` is `KAGENTI_SYNC_SATURATION_RETRY_AFTER_S`
 (default 5), or, for a pending affinity, the wait clamped to 1 to 10 seconds. The credential exchange also
 passes through `credential_required`, `credential_ambiguous`, `credential_not_found`,
 `endpoint_unresolved`, `session_not_found`, `token_invalid` and `token_expired`, so authenticated callers
@@ -128,6 +128,10 @@ terminal `error` frame, not an HTTP status.
 
 `done` is used when `stopReason` is `stop`, `length`, `end_turn` or `max_tokens`; anything else ends in
 `error`. On a non-detachable stream a client disconnect aborts the turn.
+
+A terminal `error` frame for a host's mid-turn capacity refusal has the 503 `message`'s fixed sentence as its
+`errorMessage`, never the host's figures. The refused command's `tool_result` is a tool result like any other:
+its `preview` is the clipped text the tool returned, which for a refusal is the transport's error text.
 
 ### Detachable turns: attach and cancel
 
@@ -190,9 +194,10 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
-An async turn that is still **queued** is a next turn, not a running one: it picks up the new model when a worker claims
-it, however long ago it was submitted, because `/internal/turn-credentials` reads `model` from the session as it is at
-dequeue. Pinning the model a queued turn was submitted with is M2 ([#388](https://github.com/rossoctl/moca/issues/388)).
+An async turn is the exception, and it is not a next turn either: a turn already **queued** keeps the model it was
+submitted with, however long it waits, because the turn record pins `model` and `sandboxTier` at submission and
+`/internal/turn-credentials` reads them from the record ([#388](https://github.com/rossoctl/moca/issues/388)). The
+switch applies to turns submitted after it.
 The id is checked against the credential's catalog (400 `model_unavailable` when it is not listed); when the endpoint
 cannot list its models, the id is accepted unverified and the answer has `modelVerified: false`. Only the two list routes
 answer 503 `model_catalog_unavailable`. These routes came with API 1.1.0; see the [changelog](../api/CHANGELOG.md).
@@ -217,8 +222,8 @@ Another user's session returns 404, not 403. Control-plane error codes and statu
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
-`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`turn_not_cancellable`, `turn_not_claimable`), 410 `device_code_expired`, 428 `authorization_pending`, 429
-(`bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
+`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`), 410 `device_code_expired`, 422 `policy_refused`, 428 `authorization_pending`, 429
+(`quota_exceeded`, `bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
 (`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in
 `packages/control-plane/src/errors.ts`.
