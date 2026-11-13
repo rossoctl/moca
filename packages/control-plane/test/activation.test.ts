@@ -512,11 +512,27 @@ describe('activation on first use (§6.4)', () => {
     expect(w.run).toEqual([{ template: 't1', buildId: hash('1'), worker: 'sbx_t1' }]);
     // No sandbox was kept while waiting.
     expect(await d.sandboxes!.listByOwner(alice.sub, Math.floor(now / 1000))).toHaveLength(0);
-    // Still activating: the retry waits again, without a second lease.
-    expect((await refusal(() => createSandbox(d, { template: 't1' }))).code).toBe(
+    // Still activating: the retries wait again, without a second lease, a renewal or a record.
+    const firstUse = async () =>
+      (await d.provenance!.chain('template/t1')).filter((x) => x.kind === 'activate').length;
+    const before = await firstUse();
+    const until = (await leases(d, 't1'))[0]!.until;
+    now += 30_000;
+    for (let i = 0; i < 3; i++) {
+      expect(await refusal(() => createSandbox(d, { template: 't1' }))).toEqual({
+        code: 'template_not_active',
+        readiness: 'activating',
+        retryAfterS: 30,
+      });
+    }
+    expect(await leases(d, 't1')).toHaveLength(1);
+    expect((await leases(d, 't1'))[0]!.until).toBe(until);
+    expect(await firstUse()).toBe(before);
+    // Another subject's first use takes its own lease.
+    expect((await refusal(() => createSandbox(d, { template: 't1' }, bob))).code).toBe(
       'template_not_active',
     );
-    expect(await leases(d, 't1')).toHaveLength(1);
+    expect(await firstUse()).toBe(before + 1);
     attachedNow = ['sbx_t1'];
     const r = await createSandbox(d, { template: 't1' });
     expect(r.status).toBe(201);

@@ -1050,8 +1050,12 @@ async function requireActive(
   if (readiness === 'active') return;
   let now = readiness;
   let started = false;
+  // A caller that already holds a live lease on the build (a retry of its own first use, say) is
+  // only told to wait: no renewal and no new `activate` record on every retry.
+  const leased = liveLeases(t.build, facts.nowS).some((l) => l.subject === p.sub);
   if (
     activate &&
+    !leased &&
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {
     // Its refusals (no_active_slot, quota_exceeded, template_unavailable) answer as activate's.

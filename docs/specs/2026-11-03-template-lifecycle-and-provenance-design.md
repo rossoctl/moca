@@ -406,7 +406,9 @@ So a client can name a template and go: on a deployment with template hosts
 (`SH_TEMPLATE_HOSTS`), `POST /v1/sandboxes` on a registered build that is not `active` takes the
 caller's lease (as `activate`, recorded with `reason: first_use`; its refusals `no_active_slot`,
 `template_unavailable` and `quota_exceeded` answer as they would) and answers
-`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries.
+`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries. A caller that
+already holds a live lease on the build (its own retry) is only answered the wait: no renewal and
+no new record per retry.
 `activate: false` starts nothing. No sandbox record is kept while waiting, so a wait never uses the
 live-sandbox cap. The gate applies whenever template hosts are configured, also before any of them
 has reported: until a host's first inventory, an attached worker serves and an absent one is

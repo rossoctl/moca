@@ -2513,7 +2513,8 @@ paths:
         (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
         create takes the caller's activation lease (as POST /v1/templates/{id}/activate, with its
         refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
-        `activate` record says `reason: first_use`) and answers `409 template_not_active` with
+        `activate` record says `reason: first_use`; not taken again while the caller holds a live lease on
+        the build, so a retry writes nothing) and answers `409 template_not_active` with
         `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
