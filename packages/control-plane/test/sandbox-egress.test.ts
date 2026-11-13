@@ -10,7 +10,7 @@ import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
 import {
-  EGRESS_TOTAL_BUDGET,
+  EGRESS_TOTAL_BYTES,
   EGRESS_DROP_WINDOW_S,
   EGRESS_GRACE_S,
   EGRESS_LOG_CAP,
@@ -450,9 +450,11 @@ describe("the sandbox's end record names its egress log", () => {
   });
 
   it('a log over the total budget: the end record and the late egress record name droppedBy.budget', async () => {
-    expect(EGRESS_TOTAL_BUDGET).toBe(200_000);
+    expect(EGRESS_TOTAL_BYTES).toBe(64 * 1024 * 1024);
     expect(EGRESS_LOG_CAP).toBe(10_000);
-    const d = await setup({ egress: new MemoryEgressStore(10, 3) });
+    // A budget of three events' lines (a sandbox id is 32 characters, as newId makes them here).
+    const one = Buffer.byteLength(canonicalJson(ev('0'.repeat(32))));
+    const d = await setup({ egress: new MemoryEgressStore({ cap: 10, budgetBytes: 3 * one }) });
     const a = await create(d, 't1');
     expect(await post(d, 'host-1', [ev(a.id), ev(a.id), ev(a.id), ev(a.id)])).toMatchObject({
       accepted: 3,

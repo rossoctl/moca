@@ -20,7 +20,8 @@ budget, invalid}, complete, sealed, sha256}`.
 - New POST /v1/hosts/{host}/egress `{events, cursor, oversized?}` (host bearer): the host agent's
   batches of up to 1000 events and its journal cursor, idempotent by (host, cursor), answering
   `{accepted, refused, capped, overBudget, invalid, dropped, cursor}`. A log holds at most 10,000
-  events and all logs together at most 200,000; the rest count as dropped.
+  events and 4 MiB of lines, and all logs together at most 64 MiB of lines; the rest count as
+  dropped.
 - GET /v1/hosts/{host}/wanted gains `egressSids`, the workspace keys whose events the host ships (the
   set the egress route accepts); the agent sends no other sandbox's or session's events.
 - The `sandbox` provenance record that ends a sandbox (`state: terminated`) gains

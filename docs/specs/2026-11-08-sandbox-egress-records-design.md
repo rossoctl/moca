@@ -76,12 +76,15 @@ provenance.
 
 - **Store, in the control plane:**
   - **Where:** Redis (where the sandbox records live): a stream `sh:sbx:egress:<sandboxId>` (one
-    canonical line per event, capped at 10,000 per sandbox and 200,000 across all logs, the excess
-    counted as dropped), a hash `…:meta` (drop counts, sealed), a key per host
-    (`sh:sbx:egress:host:<host>`, its last cursor, for replays), and an index of the sandboxes with
-    a log (`sh:sbx:egress:index`), over which the total is summed; it drops entries whose log has
-    expired. Kept as long as the
-    sandbox record: its end plus the sandbox retention (`SH_SANDBOX_RETENTION_SECONDS`, 14 days).
+    canonical line per event, capped at 10,000 events and 4 MiB of lines per sandbox and 64 MiB of
+    lines across all logs, the excess counted as dropped), a hash `…:meta` (drop counts, sealed), a
+    key per host (`sh:sbx:egress:host:<host>`, its last cursor, for replays), and the budget's keys:
+    each log's bytes (`sh:sbx:egress:bytes`), the logs by expiry (`sh:sbx:egress:expiry`) and their
+    running total (`sh:sbx:egress:total`). The caps are in bytes because a line may be up to 8 KiB
+    and its `host` and `path` come from the guest. A post costs its own events plus the logs whose
+    expiry has passed (at most 500 per post, their bytes given back), not the number of logs
+    retained. Kept as long as the sandbox record: its end plus the sandbox retention
+    (`SH_SANDBOX_RETENTION_SECONDS`, 14 days).
   - **Who:** an event is stored only when its `sid` is the workspace key of a sandbox on a worker of
     a build this host holds, ended at most 600 s ago; every other event is refused and counted.
 - **Read:**
