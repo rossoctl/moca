@@ -38,18 +38,19 @@ A subject is `github:` plus the numeric GitHub user id, not the login. Look one 
 
 Optional inputs:
 
-| Variable                               | Default | Rule                                                                                                                                                |
-| -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SBX_EGRESS_CREDENTIALS`               | off     | `1` enables user-scoped egress credentials (`mocactl sbx credentials`); needs host steps after: [runbook](RUNBOOK.md#credential-injection---egress) |
-| `SBX_LIFETIME_DAYS`                    | 7       | 1-30; each worker's idle reclaim is set to this plus two days (below)                                                                               |
-| `SBX_TOKEN_TTL_MINUTES`                | 15      | 5-60: a sandbox token's lifetime, the longest command, and the delete delay                                                                         |
-| `SBX_RETENTION_DAYS`                   | 14      | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`                                                                               |
-| `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40   | live sandboxes per user, and in all                                                                                                                 |
-| `SBX_MAX_INFLIGHT`                     | 2       | 1-8: `Exec` calls one sandbox may have in flight at the relay                                                                                       |
-| `SBX_WORKSPACE_IMAGE_MB`               | 2048    | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)                                                                            |
-| `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none    | the Route's certificate; otherwise the router's (api) or a self-signed one                                                                          |
-| `SBX_JANITOR_WAIT_MINUTES`             | 60      | how long after a sandbox ends the janitor frees its workspace (below)                                                                               |
-| `SBX_API_CA_FILE`                      | none    | a PEM CA the host janitor trusts for the API Route (below)                                                                                          |
+| Variable                               | Default             | Rule                                                                                                                                                                                                                     |
+| -------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SBX_EGRESS_CREDENTIALS`               | off                 | `1` enables user-scoped egress credentials (`mocactl sbx credentials`); needs host steps after: [runbook](RUNBOOK.md#credential-injection---egress)                                                                      |
+| `SBX_REDIS_IMAGE`                      | the base's Valkey 9 | `repository[:tag]@sha256:<digest>`: the image Redis runs. Set it to Redis 7 for a namespace whose data a Redis 7.4 wrote: Valkey 9 cannot read RDB format 12, and its load aborts ([runbook §2](RUNBOOK.md#2-upgrading)) |
+| `SBX_LIFETIME_DAYS`                    | 7                   | 1-30; each worker's idle reclaim is set to this plus two days (below)                                                                                                                                                    |
+| `SBX_TOKEN_TTL_MINUTES`                | 15                  | 5-60: a sandbox token's lifetime, the longest command, and the delete delay                                                                                                                                              |
+| `SBX_RETENTION_DAYS`                   | 14                  | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`                                                                                                                                                    |
+| `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40               | live sandboxes per user, and in all                                                                                                                                                                                      |
+| `SBX_MAX_INFLIGHT`                     | 2                   | 1-8: `Exec` calls one sandbox may have in flight at the relay                                                                                                                                                            |
+| `SBX_WORKSPACE_IMAGE_MB`               | 2048                | each workspace's image size (`microvm-worker`'s `SH_WORKSPACE_IMAGE_MB`)                                                                                                                                                 |
+| `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none                | the Route's certificate; otherwise the router's (api) or a self-signed one                                                                                                                                               |
+| `SBX_JANITOR_WAIT_MINUTES`             | 60                  | how long after a sandbox ends the janitor frees its workspace (below)                                                                                                                                                    |
+| `SBX_API_CA_FILE`                      | none                | a PEM CA the host janitor trusts for the API Route (below)                                                                                                                                                               |
 
 **Lease mode (SBX0.3)** has two control-plane settings
 ([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` does not
@@ -154,14 +155,22 @@ Otherwise every janitor run logs `skipped`.
 
 ## 2. KVM host side
 
-The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker, jailer,
-`microvm-worker`), `/usr/local/bin/moca-egress` (the install refuses without it, unless `--no-egress`)
-and outbound TCP 443 to the attach host. Build each template's snapshot under
+The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker, jailer),
+SBX0's own `microvm-worker` build at `SBX_WORKER_BIN` (below), `/usr/local/bin/moca-egress` (the
+install refuses without it, unless `--no-egress`) and outbound TCP 443 to the attach host. Build each template's snapshot under
 `/srv/sbx/snapshots/<image>` with `deploy/microvm/build-snapshot.sh`, then per worker:
 
     scp -r deploy/sbx/.generated/workers/<id> <host>:sbx-<id>
     ssh <host> sudo <checkout>/deploy/sbx/install-host.sh sbx-<id> --snapshot <image> [--budget-mb N]
     ssh <host> rm -r sbx-<id>
+
+The worker's guest RAM comes from the snapshot's `manifest.json`, and `--budget-mb` (default 8192)
+must hold one session of it: (guest RAM + 32) × 3 + 1024 MiB, 13408 for a 4096 MiB guest. SBX0's
+workers run their own `microvm-worker` build, `SBX_WORKER_BIN` (default
+`/usr/local/libexec/sbx/microvm-worker`, built from the same tree:
+`CGO_ENABLED=0 go build -o /usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`),
+never the `/usr/local/bin/microvm-worker` that `deploy/microvm`'s P4 worker runs; a missing one is
+refused.
 
 The script waits up to `SBX_ATTACH_TIMEOUT` (120 s) for the worker's attach to hold. A newly added
 worker's token reaches the relay only when the kubelet syncs the Secret, about a minute, so the first
