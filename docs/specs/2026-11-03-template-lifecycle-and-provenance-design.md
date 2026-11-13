@@ -407,7 +407,9 @@ and the registration `check` (§8.2); a registered build's id becomes its manife
 template's first registered build takes the `default` tag. A build id names one build of a
 template: a build whose manifest hash another build of the template already has (the same image
 and spec created again under another profile or gate record, which the build finds already built)
-is rejected, rule `T.unique`, naming that build.
+is rejected, rule `T.unique`, naming that build. When that build is retired (a host's "already built"
+short cut found its snapshot still there: removal has not run, or keeps it because its worker or id is
+shared), the message says to change the spec or create again after the snapshot's removal.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's

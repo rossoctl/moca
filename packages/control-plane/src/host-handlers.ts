@@ -634,7 +634,12 @@ export const HOST_HANDLERS: Record<string, Handler> = {
           ? {
               rule: 'T.unique',
               passed: false,
-              message: `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+              // A retired twin is the host's "already built" short cut reporting a snapshot that
+              // removal has not reached (or keeps, being shared): say how to get a new build.
+              message:
+                twin.status === 'retired'
+                  ? `the same snapshot as retired build ${twin.handle ?? twin.buildId}: change the spec, or create again after its snapshot is removed from the host`
+                  : `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
             }
           : { rule: 'T.unique', passed: true },
       );

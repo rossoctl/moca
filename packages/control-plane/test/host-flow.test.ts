@@ -227,6 +227,49 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(b.reason.message).toContain(first);
   });
 
+  it('says how to rebuild when the same snapshot belongs to a retired build', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
+      d,
+    );
+    // The first build is retired, but its snapshot is still on the host (removal has not run).
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) =>
+        x.buildId === HASH ? { ...x, status: 'retired' as const } : x,
+      ),
+    }));
+    const again = await HANDLERS.createTemplate!(
+      ctx({
+        principal: alice,
+        body: {
+          id: ID,
+          image: IMAGE,
+          spec: { ...REST, source_record_digest: undefined, skip_git_identity_check: false },
+          profile: 'base',
+        },
+      }),
+      d,
+    );
+    expect(again.status).toBe(202);
+    const second = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: second }, { event: 'built', ...records() }),
+      d,
+    );
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: ID, build: second } }),
+        d,
+      )
+    ).body as Body;
+    expect(b).toMatchObject({ status: 'rejected', reason: { rule: 'T.unique' } });
+    expect(b.reason.message).toContain('retired build');
+    expect(b.reason.message).toContain('change the spec');
+  });
+
   it('records a failed build with its step and message', async () => {
     const d = await setup();
     const build = await claimAndBuild(d);
