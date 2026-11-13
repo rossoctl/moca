@@ -253,6 +253,17 @@ export const OIDC_SUB_PATTERN = '[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}';
  */
 export const SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|test:[0-9]+|oidc:${OIDC_SUB_PATTERN})$`);
 
+/**
+ * The subjects the members, owner and quota routes accept (adapted to #701): a person's
+ * login from either real provider, `github:<numeric id>` or `oidc:<provider sub>`. Never `test:<n>`:
+ * a synthetic test user is enrolled by SH_TEST_USERS, not by the API, and the sandbox profile refuses
+ * one outright. Built from the same pattern as SUBJECT_RE, so the two cannot drift.
+ */
+export const MEMBER_SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|oidc:${OIDC_SUB_PATTERN})$`);
+
+/** The member grammar as a reader sees it, for refusals and help texts. */
+export const MEMBER_SUBJECT_FORMS = 'github:<numeric id> or oidc:<provider sub>';
+
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')
     .split(',')
