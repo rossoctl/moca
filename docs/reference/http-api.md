@@ -249,15 +249,18 @@ stops its worker); waiting for the snapshot's removal from every host (`heldBy` 
 
 The admin routes came with API 1.9.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one
 subject's override (`PUT /v1/quota/{subject}`, `github:<numeric id>` or `oidc:<provider sub>`; a body of `null` removes
-it). Overrides live in the policy (`quotaBySubject`), so each change is a `policy` record naming the admin, enforced at
-once; `?expect=` (the value read, as JSON percent-encoded into the query, e.g.
+it). A quota holds `templates`, `buildsQueued`, `active` and, optionally, `owned` (a write without `owned` keeps the
+target's; a subject whose override has none has the default's). Overrides live in the policy (`quotaBySubject`), so each
+change is a `policy` record naming the admin, enforced at once; `?expect=` (the value read, as JSON percent-encoded into the query, e.g.
 `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D`, or `?expect=null` for no override)
-makes it a compare-and-set, 409 `quota_changed` with nothing written when the quota is no longer that value; `GET /v1/quota` shows the limits that apply to the caller and `quotaSource` (`subject` or `default`). An admin also
+makes it a compare-and-set on the four counters, 409 `quota_changed` with nothing written when the quota is no longer
+that value; `GET /v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
+`ownedSource`, the same for `owned` alone. An admin also
 rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{build}/reject {reason}`): it becomes
 `rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire, and a
 sandbox create naming it is 400 `unknown_template`. A `reject` record names the admin, the reason and the build's `build`
 record; a reject is refused 409 `build_in_use` under a live sandbox, is idempotent, and cannot be undone.
-`mocactl sbx templates quota TARGET` sets a quota from the terminal.
+`mocactl sbx templates quota TARGET` sets a quota from the terminal (`--owned N` for `owned`).
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,

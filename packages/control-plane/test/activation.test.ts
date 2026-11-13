@@ -1698,6 +1698,84 @@ describe('admin quotas (§5.2)', () => {
     ]);
   });
 
+  it('takes owned as a fourth counter: per subject, else the default, kept by a write without it, in ?expect=', async () => {
+    const d = await setup();
+    const q = { templates: 5, buildsQueued: 10, active: 1 };
+    const create = (id: string) =>
+      HANDLERS.createTemplate!(
+        ctx({ principal: alice, body: { id, image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+        d,
+      ).then(
+        (r) => r.status,
+        (x: { code: string; extra?: unknown }) => x,
+      );
+    // An override without owned: owned is the default's.
+    await putQuota(d, alice.sub, q);
+    expect(await quotaOf(d)).toMatchObject({
+      quotaSource: 'subject',
+      ownedSource: 'default',
+      owned: { limit: DEFAULT_POLICY.quota.owned, used: 0 },
+    });
+    await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 8, owned: 50 });
+    expect((await quotaOf(d)).owned.limit).toBe(50);
+    // alice's own owned: enforced on her new ids, while bob keeps the default's.
+    const r = (await putQuota(d, alice.sub, { ...q, owned: 1 })).body as Body;
+    expect(r).toMatchObject({ quota: { ...q, owned: 1 }, before: q });
+    expect(await quotaOf(d)).toMatchObject({ ownedSource: 'subject', owned: { limit: 1 } });
+    expect(await quotaOf(d, bob)).toMatchObject({ ownedSource: 'default', owned: { limit: 50 } });
+    expect(await create('own-a')).toBe(202);
+    expect(await create('own-b')).toMatchObject({
+      code: 'quota_exceeded',
+      extra: { quota: 'owned' },
+    });
+    // A write without owned keeps the target's: alice's, and the default's.
+    expect(((await putQuota(d, alice.sub, { ...q, active: 2 })).body as Body).quota).toEqual({
+      ...q,
+      active: 2,
+      owned: 1,
+    });
+    expect(
+      ((await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 3 })).body as Body)
+        .quota,
+    ).toEqual({ templates: 100, buildsQueued: 10, active: 3, owned: 50 });
+    // ?expect= compares owned too: an expect without it is not the quota now.
+    const putIf = (body: unknown, expect: unknown) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject: alice.sub },
+          body,
+          query: new URLSearchParams({ expect: JSON.stringify(expect) }),
+        }),
+        d,
+      );
+    const stored = { ...q, active: 2, owned: 1 };
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...q, active: 2 }))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...stored, owned: 2 }))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...stored, owned: -1 }))).toBe(
+      'invalid_request',
+    );
+    expect(((await putIf({ ...q, owned: 3 }, stored)).body as Body).quota.owned).toBe(3);
+    // A bad owned is refused, by both routes; a good one in an override is kept by PUT /v1/policy.
+    for (const owned of [-1, 1.5, '3', null])
+      expect(await refusal(() => putQuota(d, alice.sub, { ...q, owned }))).toBe('invalid_request');
+    const over = (owned: unknown) => ({
+      ...DEFAULT_POLICY,
+      quotaBySubject: { [alice.sub]: { ...q, owned } },
+    });
+    expect(
+      await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: over(-1) }), d)),
+    ).toBe('invalid_request');
+    expect((await HANDLERS.putPolicy!(ctx({ principal: admin, body: over(7) }), d)).status).toBe(
+      200,
+    );
+    expect(await quotaOf(d)).toMatchObject({ ownedSource: 'subject', owned: { limit: 7 } });
+  });
+
   it("takes an oidc subject's override as a github one's (#701)", async () => {
     const d = await setup();
     const erin = 'oidc:erin@example.test';

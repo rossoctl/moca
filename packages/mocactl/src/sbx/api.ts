@@ -41,8 +41,8 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
-/** A template quota (openapi Quota, template lifecycle spec §6.2). */
-export type SbxQuota = { templates: number; buildsQueued: number; active: number };
+/** A template quota (openapi Quota, template lifecycle spec §6.2); owned is optional. */
+export type SbxQuota = { templates: number; buildsQueued: number; active: number; owned?: number };
 
 /** The policy as `GET /v1/policy` answers it, as much of it as a quota write reads (§8). */
 export interface SbxPolicyView {

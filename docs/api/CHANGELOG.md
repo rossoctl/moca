@@ -16,14 +16,18 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   Quota, or `null` to remove a subject's override (the default is never removed). Each change is a
   new `policy` record naming the admin. Answers `{target, subject, quota, before, policy, record}`:
   the quota now and before (null: no override), the new policy's digest and the record's. Enforced
-  at once on creates, queued builds and activations. A quota holds the three counters only (another
-  key is `400 invalid_request`). An optional `?expect=` (JSON: the quota the client read, `null` for
-  no override) makes the write a compare-and-set: when the target's quota is not that value now,
-  nothing is written and the answer is the new code `409 quota_changed`.
+  at once on creates, queued builds and activations. A quota holds `templates`, `buildsQueued` and
+  `active`, and optionally `owned` (another key is `400 invalid_request`); a body without `owned`
+  leaves the target's `owned` as it is. An optional `?expect=` (JSON: the quota the client read,
+  `null` for no override) makes the write a compare-and-set on all four counters (an unset `owned`
+  matches only an unset one): when the target's quota is not that value now, nothing is written and
+  the answer is the new code `409 quota_changed`.
 - Policy gains `quotaBySubject`, the per-subject overrides of `quota`, keyed by subject; a key that
-  is not a subject, or a malformed quota, is `400 invalid_request`.
+  is not a subject, or a malformed quota, is `400 invalid_request`. An override's `owned` is
+  optional: without it, the subject's `owned` is the default's (else 200).
 - GET /v1/quota answers the limits that apply to the caller (its override, else the default) and
-  gains `quotaSource`, `subject` or `default`.
+  gains `quotaSource`, `subject` or `default`, and `ownedSource`, the same for `owned` alone (an
+  override may leave `owned` to the default).
 - New POST /v1/templates/{id}/builds/{build}/reject `{reason}` (admin; the reason is required): a
   registered build becomes `rejected` with `reason.rule` `admin`, its activation leases go, a host
   holding it finds it in the wanted state's `stop` (as a retired build) and its `detached` report is

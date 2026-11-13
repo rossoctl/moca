@@ -54,9 +54,19 @@ export interface Policy {
   quotaBySubject?: Record<string, Quota>;
 }
 
-/** The quota that applies to a subject (§6.2): its override, else the default. */
-export const quotaFor = (pol: Policy, subject: string): Quota =>
-  pol.quotaBySubject?.[subject] ?? pol.quota;
+/**
+ * The quota that applies to a subject (§6.2), each counter its override's, else the default's.
+ * An override always holds templates, buildsQueued and active; its owned is optional, so owned is
+ * the override's, else the default's, else DEFAULT_OWNED. The answer always holds owned.
+ */
+export const quotaFor = (pol: Policy, subject: string): Quota & { owned: number } => {
+  const over = pol.quotaBySubject?.[subject];
+  return { ...(over ?? pol.quota), owned: over?.owned ?? ownedLimit(pol.quota) };
+};
+
+/** Where a subject's owned quota comes from: its override, else the deployment default. */
+export const ownedSource = (pol: Policy, subject: string): 'subject' | 'default' =>
+  pol.quotaBySubject?.[subject]?.owned !== undefined ? 'subject' : 'default';
 
 export interface Quota {
   /** Templates a subject owns with a build registered or on its way there. */
@@ -69,10 +79,13 @@ export interface Quota {
    * Template ids a subject owns, in any status (a failed or cancelled-only template too): bounds
    * the catalog documents and provenance streams one subject opens, which `templates` alone does
    * not, since a failed or cancelled-only template holds no `templates` slot. Checked for a new id
-   * only. Optional: a policy without it gets DEFAULT_OWNED.
+   * only. Optional: a default without it gets DEFAULT_OWNED, an override without it the default's.
    */
   owned?: number;
 }
+
+/** The counters a quota holds; `owned` is optional. */
+export const QUOTA_KEYS = ['templates', 'buildsQueued', 'active', 'owned'] as const;
 
 /** The `owned` quota of a policy that does not set one. */
 export const DEFAULT_OWNED = 200;
@@ -510,15 +523,16 @@ export function policyProblems(p: unknown): string[] {
       for (const [s, v] of Object.entries(by as Record<string, unknown>)) {
         if (!MEMBER_SUBJECT_RE.test(s))
           out.push(`quotaBySubject: ${s} is not a subject (${MEMBER_SUBJECT_FORMS})`);
-        // An override holds the three counters alone (#748): nothing else is kept in the policy.
+        // An override holds the four counters alone (#748), owned optional: nothing else is kept
+        // in the policy.
+        const ov = v as Partial<Quota> | undefined;
         if (
           !quotaOk(v) ||
-          Object.keys(v as object).some(
-            (k) => k !== 'templates' && k !== 'buildsQueued' && k !== 'active',
-          )
+          (ov?.owned !== undefined && !(int(ov.owned) && ov.owned >= 0)) ||
+          Object.keys(v as object).some((k) => !(QUOTA_KEYS as readonly string[]).includes(k))
         )
           out.push(
-            `quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active, and nothing else`,
+            `quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active, optionally owned, and nothing else`,
           );
       }
   }

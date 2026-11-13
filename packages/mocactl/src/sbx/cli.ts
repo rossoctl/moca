@@ -67,12 +67,14 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  (default 300 s; exit 5 on a timeout), at once for
                                                  a build no host holds; waiting for
                                                  its removal from every host comes with #743
-  mocactl sbx templates quota TARGET --templates N --builds-queued N --active N [--json]
+  mocactl sbx templates quota TARGET --templates N --builds-queued N --active N [--owned N] [--json]
   mocactl sbx templates quota TARGET --clear [--json]
                                                  set a subject's template quotas (TARGET
                                                  github:<numeric id> or oidc:<provider sub>) or the
                                                  default (TARGET default); --clear removes a
-                                                 subject's override (admins only). Reads, then
+                                                 subject's override (admins only). --owned: the
+                                                 template ids it may own in any status (without
+                                                 it, the target keeps its own). Reads, then
                                                  writes only if unchanged since the read: prints
                                                  old -> new; exit 1, nothing written, if another
                                                  admin changed it in between
@@ -386,6 +388,7 @@ export async function sbxMain(
         templates: { type: 'string' },
         'builds-queued': { type: 'string' },
         active: { type: 'string' },
+        owned: { type: 'string' },
         clear: { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
@@ -480,8 +483,8 @@ export async function sbxMain(
     );
     return SBX_EXIT.usage;
   }
-  // `templates quota TARGET` (§5.2): the three limits, all of them, or --clear.
-  const quotaFlags = (['templates', 'builds-queued', 'active', 'clear'] as const).filter(
+  // `templates quota TARGET` (§5.2): the three limits, all of them, and owned if given, or --clear.
+  const quotaFlags = (['templates', 'builds-queued', 'active', 'owned', 'clear'] as const).filter(
     (f) => values[f] !== undefined,
   );
   const settingQuota = command === 'templates' && arg === 'quota';
@@ -514,7 +517,12 @@ export async function sbxMain(
         );
         return SBX_EXIT.usage;
       }
-      quotaBody = q;
+      const owned = values.owned === undefined ? undefined : n(values.owned);
+      if (owned !== undefined && !Number.isSafeInteger(owned)) {
+        io.err(`sbx: --owned must be a whole number\n${SBX_USAGE}`);
+        return SBX_EXIT.usage;
+      }
+      quotaBody = owned === undefined ? q : { ...q, owned };
     }
   }
   let leaseSeconds: number | undefined;

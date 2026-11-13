@@ -23,9 +23,10 @@ import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
   normalizeSpec,
-  ownedLimit,
+  ownedSource,
   policyDigest,
   policyProblems,
+  QUOTA_KEYS,
   quotaFor,
   TEMPLATE_ID_RE,
   type Policy,
@@ -625,12 +626,12 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
         );
       }
       // A new id is one more document and stream for good: a create-then-cancel loop frees its
-      // templates and buildsQueued slots, never this one. An override holds the three counters
-      // alone, so owned is the deployment default's.
-      if (!cur && u.owned >= ownedLimit(pol.quota)) {
+      // templates and buildsQueued slots, never this one. The owner's: its override's, else the
+      // default's (quotaFor).
+      if (!cur && u.owned >= quota.owned) {
         throw new CpError(
           'quota_exceeded',
-          `at most ${ownedLimit(pol.quota)} template ids owned per subject, in any status`,
+          `at most ${quota.owned} template ids owned per subject, in any status`,
           undefined,
           { quota: 'owned' },
         );
@@ -1293,33 +1294,39 @@ async function retireBuilds(
 }
 
 /**
- * A quota write's body (§5.2): exactly `templates`, `buildsQueued` and `active`, returned as a new
- * object of those three, so nothing else the request carried reaches the policy. Their values are
- * policyProblems' to judge.
+ * A quota write's body (§5.2): exactly `templates`, `buildsQueued` and `active`, and `owned` when
+ * given, returned as a new object of those, so nothing else the request carried reaches the
+ * policy. Their values are policyProblems' to judge.
  */
 function quotaBody(v: unknown): Policy['quota'] {
-  const keys = ['templates', 'buildsQueued', 'active'] as const;
   if (typeof v !== 'object' || v === null || Array.isArray(v))
-    throw new CpError('invalid_request', 'a quota is an object: templates, buildsQueued, active');
-  const extra = Object.keys(v).filter((k) => !(keys as readonly string[]).includes(k));
+    throw new CpError(
+      'invalid_request',
+      'a quota is an object: templates, buildsQueued, active, optionally owned',
+    );
+  const extra = Object.keys(v).filter((k) => !(QUOTA_KEYS as readonly string[]).includes(k));
   if (extra.length > 0)
     throw new CpError(
       'invalid_request',
-      `a quota holds only templates, buildsQueued, active (not ${extra.join(', ')})`,
+      `a quota holds only templates, buildsQueued, active, owned (not ${extra.join(', ')})`,
     );
   const o = v as Record<string, unknown>;
   return {
     templates: o.templates,
     buildsQueued: o.buildsQueued,
     active: o.active,
+    ...(o.owned !== undefined ? { owned: o.owned } : {}),
   } as Policy['quota'];
 }
 
-/** Whether two quotas (or two absent overrides, null) hold the same three counters. */
+/** Whether two quotas (or two absent overrides, null) hold the same four counters, owned unset alike. */
 const sameQuota = (a: Policy['quota'] | null, b: Policy['quota'] | null): boolean =>
   a === null || b === null
     ? a === b
-    : a.templates === b.templates && a.buildsQueued === b.buildsQueued && a.active === b.active;
+    : a.templates === b.templates &&
+      a.buildsQueued === b.buildsQueued &&
+      a.active === b.active &&
+      a.owned === b.owned;
 
 /** POST /v1/templates/{id}/retire (§5.1): every build of the template not yet retired. */
 async function retireTemplate(ctx: RequestCtx, deps: CpDeps) {
@@ -1540,7 +1547,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       );
     if (isDefault && ctx.body === null)
       throw new CpError('invalid_request', 'the default quota is set, never removed');
-    // Stored as the three counters alone: a key beyond them is refused, never kept in the policy.
+    // Stored as the four counters alone: a key beyond them is refused, never kept in the policy.
+    // A body without owned leaves the target's owned as it is.
     const body = ctx.body === null ? null : quotaBody(ctx.body);
     // A compare-and-set (`?expect=`, JSON: the quota the client read, null for no override): the
     // write is made only if the target's quota is that value now, else 409 quota_changed with
@@ -1554,20 +1562,14 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       } catch {
         throw new CpError('invalid_request', 'expect must be a quota, or null, as JSON');
       }
-      // The quota a client read can carry the default's owned, which this write does not set
-      // (an override holds the three counters alone): the compare is on the three, so it is
-      // dropped here.
-      if (typeof v === 'object' && v !== null && !Array.isArray(v) && 'owned' in v) {
-        const rest = { ...(v as Record<string, unknown>) };
-        delete rest.owned;
-        v = rest;
-      }
       expected = v === null ? null : quotaBody(v);
       if (
         expected !== null &&
-        ![expected.templates, expected.buildsQueued, expected.active].every(
+        (![expected.templates, expected.buildsQueued, expected.active].every(
           (n) => Number.isSafeInteger(n) && n >= 0,
-        )
+        ) ||
+          (expected.owned !== undefined &&
+            !(Number.isSafeInteger(expected.owned) && expected.owned >= 0)))
       )
         throw new CpError('invalid_request', 'expect must hold whole numbers, as a quota does');
     }
@@ -1577,17 +1579,20 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     let next!: Policy;
     const { record } = await store.update((cur) => {
       next = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
+      // A body without owned keeps the target's owned, if it has one.
+      const keepOwned = (q: Policy['quota'], old: Policy['quota'] | undefined): Policy['quota'] =>
+        q.owned === undefined && old?.owned !== undefined ? { ...q, owned: old.owned } : q;
       if (isDefault) {
         before = cur.quota;
-        // The three counters are set; the default's owned, which this does not set, is kept.
-        next.quota =
-          cur.quota.owned === undefined
-            ? (body as Policy['quota'])
-            : { ...(body as Policy['quota']), owned: cur.quota.owned };
+        next.quota = keepOwned(body as Policy['quota'], cur.quota);
       } else {
         before = cur.quotaBySubject?.[subject] ?? null;
         if (body === null) delete next.quotaBySubject![subject];
-        else next.quotaBySubject![subject] = body as Policy['quota'];
+        else
+          next.quotaBySubject![subject] = keepOwned(
+            body as Policy['quota'],
+            cur.quotaBySubject?.[subject],
+          );
       }
       if (expected !== undefined && !sameQuota(before as Policy['quota'] | null, expected))
         throw new CpError(
@@ -1636,10 +1641,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         templates: { limit: quota.templates, used: u.templates },
         buildsQueued: { limit: quota.buildsQueued, used: u.buildsQueued },
         active: { limit: quota.active, used: active },
-        // An override holds the three counters alone: owned is the deployment default's.
-        owned: { limit: ownedLimit(pol.quota), used: u.owned },
-        // Whether this subject has an admin-set quota (§5.2) or the deployment default.
+        owned: { limit: quota.owned, used: u.owned },
+        // Whether this subject has an admin-set quota (§5.2) or the deployment default; owned has
+        // its own, as an override may leave it to the default.
         quotaSource: pol.quotaBySubject?.[p.sub] ? 'subject' : 'default',
+        ownedSource: ownedSource(pol, p.sub),
         ...(sandboxes ? { sandboxes } : {}),
       },
     };

@@ -355,7 +355,7 @@ registered build that later turns out wrong.
 
 | Route                                                    | Does                                                                                                      |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `PUT /v1/quota/default`                                  | sets the deployment default quota (`templates`, `buildsQueued`, `active`)                                 |
+| `PUT /v1/quota/default`                                  | sets the deployment default quota (`templates`, `buildsQueued`, `active`, optionally `owned`)             |
 | `PUT /v1/quota/{subject}`                                | sets one subject's override (`github:<numeric id>` or `oidc:<provider sub>`); a body of `null` removes it |
 | `POST /v1/templates/{id}/builds/{build}/reject {reason}` | a registered build becomes `rejected` (`reason.rule: admin`)                                              |
 
@@ -366,8 +366,12 @@ registered build that later turns out wrong.
   never drop each other's change; a write with `?expect=` (the value the client read) is made only
   if the target's quota is still that value, else `409 quota_changed` with nothing written. It is
   enforced at once, on the next create, queued build and
-  activation: a subject's limits are its override, else the default (§6.2). `GET /v1/quota` shows
-  the limits that apply to the caller and `quotaSource` (`subject` or `default`). The default is
+  activation: a subject's limits are its override, else the default (§6.2). A quota holds
+  `templates`, `buildsQueued` and `active`, and `owned` optionally: an override without `owned`
+  leaves it to the default's (else 200), and a write without `owned` keeps the target's, so an
+  admin who sets the other three never resets it unseen (`?expect=` compares all four). `GET
+/v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
+  `ownedSource`, the same for `owned` alone. The default is
   set, never removed. A subject is never `test:<n>` (a synthetic test user, enrolled by the
   deployment's settings).
 - **Reject after the fact** shares retire's handling (§5.1): an admin only, with a reason, on a
@@ -384,8 +388,9 @@ registered build that later turns out wrong.
   live sandbox runs on the build, and is idempotent (an already rejected build is answered with
   `record: null`). Not reversible: a new build is the way back. A retired build is not rejected;
   a rejected one may still be retired.
-- **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N`,
-  or `--clear` for a subject's override (admins). Like every admin write it names the control
+- **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N
+[--owned N]`, or `--clear` for a subject's override (admins); without `--owned` the target keeps
+  its `owned`, and the new value printed is the one stored. Like every admin write it names the control
   plane it writes to and refuses a login issued for another deployment, then reads the value
   (`GET /v1/policy`) and writes it as a compare-and-set (`?expect=` the value read): it prints old
   -> new with the policy's digest and record, and when another admin changed the value after its

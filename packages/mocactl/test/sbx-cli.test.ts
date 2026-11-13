@@ -892,6 +892,38 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
     expect(io.outs.join('')).toBe('');
   });
 
+  it('--owned sets the fourth counter; without it, the target keeps its own and new shows it', async () => {
+    const { home, env, io } = setup();
+    const OLD4 = { ...OLD, owned: 7 };
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({
+        status: 200,
+        body: policyView({ quotaBySubject: { 'github:9': OLD4 } }),
+      }),
+      // As the control plane stores it: a body without owned keeps the target's.
+      'PUT /v1/quota/github%3A9': (req) =>
+        answer('github:9', { owned: 7, ...(req.body as object) }, OLD4),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain([...ARGS, '--owned', '3'], env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/github%3A9${ifRead(OLD4)}`);
+    expect(cp.calls.at(-1)!.body).toEqual({ ...Q, owned: 3 });
+    expect(io.outs.join('')).toContain(
+      'github:9: templates 3, builds queued 1, active 1, owned 7 -> templates 5, builds queued 2, active 1, owned 3 ',
+    );
+    io.outs.length = 0;
+    expect(await sbxMain(ARGS, env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)!.body).toEqual(Q);
+    expect(io.outs.join('')).toContain('-> templates 5, builds queued 2, active 1, owned 7 ');
+    for (const bad of ['-1', '1.5', 'x'])
+      expect(await sbxMain([...ARGS, '--owned', bad], env, io, opts)).toBe(2);
+    expect(io.errs.join('\n')).toMatch(/--owned must be a whole number/);
+    expect(
+      await sbxMain(['templates', 'quota', 'github:9', '--clear', '--owned', '1'], env, io, opts),
+    ).toBe(2);
+    expect(await sbxMain(['ls', '--owned', '1'], env, io, opts)).toBe(2);
+  });
+
   it('expects no override when the subject has none', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
