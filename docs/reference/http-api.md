@@ -191,7 +191,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Internal       | `POST /internal/credentials` (session token → credential) and `POST /internal/turn-credentials` (queued turn id → credential, at dequeue): data plane only, both authenticated with `SH_EXCHANGE_TOKEN` |
 | Templates      | `GET /v1/templates`, `GET /v1/templates/{id}`, `GET /v1/templates/{id}/builds[/{build}]`, `GET /v1/templates/{id}/tags`: both route profiles (API 1.4.0)                                                |
 | Self-serve     | `POST /v1/templates`, `POST /v1/templates/{id}/builds`, `POST /v1/templates/{id}/builds/{build}/cancel`, `GET` and `PUT /v1/policy`, `GET /v1/quota`: both route profiles (API 1.5.0)                   |
-| Subjects       | `GET /v1/subjects`; `PUT`, `DELETE /v1/subjects/{subject}[/roles/admin]` (enroll, unenroll; grant with an optional `until`, revoke): both route profiles (API 1.6.0)                                    |
+| Subjects       | `GET /v1/subjects`; `PUT`, `DELETE /v1/subjects/{subject}[/roles/admin]` (enroll, unenroll; grant with an optional `until`, revoke): both route profiles (API 1.7.0)                                    |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -219,7 +219,7 @@ is queued, and a refusal is 422 `policy_refused` naming the gating rule
 (409 `template_exists`); quotas are per subject (429 `quota_exceeded` naming which; `GET /v1/quota` shows them). A create
 with the same inputs as a build of the caller's own template answers that build, `reused: true`.
 
-Who is enrolled and who is an admin (API 1.6.0, with a template store): the deployment's settings
+Who is enrolled and who is an admin (API 1.7.0, with a template store): the deployment's settings
 (`SH_ALLOWED_SUBJECTS`, `SH_ADMIN_SUBJECTS`) are the bootstrap, and admins add to them through `/v1/subjects`: any admin
 reads the list, only an admin named in `SH_ADMIN_SUBJECTS` changes it. Roles and enrollment are evaluated per request, so
 a grant, a revoke or a lapsed `until` takes effect at the subject's next request; a token's `roles` claim reports what

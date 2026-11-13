@@ -85,6 +85,8 @@ export function makeDeps(
       maxTotal: 40,
       issuer: 'sbx-control-plane',
       execEndpoint: 'sbx-exec.apps.example.invalid:443',
+      modesAllowed: new Set(['per-exec', 'lease'] as const),
+      idleCeilingS: 1800,
     },
     ...configOver,
   };

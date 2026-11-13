@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/main.js';
 import {
+  Exec,
   SandboxWorkerService,
   SandboxExecClient,
   type WorkerFrame,
@@ -131,14 +132,14 @@ describe('exec terminal status over a real transport', () => {
 
     const { events, done } = execStatus(addr, {
       sandboxId: 'sbx-1',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: 7,
         command: 'boom',
         stdin: new Uint8Array(),
         timeoutS: 0,
         streaming: true,
         workspaceKey: '',
-      },
+      }),
     });
 
     const s = await done;
@@ -157,14 +158,14 @@ describe('exec terminal status over a real transport', () => {
     const { addr } = await startRelay();
     const { done } = execStatus(addr, {
       sandboxId: 'sbx-absent',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: 1,
         command: 'true',
         stdin: new Uint8Array(),
         timeoutS: 0,
         streaming: true,
         workspaceKey: '',
-      },
+      }),
     });
     const s = await done;
     expect(s.code).not.toBe(status.OK);

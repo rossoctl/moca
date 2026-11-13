@@ -22,7 +22,12 @@ import {
   type ExecEvent,
   type AbortRequest,
   type AbortResponse,
+  type LeaseControlRequest,
+  type LeaseControlResponse,
+  type LeaseKeepaliveRequest,
+  type LeaseKeepaliveResponse,
   MAX_EXEC_MESSAGE_BYTES,
+  SandboxMode,
 } from '@moca/k8s-sandbox';
 import { RedisRecordStore, affinityTimings } from '@moca/harness';
 import {
@@ -44,11 +49,19 @@ import {
   DEFAULT_SANDBOX_MAX_INFLIGHT,
   keysetFromEnv,
   makeSandboxTokenVerifier,
+  makeSetModeTokenVerifier,
   sandboxMaxInflight,
   type SandboxVerifier,
+  type SetModeVerifier,
 } from './sandbox-auth.js';
 import { failExecStream, grpcError, pumpExec } from './exec-stream.js';
-import { SANDBOX_DRAIN_GRACE_S, makeAudit, makeSandboxCaller } from './sandbox-caller.js';
+import {
+  SANDBOX_DRAIN_GRACE_S,
+  leaseOpName,
+  makeAudit,
+  makeSandboxCaller,
+  type LeaseTimeoutsMs,
+} from './sandbox-caller.js';
 
 export { grpcError } from './exec-stream.js';
 export { SANDBOX_DRAIN_GRACE_S, armDeadline } from './sandbox-caller.js';
@@ -58,6 +71,13 @@ export interface RelayServerDeps extends RelayDeps {
   validateExecToken: (presented: string | undefined) => boolean;
   /** Sandbox tokens (SBX0 §3.2). Omitted: only the harness's exec token is accepted. */
   verifySandboxToken?: SandboxVerifier;
+  /** Set-mode tokens, for LeaseControl set_mode (lease-mode §8.2). Omitted: every set_mode is refused. */
+  verifySetModeToken?: SetModeVerifier;
+  /**
+   * LeaseControl's per-op timeouts. Defaults to 15 s for status and 31 min (the worker's
+   * LeaseGraceLimit plus 60 s) for reset and set_mode; tests set short ones.
+   */
+  leaseTimeoutsMs?: LeaseTimeoutsMs;
   /** In-flight Execs admitted per `sbx` (SBX0 §3.6). Defaults to 2. */
   sandboxMaxInflight?: number;
   /** Seconds past a token's `exp` at which its running Exec is cancelled. Defaults to 30; tests set 0. */
@@ -141,9 +161,14 @@ export function makeExecAuth(
   env: NodeJS.ProcessEnv,
 ): Pick<
   RelayServerDeps,
-  'validateExecToken' | 'verifySandboxToken' | 'sandboxMaxInflight' | 'sandboxAuditCommands'
+  | 'validateExecToken'
+  | 'verifySandboxToken'
+  | 'verifySetModeToken'
+  | 'sandboxMaxInflight'
+  | 'sandboxAuditCommands'
 > {
   const verifySandboxToken = makeSandboxTokenVerifier(env);
+  const verifySetModeToken = makeSetModeTokenVerifier(env);
   const maxInflight = sandboxMaxInflight(env);
   if (!env.MOCA_RELAY_EXEC_TOKEN && !verifySandboxToken) {
     throw new Error(
@@ -156,6 +181,7 @@ export function makeExecAuth(
     ...(verifySandboxToken
       ? {
           verifySandboxToken,
+          ...(verifySetModeToken ? { verifySetModeToken } : {}),
           sandboxMaxInflight: maxInflight,
           // Exactly "1": an operator debug flag, so anything else is off.
           ...(env.SH_SANDBOX_AUDIT_COMMANDS === '1' ? { sandboxAuditCommands: true } : {}),
@@ -168,6 +194,8 @@ type ExecAuth = Pick<
   RelayServerDeps,
   | 'validateExecToken'
   | 'verifySandboxToken'
+  | 'verifySetModeToken'
+  | 'leaseTimeoutsMs'
   | 'sandboxMaxInflight'
   | 'sandboxLeewayS'
   | 'sandboxDrainGraceS'
@@ -238,6 +266,9 @@ function addWorkerService(server: Server, relay: ReturnType<typeof createRelay>)
   server.addService(SandboxWorkerService, workerImpl);
 }
 
+/** The lease calls are a sandbox's own (lease-mode §8.2): the harness never uses leases. */
+const HARNESS_NO_LEASES = 'lease calls not permitted: the harness never uses leases';
+
 function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
   // Audit lines (SBX0 §3.5) only on a relay with sandbox keys, so a MOCA relay's output is
   // unchanged. Fixed reasons, the token's sub and sbx only when it verified; never the token.
@@ -254,6 +285,8 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
     reqIdKey: auth.sandboxReqIdKey ?? randomBytes(32),
     timers: auth.timers,
     audit,
+    ...(auth.verifySetModeToken ? { verifySetMode: auth.verifySetModeToken } : {}),
+    ...(auth.leaseTimeoutsMs ? { leaseTimeoutsMs: auth.leaseTimeoutsMs } : {}),
   });
 
   const execImpl: SandboxExecServer = {
@@ -296,7 +329,15 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         await sandbox.exec(call, caller.claims, req.sandboxId, e, t0);
         return;
       }
-      await pumpExec(call, relay, req.sandboxId, e, { workload: req.workload });
+      // The harness never uses leases: whatever it sent, its Execs run per-exec, unversioned.
+      const harnessExec = {
+        ...e,
+        mode: SandboxMode.SANDBOX_MODE_UNSPECIFIED,
+        modeEpoch: 0,
+        idleTimeoutS: 0,
+        keepalive: false,
+      };
+      await pumpExec(call, relay, req.sandboxId, harnessExec, { workload: req.workload });
     },
     abort: (
       call: ServerUnaryCall<AbortRequest, AbortResponse>,
@@ -321,6 +362,71 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         return;
       }
       relay.routeAbort(entry.wrk, entry.wid);
+      cb(null, {});
+    },
+    // SBX0.3 lease calls (lease-mode §8.2): sandbox-token callers only.
+    leaseControl: (
+      call: ServerUnaryCall<LeaseControlRequest, LeaseControlResponse>,
+      cb: sendUnaryData<LeaseControlResponse>,
+    ) => {
+      const t0 = Date.now();
+      const caller = execCaller(call.metadata, auth);
+      const req = call.request;
+      if (caller.kind !== 'sandbox') {
+        const reason = caller.kind === 'harness' ? HARNESS_NO_LEASES : caller.reason;
+        if (reason)
+          audit.leaseControl(t0, {
+            wrk: req.sandboxId,
+            op: leaseOpName(req.op),
+            outcome: 'refused',
+            reason,
+          });
+        cb(
+          caller.kind === 'harness'
+            ? grpcError(status.PERMISSION_DENIED, HARNESS_NO_LEASES)
+            : unauthenticated(),
+          null,
+        );
+        return;
+      }
+      // A client that goes away withdraws its call: the relay drops the waiter and frees the slot.
+      // The listener goes once the call settles, whichever way.
+      const cancelled = new AbortController();
+      const onCancelled = () => cancelled.abort();
+      call.on('cancelled', onCancelled);
+      if (call.cancelled) cancelled.abort();
+      sandbox.leaseControl(caller.claims, req, t0, cancelled.signal).then(
+        (res) => {
+          call.off('cancelled', onCancelled);
+          cb(null, res);
+        },
+        (err: Error) => {
+          call.off('cancelled', onCancelled);
+          cb(err, null);
+        },
+      );
+    },
+    leaseKeepalive: (
+      call: ServerUnaryCall<LeaseKeepaliveRequest, LeaseKeepaliveResponse>,
+      cb: sendUnaryData<LeaseKeepaliveResponse>,
+    ) => {
+      // Not audited, refusals included: a client may send one every few seconds.
+      const caller = execCaller(call.metadata, auth);
+      if (caller.kind !== 'sandbox') {
+        cb(
+          caller.kind === 'harness'
+            ? grpcError(status.PERMISSION_DENIED, HARNESS_NO_LEASES)
+            : unauthenticated(),
+          null,
+        );
+        return;
+      }
+      try {
+        sandbox.leaseKeepalive(caller.claims, call.request);
+      } catch (err) {
+        cb(err as Error, null);
+        return;
+      }
       cb(null, {});
     },
   };
