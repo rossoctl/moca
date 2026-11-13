@@ -430,7 +430,8 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   Without a mark, the restart re-sends this boot's entries, which the control plane stores twice; the
   agent says so in an error line (`no position mark`). Entries of an earlier boot that the old cursor
   had not reached are not read.
-- **What is kept:** each event exactly as the proxy wrote it, for as long as the sandbox record
+- **What is kept:** each event with its fields and values as the proxy wrote them (the agent decodes and
+  re-encodes each one, so the bytes may differ, and the control plane stores its own canonical line), for as long as the sandbox record
   (`SBX_RETENTION_DAYS`). A log holds at most 10,000 events (`EGRESS_LOG_CAP`, about 3 MB), and all
   logs together at most 200,000 (`EGRESS_TOTAL_BUDGET`): with 256 MiB for Redis, egress logs take at
   most about 64 MB. The total counts the logs that still exist, so an expired log gives its share

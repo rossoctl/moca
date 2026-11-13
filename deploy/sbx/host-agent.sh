@@ -24,7 +24,7 @@
 # the wanted state at once: the one that does not get it skips, saying so.
 #
 # The egress step, in --wanted-only runs only: it READS moca-egress's journal and posts
-# the proxy's audit events, as the proxy wrote them, to POST /v1/hosts/<id>/egress, where each event
+# the proxy's audit events, with no field added, removed or changed, to POST /v1/hosts/<id>/egress, where each event
 # lands in its sandbox's egress log. It never touches moca-egress (no start, stop, restart or config):
 # a failed post changes nothing on the host's egress, it only leaves the journal cursor where it was.
 #   - Off when `systemctl is-active moca-egress.service` does not say active (a --no-egress host, none
@@ -425,7 +425,9 @@ egress_select() { # egress_select ENTRIES MARK_BOOT MARK_MONO
   # A MESSAGE that is not text (journalctl prints bytes that are not UTF-8 as an array of numbers)
   # cannot be read for its sid: it is counted (unreadable) and said in an error line, never silent.
   # An event over 8 KiB (a guest's long path) is not sent; its sid is, as `oversized`, and the
-  # control plane counts it as dropped in that sandbox's log. Nothing in an event is changed.
+  # control plane counts it as dropped in that sandbox's log. No field is added, removed or changed:
+  # the values are kept, not the bytes, as jq decodes each MESSAGE and writes it out again (Go's
+  # `\u003c` comes out as `<`); the control plane hashes its own serialization, so no digest changes.
   # Only this host's sandboxes' events, and the proxy's audit_dropped reports (no sid); `notOurs`
   # counts the others, which stay on the host (it is read aside, and never posted).
   (umask 077 && jq -cs --arg b "$2" --argjson m "$3" --slurpfile s "$WORK/egress.sids" '(last | .__CURSOR) as $c
