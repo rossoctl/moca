@@ -7,11 +7,24 @@ import {
   type LeaseOpName,
   type LeaseStatusView,
 } from '@moca/sandbox-client';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sbxMain } from '../src/sbx/cli.js';
 import type { ExecFactory } from '../src/sbx/exec.js';
 import { modeRank, sendSetMode } from '../src/sbx/mode.js';
-import { fakeCp, fakeLease, jwt, sandbox, SBX, setup, TOKEN, TOKEN_IAT } from './helpers/sbx.js';
+import {
+  cleanupTmp,
+  fakeCp,
+  fakeLease,
+  jwt,
+  sandbox,
+  SBX,
+  setup,
+  tmp,
+  TOKEN,
+  TOKEN_IAT,
+} from './helpers/sbx.js';
+
+afterEach(cleanupTmp);
 
 /** What the worker answers once a lease mode's epoch is known (spec §8.3). */
 const APPLIED: LeaseStatusView = {
@@ -419,6 +432,8 @@ function leaseWorld(
   o: {
     record?: Record<string, unknown>;
     tty?: boolean;
+    /** The working directory sbxMain sees (default: the test process's). */
+    cwd?: string;
     /** A PUT body the control plane refuses with 400 invalid_request. */
     putRefuses?: (body: { mode: string; idleTimeoutS?: number }) => boolean;
     lease?: (
@@ -492,6 +507,7 @@ function leaseWorld(
       execFactory: factory,
       stdinIsTTY: o.tty ?? true,
       signal: ac.signal,
+      ...(o.cwd !== undefined ? { cwd: o.cwd } : {}),
     });
   };
   return {
@@ -529,6 +545,31 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
       expect(await w.run(['mode', mode, SBX])).toBe(0);
       expect(w.puts()).toEqual([{ mode }]);
     }
+  });
+
+  it('mode tells a bound repository to run sbx up when the agent rules change (review #4569829055)', async () => {
+    const HINT = 'run "mocactl sbx up" to update the agent rules';
+    const bound = () => {
+      const d = tmp('sbx-mode-bound-');
+      mkdirSync(join(d, '.sbx'));
+      writeFileSync(join(d, '.sbx', 'sandbox.json'), JSON.stringify({ id: SBX }));
+      return d;
+    };
+    const w = leaseWorld({ record: { mode: 'lease' }, cwd: bound() });
+    expect(await w.run(['mode', 'per-exec'])).toBe(0);
+    expect(w.err()).toContain(HINT);
+    // Not bound here: no hint.
+    const other = leaseWorld({ record: { mode: 'lease' }, cwd: tmp('sbx-mode-unbound-') });
+    expect(await other.run(['mode', 'per-exec', SBX])).toBe(0);
+    expect(other.err()).not.toContain(HINT);
+    // lease and lease+processes share one rules block: nothing to update.
+    const same = leaseWorld({ record: { mode: 'lease' }, cwd: bound() });
+    expect(await same.run(['mode', 'lease+processes'])).toBe(0);
+    expect(same.err()).not.toContain(HINT);
+    // A mode the control plane refused changed nothing.
+    const refused = leaseWorld({ tty: false, record: { mode: 'per-exec' }, cwd: bound() });
+    expect(await refused.run(['mode', 'lease'])).toBe(2);
+    expect(refused.err()).not.toContain(HINT);
   });
 
   it('mode keeps the current idle timeout', async () => {
@@ -786,12 +827,44 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
           : new LeaseControlError('unavailable', 'gone'),
     });
     expect(await p.run(['get', SBX])).toBe(0);
-    expect(p.err()).toContain('re-sent mode lease: pending');
+    // The pending line is create's (review #4569829068).
+    expect(p.err()).toContain(
+      `sbx: lease pending (unavailable): the sandbox runs per-Exec until "mocactl sbx get ${SBX}" re-sends the mode`,
+    );
+    expect(p.err()).not.toContain('re-sent mode lease: pending');
     // A known epoch is not re-sent.
     const k = leaseWorld();
     expect(await k.run(['get', SBX])).toBe(0);
     expect(k.modeMints()).toBe(0);
     expect(k.calls.map((c) => c.op)).toEqual(['status']);
+  });
+
+  it("get --json says a re-sent set_mode's hard failure, as create --json does (review #4569829068)", async () => {
+    const w = leaseWorld({
+      lease: (op) =>
+        op === 'status'
+          ? { ...APPLIED, epochKnown: false }
+          : new LeaseControlError(
+              'failed',
+              'stale_mode: epoch 1 is below the stored 2',
+              'stale_mode: x',
+            ),
+    });
+    expect(await w.run(['get', SBX, '--json'])).toBe(1);
+    const j = JSON.parse(w.out());
+    expect(j.setMode).toEqual({
+      error: 'set_mode failed (failed): stale_mode: epoch 1 is below the stored 2',
+    });
+    expect(j.lease).toMatchObject({ epochKnown: false });
+    // Pending and applied keep their outcome.
+    const p = leaseWorld({
+      lease: (op) =>
+        op === 'status'
+          ? { ...APPLIED, epochKnown: false }
+          : new LeaseControlError('unavailable', 'gone'),
+    });
+    expect(await p.run(['get', SBX, '--json'])).toBe(0);
+    expect(JSON.parse(p.out()).setMode).toEqual({ outcome: 'pending', code: 'unavailable' });
   });
 
   it('an unseen notice prints once across two get calls', async () => {

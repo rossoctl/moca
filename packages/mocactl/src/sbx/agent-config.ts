@@ -132,8 +132,9 @@ export const rulesFor = (mode: SandboxModeName): string =>
   );
 /** The per-exec block body: the server's own instructions (MCP_INSTRUCTIONS) under a heading. */
 export const RULES = rulesFor('per-exec');
-/** Every mode's block body, once: what `doctor` takes as up to date. */
-const ALL_RULES = [...new Set((['per-exec', 'lease', 'lease+processes'] as const).map(rulesFor))];
+const MODES = ['per-exec', 'lease', 'lease+processes'] as const;
+/** Every mode's block body, once: what `doctor` takes as up to date when the mode is unknown. */
+const ALL_RULES = [...new Set(MODES.map(rulesFor))];
 
 /** The server name in every file: Claude Code's tools are then `mcp__sandbox__*`. */
 export const SERVER = 'sandbox';
@@ -1366,8 +1367,10 @@ export function removeAgentConfig(root: string): string[] {
 /**
  * Whether the denied state holds (spec §6.1, §6.3): each agent has the sandbox server, and every
  * local built-in in this module's lists is denied. One line per problem; [] when it all holds.
+ * `mode` is the sandbox's, as its record says it now: the rules block must then be that mode's
+ * (nothing rewrites it on `sbx mode`); without it, any mode's block is up to date.
  */
-export function checkAgentConfig(root: string): string[] {
+export function checkAgentConfig(root: string, mode?: SandboxModeName): string[] {
   const problems: string[] = [];
   const cortex = cortexMode(root);
   const load = (rel: string, jsonc: boolean): Json | undefined => {
@@ -1473,8 +1476,17 @@ export function checkAgentConfig(root: string): string[] {
       const text = t.exists ? readFileSync(t.abs, 'utf8') : '';
       const mk = markers(t.rel, text, 'mocactl sbx up re-merges it once fixed');
       const body = mk ? text.slice(mk[0], mk[1]).replace(/\r\n/g, '\n') : undefined;
-      // The block for any mode: doctor does not know which one the sandbox is in now.
-      if (!ALL_RULES.some((rules) => body === blockFor('\n', rules))) {
+      const isBlock = (rules: string) => body === blockFor('\n', rules);
+      if (mode !== undefined && !isBlock(rulesFor(mode))) {
+        // A block another mode's `up` wrote: the agent is told what that mode keeps.
+        const other = MODES.find((m) => isBlock(rulesFor(m)));
+        problems.push(
+          other !== undefined
+            ? `${f}: has the sandbox rules block for ${other} mode, but the sandbox is in ${mode} mode`
+            : `${f}: ${body === undefined ? 'has no' : 'has an out-of-date'} sandbox rules block`,
+        );
+      } else if (mode === undefined && !ALL_RULES.some(isBlock)) {
+        // The block for any mode: the sandbox's own is not known here.
         problems.push(
           `${f}: ${body === undefined ? 'has no' : 'has an out-of-date'} sandbox rules block`,
         );

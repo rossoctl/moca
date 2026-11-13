@@ -634,11 +634,15 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
   set-mode token. Applied, it prints `mode <m> (epoch <n>)`, and `lease ended (mode_change)` when a
   downgrade ended a live lease. Pending, it exits 0 and prints
   `mode <m> stored (epoch <n>); the worker could not be reached (<code>): it applies at the next command`.
-  Ctrl-C prints the same with `cancelled` and exits 130.
+  Ctrl-C prints the same with `cancelled` and exits 130. In a repository bound to the sandbox
+  (`.sbx/sandbox.json`), a change of the agent rules (per-exec to a lease mode, or back) adds
+  `run "mocactl sbx up" to update the agent rules` on stderr: nothing rewrites the block `up`
+  wrote, and `sbx doctor` checks it against the record's mode.
 - **`get [ID] [--json]`** shows the record's mode, epoch and idle timeout, and the lease from
   `LeaseControl status` (a `per-exec` record makes no call: `none (per-exec)`). When the worker
   answers `epoch_known: false`, it mints a fresh set-mode token, sends it, and says
-  `re-sent mode <m>: applied` (or `pending`) on stderr.
+  `re-sent mode <m>: applied` on stderr, or `create`'s pending line. `--json` adds `setMode`, as
+  `create --json` does: the outcome, or `{error}` when the send failed (exit 1).
 - **`ls`** shows each sandbox's mode.
 
 **As built (plan 4), the worker's state files.** Every worker writes `.lease-state/.boot`
@@ -727,7 +731,8 @@ for a refusal at the worker's own cap.
   `reset`: the 31-minute timeout, the same cap of 4 in flight, and a `sandbox_lease_control` line
   with `op` `sandbox_deleted`. `mocactl sbx rm` reads the record first (P4-R16) and, for a lease
   mode, sends it before the `DELETE`. It is best-effort: any failure, or 15 s without an answer,
-  and the `DELETE` goes ahead. Ctrl-C during it deletes nothing (exit 130).
+  and the `DELETE` goes ahead. The 15 s bound covers the whole step: the record read, the token
+  mint and the call. Ctrl-C during it deletes nothing (exit 130).
 - **Keepalives are coalesced.** The relay writes at most one keepalive frame per workspace to each
   worker per second (`LEASE_KEEPALIVE_COALESCE_MS`). The others are answered OK and not written.
 - **`mocactl sbx mcp` sends the keepalive.** While its current sandbox token's `mode` claim is a

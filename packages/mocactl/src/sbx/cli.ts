@@ -1050,6 +1050,7 @@ async function sbxMainWith(
       return cmdMode(ctx, id!, arg as SandboxModeName, {
         ...(modeIdle !== undefined ? { idleTimeoutS: modeIdle } : {}),
         tty: deps.stdinIsTTY === true,
+        boundHere: readBoundSandbox(deps.cwd ?? process.cwd()) === id,
         ...(deps.execFactory ? { factory: deps.execFactory } : {}),
       });
     case 'reset':

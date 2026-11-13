@@ -287,9 +287,12 @@ export class SandboxApiClient extends ControlPlaneClient {
     ).sandboxes.map(withMode);
   }
 
-  async getSandbox(id: string): Promise<SbxSandbox> {
+  /** `signal` aborts the request (`rm`'s bounded lease step). */
+  async getSandbox(id: string, opts: { signal?: AbortSignal } = {}): Promise<SbxSandbox> {
     return withMode(
-      await this.json<WireSandbox<SbxSandbox>>('GET', `/v1/sandboxes/${encodeURIComponent(id)}`),
+      await this.json<WireSandbox<SbxSandbox>>('GET', `/v1/sandboxes/${encodeURIComponent(id)}`, {
+        signal: opts.signal,
+      }),
     );
   }
 
@@ -297,8 +300,11 @@ export class SandboxApiClient extends ControlPlaneClient {
     return this.json('DELETE', `/v1/sandboxes/${encodeURIComponent(id)}`);
   }
 
-  mintSandboxToken(id: string): Promise<SbxToken> {
-    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/token`);
+  /** `signal` aborts the request (`rm`'s bounded lease step). */
+  mintSandboxToken(id: string, opts: { signal?: AbortSignal } = {}): Promise<SbxToken> {
+    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/token`, {
+      signal: opts.signal,
+    });
   }
 
   /**

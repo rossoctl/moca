@@ -5,11 +5,19 @@ import {
   type SandboxModeName,
 } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
+import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
+import { rulesFor } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
 import { jwtMode, openExec, sandboxFailureText, type ExecFactory } from './exec.js';
-import { modeRank, sendSetMode, setModeFailureText, UPGRADE_NEEDS_TTY } from './mode.js';
+import {
+  modeRank,
+  pendingText,
+  sendSetMode,
+  setModeFailureText,
+  UPGRADE_NEEDS_TTY,
+} from './mode.js';
 import { printNotices } from './notices.js';
 
 /**
@@ -50,12 +58,20 @@ export async function cmdMode(
   c: SbxCtx,
   id: string,
   mode: SandboxModeName,
-  o: { idleTimeoutS?: number; tty: boolean; factory?: ExecFactory },
+  o: {
+    idleTimeoutS?: number;
+    tty: boolean;
+    factory?: ExecFactory;
+    /** The working directory is bound to this sandbox (`.sbx/sandbox.json`): `up` wrote its rules. */
+    boundHere?: boolean;
+  },
 ): Promise<number> {
   let s: SbxSandbox;
   let setModeToken: string;
+  let was: SandboxModeName;
   try {
     const cur = await c.api.getSandbox(id);
+    was = cur.mode;
     if (modeRank(mode) > modeRank(cur.mode) && !o.tty) {
       c.io.err(`sbx: ${UPGRADE_NEEDS_TTY}`);
       return SBX_EXIT.usage;
@@ -84,6 +100,11 @@ export async function cmdMode(
     }
   } catch (err) {
     return failed(c, err);
+  }
+  // Nothing rewrites the CLAUDE.md / AGENTS.md block `up` wrote for the old mode (review
+  // #4569829055); lease and lease+processes share one, so only a change of text is said.
+  if (o.boundHere && rulesFor(was) !== rulesFor(s.mode)) {
+    c.io.err('sbx: run "mocactl sbx up" to update the agent rules');
   }
   const stored = `mode ${s.mode} stored (epoch ${s.modeEpoch})`;
   let x;
@@ -192,7 +213,8 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
     return failed(c, err);
   }
   let lease: LeaseInfo = null;
-  let setMode: { outcome: 'applied' } | { outcome: 'pending'; code: string } | undefined;
+  let setMode:
+    { outcome: 'applied' } | { outcome: 'pending'; code: string } | { error: string } | undefined;
   let code: number = SBX_EXIT.ok;
   if (modeRank(s.mode) > 0) {
     let x;
@@ -210,15 +232,22 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
           try {
             const { setModeToken } = await c.api.mintSandboxModeToken(id);
             const r = await sendSetMode(x, c.api, id, setModeToken, c.signal);
-            c.io.err(`re-sent mode ${s.mode}: ${r.outcome}`);
             if (r.outcome === 'applied') {
+              c.io.err(`re-sent mode ${s.mode}: applied`);
               v = r.status;
               printNotices(c, id, [v.pending]);
               setMode = { outcome: 'applied' };
-            } else setMode = { outcome: 'pending', code: r.code };
+            } else {
+              // create's line for a pending set_mode (review #4569829068).
+              c.io.err(`sbx: ${pendingText(id, r.code)}`);
+              setMode = { outcome: 'pending', code: r.code };
+            }
           } catch (err) {
             if (c.signal?.aborted) throw err;
-            c.io.err(`sbx: re-sending mode ${s.mode} failed: ${setModeFailureText(err)}`);
+            // In --json too, as create says it: the mode is stored, and was not applied.
+            const text = err instanceof ApiError ? describeError(err) : setModeFailureText(err);
+            c.io.err(`sbx: re-sending mode ${s.mode} failed: ${text}`);
+            setMode = { error: text };
             code = SBX_EXIT.failed;
           }
         }

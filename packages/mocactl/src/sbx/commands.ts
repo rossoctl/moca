@@ -494,27 +494,29 @@ export const RM_LEASE_WAIT_MS = 15_000;
 /**
  * `LeaseControl sandbox_deleted` for a lease sandbox, before its DELETE (spec §4.1): best-effort,
  * so any error (the record, the token, the call) is ignored and the DELETE goes ahead, as it does
- * after RM_LEASE_WAIT_MS. Ctrl-C cancels the call (the caller then deletes nothing). A per-exec
- * sandbox has no lease, and no call is made.
+ * after RM_LEASE_WAIT_MS. The bound covers the whole step: the record read, the token mint and the
+ * dial, then the call (spec §8.3). Ctrl-C cancels it at any point (the caller then deletes
+ * nothing). A per-exec sandbox has no lease, and no call is made.
  */
 async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
+  const waited = new AbortController();
+  const settled = new AbortController();
+  void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
+    if (!settled.signal.aborted) waited.abort();
+  });
+  const signal = c.signal ? AbortSignal.any([c.signal, waited.signal]) : waited.signal;
   try {
-    if (modeRank((await c.api.getSandbox(id)).mode) === 0) return;
-    const x = await openExec(c.api, id, factory);
-    const waited = new AbortController();
-    const settled = new AbortController();
-    void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
-      if (!settled.signal.aborted) waited.abort();
-    });
-    const signal = c.signal ? AbortSignal.any([c.signal, waited.signal]) : waited.signal;
+    if (modeRank((await c.api.getSandbox(id, { signal })).mode) === 0) return;
+    const x = await openExec(c.api, id, factory, { signal });
     try {
       await x.leaseControl('sandbox_deleted', undefined, { signal });
     } finally {
-      settled.abort();
       x.close();
     }
   } catch {
     // Best-effort: the DELETE decides, and reports its own failure.
+  } finally {
+    settled.abort();
   }
 }
 

@@ -616,7 +616,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       });
       return { ...s, cp, leaseCalls, execFactory };
     };
-    // The bound passes (the sleep seam answers at once): the DELETE goes ahead.
+    // The bound passes (the sleep seam answers once the call is waiting): the DELETE goes ahead.
     const w = world();
     const slept: number[] = [];
     expect(
@@ -624,7 +624,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         home: w.home,
         fetchImpl: w.cp.fetchImpl,
         execFactory: w.execFactory,
-        sleep: async (ms) => void slept.push(ms),
+        sleep: async (ms) => {
+          slept.push(ms);
+          await vi.waitFor(() => expect(w.leaseCalls).toHaveLength(1));
+        },
       }),
     ).toBe(0);
     expect(slept).toEqual([15_000]);
@@ -644,6 +647,83 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(await p).toBe(130);
     expect(x.cp.calls.some((c) => c.method === 'DELETE')).toBe(false);
     expect(x.io.errs.join('\n')).toContain('nothing was deleted');
+  });
+
+  it("rm's 15 s bound covers the record read and the token mint too; Ctrl-C there deletes nothing (review #4569829061)", async () => {
+    const world = (hang: 'get' | 'token') => {
+      const s = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'lease' }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 200,
+          body: { id: SBX, state: 'terminated', reason: 'deleted' },
+        }),
+      });
+      const hung: string[] = [];
+      // A control plane that never answers the record read (or the mint): only an abort ends it.
+      const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+        const u = new URL(String(input));
+        const method = init?.method ?? 'GET';
+        const slow =
+          hang === 'get'
+            ? method === 'GET' && u.pathname === `/v1/sandboxes/${SBX}`
+            : method === 'POST' && u.pathname === `/v1/sandboxes/${SBX}/token`;
+        if (!slow) return cp.fetchImpl(input, init);
+        hung.push(`${method} ${u.pathname}`);
+        return new Promise<Response>((_res, rej) => {
+          const stop = () => rej(new DOMException('aborted', 'AbortError'));
+          if (init?.signal?.aborted) stop();
+          init?.signal?.addEventListener('abort', stop, { once: true });
+        });
+      }) as typeof fetch;
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...fakeLease(() => ({
+          mode: 'lease',
+          epochKnown: true,
+          state: 'none',
+          ageMs: 0,
+          idleTimeoutS: 0,
+        })),
+      });
+      return { ...s, cp, fetchImpl, hung, execFactory };
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      for (const hang of ['get', 'token'] as const) {
+        const w = world(hang);
+        const p = sbxMain(['rm', '--force', SBX], w.env, w.io, {
+          home: w.home,
+          fetchImpl: w.fetchImpl,
+          execFactory: w.execFactory,
+        });
+        await vi.waitFor(() => expect(w.hung).toHaveLength(1));
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(await p, hang).toBe(0);
+        expect(w.cp.calls.at(-1), hang).toMatchObject({ method: 'DELETE' });
+        expect(w.io.errs.join('\n')).toMatch(/^deleted /);
+      }
+      // Ctrl-C while the record read hangs: no DELETE, said so, exit 130.
+      const x = world('get');
+      const ac = new AbortController();
+      const p = sbxMain(['rm', '--force', SBX], x.env, x.io, {
+        home: x.home,
+        fetchImpl: x.fetchImpl,
+        execFactory: x.execFactory,
+        signal: ac.signal,
+      });
+      await vi.waitFor(() => expect(x.hung).toHaveLength(1));
+      ac.abort();
+      expect(await p).toBe(130);
+      expect(x.cp.calls.some((c) => c.method === 'DELETE')).toBe(false);
+      expect(x.io.errs.join('\n')).toContain('nothing was deleted');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rm forgets the sandbox\'s seen notices, the "already gone" path too', async () => {

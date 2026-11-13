@@ -107,11 +107,11 @@ export function sandboxTokenFn(
   now: () => number = Date.now,
   /** Called with each token minted, before any caller gets it (`sbx mcp` reads its mode). */
   onMint?: (t: SbxToken) => void,
-): { token: TokenFn; first(): Promise<SbxToken> } {
+): { token: TokenFn; first(signal?: AbortSignal): Promise<SbxToken> } {
   let cur: SbxToken | undefined;
   let pending: Promise<SbxToken> | undefined;
-  const mint = () =>
-    (pending ??= api.mintSandboxToken(id).then(
+  const mint = (signal?: AbortSignal) =>
+    (pending ??= api.mintSandboxToken(id, signal ? { signal } : {}).then(
       (t) => {
         pending = undefined;
         cur = t;
@@ -123,14 +123,18 @@ export function sandboxTokenFn(
         throw err;
       },
     ));
-  const get = async (force: boolean, minValidS: number): Promise<SbxToken> => {
+  const get = async (
+    force: boolean,
+    minValidS: number,
+    signal?: AbortSignal,
+  ): Promise<SbxToken> => {
     const need = Math.max(MIN_LEFT_S, minValidS);
-    if (force || !cur || cur.expiresAt - now() / 1000 < need) return mint();
+    if (force || !cur || cur.expiresAt - now() / 1000 < need) return mint(signal);
     return cur;
   };
   return {
     token: async ({ force, minValidS }) => grantOf(await get(force, minValidS)),
-    first: () => get(false, MIN_LEFT_S),
+    first: (signal?: AbortSignal) => get(false, MIN_LEFT_S, signal),
   };
 }
 
@@ -162,15 +166,17 @@ export async function openExec(
     onToken?: (t: SbxToken) => void;
     /** The connection's `Exec.keepalive` (default false). */
     keepalive?: ExecConnOptions['keepalive'];
+    /** Aborts the opening's requests: the first token mint and the expiry lookup. */
+    signal?: AbortSignal;
   } = {},
 ): Promise<OpenedExec> {
   const t = sandboxTokenFn(api, id, Date.now, o.onToken);
-  const first = await t.first();
+  const first = await t.first(o.signal);
   let sandboxExpiresAt = o.sandboxExpiresAt;
   const life = grantOf(first).lifetimeS;
   if (sandboxExpiresAt === undefined && life > 0 && life < SHORT_TOKEN_S) {
     // Best effort: without it, a short token is only reported as a short lifetime.
-    sandboxExpiresAt = await api.getSandbox(id).then(
+    sandboxExpiresAt = await api.getSandbox(id, o.signal ? { signal: o.signal } : {}).then(
       (s) => s.expiresAt,
       () => undefined,
     );
