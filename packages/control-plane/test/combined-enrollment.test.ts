@@ -1,5 +1,11 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HANDLERS, apiIssuer } from '../src/handlers.js';
+import { ProvenanceStore } from '../src/provenance.js';
+import { FileTemplateCatalog } from '../src/template-catalog.js';
+import { FilePolicyStore } from '../src/template-policy-store.js';
 import { isEnrolled, isEnrolledForSandbox } from '../src/sandbox-config.js';
 import { mintSandboxToken } from '../src/sandbox-token.js';
 import { DEFAULT_ISSUER } from '../src/token.js';
@@ -79,13 +85,39 @@ describe('who may call what on the combined profile', () => {
       () => HANDLERS.putPolicy!(ctx({ principal: outsider, body: {} }), d),
     ];
     for (const w of writes) expect(await codeOf(w)).toBe('not_enrolled');
-    // A read is never refused for enrollment on combined (it may fail otherwise: no store here).
-    for (const r of [
-      () => HANDLERS.listTemplates!(ctx({ principal: tester }), d),
-      () => HANDLERS.getTemplate!(ctx({ principal: tester, params: { id: 'default' } }), d),
-    ]) {
-      expect(await outcome(r)).not.toBe('not_enrolled');
+  });
+
+  it('answers the template, policy and quota reads to them (200, with a template store)', async () => {
+    const d = combined();
+    const dir = mkdtempSync(join(tmpdir(), 'cp-combined-'));
+    const provenance = new ProvenanceStore({ dir, now: d.now });
+    d.provenance = provenance;
+    d.templates = new FileTemplateCatalog({
+      dir,
+      declared: [{ id: 'default', worker: 'sbx_default', description: 'default', tools: [] }],
+      provenance,
+      now: d.now,
+    });
+    d.policy = new FilePolicyStore({ dir, provenance });
+    for (const principal of [outsider, tester, alice]) {
+      const reads = {
+        listTemplates: () => HANDLERS.listTemplates!(ctx({ principal }), d),
+        getTemplate: () => HANDLERS.getTemplate!(ctx({ principal, params: { id: 'default' } }), d),
+        getPolicy: () => HANDLERS.getPolicy!(ctx({ principal }), d),
+        getQuota: () => HANDLERS.getQuota!(ctx({ principal }), d),
+      };
+      for (const [name, read] of Object.entries(reads)) {
+        expect({ name, sub: principal.sub, status: (await read()).status }).toEqual({
+          name,
+          sub: principal.sub,
+          status: 200,
+        });
+      }
     }
+    const list = (await HANDLERS.listTemplates!(ctx({ principal: tester }), d)).body as {
+      templates: { id: string }[];
+    };
+    expect(list.templates.map((t) => t.id)).toContain('default');
   });
 
   it('keeps sessions open to any logged-in subject, as on harness', async () => {
