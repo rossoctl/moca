@@ -121,12 +121,12 @@ provenance.
 
 ## 4. The API
 
-| Route                                         | Who                                | Answer                                                  |
-| --------------------------------------------- | ---------------------------------- | ------------------------------------------------------- |
-| `POST /v1/hosts/{host}/egress`                | a host agent, as itself            | `{accepted, refused, capped, invalid, dropped, cursor}` |
-| `GET /v1/sandboxes/{id}/egress`               | the owner, an admin                | `{events, next, summary}`                               |
-| `GET /v1/sandboxes/{id}/egress?format=ndjson` | the owner, an admin                | the log, NDJSON                                         |
-| `GET /v1/hosts/{host}/wanted`                 | a host agent, as itself (existing) | gains `egressSids`                                      |
+| Route                                         | Who                                | Answer                                                              |
+| --------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------- |
+| `POST /v1/hosts/{host}/egress`                | a host agent, as itself            | `{accepted, refused, capped, overBudget, invalid, dropped, cursor}` |
+| `GET /v1/sandboxes/{id}/egress`               | the owner, an admin                | `{events, next, summary}`                                           |
+| `GET /v1/sandboxes/{id}/egress?format=ndjson` | the owner, an admin                | the log, NDJSON                                                     |
+| `GET /v1/hosts/{host}/wanted`                 | a host agent, as itself (existing) | gains `egressSids`                                                  |
 
 Errors: 404 `sandbox_not_found` for an unknown sandbox or another subject's, as for the other sandbox
 routes. CLI: `mocactl sbx egress [ID] [--json | --ndjson | --verify]`.
@@ -150,7 +150,8 @@ routes. CLI: `mocactl sbx egress [ID] [--json | --ndjson | --verify]`.
 
 1. **Who may read a sandbox's egress:** the sandbox's owner and admins, the same as the other
    sandbox routes. No separate grader role.
-2. **Retention:** the sandbox record's (`SBX_RETENTION_DAYS`, 14 days today).
+2. **Retention:** the sandbox record's (`SH_SANDBOX_RETENTION_SECONDS`, 14 days by default;
+   `deploy/sbx/setup.sh` sets it from `SBX_RETENTION_DAYS`).
 3. **A loss budget:** if the proxy dropped events for a sandbox (`audit_dropped`), the sandbox's end
    record marks its egress log incomplete, with the drop count, and the grader decides whether that
    rep is still valid.
