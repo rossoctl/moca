@@ -505,6 +505,26 @@ describe.skipIf(!havePython)('redact-provenance.py', () => {
     ).toMatchObject({ seq: 7, prev: newHead.head });
   });
 
+  it('counts a hit only where the redaction changes a value, and removes no record the chain names', async () => {
+    const dir = freshDir();
+    const s = store(dir);
+    await onboard(s);
+    const head = (await s.head(T))!.head;
+    const files = readdirSync(join(dir, 'records')).sort();
+    // A match only inside a key, and one only across a key and its value in the canonical text:
+    // the redaction rewrites string values, so neither changes a byte.
+    for (const pattern of ['manifest_hash', '"source":"trusted-builder"']) {
+      const r = redact(dir, 'demo-app', '--pattern', pattern, '--apply');
+      expect(r.status, pattern).toBe(0);
+      expect(r.out, pattern).toContain('0 match');
+      expect(r.out, pattern).toContain('nothing to redact');
+      expect(readdirSync(join(dir, 'records')).sort(), pattern).toEqual(files);
+      const again = store(dir);
+      expect((await again.head(T))!.head, pattern).toBe(head);
+      expect((await again.chain(T)).length, pattern).toBe(4);
+    }
+  });
+
   it('says nothing to redact when nothing matches, and refuses a stream with no head', async () => {
     const dir = freshDir();
     await onboard(store(dir));
