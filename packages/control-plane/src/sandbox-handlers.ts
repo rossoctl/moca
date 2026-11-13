@@ -829,7 +829,11 @@ function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
 const leasedBy = (docs: TemplateDoc[], subject: string, nowS: number): TemplateBuild[] =>
   docs
     .flatMap((d) => d.builds)
-    .filter((x) => liveLeases(x, nowS).some((l) => l.subject === subject));
+    // Only a registered build's lease counts: a retire or a reject drops its leases, and none is
+    // written after (takeLeaseLocked), but a lease on an ended build never holds a quota slot.
+    .filter(
+      (x) => x.status === 'registered' && liveLeases(x, nowS).some((l) => l.subject === subject),
+    );
 
 /**
  * Activate (§6.3): take or renew this subject's lease on a registered build, by `tag` (default
@@ -890,7 +894,8 @@ const deploymentRun = (id: string) =>
  * before a drop judged against more leases than remain, never fewer. A retire takes it (§5.1),
  * and so does an admin's reject after the fact (§5.2): each ends a build's use, and takeLease
  * re-reads the build's status under it, so a lease is never written onto a build retired or
- * rejected after the activation resolved it.
+ * rejected after the activation resolved it. A sandbox create takes it around its last status
+ * read and its store write (createUnlessEnded), so no sandbox lands on a build ended meanwhile.
  *
  * It is process-local, which suffices because one control plane process owns the store: the
  * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
@@ -1368,6 +1373,32 @@ async function requireActive(
   );
 }
 
+/**
+ * Stores a new sandbox (`create`) unless its build was retired (§5.1) or rejected after the fact
+ * (§5.2) since resolveForUse read it: the build's status is re-read and the sandbox stored under
+ * the activation lock, which a retire and a reject hold around their in-use check and their write.
+ * So either the sandbox is stored first, and the retire or reject sees it live (`409
+ * build_in_use`), or the build has ended first, and the create is refused with nothing stored
+ * (`410 template_retired`, or `400 unknown_template` for a rejected build, as resolveForUse
+ * answers). A deployment whose catalog takes no writes (no retire, no reject) needs no lock.
+ */
+async function createUnlessEnded<T>(
+  deps: CpDeps,
+  t: { id: string; buildId: string },
+  create: () => Promise<T>,
+): Promise<T> {
+  const cat = deps.templates;
+  if (!cat?.update) return create();
+  return activationLock(cat).run('activation', async () => {
+    const b = (await cat.get(t.id))?.builds.find((x) => x.buildId === t.buildId);
+    if (b?.status === 'retired')
+      throw new CpError('template_retired', `template '${t.id}' build ${t.buildId} is retired`);
+    if (b?.status !== 'registered')
+      throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
+    return create();
+  });
+}
+
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
   // The template reads (template lifecycle spec §4), on both route profiles (§4.1): on `harness`
   // requireEnrolled admits any logged-in subject. The worker id is deployment plumbing; a client
@@ -1588,10 +1619,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       createdAt: now,
       expiresAt: now + cfg.lifetimeS,
     };
-    const outcome = await store.create(
-      rec,
-      { perSubject: cfg.maxPerSubject, total: cfg.maxTotal, retentionS: cfg.retentionS },
-      now,
+    const outcome = await createUnlessEnded(deps, template, () =>
+      store.create(
+        rec,
+        { perSubject: cfg.maxPerSubject, total: cfg.maxTotal, retentionS: cfg.retentionS },
+        now,
+      ),
     );
     if (outcome === 'quota_subject') {
       throw new CpError('quota_exceeded', `at most ${cfg.maxPerSubject} live sandboxes per user`);

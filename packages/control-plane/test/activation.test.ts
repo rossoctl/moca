@@ -1378,6 +1378,68 @@ describe('reject after the fact (§5.2)', () => {
     expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
   });
 
+  it('a reject waits for an activation taking its lease, then drops that lease', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    // A reject arrives while the activation is between its checks and its lease write: under the
+    // activation lock it waits for the lease, then drops it.
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let rejecting: Promise<unknown> | null = null;
+    prov.append = async (input) => {
+      const rec = await append(input);
+      if (input.kind === 'activate' && !rejecting) {
+        rejecting = reject(d, 't1', hash('1'), { reason: 'broken' });
+        await Promise.race([rejecting, new Promise((r) => setTimeout(r, 200))]);
+      }
+      return rec;
+    };
+    expect((await activate(d, 't1')).status).toBe(200);
+    await rejecting;
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'rejected',
+      leases: [],
+    });
+    expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
+      active: { used: 0 },
+    });
+  });
+
+  for (const [how, code] of [
+    ['reject', 'unknown_template'],
+    ['retire', 'template_retired'],
+  ] as const) {
+    it(`a sandbox create that resolved the build before a ${how} stores nothing (${code})`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      await activate(d, 't1');
+      // The create reads the build (registered); the build then ends, before the create stores
+      // its sandbox. Its last read, under the activation lock, sees that and stores nothing.
+      const cat = d.templates!;
+      const get = cat.get.bind(cat);
+      let armed = true;
+      cat.get = async (id) => {
+        const doc = await get(id);
+        if (armed) {
+          armed = false;
+          if (how === 'reject') await reject(d, 't1', hash('1'), { reason: 'broken' });
+          else
+            await HANDLERS.retireTemplateBuild!(
+              ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+              d,
+            );
+        }
+        return doc;
+      };
+      expect(await refusal(() => sandbox(d, 't1'))).toBe(code);
+      expect(await d.sandboxes!.listAll(NOW_MS / 1000)).toEqual([]);
+    });
+  }
+
   it('refuses a non-admin (the owner too), no reason, an unknown build and one not registered', async () => {
     const d = await setup();
     attachedNow = [];

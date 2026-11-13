@@ -371,8 +371,10 @@ registered build that later turns out wrong.
   to stop its worker (§6.3 `stop`, as for a retired build), and a sandbox create naming it answers
   `400 unknown_template`, as for a build policy rejected at registration (an activation:
   `409 template_unavailable`). Like a retire it runs under the activation lock, so an activation
-  racing it writes no lease on the rejected build, and its worker still draining a live sandbox
-  keeps its host slot until it stops. A `reject` record names the admin, `from`, the reason and
+  racing it writes no lease on the rejected build, and a sandbox create re-reads the build and
+  stores its sandbox under that lock too, so none lands on a build retired or rejected meanwhile
+  (the create is refused instead); a worker still draining a live sandbox keeps its host slot
+  until it stops. A `reject` record names the admin, `from`, the reason and
   `buildRecord`, the digest of the build's `build` record. It is refused `409 build_in_use` while a
   live sandbox runs on the build, and is idempotent (an already rejected build is answered with
   `record: null`). Not reversible: a new build is the way back. A retired build is not rejected;
