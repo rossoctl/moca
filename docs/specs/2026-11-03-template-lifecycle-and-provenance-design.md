@@ -2,11 +2,11 @@
 
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
-self-serve create (#737), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and
-placement by host memory (#744), §6.5, the pacing of cold starts (#745), §7,
-provenance (#730), and §8, policy (#737); §5 and §9-§12 (the owner's and the admin's actions,
-tracing, validation, order of work, decisions) come with the issues that build them, and keep their
-numbers so a reference to a section stays valid.
+self-serve create (#737), §5.1-§5.2, the owner's and the admin's actions as built so far (#737,
+#747), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and placement by host
+memory (#744), §6.5, the pacing of cold starts (#745), §7, provenance (#730), and §8, policy
+(#737); the rest of §5, and §9-§12 (tracing, validation, order of work, decisions) come with the
+issues that build them, and keep their numbers so a reference to a section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -282,6 +282,57 @@ agent (sandboxes, `sandbox`) see the same templates, builds and readiness; the h
 need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in subject. The
 `harness` profile holds no sandbox records, so there `capacity.inUse` and `lastUsedAt` are null
 (unknown), not zero.
+
+## 5. The owner's and the admin's actions
+
+Every action below is an API call that writes a provenance record naming its subject, the new value
+and the one before (§7.1), and needs the template store (`SH_PROVENANCE_DIR`; without it the route
+answers `400 invalid_request`). All mount on both route profiles (§4.1). Sandboxes and sessions
+already created keep the build they were given.
+
+### 5.1 The owner's (self-serve)
+
+**Built (#737, #747):** every route in this table. A caller who cannot see the template gets
+`404 template_not_found`, as on the reads; one who sees it but neither owns it nor is an admin gets
+`403 forbidden`.
+
+| Route                                                                                 | Who                                | Does                                                                                                                                          |
+| ------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/templates` · `POST /v1/templates/{id}/builds`                               | any client; a new build: the owner | creates a template or a build (§4)                                                                                                            |
+| `POST /v1/templates/{id}/builds/{build}/cancel`                                       | the owner                          | a `queued`, `building` or `probing` build → `failed` (`cancelled`); a `build` record                                                          |
+| `POST /v1/templates/{id}/tags {tags, build}` · `DELETE /v1/templates/{id}/tags/{tag}` | the owner                          | moves tags onto a registered build, or removes a tag; removing one never deletes the build (adopted from E2B); a `tag` record per tag changed |
+| `PATCH /v1/templates/{id} {visibility, description}`                                  | the owner                          | changes them; a `visibility` record per field changed (`{field, value, before}`)                                                              |
+
+A tag move names the build by its build id or its handle, and only a registered build takes a tag.
+After it, `id:tag` (and the bare `id`, for `default`) resolves to the new build at the next creation
+(§3.2). `default` is moved, never removed: the bare `id` must resolve. A tag already on the build,
+or a field already at its value, changes nothing and writes no record. `private` hides the template
+from other subjects (a 404, as for an id that does not exist) and refuses their new use.
+
+### 5.2 The admin's
+
+"Admin" is the existing `admin` role (`SH_ADMIN_SUBJECTS`, `packages/control-plane/src/identity.ts`).
+Admins do not approve builds; they set what policy allows and act where self-serve cannot:
+
+| Route                               | Does                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `PUT /v1/policy`                    | the policy profiles (§8): rules, envelope, registries, trusted gate-record sources; a new policy record |
+| every owner action, on any template | e.g. move another's tags, or make another's template private; the record names the admin                |
+| `PUT /v1/templates/{id}/owner`      | transfers ownership; also hands a declared template (no owner) to a subject; an `owner` record          |
+
+The new owner is a person's subject, `github:<numeric id>` or `oidc:<provider sub>` (never a
+synthetic `test:<n>`), and must be enrolled now (on the `sandbox` profile: `SH_ALLOWED_SUBJECTS`, or
+an admin). They get every owner action, and the quotas count the template as theirs from then on; a
+transfer to the current owner changes nothing.
+
+A template the deployment declared (imported once from `SH_SANDBOX_TEMPLATES` into an empty
+catalog, §3.1) has no owner, so its id blocks every self-serve create under it: `409
+template_exists`. An admin hands it to a subject with `PUT /v1/templates/{id}/owner` (an `owner`
+record with `before: null`); the subject then builds, tags and edits it like any template of theirs.
+The env list is not imported again, so a restart does not undo the transfer.
+
+Not covered here: whether a declared id should be claimable without an admin (a deployment with no
+admin cannot transfer), and per-template roles (a maintainer who may tag but not transfer).
 
 ## 6. Builds and activation on a host
 

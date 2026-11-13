@@ -257,6 +257,151 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     ]);
   });
 
+  it('moves tags onto a build and removes one, saying what changed (lifecycle §5.1)', async () => {
+    const { home, env, io } = setup();
+    const b2 = `sha256:${'2'.repeat(64)}`;
+    const b1 = `sha256:${'1'.repeat(64)}`;
+    const cp = fakeCp({
+      'POST /v1/templates/node22/tags': () => ({
+        status: 200,
+        body: {
+          templateId: 'node22',
+          subject: 'github:1',
+          buildId: b2,
+          tags: [
+            { tag: 'default', buildId: b2, before: b1, record: `sha256:${'a'.repeat(64)}` },
+            { tag: 'stable', buildId: b2, before: null, record: `sha256:${'b'.repeat(64)}` },
+            { tag: 'v2', buildId: b2, before: b2, record: null },
+          ],
+        },
+      }),
+      'DELETE /v1/templates/node22/tags/stable': () => ({
+        status: 200,
+        body: {
+          templateId: 'node22',
+          subject: 'github:1',
+          tag: 'stable',
+          buildId: null,
+          before: b2,
+          record: `sha256:${'c'.repeat(64)}`,
+        },
+      }),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(
+      await sbxMain(
+        ['templates', 'tag', 'node22', 'default', 'stable', 'v2', '--build', b2],
+        env,
+        io,
+        opts,
+      ),
+    ).toBe(0);
+    expect(cp.calls.at(-1)).toMatchObject({
+      method: 'POST',
+      body: { tags: ['default', 'stable', 'v2'], build: b2 },
+    });
+    const out = io.outs.join('');
+    expect(out).toContain(`node22:default -> ${b2} (was ${b1})`);
+    expect(out).toContain(`node22:stable -> ${b2} (new)`);
+    expect(out).toContain(`node22:v2 -> ${b2} (unchanged)`);
+    io.outs.length = 0;
+    expect(await sbxMain(['templates', 'untag', 'node22', 'stable'], env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)!.method).toBe('DELETE');
+    expect(io.outs.join('')).toContain(`removed node22:stable (was ${b2})`);
+    io.outs.length = 0;
+    expect(await sbxMain(['templates', 'untag', 'node22', 'stable', '--json'], env, io, opts)).toBe(
+      0,
+    );
+    expect(JSON.parse(io.outs.join(''))).toMatchObject({ tag: 'stable', before: b2 });
+    // Usage errors, before any request.
+    const n = cp.calls.length;
+    expect(await sbxMain(['templates', 'tag', 'node22', 'x'], env, io, opts)).toBe(2);
+    expect(io.errs.join('\n')).toMatch(/templates tag needs --build BUILD/);
+    expect(await sbxMain(['templates', 'tag', 'node22', '--build', b2], env, io, opts)).toBe(2);
+    expect(await sbxMain(['templates', 'untag', 'node22'], env, io, opts)).toBe(2);
+    expect(await sbxMain(['templates', 'untag', 'node22', 'a', 'b'], env, io, opts)).toBe(2);
+    expect(await sbxMain(['templates', 'untag', 'node22', 'a', '--build', b2], env, io, opts)).toBe(
+      2,
+    );
+    expect(io.errs.join('\n')).toMatch(
+      /--build only applies to templates show, follow, cancel, tag/,
+    );
+    expect(cp.calls.length).toBe(n);
+  });
+
+  it('edits a template and transfers it, saying what changed (lifecycle §5.1, §5.2)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'PATCH /v1/templates/node22': (req) => ({
+        status: 200,
+        body: {
+          templateId: 'node22',
+          subject: 'github:1',
+          visibility: 'private',
+          description: 'Node',
+          changes: (req.body as { visibility?: string } | undefined)?.visibility
+            ? [
+                {
+                  field: 'visibility',
+                  value: 'private',
+                  before: 'deployment',
+                  record: `sha256:${'a'.repeat(64)}`,
+                },
+              ]
+            : [],
+        },
+      }),
+      'PUT /v1/templates/node22/owner': () => ({
+        status: 200,
+        body: {
+          templateId: 'node22',
+          subject: 'github:1',
+          owner: 'github:9',
+          before: 'github:1',
+          record: `sha256:${'b'.repeat(64)}`,
+        },
+      }),
+      'PUT /v1/templates/other/owner': () => ({
+        status: 403,
+        body: { error: 'forbidden', message: 'transferring a template requires the admin role' },
+      }),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(
+      await sbxMain(['templates', 'edit', 'node22', '--visibility', 'private'], env, io, opts),
+    ).toBe(0);
+    expect(cp.calls.at(-1)).toMatchObject({ method: 'PATCH', body: { visibility: 'private' } });
+    expect(io.outs.join('')).toContain('node22: visibility changed');
+    io.outs.length = 0;
+    expect(
+      await sbxMain(['templates', 'edit', 'node22', '--description', 'Node'], env, io, opts),
+    ).toBe(0);
+    expect(cp.calls.at(-1)).toMatchObject({ body: { description: 'Node' } });
+    expect(io.outs.join('')).toContain('node22: unchanged');
+    io.outs.length = 0;
+    expect(await sbxMain(['templates', 'transfer', 'node22', 'github:9'], env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)).toMatchObject({ method: 'PUT', body: { owner: 'github:9' } });
+    expect(io.outs.join('')).toContain('node22: owner github:9 (was github:1)');
+    // A refusal is reported with its code (exit 1).
+    expect(await sbxMain(['templates', 'transfer', 'other', 'github:9'], env, io, opts)).toBe(1);
+    expect(io.errs.join('\n')).toMatch(/forbidden|admin role/);
+    // Usage errors, before any request.
+    const n = cp.calls.length;
+    expect(await sbxMain(['templates', 'edit', 'node22'], env, io, opts)).toBe(2);
+    expect(io.errs.join('\n')).toMatch(/templates edit needs --visibility or --description/);
+    expect(
+      await sbxMain(['templates', 'edit', 'node22', '--visibility', 'public'], env, io, opts),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toMatch(/--visibility must be private or deployment/);
+    expect(await sbxMain(['ls', '--visibility', 'private'], env, io, opts)).toBe(2);
+    expect(await sbxMain(['templates', 'show', 'x', '--description', 'd'], env, io, opts)).toBe(2);
+    expect(await sbxMain(['templates', 'transfer', 'node22'], env, io, opts)).toBe(2);
+    expect(
+      await sbxMain(['templates', 'edit', 'a', 'b', '--description', 'd'], env, io, opts),
+    ).toBe(2);
+    expect(cp.calls.length).toBe(n);
+  });
+
   it('creates a sandbox with a template, a name and labels, and prints its id and expiry', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
@@ -455,6 +600,35 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['token', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     expect(io.outs.join('')).toBe(`${TOKEN.token}\n`);
+  });
+
+  it('token --renew-every: a fresh token per period, one line each, until stopped', async () => {
+    const { home, env, io } = setup();
+    let n = 0;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, token: `${TOKEN.token}${n++}` },
+      }),
+    });
+    const ac = new AbortController();
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      if (slept.length === 2) ac.abort();
+    };
+    const deps = { home, fetchImpl: cp.fetchImpl, sleep, signal: ac.signal };
+    expect(await sbxMain(['token', SBX, '--renew-every', '600'], env, io, deps)).toBe(0);
+    expect(io.outs.join('')).toBe(`${TOKEN.token}0\n${TOKEN.token}1\n`);
+    expect(slept).toEqual([600_000, 600_000]);
+    // Only on token, and only a whole number of seconds, at least 1: refused before any request.
+    const calls = cp.calls.length;
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['ls', '--renew-every', '5'], env, io, d)).toBe(2);
+    expect(await sbxMain(['token', SBX, '--renew-every', '0'], env, io, d)).toBe(2);
+    expect(await sbxMain(['token', SBX, '--renew-every', '1.5'], env, io, d)).toBe(2);
+    expect(io.errs.join('\n')).toContain('--renew-every must be a whole number of seconds');
+    expect(cp.calls.length).toBe(calls);
   });
 
   it('says why a terminated sandbox gives no token', async () => {

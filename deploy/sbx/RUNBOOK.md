@@ -62,6 +62,9 @@ gitignored).
    (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
    `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
    for another worker is refused before anything is written.
+   On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
+   the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
+   agent's wanted state instead of starting all of them.
 
 6. **The janitor,** once per KVM host:
 
@@ -124,7 +127,9 @@ aborts (`Can't handle RDB format version 12`) and `redis-0` crash-loops, taking 
 down with it. Until a migration exists, keep such a namespace on Redis 7: set `SBX_REDIS_IMAGE` to
 the digest it ran, e.g.
 `docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`
-(the pin before #670). Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
+(the pin before #670). With `SBX_REDIS_IMAGE` unset, `setup.sh` now refuses, before it applies
+anything, when the namespace's `redis` StatefulSet runs an image other than Valkey, and names that
+image. Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
 `dump.rdb` and `appendonlydir`). The StatefulSet is OrderedReady: a `redis-0` that crash-loops on
 the old revision is never replaced, so `setup.sh`'s rollout wait times out. Then delete the pod
 (`kubectl -n <namespace> delete pod redis-0`; its PVC stays) and re-run `setup.sh`.
@@ -543,6 +548,23 @@ pulled.
 `journalctl -u sbx-worker@<id>`. A worker that crash-looped into `failed` is brought back by
 re-running its `install-host.sh` (it resets the failed state).
 
+**A VM left behind by a stopped worker.** A worker's Firecracker VMs run in `pool-N` cgroups under
+its slice, `/sys/fs/cgroup/sbx.slice/sbx-<id>.slice`, beside the unit's own cgroup, so stopping the
+unit does not kill them. The unit's `ExecStopPost=` does: after every exit (a stop, a crash, a stop
+timeout) `/usr/local/libexec/sbx-reap-vms.sh <id>` kills each `pool-N` cgroup of that slice and waits
+up to 10 s for it to empty, logging `sbx-reap-vms:` lines to `journalctl -u sbx-worker@<id>`. A
+`still populated` line there, or a host installed before the step existed, can leave a VM holding its
+guest memory until that worker next starts. With the worker stopped, find one by its cgroup:
+
+```bash
+grep -H . /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-*/cgroup.procs   # any pid here is a leaked VM
+for p in $(pgrep -x firecracker); do echo "$p $(cut -d: -f3 "/proc/$p/cgroup")"; done   # every VM's cgroup
+```
+
+and reap it with `sudo /usr/local/libexec/sbx-reap-vms.sh <id>` (or
+`echo 1 | sudo tee /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-<n>/cgroup.kill`). Never while the
+worker runs: its `pool-N` cgroups then hold its live sandboxes' VMs.
+
 ## 11. The disk filling up
 
 1. `status.sh --host`: the workspace filesystem line, and the janitor's last run.
@@ -564,7 +586,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 ```
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
-also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
+also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
 installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
@@ -882,7 +904,7 @@ pending)`, `used` being its running workers' cost, their VMs' committed memory a
   set the floor at or above lease mode's reclaim target.
 - **Version skew, both ways:** an agent older than memory-aware placement sends no `memory`, and
   the control plane places that host by `SBX_ACTIVE_LIMIT` alone, as before. A control plane older
-  than it (openapi 1.10.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
+  than it (openapi 1.11.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
   refuses to start a build whose memory file does not match. Upgrade either first; list both in the
   rollout.
 
@@ -900,7 +922,7 @@ workers that start together share the host's disk. So the agent starts at most
   refused** (exit 2, before any call), as is a leading zero or anything that is not a number.
 - **Where "starting" comes from:** the control plane's wanted answer lists, in `starting`, the
   builds placed on this host whose worker the relay does not show attached. The limit is the
-  agent's, so it holds **with an older control plane too** (openapi before 1.11.0, no `starting`):
+  agent's, so it holds **with an older control plane too** (openapi before 1.12.0, no `starting`):
   the agent then counts as starting the workers it started less than `SBX_START_WINDOW_S` ago
   (default 300) that are still running and wanted. Its starts are kept in `/srv/sbx/start-times`
   (0600).
@@ -936,13 +958,13 @@ workers that start together share the host's disk. So the agent starts at most
 - **The one change on upgrade:** a host whose agent is upgraded, with no new settings and whatever
   its control plane, now starts at most 4 workers at once instead of every wanted one; a wide
   activation starts in waves of `SBX_START_CONCURRENCY`, each about one start time long (a slot
-  frees when a worker attaches, or, with a control plane older than 1.11.0, after
+  frees when a worker attaches, or, with a control plane older than 1.12.0, after
   `SBX_START_WINDOW_S`), so 28 builds at the default take about seven waves, many minutes, and a
   client's first Retry-After is the old 30 s until the host has measured a start. A control plane
-  older than 1.11.0 ignores the new inventory fields; an older agent sends none, and the control
+  older than 1.12.0 ignores the new inventory fields; an older agent sends none, and the control
   plane then shows no queue and answers Retry-After as before.
 
-**The idle grace** (part of cold-start pacing, openapi 1.11.0): a released worker can stay up for a
+**The idle grace** (part of cold-start pacing, openapi 1.12.0): a released worker can stay up for a
 while, so a template used again soon is warm (no memory-file read at all).
 
 - **The setting:** `SBX_IDLE_GRACE_S` in `host-agent.env` (0600), never in argv. **Default 0: off**,
@@ -983,7 +1005,7 @@ while, so a template used again soon is warm (no memory-file read at all).
   until a wanted build needs one. A host over its memory with its graced workers lets the
   soonest-ending go first.
 - **Version skew:** an agent without the setting reports no `idleGraceSeconds`, which the control
-  plane takes as 0 (off). A control plane older than 1.11.0 ignores the field, sends no `graced`,
+  plane takes as 0 (off). A control plane older than 1.12.0 ignores the field, sends no `graced`,
   and stops released workers as before; the agent then just applies `stop`. **Roll out the control
   plane before setting `SBX_IDLE_GRACE_S` on a host**: the order is the control plane, then the
   agent, then the setting.

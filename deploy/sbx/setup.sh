@@ -335,6 +335,25 @@ preflight() {
   # Namespace-scoped read: a shared cluster rarely grants `get namespace`, and this never creates one.
   kc get configmaps -n "$NS" -o name >/dev/null 2>&1 ||
     die "namespace $NS must already exist and be readable (this script creates nothing cluster-scoped)"
+  check_redis_image
+}
+
+# Without SBX_REDIS_IMAGE the overlay runs the base's Valkey 9, which cannot read RDB format 12 (what
+# Redis 7.4 writes): a namespace whose redis StatefulSet runs another image would crash-loop redis-0
+# once switched (#811). So that is refused, before anything is applied; a fresh namespace (no
+# StatefulSet) and one already on Valkey pass. RUNBOOK §2.
+check_redis_image() {
+  [[ -z "${SBX_REDIS_IMAGE:-}" ]] || return 0
+  local json image repo
+  # Captured first (errexit), as in route_cert: a failing get must not read as "no StatefulSet".
+  json="$(kc get statefulset redis -n "$NS" --ignore-not-found -o json)"
+  [[ -n "$json" ]] || return 0
+  image="$(jq -r '(.spec.template.spec.containers // []) | (map(select(.name == "redis")) + .)[0].image // empty' <<<"$json")"
+  [[ -n "$image" ]] || die "could not read the image of StatefulSet redis in $NS"
+  repo="${image%%@*}"
+  [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
+  [[ "$repo" != *valkey/valkey* ]] || return 0
+  die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See deploy/sbx/RUNBOOK.md §2"
 }
 
 secret_json() { kc get secret "$1" -n "$NS" --ignore-not-found -o json; }

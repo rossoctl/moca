@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.11.0
+## 1.12.0
 
 Pacing template workers' cold starts ([#745](https://github.com/rossoctl/moca/issues/745)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.5: a
@@ -28,7 +28,7 @@ an older control plane too. Every change is additive.
 startSeconds)` when the host reports both; else 30 s, as before. A queued activation stays
   `activating` longer than before: a client polls with a timeout sized for the host's whole start
   line.
-- A build whose worker already runs on a holder needs no start: it stays there (1.10.0's sticky
+- A build whose worker already runs on a holder needs no start: it stays there (1.11.0's sticky
   placement), whether or not the host reports memory figures; a graced build leased again too.
 - The idle grace runs from the build's last lease end (a release's time, or an expired lease's
   `until`), for a worker the agent reports running with no live sandbox, while the host has room
@@ -46,7 +46,7 @@ startSeconds)` when the host reports both; else 30 s, as before. A queued activa
   whose agent reports it, and `idleGraceSeconds` and `graced` (a count) for a host whose agent sets
   a grace.
 
-## 1.10.0
+## 1.11.0
 
 Placement of template workers by host memory ([#744](https://github.com/rossoctl/moca/issues/744)),
 per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
@@ -72,7 +72,7 @@ memFloorMib, memPressureFull10, memPressureLimit, runningWorkers, vmCommittedMib
 pressureFull10, pressureLimit, brake, runningWorkers, memfileMismatch, reportedAt}`, only for a
   host whose agent reports it; `floorMib` is the effective floor.
 
-## 1.9.0
+## 1.10.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
 per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
@@ -122,7 +122,7 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 - New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
   Error schema gains `readiness`, and `quota` the value `active`.
 
-## 1.8.0
+## 1.9.0
 
 Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
@@ -151,6 +151,31 @@ for the builds (else `400 invalid_request`), and answer only a host listed in `S
   writes a `build` record, checks them against the create's request and registers the build (its
   `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
   rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
+## 1.8.0
+
+Template tags, edits and owner transfer through the API
+([#747](https://github.com/rossoctl/moca/issues/747)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.1-§5.2.
+Every change is additive; the new routes mount on both route profiles and need `SH_PROVENANCE_DIR` (else
+`400 invalid_request`). Each change writes a provenance record naming the new value and the one before.
+
+- New POST /v1/templates/{id}/tags `{tags, build}` (the owner, or an admin): moves 1-16 tags onto a registered build of
+  the template, by build id or handle, without a rebuild. New sandboxes and sessions naming `id:tag` (and the bare `id`,
+  for `default`) get the new build; those already created keep theirs. A `tag` record per tag that changes
+  (`{tag, buildId, before}`); a tag already on the build answers `record: null`.
+- New DELETE /v1/templates/{id}/tags/{tag} (the owner, or an admin): removes a tag; its build is not deleted. `default`
+  is moved, never removed (`400 invalid_request`); a tag name outside the tag grammar is `400 invalid_request`
+  too. A `tag` record with `buildId: null`.
+- New PATCH /v1/templates/{id} `{description?, visibility?}` (the owner, or an admin): a `visibility` record
+  (`{field, value, before}`) per field that changes. A description holding a lone surrogate is `400 invalid_request`.
+- New PUT /v1/templates/{id}/owner `{owner}` (an admin): the new owner, `github:<numeric id>` or `oidc:<provider sub>`
+  (never `test:<n>`), must be enrolled. A template the deployment declared (`owner: null`) can be handed to a subject
+  the same way (`before: null`), who can then build, tag and edit it; a restart does not undo it. An `owner` record
+  (`{owner, before}`).
+- Every template change (a tag moved or removed, an edit, an owner transfer, a cancelled build) is stored only once its
+  records are on the chain: a record that fails to append refuses the change. The owner's check is made again under the
+  template's lock, so a change by an owner the template was transferred away from meanwhile is refused (`403`).
 
 ## 1.7.0
 
