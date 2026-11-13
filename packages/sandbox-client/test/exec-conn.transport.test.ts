@@ -958,7 +958,8 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       expect((e as LeaseControlError).wire).toBe(
         code === status.FAILED_PRECONDITION ? details : undefined,
       );
-      expect(r.controls).toHaveLength(1); // never retried
+      // Only a token refusal is retried, once (P4-R7).
+      expect(r.controls).toHaveLength(code === status.UNAUTHENTICATED ? 2 : 1);
     }
     // Any other status is a failure with no wire string.
     const r = await fakeRelay(ok, undefined, {
@@ -982,6 +983,68 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       name: 'LeaseControlError',
       code: 'denied',
     });
+  });
+
+  it('retries a lease call once with a forced fresh token after UNAUTHENTICATED (P4-R7)', async () => {
+    const refuseFirst = <R>(answer: R) => {
+      let n = 0;
+      return () =>
+        n++ === 0
+          ? { code: status.UNAUTHENTICATED, details: 'lease authentication failed' }
+          : answer;
+    };
+    const r = await fakeRelay(ok, undefined, {
+      control: refuseFirst({
+        status: LeaseStatus.fromPartial({ mode: SandboxMode.SANDBOX_MODE_LEASE, state: 'active' }),
+      }),
+      keepalive: refuseFirst({}),
+    });
+    const { c, asks } = conn(r.addr);
+    await expect(c.leaseControl('set_mode', 'mode.jwt')).resolves.toMatchObject({
+      mode: 'lease',
+      state: 'active',
+    });
+    expect(asks).toEqual([
+      { force: false, minValidS: 60 },
+      { force: true, minValidS: 60 },
+    ]);
+    // The same set-mode token both times: the relay refused the bearer before routing.
+    expect(r.controls.map((x) => [x.auth, x.req.op, x.req.setModeToken])).toEqual([
+      ['Bearer stale', LeaseOp.LEASE_OP_SET_MODE, 'mode.jwt'],
+      ['Bearer fresh', LeaseOp.LEASE_OP_SET_MODE, 'mode.jwt'],
+    ]);
+    asks.length = 0;
+    await expect(c.leaseKeepalive()).resolves.toBeUndefined();
+    expect(asks).toEqual([
+      { force: false, minValidS: 60 },
+      { force: true, minValidS: 60 },
+    ]);
+    expect(r.keepalives.map((x) => x.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+  });
+
+  it('surfaces a second UNAUTHENTICATED as unauthenticated, after exactly two requests', async () => {
+    const refused = { code: status.UNAUTHENTICATED, details: 'lease authentication failed' };
+    const r = await fakeRelay(ok, undefined, { control: () => refused, keepalive: () => refused });
+    const { c } = conn(r.addr);
+    for (const op of ['status', 'reset', 'set_mode', 'sandbox_deleted'] as const) {
+      r.controls.length = 0;
+      const e = await c.leaseControl(op, 'mode.jwt').catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(LeaseControlError);
+      expect(e).toMatchObject({ code: 'unauthenticated', grpcCode: status.UNAUTHENTICATED });
+      expect(r.controls.map((x) => x.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+    }
+    await expect(c.leaseKeepalive()).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(r.keepalives).toHaveLength(2);
+  });
+
+  it('does not retry any other refusal', async () => {
+    const r = await fakeRelay(ok, undefined, {
+      control: () => ({ code: status.PERMISSION_DENIED, details: 'set_mode not permitted' }),
+    });
+    const { c, asks } = conn(r.addr);
+    await expect(c.leaseControl('set_mode', 'mode.jwt')).rejects.toMatchObject({ code: 'denied' });
+    expect(r.controls).toHaveLength(1);
+    expect(asks).toEqual([{ force: false, minValidS: 60 }]);
   });
 
   it('propagates a token source failure from a lease call unchanged, sending nothing', async () => {

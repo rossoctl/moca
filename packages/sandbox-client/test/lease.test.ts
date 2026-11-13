@@ -48,6 +48,25 @@ describe('leaseNotice (spec §5 copy)', () => {
     expect(expiring(60_000)).toBe('[sandbox] guest restarts within 1 min (max_duration)');
   });
 
+  it('says "soon" for an expiring event with no deadline (a worker before ends_by_unix_ms)', () => {
+    for (const endsByUnixMs of [0, -1]) {
+      expect(leaseNotice(ev({ state: 'expiring', reason: 'max_duration', endsByUnixMs }), AT)).toBe(
+        '[sandbox] guest restarts soon (max_duration)',
+      );
+    }
+  });
+
+  it('names max_duration on every expiring line, whatever the reason field says', () => {
+    for (const reason of ['', 'grace_limit']) {
+      expect(leaseNotice(ev({ state: 'expiring', reason, endsByUnixMs: AT + 120_000 }), AT)).toBe(
+        '[sandbox] guest restarts within 2 min (max_duration)',
+      );
+      expect(leaseNotice(ev({ state: 'expiring', reason, endsByUnixMs: 0 }), AT)).toBe(
+        '[sandbox] guest restarts soon (max_duration)',
+      );
+    }
+  });
+
   it('formats a start with the mode name', () => {
     expect(leaseNotice(ev({ state: 'start' }), AT)).toBe('[sandbox] new guest (lease, 14:02)');
     expect(

@@ -20,7 +20,10 @@ import { LeaseControlError, leaseStatusView, type LeaseStatusView } from './leas
  *
  * The one retry rule: a token refusal (UNAUTHENTICATED) is retried once, with a forced fresh token,
  * ONLY if no event arrived. A command that started is never run twice: any failure after the first
- * event -- a dropped connection included -- is surfaced as an error.
+ * event -- a dropped connection included -- is surfaced as an error. The lease calls follow the same
+ * rule (ruling P4-R7): `leaseControl`, every op, and `leaseKeepalive` retry a token refusal once
+ * with a forced fresh token, and a second refusal is a LeaseControlError `unauthenticated`. The relay
+ * refuses the bearer before routing, so `set_mode` resends the same set-mode token, never used yet.
  */
 export interface ExecResult {
   stdout: Buffer;
@@ -296,46 +299,61 @@ export class SandboxExecConn {
 
   /**
    * One lease operation on this sandbox's lease (spec §8.3), under the sandbox token as an Exec.
-   * `setModeToken` is sent with `set_mode` only. Never retried: a failure is a LeaseControlError
-   * (a token source failure propagates unchanged).
+   * `setModeToken` is sent with `set_mode` only. A failure is a LeaseControlError, after the one
+   * token-refusal retry (see the top of the file); a token source failure propagates unchanged.
    */
   leaseControl = async (op: LeaseOpName, setModeToken?: string): Promise<LeaseStatusView> => {
-    const md = await this.bearer();
     const req = LeaseControlRequest.fromPartial({
       sandboxId: this.o.sandboxId,
       op: LEASE_OPS[op],
       setModeToken: op === 'set_mode' ? (setModeToken ?? '') : '',
     });
     const backstopMs = op === 'status' ? LEASE_STATUS_BACKSTOP_MS : LEASE_MUTATE_BACKSTOP_MS;
-    const res = await new Promise<LeaseControlResponse>((resolve, reject) =>
-      this.client.leaseControl(req, md, { deadline: Date.now() + backstopMs }, (e, r) =>
-        e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(r),
-      ),
+    const res = await this.leaseCall(
+      (md) =>
+        new Promise<LeaseControlResponse>((resolve, reject) =>
+          this.client.leaseControl(req, md, { deadline: Date.now() + backstopMs }, (e, r) =>
+            e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(r),
+          ),
+        ),
     );
     return leaseStatusView(res.status);
   };
 
   /** Records harness liveness for a live lease (spec §4, §8.3); the relay answers OK at once. */
   leaseKeepalive = async (): Promise<void> => {
-    const md = await this.bearer();
     const req = LeaseKeepaliveRequest.fromPartial({ sandboxId: this.o.sandboxId });
-    await new Promise<void>((resolve, reject) =>
-      this.client.leaseKeepalive(
-        req,
-        md,
-        { deadline: Date.now() + LEASE_KEEPALIVE_BACKSTOP_MS },
-        (e) =>
-          e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(),
-      ),
+    await this.leaseCall(
+      (md) =>
+        new Promise<void>((resolve, reject) =>
+          this.client.leaseKeepalive(
+            req,
+            md,
+            { deadline: Date.now() + LEASE_KEEPALIVE_BACKSTOP_MS },
+            (e) =>
+              e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(),
+          ),
+        ),
     );
   };
 
-  /** The sandbox token as call metadata, from the token source as an Exec's first ask. */
-  private async bearer(): Promise<Metadata> {
-    const { token } = await this.o.token({ force: false, minValidS: TOKEN_MARGIN_S });
-    const md = new Metadata();
-    md.set('authorization', `Bearer ${token}`);
-    return md;
+  /**
+   * Sends a lease call under the sandbox token; on a token refusal, once more under a forced fresh
+   * token (P4-R7). The ask is an Exec's first: the token must have the 60 s margin left.
+   */
+  private async leaseCall<T>(send: (md: Metadata) => Promise<T>): Promise<T> {
+    const bearer = async (force: boolean) => {
+      const { token } = await this.o.token({ force, minValidS: TOKEN_MARGIN_S });
+      const md = new Metadata();
+      md.set('authorization', `Bearer ${token}`);
+      return md;
+    };
+    try {
+      return await send(await bearer(false));
+    } catch (err) {
+      if (!(err instanceof LeaseControlError && err.code === 'unauthenticated')) throw err;
+    }
+    return send(await bearer(true));
   }
 
   private learn(g: SandboxTokenGrant): void {

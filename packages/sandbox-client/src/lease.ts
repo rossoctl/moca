@@ -117,8 +117,11 @@ export function leaseNotice(ev: LeaseEvent, nowMs: number): string | undefined {
         ev.processes.map((p) => `; stopped: ${p}`).join('')
       );
     case 'expiring': {
+      // Only max_duration expires a lease, so the copy names it whatever `reason` says (P4-R8).
+      // A worker that predates ends_by_unix_ms sends 0: no deadline to count down to.
+      if (ev.endsByUnixMs <= 0) return '[sandbox] guest restarts soon (max_duration)';
       const min = Math.max(1, Math.ceil((ev.endsByUnixMs - nowMs) / 60_000));
-      return `[sandbox] guest restarts within ${min} min (${ev.reason || 'max_duration'})`;
+      return `[sandbox] guest restarts within ${min} min (max_duration)`;
     }
     case 'start':
       return `[sandbox] new guest (${modeName(ev.mode)}, ${hhmm(ev.atUnixMs)})`;
