@@ -104,19 +104,25 @@ describe('mocactl sbx egress', () => {
     ]);
   });
 
-  it('--json stops on a repeated next, and prints the last page summary', async () => {
+  it("--json takes the first page's summary (later pages carry null), and stops on a repeated next", async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
       [`GET ${PATH}`]: (req) =>
         req.path.includes('after=1-0')
-          ? { status: 200, body: { events: [E2], next: null, summary: summary({ total: 3 }) } }
+          ? { status: 200, body: { events: [E2], next: null, summary: null } }
           : { status: 200, body: { events: [E1], next: '1-0', summary: summary() } },
     });
     expect(
       await sbxMain(['egress', SBX, '--json'], env, io, { home, fetchImpl: cp.fetchImpl }),
     ).toBe(0);
-    expect(JSON.parse(io.outs.join('')).summary.total).toBe(3);
+    expect(JSON.parse(io.outs.join(''))).toEqual({ events: [E1, E2], summary: summary() });
     io.outs.length = 0;
+    // A first page without its summary is an error, not a crash.
+    const bare = fakeCp({
+      [`GET ${PATH}`]: () => ({ status: 200, body: { events: [], next: null, summary: null } }),
+    });
+    expect(await sbxMain(['egress', SBX], env, io, { home, fetchImpl: bare.fetchImpl })).toBe(1);
+    expect(io.errs.join('\n')).toMatch(/no egress summary on the first page/);
     const loop = fakeCp({
       [`GET ${PATH}`]: () => ({
         status: 200,

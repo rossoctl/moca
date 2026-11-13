@@ -45,7 +45,8 @@ export interface SbxDiscovery {
 export interface SbxEgressPage {
   events: Record<string, unknown>[];
   next: string | null;
-  summary: SbxEgressSummary;
+  /** On the first page only (it reads the whole log); null on the pages after `after`. */
+  summary: SbxEgressSummary | null;
 }
 
 /** The log's summary (openapi EgressSummary): per destination host, completeness and digest. */

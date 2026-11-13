@@ -357,6 +357,12 @@ export async function cmdEgress(
       return SBX_EXIT.ok;
     }
     let page = await c.api.sandboxEgress(id, { limit: 1000 });
+    // The summary comes on the first page only (the control plane computes it once, there).
+    const summary = page.summary;
+    if (!summary) {
+      c.io.err('sbx: the control plane sent no egress summary on the first page');
+      return SBX_EXIT.failed;
+    }
     if (c.json) {
       const events = [...page.events];
       // A server that hands out a `next` it handed out before would loop forever: refused.
@@ -370,11 +376,9 @@ export async function cmdEgress(
         page = await c.api.sandboxEgress(id, { after: page.next, limit: 1000 });
         events.push(...page.events);
       }
-      // The last page's summary: computed per request, so for a live log it covers the most events.
-      c.io.out(JSON.stringify({ events, summary: page.summary }) + '\n');
+      c.io.out(JSON.stringify({ events, summary }) + '\n');
       return SBX_EXIT.ok;
     }
-    const summary = page.summary;
     const hosts = Object.entries(summary.byHost).sort(([a], [b]) => (a < b ? -1 : 1));
     for (const [host, h] of hosts) {
       const decisions = Object.entries(h.decisions)
@@ -409,6 +413,10 @@ export async function cmdEgress(
 async function verifyEgress(c: SbxCtx, id: string): Promise<number> {
   const body = await c.api.sandboxEgressNdjson(id);
   const summary = (await c.api.sandboxEgress(id, { limit: 1 })).summary;
+  if (!summary) {
+    c.io.err('sbx: the control plane sent no egress summary on the first page');
+    return SBX_EXIT.failed;
+  }
   const sha256 = `sha256:${createHash('sha256').update(body).digest('hex')}`;
   let lines = 0;
   for (const b of body) if (b === 0x0a) lines += 1;
