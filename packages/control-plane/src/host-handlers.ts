@@ -105,6 +105,10 @@ export class HostRegistry {
  * --wanted-only timer re-sends it every 15 s). A host whose agent died or was removed then takes no
  * new placement and no activeLimit slot, and a deployment whose every host is silent reads
  * readiness from the workers' presence alone, as before any host reported.
+ *
+ * Two steps with activation.ts's memoryStaleS (60 s): after about 60 s without an inventory, the
+ * memory brake (`stale`) already stops new starts on a host that reports its memory, while it keeps
+ * what it runs; at HOST_STALE_S the host leaves placement entirely.
  */
 export const HOST_STALE_S = 360;
 

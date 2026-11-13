@@ -93,7 +93,12 @@ export interface Placement {
 export const workerOverheadMib = 128;
 /** The guest size of a build that recorded none (imported, or older than the manifest's field). */
 export const defaultCostMib = 4096;
-/** An inventory older than this gives its host no headroom for new starts (four missed reports). */
+/**
+ * An inventory older than this gives its host no headroom for new starts (four missed reports).
+ * The first of two steps: after about 60 s without an inventory this brake stops new starts on a
+ * memory-reporting host (what it runs is kept); at host-handlers.ts's HOST_STALE_S (360 s) the host
+ * leaves placement entirely.
+ */
 export const memoryStaleS = 60;
 
 /**
