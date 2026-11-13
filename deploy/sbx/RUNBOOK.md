@@ -560,6 +560,23 @@ pulled.
 `journalctl -u sbx-worker@<id>`. A worker that crash-looped into `failed` is brought back by
 re-running its `install-host.sh` (it resets the failed state).
 
+**A VM left behind by a stopped worker.** A worker's Firecracker VMs run in `pool-N` cgroups under
+its slice, `/sys/fs/cgroup/sbx.slice/sbx-<id>.slice`, beside the unit's own cgroup, so stopping the
+unit does not kill them. The unit's `ExecStopPost=` does: after every exit (a stop, a crash, a stop
+timeout) `/usr/local/libexec/sbx-reap-vms.sh <id>` kills each `pool-N` cgroup of that slice and waits
+up to 10 s for it to empty, logging `sbx-reap-vms:` lines to `journalctl -u sbx-worker@<id>`. A
+`still populated` line there, or a host installed before the step existed, can leave a VM holding its
+guest memory until that worker next starts. With the worker stopped, find one by its cgroup:
+
+```bash
+grep -H . /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-*/cgroup.procs   # any pid here is a leaked VM
+for p in $(pgrep -x firecracker); do echo "$p $(cut -d: -f3 "/proc/$p/cgroup")"; done   # every VM's cgroup
+```
+
+and reap it with `sudo /usr/local/libexec/sbx-reap-vms.sh <id>` (or
+`echo 1 | sudo tee /sys/fs/cgroup/sbx.slice/sbx-<id>.slice/pool-<n>/cgroup.kill`). Never while the
+worker runs: its `pool-N` cgroups then hold its live sandboxes' VMs.
+
 ## 11. The disk filling up
 
 1. `status.sh --host`: the workspace filesystem line, and the janitor's last run.
@@ -581,7 +598,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 ```
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
-also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
+also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
 installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
