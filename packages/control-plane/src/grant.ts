@@ -72,7 +72,12 @@ export interface InferenceGrantClaims extends GrantClaimsBase {
 
 export interface SandboxGrantClaims extends GrantClaimsBase {
   aud: typeof SANDBOX_GRANT_AUDIENCE;
-  /** The NAMES of the `sandbox-egress` credentials the session may use. Never their values. */
+  /**
+   * The NAMES of `sandbox-egress` credentials, never their values. These are the SESSION OWNER's
+   * set as of the mint -- §6.1 words it per-session, but no session record narrows it -- so one
+   * added mid-turn appears at the next refresh. The token endpoint re-filters by the
+   * destination's `hosts` (§6.3 step 3), which makes this an upper bound and not an entitlement.
+   */
   egress: string[];
   /** The bundle digest bound to the session (§7.2). Absent when none is. */
   cfg?: string;

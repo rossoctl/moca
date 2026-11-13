@@ -340,13 +340,11 @@ export const targetOf = (r: ResolvedInference): InferenceTarget => ({
  * below and `grant-exchange.ts` must refuse an unknown session, another subject's session and a
  * deleted session identically, or the pair of them becomes an existence oracle that the session
  * route alone is not.
- *
- * `tenant` comes back from the TOKEN, not the record, because that is the claim a grant copies.
  */
 export async function sessionFromToken(
   presentedToken: string,
   deps: CpDeps,
-): Promise<{ rec: SessionRecord; tenant: string }> {
+): Promise<SessionRecord> {
   // Only a SESSION token may drive a turn; an api token is rejected here (plan gap #7).
   const claims = verifyToken(presentedToken, deps.verifyKeys, {
     now: Math.floor(deps.now() / 1000),
@@ -362,14 +360,14 @@ export async function sessionFromToken(
   }
   // The tombstone check is what stops a DELETED session starting a new turn (spec §5.3, §7.3).
   if (rec.tombstone) throw new CpError('session_not_found', undefined, claims.sid);
-  return { rec, tenant: claims.tenant };
+  return rec;
 }
 
 export async function exchangeCredential(
   presentedToken: string,
   deps: CpDeps,
 ): Promise<ExchangeResponse> {
-  const { rec } = await sessionFromToken(presentedToken, deps);
+  const rec = await sessionFromToken(presentedToken, deps);
 
   const resolved = await resolveInference(rec, deps);
   const { secretValue, credentialName, baseUrl, authHeader, usedOperatorFallback } = resolved;

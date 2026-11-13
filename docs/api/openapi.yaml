@@ -180,7 +180,14 @@ components:
       required: [inferenceGrant, sandboxGrant, turnExp, exp]
       properties:
         inferenceGrant: { type: string, description: 'compact JWS, aud moca-inference' }
-        sandboxGrant: { type: string, description: 'compact JWS, aud moca-sandbox' }
+        sandboxGrant:
+          type: string
+          description: |
+            compact JWS, aud moca-sandbox. Its `egress` claim lists the session OWNER's
+            `sandbox-egress` credential names as of this mint — by name, never by value — so one
+            added mid-turn appears at the next refresh. The token endpoint narrows them to the
+            destination's own hosts, which makes the claim an upper bound rather than a grant of
+            access to every name in it.
         turnExp:
           type: integer
           description: |
@@ -2932,9 +2939,11 @@ paths:
             `unauthorized` when the shared bearer is missing or wrong. `grant_invalid` for EVERY way
             the presented grant can fail: bad signature, `alg: none` or any non-EdDSA alg, wrong
             `typ` (a session token presented here), wrong `aud`, unknown `kid`, past `exp`, or past
-            `turnExp`. One code on purpose (§6.3) — the caller's only move on any of them is to
-            re-exchange at `/internal/turn-grants`, and a code naming which check failed would tell
-            the holder of a tampered grant how close it got.
+            `turnExp`. One code on purpose (§6.3): the caller's only move on any of them is to
+            re-exchange at `/internal/turn-grants`, so splitting the code the way the session
+            token's `token_invalid`/`token_expired` are split would buy a caller nothing. The
+            `message` does name the failed check, for the operator reading the log — the route is
+            behind the shared bearer, so no untrusted holder of a tampered grant reaches it.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

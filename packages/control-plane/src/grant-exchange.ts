@@ -57,7 +57,6 @@ function grantDeps(deps: CpDeps): {
  */
 async function mintFor(
   rec: SessionRecord,
-  tenant: string,
   turnExpS: number,
   decision: 'grants_issued' | 'grants_refreshed',
   deps: CpDeps,
@@ -65,11 +64,20 @@ async function mintFor(
   const { signer } = grantDeps(deps);
   // Descriptors only -- `list` is the route that must enumerate without decrypting. A session may
   // hold several egress credentials (one per destination), so this is a list and not a choice.
+  // The set is the OWNER's `sandbox-egress` credentials as of this mint, not a per-session subset:
+  // nothing on the session record narrows them. §6.3 step 3 re-filters by `destination.hosts` when
+  // the grant is redeemed, so the claim is an upper bound on what a token can be minted for.
+  // shortcut: one uncached `list` per issue AND per refresh -- on the Kubernetes store that is a
+  // `kubectl get secret` subprocess, so a turn refreshing at half-life costs ~13 instead of 1.
+  // Cache it on the session record (or pass the descriptors through) when a redeemer makes refresh
+  // a real code path; today nothing refreshes.
   const descriptors = await deps.credentials.list(rec.owner);
   const egress = descriptors.filter((d) => d.consumer === 'sandbox-egress').map((d) => d.name);
   const minted = mintGrants(signer, {
     sub: rec.owner,
-    tenant,
+    // The record's tenant, on both paths. A refresh does NOT echo the presented grant's claim:
+    // every other field is re-read, and tenant re-read with them is one less thing to reason about.
+    tenant: rec.tenant,
     sid: rec.sessionId,
     // The NAME the session chose at creation, verbatim. '' when it chose none: resolution, including
     // the audited operator fallback, is the token endpoint's job, and §6.3 keeps the session record
@@ -119,15 +127,9 @@ export async function issueTurnGrants(
   presentedToken: string,
   deps: CpDeps,
 ): Promise<TurnGrantsResponse> {
-  const { rec, tenant } = await sessionFromToken(presentedToken, deps);
+  const rec = await sessionFromToken(presentedToken, deps);
   const nowS = Math.floor(deps.now() / 1000);
-  return mintFor(
-    rec,
-    tenant,
-    turnExp(nowS, undefined, deps.config.turnMaxS),
-    'grants_issued',
-    deps,
-  );
+  return mintFor(rec, turnExp(nowS, undefined, deps.config.turnMaxS), 'grants_issued', deps);
 }
 
 /**
@@ -160,7 +162,7 @@ export async function refreshTurnGrants(
   if (!rec || rec.owner !== claims.sub || rec.tombstone) {
     throw new CpError('session_not_found', undefined, claims.sid);
   }
-  return mintFor(rec, claims.tenant, claims.turn_exp, 'grants_refreshed', deps);
+  return mintFor(rec, claims.turn_exp, 'grants_refreshed', deps);
 }
 
 /**

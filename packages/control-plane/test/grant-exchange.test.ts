@@ -188,6 +188,19 @@ describe('issueTurnGrants (MI1 §6.2)', () => {
     expect(await codeOf(() => issueTurnGrants(token, d))).toBe('session_not_found');
   });
 
+  it('returns NO grant when the audit write fails, rather than issuing one off the books', async () => {
+    // The same rule `turn-exchange.test.ts:328` pins for its credential: the audit entry is the only
+    // record that a capability left the control plane, so a failed write refuses the capability.
+    const token = await sessionToken(d);
+    d.index.audit = async () => {
+      throw new Error('redis is down');
+    };
+    expect(await codeOf(() => issueTurnGrants(token, d))).toBe('internal_error');
+    // And nothing was logged either: a grant the stream never saw must not appear in stdout as if
+    // it had been handed out.
+    expect(d.logLines.filter((l) => l.decision === 'grants_issued')).toHaveLength(0);
+  });
+
   it('is an internal_error, not a 4xx, when the ring is unconfigured', async () => {
     // Both routes are feature-gated off without a key and 404 before the body is read, so reaching
     // the function with no signer is a wiring fault rather than caller input.
@@ -243,6 +256,20 @@ describe('refreshTurnGrants (MI1 §6.2)', () => {
         now: nowS(d),
       }),
     ).toMatchObject({ cred: 'other-anthropic' });
+  });
+
+  it('takes tenant from the record too, rather than echoing the presented grant', async () => {
+    const first = await issueTurnGrants(await sessionToken(d), d);
+    const rec = (await d.index.get('sid-fixed'))!;
+    await d.index.create({ ...rec, tenant: 'tenant-moved' });
+    const res = await refreshTurnGrants(first.inferenceGrant, d);
+    // Every other claim is re-read, so tenant is read with them: `turn_exp` is the one value a
+    // refresh carries forward, and it does so because it is an absolute cap.
+    expect(
+      verifyGrant(res.inferenceGrant, d.grantVerifyKeys!, INFERENCE_GRANT_AUDIENCE, {
+        now: nowS(d),
+      }),
+    ).toMatchObject({ tenant: 'tenant-moved', turn_exp: first.turnExp });
   });
 
   it('clamps the refreshed exp to turn_exp as the turn runs out', async () => {

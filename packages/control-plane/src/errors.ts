@@ -76,8 +76,10 @@ const STATUS: Record<CpErrorCode, number> = {
   // 401: ONE code for every way a session grant can fail -- bad signature, wrong typ, wrong aud,
   // unknown kid, past `exp`, past `turn_exp` (MI1 §6.3's checklist item 1). Deliberately not split
   // the way the session token's token_invalid/token_expired are: a grant is presented by the data
-  // plane, whose only move on any of them is to re-exchange, and a code naming WHICH check failed
-  // tells a holder of a tampered grant how close it got. Distinct from `invalid_grant` below, which
+  // plane, whose only move on any of them is to re-exchange, so a second code would buy it nothing.
+  // Note this does NOT withhold which check failed -- `writeError` below sends `message`, and
+  // verifyGrant's messages name the check. That is deliberate (the route is behind the shared
+  // bearer, and an operator debugging a verifier needs it). Distinct from `invalid_grant` below, which
   // is OAuth's refresh-token refusal and has nothing to do with session grants despite the name.
   grant_invalid: 401,
   // 400, as RFC 6749 §5.2 answers a refused grant: the refresh token is unknown, revoked, expired
