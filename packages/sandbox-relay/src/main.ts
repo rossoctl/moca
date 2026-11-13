@@ -390,12 +390,20 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         return;
       }
       // A client that goes away withdraws its call: the relay drops the waiter and frees the slot.
+      // The listener goes once the call settles, whichever way.
       const cancelled = new AbortController();
-      call.on('cancelled', () => cancelled.abort());
+      const onCancelled = () => cancelled.abort();
+      call.on('cancelled', onCancelled);
       if (call.cancelled) cancelled.abort();
       sandbox.leaseControl(caller.claims, req, t0, cancelled.signal).then(
-        (res) => cb(null, res),
-        (err: Error) => cb(err, null),
+        (res) => {
+          call.off('cancelled', onCancelled);
+          cb(null, res);
+        },
+        (err: Error) => {
+          call.off('cancelled', onCancelled);
+          cb(err, null);
+        },
       );
     },
     leaseKeepalive: (

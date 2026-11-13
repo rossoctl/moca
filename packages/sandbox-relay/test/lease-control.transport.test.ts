@@ -1,5 +1,5 @@
-import { Metadata, credentials, status } from '@grpc/grpc-js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { Metadata, Server, credentials, status, type ServerUnaryCall } from '@grpc/grpc-js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LeaseOp,
   LeaseStatus,
@@ -411,6 +411,57 @@ describe('LeaseControl (lease-mode §8.2)', () => {
     const r = await relay();
     const got = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
     expect(got.code).toBe(status.UNAVAILABLE);
+  });
+});
+
+describe("LeaseControl's cancel listener (review #4559538392)", () => {
+  /**
+   * Wraps the exec service's leaseControl handler as the relay registers it, to see each server
+   * call: its 'cancelled' listeners when the handler is entered, and after the call settled.
+   */
+  function watchLeaseCalls() {
+    const seen: Array<{ call: ServerUnaryCall<unknown, unknown>; before: number }> = [];
+    const add = Server.prototype.addService;
+    const spy = vi.spyOn(Server.prototype, 'addService').mockImplementation(function (
+      this: Server,
+      service,
+      impl,
+    ) {
+      const lc = (impl as Record<string, unknown>).leaseControl as
+        ((call: ServerUnaryCall<unknown, unknown>, cb: unknown) => void) | undefined;
+      const wrapped = lc
+        ? {
+            ...impl,
+            leaseControl: (call: ServerUnaryCall<unknown, unknown>, cb: unknown) => {
+              seen.push({ call, before: call.listenerCount('cancelled') });
+              lc(call, cb);
+            },
+          }
+        : impl;
+      return add.call(this, service, wrapped);
+    });
+    return { seen, restore: () => spy.mockRestore() };
+  }
+
+  it('is removed once the call settles, on an answer and on an error', async () => {
+    const w = watchLeaseCalls();
+    let r: Awaited<ReturnType<typeof relay>>;
+    try {
+      r = await relay();
+    } finally {
+      w.restore();
+    }
+    // An error: no worker is attached.
+    expect((await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS)).code).toBe(
+      status.UNAVAILABLE,
+    );
+    // An answer.
+    await worker(r.attach, 'sbx_default', 'auto', 0, undefined, undefined, answers);
+    expect((await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS)).code).toBe(status.OK);
+    expect(w.seen).toHaveLength(2);
+    for (const { call, before } of w.seen) {
+      expect(call.listenerCount('cancelled')).toBe(before);
+    }
   });
 });
 
