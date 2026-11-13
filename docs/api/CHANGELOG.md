@@ -25,6 +25,9 @@ Sessions and sandboxes from one combined control plane
   another reason holds no lease.
 - The `Session` view adds `sandboxBuildId` and `templateManifestHash` beside `sandboxTemplate`.
 - POST /internal/credentials returns `sandboxBuildId` for a session pinned to a manifest-hash build.
+  Each exchange of such a session (and of its queued turns) keeps that build's worker running for
+  the hosts' idle limit from the turn, as a live sandbox does (GET /v1/hosts/{host}/wanted leaves it
+  out of `stop`); it starts no worker and takes no lease.
 
 The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.2.0: a session pinned
 to a build runs only on workers labelled `moca.dev/build` with it, and its turn is refused (503

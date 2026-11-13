@@ -82,6 +82,12 @@ export interface HostState {
 /** In-memory host state; the inventory is re-sent on every poll, so a restart loses nothing durable. */
 export class HostRegistry {
   private readonly hosts = new Map<string, HostState>();
+  /**
+   * buildId -> its worker, and until when (epoch s) a turn of a session pinned to it keeps that
+   * worker as a live sandbox does (busyWorkers): set by each turn's credential exchange
+   * (holdPinnedWorker). In memory, as the host state: a restart forgets it until the next turn.
+   */
+  private readonly sessionUse = new Map<string, { worker: string; until: number }>();
   set(id: string, st: HostState): void {
     this.hosts.set(id, st);
   }
@@ -90,6 +96,34 @@ export class HostRegistry {
   }
   all(): [string, HostState][] {
     return [...this.hosts.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+  }
+  /**
+   * How long a pinned session's turn keeps its build's worker: the largest idle limit of the fresh
+   * hosts holding the build, 3600 s when none reports one, clamped to 60-86400 s (the same rule as a
+   * lease's default length, takeLease).
+   */
+  sessionHoldSeconds(buildId: string, nowS: number): number {
+    const idle = [...this.hosts.values()]
+      .filter((h) => nowS - h.at <= HOST_STALE_S && h.holds[buildId] !== undefined)
+      .map((h) => h.limits.idleLimitSeconds);
+    return Math.min(86_400, Math.max(60, Math.max(0, ...idle) || 3600));
+  }
+  /** The worker a pinned session's turn last kept for `buildId`, if that hold has not run out. */
+  sessionWorker(buildId: string, nowS: number): string | undefined {
+    const u = this.sessionUse.get(buildId);
+    return u && u.until > nowS ? u.worker : undefined;
+  }
+  markSessionUse(buildId: string, worker: string, until: number): void {
+    this.sessionUse.set(buildId, { worker, until });
+  }
+  /** The workers a pinned session's turn keeps now; the holds that ran out are dropped. */
+  sessionWorkers(nowS: number): string[] {
+    const out: string[] = [];
+    for (const [b, u] of this.sessionUse) {
+      if (u.until > nowS) out.push(u.worker);
+      else this.sessionUse.delete(b);
+    }
+    return out;
   }
 }
 
@@ -112,13 +146,48 @@ export function hostViewsOf(deps: CpDeps): HostView[] {
   }));
 }
 
-/** The workers with a live sandbox: never stopped under one, so they drain and keep their slot. */
+/**
+ * The workers with a live sandbox, or with a recent turn of a session pinned to their build
+ * (HostRegistry.sessionUse): never stopped under one, so they drain and keep their slot. A session
+ * keeps a worker that runs; it never starts one (only a lease does).
+ */
 export async function busyWorkers(deps: CpDeps, nowS: number): Promise<Set<string>> {
   const busy = new Set<string>();
   if (deps.sandboxes) {
     for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
   }
+  for (const w of deps.hosts?.sessionWorkers(nowS) ?? []) busy.add(w);
   return busy;
+}
+
+/**
+ * A turn of a session pinned to a host-managed build (its credential exchange) keeps that build's
+ * worker for the hold (sessionHoldSeconds) from now, as a live sandbox keeps its worker, so the
+ * worker outlives the first-use lease while the session is in use. Best effort: a failure is
+ * logged and never fails the turn. Reads the catalog only for the first turn of a hold.
+ */
+export async function holdPinnedWorker(
+  rec: { sandboxBuildId?: string },
+  deps: CpDeps,
+): Promise<void> {
+  const build = rec.sandboxBuildId;
+  const hosts = deps.hosts;
+  if (!hosts || !deps.templates || !build?.startsWith('sha256:')) return;
+  try {
+    const nowS = seconds(deps);
+    let worker = hosts.sessionWorker(build, nowS);
+    if (worker === undefined) {
+      worker = (await deps.templates.list())
+        .flatMap((d) => d.builds)
+        .find((b) => b.buildId === build && b.status === 'registered')?.worker;
+    }
+    if (worker) hosts.markSessionUse(build, worker, nowS + hosts.sessionHoldSeconds(build, nowS));
+  } catch (err) {
+    console.error(
+      `[control-plane] holding the worker of build ${build} for a session turn failed: ` +
+        `${(err as Error)?.message ?? String(err)}`,
+    );
+  }
 }
 
 /** The hosts whose last inventory is at most HOST_STALE_S old, by id. */

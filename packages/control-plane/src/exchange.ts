@@ -4,6 +4,7 @@ import { touchBundle } from './bundle-budget.js';
 import { firstBinding, inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpConfig, CpDeps } from './handlers.js';
+import { holdPinnedWorker } from './host-handlers.js';
 import type { InferenceTarget } from './model-catalog.js';
 import type { SessionModel } from './models.js';
 import type { SessionRecord } from './ownership.js';
@@ -422,6 +423,8 @@ export async function exchangeCredential(
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
   const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  // A turn of a session pinned to a build keeps that build's worker running between turns.
+  if (template) await holdPinnedWorker(rec, deps);
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,

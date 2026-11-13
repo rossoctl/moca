@@ -111,6 +111,20 @@ the `sandbox` profile.
   another. The label is the worker's own claim, from its Hello: the relay does not check it
   against the attach token, so a compromised worker can claim any build. That is the trust
   `moca.dev/template` already has, and no new exposure.
+- **A pinned session keeps its worker while in use:** nothing else would. The first-use lease
+  runs out (by default after the hosts' idle limit, 3600 s), and an active build takes no lease for
+  a later session, so the host agent would stop the worker between turns and the next turn would
+  find none. So each turn's credential exchange (interactive or queued) keeps the build's worker
+  for the hold, the same length as a default lease, from that turn, as a live sandbox keeps its
+  worker (`busyWorkers`): it is not stopped while held, and keeps its slot. A hold keeps a worker
+  that runs; it never starts one, and never counts as a lease or against `quota.active`.
+  **Failure mode:** a session with no turn for longer than the hold (or across a control-plane
+  restart, which forgets the holds as it forgets host state until the next turn) can find its
+  worker stopped; its next turn is refused (`503 sandbox_unavailable`), and a subject not enrolled
+  cannot start it again. **Recovery:** an enrolled subject activates the template
+  (`mocactl sbx templates activate ID --wait`, or `POST /v1/templates/{id}/activate`), and the
+  session's turns run again once its worker is attached; the session keeps its build, so nothing
+  else changes.
 - **Upgrade order:** sandboxes route by worker id and ignore the label; an unpinned session matches
   by template as before; only a pinned session refuses a worker without the label. So the worker
   rebuild must precede the first pinned Moca Pi session on a combined deployment, and nothing else
@@ -188,6 +202,8 @@ Increments 1-5 are code and tests only; 6 and 7 need a cluster (and a KVM host f
 ## 6. Limits
 
 - On `combined` a non-enrolled login can use sessions, as on `harness` (§3.2).
+- A pinned session idle for longer than the hold can lose its worker, until an enrolled subject
+  activates the template again (§3.4).
 - On `combined` the harness's exec token reaches every attached worker, the sandboxes of enrolled
   users included (§3.6): a supervisor compromise is no longer contained to the harness's workers.
 - With no model-catalog hosts, a session's `model` is accepted unverified (`modelVerified: false`).
