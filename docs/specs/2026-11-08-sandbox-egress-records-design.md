@@ -97,7 +97,8 @@ provenance.
 - **Read:**
   - `GET /v1/sandboxes/{id}/egress?after=<next>&limit=N` (1-1000, default 100), for whoever may read
     the sandbox (its owner or an admin), gives `{events, next, summary}`;
-  - `summary`: `byHost` (count, decisions, bytes up and down per destination host), `total`,
+  - `summary`, on the first page only (null after it, so paging a log through reads it once):
+    `byHost` (count, decisions, bytes up and down per destination host), `total`,
     `dropped`, `droppedBy` (`proxy`, `cap`, `budget`, `invalid`), `complete`, `sealed`, `sha256`.
 - **The digest:** `sha256:` and the hex sha256 of the NDJSON export: each stored event's canonical
   JSON (the provenance canonicalization) followed by one newline, in arrival order.

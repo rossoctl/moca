@@ -1350,7 +1350,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
 
   /**
    * A sandbox's egress log, for whoever may read the sandbox (GET /v1/sandboxes/{id}):
-   * `{events, next, summary}` a page at a time (`after` is the last page's `next`), or with
+   * `{events, next, summary}` a page at a time (`after` is the last page's `next`; `summary` on the
+   * first page, null after it), or with
    * `format=ndjson` the whole log, whose sha256 is `summary.sha256` and the end record's.
    */
   getSandboxEgress: async (ctx, deps) => {
@@ -1377,7 +1378,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       body: {
         events: page.map((e) => JSON.parse(e.line) as unknown),
         next: page.length === limit ? page[page.length - 1]!.id : null,
-        summary: await summarize(deps.egress, rec.id),
+        // On the first page only: the summary reads the whole log, so a page after it (`after`)
+        // costs that page alone, and paging a log through is linear in its length.
+        summary: after === null ? await summarize(deps.egress, rec.id) : null,
       },
     };
   },

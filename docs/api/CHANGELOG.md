@@ -14,7 +14,8 @@ Every change is additive.
   gives `{events, next, summary}`. The events are the proxy's audit events exactly as it wrote them
   (new `EgressEvent` schema), in arrival order. `summary` (new `EgressSummary` schema) is
   `{byHost: {host: {count, decisions, bytesUp, bytesDown}}, total, dropped, droppedBy: {proxy, cap,
-budget, invalid}, complete, sealed, sha256}`.
+budget, invalid}, complete, sealed, sha256}`, on the first page (no `after`); null on the pages
+  after it.
 - `?format=ndjson` gives the whole log as `application/x-ndjson`: each event's canonical JSON, each
   followed by `\n`. Its sha256 is `summary.sha256`.
 - New POST /v1/hosts/{host}/egress `{events, cursor, oversized?}` (host bearer): the host agent's

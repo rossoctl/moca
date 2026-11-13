@@ -342,7 +342,7 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     expect(((await read(d, a.id, {}, admin)).body as Body).events).toHaveLength(1);
   });
 
-  it('pages by next, and its NDJSON export hashes to the summary sha256', async () => {
+  it('pages by next (the summary on the first page), and its NDJSON export hashes to its sha256', async () => {
     const d = await setup();
     const a = await create(d, 't1');
     const events = Array.from({ length: 5 }, (_, i) => ev(a.id, { bytes_up: i }));
@@ -352,6 +352,15 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     const p3 = (await read(d, a.id, { limit: '2', after: p2.next })).body as Body;
     expect([...p1.events, ...p2.events, ...p3.events]).toEqual(events);
     expect(p3.next).toBeNull();
+    // The summary comes with the first page only; a later page reads that page alone.
+    expect([p2.summary, p3.summary]).toEqual([null, null]);
+    const store = d.egress!;
+    const page = store.page.bind(store);
+    let reads = 0;
+    store.page = async (...args) => (reads++, page(...args));
+    await read(d, a.id, { limit: '2', after: p1.next });
+    expect(reads).toBe(1);
+    store.page = page;
     const nd = await read(d, a.id, { format: 'ndjson' });
     expect(nd.contentType).toBe('application/x-ndjson');
     // The digest's definition: sha256 over each event's canonical JSON, each followed by "\n".

@@ -2914,7 +2914,13 @@ paths:
                       type: [string, 'null'],
                       description: "the next page's `after`; null at the end",
                     }
-                  summary: { $ref: '#/components/schemas/EgressSummary' }
+                  summary:
+                    description: |
+                      the whole log's summary, on the first page (no `after`); null on the pages
+                      after it, so paging a log through reads it once
+                    oneOf:
+                      - { $ref: '#/components/schemas/EgressSummary' }
+                      - { type: 'null' }
             application/x-ndjson:
               schema: { type: string }
         '400':
