@@ -614,6 +614,7 @@ describe('lease mode (plan 4, spec §5)', () => {
     const { client, records } = await connect({
       exec: async (c) => (sent.push(c), res()),
       lease: f.lease,
+      mode: 'lease',
     });
     const r = await call(client, 'reset', {});
     expect(r.isError).toBeFalsy();
@@ -625,7 +626,7 @@ describe('lease mode (plan 4, spec §5)', () => {
 
   it('reset with no lease', async () => {
     const f = leaseFake(NO_LEASE);
-    const { client } = await connect({ exec: async () => res(), lease: f.lease });
+    const { client } = await connect({ exec: async () => res(), lease: f.lease, mode: 'lease' });
     expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
     expect(f.ops).toEqual(['status']);
   });
@@ -633,6 +634,7 @@ describe('lease mode (plan 4, spec §5)', () => {
   it('a failed reset is a tool error naming the code', async () => {
     const { client } = await connect({
       exec: async () => res(),
+      mode: 'lease',
       lease: async (op) => {
         if (op === 'status') return ACTIVE;
         throw new LeaseControlError('timeout', 'deadline exceeded');
@@ -662,10 +664,109 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(text(await call(client, 'sandbox_info', {}))).toContain('\nlast end: idle, 14:02\n');
     expect(f.ops).toEqual(['status', 'status']);
     const zero = leaseFake({ ...ACTIVE, idleTimeoutS: 0 });
-    const { client: c2 } = await connect({ exec, lease: zero.lease });
+    const { client: c2 } = await connect({ exec, lease: zero.lease, mode: 'lease' });
     expect(text(await call(c2, 'sandbox_info', {}))).toContain(
       '\nidle timeout: 0s (the worker default)\n',
     );
+  });
+
+  it('sandbox_info on a per-exec sandbox makes no lease call (P4-R9)', async () => {
+    const f = leaseFake(ACTIVE);
+    const { client } = await connect({ exec: async () => res(), lease: f.lease });
+    expect(text(await call(client, 'sandbox_info', {}))).toBe(
+      [
+        'template default',
+        'mode: per-exec',
+        'lease: none (per-exec)',
+        'last end: none',
+        'tracked processes: none',
+      ].join('\n'),
+    );
+    expect(f.ops).toEqual([]);
+  });
+
+  it("sandbox_info follows the re-fetched record's mode, the status-failure fallback included", async () => {
+    // Started lease, now per-exec: no status call.
+    const down = leaseFake(ACTIVE);
+    const { client } = await connect({
+      exec: async () => res(),
+      mode: 'lease',
+      lease: down.lease,
+      info: async () => ({ text: 'template default', mode: 'per-exec' }),
+    });
+    expect(text(await call(client, 'sandbox_info', {}))).toContain(
+      '\nmode: per-exec\nlease: none (per-exec)\n',
+    );
+    expect(down.ops).toEqual([]);
+    // Started per-exec, now lease+processes: status is asked, and its failure names the new mode.
+    const ops: string[] = [];
+    const { client: up } = await connect({
+      exec: async () => res(),
+      info: async () => ({ text: 'template default', mode: 'lease+processes' }),
+      lease: async (op) => {
+        ops.push(op);
+        throw new LeaseControlError('timeout', 'slow');
+      },
+    });
+    expect(text(await call(up, 'sandbox_info', {}))).toBe(
+      [
+        'template default',
+        'mode: lease+processes',
+        'lease: unknown (timeout)',
+        'last end: none',
+        'tracked processes: none',
+      ].join('\n'),
+    );
+    expect(ops).toEqual(['status']);
+  });
+
+  it('reset on a per-exec sandbox makes no lease call', async () => {
+    const f = leaseFake(ACTIVE);
+    const { client } = await connect({ exec: async () => res(), lease: f.lease });
+    expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
+    expect(f.ops).toEqual([]);
+  });
+
+  it("a cancelled call's lease events ride the next result", async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    let first = true;
+    const exec: Exec = (_c, o) =>
+      first
+        ? ((first = false),
+          new Promise((_r, reject) => {
+            o?.signal?.addEventListener('abort', () => {
+              const e = new ExecMachineryError('sandbox failure: cancelled', 1, 'machinery', true);
+              e.lease = [end];
+              reject(e);
+            });
+          }))
+        : Promise.resolve(res()); // the worker sent it once, on the cancelled Exec
+    const { client } = await connect({ exec });
+    const ac = new AbortController();
+    const p = call(client, 'bash', { command: 'sleep 9' }, ac.signal);
+    await sleep(10);
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    await sleep(10);
+    expect(text(await call(client, 'bash', { command: 'next' }))).toBe(`${END_IDLE}\nok\n`);
+    expect(text(await call(client, 'bash', { command: 'again' }))).toBe('ok\n');
+  });
+
+  it('keeps only the last expiring event of a result', async () => {
+    let n = 0;
+    // edit's two Execs straddle a minute boundary: 5 min, then 4 min left.
+    const exec: Exec = async () =>
+      n++ === 0
+        ? res({
+            stdout: Buffer.from('a b\n'),
+            lease: [ev({ state: 'expiring', endsByUnixMs: AT + 4 * 60_000 + 1 })],
+          })
+        : res({ lease: [ev({ state: 'expiring', endsByUnixMs: AT + 4 * 60_000 - 1 })] });
+    const { client } = await connect({ exec, now: () => AT });
+    const r = await call(client, 'edit', { path: 'f', edits: [{ oldText: 'a', newText: 'c' }] });
+    const lines = text(r).split('\n');
+    expect(lines[0]).toBe('[sandbox] guest restarts within 4 min (max_duration)');
+    expect(text(r)).not.toContain('within 5 min');
   });
 
   it('sandbox_info survives a status failure', async () => {

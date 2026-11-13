@@ -56,5 +56,6 @@ export {
   execFailureText,
   sandboxRules,
   type CallRecord,
+  type SandboxInfo,
   type SandboxMcpOptions,
 } from './mcp-server.js';

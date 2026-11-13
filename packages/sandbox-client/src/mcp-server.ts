@@ -48,10 +48,19 @@ export interface CallRecord {
   error?: string;
 }
 
+/** `sandbox_info`'s text, and the sandbox's mode as the record says it now. */
+export interface SandboxInfo {
+  text: string;
+  mode: SandboxModeName;
+}
+
 export interface SandboxMcpOptions {
   exec: Exec;
-  /** `sandbox_info`'s text, before the lease fields. Costs no Exec, and is never queued. */
-  info: () => Promise<string>;
+  /**
+   * `sandbox_info`'s text, before the lease fields, and the record's current mode, which every
+   * lease field follows; a bare string means the mode at start. Costs no Exec, and is never queued.
+   */
+  info: () => Promise<string | SandboxInfo>;
   /** The sandbox's lease calls: `reset`, and the status `sandbox_info` shows. */
   lease: LeaseCall;
   /** The sandbox's mode at start, for the tool and rule texts (default per-exec). */
@@ -258,21 +267,28 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const dedupe = new NoticeDedupe();
   let lastEnd: LeaseEvent | undefined;
 
-  /** The lease fields of `sandbox_info`. A failed status is shown, never a failed tool. */
-  const leaseInfo = async (): Promise<string[]> => {
-    const lines: string[] = [];
-    try {
-      const v = await o.lease('status');
-      const idle = `${v.idleTimeoutS}s${v.idleTimeoutS === 0 ? ' (the worker default)' : ''}`;
-      lines.push(
-        `mode: ${v.mode}`,
-        `lease: ${v.state}`,
-        `age: ${Math.floor(v.ageMs / 1000)}s`,
-        `idle timeout: ${idle}`,
-      );
-    } catch (err) {
-      const code = err instanceof LeaseControlError ? err.code : 'unavailable';
-      lines.push(`mode: ${mode}`, `lease: unknown (${code})`);
+  /**
+   * The lease fields of `sandbox_info` for the record's current mode. A per-exec sandbox has no
+   * lease to ask about (P4-R9: the default deployment's worker would refuse the status). A failed
+   * status is shown, never a failed tool.
+   */
+  const leaseInfo = async (current: SandboxModeName): Promise<string[]> => {
+    const lines = [`mode: ${current}`];
+    if (current === 'per-exec') {
+      lines.push('lease: none (per-exec)');
+    } else {
+      try {
+        const v = await o.lease('status');
+        const idle = `${v.idleTimeoutS}s${v.idleTimeoutS === 0 ? ' (the worker default)' : ''}`;
+        lines.push(
+          `lease: ${v.state}`,
+          `age: ${Math.floor(v.ageMs / 1000)}s`,
+          `idle timeout: ${idle}`,
+        );
+      } catch (err) {
+        const code = err instanceof LeaseControlError ? err.code : 'unavailable';
+        lines.push(`lease: unknown (${code})`);
+      }
     }
     const end = lastEnd ? `${lastEnd.reason}, ${hhmm(lastEnd.atUnixMs)}` : 'none';
     // Plan 5 tracks processes; until then there are none to show.
@@ -280,24 +296,35 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     return lines;
   };
   const info = async (): Promise<string> => {
-    const [text, lease] = await Promise.all([o.info(), leaseInfo()]);
-    return [text, ...lease].join('\n');
+    const got = await o.info();
+    const cur = typeof got === 'string' ? { text: got, mode } : got;
+    return [cur.text, ...(await leaseInfo(cur.mode))].join('\n');
   };
 
-  /** The notice lines for one result's lease events; a start only when no end is shown. */
+  /**
+   * The events of a cancelled call, whose result nobody receives: shown on the next result, so no
+   * lease end goes unsaid.
+   */
+  const held: LeaseEvent[] = [];
+  /**
+   * The notice lines for one result's lease events: a start only when no end is shown, and only
+   * the last expiring event (edit's two Execs may straddle a minute boundary).
+   */
   const notices = (events: LeaseEvent[]): string[] => {
     const fresh = dedupe.take(events);
-    for (const ev of fresh) {
+    let lastExpiring = -1;
+    fresh.forEach((ev, i) => {
+      if (ev.state === 'expiring') lastExpiring = i;
       if (ev.state === 'end' && (!lastEnd || ev.atUnixMs >= lastEnd.atUnixMs)) lastEnd = ev;
-    }
+    });
     const ended = fresh.some((ev) => ev.state === 'end');
     const lines: string[] = [];
-    for (const ev of fresh) {
-      if (ev.state === 'start' && ended) continue;
+    fresh.forEach((ev, i) => {
+      if (ev.state === 'start' && ended) return;
+      if (ev.state === 'expiring' && i !== lastExpiring) return;
       const l = leaseNotice(ev, now());
-      // edit's two Execs both carry an expiring event: one line.
-      if (l !== undefined && !lines.includes(l)) lines.push(l);
-    }
+      if (l !== undefined) lines.push(l);
+    });
     return lines;
   };
 
@@ -358,7 +385,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     };
     /** The result with its notice lines first, before the output or the error text. */
     const noticed = (r: CallToolResult): CallToolResult => {
-      const lines = notices(events);
+      const lines = notices([...held.splice(0), ...events]);
       if (lines.length === 0) return r;
       const [first, ...rest] = r.content;
       if (first?.type === 'text') {
@@ -376,7 +403,10 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
         return noticed(r as CallToolResult);
       } catch (err) {
         // The SDK sends nothing for a cancelled request; the record says why it ended.
-        if (extra.signal.aborted) return refuse(CANCELLED);
+        if (extra.signal.aborted) {
+          held.push(...events);
+          return refuse(CANCELLED);
+        }
         return noticed(refuse(oneLine(describe(err, o.expiresAt))));
       }
     };

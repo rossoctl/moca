@@ -102,15 +102,16 @@ export async function serveSbxMcp(
   const lease: LeaseCall = async (op) => (await open()).leaseControl(op);
   const info = async () => {
     const now = await c.api.getSandbox(id);
+    const current = recordMode(now);
     const calls =
-      recordMode(now) === 'per-exec'
-        ? 'every call is a fresh VM, so no process survives it'
-        : LEASE_RULE;
-    return (
-      `Sandbox ${now.id}${now.name ? ` (${now.name})` : ''}: template ${now.template}, ${now.state}, expires ` +
-      `${new Date(now.expiresAt * 1000).toISOString()}. Files live under /workspace and persist; ${calls}; ` +
-      'there is no network; calls run one at a time.'
-    );
+      current === 'per-exec' ? 'every call is a fresh VM, so no process survives it' : LEASE_RULE;
+    return {
+      text:
+        `Sandbox ${now.id}${now.name ? ` (${now.name})` : ''}: template ${now.template}, ${now.state}, expires ` +
+        `${new Date(now.expiresAt * 1000).toISOString()}. Files live under /workspace and persist; ${calls}; ` +
+        'there is no network; calls run one at a time.',
+      mode: current,
+    };
   };
   const server = createSandboxMcpServer({
     exec,

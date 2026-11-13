@@ -826,6 +826,8 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       content: { text: string }[];
     };
     expect(info.content[0]!.text).toMatch(/template node22.*expires/s);
+    // A per-exec record: no lease call (P4-R9), so the fake's missing lease calls never show.
+    expect(info.content[0]!.text).toContain('\nmode: per-exec\nlease: none (per-exec)\n');
     await client.close();
     expect(await served).toBe(0);
     expect(io.outs).toEqual([]); // stdout belongs to MCP frames only

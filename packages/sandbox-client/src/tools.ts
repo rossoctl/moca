@@ -666,6 +666,8 @@ export function sandboxTools(o: {
       'guest is in a bad state. Costs no VM.',
     inputSchema: { type: 'object', properties: {} },
     async run() {
+      // A per-exec sandbox has no lease (and its worker may have no lease calls): nothing to ask.
+      if (!leased) return ok(RESET_NONE_TEXT);
       // Only a live lease has a guest to end; asking first keeps a reset of nothing a no-op.
       if ((await lease('status')).state === 'none') return ok(RESET_NONE_TEXT);
       await lease('reset');
