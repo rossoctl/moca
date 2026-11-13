@@ -16,6 +16,7 @@ import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
   normalizeSpec,
+  ownedLimit,
   policyDigest,
   policyProblems,
   TEMPLATE_ID_RE,
@@ -426,20 +427,23 @@ const buildHandle = (raw: string): string => `b-${sandboxId(raw).slice('sbx-'.le
  * The quota counters for one subject (§6.2). `templates`: the templates it owns with a build
  * registered or on its way there (a template whose builds all failed, were cancelled or were
  * retired holds no slot, so a failure never locks a subject out). `buildsQueued`: its builds not
- * yet built (queued, building or probing), the host work it has in flight.
+ * yet built (queued, building or probing), the host work it has in flight. `owned`: the template
+ * ids it owns in any status, the catalog documents and provenance streams it holds.
  */
 async function usage(
   cat: TemplateCatalog,
   subject: string,
-): Promise<{ templates: number; buildsQueued: number }> {
+): Promise<{ templates: number; buildsQueued: number; owned: number }> {
   let templates = 0;
   let buildsQueued = 0;
+  let owned = 0;
   for (const d of await cat.list()) {
     if (d.owner !== subject) continue;
+    owned++;
     if (d.builds.some((b) => REUSABLE.has(b.status))) templates++;
     buildsQueued += d.builds.filter((b) => CANCELLABLE.has(b.status)).length;
   }
-  return { templates, buildsQueued };
+  return { templates, buildsQueued, owned };
 }
 
 /**
@@ -551,12 +555,26 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
       if (reused) return cur!;
       const u = await usage(cat, charged);
-      if (!cur && u.templates >= quota.templates) {
+      // A template takes a slot when it holds none yet: a new id, or one whose builds all failed,
+      // were cancelled or were retired (usage does not count it). Checking only new ids would let
+      // a subject bring such templates back past the quota.
+      const holdsSlot = cur?.builds.some((x) => REUSABLE.has(x.status)) ?? false;
+      if (!holdsSlot && u.templates >= quota.templates) {
         throw new CpError(
           'quota_exceeded',
           `at most ${quota.templates} templates per subject`,
           undefined,
           { quota: 'templates' },
+        );
+      }
+      // A new id is one more document and stream for good: a create-then-cancel loop frees its
+      // templates and buildsQueued slots, never this one.
+      if (!cur && u.owned >= ownedLimit(quota)) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${ownedLimit(quota)} template ids owned per subject, in any status`,
+          undefined,
+          { quota: 'owned' },
         );
       }
       if (u.buildsQueued >= quota.buildsQueued) {
@@ -1191,6 +1209,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         templates: { limit: pol.quota.templates, used: u.templates },
         buildsQueued: { limit: pol.quota.buildsQueued, used: u.buildsQueued },
         active: { limit: pol.quota.active, used: active },
+        owned: { limit: ownedLimit(pol.quota), used: u.owned },
         ...(sandboxes ? { sandboxes } : {}),
       },
     };
