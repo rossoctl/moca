@@ -17,6 +17,9 @@ const EXPECTED: Record<CpErrorCode, number> = {
   token_required: 401,
   token_invalid: 401,
   token_expired: 401,
+  // 401: one code for every way a SESSION GRANT can fail (MI1 §6.3). Not to be confused with
+  // `invalid_grant` below, which is OAuth's refresh-token refusal.
+  grant_invalid: 401,
   // 400, as RFC 6749 §5.2 answers a refused grant: the refresh token is unknown, revoked, expired
   // or a replayed predecessor. One code for all four, so a client's only move is "log in again".
   invalid_grant: 400,
