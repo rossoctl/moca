@@ -94,6 +94,11 @@ case "$1 $2" in
     .data = ((.data // {}) * ($p.data // {}) | with_entries(select(.value != null))) |
     if (.data // {}) == {} then del(.data) else . end' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
   exit 0 ;;
+'get route')
+  # A Route exists when the test made $MOCK_STATE/route-NAME.exists; MOCK_FAIL_GET=route fails the read.
+  [[ "${MOCK_FAIL_GET:-}" != route ]] || { echo 'Error from server (Forbidden): routes is forbidden' >&2; exit 1; }
+  [[ ! -f "$MOCK_STATE/route-$3.exists" ]] || echo "route.route.openshift.io/$3"
+  exit 0 ;;
 'patch route')
   # The last patch of each Route, as given (a --patch-file is read, so its content is never argv).
   name="$3" patch=''
@@ -971,3 +976,32 @@ for r in "${refusals[@]}"; do
   ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
 done
 pass 'refuses a bad profile, a missing or clashing SBX_MOCA_HOST, egress, no store and a bad replica count with combined'
+
+# 17. SBX_PROFILE=combined refuses an SBX0 namespace (its moca-mu1, or its sbx-api Route) before
+#     anything is applied, unless SBX_CONVERT_TO_COMBINED=1.
+reset_state
+run_setup true || fail 'the sandbox run before the refusal test failed'
+before_mu1="$(jq -S . "$MOCK_STATE/secret-moca-mu1.json")"
+: >"$MOCK_LOG"
+! run_setup "${C[@]}" || fail 'combined accepted an SBX0 namespace (its moca-mu1)'
+grep -q 'looks like an SBX0 (sandbox profile) namespace: its moca-mu1 holds SH_JANITOR_TOKEN but no SH_EXCHANGE_TOKEN' "$TMP/out" ||
+  fail 'the refusal does not name the moca-mu1 reason'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing an SBX0 namespace'
+[[ "$(jq -S . "$MOCK_STATE/secret-moca-mu1.json")" == "$before_mu1" ]] || fail 'moca-mu1 changed on the refusal'
+reset_state
+: >"$MOCK_STATE/route-sbx-api.exists"
+! run_setup "${C[@]}" || fail 'combined accepted a namespace with the sbx-api Route'
+grep -q 'it has the sbx-api Route' "$TMP/out" || fail 'the refusal does not name the Route'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing the sbx-api Route'
+reset_state
+! run_setup eval "${C[*]:1}; export MOCK_FAIL_GET=route" || fail 'carried on past a failing read of the Routes'
+grep -q 'could not read the Routes' "$TMP/out" || fail 'a failing Route read is not named'
+! run_setup eval "${C[*]:1}; export SBX_CONVERT_TO_COMBINED=yes" || fail 'accepted SBX_CONVERT_TO_COMBINED=yes'
+grep -q 'SBX_CONVERT_TO_COMBINED must be unset, 0 or 1' "$TMP/out" || fail 'a bad SBX_CONVERT_TO_COMBINED is not named'
+# The override converts on purpose.
+reset_state
+run_setup true || fail 'the sandbox run before the override failed'
+: >"$MOCK_STATE/route-sbx-api.exists"
+run_setup eval "${C[*]:1}; export SBX_CONVERT_TO_COMBINED=1" || fail "SBX_CONVERT_TO_COMBINED=1 was refused: $(cat "$TMP/out")"
+has_key moca-mu1 SH_EXCHANGE_TOKEN || fail 'the override run did not add the exchange token'
+pass 'SBX_PROFILE=combined refuses an SBX0 namespace before applying anything, unless SBX_CONVERT_TO_COMBINED=1'

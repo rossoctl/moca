@@ -52,7 +52,10 @@
 #                           It turns the template store on, keeps the harness's exec token in moca-relay,
 #                           and adds the harness's keys to moca-mu1 (SH_SESSION_TOKEN_PUBLIC_KEYS,
 #                           SH_CREDENTIAL_KEK, SH_EXCHANGE_TOKEN). Egress credentials are refused with it
-#                           (both would mount a KEK). Its namespace must be another than a sandbox one's
+#                           (both would mount a KEK). Its namespace must be another than a sandbox one's:
+#                           a namespace whose moca-mu1 holds SH_JANITOR_TOKEN but no SH_EXCHANGE_TOKEN, or
+#                           that has the sbx-api Route, is refused, before anything is applied
+#   SBX_CONVERT_TO_COMBINED optional; 1 turns that refusal off, to convert an SBX0 namespace on purpose
 #   SBX_MOCA_HOST           required with SBX_PROFILE=combined: the supervisor Route's host (Moca Pi turns);
 #                           SBX_MOCA_TLS_{CERT,KEY} its certificate, otherwise self-signed
 #   SBX_SANDBOX_IMAGE       required with SBX_PROFILE=combined, pinned by digest: the in-cluster container
@@ -379,6 +382,30 @@ preflight() {
   # Namespace-scoped read: a shared cluster rarely grants `get namespace`, and this never creates one.
   kc get configmaps -n "$NS" -o name >/dev/null 2>&1 ||
     die "namespace $NS must already exist and be readable (this script creates nothing cluster-scoped)"
+}
+
+# SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
+# its overlay (combined design §3.6: a namespace of its own). Refused, before anything is applied,
+# when moca-mu1 holds SBX0's janitor token but no exchange token, or the sbx-api Route exists, unless
+# SBX_CONVERT_TO_COMBINED=1. Only key names are read, never a value.
+check_combined_namespace() {
+  [[ -n "$COMBINED" ]] || return 0
+  if [[ "${SBX_CONVERT_TO_COMBINED:-}" == 1 ]]; then
+    log "SBX_CONVERT_TO_COMBINED=1: not checking whether $NS is an SBX0 namespace"
+    return 0
+  fi
+  [[ -z "${SBX_CONVERT_TO_COMBINED:-}" || "$SBX_CONVERT_TO_COMBINED" == 0 ]] ||
+    die 'SBX_CONVERT_TO_COMBINED must be unset, 0 or 1'
+  local json route why=''
+  json="$(secret_json moca-mu1)" || die "could not read the Secret moca-mu1 in $NS"
+  if [[ -n "$json" ]] &&
+    jq -e '(.data // {}) | has("SH_JANITOR_TOKEN") and (has("SH_EXCHANGE_TOKEN") | not)' <<<"$json" >/dev/null; then
+    why='its moca-mu1 holds SH_JANITOR_TOKEN but no SH_EXCHANGE_TOKEN'
+  fi
+  route="$(kc get route sbx-api -n "$NS" --ignore-not-found -o name)" || die "could not read the Routes in $NS"
+  [[ -z "$route" ]] || why="${why:+$why, and }it has the sbx-api Route"
+  [[ -z "$why" ]] ||
+    die "namespace $NS looks like an SBX0 (sandbox profile) namespace: $why. SBX_PROFILE=combined needs a namespace of its own; set SBX_CONVERT_TO_COMBINED=1 only to convert this one on purpose"
 }
 
 secret_json() { kc get secret "$1" -n "$NS" --ignore-not-found -o json; }
@@ -991,6 +1018,7 @@ main() {
   parse_args "$@"
   validate
   preflight
+  check_combined_namespace
   ensure_redis_secret
   ensure_relay_secret
   ensure_worker_tokens
