@@ -1103,6 +1103,20 @@ describe('retire (§5.1)', () => {
     expect(b).toMatchObject({ heldBy: ['host-1'], capacity: { running: 3, inUse: 0 } });
   });
 
+  it('never lists one worker in run and stop for two registered builds that share it', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    // Build 2 is leased and placed; build 1, unleased, would be stopped, but its worker is build 2's.
+    await activate(d, 't1', alice, { build: hash('2') });
+    expect(await wanted(d, 'host-1')).toEqual({
+      run: [{ template: 't1', buildId: hash('2'), worker: 'sbx_t1' }],
+      stop: [],
+    });
+  });
+
   it('leaves a retired build whose worker a wanted build shares out of stop, with null capacity', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

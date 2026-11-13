@@ -30,7 +30,8 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   `shared`, true for a retired build whose snapshot or worker a build that is not retired also
   uses: its worker is kept for that build, and its `capacity` is null.
 - GET /v1/hosts/{host}/wanted: `stop` also lists the retired builds the host holds with no live
-  sandbox, except a `shared` one (so one worker is never in both `run` and `stop`); POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
+  sandbox, except a `shared` one; and one worker id is never in both `run` and `stop` (two
+  registered builds from one image share it); POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
   retired build's worker and snapshot from its host is not part of this version.
 
 ## 1.7.0

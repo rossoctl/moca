@@ -268,11 +268,12 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
    * live lease, or that it runs while placement keeps them on another host, and the retired ones it
    * holds (§5.1: no longer wanted, never run again), except one whose snapshot or worker a build
-   * that is not retired shares (liveSnapshots): that build's entries decide, so one worker is never
-   * in both lists. A worker is never stopped under a live sandbox: it drains first, so a build with
-   * one is in neither list. Removing a retired build's
-   * worker and snapshot from the host is not asked here. A build imported from SH_SANDBOX_TEMPLATES
-   * (not hostManaged) is in neither list, retired or not: the deployment runs its worker.
+   * that is not retired shares (liveSnapshots): that build's entries decide. A worker in `run` for
+   * one build is never in `stop` for another that shares its worker id. A worker is never stopped
+   * under a live sandbox: it drains first, so a build with one is in neither list. Removing a
+   * retired build's worker and snapshot from the host is not asked here. A build imported from
+   * SH_SANDBOX_TEMPLATES (not hostManaged) is in neither list, retired or not: the deployment runs
+   * its worker.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -309,7 +310,11 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
       }
     }
-    return { status: 200, body: { run, stop } };
+    // One worker id can serve two registered builds (two builds of one template from one image):
+    // a worker in `run` for one is never in `stop` for the other, or every poll would stop and
+    // restart it.
+    const runs = new Set(run.map((e) => e.worker));
+    return { status: 200, body: { run, stop: stop.filter((e) => !runs.has(e.worker)) } };
   },
 
   /**

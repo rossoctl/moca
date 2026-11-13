@@ -475,8 +475,9 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   host) and `stop` (the builds it holds with no lease and no live sandbox, a leased build it runs
   while placement keeps it on another host, so one worker id never runs on two hosts, and the
   retired builds it holds (§5.1) with no live sandbox, except a retired build whose snapshot or
-  worker a build that is not retired shares, which that build's own entries decide, so one worker is
-  never in both lists; a build imported from SH_SANDBOX_TEMPLATES is in neither list, retired or
+  worker a build that is not retired shares, which that build's own entries decide; one worker id is
+  never in both lists, so a worker in `run` for one build is not in `stop` for another that shares
+  it; a build imported from SH_SANDBOX_TEMPLATES is in neither list, retired or
   not). The agent stops each `stop` worker that runs, then starts each
   `run` worker that is installed and not running (`sbx-worker@<id>`), and reports each start
   (`attached`), refusal (`refused`, with why) and stop (`detached`) at
