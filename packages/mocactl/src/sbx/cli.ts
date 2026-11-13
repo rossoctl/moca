@@ -156,7 +156,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
-exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out`;
+exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out,
+130 interrupted (Ctrl-C)`;
 
 export interface SbxDeps {
   signal?: AbortSignal;

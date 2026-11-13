@@ -651,6 +651,36 @@ describe('templates create, build, follow, cancel', () => {
     );
   });
 
+  it('many creates: Ctrl-C during the wait for a queue slot is exit 130, and posts nothing more', async () => {
+    const f = files({
+      'a.json': SPEC,
+      'b.json': { ...SPEC, id: 'my-python-2' },
+      'c.json': { ...SPEC, id: 'my-python-3' },
+    });
+    const w = world({
+      'POST /v1/templates': () => ({
+        status: 429,
+        body: { error: 'quota_exceeded', message: 'at most 1', quota: 'buildsQueued' },
+        headers: { 'retry-after': '20' },
+      }),
+    });
+    const ac = new AbortController();
+    const argv = ['templates', 'create', '--spec', f['a.json']!, '--spec', f['b.json']!];
+    expect(
+      await w.run([...argv, '--spec', f['c.json']!], {
+        signal: ac.signal,
+        sleep: async () => ac.abort(),
+      }),
+    ).toBe(130);
+    expect(w.cp.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(w.err()).toContain('sbx: interrupted (exit 130)');
+    expect(w.err()).not.toContain('over your buildsQueued quota');
+    // Interrupted before the first POST: none is sent.
+    const before = w.cp.calls.length;
+    expect(await w.run(argv, { signal: ac.signal })).toBe(130);
+    expect(w.cp.calls.length).toBe(before);
+  });
+
   it('a templates quota refusal is not waited out: it fails at once', async () => {
     const f = files({ 'spec.json': SPEC });
     const w = world({

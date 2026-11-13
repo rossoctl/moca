@@ -34,6 +34,19 @@ const BUILD_ENDS = new Set(['registered', 'failed', 'rejected', 'retired']);
 
 const clock = (c: SbxCtx) => ({ sleep: c.sleep ?? c.rt.sleep, now: c.now ?? c.rt.now });
 
+/** A Ctrl-C during a template command's wait, or between its requests: never a refusal. */
+class Interrupted extends Error {
+  constructor() {
+    super('interrupted');
+  }
+}
+
+/** The end of an interrupted command: exit 130, nothing more sent. */
+const interrupted = (c: SbxCtx) => {
+  c.io.err(`sbx: interrupted (exit ${SBX_EXIT.interrupted})`);
+  return SBX_EXIT.interrupted;
+};
+
 /** A failure worth polling through: the control plane unreachable for a moment, or a 5xx. */
 const transient = (err: unknown) =>
   err instanceof ApiError && (err.status === 0 || err.status >= 500);
@@ -359,7 +372,8 @@ export async function cmdDryRun(c: SbxCtx, inputs: CreateInput[]): Promise<numbe
 /**
  * One create, waiting out `429 quota_exceeded {quota: buildsQueued}` for a queue slot until `end`.
  * `waiting` is how many creates, this one included, wait behind the quota. Any other refusal is
- * thrown. Returns the answer, or 'timeout'.
+ * thrown; a Ctrl-C throws `Interrupted`, and no POST is sent after it. Returns the answer, or
+ * 'timeout'.
  */
 async function createOne(
   c: SbxCtx,
@@ -371,6 +385,7 @@ async function createOne(
   const { sleep, now } = clock(c);
   let said = false;
   for (;;) {
+    if (c.signal?.aborted) throw new Interrupted();
     try {
       return build !== undefined
         ? await c.api.createTemplateBuild(build, body)
@@ -386,7 +401,7 @@ async function createOne(
         Math.min(Math.max(1, err.retryAfterS ?? QUEUE_SLOT_WAIT_MS / 1000) * 1000, left),
         c.signal,
       );
-      if (c.signal?.aborted) throw err;
+      if (c.signal?.aborted) throw new Interrupted();
     }
   }
 }
@@ -412,6 +427,8 @@ export async function cmdCreateTemplates(
   const end = clock(c).now() + timeoutS * 1000;
   let code: number = SBX_EXIT.ok;
   for (const [i, { body }] of inputs.entries()) {
+    // A Ctrl-C stops the loop: the specs not yet posted are not posted.
+    if (c.signal?.aborted) return interrupted(c);
     const id = opts.build ?? body.id;
     try {
       const q = await createOne(c, body, opts.build, end, inputs.length - i);
@@ -422,6 +439,7 @@ export async function cmdCreateTemplates(
           `${sanitizeRemote(q.templateId)} ${sanitizeRemote(handleOf(q))} ${sanitizeRemote(q.status)}${q.reused ? ' (reused: the same inputs as this build)' : ''}\n`,
         );
     } catch (err) {
+      if (err instanceof Interrupted || c.signal?.aborted) return interrupted(c);
       if (err instanceof ApiError && err.code === 'template_exists') {
         code = Math.max(code, await existing(c, id, err));
         continue;

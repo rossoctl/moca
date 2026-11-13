@@ -15,7 +15,8 @@ import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
  * `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2; 5 when a wait
- * (`templates follow`, a create waiting for a queue slot) ran out of time.
+ * (`templates follow`, a create waiting for a queue slot) ran out of time; 130 when Ctrl-C stopped
+ * it, as `sbx run` and `sbx rm`.
  */
 export const SBX_EXIT = {
   ok: 0,
@@ -24,6 +25,7 @@ export const SBX_EXIT = {
   loginRequired: 3,
   unreachable: 4,
   timedOut: 5,
+  interrupted: 130,
 } as const;
 
 export interface SbxCtx {

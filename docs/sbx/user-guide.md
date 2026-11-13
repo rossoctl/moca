@@ -710,6 +710,7 @@ mocactl sbx templates follow my-python                         # exit 0 once reg
   quotas, only the server decides: its answer is still the decision.
 - Several `--spec` make one create each. When your `buildsQueued` quota is full, the next waits for
   a slot ("N waiting for a queue slot") rather than failing, up to `--timeout` (default 3600 s).
+  Ctrl-C stops it with exit 130: the specs not yet posted are not posted.
 - The same create again (same image, spec, profile and gate record) answers the build it already
   made (`reused`), not a second one. An id someone else owns is refused with its owner's name.
 - `follow` polls until the build is `registered` (exit 0), `failed` or `rejected` (exit 1, with
