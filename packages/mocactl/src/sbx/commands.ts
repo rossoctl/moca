@@ -15,8 +15,8 @@ import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
  * `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2; 5 when a wait
- * (`templates follow`, a create waiting for a queue slot) ran out of time; 130 when Ctrl-C stopped
- * it, as `sbx run` and `sbx rm`.
+ * (`templates follow`, a create waiting for a queue slot, `templates activate --wait`) ran out of
+ * time; 130 when Ctrl-C stopped it, as `sbx run` and `sbx rm`.
  */
 export const SBX_EXIT = {
   ok: 0,
@@ -98,6 +98,12 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
     // or a proxy's page) means the URL is not a sandbox-profile control plane -- a MOCA (harness
     // profile) one, or one from before SBX0.
     io.err('sbx: that control plane has no sandbox routes: is it the sandbox service?');
+  } else if (err instanceof ApiError && err.code === 'template_retired') {
+    // 410 (template lifecycle spec §5.1): not a typo in the id, so say what retired means.
+    io.err(
+      `sbx: ${describeError(err)}: a retired template or build is never served again; ` +
+        'use another build (mocactl sbx templates show ID) or another template',
+    );
   } else if (err instanceof ApiError) {
     io.err(`sbx: ${refusalText(err)}`);
   } else {
@@ -223,6 +229,36 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
   }
 }
 
+/** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
+export const ACTIVATION_WAIT_MS = 10 * 60_000;
+
+/**
+ * Creates a sandbox, waiting while its template activates (template lifecycle spec §6.4): a
+ * `409 template_not_active` means the control plane has started the activation (or, with no lease
+ * to take, is waiting for a host), so the create is retried after its Retry-After, saying why, until
+ * ACTIVATION_WAIT_MS. Any other refusal is thrown.
+ */
+export async function createWaitingForActivation(
+  c: SbxCtx,
+  body: { template: string; name?: string; labels?: Record<string, string> },
+): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
+  const start = c.rt.now();
+  for (;;) {
+    try {
+      return await c.api.createSandbox(body);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409 && err.code === 'template_not_active'))
+        throw err;
+      const left = ACTIVATION_WAIT_MS - (c.rt.now() - start);
+      if (left <= 0) throw err;
+      const waitMs = Math.min(Math.max(1, err.retryAfterS ?? 30) * 1000, left);
+      c.io.err(`sbx: ${sanitizeRemote(err.message)}; retrying in ${Math.ceil(waitMs / 1000)} s`);
+      await c.rt.sleep(waitMs, c.signal);
+      if (c.signal?.aborted) throw err;
+    }
+  }
+}
+
 /**
  * `sbx create [--template ID[:TAG|@BUILD]] [--seed]`. With --seed, the served build's seed runs as
  * the new sandbox's first command and the workspace is checked (seedSandbox): a failure there is
@@ -234,7 +270,7 @@ export async function cmdCreate(
   seed?: { factory?: ExecFactory },
 ): Promise<number> {
   try {
-    const s = await c.api.createSandbox(body);
+    const s = await createWaitingForActivation(c, body);
     c.io.err(
       `created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`,
     );

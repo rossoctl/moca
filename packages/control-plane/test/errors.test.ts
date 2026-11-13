@@ -39,6 +39,11 @@ const EXPECTED: Record<CpErrorCode, number> = {
   template_not_found: 404,
   template_exists: 409,
   policy_refused: 422,
+  no_active_slot: 409,
+  template_unavailable: 409,
+  template_not_active: 409,
+  template_retired: 410,
+  build_in_use: 409,
   mode_not_allowed: 403,
   digest_mismatch: 400,
   bundle_quota_exceeded: 429,
@@ -181,6 +186,18 @@ describe('writeError', () => {
       }),
     );
     expect(JSON.parse(calls.body!)).toEqual({ error: 'sandbox_terminated', reason: 'expired' });
+  });
+
+  it('sends Retry-After when the error carries a whole number of seconds, and only then', () => {
+    const { res, calls } = fakeRes();
+    writeError(res as never, new CpError('no_active_slot', 'full', undefined, undefined, 600));
+    expect(calls.status).toBe(409);
+    expect(calls.headers).toEqual({ 'Content-Type': 'application/json', 'Retry-After': '600' });
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      const r = fakeRes();
+      writeError(r.res as never, new CpError('no_active_slot', 'full', undefined, undefined, bad));
+      expect(r.calls.headers).toEqual({ 'Content-Type': 'application/json' });
+    }
   });
 
   it('maps an unknown throwable to internal_error without leaking its message', () => {

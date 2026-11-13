@@ -46,12 +46,15 @@ import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from '.
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
 import {
+  cmdActivate,
   cmdCancelBuild,
   cmdCreateTemplates,
+  cmdDeactivate,
   cmdDryRun,
   cmdFollowTemplate,
   cmdPolicy,
   cmdQuota,
+  cmdRetire,
   cmdShowTemplate,
   readCreateInputs,
 } from './templates.js';
@@ -93,6 +96,23 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  3600), 130 on Ctrl-C (the build goes on)
   mocactl sbx templates cancel ID --build BUILD [--json]
                                                  withdraw a queued, building or probing build
+  mocactl sbx templates activate ID [--build BUILD] [--lease S] [--wait [--timeout S]] [--json]
+                                                 take or renew your activation lease on a build (tag
+                                                 default, or BUILD; S seconds, 60-86400); a host agent
+                                                 starts its worker. --wait: until it is active, saying
+                                                 why it waits (default 1800 s; exit 5 on a timeout)
+  mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
+                                                 its worker drains and stops
+  mocactl sbx templates retire ID [--build BUILD] [--reason TEXT] [--wait [--timeout S]] [--json]
+                                                 retire a template you own (every build), or one
+                                                 build: never served again, refused while a sandbox
+                                                 runs on it, not undone (a new build is the way
+                                                 back). --reason: kept in its record (not with
+                                                 --build). --wait: until its worker has stopped
+                                                 and every host has removed it (default 300 s;
+                                                 exit 5 on a timeout), at once for a build no
+                                                 host holds, or one whose worker a build not
+                                                 retired uses
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -337,10 +357,20 @@ const NO_JSON = new Set([
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 /** The `templates` subcommands; all but `create` take one template ID. */
-const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel'];
-/** The `templates` subcommands that take --build, and those that take --timeout (a wait). */
-const TAKES_BUILD = ['show', 'follow', 'cancel'];
-const TAKES_TIMEOUT = ['follow', 'create', 'build'];
+const TEMPLATE_SUBS = [
+  'create',
+  'build',
+  'show',
+  'follow',
+  'cancel',
+  'activate',
+  'deactivate',
+  'retire',
+];
+/** The `templates` subcommands that take --build, and those that take --timeout (a wait; activate's
+ * and retire's only with --wait). */
+const TAKES_BUILD = ['show', 'follow', 'cancel', 'activate', 'retire'];
+const TAKES_TIMEOUT = ['follow', 'create', 'build', 'activate', 'retire'];
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -425,6 +455,9 @@ export async function sbxMain(
         json: { type: 'boolean' },
         sandbox: { type: 'string' },
         timeout: { type: 'string' },
+        lease: { type: 'string' },
+        wait: { type: 'boolean' },
+        reason: { type: 'string' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
         'max-push': { type: 'string' },
@@ -499,6 +532,8 @@ export async function sbxMain(
   }
   // `templates SUB`: the template subcommand, for the flags that apply to some of them only.
   const sub = command === 'templates' ? arg : undefined;
+  const activating = sub === 'activate';
+  const retiring = sub === 'retire';
   if (
     values.timeout !== undefined &&
     command !== 'run' &&
@@ -516,6 +551,10 @@ export async function sbxMain(
     io.err(`sbx: --${createFlag} only applies to templates create and build\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  if (values.timeout !== undefined && (activating || retiring) && !values.wait) {
+    io.err(`sbx: --timeout with templates ${sub} needs --wait\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
   if (values.id !== undefined && sub !== 'create') {
     io.err(`sbx: --id only applies to templates create\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -531,6 +570,33 @@ export async function sbxMain(
   if (sub === 'build' && (values.spec?.length ?? 0) > 1) {
     io.err(`sbx: templates build takes one --spec\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
+  }
+  if (values.lease !== undefined && !activating) {
+    io.err(`sbx: --lease only applies to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.wait !== undefined && !(activating || retiring)) {
+    io.err(`sbx: --wait only applies to templates activate and templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && !retiring) {
+    io.err(`sbx: --reason only applies to templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && values.build !== undefined) {
+    io.err(
+      `sbx: --reason is kept for a whole template's retire; retiring one build (--build) takes none\n${SBX_USAGE}`,
+    );
+    return SBX_EXIT.usage;
+  }
+  let leaseSeconds: number | undefined;
+  if (values.lease !== undefined) {
+    const raw = values.lease.trim();
+    leaseSeconds = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 60 || leaseSeconds > 86_400) {
+      io.err(`sbx: --lease must be a whole number of seconds, 60 to 86400 (got '${values.lease}')`);
+      return SBX_EXIT.usage;
+    }
   }
   const flagMisuse = SYNC_FLAGS.find(
     ([flag, cmds]) => values[flag] !== undefined && !cmds.includes(command),
@@ -561,7 +627,8 @@ export async function sbxMain(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates SUB ...` (template lifecycle spec §4); bare `templates` lists them.
+  // `templates SUB ...` (template lifecycle spec §4; activate and deactivate: §6.3; retire:
+  // §5.1); bare `templates` lists them.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -827,6 +894,21 @@ export async function sbxMain(
         });
       if (arg === 'cancel') return cmdCancelBuild(ctx, extra[0]!, values.build!);
       if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
+      if (arg === 'activate')
+        return cmdActivate(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(leaseSeconds !== undefined ? { leaseSeconds } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
+      if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
+      if (arg === 'retire')
+        return cmdRetire(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(values.reason !== undefined ? { reason: values.reason } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
       return cmdTemplates(ctx);
     case 'create':
       return cmdCreate(

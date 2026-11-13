@@ -3,13 +3,16 @@
 # (docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md §8.2).
 #
 #   sudo deploy/sbx/install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress]
-#   sudo deploy/sbx/install-host.sh --uninstall WORKER_ID
+#   sudo deploy/sbx/install-host.sh --uninstall WORKER_ID [--keep-shared]
 #   sudo deploy/sbx/install-host.sh --janitor JANITOR_BUNDLE_DIR
 #   sudo deploy/sbx/install-host.sh --uninstall-janitor
 #   sudo deploy/sbx/install-host.sh --egress EGRESS_BUNDLE_DIR | --uninstall-egress | --egress-ca-out
 #
 # BUNDLE_DIR is deploy/sbx/.generated/workers/<id> from deploy/sbx/setup.sh. IMAGE names a golden
 # snapshot under $SBX_SRV/snapshots (deploy/microvm/build-snapshot.sh --out $SBX_SRV/snapshots/IMAGE).
+# When deploy/sbx/template-onboarding/template-build.sh wrote a template record for IMAGE
+# ($SBX_SRV/templates/IMAGE.json), the worker env carries SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so
+# the worker checks that record against its snapshot at start; a record for another worker is refused.
 # Needs firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md; moca-egress:
 # CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress), and microvm-worker.
 # SBX_WORKER_BIN (an absolute path; default /usr/local/libexec/sbx/microvm-worker, SBX0's own build)
@@ -42,6 +45,10 @@
 # is listed in $SBX_ENV_DIR/manifest, and --uninstall is the undo (spec §8.2): it removes the
 # worker's files and, once no worker is left in the manifest, the shared template unit and
 # sbx.slice and the moca-egress unit it installed (and its env file, unless the operator edited it). It leaves workspace data in place (the janitor, or the operator, removes that).
+# --keep-shared removes only the worker's own files, even for the last worker: the shared units,
+# moca-egress and its credential injection stay for the next worker (the host agent's removal of a
+# retired build runs it so, so a client's retire never takes a host's egress setup). A plain
+# --uninstall of the same id afterwards removes them, once no worker is left.
 #
 # --egress takes deploy/sbx/.generated/egress (egress.env, egress.token [+ api-ca.crt]) and turns on
 # credential injection in the moca-egress this script installed (spec §6.2; refused beside a
@@ -107,13 +114,14 @@ die() { echo "deploy/sbx/install-host.sh: $*" >&2; exit 1; }
 
 env_value() { (grep -E "^$1=" "$2" 2>/dev/null || true) | tail -1 | cut -d= -f2-; }
 
-BUNDLE='' SNAPSHOT='' BUDGET_MB="$DEFAULT_BUDGET_MB" UNINSTALL='' JANITOR='' UNINSTALL_JANITOR='' NO_EGRESS='' EGRESS_BUNDLE='' UNINSTALL_EGRESS='' EGRESS_CA_OUT=''
+BUNDLE='' SNAPSHOT='' BUDGET_MB="$DEFAULT_BUDGET_MB" UNINSTALL='' KEEP_SHARED='' JANITOR='' UNINSTALL_JANITOR='' NO_EGRESS='' EGRESS_BUNDLE='' UNINSTALL_EGRESS='' EGRESS_CA_OUT=''
 parse_args() {
   while (($#)); do
     case "$1" in
     --snapshot) [[ $# -ge 2 ]] || die '--snapshot needs a value'; SNAPSHOT="$2"; shift 2 ;;
     --budget-mb) [[ $# -ge 2 ]] || die '--budget-mb needs a value'; BUDGET_MB="$2"; shift 2 ;;
     --uninstall) [[ $# -ge 2 ]] || die '--uninstall needs a worker id'; UNINSTALL="$2"; shift 2 ;;
+    --keep-shared) KEEP_SHARED=1; shift ;;
     --janitor) [[ $# -ge 2 ]] || die '--janitor needs the janitor bundle directory'; JANITOR="$2"; shift 2 ;;
     --uninstall-janitor) UNINSTALL_JANITOR=1; shift ;;
     --no-egress) NO_EGRESS=1; shift ;;
@@ -471,8 +479,8 @@ install_units() {
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
-# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB. It writes nothing and touches no unit, so a
-# refusal comes before install_egress starts one.
+# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and W_TEMPLATE.
+# It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
 validate_worker() {
   local env="$BUNDLE/worker.env" id addr tok idle image_mb
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
@@ -500,7 +508,28 @@ validate_worker() {
   check_snapshot_ca
   check_snapshot_ram
   check_jail_path "$id"
+  check_template_record "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
+}
+
+# check_template_record WORKER_ID: when template-build.sh wrote a record for the snapshot
+# ($SBX_SRV/templates/<snapshot>.json), the worker is wired to it (SH_TEMPLATE_RECORD and
+# SANDBOX_TEMPLATE, its template id), so it checks the record against its snapshot at every start.
+# The record must name this worker: a bundle of another worker is refused here, before anything is
+# written, rather than left to crash-loop. No record (a snapshot built without template-build.sh):
+# no check, as before. Sets W_RECORD and W_TEMPLATE (empty without a record).
+check_template_record() {
+  local rec="$SBX_SRV/templates/$SNAPSHOT.json" tid worker
+  W_RECORD='' W_TEMPLATE=''
+  [[ -e "$rec" ]] || return 0
+  command -v jq >/dev/null || die "needs jq on PATH to read the template record $rec"
+  [[ "$(jq -r '.schema // empty' "$rec" 2>/dev/null)" == moca-sbx-template/1 ]] ||
+    die "$rec is not a template record (schema moca-sbx-template/1, from template-build.sh)"
+  tid="$(jq -r '.id // empty' "$rec")" worker="$(jq -r '.worker // empty' "$rec")"
+  [[ "$tid" =~ ^[A-Za-z0-9._-]+$ ]] || die "$rec has no valid template id"
+  [[ "$worker" == "$1" ]] ||
+    die "the template record $rec is for worker ${worker:-<none>}, not this bundle's $1: pass the bundle of $worker, or the snapshot of $1"
+  W_RECORD="$rec" W_TEMPLATE="$tid"
 }
 
 install_worker() {
@@ -519,6 +548,7 @@ install_worker() {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\nSH_GUEST_RAM_MB=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT" "$guest_mb"
+      [[ -z "$W_RECORD" ]] || printf 'SH_TEMPLATE_RECORD=%s\nSANDBOX_TEMPLATE=%s\n' "$W_RECORD" "$W_TEMPLATE"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
@@ -773,7 +803,12 @@ uninstall_worker() {
   [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -e "worker sbx-worker@$id " -e "/$id-relay-ca.crt"
   log "removed sbx-worker@$id"
   remove_legacy_jail "$id"
-  remove_shared_units
+  if [[ -n "$KEEP_SHARED" ]]; then
+    [[ ! -f "$SBX_ENV_DIR/manifest" ]] || grep -q '^worker ' "$SBX_ENV_DIR/manifest" ||
+      log "kept the shared units, moca-egress and its credential injection (--keep-shared): no worker is left; a plain --uninstall $id removes them"
+  else
+    remove_shared_units
+  fi
   systemctl daemon-reload
   log "left in place: $SBX_SRV/workspaces/$id and $(jail_dir "$id") (workspace data; remove by hand when no sandbox needs it)"
 }
@@ -784,6 +819,7 @@ main() {
   local modes=0 m
   for m in "$BUNDLE" "$UNINSTALL" "$JANITOR" "$UNINSTALL_JANITOR" "$EGRESS_BUNDLE" "$UNINSTALL_EGRESS" "$EGRESS_CA_OUT"; do [[ -z "$m" ]] || modes=$((modes + 1)); done
   ((modes <= 1)) || die 'one of BUNDLE_DIR, --uninstall, --janitor, --uninstall-janitor, --egress, --uninstall-egress or --egress-ca-out at a time'
+  [[ -z "$KEEP_SHARED" || -n "$UNINSTALL" ]] || die '--keep-shared goes with --uninstall'
   if [[ -n "$UNINSTALL" ]]; then uninstall_worker "$UNINSTALL"; return; fi
   if [[ -n "$UNINSTALL_JANITOR" ]]; then uninstall_janitor; return; fi
   if [[ -n "$JANITOR" ]]; then install_janitor; return; fi
@@ -803,7 +839,7 @@ main() {
   [[ "$MOCA_EGRESS_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     die "MOCA_EGRESS_READY_TIMEOUT='$MOCA_EGRESS_READY_TIMEOUT' must be a whole number of seconds, at least 1"
   if [[ -n "$EGRESS_BUNDLE" ]]; then install_egress_credentials; return; fi
-  [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
+  [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID [--keep-shared] | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
   validate_worker
   [[ -n "$NO_EGRESS" ]] || install_egress
   install_units

@@ -49,8 +49,18 @@ export interface SbxBuild {
   status: string;
   profile: string;
   readiness: string | null;
-  capacity: { running: number; inUse: number | null } | null;
+  capacity: { running: number | null; inUse: number | null } | null;
   lastUsedAt: number | null;
+  /**
+   * The hosts whose last inventory holds its snapshot (template lifecycle spec §6.1); null without
+   * host agents; absent from an older control plane.
+   */
+  heldBy?: string[] | null;
+  /**
+   * A retired build whose snapshot or worker a build that is not retired shares: its worker is kept
+   * for that build, never stopped for the retire. Absent from an older control plane.
+   */
+  shared?: boolean;
   tags: string[];
   createdAt: number;
   provenance: string | null;
@@ -64,6 +74,35 @@ export interface SbxBuild {
     seed?: string;
     tools?: string[];
   };
+}
+
+/** An activation lease (POST /v1/templates/{id}/activate, template lifecycle spec §6.3). */
+export interface SbxLease {
+  templateId: string;
+  buildId: string;
+  /** Epoch seconds. */
+  leaseUntil: number;
+  /** The host it is placed on; null while no host agent has reported. */
+  host: string | null;
+}
+
+/** One build a retire answered for (openapi RetiredBuild, template lifecycle spec §5.1). */
+export interface SbxRetiredBuild {
+  /** The build's handle. */
+  build: string;
+  /** Null for a build retired before it registered. */
+  buildId: string | null;
+  readiness: 'retired';
+  /** The retire record written now; null when it was already retired. */
+  record: string | null;
+}
+
+/** What a retire answers: a whole template's (`builds`), or one build's (its fields inline). */
+export interface SbxRetired extends Partial<SbxRetiredBuild> {
+  templateId: string;
+  subject: string;
+  status: 'retired';
+  builds?: SbxRetiredBuild[];
 }
 
 /** A template with its builds (openapi Template). */
@@ -153,6 +192,32 @@ export class SandboxApiClient extends ControlPlaneClient {
       'GET',
       `/v1/templates/${encodeURIComponent(id)}/builds/${encodeURIComponent(build)}`,
     );
+  }
+
+  /** Take or renew the caller's activation lease on a build (`POST /v1/templates/{id}/activate`). */
+  activateTemplate(
+    id: string,
+    body: { tag?: string; build?: string; leaseSeconds?: number },
+  ): Promise<SbxLease> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/activate`, { body });
+  }
+
+  /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
+  deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
+  }
+
+  /**
+   * Retire a template (`POST /v1/templates/{id}/retire`), or one build of it (`DELETE
+   * /v1/templates/{id}/builds/{build}`, which takes no reason).
+   */
+  retireTemplate(id: string, opts: { build?: string; reason?: string } = {}): Promise<SbxRetired> {
+    const t = encodeURIComponent(id);
+    return opts.build !== undefined
+      ? this.json('DELETE', `/v1/templates/${t}/builds/${encodeURIComponent(opts.build)}`)
+      : this.json('POST', `/v1/templates/${t}/retire`, {
+          body: opts.reason !== undefined ? { reason: opts.reason } : {},
+        });
   }
 
   /** Create a template, or a new build of one's own (lifecycle spec §4): `POST /v1/templates`. */

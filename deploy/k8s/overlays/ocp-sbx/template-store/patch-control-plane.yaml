@@ -1,6 +1,7 @@
-# The template store on the sandbox profile (template lifecycle spec §3.1, §7.2). Names the BASE
-# namespace like every patch in the overlay. With SH_PROVENANCE_DIR set, SH_SANDBOX_TEMPLATES is
-# imported into the store once, at the first start against an empty store, and ignored after that.
+# The template store and the host agents' tokens on the sandbox profile (template lifecycle spec
+# §7.2, §6.1). Names the BASE namespace like every patch in the overlay. SH_TEMPLATE_HOSTS comes
+# from sbx-settings (setup.sh writes it); one token per host is a file in /run/credentials, from the
+# Secret sbx-template-hosts, which setup.sh keeps apart from moca-mu1 and sbx-egress.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: moca-control-plane, namespace: moca }
@@ -12,8 +13,28 @@ spec:
         - name: control-plane
           env:
             - { name: SH_PROVENANCE_DIR, value: /var/lib/moca/templates }
+            - name: SH_TEMPLATE_HOSTS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_TEMPLATE_HOSTS, optional: true } }
           volumeMounts:
             - { name: template-store, mountPath: /var/lib/moca/templates }
       volumes:
         - name: template-store
           persistentVolumeClaim: { claimName: moca-sbx-templates }
+        # moca-mu1's two items, every key of sbx-egress (optional: only with SBX_EGRESS_CREDENTIALS=1)
+        # and every key of sbx-template-hosts (one token per host), each a file. A strategic merge
+        # REPLACES a projected volume's source list, so this component restates every source the
+        # egress component would add, sbx-egress as optional: with egress off the Secret does not
+        # exist and the source is skipped; with it on, its keys are mounted as before.
+        - name: credentials
+          secret: null
+          projected:
+            defaultMode: 256 # 0400
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+                    - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+              - secret: { name: sbx-egress, optional: true }
+              - secret: { name: sbx-template-hosts }
