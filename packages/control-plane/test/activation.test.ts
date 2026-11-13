@@ -1081,6 +1081,19 @@ describe('memory-aware placement', () => {
     );
   });
 
+  it('keeps a build on the memory-reporting host already running its worker, counting it once', () => {
+    // h1 sorts first by id and has fewer builds placed; the worker runs on h2.
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    const h1 = host('h1', [hash('a')], 100_000);
+    const h2 = host('h2', [hash('a'), hash('b')], 100_000, { running: ['w_a'] });
+    const p = place(docs, [h1, h2], 100);
+    expect(p.placed.get(hash('a'))).toBe('h2');
+    expect(p.placed.get(hash('b'))).toBe('h2');
+    // h2 counts a once (running, not pending) and b once (placed, pending).
+    expect(p.memory.get('h2')).toMatchObject({ usedMib: 2 * G, pendingMib: G });
+    expect(p.memory.get('h1')).toMatchObject({ usedMib: 0, pendingMib: 0 });
+  });
+
   it('sticky placement and the memory rule together: running is the union of both reports', () => {
     const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
     // Running by the held build's `running` flag only (an attached report newer than the memory
