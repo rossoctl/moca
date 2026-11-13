@@ -159,6 +159,45 @@ check "a tool --require names is still required" "$(grep -c 'missing required to
 bash "$SCRIPT" --out "$TMP/out-req4" --image example/img:1 --require "bash ../evil" >"$TMP/run-req4.log" 2>&1
 check "a path is not a tool name (exit 2)" "$?" "2"
 
+echo "== the image's symlinks out of the tree are never written through (the build runs as root)"
+# The tree is an untrusted image's filesystem: an absolute symlink in it resolves on the build host.
+# Each case points one path at a "host" file or directory outside the tree and checks it is untouched.
+mkdir -p "$TMP/host/etc" "$TMP/host/bin" "$TMP/host/dev"
+echo precious >"$TMP/host/sudoers"
+echo precious >"$TMP/host/bin/remote-worker"
+make_fixture "${ALL_TOOLS[@]}"
+ln -s "$TMP/host/sudoers" "$FIXTURE/etc/moca-rootfs-source"
+bash "$SCRIPT" --out "$TMP/out-ln1" --image example/img:1 >"$TMP/run-ln1.log" 2>&1
+check "an absolute /etc/moca-rootfs-source symlink: exit 1" "$?" "1"
+check "the host file it points at is unchanged" "$(cat "$TMP/host/sudoers")" "precious"
+check "names the symlink" "$(grep -c '/etc/moca-rootfs-source is a symlink' "$TMP/run-ln1.log")" "1"
+check "no tree is left behind" "$([ -e "$TMP/out-ln1" ] && echo present || echo absent)" "absent"
+make_fixture "${ALL_TOOLS[@]}"
+rm -rf "${FIXTURE:?}/etc"
+ln -s "$TMP/host/etc" "$FIXTURE/etc"
+bash "$SCRIPT" --out "$TMP/out-ln2" --image example/img:1 >"$TMP/run-ln2.log" 2>&1
+check "/etc a symlink out of the tree: exit 1" "$?" "1"
+check "nothing written in the host directory" "$(ls -A "$TMP/host/etc" | wc -l | tr -d ' ')" "0"
+check "names /etc" "$(grep -c "image's /etc resolves outside the tree" "$TMP/run-ln2.log")" "1"
+make_fixture "${ALL_TOOLS[@]}"
+rm -rf "${FIXTURE:?}/usr/local/bin"
+ln -s "$TMP/host/bin" "$FIXTURE/usr/local/bin"
+bash "$SCRIPT" --out "$TMP/out-ln3" --image example/img:1 >"$TMP/run-ln3.log" 2>&1
+check "/usr/local/bin a symlink out of the tree: exit 1" "$?" "1"
+check "the host's remote-worker is not removed" "$(cat "$TMP/host/bin/remote-worker" 2>/dev/null)" "precious"
+make_fixture "${ALL_TOOLS[@]}"
+ln -s "$TMP/host/dev" "$FIXTURE/dev"
+bash "$SCRIPT" --out "$TMP/out-ln4" --image example/img:1 >"$TMP/run-ln4.log" 2>&1
+check "/dev a symlink out of the tree: exit 1" "$?" "1"
+make_fixture "${ALL_TOOLS[@]}"
+mkdir -p "$FIXTURE/real/etc"
+rm -rf "${FIXTURE:?}/etc"
+ln -s real/etc "$FIXTURE/etc"
+bash "$SCRIPT" --out "$TMP/out-ln5" --image example/img:1 >"$TMP/run-ln5.log" 2>&1
+check "a relative /etc symlink inside the tree still builds" "$?" "0"
+check "the provenance lands inside the tree" \
+  "$(grep -c '^image=example/img:1$' "$TMP/out-ln5/real/etc/moca-rootfs-source")" "1"
+
 echo "== a non-empty --out is refused and left untouched"
 mkdir -p "$TMP/out3"; echo keep >"$TMP/out3/precious"
 make_fixture "${ALL_TOOLS[@]}"

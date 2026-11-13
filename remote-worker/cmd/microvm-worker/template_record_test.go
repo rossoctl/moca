@@ -81,16 +81,23 @@ func TestTemplateRecordRefusesEachMismatch(t *testing.T) {
 	}
 }
 
-// A version-1 manifest has no source_image_digest: the record's image cannot be compared,
-// and the rest still is.
-func TestTemplateRecordV1ManifestSkipsOnlyTheImage(t *testing.T) {
+// A record comes from template-build.sh, which only builds version-2 manifests carrying the
+// image digest: a version-1 manifest, or a version-2 one without source_image_digest, is
+// refused rather than checked with the image comparison skipped.
+func TestTemplateRecordV1ManifestRefused(t *testing.T) {
 	man := vmpool.Manifest{Hash: "sha256:h1", GuestRAMMB: 4096}
-	rec := writeRecord(t, func(r map[string]any) { r["image"] = "registry.example.com/x:latest" })
-	if err := check(t, rec, man); err != nil {
-		t.Fatalf("a v1 manifest's record was refused for its image: %v", err)
+	err := check(t, writeRecord(t, nil), man)
+	if err == nil || !strings.Contains(err.Error(), "predates hash version 2") {
+		t.Fatalf("err = %v, want a v1 manifest refused as predating hash version 2", err)
 	}
-	if err := check(t, writeRecord(t, func(r map[string]any) { r["manifest_hash"] = "sha256:no" }), man); err == nil {
-		t.Fatal("a v1 manifest's record with another hash was accepted")
+}
+
+func TestTemplateRecordManifestWithoutImageDigestRefused(t *testing.T) {
+	man := recordMan()
+	man.SourceImageDigest = ""
+	err := check(t, writeRecord(t, nil), man)
+	if err == nil || !strings.Contains(err.Error(), "no source_image_digest") {
+		t.Fatalf("err = %v, want a manifest without source_image_digest refused", err)
 	}
 }
 
