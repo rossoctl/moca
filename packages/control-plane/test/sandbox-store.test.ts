@@ -21,6 +21,9 @@ describe('MemorySandboxStore retention', () => {
       labels: {},
       createdAt: 100,
       expiresAt: 200,
+      mode: 'per-exec' as const,
+      idleTimeoutS: 0,
+      modeEpoch: 0,
     };
     await store.create(rec, { perSubject: 1, total: 1, retentionS: 50 }, 100);
     expect(await store.markDeleted('sbx-r', 150, 50)).toBe('deleted');
