@@ -119,7 +119,7 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
   {
     method: 'get',
     path: '/v1/templates/{id}/builds/{build}',
-    reads: ['buildId', 'status', 'readiness', 'capacity', 'tags', 'spec'],
+    reads: ['buildId', 'handle', 'status', 'readiness', 'capacity', 'reason', 'tags', 'spec'],
   },
   // `sbx templates activate` and `deactivate` (template lifecycle spec §6.3).
   {
@@ -133,6 +133,30 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/templates/{id}/deactivate',
     reads: ['templateId', 'released'],
   },
+  // The authoring commands: create, build, follow, cancel, quota, policy (template lifecycle spec §4, §8).
+  {
+    method: 'post',
+    path: '/v1/templates',
+    reads: ['templateId', 'buildId', 'build', 'status', 'reused'],
+    sends: ['id', 'image', 'spec', 'profile', 'gateRecord', 'visibility'],
+  },
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/builds',
+    reads: ['templateId', 'buildId', 'build', 'status', 'reused'],
+    sends: ['image', 'spec', 'profile', 'gateRecord'],
+  },
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/builds/{build}/cancel',
+    reads: ['templateId', 'build', 'status'],
+  },
+  {
+    method: 'get',
+    path: '/v1/quota',
+    reads: ['subject', 'templates', 'buildsQueued', 'active', 'sandboxes'],
+  },
+  { method: 'get', path: '/v1/policy', reads: ['policy', 'digest', 'record'] },
 ];
 
 // The fields of each Sandbox and template `mocactl sbx ls` / `templates` print.
@@ -163,6 +187,10 @@ const CODES_USED = [
   'sandbox_not_found',
   // `sbx templates show` reports it as itself (sbx/commands.ts OWN_404).
   'template_not_found',
+  // The authoring commands (sbx/templates.ts): an id another's, a refusal's rule, a full queue.
+  'template_exists',
+  'policy_refused',
+  'quota_exceeded',
   'async_quota_exhausted',
   'turn_not_cancellable',
 ];
@@ -297,7 +325,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
       expect(op, `${method} ${path} missing from openapi.yaml`).toBeDefined();
       const schema = responseSchema(op);
       for (const f of reads ?? []) expect(Object.keys(schema?.properties ?? {})).toContain(f);
-      const req = op.requestBody?.content?.['application/json']?.schema;
+      // The create routes' body is a `$ref` (TemplateCreate): resolved as a response is.
+      const req = resolveSchema(op.requestBody?.content?.['application/json']?.schema);
       for (const f of sends ?? []) expect(Object.keys(req?.properties ?? {})).toContain(f);
     },
   );
@@ -326,9 +355,31 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     }
   });
 
+  it('the error body holds the fields a template refusal is read by', () => {
+    const e = resolveSchema(openapi.components.schemas.Error);
+    for (const f of ['rule', 'quota']) expect(Object.keys(e.properties)).toContain(f);
+  });
+
+  it('the policy holds the fields sbx policy prints and the dry run reads', () => {
+    const p = resolveSchema(openapi.components.schemas.Policy);
+    for (const f of [
+      'profiles',
+      'defaultProfile',
+      'allowedRegistries',
+      'trustedGateRecords',
+      'quota',
+    ])
+      expect(Object.keys(p.properties)).toContain(f);
+    const profile = p.properties.profiles.additionalProperties;
+    for (const f of ['requires', 'envelope']) expect(Object.keys(profile.properties)).toContain(f);
+    const env = profile.properties.envelope;
+    for (const f of ['maxGuestMb', 'maxVcpus', 'maxWorkspaceMb', 'exact'])
+      expect(Object.keys(env.properties)).toContain(f);
+  });
+
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 14 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 19 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -343,6 +394,11 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.getTemplateBuild('TID', 'BID');
     await c.activateTemplate('TID', {});
     await c.deactivateTemplate('TID');
+    await c.createTemplate({ id: 'x', image: 'i', spec: {} });
+    await c.createTemplateBuild('TID', { image: 'i', spec: {} });
+    await c.cancelTemplateBuild('TID', 'BID');
+    await c.getQuota();
+    await c.getPolicy();
     const seen = calls.map(
       (k) =>
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
@@ -370,6 +426,11 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'getTemplateBuild',
         'activateTemplate',
         'deactivateTemplate',
+        'createTemplate',
+        'createTemplateBuild',
+        'cancelTemplateBuild',
+        'getQuota',
+        'getPolicy',
       ]),
     );
   });
