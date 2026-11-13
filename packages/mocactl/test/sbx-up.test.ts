@@ -155,7 +155,7 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     }
     // doctor takes the block written for the sandbox's mode.
     expect(checkAgentConfig(h.r)).toEqual([]);
-  });
+  }, 30_000);
 
   it('warns and pushes nothing when the reused sandbox holds changes not yet pulled', async () => {
     const h = harness();

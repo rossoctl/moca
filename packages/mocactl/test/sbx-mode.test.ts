@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
   LeaseControlError,
   leaseNotice,
@@ -405,6 +405,8 @@ function leaseWorld(
   o: {
     record?: Record<string, unknown>;
     tty?: boolean;
+    /** A PUT body the control plane refuses with 400 invalid_request. */
+    putRefuses?: (body: { mode: string; idleTimeoutS?: number }) => boolean;
     lease?: (
       op: LeaseOpName,
       token?: string,
@@ -420,6 +422,12 @@ function leaseWorld(
     [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: rec }),
     [`PUT /v1/sandboxes/${SBX}/mode`]: (req) => {
       const b = req.body as { mode: string; idleTimeoutS?: number };
+      if (o.putRefuses?.(b)) {
+        return {
+          status: 400,
+          body: { error: 'invalid_request', message: 'idleTimeoutS must be 30..600' },
+        };
+      }
       rec = {
         ...rec,
         mode: b.mode,
@@ -499,6 +507,8 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
     }
     const up = leaseWorld({ tty: false, record: { mode: 'lease' } });
     expect(await up.run(['mode', 'lease+processes', SBX])).toBe(2);
+    expect(up.puts()).toEqual([]);
+    expect(up.calls).toEqual([]);
     // A downgrade, and a same-rank change, need no terminal.
     for (const mode of ['per-exec', 'lease']) {
       const w = leaseWorld({ tty: false, record: { mode: 'lease' } });
@@ -533,8 +543,32 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
     });
     expect(await w.run(['mode', 'per-exec', SBX])).toBe(0);
     expect(w.out()).toBe('mode per-exec (epoch 3)\nlease ended (mode_change)\n');
-    // The pending end's notice, on stderr, once.
-    expect(w.err()).toContain(leaseNotice(end, Date.now())!);
+    // The stdout line is the report: the end is marked seen, with no notice line (P4-R17).
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
+    expect(await w.run(['mode', 'per-exec', SBX])).toBe(0);
+    expect(w.out()).toBe('mode per-exec (epoch 4)\n');
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
+  });
+
+  it('mode retries without a carried idle timeout the deployment no longer allows (P4-R18)', async () => {
+    const w = leaseWorld({
+      record: { mode: 'lease', idleTimeoutS: 900 },
+      putRefuses: (b) => b.idleTimeoutS !== undefined,
+    });
+    expect(await w.run(['mode', 'per-exec', SBX])).toBe(0);
+    expect(w.puts()).toEqual([{ mode: 'per-exec', idleTimeoutS: 900 }, { mode: 'per-exec' }]);
+    expect(w.err()).toContain(
+      "idle timeout reset to the worker default: the deployment's ceiling no longer allows 900 s",
+    );
+    expect(w.out()).toBe('mode per-exec (epoch 2)\n');
+    // One the user gave is the user's: refused, not retried.
+    const x = leaseWorld({
+      record: { mode: 'lease', idleTimeoutS: 900 },
+      putRefuses: (b) => b.idleTimeoutS !== undefined,
+    });
+    expect(await x.run(['mode', 'per-exec', SBX, '--idle-timeout', '900'])).toBe(1);
+    expect(x.puts()).toHaveLength(1);
+    expect(x.err()).toContain('idleTimeoutS must be 30..600');
   });
 
   it('mode with an unreachable worker prints the pending line, exit 0', async () => {
@@ -597,13 +631,24 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
 
 describe('mocactl sbx reset (spec §8.3)', () => {
   it('reset ends the lease', async () => {
+    const start = ev({ state: 'start', atUnixMs: 1_800_000_000_000 });
+    const resetEnd = ev({ reason: 'reset' });
+    let reset = false;
     const w = leaseWorld({
-      lease: (op) => (op === 'status' ? ACTIVE : { ...APPLIED, pending: ev({ reason: 'reset' }) }),
+      lease: (op) => {
+        if (op === 'reset') reset = true;
+        return reset ? { ...APPLIED, pending: resetEnd } : { ...ACTIVE, pending: start };
+      },
     });
     expect(await w.run(['reset', SBX])).toBe(0);
     expect(w.calls.map((c) => c.op)).toEqual(['status', 'reset']);
     expect(w.calls.every((c) => c.signal)).toBe(true);
     expect(w.out()).toBe('lease ended (reset)\n');
+    // The stdout line reports the end: no notice for it, nor for the start beside it (P4-R17).
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
+    // Marked seen: a later get does not show it either.
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
   });
 
   it('reset with no lease', async () => {
@@ -718,7 +763,8 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
 
   it('an unseen notice prints once across two get calls', async () => {
     const end = ev({ reason: 'idle' });
-    const w = leaseWorld({ lease: () => ({ ...ACTIVE, pending: end }) });
+    let pending = end;
+    const w = leaseWorld({ lease: () => ({ ...ACTIVE, pending }) });
     expect(await w.run(['get', SBX])).toBe(0);
     const notice = leaseNotice(end, Date.now())!;
     expect(notice).toContain('[sandbox] guest restarted (idle, ');
@@ -730,17 +776,22 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
       readFileSync(join(w.paths.stateDir, 'sbx', 'notices.json'), 'utf8'),
     ) as Record<string, number>;
     expect(store).toEqual({ [SBX]: end.atUnixMs });
-    // A newer event prints again; a start beside a shown end does not.
-    const later = ev({ atUnixMs: end.atUnixMs + 60_000, reason: 'reset' });
-    const x = leaseWorld({
-      lease: (op) =>
-        op === 'status'
-          ? { ...ACTIVE, pending: ev({ state: 'start', atUnixMs: later.atUnixMs - 1 }) }
-          : { ...APPLIED, pending: later },
-    });
-    expect(await x.run(['reset', SBX])).toBe(0);
-    expect(x.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([
-      leaseNotice(later, Date.now()),
+    // A newer event prints again.
+    pending = ev({ atUnixMs: end.atUnixMs + 60_000, reason: 'memory_reclaim' });
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([
+      leaseNotice(pending, Date.now()),
     ]);
+  });
+
+  it('a corrupt notices.json does not fail get: it reads as empty', async () => {
+    const end = ev({ reason: 'idle' });
+    const w = leaseWorld({ lease: () => ({ ...ACTIVE, pending: end }) });
+    const file = join(w.paths.stateDir, 'sbx', 'notices.json');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '{not json');
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.io.errs).toContain(leaseNotice(end, Date.now()));
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ [SBX]: end.atUnixMs });
   });
 });

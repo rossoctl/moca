@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { leaseNotice, type LeaseEvent } from '@moca/sandbox-client';
+import { leaseNotice, noticeLines, type LeaseEvent } from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { SbxCtx } from './commands.js';
 
@@ -9,6 +9,10 @@ import type { SbxCtx } from './commands.js';
  * their next command, so a user whose harness had exited still learns of it. What was seen is kept
  * in `<state dir>/sbx/notices.json` (beside the flight recorder's logs), as
  * `{[sandboxId]: lastSeenAtUnixMs}`: an event is shown when its `at_unix_ms` is newer.
+ *
+ * The store keeps only the newest `at_unix_ms` per sandbox, stamped by the worker's clock: events
+ * from a worker whose clock is behind the one that stamped the stored value (a sandbox moved to
+ * another host) stay hidden until its clock passes that value.
  */
 export const noticesFile = (stateDir: string): string => join(stateDir, 'sbx', 'notices.json');
 
@@ -42,15 +46,18 @@ function save(file: string, store: Store): void {
 }
 
 /**
- * The notice lines for `events` not yet seen for sandbox `id`, and records them seen. A start is
- * shown only when no end is shown with it; an `expiring` event is shown every time (only the last,
- * spec §5: it rides on every lease Exec) and marks nothing seen.
+ * The notice lines for `events` not yet seen for sandbox `id`, and records them seen. The lines
+ * are sandbox-client's `noticeLines`: a start only when no end is shown with it, only the last
+ * `expiring`. An `expiring` event is shown every time (it rides on every lease Exec, spec §5) and
+ * marks nothing seen. A `reported` event is marked seen, and counts as shown, but gets no line: the
+ * command reports it itself (ruling P4-R17).
  */
 export function unseenNotices(
   stateDir: string,
   id: string,
   events: LeaseEvent[],
   nowMs: number,
+  reported: (ev: LeaseEvent) => boolean = () => false,
 ): { lines: string[]; fresh: LeaseEvent[] } {
   if (events.length === 0) return { lines: [], fresh: [] };
   const file = noticesFile(stateDir);
@@ -63,31 +70,25 @@ export function unseenNotices(
     at.add(ev.atUnixMs);
     return true;
   });
-  const ended = fresh.some((ev) => ev.state === 'end');
-  const lastExpiring = fresh.map((ev) => ev.state).lastIndexOf('expiring');
-  const lines: string[] = [];
-  fresh.forEach((ev, i) => {
-    if (ev.state === 'start' && ended) return;
-    if (ev.state === 'expiring' && i !== lastExpiring) return;
-    const l = leaseNotice(ev, nowMs);
-    if (l !== undefined) lines.push(l);
-  });
+  const hidden = new Set(fresh.filter(reported).map((ev) => leaseNotice(ev, nowMs)));
+  const lines = noticeLines(fresh, nowMs).filter((l) => !hidden.has(l));
   if (at.size > 0) save(file, { ...store, [id]: Math.max(last, ...at) });
   return { lines, fresh };
 }
 
 /**
  * Prints, on stderr, the notices for `events` the user has not seen for sandbox `id`, and returns
- * the events that were unseen. The reason and process names are the worker's text: sanitized
- * before they reach a terminal.
+ * the events that were unseen. `reported`: the events the command reports itself (unseenNotices).
+ * The reason and process names are the worker's text: sanitized before they reach a terminal.
  */
 export function printNotices(
   c: SbxCtx,
   id: string,
   events: Array<LeaseEvent | undefined>,
+  reported?: (ev: LeaseEvent) => boolean,
 ): LeaseEvent[] {
   const known = events.filter((ev): ev is LeaseEvent => ev !== undefined);
-  const { lines, fresh } = unseenNotices(c.rt.paths.stateDir, id, known, Date.now());
+  const { lines, fresh } = unseenNotices(c.rt.paths.stateDir, id, known, Date.now(), reported);
   for (const l of lines) c.io.err(sanitizeRemote(l));
   return fresh;
 }

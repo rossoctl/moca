@@ -455,7 +455,10 @@ export async function cmdRm(
   o: { goneOk?: boolean; factory?: ExecFactory } = {},
 ): Promise<number> {
   await endLease(c, id, o.factory);
-  if (c.signal?.aborted) return SBX_EXIT.interrupted;
+  if (c.signal?.aborted) {
+    c.io.err(`sbx: interrupted (exit ${SBX_EXIT.interrupted}): nothing was deleted`);
+    return SBX_EXIT.interrupted;
+  }
   try {
     const r = await c.api.deleteSandbox(id);
     forgetNotices(c.rt.paths.stateDir, id);
@@ -471,6 +474,7 @@ export async function cmdRm(
     return SBX_EXIT.ok;
   } catch (err) {
     if (o.goneOk && err instanceof ApiError && err.code === 'sandbox_not_found') {
+      forgetNotices(c.rt.paths.stateDir, id);
       if (c.json) c.io.out(JSON.stringify({ id, state: 'terminated', reason: 'gone' }) + '\n');
       c.io.err(`${id} is already gone (the control plane no longer has it)`);
       return SBX_EXIT.ok;
@@ -480,17 +484,31 @@ export async function cmdRm(
 }
 
 /**
+ * How long `rm` waits on `sandbox_deleted`: the worker may block the op up to its grace limit
+ * (30 min), but it finishes the op once started, so `rm` stops waiting and deletes.
+ */
+export const RM_LEASE_WAIT_MS = 15_000;
+
+/**
  * `LeaseControl sandbox_deleted` for a lease sandbox, before its DELETE (spec §4.1): best-effort,
- * so any error (the record, the token, the call) is ignored and the DELETE goes ahead. A per-exec
+ * so any error (the record, the token, the call) is ignored and the DELETE goes ahead, as it does
+ * after RM_LEASE_WAIT_MS. Ctrl-C cancels the call (the caller then deletes nothing). A per-exec
  * sandbox has no lease, and no call is made.
  */
 async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
   try {
     if (modeRank((await c.api.getSandbox(id)).mode) === 0) return;
     const x = await openExec(c.api, id, factory);
+    const waited = new AbortController();
+    const settled = new AbortController();
+    void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
+      if (!settled.signal.aborted) waited.abort();
+    });
+    const signal = c.signal ? AbortSignal.any([c.signal, waited.signal]) : waited.signal;
     try {
-      await x.leaseControl('sandbox_deleted', undefined, c.signal ? { signal: c.signal } : {});
+      await x.leaseControl('sandbox_deleted', undefined, { signal });
     } finally {
+      settled.abort();
       x.close();
     }
   } catch {

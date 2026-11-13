@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import {
   authLockPath,
@@ -584,6 +584,95 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       ).toBe(0);
       expect(cp.calls.at(-1)).toMatchObject({ method: 'DELETE' });
       expect(io.errs.join('\n')).toMatch(/^deleted /);
+    }
+  });
+
+  it("rm bounds sandbox_deleted's wait at 15 s, then deletes; Ctrl-C during it deletes nothing", async () => {
+    const world = () => {
+      const s = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'lease' }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 200,
+          body: { id: SBX, state: 'terminated', reason: 'deleted' },
+        }),
+      });
+      const leaseCalls: string[] = [];
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        // The worker blocks sandbox_deleted (up to grace_limit): only an abort ends this call.
+        leaseControl: (op, _t, o) =>
+          new Promise((_res, rej) => {
+            leaseCalls.push(op);
+            o?.signal?.addEventListener('abort', () =>
+              rej(new LeaseControlError('cancelled', 'cancelled on client')),
+            );
+          }),
+        leaseKeepalive: async () => {},
+      });
+      return { ...s, cp, leaseCalls, execFactory };
+    };
+    // The bound passes (the sleep seam answers at once): the DELETE goes ahead.
+    const w = world();
+    const slept: number[] = [];
+    expect(
+      await sbxMain(['rm', '--force', SBX], w.env, w.io, {
+        home: w.home,
+        fetchImpl: w.cp.fetchImpl,
+        execFactory: w.execFactory,
+        sleep: async (ms) => void slept.push(ms),
+      }),
+    ).toBe(0);
+    expect(slept).toEqual([15_000]);
+    expect(w.leaseCalls).toEqual(['sandbox_deleted']);
+    expect(w.cp.calls.at(-1)).toMatchObject({ method: 'DELETE' });
+    // Ctrl-C while it waits: no DELETE, said so, exit 130.
+    const x = world();
+    const ac = new AbortController();
+    const p = sbxMain(['rm', '--force', SBX], x.env, x.io, {
+      home: x.home,
+      fetchImpl: x.cp.fetchImpl,
+      execFactory: x.execFactory,
+      signal: ac.signal,
+    });
+    await vi.waitFor(() => expect(x.leaseCalls).toHaveLength(1));
+    ac.abort();
+    expect(await p).toBe(130);
+    expect(x.cp.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(x.io.errs.join('\n')).toContain('nothing was deleted');
+  });
+
+  it('rm forgets the sandbox\'s seen notices, the "already gone" path too', async () => {
+    for (const gone of [false, true]) {
+      const s = setup();
+      const file = join(s.paths.stateDir, 'sbx', 'notices.json');
+      mkdirSync(join(s.paths.stateDir, 'sbx'), { recursive: true });
+      writeFileSync(file, JSON.stringify({ [SBX]: 1, 'sbx-other': 2 }));
+      const cp = fakeCp({
+        [`DELETE /v1/sandboxes/${SBX}`]: () =>
+          gone
+            ? { status: 404, body: { error: 'sandbox_not_found', message: 'no such sandbox' } }
+            : { status: 200, body: { id: SBX, state: 'terminated', reason: 'deleted' } },
+      });
+      // Bound here, from this control plane: its 404 is "already gone".
+      const r = mkdtempSync(join(tmpdir(), 'sbx-rm-'));
+      mkdirSync(join(r, '.sbx'));
+      writeFileSync(
+        join(r, '.sbx/sandbox.json'),
+        JSON.stringify({ id: SBX, controlPlaneUrl: URL_ }),
+      );
+      expect(
+        await sbxMain(['rm', '--force', '--keep-config', SBX], s.env, s.io, {
+          home: s.home,
+          fetchImpl: cp.fetchImpl,
+          cwd: r,
+        }),
+      ).toBe(0);
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ 'sbx-other': 2 });
     }
   });
 

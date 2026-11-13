@@ -1,5 +1,6 @@
 import {
   LeaseControlError,
+  type LeaseEvent,
   type LeaseStatusView,
   type SandboxModeName,
 } from '@moca/sandbox-client';
@@ -18,6 +19,12 @@ import { printNotices } from './notices.js';
  */
 
 const withSignal = (c: SbxCtx) => (c.signal ? { signal: c.signal } : {});
+
+/** Whether a lease event is an end for `reason`. */
+const isEnd =
+  (reason: string) =>
+  (ev: LeaseEvent): boolean =>
+    ev.state === 'end' && ev.reason === reason;
 
 /** A set_mode the worker did not get (spec §8.2): the mode is stored, and lands at the next command. */
 export const modeStoredText = (mode: SandboxModeName, epoch: number, code: string): string =>
@@ -52,11 +59,28 @@ export async function cmdMode(
       c.io.err(`sbx: ${UPGRADE_NEEDS_TTY}`);
       return SBX_EXIT.usage;
     }
-    const idle = o.idleTimeoutS ?? (cur.idleTimeoutS > 0 ? cur.idleTimeoutS : undefined);
-    ({ sandbox: s, setModeToken } = await c.api.setSandboxMode(id, {
-      mode,
-      ...(idle !== undefined ? { idleTimeoutS: idle } : {}),
-    }));
+    const carried = o.idleTimeoutS === undefined && cur.idleTimeoutS > 0;
+    const idle = o.idleTimeoutS ?? (carried ? cur.idleTimeoutS : undefined);
+    try {
+      ({ sandbox: s, setModeToken } = await c.api.setSandboxMode(id, {
+        mode,
+        ...(idle !== undefined ? { idleTimeoutS: idle } : {}),
+      }));
+    } catch (err) {
+      // A carried idle timeout an operator's lowered ceiling refuses must not refuse the mode
+      // change: once more without it, stored as 0, the worker default, and said (P4-R18).
+      if (!(
+        carried &&
+        err instanceof ApiError &&
+        err.status === 400 &&
+        err.code === 'invalid_request'
+      ))
+        throw err;
+      ({ sandbox: s, setModeToken } = await c.api.setSandboxMode(id, { mode }));
+      c.io.err(
+        `sbx: idle timeout reset to the worker default: the deployment's ceiling no longer allows ${cur.idleTimeoutS} s`,
+      );
+    }
   } catch (err) {
     return failed(c, err);
   }
@@ -75,11 +99,12 @@ export async function cmdMode(
       c.io.out(modeStoredText(s.mode, s.modeEpoch, r.code) + '\n');
       return SBX_EXIT.ok;
     }
-    const fresh = printNotices(c, id, [r.status.pending]);
-    c.io.out(`mode ${s.mode} (epoch ${s.modeEpoch})\n`);
     // A downgrade ends a live lease (spec §5): its end comes back as the status's pending event,
-    // said once (a later set_mode still carries it until a lease Exec does).
-    if (fresh.some((ev) => ev.state === 'end' && ev.reason === 'mode_change')) {
+    // said once (a later set_mode still carries it until a lease Exec does), by the stdout line
+    // alone: marked seen with no notice line (P4-R17).
+    const fresh = printNotices(c, id, [r.status.pending], isEnd('mode_change'));
+    c.io.out(`mode ${s.mode} (epoch ${s.modeEpoch})\n`);
+    if (fresh.some(isEnd('mode_change'))) {
       c.io.out('lease ended (mode_change)\n');
     }
     return SBX_EXIT.ok;
@@ -127,7 +152,8 @@ export async function cmdReset(c: SbxCtx, id: string, factory?: ExecFactory): Pr
       return SBX_EXIT.ok;
     }
     const after = await x.leaseControl('reset', undefined, withSignal(c));
-    printNotices(c, id, [before.pending, after.pending]);
+    // The stdout line reports the reset's end: marked seen with no notice line (P4-R17).
+    printNotices(c, id, [before.pending, after.pending], isEnd('reset'));
     c.io.out('lease ended (reset)\n');
     return SBX_EXIT.ok;
   } catch (err) {
