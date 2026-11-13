@@ -69,6 +69,7 @@ import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
 import type { ProvenanceStore } from './provenance.js';
 import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
+import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { MEMBER_HANDLERS } from './member-handlers.js';
@@ -226,6 +227,11 @@ export interface CpDeps {
   templates?: TemplateCatalog;
   /** The relay's presence records, which template readiness is derived from (§3.3). */
   presence?: PresenceReader;
+  /**
+   * The deployment's template policy (§8), stored with the catalog and recorded in `provenance`;
+   * absent without SH_PROVENANCE_DIR, where templates cannot be created through the API.
+   */
+  policy?: PolicyStore;
   /**
    * Enrollment and roles through the API, opened with `provenance`: absent without
    * SH_PROVENANCE_DIR, when roles and enrollment come from the settings alone, as before.

@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.5.0
+  version: 1.6.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -110,6 +110,8 @@ components:
             - quota_exceeded
             - unknown_template
             - template_not_found
+            - template_exists
+            - policy_refused
             - bootstrap_subject
             - self_revoke
             - admin_granted
@@ -147,6 +149,18 @@ components:
         reason:
           type: string
           description: 'sandbox_terminated only: deleted | expired'
+        rule:
+          type: string
+          description: |
+            policy_refused only: the gating rule the create failed (profile, M1, registry, M7.id,
+            M7.guest, M7.vcpus, M7.workspace, M7.home, M7.egress, M7.seed, M7.probe, M7.tools,
+            M7.description, M7.skip_git_identity_check, M7.guest_home_gitconfig, M7.spec_id,
+            M7.spec_image, M8, M9, envelope, gate.json, X1, X1.trusted, X1.image, X10, X10.record,
+            X11, X12, X14, X15; deploy/sbx/template-onboarding/governance/GATING-RULES.md)
+        quota:
+          type: string
+          enum: [templates, buildsQueued, owned]
+          description: 'quota_exceeded on a template create: which quota'
     Session:
       type: object
       required: [sessionId, owner, tenant, createdAt, state, turns]
@@ -402,6 +416,19 @@ components:
         provenance:
           type: [string, 'null']
           description: the digest of the provenance record that created it (with SH_PROVENANCE_DIR)
+        handle:
+          type: string
+          description: |
+            the `b-<26 hex>` handle the create answered, by which the build is followed until it is
+            built (then its buildId is its manifest hash); equal to buildId for an imported build
+        reason:
+          type: [object, 'null']
+          description: on a `failed` or `rejected` build, why; null otherwise
+          required: [message]
+          properties:
+            message: { type: string }
+            step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
+            rule: { type: string, description: the gating rule, on a rejection }
         spec:
           type: object
           description: on GET /v1/templates/{id} and the builds routes only
@@ -411,6 +438,134 @@ components:
             workspace_mb: { type: integer }
             seed: { type: string }
             tools: { type: array, items: { type: string } }
+    TemplateCreate:
+      type: object
+      required: [image, spec]
+      properties:
+        id: { type: string, description: 'the template id (lowercased); ignored on /{id}/builds' }
+        image:
+          type: string
+          description: >-
+            [host[:port]/]path@sha256:<64 hex>, in the distribution reference grammar (lowercase
+            path components, no tag beside the digest), from an allowed registry (hosts compare
+            case-insensitively)
+        spec:
+          type: object
+          description: |
+            a template spec (`moca-sbx-template-spec/1`; samples in
+            deploy/sbx/template-onboarding/examples/): guest_ram_mb (or its alias guest_mb, never
+            both: M7.guest; stored as guest_ram_mb), vcpus,
+            workspace_mb?, egress, seed, probe, tools, description, and optionally guest_home,
+            skip_git_identity_check, guest_home_gitconfig, probe_status, source_record_digest. An
+            `id` or `image` in it must equal the create's own (M7.spec_id, M7.spec_image)
+        profile: { type: string, description: a policy profile; the policy's default when absent }
+        gateRecord:
+          type: string
+          description: the image's gate record file, byte for byte (its sha256 is what the policy trusts)
+        visibility:
+          type: string
+          enum: [private, deployment]
+          description: a new template's visibility; default `deployment`
+    TemplateQueued:
+      type: object
+      required: [templateId, buildId, build, status]
+      properties:
+        templateId: { type: string }
+        buildId:
+          type: [string, 'null']
+          description: null until registered; then the manifest hash (a reused registered build)
+        build:
+          type: string
+          description: the build to follow (its provisional handle b-<26 hex>, or its buildId once registered)
+        status:
+          type: string
+          enum: [queued, building, probing, built, registered]
+          description: "`queued` for a new build; a reused build's own status"
+        reused:
+          type: boolean
+          description: |
+            true when the create matched a build of the caller's template with the same inputs
+            (image, spec, profile, gate record's sha256) that is registered or on its way there
+            (§3.2): that build is answered, and no second one is queued. Absent for a new build
+    LimitUse:
+      type: object
+      required: [limit, used]
+      properties:
+        limit: { type: integer }
+        used: { type: integer }
+    Policy:
+      type: object
+      description: The template policy (template lifecycle spec §8); schema moca-template-policy/1
+      required: [schema, profiles, defaultProfile, allowedRegistries, trustedGateRecords, quota]
+      properties:
+        schema: { type: string, enum: [moca-template-policy/1] }
+        profiles:
+          type: object
+          description: profile name -> its rules; `base` must exist
+          additionalProperties:
+            type: object
+            required: [requires, envelope]
+            properties:
+              requires:
+                type: array
+                items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
+                description: gating rule ids beyond the base rules; an unknown id is refused
+              envelope:
+                type: object
+                required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
+                properties:
+                  maxGuestMb: { type: integer }
+                  maxVcpus: { type: integer }
+                  maxWorkspaceMb: { type: integer }
+                  exact:
+                    type: object
+                    required: [guestMb, vcpus]
+                    properties:
+                      guestMb: { type: integer, minimum: 1 }
+                      vcpus: { type: integer, minimum: 1 }
+        defaultProfile: { type: string }
+        allowedRegistries:
+          type: array
+          items: { type: string }
+          description: |
+            registry hosts. `<default>` is a reference with no host, which the build host pulls from
+            its own configured registry; Docker Hub is `docker.io` (`index.docker.io` reads as it)
+        trustedGateRecords:
+          type: array
+          items: { type: string }
+          description: sha256 digests of the gate records the benchmark profile trusts
+        quota: { $ref: '#/components/schemas/Quota' }
+    Quota:
+      type: object
+      required: [templates, buildsQueued, active]
+      properties:
+        templates:
+          type: integer
+          minimum: 0
+          description: >-
+            templates a subject owns with a build registered or on its way there (a template whose
+            builds all failed, were cancelled or retired is not counted, and a new build of it is
+            checked against this quota like a new id)
+        buildsQueued:
+          type: integer
+          minimum: 0
+          description: >-
+            builds of a subject's templates not yet built (queued, building or probing), charged to
+            the template's owner
+        active: { type: integer, minimum: 0 }
+        owned:
+          type: integer
+          minimum: 0
+          description: >-
+            template ids a subject owns in any status (a failed or cancelled-only template too),
+            checked for a new id only; 200 when the policy does not set it
+    PolicyView:
+      type: object
+      required: [policy, digest, record]
+      properties:
+        policy: { $ref: '#/components/schemas/Policy' }
+        digest: { type: string, description: the sha256 of the policy itself }
+        record: { type: string, description: the provenance policy record's digest }
     Subject:
       type: object
       required: [subject, enrolled, source, storeEnrolled, roles]
@@ -1605,6 +1760,69 @@ paths:
                         id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+    post:
+      operationId: createTemplate
+      summary: Create a template (or a new build of your own), self-serve; policy decides
+      description: |
+        Template lifecycle spec §4, §8.1. Any enrolled client (sandbox profile) or logged-in
+        subject (harness profile). Needs SH_PROVENANCE_DIR (else `400 invalid_request`). The create
+        is checked against the deployment's policy (GET /v1/policy) before anything is queued: a
+        refusal is `422 policy_refused` with `rule`, the gating rule's id
+        (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
+        template's stream when the template exists and is the caller's (an admin's, adding a
+        build); a refusal on a new id writes an audit-log line instead, and one on another subject's
+        id is only answered. Ids are unique per deployment: another subject's id is
+        `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
+        `429 quota_exceeded` with `quota` (`templates`, `buildsQueued` or `owned`). An admitted create
+        writes `create`, `gate` (with a gate record) and `check` records and queues the build for
+        a build host; follow it at `build`. A create whose inputs match a build of the caller's
+        template that is registered or on its way (§3.2) queues nothing and answers that build with
+        `reused: true`: `200` when it is registered, `202` while it is not. A failed or rejected
+        build is never reused.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateCreate' }
+      responses:
+        '200':
+          description: a registered build of the same inputs, reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '202':
+          description: queued (or a reused build not yet registered)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '400':
+          description: '`invalid_request` (also: this deployment stores no templates)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: "`template_not_found`: another subject's private template"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: "`template_exists`: another subject's template"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`policy_refused`, with `rule`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`, with `quota`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}:
     get:
       operationId: getTemplate
@@ -1655,13 +1873,67 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+    post:
+      operationId: createTemplateBuild
+      summary: A new build of your own template (a new image or spec); as POST /v1/templates
+      description: |
+        The template must exist (`404 template_not_found`) and be the caller's
+        (`409 template_exists`; an admin may add a build to any template); otherwise exactly
+        POST /v1/templates, the body's `id` ignored, build reuse included.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateCreate' }
+      responses:
+        '200':
+          description: a registered build of the same inputs, reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '202':
+          description: queued (or a reused build not yet registered)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateQueued' }
+        '400':
+          description: '`invalid_request` (also: this deployment stores no templates)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: "`template_not_found`: no such template, or another subject's private one"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: "`template_exists`: another subject's template"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`policy_refused`, with `rule`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`, with `quota`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds/{build}:
     get:
       operationId: getTemplateBuild
-      summary: One build of a template, with its spec
+      summary: One build of a template, with its spec, by build id or by the create's handle
       description: |
         Both profiles (§4.1). The build id is `sha256:<manifest hash>`, or `imported:<12 hex>` for
-        a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it.
+        a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it. A build
+        created through the API is also found by the `b-<26 hex>` handle its create answered.
         `404 template_not_found` for an unknown template or build.
       security: [{ sessionToken: [] }]
       parameters:
@@ -1675,6 +1947,48 @@ paths:
               schema: { $ref: '#/components/schemas/TemplateBuild' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}/cancel:
+    post:
+      operationId: cancelTemplateBuild
+      summary: Withdraw a build not yet built (the owner)
+      description: |
+        Template lifecycle spec §5.1. The template's owner, or an admin, cancels a `queued`,
+        `building` or `probing` build: it becomes `failed` with `reason.step` `cancelled`, and a
+        `build` record (outcome `cancelled`) names who did it. A failed build takes no further
+        report from a build host, so it never registers. Another subject: `403 forbidden`; an
+        unknown build: `404 template_not_found`; any other status: `400 invalid_request`.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, build, status]
+                properties:
+                  templateId: { type: string }
+                  build: { type: string, description: the build's handle }
+                  status: { type: string, enum: [failed] }
+        '400':
+          description: '`invalid_request`: the build is not queued, building or probing, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: not the template's owner"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: '`template_not_found`'
           content:
@@ -1716,6 +2030,91 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/policy:
+    get:
+      operationId: getPolicy
+      summary: The deployment's template policy (profiles, envelopes, registries, trusted gate records, quotas)
+      description: |
+        Template lifecycle spec §8. Both profiles; any enrolled client. Its `record` is the
+        provenance `policy` record every `check` cites; `digest` is the sha256 of the policy
+        itself. Until an admin sets one, the default policy applies, recorded on first use. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: the policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyView' }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+    put:
+      operationId: putPolicy
+      summary: Set the template policy (an admin); recorded
+      description: |
+        The policy is stored as sent, after validation (each problem named), and a new `policy`
+        record names the admin who set it. Enforced on the next create.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Policy' }
+      responses:
+        '200':
+          description: the policy as set
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyView' }
+        '400':
+          description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden` (not an admin) or `not_enrolled`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/quota:
+    get:
+      operationId: getQuota
+      summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
+      description: |
+        The policy's quotas and the caller's use: templates owned (with a build registered or on its
+        way there), builds queued, building or probing, templates held active (0 until activation
+        exists), and template ids owned in any status (`owned`). On the sandbox profile, `sandboxes` is
+        SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's
+        live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: limits and use
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subject, templates, buildsQueued, active, owned]
+                properties:
+                  subject: { type: string }
+                  templates: { $ref: '#/components/schemas/LimitUse' }
+                  buildsQueued: { $ref: '#/components/schemas/LimitUse' }
+                  active: { $ref: '#/components/schemas/LimitUse' }
+                  owned: { $ref: '#/components/schemas/LimitUse' }
+                  sandboxes: { $ref: '#/components/schemas/LimitUse' }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
   /v1/subjects:
     get:
       operationId: listSubjects
@@ -2415,13 +2814,18 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in, from the SESSION (the turn record does not copy
-                      it); absent whenever the deployment declares no tiers
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |
-                      the session's model and the limits recorded when it was chosen; absent when the
-                      session names none, and the worker then uses its deployment default
+                      the model the TURN RECORD pinned at submission, with the limits recorded when
+                      it was chosen; absent when the submission named none, and the worker then uses
+                      its deployment default. Pinned, so switching the session's model while this
+                      turn is still queued does not move it onto the new one.
                     required: [id]
                     properties:
                       id: { type: string }

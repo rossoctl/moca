@@ -202,10 +202,14 @@ describe('§9.3 test 3 — contract drift', () => {
         r.operationId === 'completeDeviceAuth' ||
         r.operationId === 'refreshAuth' ||
         (r.profiles.includes('sandbox') && r.profiles.length === 1 && r.auth === 'api') ||
-        // The template routes are on both profiles; on the sandbox one they check enrollment.
-        (r.path.startsWith('/v1/templates') && r.auth === 'api'),
+        // The template, policy and quota routes are on both profiles; on the sandbox one they
+        // check enrollment.
+        ((r.path.startsWith('/v1/templates') ||
+          r.path === '/v1/policy' ||
+          r.path === '/v1/quota') &&
+          r.auth === 'api'),
     ).map((r) => `${r.method} ${r.path}`);
-    expect(enrollable.length).toBe(12);
+    expect(enrollable.length).toBe(18);
     const missing = operations()
       .filter(({ path, method }) => enrollable.includes(`${method} ${path}`))
       .filter(({ op }) => !(op as { responses?: Record<string, unknown> }).responses?.['403'])

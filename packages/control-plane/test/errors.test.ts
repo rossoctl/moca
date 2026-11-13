@@ -34,6 +34,8 @@ const EXPECTED: Record<CpErrorCode, number> = {
   quota_exceeded: 429,
   unknown_template: 400,
   template_not_found: 404,
+  template_exists: 409,
+  policy_refused: 422,
   bootstrap_subject: 409,
   self_revoke: 409,
   admin_granted: 409,

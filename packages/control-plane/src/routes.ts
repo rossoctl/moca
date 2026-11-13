@@ -429,6 +429,59 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'listTemplateTags',
   },
+  // Template lifecycle spec §4, §5.1, §8.1: self-serve create, a new build, cancel, the policy and
+  // the caller's quota. On BOTH profiles (§4.1), as the reads.
+  {
+    method: 'POST',
+    path: '/v1/templates',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    maxBodyBytes: 1024 * 1024,
+    operationId: 'createTemplate',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    maxBodyBytes: 1024 * 1024,
+    operationId: 'createTemplateBuild',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds/{build}/cancel',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'cancelTemplateBuild',
+  },
+  {
+    method: 'GET',
+    path: '/v1/policy',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getPolicy',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/policy',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'putPolicy',
+  },
+  {
+    method: 'GET',
+    path: '/v1/quota',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getQuota',
+  },
   // Enrollment and roles through the API (member-handlers.ts): admin only, on both profiles as the
   // template routes; with no members store (no SH_PROVENANCE_DIR) they answer 400.
   {

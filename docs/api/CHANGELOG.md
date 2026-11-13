@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.5.0
+## 1.6.0
 
 Enrollment and the admin role through the API
 ([#739](https://github.com/rossoctl/moca/issues/739)), per the
@@ -31,6 +31,60 @@ additive; without `SH_PROVENANCE_DIR` nothing changes.
   and `role {subject, role, state: granted | revoked | expired, until, before}`, naming the acting
   admin (`control-plane` for an `expired`, written once). `verify-provenance.py` and `verifyExport`
   accept the two kinds on that stream only.
+
+## 1.5.0
+
+Self-serve template create, gated by policy ([#737](https://github.com/rossoctl/moca/issues/737)),
+per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§4 and §8. Every change is additive; all new routes mount on both route profiles and need
+`SH_PROVENANCE_DIR` (else `400 invalid_request`).
+
+- New POST /v1/templates `{id, image, spec, gateRecord?, profile?, visibility?}`: any enrolled
+  client creates a template from an image pinned by digest. The deployment's policy checks it before
+  anything is queued; an admitted create answers `202 {templateId, buildId: null, build, status:
+queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes `create`, `gate`
+  (with a gate record) and `check` provenance records. A create with the same image, spec, profile
+  and gate record sha256 as a build of the caller's own template that is registered or on its way
+  answers that build with `reused: true` (`200` when registered, `202` before); a failed or rejected
+  build is never reused.
+- New POST /v1/templates/{id}/builds (the owner, or an admin: a new image or spec, the same body and
+  answers) and POST /v1/templates/{id}/builds/{build}/cancel (the owner, or an admin: a queued,
+  building or probing build becomes `failed` with `reason.step` `cancelled`, and a `build` record).
+- New GET /v1/policy (any enrolled client) and PUT /v1/policy (an admin; each change a `policy`
+  record naming who), with the `Policy` (`moca-template-policy/1`: profiles with their rules and
+  size envelope, allowed registries, trusted gate records by sha256, quotas) and `PolicyView`
+  schemas. The default policy has a `base` and a `benchmark` profile.
+- New GET /v1/quota: the caller's limits and use (`templates`, owned with a build registered or on
+  its way there, a new build of one that holds no slot checked like a new id; `buildsQueued`,
+  queued, building or probing; `active`; `owned`, template ids owned in any status, a failed or
+  cancelled-only one included, 200 when the policy does not set it), and on the sandbox profile the
+  live-sandbox cap (`sandboxes`). `owned` counts retired ids too, and a retired id is never served
+  again, so it is in effect a lifetime cap per subject: a user who retires as they go reaches it in
+  time, and only an admin raises it.
+- New error codes `policy_refused` (422, with `rule`, the gating rule's id from
+  `deploy/sbx/template-onboarding/governance/GATING-RULES.md`) and `template_exists` (409: ids are
+  unique per deployment, the first creator owns one). `quota_exceeded` on a create names the quota
+  (`quota`: `templates`, `buildsQueued` or `owned`). The `Error` schema adds `rule` and `quota`.
+- `TemplateBuild` adds `handle` (the create's handle; equal to `buildId` for an imported build) and
+  `reason` (why a build failed or was rejected), and GET /v1/templates/{id}/builds/{build} also
+  finds a build by its handle.
+- A refused create is recorded as a `check` provenance record only on an existing template's stream
+  the caller may write; a refusal on an id no template holds writes one audit line instead
+  (`template_create_refused`, with the subject, `templateId` and the failed `rules`).
+
+Upgrade note (the policy fails closed):
+
+- X12 applies under every profile, `base` included: a `skip_git_identity_check: true` that no gate
+  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client sends a gate record
+  showing commits refused (X5: `agent_can_commit: "no"`, `git_identity: "none"`), or drops the skip:
+  the build host's git identity check then needs git with an identity in the image, or no git at all
+  once the build-snapshot change in [#757](https://github.com/rossoctl/moca/pull/757) is in.
+- A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
+  check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
+  numbers, is refused when it is read: every create and every read of the policy or the quota fails
+  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing. So read
+  `GET /v1/policy` and fix it **before** upgrading: afterwards only `PUT /v1/policy` succeeds (the
+  file itself stays readable on the volume).
 
 ## 1.4.0
 

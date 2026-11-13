@@ -22,14 +22,15 @@ import (
 //
 // The chroot base comes from shortdir rather than t.TempDir() on purpose: the jail's
 // API socket path is a unix socket, and sun_path caps out at 104 bytes on darwin (108
-// on linux). t.TempDir() on darwin is already ~70 bytes before the 45-byte
+// on linux). t.TempDir() on darwin is already ~70 bytes before the
 // /firecracker/<id>/root/run/firecracker.socket suffix is appended, which would make
-// this test fail on path length rather than on the property under test. That suffix
-// length is passed to shortdir.New, so a TMPDIR too long to hold it costs a fallback to
-// /tmp rather than an EINVAL from bind.
+// this test fail on path length rather than on the property under test. The suffix
+// passed to shortdir.New is the worst case, with the longest id nextIDLocked can mint
+// (vm- plus 20 digits), because that is what NewFirecrackerLauncher's validate checks:
+// a TMPDIR too long to hold it costs a fallback to /tmp rather than a refused launcher.
 func collisionLauncher(t *testing.T) (Launcher, string, string) {
 	t.Helper()
-	base := shortdir.New(t, "fcguard", len("/firecracker/vm-6/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fcguard", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 
 	marker := filepath.Join(base, "jailer-was-spawned")
 	jailer := filepath.Join(base, "jailer")
@@ -165,7 +166,7 @@ func TestFirecrackerProceedsPastTheCollisionGuardWhenTheJailIsFree(t *testing.T)
 // its 5 s timeout. opts.cgroupRoot points the pool at a temp tree because Cgroup2Root names the
 // host's real cgroupfs.
 func TestRestoreCleanupReturnsThePooledCgroupOnAFailedRestore(t *testing.T) {
-	base := shortdir.New(t, "fccg", len("/firecracker/vm-42/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fccg", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 
 	jailer := filepath.Join(base, "jailer")
 	if err := os.WriteFile(jailer, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
