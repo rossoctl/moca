@@ -53,8 +53,25 @@ describe('mocactl sbx egress', () => {
       /^files\.example\.com +1 {2}up 10 B, down 20 B {2}\(destination_denied 1\)\n/,
     );
     expect(out).toContain('pypi.example.com');
-    expect(out).toContain(`2 events; complete; ${SHA}\n`);
+    expect(out).toContain(`2 events; complete; open (not sealed yet); ${SHA}\n`);
     expect(cp.calls.map((c) => c.path)).toEqual([`${PATH}?limit=1000`]);
+  });
+
+  it('says sealed once the log is final, and nothing from a server that does not say', async () => {
+    const { home, env, io } = setup();
+    let sealed: boolean | undefined = true;
+    const cp = fakeCp({
+      [`GET ${PATH}`]: () => ({
+        status: 200,
+        body: { events: [], next: null, summary: { ...summary(), sealed } },
+      }),
+    });
+    expect(await sbxMain(['egress', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(io.outs.join('')).toContain(`2 events; complete; sealed; ${SHA}\n`);
+    io.outs.length = 0;
+    sealed = undefined;
+    expect(await sbxMain(['egress', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(io.outs.join('')).toContain(`2 events; complete; ${SHA}\n`);
   });
 
   it('says INCOMPLETE with the drop count', async () => {
@@ -66,7 +83,7 @@ describe('mocactl sbx egress', () => {
       }),
     });
     expect(await sbxMain(['egress', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    expect(io.outs.join('')).toContain('INCOMPLETE: 4 dropped');
+    expect(io.outs.join('')).toContain('INCOMPLETE: 4 dropped; open (not sealed yet); ');
   });
 
   it('--json reads every page, then prints the events and the summary', async () => {

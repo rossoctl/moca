@@ -337,7 +337,8 @@ export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {})
 
 /**
  * `sbx egress`: a sandbox's egress, as its KVM host's proxy logged it. Text: the
- * summary per host, then whether the log is complete and its digest. `--json`: every event and the
+ * summary per host, then whether the log is complete, whether it is sealed (final: the control
+ * plane takes no more events, 600 s after the sandbox ended) and its digest. `--json`: every event and the
  * summary, read page by page. `--ndjson`: the log exactly as served, whose sha256 the summary and the
  * sandbox's end record name (verify-provenance.py --egress checks a saved copy).
  */
@@ -388,6 +389,7 @@ export async function cmdEgress(
     c.io.out(
       `${num(summary.total)} events; ` +
         (summary.complete ? 'complete' : `INCOMPLETE: ${num(summary.dropped)} dropped`) +
+        sealedText(summary.sealed) +
         `; ${sanitizeRemote(String(summary.sha256))}\n`,
     );
     return SBX_EXIT.ok;

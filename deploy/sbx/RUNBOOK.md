@@ -442,9 +442,14 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   record (`sandbox`, `state: terminated`) names `egress: {events, sha256, dropped, droppedBy, complete}`; if events
   arrive in the 600 s after the end, a later `sandbox` record with `state: egress` names the final
   log. The grader decides whether an incomplete log still counts.
-- **Check a saved copy offline:** `mocactl sbx egress ID --ndjson > log.ndjson` after the sandbox
-  ends, then `verify-provenance.py EXPORT.json --egress ID=log.ndjson` against a provenance export
-  (`mocactl sbx egress ID --verify` checks the log served against its summary).
+- **Check a saved copy offline:** wait until the log is sealed: `sealed` in `mocactl sbx egress ID`
+  (`summary.sealed: true` with `--json`), 600 s after the sandbox ends. Until then the control plane
+  still takes the sandbox's last events, and if the log changes, the janitor's seal writes a later
+  `state: egress` record that a copy saved earlier no longer matches. Then save it with
+  `mocactl sbx egress ID --ndjson > log.ndjson`, take the provenance export, and run
+  `verify-provenance.py EXPORT.json --egress ID=log.ndjson`. (`mocactl sbx egress ID --verify` checks
+  the log served against the control plane's summary of it, not against the end record; on an open
+  log it says when events arrived while it read.)
 - **Deploy the control plane first:** an older one answers 404 on the egress route, and the agent
   keeps its batch and retries.
 - **To turn it off** on a host without disabling egress: there is no switch but the unit's state, by
