@@ -737,6 +737,10 @@ for a refusal at the worker's own cap.
   grace limit, and the relay times them out at 31 minutes.
 - **The static client** (`remote-worker/cmd/sbx`) exits 125 on `stale_mode:` and
   `lease_unsupported:`, with the wire string, and never retries them.
+- **The TS exec client** (`@moca/sandbox-client`, which `mocactl` and its MCP server use) retries a
+  `stale_mode:` refusal once, under a forced fresh token and a new `req_id`, as it retries a token
+  refusal: nothing ran, and the fresh token carries the new epoch. A second `stale_mode:` is
+  surfaced. `lease_unsupported:` is never retried.
 
 ### 8.4 Worker
 

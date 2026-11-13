@@ -857,15 +857,58 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
   });
 
   it('classifies stale_mode: and lease_unsupported: as refused before the start', async () => {
-    for (const m of ['stale_mode: x', 'lease_unsupported: this worker has no lease mode']) {
+    // stale_mode is retried once under a forced fresh token (P4-R21); lease_unsupported is not.
+    for (const [m, attempts] of [
+      ['stale_mode: x', 2],
+      ['lease_unsupported: this worker has no lease mode', 1],
+    ] as const) {
       const r = await fakeRelay(execError(m));
       await expect(conn(r.addr).c.exec('x')).rejects.toMatchObject({
         kind: 'machinery',
         mayHaveRun: false,
         message: `sandbox failure: ${m}`,
       });
-      expect(r.seen).toHaveLength(1);
+      expect(r.seen).toHaveLength(attempts);
     }
+  });
+
+  it('retries a stale_mode: refusal once under a forced fresh token, a new req_id (P4-R21)', async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1) return ok(call, n);
+      // The worker sends a pending lease event before its refusal, too.
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: workspace_key sbx-aaaa Exec mode_epoch 3 is below the stored 4')(
+        call,
+        n,
+      );
+    });
+    const { c, asks } = conn(r.addr);
+    const res = await c.exec('cat f', { timeoutS: 60 });
+    expect(res).toMatchObject({ exitCode: 3, stdout: Buffer.from('out'), lease: [end] });
+    expect(asks).toEqual([
+      { force: false, minValidS: 60 },
+      { force: true, minValidS: 120 },
+    ]);
+    expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+    expect(r.seen.map((s) => s.req.exec!.command)).toEqual(['cat f', 'cat f']);
+    // A new id: the worker fingerprints the epoch, so the old id would read as a collision.
+    expect(r.seen[1]!.req.exec!.reqId).not.toBe(r.seen[0]!.req.exec!.reqId);
+    // A second stale_mode is surfaced, carrying the first refusal's lease events too.
+    const twice = await fakeRelay((call, n) => {
+      call.write({ lease: n === 1 ? end : start } as ExecEvent);
+      execError('stale_mode: again')(call, n);
+    });
+    const e = await conn(twice.addr)
+      .c.exec('x')
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect(e).toMatchObject({
+      kind: 'machinery',
+      mayHaveRun: false,
+      message: 'sandbox failure: stale_mode: again',
+      lease: [end, start],
+    });
+    expect(twice.seen).toHaveLength(2);
   });
 
   it('sets Exec.keepalive from the keepalive option, false by default', async () => {

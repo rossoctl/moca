@@ -20,10 +20,13 @@ import { LeaseControlError, leaseStatusView, type LeaseStatusView } from './leas
  *
  * The one retry rule: a token refusal (UNAUTHENTICATED) is retried once, with a forced fresh token,
  * ONLY if no event arrived. A command that started is never run twice: any failure after the first
- * event -- a dropped connection included -- is surfaced as an error. The lease calls follow the same
- * rule (ruling P4-R7): `leaseControl`, every op, and `leaseKeepalive` retry a token refusal once
- * with a forced fresh token, and a second refusal is a LeaseControlError `unauthenticated`. The relay
- * refuses the bearer before routing, so `set_mode` resends the same set-mode token, never used yet.
+ * event -- a dropped connection included -- is surfaced as an error. The worker's `stale_mode:`
+ * refusal (the token predates a mode change) is retried the same way, once, under a new req_id
+ * (ruling P4-R21): the worker refuses it before the start, so nothing ran. The lease calls follow
+ * the token rule (ruling P4-R7): `leaseControl`, every op, and `leaseKeepalive` retry a token
+ * refusal once with a forced fresh token, and a second refusal is a LeaseControlError
+ * `unauthenticated`. The relay refuses the bearer before routing, so `set_mode` resends the same
+ * set-mode token, never used yet.
  */
 export interface ExecResult {
   stdout: Buffer;
@@ -215,7 +218,17 @@ export function newReqId(): number {
   return Number(randomBytes(8).readBigUInt64BE() >> 11n);
 }
 
+/** The worker's refusal of an Exec whose token's mode epoch is below the stored one (spec §8.2). */
+const STALE_MODE = /^stale_mode:/;
+
 class NotStarted extends Error {}
+
+/** A `stale_mode:` refusal: nothing ran. `surfaced` is the error a second one is reported as. */
+class StaleMode extends Error {
+  constructor(readonly surfaced: ExecMachineryError) {
+    super(surfaced.message);
+  }
+}
 
 /** Where the trusted roots come from: `node:tls`, or a fake in tests. */
 export interface RootSource {
@@ -266,23 +279,32 @@ export class SandboxExecConn {
     }
     if (opts.signal?.aborted) throw abortReason(opts.signal);
     const want = requested === undefined ? undefined : Math.ceil(requested);
-    // Unique within the sandbox, and reused for the one retry: the relay namespaces it per sandbox.
-    const reqId = newReqId();
+    // Unique within the sandbox: the relay namespaces it per sandbox.
+    let reqId = newReqId();
     const attempt = async (force: boolean) => {
       const { grant, timeoutS, capped } = await this.prepare(want, force);
       const r = await this.once(command, opts, reqId, timeoutS, grant.token);
       return capped ? { ...r, capped: true } : r;
     };
+    /** The lease events of a stale_mode refusal, which ride before the retry's own. */
+    let carried: LeaseEvent[] = [];
     try {
       return await attempt(false);
     } catch (err) {
-      if (!(err instanceof NotStarted)) throw err;
+      if (err instanceof StaleMode) {
+        // The token predates a mode change (P4-R21): the worker refused before the start. The
+        // retry's token carries the new epoch, which the worker's req_id cache fingerprints, so
+        // the same id would read there as a collision: it is a different Exec, under a new id.
+        carried = err.surfaced.lease;
+        reqId = newReqId();
+      } else if (!(err instanceof NotStarted)) throw err;
     }
-    // The token was refused before anything ran (the relay refuses before routing): refresh once
-    // and retry under the same req_id. The fresh token is fitted by the same freshness rules, as it
-    // may be shorter than the first (one minted near the sandbox's expiry).
+    // The token was refused before anything ran (the relay refuses before routing, the worker's
+    // stale_mode before the start): refresh once and retry. The fresh token is fitted by the same
+    // freshness rules, as it may be shorter than the first (one minted near the sandbox's expiry).
     try {
-      return await attempt(true);
+      const r = await attempt(true);
+      return carried.length > 0 ? { ...r, lease: [...carried, ...r.lease] } : r;
     } catch (err) {
       if (err instanceof NotStarted) {
         throw new ExecRefusedError(
@@ -290,7 +312,9 @@ export class SandboxExecConn {
           status.UNAUTHENTICATED,
         );
       }
-      throw err;
+      const e = err instanceof StaleMode ? err.surfaced : err;
+      if (e instanceof ExecMachineryError) e.lease = [...carried, ...e.lease];
+      throw e;
     }
   };
 
@@ -526,6 +550,7 @@ export class SandboxExecConn {
       /** Rejects with `e`, carrying the lease events that arrived before the failure. */
       const fail = (e: Error) => {
         if (e instanceof ExecMachineryError) e.lease = lease;
+        else if (e instanceof StaleMode) e.surfaced.lease = lease;
         reject(e);
       };
       const onAbort = () => {
@@ -563,6 +588,11 @@ export class SandboxExecConn {
               'machinery',
               output || (inStream && !NOT_STARTED.test(message)),
             );
+      /** The worker's in-stream ExecError: a stale_mode refusal before any output is retried. */
+      const inStreamFailure = (message: string, code?: number): Error => {
+        const e = workerFailure(message, code, true);
+        return !output && STALE_MODE.test(message) ? new StaleMode(e) : e;
+      };
 
       call.on('data', (ev: ExecEvent) => {
         started = true;
@@ -585,7 +615,7 @@ export class SandboxExecConn {
         const details = e.details || e.message;
         const outcome = outcomeOf(execError ?? details);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return fail(workerFailure(execError, e.code, true));
+        if (execError !== undefined) return fail(inStreamFailure(execError, e.code));
         if (!started && e.code === status.UNAUTHENTICATED) return fail(new NotStarted(details));
         if (!started && e.code === status.PERMISSION_DENIED) {
           return fail(new ExecRefusedError(details, e.code));
@@ -634,7 +664,7 @@ export class SandboxExecConn {
         if (end) return resolve(result(end));
         const outcome = outcomeOf(execError);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return fail(workerFailure(execError, undefined, true));
+        if (execError !== undefined) return fail(inStreamFailure(execError));
         fail(
           new ExecMachineryError(
             'sandbox failure: the exec stream ended without an End event',

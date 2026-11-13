@@ -13,6 +13,7 @@ import {
   MAX_STDIN_BYTES,
   RESET_ENDED_TEXT,
   SANDBOX_BUSY_TEXT,
+  SandboxExecConn,
   TEMPLATE_BUSY_TEXT,
   TOKEN_EXPIRED_TEXT,
   writeFileCommand,
@@ -28,6 +29,7 @@ import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { jwtMode, sandboxTokenFn, type ExecFactory } from '../src/sbx/exec.js';
 import { busyRetries } from '../src/sbx/run.js';
 import { readRecords, recordCall } from '../src/sbx/recorder.js';
+import { fakeExecRelay } from '../../sandbox-client/test/helpers/fake-relay.js';
 import {
   jwt,
   LOGIN,
@@ -1153,6 +1155,78 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     expect(m.ops).toEqual(['status', 'reset']);
     await m.client.close();
     await m.served;
+  });
+
+  it('after a mode change, the next file tool call succeeds: the exec client re-mints on stale_mode (P4-R21)', async () => {
+    // Review Focus 5, the Exec half: the owner downgrades while the MCP session runs. The held
+    // token (900 s) still covers a file tool's 120 s ask, so the next `read` goes out under the old
+    // epoch; the worker refuses it stale_mode, and the real exec client re-mints and retries.
+    const { home, env, io } = setup();
+    const epochJwt = (mode: string, mode_epoch: number) => {
+      const b = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+      const claims = { sbx: SBX, iat: TOKEN_IAT, exp: TOKEN.expiresAt, mode, mode_epoch };
+      return `${b({ alg: 'EdDSA' })}.${b(claims)}.sig`;
+    };
+    let current = { mode: 'lease', epoch: 1 };
+    let mints = 0;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => (
+        mints++,
+        { status: 200, body: { ...TOKEN, token: epochJwt(current.mode, current.epoch) } }
+      ),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'lease' }) }),
+    });
+    type Claims = { mode_epoch: number };
+    const epochOf = (bearer: string) =>
+      (JSON.parse(Buffer.from(bearer.split('.')[1]!, 'base64url').toString()) as Claims).mode_epoch;
+    const relay = await fakeExecRelay((_req, bearer) =>
+      epochOf(bearer) < current.epoch
+        ? {
+            refuse: `stale_mode: workspace_key ${SBX} Exec mode_epoch ${epochOf(bearer)} is below the stored ${current.epoch}`,
+          }
+        : { stdout: `file at epoch ${current.epoch}\n` },
+    );
+    try {
+      // The real connection, dialed at the fake relay in plain text.
+      const factory: ExecFactory = (o) => {
+        const c = new SandboxExecConn({ ...o, addr: relay.addr, tls: false, caPem: undefined });
+        return {
+          exec: c.exec,
+          close: c.close,
+          leaseControl: c.leaseControl,
+          leaseKeepalive: c.leaseKeepalive,
+        };
+      };
+      const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+      const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
+        home,
+        fetchImpl: cp.fetchImpl,
+        execFactory: factory,
+        mcpTransport: serverSide,
+      });
+      const client = new Client({ name: 't', version: '0' });
+      await client.connect(clientSide);
+      const read = () =>
+        client.callTool({ name: 'read', arguments: { path: 'f' } }) as Promise<{
+          content: { text: string }[];
+          isError?: boolean;
+        }>;
+      const before = await read();
+      expect(before.isError).toBeFalsy();
+      expect(before.content[0]!.text).toBe('file at epoch 1\n');
+      current = { mode: 'per-exec', epoch: 2 }; // `mocactl sbx mode per-exec` in another terminal
+      const after = await read();
+      expect(after.isError).toBeFalsy();
+      expect(after.content[0]!.text).toBe('file at epoch 2\n');
+      expect(mints).toBe(2); // the first token, then the retry's forced mint
+      expect(relay.seen.map((s) => epochOf(s.bearer))).toEqual([1, 1, 2]);
+      // Exec.keepalive follows the re-minted per-exec token.
+      expect(relay.seen.map((s) => s.req.exec!.keepalive)).toEqual([true, true, false]);
+      await client.close();
+      expect(await served).toBe(0);
+    } finally {
+      relay.close();
+    }
   });
 
   it('jwtMode reads the mode claim; anything else is per-exec', () => {
