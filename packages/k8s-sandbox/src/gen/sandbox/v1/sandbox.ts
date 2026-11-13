@@ -210,7 +210,7 @@ export interface ServerFrame {
   leaseControl?:
     | LeaseControlFrame
     | undefined;
-  /** push back a live lease's idle timeout; no answer */
+  /** keepalive-loss heartbeat for a live lease; never resets idle; no answer */
   keepalive?: LeaseKeepaliveFrame | undefined;
 }
 
@@ -381,7 +381,10 @@ export interface LeaseControlFrame {
   modeEpoch: number;
 }
 
-/** relay → worker: activity on a live lease, without an Exec. A no-op without a lease. */
+/**
+ * relay → worker: harness liveness for a live lease, without an Exec (the keepalive-loss
+ * rule). It never resets idle. A no-op without a lease.
+ */
 export interface LeaseKeepaliveFrame {
   workspaceKey: string;
 }
@@ -2758,7 +2761,8 @@ export const SandboxExecService = {
    * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
    * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
    * ends the lease (reset) or changes the mode (set_mode, which needs a signed
-   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   * set_mode_token). LeaseKeepalive records harness liveness for a live lease (the
+   * keepalive-loss rule); it never resets idle, and the worker gives no answer.
    */
   leaseControl: {
     path: "/sandbox.v1.SandboxExec/LeaseControl",
@@ -2788,7 +2792,8 @@ export interface SandboxExecServer extends UntypedServiceImplementation {
    * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
    * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
    * ends the lease (reset) or changes the mode (set_mode, which needs a signed
-   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   * set_mode_token). LeaseKeepalive records harness liveness for a live lease (the
+   * keepalive-loss rule); it never resets idle, and the worker gives no answer.
    */
   leaseControl: handleUnaryCall<LeaseControlRequest, LeaseControlResponse>;
   leaseKeepalive: handleUnaryCall<LeaseKeepaliveRequest, LeaseKeepaliveResponse>;
@@ -2817,7 +2822,8 @@ export interface SandboxExecClient extends Client {
    * Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
    * are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
    * ends the lease (reset) or changes the mode (set_mode, which needs a signed
-   * set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+   * set_mode_token). LeaseKeepalive records harness liveness for a live lease (the
+   * keepalive-loss rule); it never resets idle, and the worker gives no answer.
    */
   leaseControl(
     request: LeaseControlRequest,

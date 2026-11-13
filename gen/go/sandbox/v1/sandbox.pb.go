@@ -446,7 +446,7 @@ type ServerFrame_LeaseControl struct {
 }
 
 type ServerFrame_Keepalive struct {
-	Keepalive *LeaseKeepaliveFrame `protobuf:"bytes,4,opt,name=keepalive,proto3,oneof"` // push back a live lease's idle timeout; no answer
+	Keepalive *LeaseKeepaliveFrame `protobuf:"bytes,4,opt,name=keepalive,proto3,oneof"` // keepalive-loss heartbeat for a live lease; never resets idle; no answer
 }
 
 func (*ServerFrame_Exec) isServerFrame_Msg() {}
@@ -1391,7 +1391,8 @@ func (x *LeaseControlFrame) GetModeEpoch() uint64 {
 	return 0
 }
 
-// relay → worker: activity on a live lease, without an Exec. A no-op without a lease.
+// relay → worker: harness liveness for a live lease, without an Exec (the keepalive-loss
+// rule). It never resets idle. A no-op without a lease.
 type LeaseKeepaliveFrame struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceKey  string                 `protobuf:"bytes,1,opt,name=workspace_key,json=workspaceKey,proto3" json:"workspace_key,omitempty"`

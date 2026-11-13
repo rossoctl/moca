@@ -140,7 +140,8 @@ type SandboxExecClient interface {
 	// Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
 	// are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
 	// ends the lease (reset) or changes the mode (set_mode, which needs a signed
-	// set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+	// set_mode_token). LeaseKeepalive records harness liveness for a live lease (the
+	// keepalive-loss rule); it never resets idle, and the worker gives no answer.
 	LeaseControl(ctx context.Context, in *LeaseControlRequest, opts ...grpc.CallOption) (*LeaseControlResponse, error)
 	LeaseKeepalive(ctx context.Context, in *LeaseKeepaliveRequest, opts ...grpc.CallOption) (*LeaseKeepaliveResponse, error)
 }
@@ -215,7 +216,8 @@ type SandboxExecServer interface {
 	// Lease mode (SBX0.3). Both act on the sandbox's lease, not on one Exec, and both
 	// are relayed to the worker as a ServerFrame. LeaseControl reads the lease status,
 	// ends the lease (reset) or changes the mode (set_mode, which needs a signed
-	// set_mode_token); LeaseKeepalive pushes back the idle timeout of a live lease.
+	// set_mode_token). LeaseKeepalive records harness liveness for a live lease (the
+	// keepalive-loss rule); it never resets idle, and the worker gives no answer.
 	LeaseControl(context.Context, *LeaseControlRequest) (*LeaseControlResponse, error)
 	LeaseKeepalive(context.Context, *LeaseKeepaliveRequest) (*LeaseKeepaliveResponse, error)
 	mustEmbedUnimplementedSandboxExecServer()
