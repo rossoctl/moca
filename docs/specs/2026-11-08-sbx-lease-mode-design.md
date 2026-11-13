@@ -510,9 +510,12 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
   names is set to `per-exec` through the same atomic update a `PUT` uses, which raises the epoch: the
   next Exec, carrying the new token, ends the live lease (a same-epoch re-issue would read to the
   worker as a retry, §8.2). It is audited as `sandbox_mode_changed` with `reason: mode_not_allowed`.
-  Two mints racing may both downgrade, raising the epoch twice. A lowered `SH_SANDBOX_IDLE_CEILING_S`
-  clamps the `idle_timeout_s` claim of every token minted after it; the record and the epoch are
-  unchanged, since the idle timeout travels on every Exec (ruling R12).
+  Two mints racing may both downgrade, raising the epoch twice. An owner's `PUT` to a mode that is
+  still allowed, landing between a mint's read and its downgrade, can be overwritten with
+  `per-exec`; the owner sends it again. Both races are accepted, since the store has no
+  conditional update. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps the `idle_timeout_s` claim of
+  every token minted after it; the record and the epoch are unchanged, since the idle timeout
+  travels on every Exec (ruling R12).
 
 ### 8.2 The mode reaches the worker in the token
 
