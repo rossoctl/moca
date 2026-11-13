@@ -429,6 +429,9 @@ describe('hostFromEnv (SH_CONTROL_PLANE_HOST)', () => {
 describe('the control plane`s secrets as systemd credentials (deploy/vm)', () => {
   it('names exactly the secrets main.ts reads, and nothing public', () => {
     expect([...CONTROL_PLANE_SECRETS].sort()).toEqual([
+      // MI1 §6.1's grant ring, a SEPARATE private key from the session signer below -- and a file
+      // like every other secret from S2 on (§6.7), never an env line.
+      'MOCA_GRANT_SIGNING_KEY',
       'SH_CREDENTIAL_KEK',
       'SH_EXCHANGE_TOKEN',
       'SH_JANITOR_TOKEN',
