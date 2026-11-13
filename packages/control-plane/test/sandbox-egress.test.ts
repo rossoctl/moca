@@ -416,6 +416,33 @@ describe("the sandbox's end record names its egress log", () => {
     expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(true);
   });
 
+  it('a sweep that fails before the seal leaves the log unsealed, and the next sweep records it', async () => {
+    const d = await setup();
+    const a = await create(d, 't1');
+    await post(d, 'host-1', [ev(a.id)]);
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: a.id } }), d);
+    now += 30_000;
+    await post(d, 'host-1', [ev(a.id, { decision: 'aborted' })]); // late: the end record named 1
+    now += EGRESS_GRACE_S * 1000;
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let fail = 1;
+    prov.append = async (r) => {
+      if ((r.body as Body).state === 'egress' && fail-- > 0) throw new Error('append failed');
+      return append(r);
+    };
+    const janitor = () =>
+      HANDLERS.janitorSandboxes!({ ...ctx({}), janitorAuthorized: true } as never, d);
+    await expect(janitor()).rejects.toThrow('append failed');
+    expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(false);
+    await janitor();
+    await janitor();
+    const after = await ends(d, a.id);
+    expect(after).toHaveLength(2);
+    expect(after[1]!.body).toMatchObject({ state: 'egress', egress: { events: 2 } });
+    expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(true);
+  });
+
   it('on expiry with nothing late: one end record, no egress record; a drop marks it incomplete', async () => {
     const d = await setup();
     const a = await create(d, 't1');

@@ -95,10 +95,12 @@ provenance.
 - **The digest:** `sha256:` and the hex sha256 of the NDJSON export: each stored event's canonical
   JSON (the provenance canonicalization) followed by one newline, in arrival order.
 - **Provenance:** the sandbox's `terminated` record (deleted or expired) gains
-  `egress: {events, sha256, dropped, droppedBy, complete}`. Late events are accepted for 600 s after the end;
-  the janitor's sweep then seals the log and, if it changed since the end record, appends one more
-  `sandbox` record with `state: 'egress'` naming the final log. The newest `sandbox` record that
-  names `egress` is the log's digest. Record kinds are unchanged.
+  `egress: {events, sha256, dropped, droppedBy, complete}`. Late events are accepted for 600 s after
+  the end; then the janitor's sweep, if the log changed since the end record, appends one more
+  `sandbox` record with `state: 'egress'` naming the final log, and seals the log. The seal comes
+  last, so a sweep that fails before it is done again by the next one (the compare with the newest
+  record keeps it to one record). The newest `sandbox` record that names `egress` is the log's
+  digest. Record kinds are unchanged.
 - **Drops:** a proxy `audit_dropped` report (no VM) is charged to every sandbox on that host's workers
   that existed within 60 s before it: a sandbox may be marked incomplete when it lost nothing, never
   complete when it did. `complete` means `dropped == 0`.

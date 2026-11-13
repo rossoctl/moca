@@ -237,6 +237,11 @@ async function egressDigest(store: EgressStore, id: string) {
  * in the janitor's sweep after recordExpiries. A log that changed after its end record named it
  * (events that arrived in the grace) gets one more `sandbox` record, `state: 'egress'`, naming the
  * final log: the newest `sandbox` record of a sandbox that carries `egress` is its log's digest.
+ *
+ * The seal comes last, after the record is written: a sweep that fails before it (the chain, the
+ * digest or the append) leaves the log unsealed, so the next sweep does the work again. Past the
+ * grace the host post takes no events for the sandbox, so the log no longer changes, and the
+ * compare with the chain's newest record keeps a repeated sweep from writing a second record.
  */
 async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Promise<void> {
   const store = deps.egress;
@@ -247,27 +252,30 @@ async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Pr
   );
   const chains = new Map<string, Awaited<ReturnType<ProvenanceStore['chain']>>>();
   for (const r of due) {
-    if (!(await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS))) continue;
-    if (!deps.provenance) continue;
-    const stream = `template/${r.template}`;
-    if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
-    const named = chains
-      .get(stream)!
-      .filter(
-        (x) =>
-          x.kind === 'sandbox' &&
-          (x.body as { sandboxId?: string }).sandboxId === r.id &&
-          (x.body as { egress?: unknown }).egress !== undefined,
-      )
-      .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
-    const now = await egressDigest(store, r.id);
-    if (named && named.sha256 === now.sha256 && named.dropped === now.dropped) continue;
-    await deps.provenance.append({
-      stream,
-      kind: 'sandbox',
-      subject: 'janitor',
-      body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
-    });
+    if ((await store.meta(r.id)).sealed) continue;
+    if (deps.provenance) {
+      const stream = `template/${r.template}`;
+      if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
+      const named = chains
+        .get(stream)!
+        .filter(
+          (x) =>
+            x.kind === 'sandbox' &&
+            (x.body as { sandboxId?: string }).sandboxId === r.id &&
+            (x.body as { egress?: unknown }).egress !== undefined,
+        )
+        .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
+      const now = await egressDigest(store, r.id);
+      if (!named || named.sha256 !== now.sha256 || named.dropped !== now.dropped) {
+        await deps.provenance.append({
+          stream,
+          kind: 'sandbox',
+          subject: 'janitor',
+          body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
+        });
+      }
+    }
+    await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS);
   }
 }
 
