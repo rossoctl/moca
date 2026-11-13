@@ -394,7 +394,7 @@ export interface LeaseStatus {
   state: string;
   ageMs: number;
   idleTimeoutS: number;
-  /** the last end event, kept until it is acknowledged */
+  /** the last undelivered lease event (a start or an end), kept until acknowledged */
   pending: LeaseEvent | undefined;
 }
 

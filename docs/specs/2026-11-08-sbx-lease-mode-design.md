@@ -7,8 +7,8 @@ clients (`mocactl sbx`, the MCP server; plan 4) are not.
 v0.2 folds in E17a's calibration (§1.1, §17): level 1 is re-scoped (§2), free-page reporting moves
 into v1 (§6, §14), lease VMs get page-cache headroom in their cgroup (§6), and the idle timeout and
 the memory model are set together (§4).
-v0.3 records what plan 3 decided on the wire: a lease event rides before the Exec's `End` and is
-delivered at least once (§5); the `mode-token` route, the epoch a create starts at and the idle
+v0.3 records what plan 3 decided on the wire: a lease event rides before the Exec's `End`, as a
+best-effort notice (§5); the `mode-token` route, the epoch a create starts at and the idle
 timeout's bounds (§8.1); the third claim and the set-mode token (§8.2); the relay's limits and
 status codes for the new calls (§8.3).
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
@@ -354,11 +354,15 @@ until level 2 (§7).
   `error` (`stale_mode`, `lease_ended(<reason>)`, a timeout), so a client learns that the lease ended
   even when that Exec failed. `LeaseControl status` also returns it, as `LeaseStatus.pending` (§8.3).
 - **The worker keeps one pending event for each sandbox,** the last start or end, until a lease
-  Exec's response has carried it. It is acknowledged by its `at_unix_ms` (milliseconds) once it is
-  queued on a stream. An event that could not be queued (the connection ended) stays pending, and the
-  next lease Exec carries it.
-- **Delivery is at least once.** Two overlapping lease Execs on one sandbox can both carry the same
-  pending event. A client dedupes on `at_unix_ms`.
+  Exec's response has carried it. It is acknowledged by its `at_unix_ms` (milliseconds) as soon as it
+  is queued on the worker's stream to the relay. An event that could not be queued (the connection
+  had ended) stays pending, and the next lease Exec carries it.
+- **A lease event is a best-effort notice.** It is delivered once, on the next lease Exec's response,
+  and acknowledged when it is queued, not when the client reads it. If the stream breaks between the
+  two, the event is lost; `LeaseControl status` still shows the lease's state. In rare cases the same
+  event arrives twice (the acknowledgement could not be written to the host disk, or the sandbox's
+  next Exec finished before the previous one's response acknowledged it), so a client dedupes on
+  `at_unix_ms`.
 - **`expiring`** rides on every lease Exec while the lease is past its maximum duration. It is not
   acknowledged.
 - **A per-exec Exec carries no lease event,** so a client that never asked for a lease never sees
@@ -585,9 +589,12 @@ under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no 
 - **The worker** runs lease calls off its receive loop and its Exec slots, at most 16 at once across
   every sandbox it serves (then `busy: too many lease calls in flight`). The container tier has no
   lease mode and answers every `LeaseControl` with `lease_unsupported: this worker has no lease mode`.
-- **One audit line per `LeaseControl`,** marker `sandbox_lease_control`: `sub`, `sbx`, `wrk`, `op`,
-  `ms`, `outcome`, a `reason` when there is one, and for `set_mode`, once its token verified, `mode`
-  and `modeEpoch`. Like every SBX record, it has no command text.
+- **One audit line per `LeaseControl`,** marker `sandbox_lease_control`, refusals included (a call
+  with no bearer token is a `refused` line with the reason `no bearer token`): `wrk`, `op`, `ms`,
+  `outcome`, a `reason` when there is one, `sub` and `sbx` once the sandbox token verified, and for
+  `set_mode`, once its set-mode token verified, `mode` and `modeEpoch`. Like every SBX record, it has
+  no command text. A relay with no sandbox keyset, which can verify no sandbox token, answers
+  `UNAUTHENTICATED` without a line, as it does for `Exec` and `Abort`.
 
 | `LeaseControl` ends with | When                                                                                | Audit `outcome` |
 | ------------------------ | ----------------------------------------------------------------------------------- | --------------- |

@@ -186,7 +186,7 @@ message LeaseStatus {
   string      state          = 3;   // "none" | "active" | "expiring"
   uint64      age_ms         = 4;
   uint32      idle_timeout_s = 5;
-  LeaseEvent  pending        = 6;   // the last end event, kept until it is acknowledged
+  LeaseEvent  pending        = 6;   // the last undelivered lease event (a start or an end), kept until acknowledged
 }
 
 // worker → relay: the answer to a LeaseControlFrame. An empty error means OK; otherwise

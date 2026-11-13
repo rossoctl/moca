@@ -1443,7 +1443,7 @@ type LeaseStatus struct {
 	State         string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`                              // "none" | "active" | "expiring"
 	AgeMs         uint64                 `protobuf:"varint,4,opt,name=age_ms,json=ageMs,proto3" json:"age_ms,omitempty"`
 	IdleTimeoutS  uint32                 `protobuf:"varint,5,opt,name=idle_timeout_s,json=idleTimeoutS,proto3" json:"idle_timeout_s,omitempty"`
-	Pending       *LeaseEvent            `protobuf:"bytes,6,opt,name=pending,proto3" json:"pending,omitempty"` // the last end event, kept until it is acknowledged
+	Pending       *LeaseEvent            `protobuf:"bytes,6,opt,name=pending,proto3" json:"pending,omitempty"` // the last undelivered lease event (a start or an end), kept until acknowledged
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

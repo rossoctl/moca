@@ -198,8 +198,10 @@ change, mint a fresh token: the old one still carries the old epoch.
 before the `end` or the `error`. `state` is `start`, `end` (with an end `reason` such as `idle`,
 `reset` or `mode_change`) or `expiring` (the lease ends at its next idle).
 
-- **They are delivered at least once.** Two overlapping lease Execs on one sandbox can both carry
-  the same event. Dedupe on `at_unix_ms`.
+- **They are best-effort notices.** An event is delivered once, on the next lease Exec's response,
+  and the worker counts it as delivered when it queues it to send, not when you read it. If the connection
+  breaks in between, the event is lost; `LeaseControl status` still shows the lease's state. Rarely,
+  the same event arrives twice: dedupe on `at_unix_ms`.
 - **`expiring`** repeats on every lease Exec until the lease ends.
 - **A per-exec Exec never carries one.** A downgrade's `mode_change` end therefore comes back in the
   `set_mode` result's `status.pending`.
