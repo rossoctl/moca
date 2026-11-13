@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.10.0
+## 1.11.0
 
 A session's seed from its build, its workspace's patch, its records, and its queued turns on its
 template ([#751](https://github.com/rossoctl/moca/issues/751)), per the
@@ -29,7 +29,7 @@ session's turn result (and its terminal `done` and `error` frames) carries `work
 `SH_TURN_PATCH_MAX_BYTES`, never cut) and `sandbox.seed`; a `/v1/runs` prompt run of a templated
 session runs on its template and its `responded` result carries both too.
 
-## 1.9.0
+## 1.10.0
 
 Sessions and sandboxes from one combined control plane
 ([#750](https://github.com/rossoctl/moca/issues/750)), per the
@@ -60,7 +60,7 @@ The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.2
 to a build runs only on workers labelled `moca.dev/build` with it, and its turn is refused (503
 `sandbox_unavailable`) when none is attached.
 
-## 1.8.0
+## 1.9.0
 
 Sandbox templates for agent sessions
 ([#731](https://github.com/rossoctl/moca/issues/731)), per the
@@ -83,7 +83,7 @@ The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.1
 turns take the session's template from the control plane, a failed seed is a 500, and
 `workspace_reset`'s `retiered` also covers a sandbox that now serves another template.
 
-## 1.7.0
+## 1.8.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
 per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
@@ -133,7 +133,7 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 - New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
   Error schema gains `readiness`, and `quota` the value `active`.
 
-## 1.6.0
+## 1.7.0
 
 Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
@@ -162,6 +162,36 @@ for the builds (else `400 invalid_request`), and answer only a host listed in `S
   writes a `build` record, checks them against the create's request and registers the build (its
   `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
   rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
+## 1.6.0
+
+Sandbox modes ([lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §8.1–§8.2), served
+only on the `sandbox` route profile.
+
+- `Sandbox` gains `mode` (`per-exec`, `lease` or `lease+processes`), `idleTimeoutS` (0 = the worker's
+  default) and `modeEpoch`. A sandbox created `per-exec` starts at epoch 0, one created in a lease
+  mode at 1.
+- POST /v1/sandboxes accepts `mode` (default `per-exec`) and `idleTimeoutS` (30 to
+  `SH_SANDBOX_IDLE_CEILING_S`, whose default is 1800; omitted, the worker's default of 300 s; an
+  explicit 0 is 400 `invalid_request`).
+- New PUT /v1/sandboxes/{id}/mode: changes the mode and the idle timeout, raises `modeEpoch` by 1 on
+  every accepted call, audits `sandbox_mode_changed`, and returns the sandbox with a `setModeToken`
+  for the client's `LeaseControl set_mode`.
+- New POST /v1/sandboxes/{id}/mode-token: a `setModeToken` for the mode and epoch the record holds
+  now, raising nothing.
+- Both mode routes are owner only (an admin gets 404 on another user's sandbox) and take only the
+  owner's user API token; a sandbox token is a 401. A set-mode token is a JWT with
+  `typ: moca-sandbox-mode+jwt`, valid 300 s.
+- New error code `mode_not_allowed` (403): a lease mode the deployment's `SH_SANDBOX_MODES_ALLOWED`
+  (default `per-exec`, so no lease mode until an operator lists one) does not list. `per-exec` is
+  always allowed.
+- Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
+  reads as `per-exec`, epoch 0.
+- Narrowing the policy downgrades existing sandboxes at their next token mint. A sandbox token or
+  `mode-token` minted for a sandbox whose lease mode `SH_SANDBOX_MODES_ALLOWED` no longer lists first
+  sets it to `per-exec` at the next epoch, audited as `sandbox_mode_changed` with the reason
+  `mode_not_allowed`. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps the `idle_timeout_s` claim; the
+  stored `idleTimeoutS` and the epoch are unchanged.
 
 ## 1.5.0
 

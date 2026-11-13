@@ -1,7 +1,15 @@
 import { status } from '@grpc/grpc-js';
 import { OWNER_LABEL, TEMPLATE_LABEL, TIER_LABEL, WORKLOAD_LABEL } from '@moca/harness';
 import type { RecordStore, SandboxRecord } from '@moca/harness';
-import type { Exec, ExecEvent, ServerFrame, WorkerFrame } from '@moca/k8s-sandbox';
+import {
+  LeaseControlFrame,
+  LeaseKeepaliveFrame,
+  type Exec,
+  type ExecEvent,
+  type LeaseControlResult,
+  type ServerFrame,
+  type WorkerFrame,
+} from '@moca/k8s-sandbox';
 
 export interface AttachStream {
   metadata?: { get: (k: string) => string[] };
@@ -75,12 +83,20 @@ interface Parked {
   workload?: string;
   // per-reqId sinks for in-flight execs, populated by routeExec
   sinks: Map<number, (ev: ExecEvent) => void>;
+  // per-ctlId waiters for in-flight lease controls, populated by routeLeaseControl
+  controls: Map<number, PendingControl>;
   // Cancels the attach token's expiry timer; set by an attach-token Hello, called by teardown.
   cancelExpiry?: () => void;
   // Cancels a pending presence-put retry; set by Hello, called by teardown.
   cancelPresence?: () => void;
   // This stream's teardown, so drain can run it; settles once the remove and the mark have.
   teardown: () => Promise<void>;
+}
+
+/** One routeLeaseControl awaiting the worker's LeaseControlResult. */
+interface PendingControl {
+  resolve: (r: LeaseControlResult) => void;
+  reject: (err: Error) => void;
 }
 
 /** Presence-put backoff: 250 ms, doubling, capped at 10 s, with no attempt limit (#423, Task 16b). */
@@ -131,12 +147,17 @@ function trustedLabels(
   return labels;
 }
 
-/** An Exec refused by the workload check: PERMISSION_DENIED on the wire, via grpc-js's code mapping. */
-function workloadMismatch(message: string): Error & { code: number; details: string } {
+/** An error that carries its gRPC status, via grpc-js's code mapping. */
+function statusError(code: number, message: string): Error & { code: number; details: string } {
   const err = new Error(message) as Error & { code: number; details: string };
-  err.code = status.PERMISSION_DENIED;
+  err.code = code;
   err.details = message;
   return err;
+}
+
+/** An Exec refused by the workload check: PERMISSION_DENIED on the wire. */
+function workloadMismatch(message: string): Error & { code: number; details: string } {
+  return statusError(status.PERMISSION_DENIED, message);
 }
 
 const defaultTimers: RelayTimers = {
@@ -164,6 +185,28 @@ export interface Relay {
   routeExec(sandboxId: string, exec: Exec, opts?: { workload?: string }): AsyncIterable<ExecEvent>;
   routeAbort(sandboxId: string, reqId: number): void;
   /**
+   * Send one lease operation to the parked worker (lease-mode §8.2) under a fresh `ctlId`, and
+   * resolve with the worker's LeaseControlResult for that id. Every call ends: it rejects
+   * DEADLINE_EXCEEDED at `timeoutMs` (a worker on code older than lease mode ignores the frame),
+   * UNAVAILABLE when there is no live worker, the frame cannot be written or the worker disconnects
+   * first, PERMISSION_DENIED for a workload sandbox (the workload check, as routeExec's: a lease
+   * call names no workload), and CANCELLED when `signal` aborts (the caller went away). However it
+   * settles, its waiter is gone at once, so a later answer for its ctl_id is dropped. A result's
+   * own `error` is the caller's to read; this resolves with it.
+   */
+  routeLeaseControl(
+    sandboxId: string,
+    f: Omit<LeaseControlFrame, 'ctlId'>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<LeaseControlResult>;
+  /**
+   * Activity on a live lease, without an Exec. Fire-and-forget: a no-op without a live worker, and
+   * a write that fails is logged, not thrown. Throws PERMISSION_DENIED only for a workload sandbox
+   * (the workload check, as routeLeaseControl's).
+   */
+  routeKeepalive(sandboxId: string, workspaceKey: string): void;
+  /**
    * Graceful stop (#453): refuse every later Hello, run each parked session's teardown and await
    * its record remove and detach mark, then end its stream. A relay stopped without this leaves
    * stale records that turns lease until the worker reattaches, failing inside the turn with `no
@@ -181,6 +224,8 @@ export function createRelay(deps: RelayDeps): Relay {
   const sessions = new Map<string, Parked>();
   const timers = deps.timers ?? defaultTimers;
   let draining = false;
+  // One ctl_id space for the whole relay, so an id is never reused while any call could hold it.
+  let nextCtlId = 0;
   // Every attach stream still open, parked or not. A stream connected but not yet parked (its Hello
   // has not arrived, or never will) holds a server's tryShutdown open just as a parked one does, so
   // drain must end those too (#462 review).
@@ -306,6 +351,7 @@ export function createRelay(deps: RelayDeps): Relay {
         const session: Parked = {
           stream,
           sinks: new Map(),
+          controls: new Map(),
           teardown,
           ...(binding ? { workload: binding.workload } : {}),
         };
@@ -331,10 +377,16 @@ export function createRelay(deps: RelayDeps): Relay {
         putPresence(id, session, rec);
         return;
       }
-      // chunk/end/error frames are dispatched to the per-reqId sink registered by routeExec
+      // chunk/end/error/lease frames are dispatched to the per-reqId sink registered by routeExec
       const parked = sandboxId ? sessions.get(sandboxId) : undefined;
       if (!parked) return;
-      const reqId = frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId;
+      if (frame.leaseResult) {
+        // Settled once: an answer after the timeout, or a duplicate, finds no waiter.
+        parked.controls.get(frame.leaseResult.ctlId)?.resolve(frame.leaseResult);
+        return;
+      }
+      const reqId =
+        frame.chunk?.reqId ?? frame.end?.reqId ?? frame.error?.reqId ?? frame.lease?.reqId;
       if (reqId !== undefined) parked.sinks.get(reqId)?.(toExecEvent(frame));
     });
     /**
@@ -385,6 +437,10 @@ export function createRelay(deps: RelayDeps): Relay {
       for (const [reqId, sink] of parked.sinks) {
         sink({ error: { reqId, message: 'worker disconnected' } } as ExecEvent);
       }
+      // And every lease control waiting on this worker.
+      const waiting = [...parked.controls.values()];
+      parked.controls.clear();
+      for (const c of waiting) c.reject(statusError(status.UNAVAILABLE, 'worker disconnected'));
       sessions.delete(sandboxId);
       const removed = deps.records
         .remove(sandboxId)
@@ -465,6 +521,103 @@ export function createRelay(deps: RelayDeps): Relay {
     sessions.get(sandboxId)?.stream.write({ abort: { reqId } } as ServerFrame);
   }
 
+  function routeLeaseControl(
+    sandboxId: string,
+    f: Omit<LeaseControlFrame, 'ctlId'>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<LeaseControlResult> {
+    const parked = sessions.get(sandboxId);
+    if (!parked) {
+      return Promise.reject(
+        statusError(status.UNAVAILABLE, `no live worker for sandbox '${sandboxId}'`),
+      );
+    }
+    const refused = leaseOnWorkload(sandboxId, parked, 'lease control');
+    if (refused) return Promise.reject(refused);
+    if (signal?.aborted) {
+      return Promise.reject(statusError(status.CANCELLED, 'lease control cancelled'));
+    }
+    const ctlId = ++nextCtlId;
+    return new Promise<LeaseControlResult>((resolve, reject) => {
+      let handle: unknown;
+      // Every way out goes through here: the waiter, the timer and the abort listener all go at once.
+      const settle = () => {
+        if (parked.controls.get(ctlId) === entry) parked.controls.delete(ctlId);
+        timers.clearTimeout(handle);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const entry: PendingControl = {
+        resolve: (r) => {
+          settle();
+          resolve(r);
+        },
+        reject: (err) => {
+          settle();
+          reject(err);
+        },
+      };
+      const onAbort = () => entry.reject(statusError(status.CANCELLED, 'lease control cancelled'));
+      parked.controls.set(ctlId, entry);
+      handle = timers.setTimeout(
+        () =>
+          entry.reject(
+            statusError(
+              status.DEADLINE_EXCEEDED,
+              `the worker did not answer the lease control within ${timeoutMs} ms`,
+            ),
+          ),
+        timeoutMs,
+      );
+      signal?.addEventListener('abort', onAbort);
+      try {
+        // fromPartial: ts-proto's encode throws on a message literal missing a field.
+        parked.stream.write({
+          leaseControl: LeaseControlFrame.fromPartial({ ...f, ctlId }),
+        } as ServerFrame);
+      } catch (err) {
+        entry.reject(
+          statusError(
+            status.UNAVAILABLE,
+            `lease control not sent to the worker: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
+    });
+  }
+
+  function routeKeepalive(sandboxId: string, workspaceKey: string): void {
+    const parked = sessions.get(sandboxId);
+    if (!parked) return;
+    const refused = leaseOnWorkload(sandboxId, parked, 'lease keepalive');
+    if (refused) throw refused;
+    try {
+      parked.stream.write({
+        keepalive: LeaseKeepaliveFrame.fromPartial({ workspaceKey }),
+      } as ServerFrame);
+    } catch (err) {
+      // Fire-and-forget: the caller is answered OK either way, and a stream this broken is torn
+      // down by its own end or error event.
+      console.error(
+        `lease keepalive not sent to sandbox '${sandboxId}': ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * The lease routes' half of routeExec's workload check (SBX0 §3.3): their only callers are
+   * sandbox-token callers, which name no workload, so a workload sandbox refuses them, as it
+   * refuses an Exec that names none. Checked only with attach keys, as routeExec's is.
+   */
+  function leaseOnWorkload(
+    sandboxId: string,
+    parked: Parked,
+    what: string,
+  ): (Error & { code: number; details: string }) | undefined {
+    if (!deps.verifyAttach || !parked.workload) return undefined;
+    return workloadMismatch(`${what} not permitted: sandbox '${sandboxId}' belongs to a workload`);
+  }
+
   async function drain(): Promise<void> {
     draining = true;
     const parked = [...sessions.values()];
@@ -481,12 +634,21 @@ export function createRelay(deps: RelayDeps): Relay {
     );
   }
 
-  return { onAttach, parked: () => [...sessions.keys()], routeExec, routeAbort, drain };
+  return {
+    onAttach,
+    parked: () => [...sessions.keys()],
+    routeExec,
+    routeAbort,
+    routeLeaseControl,
+    routeKeepalive,
+    drain,
+  };
 }
 
 /** Map a worker→relay frame to the harness-facing ExecEvent oneof (Task 6 uses this). */
 export function toExecEvent(frame: WorkerFrame): ExecEvent {
   if (frame.chunk) return { chunk: frame.chunk } as ExecEvent;
   if (frame.end) return { end: frame.end } as ExecEvent;
+  if (frame.lease) return { lease: frame.lease } as ExecEvent;
   return { error: frame.error } as ExecEvent;
 }

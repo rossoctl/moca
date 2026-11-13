@@ -8,7 +8,7 @@ import {
   seconds,
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import type { SandboxConfig } from './sandbox-config.js';
+import { MIN_IDLE_TIMEOUT_S, type SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
 import { hostManaged, liveLeases, place, readinessOf, type Placement } from './activation.js';
 import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
@@ -33,12 +33,14 @@ import {
 } from './template-catalog.js';
 import {
   isLive,
+  isSandboxModeName,
   viewOf,
+  type SandboxModeName,
   type SandboxRecord,
   type SandboxStore,
   type SandboxView,
 } from './sandbox-store.js';
-import { mintSandboxToken } from './sandbox-token.js';
+import { mintSandboxToken, mintSetModeToken } from './sandbox-token.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -124,7 +126,125 @@ function sandboxBody(v: SandboxView) {
     expiresAt: v.expiresAt,
     terminatedAt: v.terminatedAt ?? null,
     labels: v.labels,
+    mode: v.mode,
+    idleTimeoutS: v.idleTimeoutS,
+    modeEpoch: v.modeEpoch,
   };
+}
+
+/**
+ * The mode a body asks for (lease-mode spec §8.1). `per-exec` is always allowed, whatever
+ * SH_SANDBOX_MODES_ALLOWED lists, so going back to it is never refused by policy (ruling R7); the
+ * list governs the lease modes.
+ */
+function parseMode(raw: unknown, cfg: SandboxConfig): SandboxModeName {
+  if (!isSandboxModeName(raw)) {
+    throw new CpError('invalid_request', 'mode must be one of per-exec, lease, lease+processes');
+  }
+  if (raw !== 'per-exec' && !cfg.modesAllowed.has(raw)) {
+    throw new CpError('mode_not_allowed', `mode '${raw}' is not allowed on this deployment`);
+  }
+  return raw;
+}
+
+/** The owner's lease idle timeout: omitted is 0 (the worker's default); given, 30..the ceiling. */
+function parseIdleTimeout(raw: unknown, cfg: SandboxConfig): number {
+  if (raw === undefined) return 0;
+  if (
+    !Number.isSafeInteger(raw) ||
+    (raw as number) < MIN_IDLE_TIMEOUT_S ||
+    (raw as number) > cfg.idleCeilingS
+  ) {
+    throw new CpError(
+      'invalid_request',
+      `idleTimeoutS must be an integer from ${MIN_IDLE_TIMEOUT_S} to ${cfg.idleCeilingS}`,
+    );
+  }
+  return raw as number;
+}
+
+/**
+ * Expiry is computed (spec §5.2): a sandbox past its expiresAt, or deleted, refuses here with no job
+ * run. A record past its retention never gets here: the store's get has purged it (404).
+ */
+function requireLive(rec: SandboxRecord, now: number): void {
+  const v = viewOf(rec, now);
+  if (v.state === 'terminated') {
+    const reason = v.reason ?? 'expired';
+    const why = reason === 'deleted' ? 'sandbox was deleted' : 'sandbox has expired';
+    throw new CpError('sandbox_terminated', why, undefined, { reason });
+  }
+}
+
+/**
+ * setMode gave undefined: the sandbox was deleted, expired or purged since the caller's read. Answer
+ * as a read would now: 409 with the reason while it is retained, 404 once it is gone.
+ */
+async function refuseGone(store: SandboxStore, id: string, now: number): Promise<never> {
+  const fresh = await store.get(id, now);
+  if (fresh) requireLive(fresh, now);
+  throw new CpError('sandbox_not_found', 'no such sandbox');
+}
+
+/**
+ * The record as the policy allows it NOW, before a token is minted from it (lease-mode spec §8.1).
+ * SH_SANDBOX_MODES_ALLOWED is the switch: create and PUT check it, but a sandbox outlives a policy
+ * change, so a mint re-checks it too. A lease mode the policy no longer lists is downgraded to
+ * per-exec through the store's atomic setMode, which raises the epoch: the next Exec, carrying the
+ * new token, ends the live lease, where a same-epoch re-issue would read to the worker as a retry
+ * (spec §8.2). Audited as a `sandbox_mode_changed` with reason `mode_not_allowed`, the policy's
+ * change rather than the owner's. The owner's idle timeout is kept: per-exec does not use it.
+ *
+ * Two mints racing here may both downgrade, raising the epoch twice; each audits what it changed,
+ * and both tokens are per-exec. An owner PUT to a mode still allowed, landing between this read and
+ * the setMode, is overwritten with per-exec; the owner can PUT it again. Both are accepted rather
+ * than closed with a conditional setMode, which the store does not have.
+ */
+async function underPolicy(
+  deps: CpDeps,
+  subject: string,
+  rec: SandboxRecord,
+  now: number,
+): Promise<SandboxRecord> {
+  const { cfg, store } = service(deps);
+  if (rec.mode === 'per-exec' || cfg.modesAllowed.has(rec.mode)) return rec;
+  const changed = await store.setMode(rec.id, 'per-exec', rec.idleTimeoutS, now);
+  if (!changed) return refuseGone(store, rec.id, now);
+  const next = changed.record;
+  await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
+    subject,
+    sandboxId: rec.id,
+    decision: 'sandbox_mode_changed',
+    reason: 'mode_not_allowed',
+    fromMode: changed.previousMode,
+    toMode: next.mode,
+    modeEpoch: next.modeEpoch,
+  });
+  return next;
+}
+
+/**
+ * The idle timeout a token carries: the record's, clamped to the ceiling as it is NOW. Lowering
+ * SH_SANDBOX_IDLE_CEILING_S changes neither the record nor the epoch: the idle timeout travels on
+ * every Exec (ruling R12), so the next token is enough. 0, the worker's default, stays 0.
+ */
+const idleClaim = (deps: CpDeps, rec: SandboxRecord): number =>
+  Math.min(rec.idleTimeoutS, service(deps).cfg.idleCeilingS);
+
+/** A set-mode token for the record's mode and epoch, as they are now (spec §8.2). */
+function setModeTokenFor(deps: CpDeps, rec: SandboxRecord, now: number): string {
+  return mintSetModeToken(deps.signer, {
+    sub: rec.owner,
+    sbx: rec.id,
+    wrk: rec.worker,
+    wsk: rec.wsk,
+    mode: rec.mode,
+    modeEpoch: rec.modeEpoch,
+    idleTimeoutS: idleClaim(deps, rec),
+    notAfter: rec.expiresAt,
+    iss: service(deps).cfg.issuer,
+    now,
+  });
 }
 
 function parseLabels(raw: unknown): Record<string, string> {
@@ -1228,6 +1348,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', `name must match ${NAME_RE}`);
     }
     const labels = parseLabels(b.labels);
+    const mode = b.mode === undefined ? 'per-exec' : parseMode(b.mode, cfg);
+    const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
     await requireActive(deps, p, template, b.activate !== false);
     const now = seconds(deps);
     const id = sandboxId(deps.newId());
@@ -1245,6 +1367,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       labels,
       createdAt: now,
       expiresAt: now + cfg.lifetimeS,
+      mode,
+      idleTimeoutS,
+      // Per-exec is epoch 0, as every sandbox made before modes existed is. A lease mode starts at
+      // 1 (ruling R8): the worker serves every epoch-0 Exec as unversioned per-Exec, so a lease at
+      // 0 could never be served. At 1 it is served per-Exec only until the first set_mode makes
+      // the workspace's epoch known (spec §8.2), which the client sends right after create.
+      modeEpoch: mode === 'per-exec' ? 0 : 1,
     };
     const outcome = await store.create(
       rec,
@@ -1313,22 +1442,20 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   },
 
   mintSandboxToken: async (ctx, deps) => {
-    const rec = await assertSandboxOwner(ctx, deps, { admin: false });
+    const read = await assertSandboxOwner(ctx, deps, { admin: false });
     const { cfg } = service(deps);
     const now = seconds(deps);
-    const v = viewOf(rec, now);
-    // Expiry is computed (spec §5.2): a sandbox past its expiresAt refuses here with no job run.
-    if (v.state === 'terminated') {
-      const reason = v.reason ?? 'expired';
-      const why = reason === 'deleted' ? 'sandbox was deleted' : 'sandbox has expired';
-      throw new CpError('sandbox_terminated', why, undefined, { reason });
-    }
+    requireLive(read, now);
+    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
     const { token, exp } = mintSandboxToken(deps.signer, {
       sub: rec.owner,
       tenant: rec.tenant,
       sbx: rec.id,
       wrk: rec.worker,
       wsk: rec.wsk,
+      mode: rec.mode,
+      modeEpoch: rec.modeEpoch,
+      idleTimeoutS: idleClaim(deps, rec),
       ttlSeconds: cfg.tokenTtlS,
       notAfter: rec.expiresAt,
       iss: cfg.issuer,
@@ -1345,6 +1472,56 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         execCa: cfg.execCa ?? null,
       },
     };
+  },
+
+  /**
+   * Change the mode (lease-mode spec §8.1). Owner only, as minting is: an admin calling it on
+   * another user's sandbox gets the same 404 as anyone else, since a mode is what the owner's Execs
+   * may do. Every accepted call raises the epoch, the same mode included, and
+   * returns a set-mode token for that epoch, for the client's `LeaseControl set_mode`: a downgrade
+   * takes effect at once only through it (spec §8.2).
+   */
+  setSandboxMode: async (ctx, deps) => {
+    const rec = await assertSandboxOwner(ctx, deps, { admin: false });
+    const { cfg, store } = service(deps);
+    const now = seconds(deps);
+    requireLive(rec, now);
+    const b = asRecord(ctx.body);
+    const mode = parseMode(b.mode, cfg);
+    const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
+    const changed = await store.setMode(rec.id, mode, idleTimeoutS, now);
+    // Deleted, expired or past retention since the read above.
+    if (!changed) return refuseGone(store, rec.id, now);
+    const next = changed.record;
+    await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
+      subject: ctx.principal!.sub,
+      sandboxId: rec.id,
+      decision: 'sandbox_mode_changed',
+      // From the atomic update, not `rec`: another PUT may have landed since that read (ruling R9).
+      fromMode: changed.previousMode,
+      toMode: next.mode,
+      modeEpoch: next.modeEpoch,
+    });
+    return {
+      status: 200,
+      body: {
+        sandbox: sandboxBody(viewOf(next, now)),
+        setModeToken: setModeTokenFor(deps, next, now),
+      },
+    };
+  },
+
+  /**
+   * A set-mode token for the mode and epoch the record holds now, raising nothing: what `mocactl sbx
+   * get` re-sends when the worker reports the epoch unknown (spec §8.2). Owner only, as above. The
+   * one exception is a mode the policy no longer allows, downgraded first (underPolicy).
+   */
+  mintSandboxModeToken: async (ctx, deps) => {
+    const read = await assertSandboxOwner(ctx, deps, { admin: false });
+    const now = seconds(deps);
+    requireLive(read, now);
+    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
+    return { status: 200, body: { setModeToken: setModeTokenFor(deps, rec, now) } };
   },
 
   /**

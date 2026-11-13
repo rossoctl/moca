@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import * as tls from 'node:tls';
 import { credentials, Metadata, status, type ServiceError } from '@grpc/grpc-js';
-import { SandboxExecClient, Stream, type ExecEvent } from './gen/sandbox/v1/sandbox.js';
+import {
+  Exec as ExecMessage,
+  SandboxExecClient,
+  Stream,
+  type ExecEvent,
+} from './gen/sandbox/v1/sandbox.js';
 
 /**
  * The sandbox/v1 exec client for SBX0's clients (spec §6.5, §7): TLS to the exec Route, keepalive
@@ -360,14 +365,14 @@ export class SandboxExecConn {
         sandboxId: this.o.sandboxId,
         // A sandbox caller names no workload: the relay refuses it on a workload sandbox (§3.3).
         workload: '',
-        exec: {
+        exec: ExecMessage.fromPartial({
           reqId,
           command,
           stdin: opts.stdin ? new Uint8Array(opts.stdin) : new Uint8Array(),
           timeoutS,
           streaming: true,
           workspaceKey: this.o.workspaceKey,
-        },
+        }),
       },
       md,
       // Real wall time, not `now`: grpc-js measures the deadline against the system clock.

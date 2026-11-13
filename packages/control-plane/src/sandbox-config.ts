@@ -3,6 +3,7 @@ import type { CpConfig } from './handlers.js';
 import type { RouteProfile } from './routes.js';
 import { SUBJECT_RE } from './identity.js';
 import { DEFAULT_SANDBOX_ISSUER } from './sandbox-token.js';
+import { SANDBOX_MODE_NAMES, isSandboxModeName, type SandboxModeName } from './sandbox-store.js';
 import { egressConfigFromEnv, type EgressConfig } from './egress-config.js';
 
 /**
@@ -46,6 +47,10 @@ export interface SandboxConfig {
   execCa?: string;
   /** `SH_JANITOR_TOKEN` (a credential), at least 32 characters; absent refuses the janitor's route. */
   janitorToken?: string;
+  /** `SH_SANDBOX_MODES_ALLOWED`: the modes a user may pick (lease-mode spec §8.1). */
+  modesAllowed: ReadonlySet<SandboxModeName>;
+  /** `SH_SANDBOX_IDLE_CEILING_S`: the most an owner's idleTimeoutS may be. */
+  idleCeilingS: number;
   /** `SH_EGRESS_HOSTS` + `SH_CREDENTIAL_KEK`: user-scoped egress credentials (SBX0.2b); absent = off. */
   egress?: EgressConfig;
 }
@@ -74,11 +79,33 @@ export function routeProfileFromEnv(env: NodeJS.ProcessEnv): RouteProfile {
  */
 export const MAX_SANDBOX_TOKEN_TTL_S = 3600;
 
+/** The shortest lease idle timeout an owner may set (`idleTimeoutS`); 0 means the worker's default. */
+export const MIN_IDLE_TIMEOUT_S = 30;
+
 function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
   const v = env[name];
   if (v === undefined || v === '') return def;
   if (!/^[1-9][0-9]*$/.test(v)) throw new Error(`${name} must be a positive integer`);
   return Number(v);
+}
+
+/**
+ * `SH_SANDBOX_MODES_ALLOWED`: a comma list of mode names; absent or empty means `per-exec`, so
+ * every lease mode stays off until an operator lists it (`per-exec,lease` opts in to level 1). The
+ * default stays `per-exec` until plan 4's live smoke and the lease section (§11) of the SBX
+ * security review (lease-mode spec §8.1). An unknown name, or a list of none, refuses boot.
+ */
+function modesAllowedFromEnv(env: NodeJS.ProcessEnv): ReadonlySet<SandboxModeName> {
+  const names = (env.SH_SANDBOX_MODES_ALLOWED || 'per-exec')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (names.length === 0 || !names.every(isSandboxModeName)) {
+    throw new Error(
+      `SH_SANDBOX_MODES_ALLOWED must be a comma list of ${SANDBOX_MODE_NAMES.join(', ')}`,
+    );
+  }
+  return new Set(names);
 }
 
 export function parseTemplates(raw: string | undefined): SandboxTemplate[] {
@@ -177,6 +204,12 @@ export function sandboxConfigFromEnv(
       `SH_SANDBOX_TOKEN_TTL_SECONDS must be at most ${MAX_SANDBOX_TOKEN_TTL_S}: a delete takes effect only within one token lifetime`,
     );
   }
+  const idleCeilingS = positive(env, 'SH_SANDBOX_IDLE_CEILING_S', 1800);
+  if (idleCeilingS < MIN_IDLE_TIMEOUT_S) {
+    throw new Error(
+      `SH_SANDBOX_IDLE_CEILING_S must be at least ${MIN_IDLE_TIMEOUT_S}: the smallest idle timeout an owner may set`,
+    );
+  }
   const templates = parseTemplates(env.SH_SANDBOX_TEMPLATES);
   const egress = egressConfigFromEnv(env, templates, opts);
   return {
@@ -189,6 +222,8 @@ export function sandboxConfigFromEnv(
     maxTotal: positive(env, 'SH_SANDBOX_MAX_TOTAL', 40),
     issuer: env.SH_SANDBOX_TOKEN_ISSUER || DEFAULT_SANDBOX_ISSUER,
     execEndpoint,
+    modesAllowed: modesAllowedFromEnv(env),
+    idleCeilingS,
     ...(execCa ? { execCa } : {}),
     ...(janitorToken ? { janitorToken } : {}),
     ...(egress ? { egress } : {}),
