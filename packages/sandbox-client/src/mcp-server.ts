@@ -68,7 +68,8 @@ export interface SandboxMcpOptions {
   /**
    * The mode claim of the latest sandbox token minted, undefined before the first mint. When set it
    * decides, over the record, whether `reset` and `sandbox_info` ask the lease at all: the record
-   * read at start may be stale, a token is minted from the record as it is now.
+   * read at start may be stale, a token is minted from the record as it is now. Before the first
+   * mint both re-read the record through `info`.
    */
   leaseMode?: () => SandboxModeName | undefined;
   /** Called once per call. A recorder that throws never fails the call. */
@@ -272,6 +273,17 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   // One deduper per server: an event repeated on a later result is shown once (spec §5).
   const dedupe = new NoticeDedupe();
   let lastEnd: LeaseEvent | undefined;
+  /** Keeps `lastEnd` the newest end among `evs` and what it was. */
+  const noteEnds = (evs: LeaseEvent[]) => {
+    for (const ev of evs) {
+      if (ev.state === 'end' && (!lastEnd || ev.atUnixMs >= lastEnd.atUnixMs)) lastEnd = ev;
+    }
+  };
+  /**
+   * The events of a cancelled call, whose result nobody receives: shown on the next result, so no
+   * lease end goes unsaid.
+   */
+  const held: LeaseEvent[] = [];
 
   /**
    * The lease fields of `sandbox_info` for the current mode (the latest token's, else the
@@ -301,27 +313,27 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     lines.push(`last end: ${end}`, 'tracked processes: none');
     return lines;
   };
-  const info = async (): Promise<string> => {
+  /** The record as `o.info` reads it now; a bare string means the mode at start. */
+  const current = async (): Promise<SandboxInfo> => {
     const got = await o.info();
-    const cur = typeof got === 'string' ? { text: got, mode } : got;
+    return typeof got === 'string' ? { text: got, mode } : got;
+  };
+  const info = async (): Promise<string> => {
+    const cur = await current();
+    // A held end is this result's notice: `last end` names it too.
+    noteEnds(held);
     return [cur.text, ...(await leaseInfo(o.leaseMode?.() ?? cur.mode))].join('\n');
   };
-
-  /**
-   * The events of a cancelled call, whose result nobody receives: shown on the next result, so no
-   * lease end goes unsaid.
-   */
-  const held: LeaseEvent[] = [];
   /**
    * The notice lines for one result's lease events: a start only when no end is shown, and only
    * the last expiring event (edit's two Execs may straddle a minute boundary).
    */
   const notices = (events: LeaseEvent[]): string[] => {
     const fresh = dedupe.take(events);
+    noteEnds(fresh);
     let lastExpiring = -1;
     fresh.forEach((ev, i) => {
       if (ev.state === 'expiring') lastExpiring = i;
-      if (ev.state === 'end' && (!lastEnd || ev.atUnixMs >= lastEnd.atUnixMs)) lastEnd = ev;
     });
     const ended = fresh.some((ev) => ev.state === 'end');
     const lines: string[] = [];
@@ -339,7 +351,8 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     workspace: ws,
     mode,
     lease: o.lease,
-    currentMode: () => o.leaseMode?.() ?? mode,
+    // Before the first mint the record read at start may be stale: read it again (one GET).
+    currentMode: async () => o.leaseMode?.() ?? (await current()).mode,
   });
   const byName = new Map(tools.map((t) => [t.name, t]));
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);

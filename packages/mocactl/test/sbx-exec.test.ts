@@ -920,7 +920,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
    */
   function leaseSession(
     modes: string[],
-    over: { keepalive?: () => Promise<void>; record?: string } = {},
+    over: { keepalive?: () => Promise<void>; record?: () => string } = {},
   ) {
     const { home, env, io } = setup();
     let minted = 0;
@@ -931,7 +931,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       }),
       [`GET /v1/sandboxes/${SBX}`]: () => ({
         status: 200,
-        body: sandbox({ mode: over.record ?? 'lease' }),
+        body: sandbox({ mode: over.record?.() ?? 'lease' }),
       }),
     });
     const flags: boolean[] = [];
@@ -1052,7 +1052,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
 
   it("reset and sandbox_info follow the latest minted token's mode over the start record", async () => {
     // The owner upgraded after the server started: the record it read said per-exec.
-    const m = leaseSession(['lease'], { record: 'per-exec' });
+    const m = leaseSession(['lease'], { record: () => 'per-exec' });
     await m.connect();
     const reset = async () =>
       (
@@ -1070,6 +1070,20 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     };
     expect(info.content[0]!.text).toContain('\nmode: lease\nlease: active\n');
     expect(m.ops).toEqual(['status', 'reset', 'status']);
+    await m.client.close();
+    await m.served;
+  });
+
+  it('reset before any mint re-reads the record: upgraded since start, it resets', async () => {
+    let record = 'per-exec';
+    const m = leaseSession(['lease'], { record: () => record });
+    await m.connect(); // the server read per-exec at start
+    record = 'lease'; // the owner upgrades; no call has minted a token yet
+    const r = (await m.client.callTool({ name: 'reset', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(r.content[0]!.text).toBe(RESET_ENDED_TEXT);
+    expect(m.ops).toEqual(['status', 'reset']);
     await m.client.close();
     await m.served;
   });

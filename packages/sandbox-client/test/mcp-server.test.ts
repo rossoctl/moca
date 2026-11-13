@@ -756,6 +756,44 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(g.ops).toEqual([]);
   });
 
+  it('reset before any mint re-reads the record: upgraded since start, it resets', async () => {
+    const f = leaseFake(ACTIVE);
+    let infos = 0;
+    const { client } = await connect({
+      exec: async () => res(),
+      lease: f.lease,
+      info: async () => (infos++, { text: 'template default', mode: 'lease' }),
+      leaseMode: () => undefined,
+    });
+    expect(text(await call(client, 'reset', {}))).toBe(
+      'lease ended (reset): the next command starts a new guest',
+    );
+    expect(f.ops).toEqual(['status', 'reset']);
+    expect(infos).toBe(1);
+  });
+
+  it("sandbox_info's last end includes a cancelled call's held end", async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    const exec: Exec = (_c, o) =>
+      new Promise((_r, reject) => {
+        o?.signal?.addEventListener('abort', () => {
+          const e = new ExecMachineryError('sandbox failure: cancelled', 1, 'machinery', true);
+          e.lease = [end];
+          reject(e);
+        });
+      });
+    const { client } = await connect({ exec });
+    const ac = new AbortController();
+    const p = call(client, 'bash', { command: 'sleep 9' }, ac.signal);
+    await sleep(10);
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    await sleep(10);
+    const info = text(await call(client, 'sandbox_info', {}));
+    expect(info.split('\n')[0]).toBe(END_IDLE);
+    expect(info).toContain('\nlast end: idle, 14:02\n');
+  });
+
   it('reset on a per-exec sandbox makes no lease call', async () => {
     const f = leaseFake(ACTIVE);
     const { client } = await connect({ exec: async () => res(), lease: f.lease });
