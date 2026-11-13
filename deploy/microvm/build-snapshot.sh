@@ -304,19 +304,26 @@ case "$VMM" in
     ;;
 esac
 
+# The three option checks match the WHOLE value with bash's [[ =~ ]], never grep: grep matches line
+# by line, so a value with an embedded newline passed when any one line did, and these values are
+# written into init (GUEST_HOME, through a sed script), the VMM's config and the manifest. The
+# patterns live in variables so bash 3.2 and 5 read them alike.
 # /tmp is the only writable tmpfs init mounts for every run (see assemble_rootfs), so a HOME
 # anywhere else would be read-only or vanish; the pattern keeps it one plain directory path.
-if [ -n "$GUEST_HOME" ] && ! printf '%s' "$GUEST_HOME" | grep -Eq '^/tmp(/[A-Za-z0-9._-]+)+$'; then
+guest_home_re='^/tmp(/[A-Za-z0-9._-]+)+$'
+vcpus_re='^([1-9]|[12][0-9]|3[0-2])$'
+verify_timeout_re='^[1-9][0-9]{0,4}$'
+if [ -n "$GUEST_HOME" ] && ! [[ "$GUEST_HOME" =~ $guest_home_re ]]; then
   echo "build-snapshot.sh: --guest-home must be a path under /tmp (e.g. /tmp/home), got '$GUEST_HOME'" >&2
   exit 2
 fi
 
-if ! printf '%s' "$VCPUS" | grep -Eq '^([1-9]|[12][0-9]|3[0-2])$'; then
+if ! [[ "$VCPUS" =~ $vcpus_re ]]; then
   echo "build-snapshot.sh: --vcpus must be an integer from 1 to 32, got '$VCPUS'" >&2
   exit 2
 fi
 
-if ! printf '%s' "$VERIFY_TIMEOUT_S" | grep -Eq '^[1-9][0-9]{0,4}$' || [ "$VERIFY_TIMEOUT_S" -gt 86400 ]; then
+if ! [[ "$VERIFY_TIMEOUT_S" =~ $verify_timeout_re ]] || [ "$VERIFY_TIMEOUT_S" -gt 86400 ]; then
   echo "build-snapshot.sh: --verify-timeout-s must be an integer from 1 to 86400, got '$VERIFY_TIMEOUT_S'" >&2
   exit 2
 fi
@@ -627,16 +634,15 @@ build_agent() {
 # ---------------------------------------------------------------------------
 # 3. assemble_rootfs
 # ---------------------------------------------------------------------------
-# tree_write_target REL: REL is a file under the staged tree that the build writes or appends to on
-# THIS host (etc/passwd, etc/gitconfig, the egress CA). The tree is an image's filesystem, so a path
-# in it can be a symlink out of it (an absolute one resolves on the build host). It exits 1 unless
-# REL's directory resolves inside the tree, checking the deepest part that exists before making the
-# rest (mkdir -p follows symlinks), and REL itself is not a symlink: its target is unknown, and
-# appending through it would write the build host's file.
-tree_write_target() {
-  local rel="$1" tree dir probe real d
+# tree_dir_target DIR: DIR is a directory under the staged tree that the build creates or writes
+# into on THIS host. The tree is an image's filesystem, so a path in it can be a symlink out of it
+# (an absolute one resolves on the build host). It exits 1 unless DIR resolves inside the tree,
+# checking the deepest part of it that exists BEFORE `mkdir -p` makes the rest (mkdir -p follows
+# symlinks, so making first would create directories on the build host and only then refuse), and
+# DIR itself once made.
+tree_dir_target() {
+  local dir="$1" tree probe real d
   tree="$(cd -P "$STAGE/rootfs-tree" && pwd)"
-  dir="$(dirname "$rel")"
   probe="$dir"
   while [ "$probe" != . ] && [ ! -e "$STAGE/rootfs-tree/$probe" ] && [ ! -L "$STAGE/rootfs-tree/$probe" ]; do
     probe="$(dirname "$probe")"
@@ -647,11 +653,20 @@ tree_write_target() {
     case "$real/" in
       "$tree"/*) ;;
       *)
-        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($real); refusing to write /$rel through it" >&2
+        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($real); refusing to write /$dir through it" >&2
         exit 1
         ;;
     esac
   done
+}
+
+# tree_write_target REL: REL is a file under the staged tree that the build writes or appends to on
+# THIS host (etc/passwd, etc/gitconfig, the egress CA). It exits 1 unless REL's directory passes
+# tree_dir_target and REL itself is not a symlink: its target is unknown, and appending through it
+# would write the build host's file.
+tree_write_target() {
+  local rel="$1"
+  tree_dir_target "$(dirname "$rel")"
   if [ -L "$STAGE/rootfs-tree/$rel" ]; then
     echo "build-snapshot.sh: the rootfs's /$rel is a symlink ($(readlink "$STAGE/rootfs-tree/$rel")); refusing to write through it" >&2
     exit 1
@@ -747,26 +762,16 @@ assemble_rootfs() {
   # this build layers the agent and init onto. It is copied, never mutated in place,
   # so a failed build never corrupts the caller's base image.
   cp -a "$ROOTFS/." "$STAGE/rootfs-tree/"
-  mkdir -p "$STAGE/rootfs-tree/usr/local/bin" "$STAGE/rootfs-tree/sbin" \
-    "$STAGE/rootfs-tree/tmp" "$STAGE/rootfs-tree/var" "$STAGE/rootfs-tree/workspace" \
-    "$STAGE/rootfs-tree/.moca-var"
   # NEVER WRITE THROUGH THE IMAGE'S SYMLINKS. The tree is an image's filesystem, and paths in it
   # resolve on THIS host: Ubuntu-based images ship /sbin/init -> /lib/systemd/systemd (absolute), so
   # writing "$tree/sbin/init" opened the BUILD HOST's systemd (seen on an Ubuntu-based image:
   # "Text file busy" stopped it only because that file was running; a host file that was not
-  # running would have been overwritten as root). So: the directories we write into must resolve
-  # inside the tree, and the files we write are unlinked first, which replaces a symlink rather than
-  # following it.
-  local tree_real d
-  tree_real="$(realpath -e "$STAGE/rootfs-tree")"
-  for d in sbin usr/local/bin .moca-var; do
-    case "$(realpath -e "$STAGE/rootfs-tree/$d")/" in
-      "$tree_real"/*) ;;
-      *)
-        echo "build-snapshot.sh: the rootfs's /$d resolves outside the tree ($(realpath -e "$STAGE/rootfs-tree/$d")); refusing to write through it" >&2
-        exit 1
-        ;;
-    esac
+  # running would have been overwritten as root). So: every directory the build makes or writes
+  # into must resolve inside the tree, checked before it is made (tree_dir_target), and the files we
+  # write are unlinked first, which replaces a symlink rather than following it.
+  local d
+  for d in usr/local/bin sbin tmp var workspace .moca-var; do
+    tree_dir_target "$d"
   done
   # check_var's probe: one regular file the image has under /var, a plain name (quoted into a
   # guest command), smallest path first so it is stable between builds. None: the check only writes.
@@ -879,6 +884,10 @@ export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
   elif [ -n "$GUEST_HOME" ]; then
     sed -i "/^export PATH=/a mkdir -p $GUEST_HOME\\
 export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init"
+  fi
+  # Either way, the insertion must have landed (GUEST_HOME is one plain path, checked above, so it
+  # needs no quoting in init).
+  if [ -n "$GUEST_HOME" ]; then
     grep -qx "export HOME=$GUEST_HOME" "$STAGE/rootfs-tree/sbin/init" || {
       echo "build-snapshot.sh: could not add HOME=$GUEST_HOME to init" >&2
       exit 1
@@ -2159,8 +2168,10 @@ write_manifest() {
     srcdig="$(sed -n 's/^digest=\(sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOTFS/etc/moca-rootfs-source" | head -1)"
   fi
 
-  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
-  caps_csv="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | sort | paste -sd, -)"
+  # Byte order (LC_ALL=C), as Go's sort.Strings in ComputeHash: the build host's locale must not
+  # change the capabilities line the hash covers.
+  caps_json="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | LC_ALL=C sort | awk '{printf "%s\"%s\"", sep, $0; sep=","}')"
+  caps_csv="$(printf '%s\n' "${MANIFEST_CAPABILITIES:-}" | sed '/^$/d' | LC_ALL=C sort | paste -sd, -)"
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # The GUEST's kernel release, probed in the booted VM (probe_guest_kernel), not the build host's.
   krel="${MANIFEST_GUEST_KERNEL:-}"

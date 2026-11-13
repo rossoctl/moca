@@ -70,10 +70,13 @@
 # Names: the snapshot is <id>-<first 12 hex of the image digest>, and its worker id is
 # sbx_<id with - as _>_<the same 12 hex>, so a new image of a template is a new snapshot and a new
 # worker, and the old worker keeps serving until it is retired. A snapshot that already exists with the same record is not
-# rebuilt; --force rebuilds it.
+# rebuilt: the same spec, CA, --vmm and --kernel (its sha256 in the manifest). --force rebuilds it,
+# and is needed after a change to the guest agent's source (--agent), which is not compared.
 #
 # It touches nothing else: no worker, no unit, no cluster. Installing the worker is
-# deploy/sbx/install-host.sh, after template-register.sh and setup.sh.
+# deploy/sbx/install-host.sh, after template-register.sh and setup.sh; it finds the record beside the
+# snapshot and sets the worker's SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so the worker checks the
+# record against its snapshot at every start.
 #
 # Exit: 0 built (or already built); 1 a step failed; 2 a usage or spec error.
 set -euo pipefail
@@ -256,6 +259,8 @@ write_record() {
       min_budget_mb: $budget}
     + (if $ca == "" then {} else {egress_ca_sha256: $ca} end)
     + (if .skip_git_identity_check then {skip_git_identity_check: true} else {} end)
+    + (if .guest_home then {guest_home} else {} end)
+    + (if .etc_hosts_sha256 then {etc_hosts_sha256} else {} end)
     + (if .source_record_digest then {source_record_digest} else {} end)
     + (if .probe_status then {probe_status} else {} end)
     + (if .proved_in_vm != null then {proved_in_vm} else {} end)
@@ -263,9 +268,13 @@ write_record() {
   mv "$RECORD.tmp" "$RECORD"
 }
 
-# The spec's part of a record, for "already built": the same spec on the same snapshot.
+# The spec's part of a record, for "already built": the same spec on the same snapshot. Every
+# spec field that changes the snapshot or its checks is here, with its default, so a record from
+# before a field was recorded reads as that default and a spec that sets it rebuilds.
 spec_key() { jq -S '{id, image, guest_ram_mb, vcpus, egress, seed, probe, description, tools,
-  guest_home_gitconfig: (.guest_home_gitconfig // false)}' "$1"; }
+  guest_home_gitconfig: (.guest_home_gitconfig // false), guest_home: (.guest_home // null),
+  skip_git_identity_check: (.skip_git_identity_check // false),
+  etc_hosts_sha256: (.etc_hosts_sha256 // null)}' "$1"; }
 # The gate evidence the existing record carries, for "already built": a build against another gate
 # record (or none) rewrites the record.
 gate_key() { jq -c '.gate_record.sha256 // null' "$1"; }
@@ -283,10 +292,16 @@ if [[ -n "$EGRESS_CA" ]]; then
   CA_SHA="sha256:${CA_SHA%% *}"
 fi
 
+# The build inputs that are not in the spec, for "already built": the VMM and the guest kernel are
+# compared with the snapshot's manifest. The guest agent is built from --agent's source by
+# build-snapshot.sh, so it cannot be compared without a build: after an agent change, pass --force.
+KERNEL_SHA="sha256:$({ sha256sum "$KERNEL" 2>/dev/null || shasum -a 256 "$KERNEL"; } | cut -d' ' -f1)"
 if [[ -z "$FORCE" && -f "$OUT/manifest.json" && -f "$RECORD" ]] &&
   [[ "$(spec_key "$SPEC")" == "$(spec_key "$RECORD")" ]] &&
   [[ "$(jq -r .manifest_hash "$RECORD")" == "$(jq -r .hash "$OUT/manifest.json")" ]] &&
-  [[ "$(jq -r '.egress_ca_sha256 // empty' "$OUT/manifest.json")" == "$CA_SHA" ]]; then
+  [[ "$(jq -r '.egress_ca_sha256 // empty' "$OUT/manifest.json")" == "$CA_SHA" ]] &&
+  [[ "$(jq -r '.vmm // empty' "$OUT/manifest.json")" == "$VMM" ]] &&
+  [[ "$(jq -r '.kernel_sha256 // empty' "$OUT/manifest.json")" == "$KERNEL_SHA" ]]; then
   if [[ "$(gate_key "$RECORD")" != "$(jq -c '.sha256 // null' <<<"$GATE_JSON")" ]]; then
     # The same snapshot, cited against another gate record (or newly against one): the snapshot
     # stands, only the record's evidence changes.
@@ -294,7 +309,7 @@ if [[ -z "$FORCE" && -f "$OUT/manifest.json" && -f "$RECORD" ]] &&
     log "already built: snapshot $NAME; its record now cites the given gate record ($RECORD)"
     exit 0
   fi
-  log "already built: snapshot $NAME, record $RECORD (--force rebuilds)"
+  log "already built: snapshot $NAME, record $RECORD (--force rebuilds; it is needed after a guest agent change)"
   exit 0
 fi
 
@@ -315,7 +330,10 @@ trap cleanup EXIT
 # makes a registry or a local tag that says otherwise fail here, not in a sandbox.
 log "pulling $IMAGE"
 PULLED=''
-podman image exists "$PULL" || { podman pull "$PULL" >/dev/null && PULLED=1; }
+if ! podman image exists "$PULL"; then
+  podman pull "$PULL" >/dev/null || die "could not pull $PULL"
+  PULLED=1
+fi
 got="$(podman image inspect --format '{{.Digest}}' "$PULL")"
 [[ "$got" == "$DIGEST" ]] || die "pulled $IMAGE but its digest is $got"
 
@@ -353,3 +371,4 @@ egress_flag=''
 log "built template $ID: snapshot $NAME, worker $WORKER"
 log "record: $RECORD (copy it to the operator's machine for deploy/sbx/template-onboarding/template-register.sh)"
 log "then, after setup.sh: sudo deploy/sbx/install-host.sh <bundle of $WORKER> --snapshot $NAME --budget-mb <at least $BUDGET_MIN>$egress_flag"
+log "install-host.sh wires $RECORD into the worker (SH_TEMPLATE_RECORD, SANDBOX_TEMPLATE=$ID), so the worker checks it at every start"
