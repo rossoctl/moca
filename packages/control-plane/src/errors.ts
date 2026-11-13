@@ -34,6 +34,7 @@ export const CP_ERROR_CODES = [
   'template_not_found',
   'template_exists',
   'policy_refused',
+  'mode_not_allowed',
   'self_attested',
   'digest_mismatch',
   'bundle_quota_exceeded',
@@ -97,6 +98,9 @@ const STATUS: Record<CpErrorCode, number> = {
   template_exists: 409,
   // 422: a create the policy refuses at create (spec §8.1); `rule` names the gating rule.
   policy_refused: 422,
+  // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
+  // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
+  mode_not_allowed: 403,
   // 409: deployment visibility for a template with a self-attested build, until an admin trusts its
   // gate record (trustedGateRecords).
   self_attested: 409,

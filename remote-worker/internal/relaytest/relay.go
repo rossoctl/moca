@@ -145,6 +145,43 @@ func (c *Conn) SendAbort(t *testing.T, reqID uint64) {
 	}
 }
 
+// SendLeaseControl sends a LeaseControl frame; the worker answers with a lease_result
+// carrying f's ctl_id (LeaseResult).
+func (c *Conn) SendLeaseControl(t *testing.T, f *pb.LeaseControlFrame) {
+	t.Helper()
+	if err := c.stream.Send(&pb.ServerFrame{Msg: &pb.ServerFrame_LeaseControl{LeaseControl: f}}); err != nil {
+		t.Fatalf("send lease_control: %v", err)
+	}
+}
+
+// LeaseResult drains frames until the lease_result for ctlID.
+func (c *Conn) LeaseResult(t *testing.T, ctlID uint64) *pb.LeaseControlResult {
+	t.Helper()
+	for {
+		if r := c.Next(t).GetLeaseResult(); r != nil && r.GetCtlId() == ctlID {
+			return r
+		}
+	}
+}
+
+// ExecFrames drains frames until the terminal one for reqID and returns every frame of
+// that Exec, in arrival order, terminal last: chunks, lease events, then End or ExecError.
+func (c *Conn) ExecFrames(t *testing.T, reqID uint64) []*pb.WorkerFrame {
+	t.Helper()
+	var out []*pb.WorkerFrame
+	for {
+		f := c.Next(t)
+		switch {
+		case f.GetChunk() != nil && f.GetChunk().GetReqId() == reqID,
+			f.GetLease() != nil && f.GetLease().GetReqId() == reqID:
+			out = append(out, f)
+		case f.GetEnd() != nil && f.GetEnd().GetReqId() == reqID,
+			f.GetError() != nil && f.GetError().GetReqId() == reqID:
+			return append(out, f)
+		}
+	}
+}
+
 // Next returns the next frame, skipping heartbeats.
 func (c *Conn) Next(t *testing.T) *pb.WorkerFrame {
 	t.Helper()

@@ -54,7 +54,9 @@ const SANDBOX_ONLY = [
   'janitorSandboxes',
   'listSandboxes',
   'lookupEgressCredential',
+  'mintSandboxModeToken',
   'mintSandboxToken',
+  'setSandboxMode',
 ];
 
 // SBX0.2b: mounted on `sandbox` only when egress is configured (RouteSpec.requiresEgress).
@@ -227,6 +229,50 @@ describe('route profiles (SBX0 §4.1)', () => {
       headers: { authorization: `Bearer ${JANITOR_TOKEN}` },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('takes only a user API token on the mode routes: a sandbox or set-mode token is a 401', async () => {
+    const d = { ...sandboxDeps(), newId: () => 'b'.repeat(26) };
+    const base = await serveWith(d);
+    const user = d.signer.mint({
+      sub: 'github:1234',
+      tenant: 'github:1234',
+      roles: [],
+      scope: ['api'],
+      ttlSeconds: 3600,
+      iss: apiIssuer(d.config),
+      now: Math.floor(NOW_MS / 1000),
+    });
+    const call = (method: string, path: string, token: string, body?: object) =>
+      fetch(base + path, {
+        method,
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    const created = await call('POST', '/v1/sandboxes', user, { template: 'default' });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    const sbxToken = (
+      (await (await call('POST', `/v1/sandboxes/${id}/token`, user)).json()) as {
+        token: string;
+      }
+    ).token;
+    const put = await call('PUT', `/v1/sandboxes/${id}/mode`, user, { mode: 'lease' });
+    expect(put.status).toBe(200);
+    const { setModeToken } = (await put.json()) as { setModeToken: string };
+    const minted = await call('POST', `/v1/sandboxes/${id}/mode-token`, user);
+    expect(minted.status).toBe(200);
+    for (const [what, token] of [
+      ['a sandbox token', sbxToken],
+      ['a set-mode token', setModeToken],
+    ] as const) {
+      const p = await call('PUT', `/v1/sandboxes/${id}/mode`, token, { mode: 'per-exec' });
+      expect(p.status, `PUT mode with ${what}`).toBe(401);
+      const m = await call('POST', `/v1/sandboxes/${id}/mode-token`, token);
+      expect(m.status, `mode-token with ${what}`).toBe(401);
+    }
+    // Neither refusal changed anything: the one accepted PUT is epoch 1.
+    expect((await d.sandboxes!.get(id, Math.floor(NOW_MS / 1000)))!.modeEpoch).toBe(1);
   });
 
   it('still serves the harness routes under the default profile', async () => {

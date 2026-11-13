@@ -32,7 +32,15 @@ import {
   listCredentials,
   listPresets,
 } from './credentials.js';
-import { cmdMcp, cmdPut, cmdRun, parseTimeout, workspacePath } from './run.js';
+import {
+  busyRetries,
+  cmdMcp,
+  cmdPut,
+  cmdRun,
+  parseTimeout,
+  workspacePath,
+  type RunRetry,
+} from './run.js';
 import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
@@ -103,9 +111,13 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';
                                                  exit: the command's code; 124 timed out or killed;
-                                                 125 sandbox failure; S defaults to, and is capped at,
-                                                 the sandbox token's lifetime minus 60 s)
+                                                 125 sandbox failure; 75 refused before it started,
+                                                 every try (retried MOCACTL_SBX_BUSY_RETRIES times,
+                                                 default 4, at most 20; nothing ran); 130
+                                                 interrupted; S defaults to, and is capped at, the
+                                                 sandbox token's lifetime minus 60 s)
   mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
+                                                 (a refusal before start: retried, 75, as run's)
   mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
   mocactl sbx claude [-- CLAUDE_ARGS ...]        run Claude Code on this sandbox's MCP tools, for
                                                  one run (--mcp-config + --strict-mcp-config,
@@ -175,8 +187,13 @@ export interface SbxDeps {
   readStdinBytes?: (limit?: number) => Promise<Buffer>;
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
-  /** The template commands' waits (default: the runtime's sleep). */
+  /**
+   * The template commands' waits, and `run`'s wait between tries after a refusal before start
+   * (default: the runtime's sleep).
+   */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** `run`'s jitter, 0 to 1 (default Math.random). */
+  random?: () => number;
   /** The template commands' clock, epoch ms (default: the runtime's). */
   now?: () => number;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
@@ -239,6 +256,15 @@ export function openSbxRuntime(
   });
   // `url` is never empty here, so the runtime always built its client through the factory.
   return { rt, api: api! };
+}
+
+/** `run`'s and `put`'s retry after a refusal before start. */
+function runRetry(env: NodeJS.ProcessEnv, deps: SbxDeps, ctx: SbxCtx): RunRetry {
+  return {
+    retries: busyRetries(env),
+    sleep: deps.sleep ?? ctx.rt.sleep,
+    ...(deps.random ? { random: deps.random } : {}),
+  };
 }
 
 /**
@@ -843,9 +869,9 @@ export async function sbxMain(
     case 'token':
       return cmdToken(ctx, id!);
     case 'run':
-      return cmdRun(ctx, id!, script!, timeout, deps.execFactory);
+      return cmdRun(ctx, id!, script!, timeout, deps.execFactory, runRetry(env, deps, ctx));
     case 'put':
-      return cmdPut(ctx, id!, target!, content!, deps.execFactory);
+      return cmdPut(ctx, id!, target!, content!, deps.execFactory, runRetry(env, deps, ctx));
     case 'mcp':
       return cmdMcp(ctx, id!, deps.mcpTransport, deps.execFactory);
     case 'claude':
