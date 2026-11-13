@@ -704,6 +704,40 @@ describe('activation on first use (§6.4)', () => {
     expect(stopped(await wanted(9700))).toBe(true);
   });
 
+  it('keeps no worker for the turns of a subject not enrolled: it stops once the leases end', async () => {
+    const d = await setup();
+    d.config.routeProfile = 'combined';
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    const outsider = { ...alice, sub: 'github:5555', tenant: 'github:5555' } as typeof alice;
+    await seedCredential(d, outsider.sub);
+    d.config.sessionTokenTtlSeconds = 86_400;
+    // An enrolled subject's lease starts it; the outsider's session is created once it is active.
+    await activate(d, 't1', alice);
+    attachedNow = ['sbx_t1'];
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: outsider, body: { sandbox: { template: 't1' } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    const tok = (r.body as Body).token as string;
+    const t0 = now;
+    const wanted = async (atS: number) => {
+      now = t0 + atS * 1000;
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2, [hash('1')]);
+      return (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    };
+    const stopped = (w: Body) => w.stop.some((x: Body) => x.buildId === hash('1'));
+    // Its turns run while the worker is up, but extend nothing.
+    for (const atS of [3000, 3500]) {
+      now = t0 + atS * 1000;
+      expect(await exchangeCredential(tok, d)).toMatchObject({ sandboxBuildId: hash('1') });
+    }
+    expect(stopped(await wanted(3550))).toBe(false); // the lease still stands
+    expect(stopped(await wanted(3700))).toBe(true); // no lease left, and no hold
+  });
+
   it('takes no lease for a session create that another check refuses', async () => {
     const d = await setup();
     attachedNow = [];

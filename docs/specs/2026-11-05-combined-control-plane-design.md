@@ -117,7 +117,11 @@ the `sandbox` profile.
   find none. So each turn's credential exchange (interactive or queued) keeps the build's worker
   for the hold, the same length as a default lease, from that turn, as a live sandbox keeps its
   worker (`busyWorkers`): it is not stopped while held, and keeps its slot. A hold keeps a worker
-  that runs; it never starts one, and never counts as a lease or against `quota.active`.
+  that runs; it never starts one, and never counts as a lease or against `quota.active`. Only the
+  turns of a subject enrolled for sandboxes hold (the rule first-use leases follow): a subject who
+  is not enrolled has its turns run on an active build while the worker is up, but they extend
+  nothing, so they cannot keep a build running after its owner and every lease holder have released
+  it (deactivate, the host's capacity).
   **Failure mode:** a session with no turn for longer than the hold (or across a control-plane
   restart, which forgets the holds as it forgets host state until the next turn) can find its
   worker stopped; its next turn is refused (`503 sandbox_unavailable`), and a subject not enrolled
@@ -203,7 +207,8 @@ Increments 1-5 are code and tests only; 6 and 7 need a cluster (and a KVM host f
 
 - On `combined` a non-enrolled login can use sessions, as on `harness` (§3.2).
 - A pinned session idle for longer than the hold can lose its worker, until an enrolled subject
-  activates the template again (§3.4).
+  activates the template again (§3.4). A subject not enrolled holds no worker at all: its session
+  runs only while some lease or an enrolled subject's turns keep the worker up.
 - On `combined` the harness's exec token reaches every attached worker, the sandboxes of enrolled
   users included (§3.6): a supervisor compromise is no longer contained to the harness's workers.
 - With no model-catalog hosts, a session's `model` is accepted unverified (`modelVerified: false`).

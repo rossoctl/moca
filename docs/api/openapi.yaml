@@ -2515,8 +2515,9 @@ paths:
         `stop`: the ones it holds with no live lease, and a leased one it runs while placement keeps
         it on another host, each with no live sandbox on its worker; a worker with a live sandbox is
         in neither list (it drains first, and counts against the host's `activeLimit` meanwhile).
-        So is a worker a session pinned to its build had a turn on within the hold (combined
-        control plane spec §3.4: the hosts' idle limit from that turn's credential exchange).
+        So is a worker a session pinned to its build had a turn on within the hold, when the
+        session's subject is enrolled for sandboxes (combined control plane spec §3.4: the hosts'
+        idle limit from that turn's credential exchange).
         The agent starts only workers already installed on the host.
       security: [{ hostToken: [] }]
       parameters:

@@ -4,6 +4,7 @@ import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
 import { liveLeases, place, type HostView } from './activation.js';
+import { isEnrolledForSandbox } from './sandbox-config.js';
 import { isLive } from './sandbox-store.js';
 
 /**
@@ -163,17 +164,21 @@ export async function busyWorkers(deps: CpDeps, nowS: number): Promise<Set<strin
 /**
  * A turn of a session pinned to a host-managed build (its credential exchange) keeps that build's
  * worker for the hold (sessionHoldSeconds) from now, as a live sandbox keeps its worker, so the
- * worker outlives the first-use lease while the session is in use. Best effort: a failure is
- * logged and never fails the turn. Reads the catalog only for the first turn of a hold.
+ * worker outlives the first-use lease while the session is in use. Only when the session's owner
+ * is enrolled for sandboxes (the rule first-use leases follow, combined spec §3.4): a turn of a
+ * subject who is not runs while the worker is up but extends nothing, so it cannot keep a build
+ * running after every lease on it has gone (deactivate, the host's capacity). Best effort: a
+ * failure is logged and never fails the turn. Reads the catalog only for the first turn of a hold.
  */
 export async function holdPinnedWorker(
-  rec: { sandboxBuildId?: string },
+  rec: { owner: string; sandboxBuildId?: string },
   deps: CpDeps,
 ): Promise<void> {
   const build = rec.sandboxBuildId;
   const hosts = deps.hosts;
   if (!hosts || !deps.templates || !build?.startsWith('sha256:')) return;
   try {
+    if (!isEnrolledForSandbox(rec.owner, deps.identity.rolesFor(rec.owner), deps.config)) return;
     const nowS = seconds(deps);
     let worker = hosts.sessionWorker(build, nowS);
     if (worker === undefined) {
