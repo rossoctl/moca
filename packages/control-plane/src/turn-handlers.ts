@@ -152,6 +152,12 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       cfg: rec.configRef ?? '',
       // The NAME. Resolved against the owner's credentials at dequeue (§5.4), never carried.
       credentialName: rec.credentialName,
+      // Copied for the reason `cfg` and `credentialName` are: the turn spends these unchanged, and a
+      // queued turn can wait an hour, so reading them from the live session at dequeue let a
+      // `PATCH /v1/sessions/{id}` move it onto a model its submitter never chose (#388).
+      model: rec.model ?? '',
+      ...(rec.modelLimits ? { modelLimits: rec.modelLimits } : {}),
+      sandboxTier: rec.sandboxTier ?? '',
       caps: parsed.caps,
       idempotencyKey,
       envelope: parsed.envelope,

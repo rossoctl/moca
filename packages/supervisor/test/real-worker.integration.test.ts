@@ -310,8 +310,10 @@ describe.skipIf(!liveCrash)('async crash recovery, live (SH_ASYNC_LIVE_CRASH=1)'
       await waitReady(sup!);
       const firstPid = sup!.pool.telemetry()[0]!.pid;
 
-      // The same twelve-field record `submitTurn` writes (turn-record.ts:33-57). `credentialName`,
-      // never a credential VALUE: the record and every audit entry carry the NAME (§5.1, §7.2).
+      // The same record `submitTurn` writes (turn-record.ts). `credentialName`, never a credential
+      // VALUE: the record and every audit entry carry the NAME (§5.1, §7.2). `model` and
+      // `sandboxTier` are '' -- this turn names neither, so the worker runs it on the deployment's
+      // own defaults, which is what a live rig has configured.
       await turns.create({
         turnId,
         owner: 'live-crash',
@@ -319,6 +321,8 @@ describe.skipIf(!liveCrash)('async crash recovery, live (SH_ASYNC_LIVE_CRASH=1)'
         sessionId,
         cfg: '',
         credentialName: process.env.SH_LIVE_CREDENTIAL_NAME ?? 'default',
+        model: '',
+        sandboxTier: '',
         caps: {},
         idempotencyKey: sessionId,
         envelope: { sessionId, kind: 'prompt', prompt: 'say the single word: ok' },

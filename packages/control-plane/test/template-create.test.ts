@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +6,14 @@ import { HANDLERS } from '../src/handlers.js';
 import { ProvenanceStore, sha256Hex, verifyExport } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
-import { checkCreate, DEFAULT_POLICY, registryOf, type Policy } from '../src/template-policy.js';
+import {
+  checkCreate,
+  DEFAULT_POLICY,
+  policyProblems,
+  PROFILE_RULES,
+  registryOf,
+  type Policy,
+} from '../src/template-policy.js';
 import { admin, alice, bob, codeOf, ctx, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
 
 // The repository's own worked examples: the default sandbox image's spec, and a SWE-bench spec with
@@ -23,7 +30,7 @@ const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf
 const GATE = readFileSync(join(EX, 'django__django-11133.gate-record.json'), 'utf8');
 const GATE_SHA = `sha256:${sha256Hex(Buffer.from(GATE, 'utf8'))}`;
 const { id: ID, image: IMAGE, schema: _s, notes: _n, ...REST } = SPEC;
-const spec = { ...REST, guest_mb: REST.guest_ram_mb };
+const spec = REST;
 const benchmarkPolicy: Policy = { ...DEFAULT_POLICY, trustedGateRecords: [GATE_SHA] };
 
 let seq = 0;
@@ -122,7 +129,13 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       { image: IMAGE.replace('images/', 'evil.example.com/x/') },
       'registry',
     ],
-    ['8 GiB on a benchmark', { spec: { ...spec, guest_mb: 8192 } }, 'envelope'],
+    ['8 GiB on a benchmark', { spec: { ...spec, guest_ram_mb: 8192 } }, 'envelope'],
+    [
+      'both guest-size keys, the policy reading one and the build the other',
+      { spec: { ...spec, guest_mb: 4096, guest_ram_mb: 16_384 } },
+      'M7.guest',
+    ],
+    ['both guest-size keys, even equal', { spec: { ...spec, guest_mb: 4096 } }, 'M7.guest'],
     ['an unknown profile', { profile: 'gold' }, 'profile'],
     [
       'a root identity into an image refusing commits',
@@ -137,12 +150,15 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     });
   });
 
-  it('records a refusal as a check on the template stream, and queues nothing', async () => {
+  it("records a refusal on the caller's own template as a check, and queues nothing", async () => {
     const d = stored();
+    await create(d);
     await refusal(d, body({ spec: { ...spec, egress: true } }));
+    const t = (await d.templates!.get(ID))!;
+    expect(t.builds).toHaveLength(1);
     const chain = await d.provenance!.chain(`template/${ID}`);
-    expect(chain.map((r) => r.kind)).toEqual(['check']);
-    expect(chain[0].body).toMatchObject({ outcome: 'refused' });
+    expect(chain.map((r) => r.kind)).toEqual(['create', 'gate', 'check', 'check']);
+    expect(chain.at(-1)!.body).toMatchObject({ outcome: 'refused' });
   });
 
   it('X12 fails closed: skip_git_identity_check with a gate record that never measured the identity', async () => {
@@ -159,7 +175,7 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     });
   });
 
-  it("records a refusal on a new id or the caller's own, never on another subject's", async () => {
+  it("records a refusal on the caller's own id, never on a new id or another subject's", async () => {
     const d = stored();
     await create(d); // alice owns ID now
     const len = async () => (await d.provenance!.chain(`template/${ID}`)).length;
@@ -174,11 +190,45 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       kind: 'check',
       body: { outcome: 'refused' },
     });
-    // A refusal on an id no template holds yet is recorded too.
+    // A refusal on an id no template holds yet opens no stream: one audit line names it instead.
+    const audited = () =>
+      (d.streams.get('sh:cp:audit') ?? []).filter((r) => r.decision === 'template_create_refused');
+    expect(audited()).toEqual([]);
     await expect(create(d, { ...bad, id: 'fresh-id' }, bob)).rejects.toMatchObject({
       code: 'policy_refused',
     });
-    expect((await d.provenance!.chain('template/fresh-id')).map((r) => r.kind)).toEqual(['check']);
+    expect(await d.provenance!.chain('template/fresh-id')).toEqual([]);
+    expect(audited()).toHaveLength(1);
+    expect(audited()[0]).toMatchObject({
+      subject: bob.sub,
+      templateId: 'fresh-id',
+      reason: 'policy_refused',
+      rules: 'M1,registry,X10,X1.image',
+    });
+  });
+
+  it.each([
+    [
+      'a gate record that failed',
+      { gateRecord: GATE.replace('"passed": true', '"passed": false') },
+      'X1',
+    ],
+    [
+      'a gate record for another image',
+      { gateRecord: GATE.replace(IMAGE.split('@')[1], `sha256:${'e'.repeat(64)}`) },
+      'X1.image',
+    ],
+    [
+      'skip_git_identity_check with no gate record',
+      { gateRecord: undefined, spec: { ...spec, source_record_digest: undefined } },
+      'X12',
+    ],
+  ])('applies X10 and X12 under base too: refuses %s', async (_n, over, rule) => {
+    const d = stored();
+    expect(await refusal(d, body({ profile: 'base', ...over }))).toEqual({
+      code: 'policy_refused',
+      rule,
+    });
   });
 
   it('lets a base-profile template through with no gate record', async () => {
@@ -308,6 +358,75 @@ describe('POST /v1/templates (§4, §8.1)', () => {
     expect(other.extra).toEqual({ quota: 'templates' });
   });
 
+  it('counts a probing build as queued, and charges an admin-added build to the owner', async () => {
+    const d = stored({ ...benchmarkPolicy, quota: { templates: 10, buildsQueued: 1, active: 1 } });
+    await create(d);
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((b) => ({ ...b, status: 'probing' as const })),
+    }));
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.buildsQueued.used).toBe(1);
+    const more = (principal: typeof alice) =>
+      HANDLERS.createTemplateBuild!(
+        ctx({
+          principal,
+          params: { id: ID },
+          body: body({ spec: { ...spec, description: 'another build' } }),
+        }),
+        d,
+      );
+    expect((await more(alice).catch((x) => x)).extra).toEqual({ quota: 'buildsQueued' });
+    // The admin's build of alice's template is alice's: refused on her quota, not the admin's.
+    expect((await more(admin).catch((x) => x)).extra).toEqual({ quota: 'buildsQueued' });
+    const qa = (await HANDLERS.getQuota!(ctx({ principal: admin }), d)).body as Body;
+    expect(qa.buildsQueued.used).toBe(0);
+  });
+
+  it('stores the guest_mb alias as guest_ram_mb, the key the build reads, and reuses across the two', async () => {
+    const d = stored();
+    const { guest_ram_mb, ...rest } = spec;
+    const r = await create(d, body({ spec: { ...rest, guest_mb: guest_ram_mb } }));
+    expect(r.status).toBe(202);
+    const rec = (await d.provenance!.chain(`template/${ID}`)).find((x) => x.kind === 'create')!;
+    expect(rec.body.spec).toMatchObject({ guest_ram_mb: 4096 });
+    expect(rec.body.spec).not.toHaveProperty('guest_mb');
+    const doc = (await d.templates!.get(ID))!;
+    expect(doc.builds[0].request?.spec).toMatchObject({ guest_ram_mb: 4096 });
+    expect(doc.builds[0].request?.spec).not.toHaveProperty('guest_mb');
+    expect((await create(d)).body).toMatchObject({ reused: true });
+  });
+
+  it('holds the quotas under concurrent creates for different ids', async () => {
+    const d = stored({ ...benchmarkPolicy, quota: { templates: 1, buildsQueued: 10, active: 1 } });
+    const ids = ['par-a', 'par-b', 'par-c'];
+    const rs = await Promise.allSettled(ids.map((id) => create(d, body({ id }))));
+    expect(rs.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const codes = rs.flatMap((r) => (r.status === 'rejected' ? [r.reason.code] : []));
+    expect(codes).toEqual(['quota_exceeded', 'quota_exceeded']);
+    const listed = (await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body;
+    expect(listed.templates).toHaveLength(1);
+
+    // buildsQueued, with two new builds of two of one's own templates at once.
+    const d2 = stored({ ...benchmarkPolicy, quota: { templates: 10, buildsQueued: 3, active: 1 } });
+    await create(d2, body({ id: 'own-a' }));
+    await create(d2, body({ id: 'own-b' }));
+    const more = (id: string) =>
+      HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id },
+          body: body({ spec: { ...spec, description: `more of ${id}` } }),
+        }),
+        d2,
+      );
+    const rs2 = await Promise.allSettled([more('own-a'), more('own-b')]);
+    expect(rs2.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(rs2.flatMap((r) => (r.status === 'rejected' ? [r.reason.extra] : []))).toEqual([
+      { quota: 'buildsQueued' },
+    ]);
+  });
+
   it('answers that a deployment without SH_PROVENANCE_DIR stores no templates', async () => {
     const d = makeDeps({ config: { routeProfile: 'sandbox' } });
     expect(await codeOf(() => create(d))).toBe('invalid_request');
@@ -342,6 +461,18 @@ describe('POST /v1/templates/{id}/builds/{build}/cancel (§5.1)', () => {
     expect((await create(d)).body).not.toHaveProperty('reused');
     const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
     expect(q.buildsQueued.used).toBe(1);
+  });
+
+  it('frees the template slot of a template whose only build was cancelled', async () => {
+    const d = stored({ ...benchmarkPolicy, quota: { templates: 1, buildsQueued: 10, active: 1 } });
+    const h = handleOf(await create(d));
+    expect((await create(d, body({ id: 'other-template' })).catch((x) => x)).extra).toEqual({
+      quota: 'templates',
+    });
+    await cancel(d, h);
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.templates.used).toBe(0);
+    expect((await create(d, body({ id: 'other-template' }))).status).toBe(202);
   });
 
   it('refuses another subject, an unknown build, and a build already failed', async () => {
@@ -381,6 +512,44 @@ describe('policy and quota routes', () => {
       admin.sub,
       admin.sub,
     ]);
+  });
+
+  it('PUT /v1/policy refuses a rule id no check acts on, and an exact envelope not of whole numbers', () => {
+    const bench = DEFAULT_POLICY.profiles.benchmark!;
+    const withBench = (b: unknown) => ({
+      ...DEFAULT_POLICY,
+      profiles: { ...DEFAULT_POLICY.profiles, benchmark: b },
+    });
+    expect(policyProblems(DEFAULT_POLICY)).toEqual([]);
+    for (const requires of [['X13'], ['x11'], [1]])
+      expect(policyProblems(withBench({ ...bench, requires })).join()).toMatch(/requires/);
+    for (const exact of [
+      { guestMb: '4096', vcpus: 2 },
+      { guestMb: 4096 },
+      { guestMb: 0, vcpus: 2 },
+      null,
+    ])
+      expect(
+        policyProblems(withBench({ ...bench, envelope: { ...bench.envelope, exact } })).join(),
+      ).toMatch(/exact/);
+    expect(PROFILE_RULES).toEqual(DEFAULT_POLICY.profiles.benchmark!.requires);
+  });
+
+  it('fails closed on a stored policy naming an unknown rule id, until an admin sets a valid one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cp-policy-'));
+    const provenance = new ProvenanceStore({ dir, now: () => NOW_MS });
+    const bad = {
+      ...DEFAULT_POLICY,
+      profiles: {
+        ...DEFAULT_POLICY.profiles,
+        benchmark: { ...DEFAULT_POLICY.profiles.benchmark!, requires: ['X13'] },
+      },
+    };
+    writeFileSync(join(dir, 'policy.json'), JSON.stringify({ policy: bad, record: 'sha256:x' }));
+    const store = new FilePolicyStore({ dir, provenance });
+    await expect(store.current()).rejects.toThrow(/policy.json is invalid: .*requires/);
+    await store.set(DEFAULT_POLICY, admin.sub);
+    expect((await store.current()).policy).toEqual(DEFAULT_POLICY);
   });
 
   it("GET /v1/quota shows the limits and the caller's use", async () => {
@@ -435,6 +604,48 @@ describe('the rules alone', () => {
     expect(registryOf('ghcr.io/rossoctl/moca@sha256:ab')).toBe('ghcr.io');
     expect(registryOf('localhost:5000/x@sha256:ab')).toBe('localhost:5000');
     expect(registryOf('x@sha256:ab')).toBe('<default>');
+    expect(registryOf('GHCR.io/rossoctl/moca@sha256:ab')).toBe('ghcr.io');
+    expect(registryOf('Images/x@sha256:ab')).toBe('<default>');
+  });
+
+  it('M1 takes the distribution reference grammar, pinned by digest, no tag', () => {
+    const d = `@sha256:${'a'.repeat(64)}`;
+    const m1 = (image: string) =>
+      checkCreate({ id: 'x', image, spec: {} }, DEFAULT_POLICY).results.find(
+        (r) => r.rule === 'M1',
+      )!.passed;
+    for (const ok of [
+      'images/moca-microvm',
+      'x',
+      'ghcr.io/rossoctl/moca',
+      'GHCR.io/rossoctl/moca',
+      'localhost:5000/a/b_c/d.e/f__g/h--i',
+      'localhost/x',
+    ])
+      expect(m1(ok + d), ok).toBe(true);
+    for (const bad of [
+      'Images/X',
+      '-x',
+      'a//b',
+      '../x',
+      'x:tag',
+      'ghcr.io/x:1',
+      'a/\tb',
+      'a/b\u0007',
+      'x/',
+      '-bad.host/x',
+      'a/B',
+      `${'a'.repeat(256)}`,
+    ])
+      expect(m1(bad + d), bad).toBe(false);
+    expect(m1('x@sha256:abc')).toBe(false);
+    // An allowed host matches whatever case either side writes it in.
+    const pol = { ...DEFAULT_POLICY, allowedRegistries: ['GHCR.IO'] };
+    const reg = checkCreate(
+      { id: 'x', image: `ghcr.io/rossoctl/moca${d}`, spec: {} },
+      pol,
+    ).results.find((r) => r.rule === 'registry')!;
+    expect(reg.passed).toBe(true);
   });
 
   it('passes the worked example in full under its policy, every rule listed', () => {
