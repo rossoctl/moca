@@ -67,7 +67,7 @@ Criteria for Stable and the support policy are in
 | One process per session                             | Many sessions per worker; scale by **adding pods or sizing up**     |
 | One invocation model                                | Sync, detachable streaming, human-gated                             |
 
-The economics measurement ([experiment](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md),
+The economics measurement ([experiment](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e01-e07-knative/EXPERIMENTS.md),
 run on the since-removed scale-to-zero path) showed the serverless shape consuming roughly a
 quarter of the pod-seconds of an always-on agent. P6 trades scale-to-zero for density — many
 sessions per worker with admission control — and keeps what that experiment bought on the
@@ -243,12 +243,12 @@ moca/
 
 Behaviour and economics are backed by reproducible experiments rather than claims:
 
-- **[`moca-experiments/knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md)**
+- **[`moca-experiments/experiments/e01-e07-knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e01-e07-knative/EXPERIMENTS.md)**
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`docs/archive/experiment-results.md`](docs/archive/experiment-results.md)**: E2 (reconstruction cost) and E5
   (budget enforcement), a dated write-up from June 2026. The code these ran from now lives in
-  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments).
+  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments/e02-e05-harness).
 
 ---
 

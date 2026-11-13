@@ -261,7 +261,7 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
       'invalid-workspace-key: workspace_key "x" must match',
       'empty-workspace-key: the microVM path requires',
       'spawn-failure: restore for "k": boom',
-      'req_id collision: a different command is already in flight for this id',
+      'req_id collision: a different Exec (command, mode, epoch or workspace) is already in flight for this id',
       'workspace /workspace/k: mkdir: permission denied',
       'start bash: fork failed',
       'vmpool: closed',

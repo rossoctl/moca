@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -266,9 +267,9 @@ func TestFirecrackerMountsAtAcquireNotAtRestore(t *testing.T) {
 func TestFirecrackerSerializesExecsPerRun(t *testing.T) {
 	// A pure contract assertion, no KVM needed: the pool reads this to decide whether to
 	// hold a per-run Exec mutex, and getting it wrong corrupts an ext4 (spec §4.3). Never
-	// calls Restore, so it constructs no unix socket path and needs no shortUnixSocketDir
-	// style workaround for macOS's sun_path limit.
-	lc, err := NewFirecrackerLauncher(FirecrackerOptions{SnapshotDir: t.TempDir(), JailerBin: "/bin/true", FirecrackerBin: "/bin/true", ChrootBase: t.TempDir()})
+	// calls Restore, so the base is never created; it is short only because construction checks
+	// that the API socket path fits sun_path (macOS's t.TempDir() does not).
+	lc, err := NewFirecrackerLauncher(FirecrackerOptions{SnapshotDir: t.TempDir(), JailerBin: "/bin/true", FirecrackerBin: "/bin/true", ChrootBase: "/srv/jail"})
 	if err != nil {
 		t.Fatalf("NewFirecrackerLauncher: %v", err)
 	}
@@ -566,5 +567,112 @@ func TestFirecrackerResumeResetsPhasesOnRefusal(t *testing.T) {
 		t.Errorf("after a refused Resume: ResumePhases() = (%v, %v, %v), want all zero -- "+
 			"the stash defer is below the checkNotDestroyed guard, so the refused attempt "+
 			"is reporting the previous attempt's measurements as its own", vm, vd, mo)
+	}
+}
+
+// newLeaseTestVM builds a firecrackerVM in a pooled cgroup on a fake cgroupfs root, with a jail
+// directory so Reap's whole teardown runs.
+func newLeaseTestVM(t *testing.T, id string) (*firecrackerVM, *cgroupPool, string) {
+	t.Helper()
+	root := t.TempDir()
+	const parent = "microvm.slice/microvm-vms.slice"
+	if err := os.MkdirAll(filepath.Join(root, parent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := newCgroupPool(parent, (256+32)<<20, root)
+	rel, err := pool.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jailRoot := filepath.Join(t.TempDir(), "jail", id, "root")
+	if err := os.MkdirAll(jailRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &firecrackerVM{id: id, key: "run-1", jailRoot: jailRoot, cgroups: pool, cgroupRel: rel}, pool, rel
+}
+
+// Spec §6, "Not from the cgroup pool": a lease VM starts as a pooled standby, so at promotion
+// its cgroup's memory.max is raised to the lease bound and the cgroup leaves the pool -- on
+// Reap it is retired (removed), never released to the free list where a per-Exec VM would
+// inherit the raised bound.
+func TestLeaseCgroupRaisesMemoryMaxAndRetiresOnReap(t *testing.T) {
+	var _ leaseCgrouper = (*firecrackerVM)(nil)
+	vm, pool, rel := newLeaseTestVM(t, "vm-90")
+
+	// PerVMBytes 1056 MiB + LeasePageCacheBytes 256 MiB at a 1 GiB guest.
+	if err := vm.LeaseCgroup(1312 << 20); err != nil {
+		t.Fatalf("LeaseCgroup: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(pool.abs(rel), "memory.max"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(b)); got != "1375731712" {
+		t.Fatalf("memory.max = %q, want 1375731712", got)
+	}
+
+	if err := vm.Reap(); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	pool.mu.Lock()
+	free := append([]string(nil), pool.free...)
+	pool.mu.Unlock()
+	for _, f := range free {
+		if f == rel {
+			t.Fatalf("lease cgroup %q was released to the free list; want retired", rel)
+		}
+	}
+	if _, err := os.Stat(pool.abs(rel)); !os.IsNotExist(err) {
+		t.Fatalf("lease cgroup %q still exists after Reap (stat err=%v)", rel, err)
+	}
+	if pool.leaks() != 0 {
+		t.Fatalf("leaks=%d, want 0", pool.leaks())
+	}
+}
+
+// The control: a VM that never took LeaseCgroup is released to the pool on Reap, exactly as
+// before lease mode. Guards against the retire branch swallowing the per-Exec path.
+func TestReapWithoutLeaseCgroupStillReleases(t *testing.T) {
+	vm, pool, rel := newLeaseTestVM(t, "vm-91")
+	if err := vm.Reap(); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if pool.idle() != 1 {
+		t.Fatalf("idle=%d, want 1 -- a per-Exec VM's cgroup must return to the pool", pool.idle())
+	}
+	if _, err := os.Stat(pool.abs(rel)); err != nil {
+		t.Fatalf("released cgroup removed: %v", err)
+	}
+}
+
+// A lease VM runs, so its footprint changes between reads: LeaseBytes must re-read
+// memory.current every call, unlike StandbyBytes' cache-on-first-read.
+func TestLeaseBytesIsNotCached(t *testing.T) {
+	var _ leaseFootprinter = (*firecrackerVM)(nil)
+	vm, pool, rel := newLeaseTestVM(t, "vm-92")
+	cur := filepath.Join(pool.abs(rel), "memory.current")
+
+	if err := os.WriteFile(cur, []byte(strconv.FormatInt(100<<20, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := vm.LeaseBytes(); err != nil || got != 100<<20 {
+		t.Fatalf("LeaseBytes = (%d, %v), want (%d, nil)", got, err, int64(100<<20))
+	}
+	if err := os.WriteFile(cur, []byte(strconv.FormatInt(50<<20, 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := vm.LeaseBytes(); err != nil || got != 50<<20 {
+		t.Fatalf("second LeaseBytes = (%d, %v), want (%d, nil) -- a cached read", got, err, int64(50<<20))
+	}
+}
+
+// No pooled cgroup means nothing to raise or read; both refuse rather than pretend.
+func TestLeaseCgroupAndLeaseBytesWithoutACgroupError(t *testing.T) {
+	vm := &firecrackerVM{id: "vm-93"}
+	if err := vm.LeaseCgroup(1312 << 20); err == nil {
+		t.Fatal("LeaseCgroup with no pooled cgroup: want error")
+	}
+	if _, err := vm.LeaseBytes(); err == nil {
+		t.Fatal("LeaseBytes with no pooled cgroup: want error")
 	}
 }

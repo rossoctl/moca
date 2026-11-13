@@ -132,6 +132,21 @@ func TestManifestHasLeaseFeature(t *testing.T) {
 	}
 }
 
+// balloon-fpr-v1 is the name build-snapshot.sh writes when the golden snapshot carries the
+// reporting-only balloon; the worker's start-up warning keys on this exact string.
+func TestBalloonFeatureConstant(t *testing.T) {
+	if FeatureBalloonFPRV1 != "balloon-fpr-v1" {
+		t.Fatalf("FeatureBalloonFPRV1 = %q, want balloon-fpr-v1", FeatureBalloonFPRV1)
+	}
+	var m Manifest
+	if err := json.Unmarshal([]byte(`{"features":["lease-v1","balloon-fpr-v1"]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasFeature(FeatureBalloonFPRV1) {
+		t.Fatalf("Features = %v, HasFeature(balloon-fpr-v1) = false", m.Features)
+	}
+}
+
 // Features is outside the hash, like egress_ca_sha256: ComputeHash covers kernel,
 // rootfs and agent only, so a snapshot that predates the field still verifies.
 func TestManifestHashIgnoresFeatures(t *testing.T) {
@@ -189,3 +204,38 @@ func TestProbeFailsWhenNoVMCanBeRestored(t *testing.T) {
 }
 
 var errNoKVM = os.ErrPermission
+
+// TestProbeTearsDownItsVMOnEveryFailurePath pins the probe's teardown (#797): a probe that
+// fails is followed at once by the worker's exit, so a VM it restored and did not destroy is
+// left running beside the next start's sweep. Every way Probe can fail AFTER a VM exists must
+// destroy it before returning. (The restore failure itself creates no VM here; the
+// Firecracker launcher's own teardown on that path is pinned in
+// TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears.)
+func TestProbeTearsDownItsVMOnEveryFailurePath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*fakeLauncher)
+	}{
+		{"resume fails", func(lc *fakeLauncher) {
+			lc.setResumeFn(func(*fakeVM, context.Context) error { return errNoKVM })
+		}},
+		{"guest does not answer", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{}, errNoKVM })
+		}},
+		{"true exits non-zero", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{ExitCode: 1}, nil })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, lc, _ := testPool(t)
+			tc.stage(lc)
+			if err := p.Probe(context.Background()); err == nil {
+				t.Fatal("Probe succeeded despite the staged failure")
+			}
+			if lc.createdCount() != 1 || lc.liveCount() != 0 {
+				t.Fatalf("created=%d live=%d after a failed Probe, want 1 and 0 — the probe left its VM behind",
+					lc.createdCount(), lc.liveCount())
+			}
+		})
+	}
+}
