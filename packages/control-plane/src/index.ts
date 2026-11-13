@@ -188,6 +188,7 @@ export {
   checkStaticBearer,
   exchangeCredential,
   placeholderFor,
+  sessionFromToken,
   refuseMisdirectedSecret,
   resolveInference,
   targetOf,
@@ -196,6 +197,22 @@ export {
   type ResolvedInference,
 } from './exchange.js';
 export { exchangeTurnCredential, type TurnExchangeResponse } from './turn-exchange.js';
+export {
+  DEFAULT_GRANT_ISSUER,
+  GRANT_AUDIENCES,
+  GRANT_TYP,
+  INFERENCE_GRANT_AUDIENCE,
+  SANDBOX_GRANT_AUDIENCE,
+  mintGrants,
+  turnExp,
+  verifyGrant,
+  type GrantAudience,
+  type GrantClaims,
+  type GrantMintInput,
+  type InferenceGrantClaims,
+  type SandboxGrantClaims,
+} from './grant.js';
+export { issueTurnGrants, refreshTurnGrants, type TurnGrantsResponse } from './grant-exchange.js';
 export { TurnStore, type TurnStoreOptions } from './turn-store.js';
 export {
   isTerminalState,
