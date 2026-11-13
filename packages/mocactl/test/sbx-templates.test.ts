@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ApiError, errorFromResponse } from '../src/api/errors.js';
-import { sbxMain } from '../src/sbx/cli.js';
-import { refusalText } from '../src/sbx/commands.js';
+import { openSbxRuntime, sbxMain } from '../src/sbx/cli.js';
+import { refusalText, SBX_EXIT } from '../src/sbx/commands.js';
 import { dryRun } from '../src/sbx/dry-run.js';
+import { cmdActivate, cmdRetire } from '../src/sbx/templates.js';
 import {
   cleanupTmp,
   fakeCp,
@@ -14,13 +15,16 @@ import {
   SBX,
   setup,
   TOKEN,
+  URL_,
   workspaces,
   type Handler,
 } from './helpers/sbx.js';
 
 // The template commands of mocactl (template lifecycle spec §4, §8): `sbx templates` with readiness
 // and tags, `templates show`, `create --template ID[@BUILD] --seed`, and the authoring commands
-// (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`). example.com hosts only.
+// (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`); and activation (§6.3):
+// `templates activate` and `templates deactivate`; and retire (§5.1): `templates retire`.
+// example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -275,6 +279,334 @@ describe('create --template id@build, --seed', () => {
   });
 });
 
+describe('sbx templates activate and deactivate (§6.3)', () => {
+  const LEASE = {
+    templateId: 'my-python',
+    buildId: BUILD_ID,
+    leaseUntil: 1_800_003_600,
+    host: 'host-1',
+  };
+
+  it('takes a lease, naming the build and its length, and prints it', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
+    });
+    expect(
+      await w.run(['templates', 'activate', 'my-python', '--build', BUILD_ID, '--lease', '600']),
+    ).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ build: BUILD_ID, leaseSeconds: 600 });
+    expect(w.out()).toBe(
+      `my-python ${BUILD_ID} leased until ${new Date(1_800_003_600_000).toISOString()} on host-1\n`,
+    );
+    expect(await w.run(['templates', 'activate', 'my-python', '--json'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({});
+    expect(JSON.parse(w.out())).toEqual(LEASE);
+  });
+
+  it('releases the leases', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/deactivate': () => ({
+        status: 200,
+        body: { templateId: 'my-python', released: 1 },
+      }),
+    });
+    expect(await w.run(['templates', 'deactivate', 'my-python'])).toBe(0);
+    expect(w.out()).toBe('my-python: released 1 lease\n');
+  });
+
+  it('fails a refused activation at once, naming the refusal', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/activate': () => ({
+        status: 409,
+        body: {
+          error: 'template_unavailable',
+          message: "no host holds this build's snapshot",
+          readiness: 'unavailable',
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'activate', 'my-python', '--wait'])).toBe(1);
+    expect(w.err()).toContain("no host holds this build's snapshot");
+    expect(w.cp.calls.filter((c) => c.path.includes('/activate'))).toHaveLength(1);
+  });
+
+  it('refuses a bad --lease, --wait or --timeout where they do not apply, and a missing ID', async () => {
+    const w = world({});
+    for (const argv of [
+      ['templates', 'activate', 'my-python', '--lease', '30'],
+      ['templates', 'activate', 'my-python', '--lease', '1h'],
+      ['templates', 'show', 'my-python', '--wait'],
+      ['templates', 'activate', 'my-python', '--timeout', '60'],
+      ['templates', 'deactivate', 'my-python', '--build', BUILD_ID],
+      ['templates', 'activate'],
+      ['templates', 'deactivate', 'a', 'b'],
+      ['create', '--lease', '600'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toHaveLength(0);
+  });
+
+  /** cmdActivate on a scripted control plane, with a fake clock: what it slept and said. */
+  function waiting(routes: Record<string, Handler>) {
+    const s = setup();
+    const cp = fakeCp(routes);
+    const { rt, api } = openSbxRuntime(URL_, s.env, { home: s.home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    return { ...s, cp, slept, c: { rt, api, url: URL_, io: s.io, json: false } };
+  }
+
+  it('--wait: retries no_active_slot after its Retry-After, then reads the build until active, saying why it waits', async () => {
+    let tries = 0;
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/activate': () =>
+        ++tries < 2
+          ? {
+              status: 409,
+              body: { error: 'no_active_slot', message: 'full', readiness: 'unavailable' },
+              headers: { 'retry-after': '20' },
+            }
+          : { status: 200, body: LEASE },
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ readiness: ++reads < 3 ? 'activating' : 'active' }),
+      }),
+    });
+    expect(await cmdActivate(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([20_000, 5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain('my-python: waiting: no active slot');
+    // Said once, however many reads say the same.
+    expect(errs.match(/waiting: activating: its host is starting its worker/g)).toHaveLength(1);
+    expect(w.io.outs.join('')).toContain(`my-python ${BUILD_ID} active, leased until`);
+  });
+
+  it('--wait: exits 5 when the build is not active within --timeout', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ readiness: 'activating' }),
+      }),
+    });
+    expect(await cmdActivate(w.c, 'my-python', { wait: true, timeoutS: 12 })).toBe(
+      SBX_EXIT.timedOut,
+    );
+    expect(w.slept).toEqual([5000, 5000, 2000]);
+    expect(w.io.errs.join('')).toContain('timed out after 12 s');
+  });
+});
+
+describe('sbx templates retire (§5.1)', () => {
+  const HANDLE = 'b-0123456789abcdef0123456789';
+  const RECORD = `sha256:${'d'.repeat(64)}`;
+  const retiredBuild = (record: string | null = RECORD) => ({
+    build: HANDLE,
+    buildId: BUILD_ID,
+    readiness: 'retired',
+    record,
+  });
+  const BUILD_PATH = `GET /v1/templates/my-python/builds/${HANDLE}`;
+
+  it('retires a template with a reason, and prints each build; one already retired says so', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/retire': () => ({
+        status: 200,
+        body: {
+          templateId: 'my-python',
+          subject: 'github:1',
+          status: 'retired',
+          builds: [retiredBuild(), { ...retiredBuild(null), build: 'b-old' }],
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--reason', 'superseded'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ reason: 'superseded' });
+    expect(w.out()).toBe(
+      `retired my-python ${HANDLE}\nretired my-python b-old (already retired)\n`,
+    );
+    expect(await w.run(['templates', 'retire', 'my-python', '--json'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({});
+    expect(JSON.parse(w.out())).toMatchObject({ templateId: 'my-python', status: 'retired' });
+  });
+
+  it('retires one build with --build, by DELETE', async () => {
+    const w = world({
+      [`DELETE /v1/templates/my-python/builds/${HANDLE}`]: () => ({
+        status: 200,
+        body: {
+          templateId: 'my-python',
+          subject: 'github:1',
+          status: 'retired',
+          ...retiredBuild(),
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--build', HANDLE])).toBe(0);
+    expect(w.cp.calls.at(-1)!.method).toBe('DELETE');
+    expect(w.out()).toBe(`retired my-python ${HANDLE}\n`);
+  });
+
+  it('fails a refused retire, naming the refusal', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/retire': () => ({
+        status: 409,
+        body: { error: 'build_in_use', message: `build ${HANDLE} still serves a live sandbox` },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--wait'])).toBe(1);
+    expect(w.err()).toContain('still serves a live sandbox');
+    expect(w.cp.calls).toHaveLength(1);
+  });
+
+  it('says in words that a retired template is never served again', async () => {
+    const w = world({
+      'POST /v1/sandboxes': () => ({
+        status: 410,
+        body: { error: 'template_retired', message: "template 'my-python' is retired" },
+      }),
+    });
+    expect(await w.run(['create', '--template', 'my-python'])).toBe(1);
+    expect(w.err()).toContain("template 'my-python' is retired");
+    expect(w.err()).toContain('never served again');
+  });
+
+  it('refuses --reason with --build or elsewhere, and --timeout without --wait', async () => {
+    const w = world({});
+    for (const argv of [
+      ['templates', 'retire', 'my-python', '--build', HANDLE, '--reason', 'x'],
+      ['templates', 'show', 'my-python', '--reason', 'x'],
+      ['templates', 'retire', 'my-python', '--timeout', '60'],
+      ['templates', 'retire', 'my-python', '--lease', '600'],
+      ['templates', 'retire'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toHaveLength(0);
+  });
+
+  /** cmdRetire on a scripted control plane, with a fake clock: what it slept and said. */
+  function waiting(routes: Record<string, Handler>) {
+    const s = setup();
+    const cp = fakeCp(routes);
+    const { rt, api } = openSbxRuntime(URL_, s.env, { home: s.home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    return { ...s, cp, slept, c: { rt, api, url: URL_, io: s.io, json: false } };
+  }
+  const retireRoute = () => ({
+    status: 200,
+    body: {
+      templateId: 'my-python',
+      subject: 'github:1',
+      status: 'retired',
+      builds: [retiredBuild()],
+    },
+  });
+
+  const RUNNING = { running: 3, inUse: 1 };
+  const retiredRead = (capacity: unknown, heldBy: unknown = ['host-1']) =>
+    build({ status: 'retired', readiness: 'retired', capacity, heldBy });
+
+  it('--wait: reads the build until its worker stops, saying once that it still runs', async () => {
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      // The snapshot stays held (no removal yet): only the worker's stop is waited for.
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(++reads < 3 ? RUNNING : null) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    // Said once, however many reads say the same.
+    expect(errs.match(/retired, its worker still runs \(1 in use\)/g)).toHaveLength(1);
+    expect(errs).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
+  });
+
+  it("--wait: keeps waiting while its worker's state cannot be read (running null)", async () => {
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({
+        status: 200,
+        body: retiredRead(++reads < 3 ? { running: null, inUse: null } : null),
+      }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs.match(/its worker's state cannot be read; still waiting/g)).toHaveLength(1);
+    expect(errs).toContain('retired, its worker stopped');
+  });
+
+  it('--wait: done at once without host agents (heldBy null)', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING, null) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    expect(w.io.errs.join('')).toContain(
+      `my-python ${HANDLE}: retired; no host agent holds it, so its worker is not host-managed`,
+    );
+  });
+
+  it('--wait: done at once when no host holds the build (heldBy empty, worker attached)', async () => {
+    // Host agents exist, but none holds this build (an imported template's operator-run worker):
+    // none will stop its worker, so waiting could only time out.
+    for (const capacity of [RUNNING, { running: null, inUse: null }]) {
+      const w = waiting({
+        'POST /v1/templates/my-python/retire': retireRoute,
+        [BUILD_PATH]: () => ({ status: 200, body: retiredRead(capacity, []) }),
+      });
+      expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+      expect(w.slept).toEqual([]);
+      const errs = w.io.errs.join('');
+      expect(errs).toContain('no host agent holds it, so its worker is not host-managed');
+      expect(errs).not.toContain('its worker still runs');
+    }
+  });
+
+  it('--wait: done at once for a shared build, its worker kept for a build not retired', async () => {
+    // Two builds of one template from one image share a worker id; the other is still wanted.
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: { ...retiredRead(null), shared: true } }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain(
+      `my-python ${HANDLE}: retired; its worker also serves a build that is not retired`,
+    );
+    expect(errs).not.toContain('its worker stopped');
+  });
+
+  it('--wait: exits 5 when its worker still runs at --timeout', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true, timeoutS: 12 })).toBe(SBX_EXIT.timedOut);
+    expect(w.slept).toEqual([5000, 5000, 2000]);
+    expect(w.io.errs.join('')).toContain(
+      `timed out after 12 s waiting for my-python ${HANDLE} to stop its worker`,
+    );
+  });
+});
+
 // The authoring commands: create, build, follow, cancel, quota, policy, and --dry-run.
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const IMAGE = `team/moca-microvm@${DIGEST}`;
@@ -362,6 +694,8 @@ describe('sbx quota, policy', () => {
       templates: { limit: 100, used: 3 },
       buildsQueued: { limit: 10, used: 1 },
       active: { limit: 8, used: 0 },
+      owned: { limit: 200, used: 4 },
+      ownedSource: 'default',
       sandboxes: { limit: 3, used: 1 },
     };
     const w = world({ 'GET /v1/quota': () => ({ status: 200, body: q }) });
@@ -371,6 +705,7 @@ describe('sbx quota, policy', () => {
         'templates      3 of 100\n' +
         'buildsQueued   1 of 10\n' +
         'active         0 of 8\n' +
+        'owned          4 of 200\n' +
         'sandboxes      1 of 3\n',
     );
     expect(await w.run(['quota', '--json'])).toBe(0);
@@ -388,7 +723,16 @@ describe('sbx quota, policy', () => {
     );
     expect(w.out()).toContain('registries <default>\n');
     expect(w.out()).toContain(
-      'trusted gate records 0; quota templates 100, builds queued 10, active 8\n',
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, ' +
+        'owned not set (sbx quota shows the limit in force)\n',
+    );
+    const q = { templates: 100, buildsQueued: 10, active: 8, owned: 200 };
+    const w2 = world({
+      'GET /v1/policy': () => ({ status: 200, body: policyView({ quota: q }) }),
+    });
+    expect(await w2.run(['policy'])).toBe(0);
+    expect(w2.out()).toContain(
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, owned 200\n',
     );
     expect(w.out()).toContain(`policy sha256:${'d'.repeat(64)} (record sha256:${'e'.repeat(64)})`);
     expect(await w.run(['policy', '--json'])).toBe(0);

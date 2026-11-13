@@ -768,11 +768,22 @@ func main() {
 	// the live stream (remote-worker/DESIGN.md:29-30): a worker that registers and then
 	// discovers it cannot restore has already been given work. Spec §6: fail at start,
 	// not on a user's first request.
-	if err := man.Verify(snapDir); err != nil {
+	// SH_VERIFY_MEMFILE=1 re-hashes the memory file too (a version-2 manifest): a full read
+	// of the guest's RAM image, so off by default; the build hashes it.
+	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1"}); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
 	if err := verifyInstanceType(get, man.InstanceType, detectHostInstanceType); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
+	}
+	// SH_TEMPLATE_RECORD: the template record this worker serves (template-build.sh's),
+	// checked against the snapshot and the worker's own identity. Unset: no check, as before.
+	if rec := get("SH_TEMPLATE_RECORD"); rec != "" {
+		if err := verifyTemplateRecord(rec, man, env(get, "SH_SNAPSHOT_IMAGE", "default"),
+			get("SANDBOX_ID"), strings.TrimSpace(get("SANDBOX_TEMPLATE"))); err != nil {
+			log.Fatalf("microvm-worker: %v", err)
+		}
+		log.Printf("microvm-worker: template record %s matches the snapshot (manifest %s, image %s)", rec, man.Hash, man.SourceImageDigest)
 	}
 	unpin, err := vmpool.PinMemoryFile(filepath.Join(snapDir, "memfile"))
 	if err != nil {

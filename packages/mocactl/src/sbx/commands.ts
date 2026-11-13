@@ -6,17 +6,17 @@ import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import { saveConfig, storedLoginUrl } from '../config.js';
+import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
-import type { SandboxApiClient, SbxDiscovery, SbxSandbox } from './api.js';
+import type { SandboxApiClient, SbxDiscovery, SbxQuota, SbxSandbox } from './api.js';
 import { sandboxFailureText, type ExecFactory } from './exec.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
  * `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2; 5 when a wait
- * (`templates follow`, a create waiting for a queue slot) ran out of time; 130 when Ctrl-C stopped
- * it, as `sbx run` and `sbx rm`.
+ * (`templates follow`, a create waiting for a queue slot, `templates activate --wait`) ran out of
+ * time; 130 when Ctrl-C stopped it, as `sbx run` and `sbx rm`.
  */
 export const SBX_EXIT = {
   ok: 0,
@@ -101,6 +101,12 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
     // or a proxy's page) means the URL is not a sandbox-profile control plane -- a MOCA (harness
     // profile) one, or one from before SBX0.
     io.err('sbx: that control plane has no sandbox routes: is it the sandbox service?');
+  } else if (err instanceof ApiError && err.code === 'template_retired') {
+    // 410 (template lifecycle spec §5.1): not a typo in the id, so say what retired means.
+    io.err(
+      `sbx: ${describeError(err)}: a retired template or build is never served again; ` +
+        'use another build (mocactl sbx templates show ID) or another template',
+    );
   } else if (err instanceof ApiError) {
     io.err(`sbx: ${refusalText(err)}`);
   } else {
@@ -226,6 +232,36 @@ export async function cmdTemplates(c: SbxCtx): Promise<number> {
   }
 }
 
+/** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
+export const ACTIVATION_WAIT_MS = 10 * 60_000;
+
+/**
+ * Creates a sandbox, waiting while its template activates (template lifecycle spec §6.4): a
+ * `409 template_not_active` means the control plane has started the activation (or, with no lease
+ * to take, is waiting for a host), so the create is retried after its Retry-After, saying why, until
+ * ACTIVATION_WAIT_MS. Any other refusal is thrown.
+ */
+export async function createWaitingForActivation(
+  c: SbxCtx,
+  body: { template: string; name?: string; labels?: Record<string, string> },
+): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
+  const start = c.rt.now();
+  for (;;) {
+    try {
+      return await c.api.createSandbox(body);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409 && err.code === 'template_not_active'))
+        throw err;
+      const left = ACTIVATION_WAIT_MS - (c.rt.now() - start);
+      if (left <= 0) throw err;
+      const waitMs = Math.min(Math.max(1, err.retryAfterS ?? 30) * 1000, left);
+      c.io.err(`sbx: ${sanitizeRemote(err.message)}; retrying in ${Math.ceil(waitMs / 1000)} s`);
+      await c.rt.sleep(waitMs, c.signal);
+      if (c.signal?.aborted) throw err;
+    }
+  }
+}
+
 /**
  * `sbx create [--template ID[:TAG|@BUILD]] [--seed]`. With --seed, the served build's seed runs as
  * the new sandbox's first command and the workspace is checked (seedSandbox): a failure there is
@@ -237,7 +273,7 @@ export async function cmdCreate(
   seed?: { factory?: ExecFactory },
 ): Promise<number> {
   try {
-    const s = await c.api.createSandbox(body);
+    const s = await createWaitingForActivation(c, body);
     c.io.err(
       `created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`,
     );
@@ -393,6 +429,111 @@ export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
       lines.push(['SBX_CA_FILE', writeCa(dir, `${id}-exec-ca.crt`, t.execCa)]);
     }
     for (const [k, v] of lines) c.io.out(`export ${k}=${q(v)}\n`);
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** The API token issuer each profile's control plane mints under (control-plane token.ts). */
+const ISSUER_BY_PROFILE: Record<string, string> = {
+  sandbox: 'sbx-control-plane-api',
+};
+
+/** A JWT's `iss`, read WITHOUT verifying it: only to compare. */
+function jwtIssuer(token: string): string | undefined {
+  try {
+    const c = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as {
+      iss?: unknown;
+    };
+    return typeof c.iss === 'string' ? c.iss : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Before an admin write: the login must be for this control plane, and its token minted under the
+ * issuer this control plane's profile mints under -- a login for one deployment pointed at another
+ * is refused here, before the read and the write. A token whose `iss` cannot be read (not a JWT) is
+ * left to the control plane to judge. Returns the refusal line.
+ */
+export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
+  const auth = c.rt.auth;
+  if (!auth) return undefined;
+  if (!sameControlPlane(auth.controlPlaneUrl, c.url))
+    return `the login is for ${sanitizeRemote(auth.controlPlaneUrl)}, not ${sanitizeRemote(c.url)}`;
+  const iss = jwtIssuer(auth.apiToken);
+  if (iss === undefined) return undefined;
+  const d: SbxDiscovery = await c.api.sandboxDiscovery();
+  const want = ISSUER_BY_PROFILE[d.profile ?? ''];
+  if (want !== undefined && iss !== want)
+    return `the login was issued by '${sanitizeRemote(iss)}', but ${sanitizeRemote(c.url)} (profile ${sanitizeRemote(d.profile ?? 'harness')}) issues '${want}': it is another deployment's login`;
+  return undefined;
+}
+
+const quotaText = (q: SbxQuota | null | undefined) =>
+  q
+    ? `templates ${q.templates}, builds queued ${q.buildsQueued}, active ${q.active}` +
+      (q.owned !== undefined ? `, owned ${q.owned}` : '')
+    : 'the default';
+
+/**
+ * The counters of a quota, and nothing else: what a quota write sends as `?expect=`. The control
+ * plane refuses an expect with another key, and a deployment-wide quota stored through
+ * `PUT /v1/policy` (or by an older control plane) may carry one.
+ */
+const quotaCounters = (q: SbxQuota | null): SbxQuota | null =>
+  q && {
+    templates: q.templates,
+    buildsQueued: q.buildsQueued,
+    active: q.active,
+    ...(q.owned !== undefined ? { owned: q.owned } : {}),
+  };
+
+/**
+ * `sbx templates quota TARGET (--templates N --builds-queued N --active N [--owned N] | --clear)` (template
+ * lifecycle spec §5.2; admins). Names the control plane it writes to and refuses a login issued for
+ * another deployment; reads the current value first (`GET /v1/policy`), then writes it as a
+ * compare-and-set (`?expect=`, the counters read as percent-encoded JSON, `null` for no override):
+ * if another admin changed the quota in between, the control plane writes nothing (`409 quota_changed`), and this reports the value now (exit 1).
+ * Prints old -> new (new as the control plane stored it: without --owned, the target keeps its
+ * owned) and the new policy's digest and record.
+ */
+export async function cmdSetQuota(
+  c: SbxCtx,
+  target: string,
+  quota: SbxQuota | null,
+): Promise<number> {
+  try {
+    const mismatch = await loginMismatch(c);
+    if (mismatch) {
+      c.io.err(`sbx: refused: ${mismatch}`);
+      return SBX_EXIT.failed;
+    }
+    c.io.err(`sbx: admin write to ${sanitizeRemote(c.url)}`);
+    const pol = (await c.api.getPolicy()).policy;
+    const read = target === 'default' ? pol.quota : (pol.quotaBySubject?.[target] ?? null);
+    let r: Awaited<ReturnType<typeof c.api.putQuota>>;
+    try {
+      r = await c.api.putQuota(target, quota, quotaCounters(read));
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.code !== 'quota_changed') throw err;
+      const p2 = (await c.api.getPolicy()).policy;
+      const now = target === 'default' ? p2.quota : (p2.quotaBySubject?.[target] ?? null);
+      c.io.err(
+        `sbx: nothing written: ${sanitizeRemote(target)}'s quota was changed by someone else after ` +
+          `this command read it (read ${quotaText(read)}, now ${quotaText(now)}): check it, then run ` +
+          'the command again',
+      );
+      return SBX_EXIT.failed;
+    }
+    if (c.json) c.io.out(JSON.stringify({ ...r, read }) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.target)}: ${quotaText(read)} -> ${quota === null ? 'the default' : quotaText(r.quota ?? quota)}` +
+          ` (policy ${sanitizeRemote(r.policy)}, record ${sanitizeRemote(r.record)})\n`,
+      );
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 
 /**
  * Policy at create (template lifecycle spec §8.1): the checks a template create passes before any
@@ -44,9 +45,28 @@ export interface Policy {
    * copy of the trusted source's records, until a fetch from the trusted source exists).
    */
   trustedGateRecords: string[];
-  /** Per-subject quotas (§6.2), the deployment default. */
+  /** Per-subject quotas (§6.2), the deployment default; admins may set per-subject ones. */
   quota: Quota;
+  /**
+   * Per-subject overrides of `quota` (§5.2, `PUT /v1/quota/{subject}`), by subject; absent: none. A
+   * subject not listed has the default. Kept in the policy, so every change is a `policy` record.
+   */
+  quotaBySubject?: Record<string, Quota>;
 }
+
+/**
+ * The quota that applies to a subject (§6.2), each counter its override's, else the default's.
+ * An override always holds templates, buildsQueued and active; its owned is optional, so owned is
+ * the override's, else the default's, else DEFAULT_OWNED. The answer always holds owned.
+ */
+export const quotaFor = (pol: Policy, subject: string): Quota & { owned: number } => {
+  const over = pol.quotaBySubject?.[subject];
+  return { ...(over ?? pol.quota), owned: over?.owned ?? ownedLimit(pol.quota) };
+};
+
+/** Where a subject's owned quota comes from: its override, else the deployment default. */
+export const ownedSource = (pol: Policy, subject: string): 'subject' | 'default' =>
+  pol.quotaBySubject?.[subject]?.owned !== undefined ? 'subject' : 'default';
 
 export interface Quota {
   /** Templates a subject owns with a build registered or on its way there. */
@@ -59,10 +79,13 @@ export interface Quota {
    * Template ids a subject owns, in any status (a failed or cancelled-only template too): bounds
    * the catalog documents and provenance streams one subject opens, which `templates` alone does
    * not, since a failed or cancelled-only template holds no `templates` slot. Checked for a new id
-   * only. Optional: a policy without it gets DEFAULT_OWNED.
+   * only. Optional: a default without it gets DEFAULT_OWNED, an override without it the default's.
    */
   owned?: number;
 }
+
+/** The counters a quota holds; `owned` is optional. */
+export const QUOTA_KEYS = ['templates', 'buildsQueued', 'active', 'owned'] as const;
 
 /** The `owned` quota of a policy that does not set one. */
 export const DEFAULT_OWNED = 200;
@@ -483,10 +506,36 @@ export function policyProblems(p: unknown): string[] {
   )
     out.push('trustedGateRecords must be sha256 digests');
   const q = o.quota;
-  if (!q || ![q.templates, q.buildsQueued, q.active].every((n) => int(n) && n >= 0))
-    out.push('quota must hold whole numbers templates, buildsQueued, active');
-  else if (q.owned !== undefined && !(int(q.owned) && q.owned >= 0))
+  const quotaOk = (x: unknown): boolean => {
+    const v = x as Partial<Quota> | undefined;
+    return (
+      !!v && [v.templates, v.buildsQueued, v.active].every((n) => int(n) && (n as number) >= 0)
+    );
+  };
+  if (!quotaOk(q)) out.push('quota must hold whole numbers templates, buildsQueued, active');
+  else if (q?.owned !== undefined && !(int(q.owned) && q.owned >= 0))
     out.push('quota.owned, when set, must be a whole number');
+  const by = (o as { quotaBySubject?: unknown }).quotaBySubject;
+  if (by !== undefined) {
+    if (typeof by !== 'object' || by === null || Array.isArray(by))
+      out.push('quotaBySubject must map subjects to quotas');
+    else
+      for (const [s, v] of Object.entries(by as Record<string, unknown>)) {
+        if (!MEMBER_SUBJECT_RE.test(s))
+          out.push(`quotaBySubject: ${s} is not a subject (${MEMBER_SUBJECT_FORMS})`);
+        // An override holds the four counters alone (#748), owned optional: nothing else is kept
+        // in the policy.
+        const ov = v as Partial<Quota> | undefined;
+        if (
+          !quotaOk(v) ||
+          (ov?.owned !== undefined && !(int(ov.owned) && ov.owned >= 0)) ||
+          Object.keys(v as object).some((k) => !(QUOTA_KEYS as readonly string[]).includes(k))
+        )
+          out.push(
+            `quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active, optionally owned, and nothing else`,
+          );
+      }
+  }
   return out;
 }
 
@@ -500,4 +549,13 @@ export interface PolicyStore {
   current(): Promise<{ policy: Policy; record: string }>;
   /** Store a new policy, and record it. */
   set(policy: Policy, subject: string): Promise<{ policy: Policy; record: string }>;
+  /**
+   * Read the policy, change it and store the change as one step: no other set or update runs
+   * between the read and the write, so a change made meanwhile is never lost. `mutate` gets the
+   * current policy and its record and returns the new policy, or throws to write nothing.
+   */
+  update(
+    mutate: (cur: Policy, record: string) => Policy,
+    subject: string,
+  ): Promise<{ policy: Policy; record: string }>;
 }

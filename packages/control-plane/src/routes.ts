@@ -23,8 +23,9 @@ export interface RouteSpec {
    * `exchange` -- the shared SH_EXCHANGE_TOKEN bearer (spec §5.3.1).
    * `janitor`  -- the sandbox host janitor's SH_JANITOR_TOKEN bearer (SBX0 §8.3).
    * `egress`   -- one configured KVM host's egress token (SBX0.2b §4.2); names the host.
+   * `host`     -- one template host agent's SH_HOST_TOKEN_<ID> (template lifecycle spec §6.1); names the host.
    */
-  auth: 'none' | 'api' | 'exchange' | 'janitor' | 'egress';
+  auth: 'none' | 'api' | 'exchange' | 'janitor' | 'egress' | 'host';
   /** The profiles that mount this route (see RouteProfile). */
   profiles: readonly RouteProfile[];
   /**
@@ -487,6 +488,53 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     operationId: 'cancelTemplateBuild',
   },
+  // Template lifecycle spec §5.1: retire a whole template, or one build of it.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/retire',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'retireTemplate',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/templates/{id}/builds/{build}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'retireTemplateBuild',
+  },
+  // Template lifecycle spec §5.2: an admin rejects a registered build after the fact.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds/{build}/reject',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'rejectTemplateBuild',
+  },
+  // Template lifecycle spec §6.3: take, renew or release the caller's activation lease.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/activate',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'activateTemplate',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/deactivate',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'deactivateTemplate',
+  },
   {
     method: 'GET',
     path: '/v1/policy',
@@ -510,6 +558,74 @@ export const ROUTES: readonly RouteSpec[] = [
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'getQuota',
+  },
+  // Template lifecycle spec §5.2: an admin sets the default quota, or one subject's override.
+  {
+    method: 'PUT',
+    path: '/v1/quota/{subject}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'putQuota',
+  },
+  // Template lifecycle spec §6.1: a KVM host's sbx-host-agent, with its own bearer, for itself only.
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/inventory',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostInventory',
+  },
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/builds/claim',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostClaimBuilds',
+  },
+  {
+    method: 'GET',
+    path: '/v1/hosts/{host}/blobs/{digest}',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostBlob',
+  },
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/builds/{build}/log',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostBuildLog',
+  },
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/builds/{build}/report',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    maxBodyBytes: 1024 * 1024,
+    operationId: 'hostBuildReport',
+  },
+  // Template lifecycle spec §6.3: the host's wanted state, and its workers' starts and stops.
+  {
+    method: 'GET',
+    path: '/v1/hosts/{host}/wanted',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostWanted',
+  },
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/workers/report',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostWorkerReport',
   },
   // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {

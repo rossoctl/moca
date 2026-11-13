@@ -86,6 +86,8 @@ grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/ou
 ! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a bundle with no SH_WORKSPACE_IDLE'
 pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size'
 
+# py312 has a template record (template-build.sh's); default has none.
+mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
 bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
@@ -107,7 +109,11 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
   [[ -n "$va" && "$va" != "$vb" ]] || fail "$k is shared between workers ($va)"
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
-pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py312.json" "$B" || fail "$B: SH_TEMPLATE_RECORD does not name the snapshot's record"
+! grep -q '^SH_TEMPLATE_RECORD=' "$A" || fail "$A: SH_TEMPLATE_RECORD set with no record"
+grep -qx 'SANDBOX_TEMPLATE=py312' "$B" || fail "$B: SANDBOX_TEMPLATE is not the record's id"
+! grep -q '^SANDBOX_TEMPLATE=' "$A" || fail "$A: SANDBOX_TEMPLATE set with no record"
+pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size, the template record and its id as SANDBOX_TEMPLATE when there is one"
 
 # The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
 # (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
@@ -127,6 +133,30 @@ rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"
 [[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
 [[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
 pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
+
+# A snapshot with template-build.sh's record ($SBX_SRV/templates/<snapshot>.json): the worker env
+# points the worker at it and names the template, so the worker checks the record at start. A record
+# for another worker is refused before anything is written; no record writes neither line (above).
+snap py-tools-0123456789ab && mkdir -p "$SBX_SRV/templates"
+printf '{"schema":"moca-sbx-template/1","id":"py-tools","worker":"sbx_py_tools_0123456789ab","snapshot":"py-tools-0123456789ab"}\n' \
+  >"$SBX_SRV/templates/py-tools-0123456789ab.json"
+bash "$INSTALL" "$(bundle sbx_py_tools_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail 'install a worker with a template record'
+R="$SBX_ENV_DIR/workers/sbx_py_tools_0123456789ab.env"
+grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py-tools-0123456789ab.json" "$R" || fail "$R: SH_TEMPLATE_RECORD is not the snapshot's record"
+grep -qx 'SANDBOX_TEMPLATE=py-tools' "$R" || fail "$R: SANDBOX_TEMPLATE is not the record's id"
+! grep -q '^SH_TEMPLATE_RECORD=\|^SANDBOX_TEMPLATE=' "$A" || fail "$A: a snapshot without a record got SH_TEMPLATE_RECORD"
+# The checks below read what the earlier installs logged: keep it, and look at this refusal alone.
+cp "$MOCK_LOG" "$TMP/mock.kept"; : >"$MOCK_LOG"
+! bash "$INSTALL" "$(bundle sbx_other_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail "installed another worker's bundle on a recorded snapshot"
+grep -q 'is for worker sbx_py_tools_0123456789ab, not this bundle' "$TMP/out" || fail 'the record refusal does not name both workers'
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_other_0123456789ab.env" ]] && ! grep -q systemctl "$MOCK_LOG" || fail 'wrote or touched systemd before refusing the record'
+printf '{"schema":"other/1"}\n' >"$SBX_SRV/templates/py-tools-0123456789ab.json"
+! bash "$INSTALL" "$(bundle sbx_py_tools_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail 'accepted a record of another schema'
+grep -q 'is not a template record' "$TMP/out" || fail 'the schema refusal does not say why'
+bash "$INSTALL" --uninstall sbx_py_tools_0123456789ab >"$TMP/out" 2>&1 || fail 'uninstall the recorded worker'
+rm -rf "$SBX_SRV/templates" "$SBX_SRV/snapshots/py-tools-0123456789ab"
+cat "$TMP/mock.kept" >"$MOCK_LOG"
+pass "a snapshot's template record is wired into the worker env (SH_TEMPLATE_RECORD, SANDBOX_TEMPLATE); another worker's is refused"
 
 # A worker installed before the digest-keyed jail had $SBX_SRV/jail/<id>. A reinstall and an uninstall
 # remove that worker's own old jail (its hard-linked files stay) and say so; another worker's is kept.

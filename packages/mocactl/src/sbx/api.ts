@@ -41,6 +41,9 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** A template quota (openapi Quota, template lifecycle spec §6.2); owned is optional. */
+export type SbxQuota = { templates: number; buildsQueued: number; active: number; owned?: number };
+
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
@@ -49,8 +52,18 @@ export interface SbxBuild {
   status: string;
   profile: string;
   readiness: string | null;
-  capacity: { running: number; inUse: number | null } | null;
+  capacity: { running: number | null; inUse: number | null } | null;
   lastUsedAt: number | null;
+  /**
+   * The hosts whose last inventory holds its snapshot (template lifecycle spec §6.1); null without
+   * host agents; absent from an older control plane.
+   */
+  heldBy?: string[] | null;
+  /**
+   * A retired build whose snapshot or worker a build that is not retired shares: its worker is kept
+   * for that build, never stopped for the retire. Absent from an older control plane.
+   */
+  shared?: boolean;
   tags: string[];
   createdAt: number;
   provenance: string | null;
@@ -64,6 +77,35 @@ export interface SbxBuild {
     seed?: string;
     tools?: string[];
   };
+}
+
+/** An activation lease (POST /v1/templates/{id}/activate, template lifecycle spec §6.3). */
+export interface SbxLease {
+  templateId: string;
+  buildId: string;
+  /** Epoch seconds. */
+  leaseUntil: number;
+  /** The host it is placed on; null while no host agent has reported. */
+  host: string | null;
+}
+
+/** One build a retire answered for (openapi RetiredBuild, template lifecycle spec §5.1). */
+export interface SbxRetiredBuild {
+  /** The build's handle. */
+  build: string;
+  /** Null for a build retired before it registered. */
+  buildId: string | null;
+  readiness: 'retired';
+  /** The retire record written now; null when it was already retired. */
+  record: string | null;
+}
+
+/** What a retire answers: a whole template's (`builds`), or one build's (its fields inline). */
+export interface SbxRetired extends Partial<SbxRetiredBuild> {
+  templateId: string;
+  subject: string;
+  status: 'retired';
+  builds?: SbxRetiredBuild[];
 }
 
 /** A template with its builds (openapi Template). */
@@ -105,6 +147,9 @@ export interface SbxQuotaView {
   templates: SbxLimitUse;
   buildsQueued: SbxLimitUse;
   active: SbxLimitUse;
+  /** Template ids owned in any status (a lifetime cap); absent from an older control plane. */
+  owned?: SbxLimitUse;
+  ownedSource?: 'subject' | 'default';
   sandboxes?: SbxLimitUse;
 }
 
@@ -119,7 +164,7 @@ export interface SbxProfile {
   };
 }
 
-/** `GET /v1/policy` (openapi PolicyView). */
+/** `GET /v1/policy` (openapi PolicyView): profiles for a dry run, quotas for a quota write. */
 export interface SbxPolicyView {
   policy: {
     schema: string;
@@ -127,7 +172,9 @@ export interface SbxPolicyView {
     defaultProfile: string;
     allowedRegistries: string[];
     trustedGateRecords: string[];
-    quota: { templates: number; buildsQueued: number; active: number };
+    quota: SbxQuota;
+    /** The per-subject overrides (a quota write reads them, §5.2). */
+    quotaBySubject?: Record<string, SbxQuota>;
   };
   digest: string;
   record: string;
@@ -153,6 +200,32 @@ export class SandboxApiClient extends ControlPlaneClient {
       'GET',
       `/v1/templates/${encodeURIComponent(id)}/builds/${encodeURIComponent(build)}`,
     );
+  }
+
+  /** Take or renew the caller's activation lease on a build (`POST /v1/templates/{id}/activate`). */
+  activateTemplate(
+    id: string,
+    body: { tag?: string; build?: string; leaseSeconds?: number },
+  ): Promise<SbxLease> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/activate`, { body });
+  }
+
+  /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
+  deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
+  }
+
+  /**
+   * Retire a template (`POST /v1/templates/{id}/retire`), or one build of it (`DELETE
+   * /v1/templates/{id}/builds/{build}`, which takes no reason).
+   */
+  retireTemplate(id: string, opts: { build?: string; reason?: string } = {}): Promise<SbxRetired> {
+    const t = encodeURIComponent(id);
+    return opts.build !== undefined
+      ? this.json('DELETE', `/v1/templates/${t}/builds/${encodeURIComponent(opts.build)}`)
+      : this.json('POST', `/v1/templates/${t}/retire`, {
+          body: opts.reason !== undefined ? { reason: opts.reason } : {},
+        });
   }
 
   /** Create a template, or a new build of one's own (lifecycle spec §4): `POST /v1/templates`. */
@@ -184,6 +257,30 @@ export class SandboxApiClient extends ControlPlaneClient {
   /** The deployment's template policy (§8): profiles, registries, quotas, and its digest. */
   getPolicy(): Promise<SbxPolicyView> {
     return this.json('GET', '/v1/policy');
+  }
+
+  /**
+   * Set a subject's quota, or the default; null removes a subject's override (§5.2; admins).
+   * `expect`, when given, is the value read before: the control plane writes only if the target's
+   * quota is that now, else `409 quota_changed` with nothing written. It goes as `?expect=` its
+   * JSON (`null` for no override), percent-encoded by the URL's searchParams.
+   */
+  putQuota(
+    target: string,
+    quota: SbxQuota | null,
+    expect?: SbxQuota | null,
+  ): Promise<{
+    target: string;
+    subject: string;
+    quota: SbxQuota | null;
+    before: SbxQuota | null;
+    policy: string;
+    record: string;
+  }> {
+    return this.json('PUT', `/v1/quota/${encodeURIComponent(target)}`, {
+      body: quota,
+      query: { expect: expect === undefined ? undefined : JSON.stringify(expect) },
+    });
   }
 
   createSandbox(body: {

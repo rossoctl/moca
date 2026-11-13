@@ -10,6 +10,9 @@
 #
 # BUNDLE_DIR is deploy/sbx/.generated/workers/<id> from deploy/sbx/setup.sh. IMAGE names a golden
 # snapshot under $SBX_SRV/snapshots (deploy/microvm/build-snapshot.sh --out $SBX_SRV/snapshots/IMAGE).
+# When deploy/sbx/template-onboarding/template-build.sh wrote a template record for IMAGE
+# ($SBX_SRV/templates/IMAGE.json), the worker env carries SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so
+# the worker checks that record against its snapshot at start; a record for another worker is refused.
 # Needs firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md; moca-egress:
 # CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress), and microvm-worker.
 # SBX_WORKER_BIN (an absolute path; default /usr/local/libexec/sbx/microvm-worker, SBX0's own build)
@@ -478,8 +481,8 @@ install_units() {
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
-# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB. It writes nothing and touches no unit, so a
-# refusal comes before install_egress starts one.
+# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and W_TEMPLATE.
+# It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
 validate_worker() {
   local env="$BUNDLE/worker.env" id addr tok idle image_mb
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
@@ -510,7 +513,28 @@ validate_worker() {
   check_snapshot_ca
   check_snapshot_ram
   check_jail_path "$id"
+  check_template_record "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
+}
+
+# check_template_record WORKER_ID: when template-build.sh wrote a record for the snapshot
+# ($SBX_SRV/templates/<snapshot>.json), the worker is wired to it (SH_TEMPLATE_RECORD and
+# SANDBOX_TEMPLATE, its template id), so it checks the record against its snapshot at every start.
+# The record must name this worker: a bundle of another worker is refused here, before anything is
+# written, rather than left to crash-loop. No record (a snapshot built without template-build.sh):
+# no check, as before. Sets W_RECORD and W_TEMPLATE (empty without a record).
+check_template_record() {
+  local rec="$SBX_SRV/templates/$SNAPSHOT.json" tid worker
+  W_RECORD='' W_TEMPLATE=''
+  [[ -e "$rec" ]] || return 0
+  command -v jq >/dev/null || die "needs jq on PATH to read the template record $rec"
+  [[ "$(jq -r '.schema // empty' "$rec" 2>/dev/null)" == moca-sbx-template/1 ]] ||
+    die "$rec is not a template record (schema moca-sbx-template/1, from template-build.sh)"
+  tid="$(jq -r '.id // empty' "$rec")" worker="$(jq -r '.worker // empty' "$rec")"
+  [[ "$tid" =~ ^[A-Za-z0-9._-]+$ ]] || die "$rec has no valid template id"
+  [[ "$worker" == "$1" ]] ||
+    die "the template record $rec is for worker ${worker:-<none>}, not this bundle's $1: pass the bundle of $worker, or the snapshot of $1"
+  W_RECORD="$rec" W_TEMPLATE="$tid"
 }
 
 install_worker() {
@@ -529,6 +553,7 @@ install_worker() {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\nSH_GUEST_RAM_MB=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT" "$guest_mb"
+      [[ -z "$W_RECORD" ]] || printf 'SH_TEMPLATE_RECORD=%s\nSANDBOX_TEMPLATE=%s\n' "$W_RECORD" "$W_TEMPLATE"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"

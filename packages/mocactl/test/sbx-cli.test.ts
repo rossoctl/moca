@@ -16,6 +16,7 @@ import { cmdLogin, devicePrompt } from '../src/headless.js';
 import { buildRuntime } from '../src/runtime.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
+import { createWaitingForActivation } from '../src/sbx/commands.js';
 import { readBoundSandbox } from '../src/sbx/state.js';
 import { fakeCp, LOGIN, sandbox, SBX, setup, TOKEN, URL_, type Handler } from './helpers/sbx.js';
 
@@ -284,6 +285,85 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(io.outs.join('')).toContain(SBX);
     expect(io.errs.join('')).toContain(new Date(1_800_604_800 * 1000).toISOString());
+  });
+
+  it('waits while the template activates (§6.4): retries a 409 template_not_active after its Retry-After', async () => {
+    const { home, env, io } = setup();
+    let n = 0;
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () =>
+        ++n < 3
+          ? {
+              status: 409,
+              body: {
+                error: 'template_not_active',
+                message: "template 'node22' is activating; its activation has started",
+                readiness: 'activating',
+              },
+              headers: { 'retry-after': '30' },
+            }
+          : { status: 201, body: sandbox() },
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    const s = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    );
+    expect(s.id).toBe(SBX);
+    expect(n).toBe(3);
+    expect(slept).toEqual([30_000, 30_000]);
+    expect(io.errs.join('')).toContain(
+      "sbx: template 'node22' is activating; its activation has started; retrying in 30 s",
+    );
+  });
+
+  it('gives up waiting for an activation after 10 minutes, with the refusal', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 409,
+        body: { error: 'template_not_active', message: 'activating', readiness: 'activating' },
+        headers: { 'retry-after': '30' },
+      }),
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      t += ms;
+    };
+    rt.now = () => t;
+    const err = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: 'template_not_active' });
+    // 10 minutes of 30 s waits: the first try and 20 retries.
+    expect(cp.calls.length).toBe(21);
+  });
+
+  it('does not wait on any other refusal of a create', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 409,
+        body: { error: 'no_active_slot', message: 'full', readiness: 'unavailable' },
+        headers: { 'retry-after': '60' },
+      }),
+    });
+    const { rt, api } = openSbxRuntime(URL_, env, { home, fetchImpl: cp.fetchImpl });
+    const err = await createWaitingForActivation(
+      { rt, api, url: URL_, io, json: false },
+      { template: 'node22' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: 'no_active_slot' });
+    expect(cp.calls.length).toBe(1);
   });
 
   it('creates from the default template without --template (spec §6.1), and refuses a malformed --label', async () => {
@@ -725,5 +805,215 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const [a, b] = io.outs.join('').trimEnd().split('\n');
     expect(a).not.toContain('\u001b');
     expect(a!.indexOf('node22')).toBe(b!.indexOf('node22'));
+  });
+});
+
+describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () => {
+  const policyView = (over: Record<string, unknown> = {}) => ({
+    policy: { quota: { templates: 100, buildsQueued: 10, active: 8 }, ...over },
+    digest: `sha256:${'1'.repeat(64)}`,
+    record: `sha256:${'2'.repeat(64)}`,
+  });
+  const answer = (target: string, quota: unknown, before: unknown) => ({
+    status: 200,
+    body: {
+      target,
+      subject: 'github:1',
+      quota,
+      before,
+      policy: `sha256:${'5'.repeat(64)}`,
+      record: `sha256:${'6'.repeat(64)}`,
+    },
+  });
+  const ARGS = [
+    'templates',
+    'quota',
+    'github:9',
+    '--templates',
+    '5',
+    '--builds-queued',
+    '2',
+    '--active',
+    '1',
+  ];
+  const Q = { templates: 5, buildsQueued: 2, active: 1 };
+  const OLD = { templates: 3, buildsQueued: 1, active: 1 };
+  // The compare-and-set's query: the value the command read.
+  const ifRead = (v: unknown) => `?${new URLSearchParams({ expect: JSON.stringify(v) })}`;
+
+  it('reads, writes and prints old -> new with the policy digest; names the control plane', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({
+        status: 200,
+        body: policyView({ quotaBySubject: { 'github:9': OLD } }),
+      }),
+      'PUT /v1/quota/github%3A9': (req) => answer('github:9', req.body, OLD),
+    });
+    expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(cp.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /v1/policy',
+      `PUT /v1/quota/github%3A9${ifRead(OLD)}`,
+    ]);
+    expect(cp.calls.at(-1)!.body).toEqual(Q);
+    expect(io.outs.join('')).toBe(
+      'github:9: templates 3, builds queued 1, active 1 -> templates 5, builds queued 2, active 1 ' +
+        `(policy sha256:${'5'.repeat(64)}, record sha256:${'6'.repeat(64)})\n`,
+    );
+    expect(io.errs.join('\n')).toContain(`admin write to ${URL_}`);
+  });
+
+  it('--clear sends null and prints the return to the default; the default is set the same way', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({
+        status: 200,
+        body: policyView({ quotaBySubject: { 'github:9': OLD } }),
+      }),
+      'PUT /v1/quota/github%3A9': () => answer('github:9', null, OLD),
+      'PUT /v1/quota/default': (req) =>
+        answer('default', req.body, { templates: 100, buildsQueued: 10, active: 8 }),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['templates', 'quota', 'github:9', '--clear'], env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)).toMatchObject({
+      method: 'PUT',
+      path: `/v1/quota/github%3A9${ifRead(OLD)}`,
+    });
+    expect(cp.calls.at(-1)!.body).toBeNull();
+    expect(io.outs.join('')).toContain(
+      'github:9: templates 3, builds queued 1, active 1 -> the default',
+    );
+    io.outs.length = 0;
+    expect(await sbxMain(['templates', 'quota', 'default', ...ARGS.slice(3)], env, io, opts)).toBe(
+      0,
+    );
+    expect(io.outs.join('')).toContain(
+      'default: templates 100, builds queued 10, active 8 -> templates 5, builds queued 2, active 1',
+    );
+  });
+
+  it('writes nothing when the quota changed after its read, and reports the value now (exit 1)', async () => {
+    const { home, env, io } = setup();
+    let reads = 0;
+    const cp = fakeCp({
+      // The first read sees OLD; another admin then writes, so the second read sees theirs.
+      'GET /v1/policy': () => ({
+        status: 200,
+        body: policyView({
+          quotaBySubject: { 'github:9': reads++ === 0 ? OLD : { ...OLD, templates: 4 } },
+        }),
+      }),
+      'PUT /v1/quota/github%3A9': () => ({
+        status: 409,
+        body: { error: 'quota_changed', message: "github:9's quota changed since it was read" },
+      }),
+    });
+    expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+    expect(cp.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /v1/policy',
+      `PUT /v1/quota/github%3A9${ifRead(OLD)}`,
+      'GET /v1/policy',
+    ]);
+    expect(io.errs.join('\n')).toContain(
+      "nothing written: github:9's quota was changed by someone else after this command read it (read templates 3, builds queued 1, active 1, now templates 4, builds queued 1, active 1)",
+    );
+    expect(io.outs.join('')).toBe('');
+  });
+
+  it('--owned sets the fourth counter; without it, the target keeps its own and new shows it', async () => {
+    const { home, env, io } = setup();
+    const OLD4 = { ...OLD, owned: 7 };
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({
+        status: 200,
+        body: policyView({ quotaBySubject: { 'github:9': OLD4 } }),
+      }),
+      // As the control plane stores it: a body without owned keeps the target's.
+      'PUT /v1/quota/github%3A9': (req) =>
+        answer('github:9', { owned: 7, ...(req.body as object) }, OLD4),
+    });
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain([...ARGS, '--owned', '3'], env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/github%3A9${ifRead(OLD4)}`);
+    expect(cp.calls.at(-1)!.body).toEqual({ ...Q, owned: 3 });
+    expect(io.outs.join('')).toContain(
+      'github:9: templates 3, builds queued 1, active 1, owned 7 -> templates 5, builds queued 2, active 1, owned 3 ',
+    );
+    io.outs.length = 0;
+    expect(await sbxMain(ARGS, env, io, opts)).toBe(0);
+    expect(cp.calls.at(-1)!.body).toEqual(Q);
+    expect(io.outs.join('')).toContain('-> templates 5, builds queued 2, active 1, owned 7 ');
+    for (const bad of ['-1', '1.5', 'x'])
+      expect(await sbxMain([...ARGS, '--owned', bad], env, io, opts)).toBe(2);
+    expect(io.errs.join('\n')).toMatch(/--owned must be a whole number/);
+    expect(
+      await sbxMain(['templates', 'quota', 'github:9', '--clear', '--owned', '1'], env, io, opts),
+    ).toBe(2);
+    expect(await sbxMain(['ls', '--owned', '1'], env, io, opts)).toBe(2);
+  });
+
+  it('expects no override when the subject has none', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({ status: 200, body: policyView() }),
+      'PUT /v1/quota/github%3A9': (req) => answer('github:9', req.body, null),
+    });
+    expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/github%3A9${ifRead(null)}`);
+    expect(io.outs.join('')).toContain('github:9: the default -> templates 5');
+  });
+
+  it('expects only the counters read, when the stored quota carries another key', async () => {
+    const { home, env, io } = setup();
+    // A deployment-wide quota stored through PUT /v1/policy may hold a key the control plane's
+    // expect refuses; the command sends the counters alone.
+    const STORED = { ...OLD, owned: 7, note: 'set by hand' };
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({ status: 200, body: policyView({ quota: STORED }) }),
+      'PUT /v1/quota/default': (req) => answer('default', req.body, STORED),
+    });
+    expect(
+      await sbxMain(['templates', 'quota', 'default', ...ARGS.slice(3)], env, io, {
+        home,
+        fetchImpl: cp.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/default${ifRead({ ...OLD, owned: 7 })}`);
+  });
+
+  it("refuses a login another deployment's control plane issued, before any read or write", async () => {
+    const { home, env, io, paths } = setup();
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const other = `${b64({ alg: 'EdDSA' })}.${b64({ iss: 'sh-control-plane', sub: 'github:1' })}.sig`;
+    saveAuth(sbxPaths(paths), { ...LOGIN, apiToken: other });
+    const cp = fakeCp({
+      'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }),
+    });
+    expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+    expect(io.errs.join('\n')).toContain(
+      `refused: the login was issued by 'sh-control-plane', but ${URL_} (profile sandbox) issues 'sbx-control-plane-api'`,
+    );
+    expect(cp.calls.map((c) => c.path)).toEqual(['/v1/discovery']);
+  });
+
+  it('refuses bad flags before any request (exit 2)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({});
+    const opts = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['templates', 'quota', 'github:9', '--active', '1'], env, io, opts)).toBe(
+      2,
+    );
+    expect(io.errs.join('\n')).toMatch(/needs --templates, --builds-queued and --active/);
+    expect(
+      await sbxMain(['templates', 'quota', 'github:9', '--clear', '--active', '1'], env, io, opts),
+    ).toBe(2);
+    expect(await sbxMain(['templates', 'quota', 'default', '--clear'], env, io, opts)).toBe(2);
+    expect(await sbxMain([...ARGS.slice(0, 2), ...ARGS.slice(3)], env, io, opts)).toBe(2);
+    expect(await sbxMain(['ls', '--active', '1'], env, io, opts)).toBe(2);
+    expect(
+      await sbxMain([...ARGS.slice(0, 3), '--templates', '-1', ...ARGS.slice(5)], env, io, opts),
+    ).toBe(2);
+    expect(cp.calls).toEqual([]);
   });
 });
