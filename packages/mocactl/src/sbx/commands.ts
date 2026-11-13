@@ -351,8 +351,8 @@ export async function cmdEgress(
     if (verify) return await verifyEgress(c, id);
     if (ndjson) {
       const body = await c.api.sandboxEgressNdjson(id);
-      if (c.io.outBytes) c.io.outBytes(Buffer.from(body, 'utf8'));
-      else c.io.out(body);
+      if (c.io.outBytes) c.io.outBytes(body);
+      else c.io.out(body.toString('utf8'));
       return SBX_EXIT.ok;
     }
     let page = await c.api.sandboxEgress(id, { limit: 1000 });
@@ -389,32 +389,69 @@ export async function cmdEgress(
 }
 
 /**
- * `sbx egress ID --verify`: the log as served, its sha256 and line
- * count checked against the summary's, which is what the sandbox's end record names (as
- * verify-provenance.py --egress checks a saved copy against the record). Exit 0 only when both match.
+ * `sbx egress ID --verify`: the log as served, its sha256 and line count checked against the
+ * control plane's summary of the same log. That catches damage in transit and a server whose log
+ * and summary disagree; it does not read the sandbox's end record (an owner cannot read provenance
+ * records: verify-provenance.py --egress checks a saved copy against an export). The log is read
+ * first and the summary after, so an open log (not yet sealed) that gained events in between shows
+ * as such, not as damage. Exit 0 only when both match.
  */
 async function verifyEgress(c: SbxCtx, id: string): Promise<number> {
-  const summary = (await c.api.sandboxEgress(id, { limit: 1 })).summary;
   const body = await c.api.sandboxEgressNdjson(id);
-  const sha256 = `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
-  const lines = body.split('\n').filter((l) => l !== '').length;
-  const ok = sha256 === summary.sha256 && lines === summary.total;
+  const summary = (await c.api.sandboxEgress(id, { limit: 1 })).summary;
+  const sha256 = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+  let lines = 0;
+  for (const b of body) if (b === 0x0a) lines += 1;
+  const whole = body.length === 0 || body[body.length - 1] === 0x0a;
+  const ok = whole && sha256 === summary.sha256 && lines === summary.total;
+  // An open log that grew between the two reads: more events in the summary than were read.
+  const grew =
+    !ok && summary.sealed !== true && typeof summary.total === 'number' && summary.total > lines;
   if (c.json)
     c.io.out(
       JSON.stringify({
         verified: ok,
         sha256,
         lines,
-        summary: { sha256: summary.sha256, total: summary.total, complete: summary.complete },
+        summary: {
+          sha256: summary.sha256,
+          total: summary.total,
+          complete: summary.complete,
+          sealed: summary.sealed,
+        },
+        ...(grew ? { open: true } : {}),
       }) + '\n',
+    );
+  else if (ok)
+    c.io.out(
+      `verified: ${lines} events, ${sanitizeRemote(sha256)}` +
+        (summary.complete ? '' : `; INCOMPLETE: ${num(summary.dropped)} dropped`) +
+        sealedText(summary.sealed) +
+        '\n',
+    );
+  else if (grew)
+    c.io.out(
+      `NOT verified: the log is still open (not sealed) and gained events while it was read ` +
+        `(${lines} read, ${num(summary.total)} now); run --verify again, or once it is sealed ` +
+        `(10 minutes after the sandbox ends)\n`,
     );
   else
     c.io.out(
-      ok
-        ? `verified: ${lines} events, ${sanitizeRemote(sha256)}${summary.complete ? '' : `; INCOMPLETE: ${summary.dropped} dropped`}\n`
-        : `NOT verified: the log served is ${lines} events, ${sanitizeRemote(sha256)}; the summary names ${summary.total}, ${sanitizeRemote(summary.sha256)}\n`,
+      `NOT verified: the log served is ${lines} events, ${sanitizeRemote(sha256)}; ` +
+        `the summary names ${num(summary.total)}, ${sanitizeRemote(String(summary.sha256))}\n`,
     );
   return ok ? SBX_EXIT.ok : SBX_EXIT.failed;
+}
+
+/** A number from the server, printed only when it is one: anything else is `?`, never its text. */
+function num(x: unknown): string {
+  return typeof x === 'number' && Number.isFinite(x) ? String(x) : '?';
+}
+
+/** `; sealed` or `; open (not sealed yet)`; nothing from a server that does not say. */
+function sealedText(sealed: boolean | undefined): string {
+  if (sealed === undefined) return '';
+  return sealed ? '; sealed' : '; open (not sealed yet)';
 }
 
 export async function cmdToken(c: SbxCtx, id: string): Promise<number> {

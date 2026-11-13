@@ -169,12 +169,15 @@ export class SandboxApiClient extends ControlPlaneClient {
     });
   }
 
-  /** The whole log as NDJSON, byte for byte as served: its sha256 is the summary's. */
-  async sandboxEgressNdjson(id: string): Promise<string> {
+  /**
+   * The whole log as NDJSON, byte for byte as served: its sha256 is the summary's. The bytes, never
+   * a decoded string, so neither a UTF-8 decoder's replacements nor a BOM's removal can change them.
+   */
+  async sandboxEgressNdjson(id: string): Promise<Buffer> {
     const res = await this.request('GET', `/v1/sandboxes/${encodeURIComponent(id)}/egress`, {
       query: { format: 'ndjson' },
     });
-    return res.text();
+    return Buffer.from(await res.arrayBuffer());
   }
 
   mintSandboxToken(id: string): Promise<SbxToken> {

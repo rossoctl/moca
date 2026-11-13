@@ -76,7 +76,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  what the sandbox reached through its host's egress
                                                  proxy: per host, and whether the log is complete;
                                                  --ndjson prints the log whose sha256 its end record names;
-                                                 --verify checks the log's sha256 and count against it
+                                                 --verify checks the log served against the control
+                                                 plane's summary of it (sha256 and count; once the log
+                                                 is sealed, 10 minutes after the end, it is final)
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';

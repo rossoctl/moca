@@ -105,21 +105,90 @@ describe('mocactl sbx egress', () => {
   it('--verify checks the log served against its summary: exit 0 only when both match', async () => {
     const { home, env, io } = setup();
     let summarySha = SHA;
-    const fetchImpl = (async (input: string | URL) =>
-      String(input).includes('format=ndjson')
+    const order: string[] = [];
+    const fetchImpl = (async (input: string | URL) => {
+      const ndjson = String(input).includes('format=ndjson');
+      order.push(ndjson ? 'ndjson' : 'summary');
+      return ndjson
         ? new Response(NDJSON, { status: 200, headers: { 'content-type': 'application/x-ndjson' } })
         : new Response(
             JSON.stringify({ events: [], next: null, summary: summary({ sha256: summarySha }) }),
             { status: 200, headers: { 'content-type': 'application/json' } },
-          )) as typeof fetch;
+          );
+    }) as typeof fetch;
     expect(await sbxMain(['egress', SBX, '--verify'], env, io, { home, fetchImpl })).toBe(0);
-    expect(io.outs.join('')).toBe(`verified: 2 events, ${SHA}\n`);
+    expect(io.outs.join('')).toBe(`verified: 2 events, ${SHA}; open (not sealed yet)\n`);
+    // The log first, then the summary: an open log that grows in between shows as open, not damage.
+    expect(order).toEqual(['ndjson', 'summary']);
     io.outs.length = 0;
     summarySha = `sha256:${'0'.repeat(64)}`;
     expect(await sbxMain(['egress', SBX, '--verify', '--json'], env, io, { home, fetchImpl })).toBe(
       1,
     );
     expect(JSON.parse(io.outs.join(''))).toMatchObject({ verified: false, sha256: SHA, lines: 2 });
+  });
+
+  it('--verify on an open log that gained events while it was read says so (exit 1)', async () => {
+    const { home, env, io } = setup();
+    const fetchImpl = (async (input: string | URL) =>
+      String(input).includes('format=ndjson')
+        ? new Response(NDJSON, { status: 200 })
+        : new Response(
+            JSON.stringify({
+              events: [],
+              next: null,
+              summary: summary({ total: 3, sha256: `sha256:${'1'.repeat(64)}` }),
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )) as typeof fetch;
+    expect(await sbxMain(['egress', SBX, '--verify'], env, io, { home, fetchImpl })).toBe(1);
+    expect(io.outs.join('')).toMatch(
+      /^NOT verified: the log is still open \(not sealed\) and gained events while it was read \(2 read, 3 now\)/,
+    );
+  });
+
+  it('--ndjson and --verify use the bytes as served, not a decoded string', async () => {
+    const { home, env, io } = setup();
+    // A BOM and a byte that is not UTF-8: a decoder would strip the one and replace the other.
+    const raw = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from('{"host":"a.example.com"}'),
+      Buffer.from([0xff, 0x0a]),
+    ]);
+    const sha = `sha256:${createHash('sha256').update(raw).digest('hex')}`;
+    const fetchImpl = (async (input: string | URL) =>
+      String(input).includes('format=ndjson')
+        ? new Response(raw, { status: 200 })
+        : new Response(
+            JSON.stringify({
+              events: [],
+              next: null,
+              summary: summary({ total: 1, sha256: sha, sealed: true }),
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )) as typeof fetch;
+    expect(await sbxMain(['egress', SBX, '--ndjson'], env, io, { home, fetchImpl })).toBe(0);
+    expect(Buffer.concat(io.outB).equals(raw)).toBe(true);
+    expect(await sbxMain(['egress', SBX, '--verify'], env, io, { home, fetchImpl })).toBe(0);
+    expect(io.outs.join('')).toBe(`verified: 1 events, ${sha}; sealed\n`);
+  });
+
+  it('--verify prints a server number that is not a number as ?, never its text', async () => {
+    const { home, env, io } = setup();
+    const fetchImpl = (async (input: string | URL) =>
+      String(input).includes('format=ndjson')
+        ? new Response(NDJSON, { status: 200 })
+        : new Response(
+            JSON.stringify({
+              events: [],
+              next: null,
+              summary: summary({ total: '\u001b[2Jx', sealed: true }),
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )) as typeof fetch;
+    expect(await sbxMain(['egress', SBX, '--verify'], env, io, { home, fetchImpl })).toBe(1);
+    expect(io.outs.join('')).toContain('the summary names ?, ');
+    expect(io.outs.join('')).not.toContain('\u001b');
   });
 
   it("is another user's sandbox: the same not-found as sbx token", async () => {
