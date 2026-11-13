@@ -182,9 +182,10 @@ pick. A sandbox's mode is set on the control plane: `mode` and `idleTimeoutS` on
 **The mode reaches the worker in your token.** A sandbox token carries the claims `mode`,
 `mode_epoch` and `idle_timeout_s`, and the relay writes them into every `Exec` it routes, over
 whatever the client sent. Leave `Exec.mode`, `mode_epoch` and `idle_timeout_s` unset. After a mode
-change, mint a fresh token: the old one still carries the old epoch. A token from before the
-sandbox's first mode change carries epoch 0, and it is not refused: the worker serves an epoch-0
-Exec per-`Exec`, and that ends a live lease.
+change, mint a fresh token: the old one still carries the old epoch. For a sandbox created
+`per-exec`, a token from before its first mode change carries epoch 0, and it is not refused: the
+worker serves an epoch-0 Exec per-`Exec`, and that ends a live lease. A sandbox created in a lease
+mode starts at epoch 1 (below), so none of its tokens carries 0.
 
 - **`Exec.keepalive`** is the one lease field that is yours. Setting it, or calling
   `LeaseKeepalive`, turns the keepalive rule on for the rest of the lease: the lease then ends when
@@ -227,15 +228,16 @@ the mode and run it per-`Exec`, without lease events. On `LeaseControl`, the con
 age_ms, idle_timeout_s, pending}`, read after the op. `reset` and a downgrade wait for the lease to
 end, which can take as long as an Exec in flight needs (up to 30 minutes).
 
-| Code                  | Cause                                                                                                                                 |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `UNAUTHENTICATED`     | Missing, expired or invalid sandbox token                                                                                             |
-| `PERMISSION_DENIED`   | `sandbox_id` is not the token's worker or is a workload sandbox, or the set-mode token was refused (one message, whatever the reason) |
-| `INVALID_ARGUMENT`    | No `op`                                                                                                                               |
-| `RESOURCE_EXHAUSTED`  | `sandbox busy`: the sandbox already has 4 `LeaseControl` calls in flight. Nothing was sent                                            |
-| `FAILED_PRECONDITION` | The worker refused the op; the details are its message (above, or `busy: too many lease calls in flight`, below)                      |
-| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s (`status`) or 31 minutes (`reset`, `set_mode`): it may predate lease mode                       |
-| `UNAVAILABLE`         | The template's worker is not attached, or it went away before answering                                                               |
+| Code                  | Cause                                                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UNAUTHENTICATED`     | Missing, expired or invalid sandbox token                                                                                                                                                   |
+| `PERMISSION_DENIED`   | A harness exec token (the harness never uses leases); `sandbox_id` is not the token's worker or is a workload sandbox; or the set-mode token was refused (one message, whatever the reason) |
+| `INVALID_ARGUMENT`    | No `op`                                                                                                                                                                                     |
+| `RESOURCE_EXHAUSTED`  | `sandbox busy`: the sandbox already has 4 `LeaseControl` calls in flight. Nothing was sent                                                                                                  |
+| `FAILED_PRECONDITION` | The worker refused the op; the details are its message (above, or `busy: too many lease calls in flight`, below)                                                                            |
+| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s (`status`) or 31 minutes (`reset`, `set_mode`): it may predate lease mode                                                                             |
+| `UNAVAILABLE`         | The template's worker is not attached, or it went away before answering                                                                                                                     |
+| `CANCELLED`           | You cancelled the call before the worker answered. The relay frees its place at once, but a `reset` or `set_mode` already sent runs on at the worker: read the outcome with `status`        |
 
 On a `PERMISSION_DENIED` from `set_mode`, fetch a fresh set-mode token once and retry. A worker
 runs at most 2 `reset` or `set_mode` calls per sandbox, and 16 in all, and answers `busy` past

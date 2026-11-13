@@ -55,10 +55,10 @@ Optional inputs:
 ([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` does not
 set them yet, so a deployment runs with their defaults:
 
-| Variable                    | Default    | Rule                                                                                                                                                                                     |
-| --------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SH_SANDBOX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick, a comma list of `per-exec`, `lease` and `lease+processes`. `per-exec` is always allowed, listed or not. Keep the default until the lease gate below is passed |
-| `SH_SANDBOX_IDLE_CEILING_S` | 1800       | the longest lease idle timeout an owner may set, in seconds; at least 30, or the control plane refuses to boot. An owner who sets none gets the worker's default, 300 s                  |
+| Variable                    | Default    | Rule                                                                                                                                                                                                                                                                                      |
+| --------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SH_SANDBOX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick, a comma list of `per-exec`, `lease` and `lease+processes`. `per-exec` is always allowed, listed or not. Keep the default until the lease gate below is passed                                                                                                  |
+| `SH_SANDBOX_IDLE_CEILING_S` | 1800       | the longest lease idle timeout an owner may set, in seconds; at least 30, or the control plane refuses to boot. An owner who sets none gets the worker's default, 300 s. The worker also clamps with its own `SH_LEASE_IDLE_CEILING_S` (default 1800), so raise it together with this one |
 
 **Lease mode stays off by default.** It stays off until plan 4's live smoke test passes and the
 [SBX security review](../../docs/sbx/security-review.md) has its lease section (lease-mode spec

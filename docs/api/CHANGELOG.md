@@ -12,8 +12,8 @@ only on the `sandbox` route profile.
   default) and `modeEpoch`. A sandbox created `per-exec` starts at epoch 0, one created in a lease
   mode at 1.
 - POST /v1/sandboxes accepts `mode` (default `per-exec`) and `idleTimeoutS` (30 to
-  `SH_SANDBOX_IDLE_CEILING_S`, default 1800; omitted means the worker's default, an explicit 0 is
-  400 `invalid_request`).
+  `SH_SANDBOX_IDLE_CEILING_S`, whose default is 1800; omitted, the worker's default of 300 s; an
+  explicit 0 is 400 `invalid_request`).
 - New PUT /v1/sandboxes/{id}/mode: changes the mode and the idle timeout, raises `modeEpoch` by 1 on
   every accepted call, audits `sandbox_mode_changed`, and returns the sandbox with a `setModeToken`
   for the client's `LeaseControl set_mode`.
