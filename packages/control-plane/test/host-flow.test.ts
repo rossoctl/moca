@@ -235,6 +235,59 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(ex.records.some((r) => r.kind === 'build' && r.body.outcome === 'cancelled')).toBe(true);
   });
 
+  it('keeps a cancel that lands while a built report is being written (re-checked in the update)', async () => {
+    const d = await setup();
+    const build = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(asHost('host-1', { build }, { event: 'building' }), d);
+    // Hold the report in its first blob write, after it has read the build as `building`.
+    const prov = d.provenance!;
+    const putBlob = prov.putBlob.bind(prov);
+    let entered!: () => void;
+    let release!: () => void;
+    const inBlob = new Promise<void>((r) => (entered = r));
+    const held = new Promise<void>((r) => (release = r));
+    prov.putBlob = async (buf: Buffer) => {
+      entered();
+      await held;
+      return putBlob(buf);
+    };
+    const report = HANDLERS.hostBuildReport!(
+      asHost('host-1', { build }, { event: 'built', ...records() }),
+      d,
+    );
+    await inBlob;
+    await HANDLERS.cancelTemplateBuild!(ctx({ principal: alice, params: { id: ID, build } }), d);
+    release();
+    expect(await codeOf(() => report)).toBe('invalid_request');
+    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+      .body as Body;
+    expect(t.builds[0]).toMatchObject({ status: 'failed', reason: { step: 'cancelled' } });
+    expect(t.tags).toEqual({});
+    // No record says it was built or registered: the chain holds the cancel only.
+    const chain = await prov.chain(`template/${ID}`);
+    expect(chain.map((x) => x.kind)).toEqual(['create', 'gate', 'check', 'build']);
+    expect(chain.at(-1)!.body).toMatchObject({ outcome: 'cancelled' });
+  });
+
+  it('refuses a report with an unknown event, and a building report on a cancelled build', async () => {
+    const d = await setup();
+    const build = await claimAndBuild(d);
+    expect(
+      await codeOf(() =>
+        HANDLERS.hostBuildReport!(asHost('host-1', { build }, { event: 'done' }), d),
+      ),
+    ).toBe('invalid_request');
+    await HANDLERS.cancelTemplateBuild!(ctx({ principal: alice, params: { id: ID, build } }), d);
+    for (const event of ['building', 'probing', 'failed']) {
+      expect(
+        await codeOf(() => HANDLERS.hostBuildReport!(asHost('host-1', { build }, { event }), d)),
+      ).toBe('invalid_request');
+    }
+    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+      .body as Body;
+    expect(t.builds[0]).toMatchObject({ status: 'failed', reason: { step: 'cancelled' } });
+  });
+
   it('refuses a report for a build another host claimed (a host reports only for itself)', async () => {
     const d = await setup();
     const build = await claimAndBuild(d);

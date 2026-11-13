@@ -310,7 +310,9 @@ A claimed build's job is the spec as the policy checked it: the template's id an
 image always win over keys of the same name in the spec, and the guest size is always named
 `guest_ram_mb` (the API also takes `guest_mb`; `template-build.sh` reads only `guest_ram_mb`). A
 report is accepted only for a build handed to that host, and a failed or cancelled build takes no
-more reports. On `built` the control plane stores T and S byte for byte, writes a `build` record
+more reports; the check is made again inside the template's update, with the report's records, so
+an owner's cancel that lands while a report is being written stands and no record says it
+registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
 template's first registered build takes the `default` tag.
 
