@@ -37,6 +37,7 @@ export const CP_ERROR_CODES = [
   'no_active_slot',
   'template_unavailable',
   'template_not_active',
+  'mode_not_allowed',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -107,6 +108,9 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: a sandbox create on a build that is not active (§6.4); its activation has started unless the
   // create said `activate: false`. Retry-After says when to try again.
   template_not_active: 409,
+  // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
+  // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
+  mode_not_allowed: 403,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.
