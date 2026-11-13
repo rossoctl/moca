@@ -694,7 +694,8 @@ below takes `--json` (the API's answer, never a token).
 
 **What you may do.** `mocactl sbx quota` shows your template quotas and use, and your live-sandbox
 cap; `mocactl sbx policy` the profiles a create can name, each with its size envelope, egress and
-rules, the registries an image may come from, and the policy's digest.
+rules, the registries an image may come from, and the policy's digest; `mocactl sbx hosts` each
+KVM host's active slots, start line and memory.
 
 **Create, and follow the build:**
 
@@ -723,6 +724,53 @@ mocactl sbx templates follow my-python                         # exit 0 once reg
 - `follow` polls until the build is `registered` (exit 0), `failed` or `rejected` (exit 1, with
   its reason). `templates show ID` prints it once; `templates cancel ID --build B` withdraws one not
   yet built. `templates build ID --spec F` is a new build of your template.
+
+**Use it:**
+
+```bash
+mocactl sbx templates activate my-python --wait     # until active, saying why it waits
+mocactl sbx create --template my-python --seed      # the build's seed first, then a clean-tree check
+mocactl sbx templates deactivate my-python --stop-now
+```
+
+`activate --wait` prints why a start waits (queued at position N, no slot, memory, or a memory
+file to rebuild); a refusal other than a full slot fails at once.
+`create --template ID@BUILD` pins one build. `create --seed` runs the build's seed as the sandbox's
+first command, then checks that `/workspace` is a clean git tree; a failure keeps the sandbox, for
+you to look at. The seeded tree becomes the sandbox's baseline, so `sbx pull` returns only what
+changed after the seed, and `sbx rm` deletes an unchanged seeded sandbox with no `--force`.
+**A probe sandbox you then changed needs `sbx rm --force`:** a sandbox created with `--seed` to try
+a template, in which you ran something that wrote to `/workspace` (a test run's caches, a build),
+has changes not yet pulled, so a plain `rm` refuses it. Pull what you want to keep, then
+`mocactl sbx rm --force <id>`. `deactivate --stop-now` skips the host's idle grace.
+
+**Change and retire it:** `mocactl sbx templates tag ID default --build B` points new creates at
+another build; `templates edit ID` changes its description and visibility. `mocactl sbx templates
+retire my-python --wait` returns once no host holds it; `--build B` retires one build. A retire is
+refused while a sandbox or session still uses the build (`409 build_in_use`): delete those first. A
+create after a retire answers `410 template_retired`.
+
+**Waits and their exit.** `follow` waits up to 3600 s, `retire --wait` 300 s; `activate --wait` at
+least 1800 s, more for a build queued behind its host's start limit: (position ÷ starts at once,
+rounded up, plus 1) × the host's measured start time × 1.25, read at the first poll, and at most
+4 h. `--timeout S` sets another. Past it they exit **5**; nothing is undone.
+
+**What your sandbox reached.** For a template with egress, `mocactl sbx egress <sandbox>` lists the
+hosts the sandbox connected to, from the KVM host's egress proxy, and the sandbox's end record names
+the log's digest.
+
+**A record of every call.** `--record calls.ndjson` on these commands (and every other command that
+calls the API, but `token`, `login`, `logout` and `credentials`) appends one JSON line per HTTP
+attempt: the command, the path, the status, both bodies and their times. The file is created `0600`.
+Tokens and gate records are kept only as their sha256, and hosts and build-log text only as their
+length, so a record can be shared. `mocactl run "prompt" --record F` writes the same record for a
+Moca Pi session's calls ([CLI reference](../reference/cli-mocactl.md)).
+
+**For admins.** `mocactl sbx admin subjects enroll|unenroll|grant|revoke` reads the current value
+first and prints `old -> new` and the record written; if the value changed between that read and
+the write (another admin at the same time), it says so and exits 1: check it and write again.
+`mocactl sbx templates quota TARGET …` sets a subject's template quotas, and `templates transfer ID
+SUBJECT` hands a template to another owner.
 
 ## 9. Using the API directly
 
