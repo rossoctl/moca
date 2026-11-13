@@ -444,7 +444,7 @@ func TestLeaseEndedWireString(t *testing.T) {
 		_, err := r.Run(context.Background(), s, sink)
 		errc <- err
 	}()
-	<-entered
+	recvWithin(t, entered, "the Exec to reach the guest")
 	clk.Advance(p.cfg.LeaseGraceLimit + time.Minute)
 	err := recvWithin(t, errc, "the Exec's return at the grace limit")
 	if err == nil || err.Error() != "lease_ended(grace_limit)" {

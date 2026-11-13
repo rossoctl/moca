@@ -87,9 +87,11 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		return 0, wexec.ErrAborted
 	default:
 		// Refusals, key mismatches and spawn failures all become ExecError. They stay
-		// distinguishable in the message and are already counted in Stats, which is
-		// what spec §7.3's "ExecErrors by cause" row reads. The lease errors take their
-		// wire strings (wireError).
+		// distinguishable in the message. The pool's refusals are already counted in
+		// Stats, which is what spec §7.3's "ExecErrors by cause" row reads; the one
+		// refusal built here, specMode's lease_unsupported for a mode this worker does
+		// not know, never reached the pool and is not. The lease errors take their wire
+		// strings (wireError).
 		return 0, wireError(err)
 	}
 }
