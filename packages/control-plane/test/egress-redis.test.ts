@@ -9,6 +9,7 @@ import {
   EGRESS_TOTAL_BYTES,
   MemoryEgressStore,
   RedisEgressStore,
+  compareEntryIds,
   summarize,
   type EgressRedisLike,
   type EgressStore,
@@ -57,6 +58,15 @@ const group = (sandboxId: string, n: number, expireAtS: number, from = 0) => ({
   expireAtS,
 });
 
+describe('compareEntryIds', () => {
+  it('orders stream ids by ms, then seq, numerically', () => {
+    expect(compareEntryIds('9-0', '10-0')).toBe(-1);
+    expect(compareEntryIds('10-2', '10-10')).toBe(-1);
+    expect(compareEntryIds('10-10', '10-10')).toBe(0);
+    expect(compareEntryIds('18446744073709551615-1', '18446744073709551615-0')).toBe(1);
+  });
+});
+
 describe.each([
   [
     'memory',
@@ -100,6 +110,24 @@ describe.each([
     expect(await store.seal('sbx-a', exp)).toBe(false);
     const late = await store.append('host-1', 'c3', [group('sbx-a', 2, exp)], 0, 0);
     expect(late).toMatchObject({ accepted: 0, refused: 2 });
+    await done();
+  });
+
+  it('pages after an id that is not in the log by id order, as XRANGE does', async () => {
+    const { store, done } = make();
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    await store.append('host-1', 'c1', [group('sbx-a', 3, exp)], 0, 0);
+    const all = await store.page('sbx-a', null, 10);
+    const [ms, seq] = all[1]!.id.split('-');
+    // An id just after the 2nd entry's, which need not be in the log (in the memory store it is
+    // not), one before every entry, and one after them all.
+    const between = `${ms}-${BigInt(seq!) + 1n}`;
+    const want = all.filter((e) => compareEntryIds(e.id, between) > 0).map((e) => e.line);
+    expect((await store.page('sbx-a', between, 10)).map((e) => e.line)).toEqual(want);
+    expect((await store.page('sbx-a', '0-0', 10)).map((e) => e.line)).toEqual(
+      all.map((e) => e.line),
+    );
+    expect(await store.page('sbx-a', '99999999999999-0', 10)).toEqual([]);
     await done();
   });
 

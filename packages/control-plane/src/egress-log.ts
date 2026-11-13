@@ -194,6 +194,13 @@ export interface EgressStore {
 }
 
 export const ENTRY_ID_RE = /^[0-9]{1,20}-[0-9]{1,20}$/;
+
+/** Stream ids (`<ms>-<seq>`) in Redis's order: by ms, then seq, each a 64-bit number. */
+export function compareEntryIds(a: string, b: string): number {
+  const [am, as] = a.split('-').map(BigInt) as [bigint, bigint];
+  const [bm, bs] = b.split('-').map(BigInt) as [bigint, bigint];
+  return am !== bm ? (am < bm ? -1 : 1) : as === bs ? 0 : as < bs ? -1 : 1;
+}
 const PAGE = 1000;
 
 export interface EgressSummary {
@@ -353,10 +360,11 @@ export class MemoryEgressStore implements EgressStore {
     return a;
   }
 
+  /** As Redis XRANGE `(after`: the entries whose id is after `after` in stream-id order. */
   async page(id: string, after: string | null, limit: number) {
     const es = this.logs.get(id)?.entries ?? [];
-    const from = after === null ? 0 : es.findIndex((e) => e.id === after) + 1;
-    return es.slice(from, from + limit);
+    const from = after === null ? 0 : es.findIndex((e) => compareEntryIds(e.id, after) > 0);
+    return from < 0 ? [] : es.slice(from, from + limit);
   }
 
   async meta(id: string) {
