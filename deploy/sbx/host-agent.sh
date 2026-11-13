@@ -44,8 +44,9 @@
 #     the last batch taken, and the next run goes on from there.
 #   - The cursor is $SBX_SRV/egress.cursor (0600), the journal position after the last event the
 #     control plane took. With none, the step starts at this boot's first entry.
-#   - Batches of up to 1000 journal entries, at most 10 per run; a non-event line (the proxy's own log)
-#     is skipped. A batch is saved to $SBX_SRV/egress.pending.json (0600) before it is posted and re-sent
+#   - Batches of up to 1000 journal entries, at most 10 per run, read with --all (without it a field
+#     over 4096 bytes comes out null); a non-event line (the proxy's own log) is skipped, and an entry
+#     whose MESSAGE is not text (not UTF-8: an array of bytes) is an error line, as it cannot be read. A batch is saved to $SBX_SRV/egress.pending.json (0600) before it is posted and re-sent
 #     unchanged until it is taken, so a retry repeats its cursor and the control plane, idempotent by
 #     (host, cursor), never stores it twice.
 #   - A post that fails (the control plane down, a 5xx, or a 404 from one without the route) is an error
@@ -429,7 +430,7 @@ egress() {
   if [[ -f "$pending" ]]; then
     egress_post || { error "egress post failed: the cursor stays, the next run retries (HTTP $EG_CODE)"; exec 8>&-; return; }
   fi
-  local rc mb mm skipped
+  local rc mb mm skipped n_bad
   for ((i = 0; i < EGRESS_BATCHES; i++)); do
     if ((SECONDS - started >= EGRESS_BUDGET_S)); then
       say "{\"agent\":\"skipped\",\"why\":\"egress: the ${EGRESS_BUDGET_S} s budget is spent; the next run goes on\"}"
@@ -440,7 +441,9 @@ egress() {
     entries="$WORK/egress.entries"
     # journalctl's own exit status, written aside: the pipe's is head's, and head stopping early is a
     # SIGPIPE (141) for a full batch, not a failure. (A && B || C keeps set -e out of the subshell.)
-    { journalctl -u moca-egress.service -o json --no-pager "${pos[@]}" 2>"$WORK/egress.jerr" && echo 0 >"$WORK/egress.jrc" ||
+    # --all: without it, journalctl prints a field over 4096 bytes as null, so an event of 4-8 KiB
+    # would be passed over unsent and uncounted.
+    { journalctl -u moca-egress.service -o json --all --no-pager "${pos[@]}" 2>"$WORK/egress.jerr" && echo 0 >"$WORK/egress.jrc" ||
       echo "$?" >"$WORK/egress.jrc"; } | head -n "$EGRESS_BATCH" >"$entries" || true
     rc="$(<"$WORK/egress.jrc")"
     n="$(wc -l <"$entries" | tr -d ' ')"
@@ -466,6 +469,8 @@ egress() {
     if [[ -f "$SBX_SRV/egress.catchup" && -s "$SBX_SRV/egress.mark" ]]; then read -r mb mm <"$SBX_SRV/egress.mark" || true; fi
     [[ "$mm" =~ ^[0-9]+$ ]] || { mb='' mm=-1; }
     # Each entry's MESSAGE is a proxy event when it is a JSON object from moca-egress; others are skipped.
+    # A MESSAGE that is not text (journalctl prints bytes that are not UTF-8 as an array of numbers)
+    # cannot be read for its sid: it is counted (unreadable) and said in an error line, never silent.
     # An event over 8 KiB (a guest's long path) is not sent; its sid is, as `oversized`, and the
     # control plane counts it as dropped in that sandbox's log. Nothing in an event is changed.
     # Only this host's sandboxes' events, and the proxy's audit_dropped reports (no sid); `notOurs`
@@ -475,11 +480,14 @@ egress() {
         | [.[] | .MESSAGE | strings | (try fromjson catch null) | objects | select(.via == "moca-egress")] as $every
         | [$every[] | select((.decision == "audit_dropped" and ((.sid // "") == "")) or (.sid as $x | $s[0] | index([$x]) != null))] as $all
         | {cursor: $c, notOurs: (($every | length) - ($all | length)),
+           unreadable: ([.[] | select(.MESSAGE != null and (.MESSAGE | type) != "string")] | length),
            events: [$all[] | select((tojson | utf8bytelength) <= 8192)],
            oversized: [$all[] | select((tojson | utf8bytelength) > 8192) | (.sid // "" | tostring | .[0:128])]}' \
-      "$entries" >"$pending.all" && jq -c 'del(.notOurs)' "$pending.all" >"$pending") ||
+      "$entries" >"$pending.all" && jq -c 'del(.notOurs, .unreadable)' "$pending.all" >"$pending") ||
       { rm -f "$pending" "$pending.all"; error 'egress: the journal batch did not parse'; break; }
     EG_NOT_OURS=$((EG_NOT_OURS + $(jq .notOurs "$pending.all")))
+    n_bad="$(jq .unreadable "$pending.all")"
+    ((n_bad == 0)) || error "egress: $n_bad journal entries of moca-egress have a MESSAGE that is not text; not sent"
     rm -f "$pending.all"
     # The skipped count, and the mark after this batch (never moved back within a boot).
     # '|'-joined: with tabs, read would collapse an empty boot id and shift the fields.

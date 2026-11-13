@@ -428,7 +428,7 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   most about 64 MB. The total counts the logs that still exist, so an expired log gives its share
   back. Each post reads the length of every retained log, so its cost grows with the number of
   sandboxes retained with a log: small at SBX0's scale.
-- **Completeness:** an event over 8 KiB isn't sent (only its sandbox id is). A log's `dropped` counts
+- **Completeness:** an event over 8 KiB isn't sent (only its sandbox id is); the agent reads the journal with `--all`, so one up to 8 KiB is sent whole (without it journalctl prints a field over 4096 bytes as `null`). A journal entry whose message is not text (not UTF-8) cannot be read for its sandbox: the agent says so in an error line. A log's `dropped` counts
   those (`invalid`), events past its cap (`cap`) or past the total budget (`budget`), and the proxy's own `audit_dropped` reports, charged to every sandbox on
   the host's workers live within 60 s before each. `complete` is `dropped == 0`. The sandbox's end
   record (`sandbox`, `state: terminated`) names `egress: {events, sha256, dropped, droppedBy, complete}`; if events

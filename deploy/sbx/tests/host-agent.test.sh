@@ -101,7 +101,8 @@ cat >"$TMP/bin/flock" <<'MOCK'
 MOCK
 # journalctl: logs its argv; answers -o json entries from $MOCK_STATE/journal (one JSON entry a line,
 # each with __CURSOR), after --after-cursor when given; a cursor no entry has is journalctl's
-# "Failed to seek to cursor" and exit 1, as a rotated-away cursor is. Exits 1 if anything else is asked.
+# "Failed to seek to cursor" and exit 1, as a rotated-away cursor is. Without --all, a MESSAGE over
+# 4096 bytes is printed null, as journalctl does. Exits 1 if anything else is asked.
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
@@ -110,11 +111,13 @@ args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   [[ "${args[$i]}" == --after-cursor ]] && after="${args[$((i + 1))]}"
 done
-[[ " $* " == *" -u moca-egress.service -o json --no-pager "* ]] || exit 1
+[[ " $* " == *" -u moca-egress.service -o json "* ]] || exit 1
+full() { if [[ " $* " == *" --all "* ]]; then cat; else
+  jq -c 'if (.MESSAGE | type) == "string" and (.MESSAGE | utf8bytelength) > 4096 then .MESSAGE = null else . end'; fi; }
 [[ -f "$MOCK_STATE/journal" ]] || exit 0
-if [[ -z "$after" ]]; then cat "$MOCK_STATE/journal"; else
+if [[ -z "$after" ]]; then cat "$MOCK_STATE/journal" | full "$@"; else
   grep -qF "\"__CURSOR\":\"$after\"" "$MOCK_STATE/journal" || { echo 'Failed to seek to cursor: Invalid argument' >&2; exit 1; }
-  awk -v c="$after" 'seen { print } index($0, "\"__CURSOR\":\"" c "\"") { seen = 1 }' "$MOCK_STATE/journal"
+  awk -v c="$after" 'seen { print } index($0, "\"__CURSOR\":\"" c "\"") { seen = 1 }' "$MOCK_STATE/journal" | full "$@"
 fi
 MOCK
 chmod +x "$TMP/bin/curl" "$TMP/bin/template-build" "$TMP/bin/systemctl" "$TMP/bin/flock" "$TMP/bin/journalctl"
@@ -431,7 +434,7 @@ grep -Eq 'systemctl (start|stop|restart|enable|disable)[^@]*moca-egress' "$MOCK_
 rm -f "$TMP/state/enabled-moca-egress.service"
 touch "$TMP/state/active-moca-egress.service"
 egress_run || fail 'the egress run failed'
-grep -q 'journalctl -u moca-egress.service -o json --no-pager -b' "$MOCK_LOG" || fail 'the first read is not from this boot'
+grep -q 'journalctl -u moca-egress.service -o json --all --no-pager -b' "$MOCK_LOG" || fail 'the first read is not from this boot'
 jq -e --argjson a "$EV" --argjson b "$EV2" '.events == [$a, $b] and .cursor == "c3" and .oversized == []' "$TMP/state/egress-posts" >/dev/null ||
   fail 'the post does not carry exactly the proxy events and the last cursor'
 jq -e '[.events[] | keys[]] - ["time","via","vm_id","sid","sub","host","dial_addr","method","path","status","bytes_up","bytes_down","credential","decision","dropped","coalesced"] == []' \
@@ -473,6 +476,16 @@ BIG="$(jq -cn --argjson e "$EV" '$e + {path: ("/" + ("a" * 9000))}')"
 entry c1007 "$BIG" >>"$TMP/state/journal"
 egress_run || fail 'the oversized run failed'
 jq -e '.events == [] and .oversized == ["sbx-0123456789abcdef0123456789"]' "$TMP/state/egress-posts" >/dev/null || fail 'an oversized event'
+# An event of 5 KiB (over journalctl's 4096-byte field limit without --all) is sent whole.
+MID="$(jq -cn --argjson e "$EV" '$e + {path: ("/" + ("b" * 5000))}')"
+entry c1008 "$MID" >>"$TMP/state/journal"
+egress_run || fail 'the 5 KiB run failed'
+jq -e --argjson m "$MID" '.events == [$m] and .oversized == []' "$TMP/state/egress-posts" >/dev/null || fail 'a 5 KiB event was not sent whole'
+# A MESSAGE that is not text (journalctl's array of bytes) is not sent, and is said.
+jq -cn '{__CURSOR: "c1009", __MONOTONIC_TIMESTAMP: "1009", _BOOT_ID: "b1", MESSAGE: [104, 255, 105], _SYSTEMD_UNIT: "moca-egress.service"}' >>"$TMP/state/journal"
+egress_run || fail 'the unreadable run failed'
+grep -q 'egress: 1 journal entries of moca-egress have a MESSAGE that is not text; not sent' "$TMP/out" || fail 'an unreadable MESSAGE was silent'
+[[ "$(<"$TMP/srv/egress.cursor")" == c1009 ]] || fail 'the cursor after an unreadable entry'
 pass 'ships egress events as written, only with moca-egress active (enabled or not), never acting on it; batches of 1000; a failed post keeps the cursor and retries the same batch'
 
 # 14. A 400 invalid_request (a batch the control plane will never take) is set aside, never retried
@@ -519,7 +532,7 @@ egress_run || fail 'the first run of 15 failed'
 egress_run || fail 'the rotated run failed'
 grep -q 'egress: the journal cursor is no longer valid; restarting from this boot' "$TMP/out" || fail 'no error for a rotated cursor'
 [[ "$(<"$TMP/srv/egress.cursor.stale")" == c11 ]] || fail 'the old cursor was not kept'
-grep -q 'journalctl -u moca-egress.service -o json --no-pager -b' "$MOCK_LOG" || fail 'no restart from this boot'
+grep -q 'journalctl -u moca-egress.service -o json --all --no-pager -b' "$MOCK_LOG" || fail 'no restart from this boot'
 jq -s -e --argjson a "$EV" '(map(.events) | add) == [$a] and .[-1].cursor == "r12"' "$TMP/state/egress-posts" >/dev/null ||
   fail 'the restart re-sent entries already sent, or did not ship the new one'
 grep -q '"egressSkipped":2' "$TMP/out" || fail 'the skipped entries are not counted'
