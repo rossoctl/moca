@@ -213,6 +213,7 @@ export {
   type SandboxGrantClaims,
 } from './grant.js';
 export { issueTurnGrants, refreshTurnGrants, type TurnGrantsResponse } from './grant-exchange.js';
+export { redeemInferenceGrant, type RedeemedInference } from './grant-redeem.js';
 export { TurnStore, type TurnStoreOptions } from './turn-store.js';
 export {
   isTerminalState,
