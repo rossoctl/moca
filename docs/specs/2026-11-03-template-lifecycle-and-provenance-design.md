@@ -382,7 +382,10 @@ poll:
 
 **Removal (step 7, #743).** The wanted state's `remove` lists the retired builds the host holds with
 no live sandbox on their worker, each also in `stop`, so a running worker is stopped first, in the
-same run. For each, the agent finds the snapshot from its own template record whose manifest hash
+same run. A retired build whose build id or worker a build that is not retired shares (in any
+template: the same snapshot registered again, or a worker id kept) is in neither list, and its
+`removed` is refused `409 build_in_use`: deleting it would take the snapshot or worker that build
+needs, and drop its host from that build's `heldBy`. For each, the agent finds the snapshot from its own template record whose manifest hash
 is the build id and whose worker is the one named, never from a path the control plane sends: a
 name no record matches deletes nothing and is reported as an error. It skips a worker whose unit
 still runs (removed once it is stopped), runs `install-host.sh --uninstall <worker>` if the worker is

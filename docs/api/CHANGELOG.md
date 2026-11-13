@@ -13,11 +13,13 @@ Every change is additive.
 - GET /v1/hosts/{host}/wanted gains `remove`: the retired builds the host holds with no live sandbox
   on their worker, each also in `stop`. The agent stops a running worker, then uninstalls it
   (`install-host.sh --uninstall`), deletes the snapshot and its template record, and reports it. A
-  worker with a live sandbox is in no list.
+  worker with a live sandbox is in no list, nor is a retired build whose build id or worker a build
+  that is not retired shares (in any template): its snapshot or worker is still needed.
 - POST /v1/hosts/{host}/workers/report takes `removed` for a retired build the host holds: a `retire`
   record by `host:<id>` with `event: removed` and `buildRecord` (the digest of the build's `build`
   record). The host no longer holds the build, so TemplateBuild's `heldBy` drops it at once, before
-  the host's next inventory.
+  the host's next inventory. A `removed` for a build the wanted state leaves out because a build not
+  retired shares it is refused `409 build_in_use`.
 
 ## 1.8.0
 

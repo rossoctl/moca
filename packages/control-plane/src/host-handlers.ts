@@ -238,6 +238,24 @@ function registrationResults(
 /** The statuses a host may still report on: claimed, and not yet registered, rejected or failed. */
 const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
 
+/**
+ * The build ids and workers of every build that is not retired, in every template. A retired build
+ * that shares either with one (the same snapshot built again, a twin in another template, a worker
+ * id reused) names a snapshot or worker still needed: it is never stopped or removed for the
+ * retire, and its `removed` is refused.
+ */
+function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
+  const ids = new Set<string>();
+  const workers = new Set<string>();
+  for (const d of docs)
+    for (const b of d.builds) {
+      if (b.status === 'retired') continue;
+      ids.add(b.buildId);
+      if (b.worker) workers.add(b.worker);
+    }
+  return (b) => ids.has(b.buildId) || (b.worker !== '' && workers.has(b.worker));
+}
+
 /** Refuses a report on a build that is not this host's, or that takes no more reports. */
 function reportable(y: TemplateBuild, host: string): void {
   if (y.claim?.host !== host) throw new CpError('not_found', 'no such build claimed by this host');
@@ -268,6 +286,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const run: Record<string, unknown>[] = [];
     const stop: Record<string, unknown>[] = [];
     const remove: Record<string, unknown>[] = [];
+    const shared = liveSnapshots(docs);
     for (const d of docs) {
       for (const b of d.builds) {
         if (!mine || mine.holds[b.buildId] === undefined || !hostManaged(b)) continue;
@@ -275,6 +294,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         // A retired build has no lease and is never placed: once its worker is idle it is stopped,
         // then removed from the host with its snapshot. Never one with a live sandbox.
         if (b.status === 'retired') {
+          // Its snapshot or worker serves a build that is not retired: left alone (that build's
+          // own entries decide whether its worker runs).
+          if (shared(b)) continue;
           if (mine.refused) delete mine.refused[b.buildId];
           if (b.worker && !busy.has(b.worker)) {
             stop.push(entry);
@@ -327,9 +349,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       event === 'removed'
         ? x.status === 'retired'
         : x.status === 'registered' || (event === 'detached' && x.status === 'retired');
-    const doc = (await cat.list()).find((d) =>
-      d.builds.some((x) => x.buildId === buildId && ok(x)),
-    );
+    const docs = await cat.list();
+    const doc = docs.find((d) => d.builds.some((x) => x.buildId === buildId && ok(x)));
     const mine = deps.hosts?.get(host);
     if (!doc || mine?.holds[buildId] === undefined) {
       throw new CpError(
@@ -339,6 +360,15 @@ export const HOST_HANDLERS: Record<string, Handler> = {
           : event === 'detached'
             ? 'no registered or retired build this host holds'
             : 'no registered build this host holds',
+      );
+    }
+    const target = doc.builds.find((x) => x.buildId === buildId && ok(x))!;
+    // The wanted state never asks for this one's removal; a report of it would drop the live
+    // build's host from its heldBy.
+    if (event === 'removed' && liveSnapshots(docs)(target)) {
+      throw new CpError(
+        'build_in_use',
+        'a build that is not retired shares this snapshot or worker; it is not removed',
       );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
@@ -368,11 +398,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         event,
         ...(event === 'removed'
           ? {
-              buildRecord: await buildRecordOf(
-                prov,
-                doc.id,
-                doc.builds.find((x) => x.buildId === buildId && ok(x))!,
-              ),
+              buildRecord: await buildRecordOf(prov, doc.id, target),
             }
           : {}),
         ...(reason ? { reason } : {}),

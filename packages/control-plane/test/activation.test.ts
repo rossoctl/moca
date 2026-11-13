@@ -1075,6 +1075,39 @@ describe('retire (§5.1)', () => {
     expect((await wanted(d, 'host-1')).remove).toEqual([]);
   });
 
+  it('never stops or removes a retired build whose snapshot or worker a build not retired shares', async () => {
+    const d = await setup();
+    attachedNow = [];
+    const report = (buildId: string, event: string) =>
+      HANDLERS.hostWorkerReport!(asHost('host-1', {}, { buildId, event }), d);
+    // The same snapshot (manifest hash) registered again, in another template, beside a retired one.
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('1'), 'sbx_t2');
+    // The same worker id kept by another build of the template (another spec, another hash).
+    await registered(d, 't3', hash('3'), 'sbx_t3');
+    await registered(d, 't3', hash('4'), 'sbx_t3', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('3')]: 't3', [hash('4')]: 't3' }, 2);
+    await retire(d, 't1');
+    await retireBuild(d, 't3', hash('3'));
+    const w = await wanted(d, 'host-1');
+    expect(w.remove).toEqual([]);
+    expect(w.stop).not.toContainEqual(expect.objectContaining({ template: 't1' }));
+    expect(w.stop).not.toContainEqual(expect.objectContaining({ buildId: hash('3') }));
+    // Its `removed` is refused, and the live build keeps its host.
+    expect(await refusal(() => report(hash('1'), 'removed'))).toBe('build_in_use');
+    expect(await refusal(() => report(hash('3'), 'removed'))).toBe('build_in_use');
+    const held = (id: string, build: string) =>
+      HANDLERS.getTemplateBuild!(ctx({ principal: alice, params: { id, build } }), d);
+    expect(((await held('t2', hash('1'))).body as Body).heldBy).toEqual(['host-1']);
+    // Once the sharing build is retired too, both are removed as any retired build is.
+    await retireBuild(d, 't3', hash('4'));
+    const entry = (b: string) => ({ template: 't3', buildId: b, worker: 'sbx_t3' });
+    const both = (await wanted(d, 'host-1')).remove as unknown[];
+    expect(both).toHaveLength(2);
+    expect(both).toEqual(expect.arrayContaining([entry(hash('3')), entry(hash('4'))]));
+    expect(((await report(hash('3'), 'removed')).body as Body).recorded).toBe('removed');
+  });
+
   it('never asks for the removal of a retired build with a live sandbox', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
