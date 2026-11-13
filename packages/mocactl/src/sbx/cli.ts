@@ -67,9 +67,10 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  image default to the spec's; the gate record is sent
                                                  byte for byte. Several --spec: one create each, waiting
                                                  for a queue slot while your buildsQueued quota is full
-                                                 (up to S, default 3600). An id already yours: its
-                                                 newest build is followed. --dry-run: the policy's
-                                                 checks that need only the inputs, nothing created
+                                                 (up to S, default 3600). An id already yours: a new
+                                                 build of it (the same inputs: that build, reused).
+                                                 --dry-run: the policy's checks that need only the
+                                                 inputs, nothing created
   mocactl sbx templates build ID --spec F [--image REF] [--profile P] [--gate-record F] [--dry-run]
                                [--timeout S] [--json]
                                                  a new build of your template ID

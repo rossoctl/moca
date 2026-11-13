@@ -556,7 +556,7 @@ describe('templates create, build, follow, cancel', () => {
     expect(w.out()).toBe(`my-python ${HANDLE} queued\n`);
   });
 
-  it('409 template_exists: follows your own newest build and posts nothing more', async () => {
+  it('409 template_exists on an id read as your own: the refusal as sent, no answer made up', async () => {
     const f = files({ 'spec.json': SPEC });
     const w = world({
       'POST /v1/templates': () => ({
@@ -568,14 +568,11 @@ describe('templates create, build, follow, cancel', () => {
         body: template({ builds: [handled({ status: 'building', readiness: null })] }),
       }),
     });
-    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!, '--json'])).toBe(0);
+    expect(await w.run(['templates', 'create', '--spec', f['spec.json']!, '--json'])).toBe(1);
     expect(w.cp.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
-    expect(JSON.parse(w.out())).toMatchObject({
-      build: BUILD_PATH,
-      status: 'building',
-      reused: true,
-    });
-    expect(w.err()).toContain(`my-python is already yours: following its newest build, ${HANDLE}`);
+    expect(w.out()).toBe('');
+    expect(w.err()).toContain("template 'my-python' exists");
+    expect(w.err()).not.toContain('following');
   });
 
   it("409 template_exists: names another's owner, and a declared one", async () => {
