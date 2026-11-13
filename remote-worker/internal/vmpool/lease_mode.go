@@ -6,6 +6,8 @@ import (
 	"log"
 	"slices"
 	"time"
+
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // Mode is how a sandbox's Execs use VMs (spec §3). The zero value is per-Exec, so an
@@ -40,6 +42,34 @@ func ParseMode(s string) (Mode, error) {
 		}
 	}
 	return 0, fmt.Errorf("vmpool: mode %q is not one of per-exec, lease, lease+processes", s)
+}
+
+// Proto is m as the wire's SandboxMode. An out-of-range Mode has no wire spelling and
+// maps to UNSPECIFIED; the pool never stores one (SetMode and MarshalText refuse it).
+func (m Mode) Proto() pb.SandboxMode {
+	switch m {
+	case ModePerExec:
+		return pb.SandboxMode_SANDBOX_MODE_PER_EXEC
+	case ModeLease:
+		return pb.SandboxMode_SANDBOX_MODE_LEASE
+	case ModeLeaseProcesses:
+		return pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES
+	}
+	return pb.SandboxMode_SANDBOX_MODE_UNSPECIFIED
+}
+
+// ModeFromProto is Proto's inverse, with UNSPECIFIED read as per-exec (the proto's own
+// rule). A value this worker does not know is refused, never mapped to a default.
+func ModeFromProto(m pb.SandboxMode) (Mode, error) {
+	switch m {
+	case pb.SandboxMode_SANDBOX_MODE_UNSPECIFIED, pb.SandboxMode_SANDBOX_MODE_PER_EXEC:
+		return ModePerExec, nil
+	case pb.SandboxMode_SANDBOX_MODE_LEASE:
+		return ModeLease, nil
+	case pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES:
+		return ModeLeaseProcesses, nil
+	}
+	return 0, fmt.Errorf("vmpool: SandboxMode %d is not one this worker knows", int32(m))
 }
 
 // MarshalText and UnmarshalText make the state file carry the spelling rather than a

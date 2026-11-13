@@ -37,6 +37,13 @@ func serveOverFakeRelay(t *testing.T, root string) (*relaytest.Conn, vmpool.Pool
 		t.Fatalf("vmpool.New: %v", err)
 	}
 	t.Cleanup(func() { _ = pool.Close() })
+	return attachPool(t, pool), pool
+}
+
+// attachPool serves pool's Runner over a fresh in-process relay and returns the parked
+// worker stream.
+func attachPool(t *testing.T, pool vmpool.Pool) *relaytest.Conn {
+	t.Helper()
 
 	relay := relaytest.Start(t)
 	sess := session.New(session.Config{
@@ -55,7 +62,7 @@ func serveOverFakeRelay(t *testing.T, root string) (*relaytest.Conn, vmpool.Pool
 		t.Fatalf("attach: %v", err)
 	}
 	go func() { _ = sess.Serve(ctx, stream) }()
-	return relay.WaitAttach(t), pool
+	return relay.WaitAttach(t)
 }
 
 func TestAnExecOverTheAttachContractRunsInAVM(t *testing.T) {
@@ -109,5 +116,115 @@ func TestTwoRunsDoNotSeeEachOthersFiles(t *testing.T) {
 	// hypervisor, where the boundary is KVM rather than a directory.
 	if string(stdout) != "absent\n" {
 		t.Fatalf("run-b saw %q, want %q", stdout, "absent\n")
+	}
+}
+
+// leaseLauncher is a Firecracker-kind fake whose VMs serve any number of Execs, so a pool
+// over it with a lease-v1 manifest is lease-capable (vmpool.LeaseSupported). Its VMs run
+// nothing: each Exec answers "ran", and a lease start's normalise step succeeds.
+type leaseLauncher struct{}
+
+func (l *leaseLauncher) Kind() vmpool.VMMKind        { return vmpool.Firecracker }
+func (l *leaseLauncher) SerializesExecsPerRun() bool { return true }
+func (l *leaseLauncher) Restore(_ context.Context, req vmpool.RestoreRequest) (vmpool.VM, error) {
+	return &leaseVM{key: req.Key}, nil
+}
+
+type leaseVM struct{ key string }
+
+func (v *leaseVM) Key() string                  { return v.key }
+func (v *leaseVM) Resume(context.Context) error { return nil }
+func (v *leaseVM) Destroy() error               { return nil }
+func (v *leaseVM) Run(_ context.Context, c vmpool.Command, out vmpool.Sink) (vmpool.Result, error) {
+	if !c.NormaliseWorkspace {
+		out.Stdout([]byte("ran\n"))
+	}
+	return vmpool.Result{}, nil
+}
+
+// The lease round-trip over the Attach contract: the real session, vmpool.Runner and pool,
+// with only the hypervisor faked. A lease Exec starts a lease and carries its start event;
+// LeaseControl status reads it active; set_mode per-exec ends it (mode_change); and the
+// next lease Exec carries that end ahead of its terminal frame.
+func TestALeaseRoundTripOverTheAttachContract(t *testing.T) {
+	root := t.TempDir()
+	pool, err := vmpool.New(vmpool.Config{
+		VMM:               vmpool.Firecracker,
+		SnapshotDir:       root,
+		WorkspaceRoot:     root,
+		MaxRuns:           8,
+		MaxCommittedBytes: 32 << 30,
+		ManifestFeatures:  []string{vmpool.FeatureLeaseV1},
+		// No memory reclaim from this host's own MemAvailable mid-test.
+		LeaseReclaimFreeBytes: 1,
+	}, &leaseLauncher{}, vmpool.RealClock())
+	if err != nil {
+		t.Fatalf("vmpool.New: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	c := attachPool(t, pool)
+	const key = "sess-lease"
+	lease := func(reqID, epoch uint64) *pb.Exec {
+		return &pb.Exec{ReqId: reqID, Command: "work", TimeoutS: 30, Streaming: true, WorkspaceKey: key,
+			Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, ModeEpoch: epoch}
+	}
+	control := func(ctlID uint64, op pb.LeaseOp, m pb.SandboxMode, epoch uint64) *pb.LeaseStatus {
+		t.Helper()
+		c.SendLeaseControl(t, &pb.LeaseControlFrame{CtlId: ctlID, WorkspaceKey: key, Op: op, Mode: m, ModeEpoch: epoch})
+		r := c.LeaseResult(t, ctlID)
+		if r.GetError() != "" {
+			t.Fatalf("lease_control %d (%s): error %q", ctlID, op, r.GetError())
+		}
+		return r.GetStatus()
+	}
+	// leaseEvents splits an Exec's frames into its lease events and its terminal frame,
+	// requiring every event to arrive before the terminal one (ExecFrames returns it last).
+	leaseEvents := func(frames []*pb.WorkerFrame) (evs []*pb.LeaseEvent, terminal *pb.WorkerFrame) {
+		for _, f := range frames[:len(frames)-1] {
+			if ev := f.GetLease(); ev != nil {
+				evs = append(evs, ev)
+			}
+		}
+		return evs, frames[len(frames)-1]
+	}
+
+	// A key with no state reaches lease mode only through set_mode (spec §8.2).
+	if st := control(1, pb.LeaseOp_LEASE_OP_SET_MODE, pb.SandboxMode_SANDBOX_MODE_LEASE, 1); !st.GetEpochKnown() {
+		t.Fatalf("set_mode lease 1: status %v, want the epoch known", st)
+	}
+
+	c.SendExec(t, lease(10, 1))
+	evs, term := leaseEvents(c.ExecFrames(t, 10))
+	if term.GetEnd() == nil || term.GetEnd().GetExitCode() != 0 {
+		t.Fatalf("lease Exec terminal = %v, want End{0}", term)
+	}
+	if len(evs) != 1 || evs[0].GetState() != "start" || evs[0].GetMode() != pb.SandboxMode_SANDBOX_MODE_LEASE {
+		t.Fatalf("lease Exec events = %v, want one lease start", evs)
+	}
+
+	if st := control(2, pb.LeaseOp_LEASE_OP_STATUS, 0, 0); st.GetState() != "active" ||
+		st.GetMode() != pb.SandboxMode_SANDBOX_MODE_LEASE || st.GetPending() != nil {
+		t.Fatalf("status = %v, want an active lease with nothing pending", st)
+	}
+
+	st := control(3, pb.LeaseOp_LEASE_OP_SET_MODE, pb.SandboxMode_SANDBOX_MODE_PER_EXEC, 2)
+	if st.GetState() != "none" || st.GetPending().GetReason() != "mode_change" {
+		t.Fatalf("set_mode per-exec 2: status %v, want the lease ended mode_change", st)
+	}
+	at := st.GetPending().GetAtUnixMs()
+
+	// A client still holding the epoch-1 lease token: refused stale_mode, with the end
+	// event riding ahead of the error.
+	c.SendExec(t, lease(11, 1))
+	evs, term = leaseEvents(c.ExecFrames(t, 11))
+	if msg := term.GetError().GetMessage(); !strings.HasPrefix(msg, "stale_mode: ") {
+		t.Fatalf("stale Exec terminal = %v, want ExecError stale_mode", term)
+	}
+	if len(evs) != 1 || evs[0].GetState() != "end" || evs[0].GetReason() != "mode_change" ||
+		evs[0].GetAtUnixMs() != at || evs[0].GetReqId() != 11 {
+		t.Fatalf("stale Exec events = %v, want the end/mode_change at %d ms under req_id 11", evs, at)
+	}
+	if st := control(4, pb.LeaseOp_LEASE_OP_STATUS, 0, 0); st.GetPending() != nil {
+		t.Fatalf("status after delivery = %v, want the event acknowledged", st)
 	}
 }

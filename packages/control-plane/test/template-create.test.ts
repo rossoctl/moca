@@ -647,6 +647,9 @@ describe('policy and quota routes', () => {
       labels: {},
       createdAt: nowS - 120,
       expiresAt,
+      mode: 'per-exec' as const,
+      idleTimeoutS: 0,
+      modeEpoch: 0,
     });
     const limits = { perSubject: 3, total: 40, retentionS: 3600 };
     await d.sandboxes!.create(rec('sbx-live', nowS + 60), limits, nowS - 120);
