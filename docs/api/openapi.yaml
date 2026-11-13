@@ -200,19 +200,23 @@ components:
           type: [string, 'null']
           description: |
             the sandbox template the session runs on (session-templates spec §3.3): present on a
-            deployment that declares templates (SH_SANDBOX_TEMPLATES), null there for a session
-            with none; present too for any session that named one, even once the deployment no
-            longer declares it (its turns then find no worker and are refused)
+            deployment that declares templates (SH_SANDBOX_TEMPLATES) and on every `combined`
+            deployment (whose template list is always set, empty when the variable is), null there
+            for a session with none; present too for any session that named one, even once the
+            deployment no longer declares it (its turns then find no worker and are refused).
+            Absent otherwise, and so are sandboxBuildId and templateManifestHash
         sandboxBuildId:
           type: [string, 'null']
           description: |
-            with sandboxTemplate: the build the template resolved to at creation through the
-            template store (combined control plane spec §3.4), kept for the session's life; a
-            manifest-hash build's turns run only on workers labelled moca.dev/build with it. Null
-            without a template store
+            present exactly when sandboxTemplate is: the build the template resolved to at creation
+            through the template store (combined control plane spec §3.4), kept for the session's
+            life; a manifest-hash build's turns run only on workers labelled moca.dev/build with
+            it. Null for a session with no template, or one created without a template store
         templateManifestHash:
           type: [string, 'null']
-          description: with sandboxTemplate, the manifest hash of sandboxBuildId; null for an imported build
+          description: |
+            present exactly when sandboxTemplate is: the manifest hash of sandboxBuildId; null when
+            sandboxBuildId is null or an imported build
         model:
           type: [string, 'null']
           description: |
