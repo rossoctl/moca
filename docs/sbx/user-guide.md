@@ -703,7 +703,8 @@ mocactl sbx templates follow my-python                         # exit 0 once reg
 
 - `--spec` is a spec file or a gate record (whose `template` block is the spec); the id and image
   are the spec's own (`--id`, `--image` must equal them). `--profile P` names a policy profile,
-  `--gate-record F` sends its gate record byte for byte (the `benchmark` profile needs one),
+  `--gate-record F` sends its gate record byte for byte (the `benchmark` profile needs one; at most
+  1 MiB, with one `--spec`),
   `--visibility private` keeps a new template to yourself.
 - `--dry-run` sends nothing: it names the policy rule a create would fail (`M7.id`, `M1`, `X10`, …).
   Whether the policy trusts a gate record, whether the image's registry is allowed, and your
