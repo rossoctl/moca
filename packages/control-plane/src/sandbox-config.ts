@@ -85,12 +85,13 @@ function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
 }
 
 /**
- * `SH_SANDBOX_MODES_ALLOWED`: a comma list of mode names; absent or empty means `per-exec,lease`, so
- * level 2 (`lease+processes`) stays off until an operator lists it. An unknown name, or a list of
- * none, refuses boot.
+ * `SH_SANDBOX_MODES_ALLOWED`: a comma list of mode names; absent or empty means `per-exec`, so
+ * every lease mode stays off until an operator lists it (`per-exec,lease` opts in to level 1). The
+ * default stays `per-exec` until plan 4's live smoke and the lease section (§11) of the SBX
+ * security review (lease-mode spec §8.1). An unknown name, or a list of none, refuses boot.
  */
 function modesAllowedFromEnv(env: NodeJS.ProcessEnv): ReadonlySet<SandboxModeName> {
-  const names = (env.SH_SANDBOX_MODES_ALLOWED || 'per-exec,lease')
+  const names = (env.SH_SANDBOX_MODES_ALLOWED || 'per-exec')
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);

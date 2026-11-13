@@ -2142,7 +2142,8 @@ paths:
                   enum: [per-exec, lease, lease+processes]
                   description: |
                     default `per-exec`. A lease mode must be listed in SH_SANDBOX_MODES_ALLOWED
-                    (default `per-exec,lease`), else 403 `mode_not_allowed`; `per-exec` always is.
+                    (default `per-exec`: no lease mode), else 403 `mode_not_allowed`; `per-exec`
+                    always is.
                 idleTimeoutS:
                   type: integer
                   minimum: 30

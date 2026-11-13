@@ -23,7 +23,8 @@ only on the `sandbox` route profile.
   owner's user API token; a sandbox token is a 401. A set-mode token is a JWT with
   `typ: moca-sandbox-mode+jwt`, valid 300 s.
 - New error code `mode_not_allowed` (403): a lease mode the deployment's `SH_SANDBOX_MODES_ALLOWED`
-  (default `per-exec,lease`) does not list. `per-exec` is always allowed.
+  (default `per-exec`, so no lease mode until an operator lists one) does not list. `per-exec` is
+  always allowed.
 - Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
   reads as `per-exec`, epoch 0.
 

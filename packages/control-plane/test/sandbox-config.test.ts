@@ -56,8 +56,9 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
       execEndpoint: 'sbx-exec.apps.example.invalid:443',
     });
     expect(c.sandbox!.templates.map((t) => t.worker)).toEqual(['sbx_default', 'sbx_node22']);
-    // Lease-mode policy (lease-mode spec §8.1): level 2 stays off unless an operator lists it.
-    expect([...c.sandbox!.modesAllowed].sort()).toEqual(['lease', 'per-exec']);
+    // Lease-mode policy (lease-mode spec §8.1, ruling R20): every lease mode stays off unless an
+    // operator lists it, until the §11 lease section of the security review.
+    expect([...c.sandbox!.modesAllowed].sort()).toEqual(['per-exec']);
     expect(c.sandbox!.idleCeilingS).toBe(1800);
   });
 
@@ -71,7 +72,8 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     ]);
     expect(modes('per-exec')).toEqual(['per-exec']);
     expect(modes('lease,lease')).toEqual(['lease']);
-    expect(modes('')).toEqual(['lease', 'per-exec']);
+    expect(modes('')).toEqual(['per-exec']);
+    expect(modes(undefined)).toEqual(['per-exec']);
   });
 
   it('refuses an unknown or empty mode list at boot, without echoing it', () => {

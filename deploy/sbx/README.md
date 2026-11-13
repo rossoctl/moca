@@ -55,10 +55,17 @@ Optional inputs:
 ([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` does not
 set them yet, so a deployment runs with their defaults:
 
-| Variable                    | Default          | Rule                                                                                                                                                                                           |
-| --------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SH_SANDBOX_MODES_ALLOWED`  | `per-exec,lease` | the modes a user may pick, a comma list of `per-exec`, `lease` and `lease+processes`. `per-exec` is always allowed, listed or not. Keep `lease+processes` off until the security review passes |
-| `SH_SANDBOX_IDLE_CEILING_S` | 1800             | the longest lease idle timeout an owner may set, in seconds; at least 30, or the control plane refuses to boot. An owner who sets none gets the worker's default, 300 s                        |
+| Variable                    | Default    | Rule                                                                                                                                                                                     |
+| --------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SH_SANDBOX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick, a comma list of `per-exec`, `lease` and `lease+processes`. `per-exec` is always allowed, listed or not. Keep the default until the lease gate below is passed |
+| `SH_SANDBOX_IDLE_CEILING_S` | 1800       | the longest lease idle timeout an owner may set, in seconds; at least 30, or the control plane refuses to boot. An owner who sets none gets the worker's default, 300 s                  |
+
+**Lease mode stays off by default.** It stays off until plan 4's live smoke test passes and the
+[SBX security review](../../docs/sbx/security-review.md) has its lease section (lease-mode spec
+§11). A microVM worker serves lease mode on its own once its snapshot advertises `lease-v1`, so the
+control plane's list is the only switch. After that gate, an operator opts in to level 1 with
+`SH_SANDBOX_MODES_ALLOWED=per-exec,lease`. Keep `lease+processes` off until the security review
+covers it.
 
 The relay needs nothing new for lease mode: it verifies set-mode tokens with the sandbox token
 keyset and issuer it already has.

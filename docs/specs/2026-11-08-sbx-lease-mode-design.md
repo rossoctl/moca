@@ -473,8 +473,10 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
   `modeEpoch` (a counter, raised on each change).
 - `POST /v1/sandboxes` accepts `mode` and `idleTimeoutS`. `PUT /v1/sandboxes/{id}/mode` changes
   them. Both need the owner's **user API token**. A sandbox token is never enough. Operator policy
-  (`SH_SANDBOX_MODES_ALLOWED`, default `per-exec,lease`) decides which modes a user may pick, so level 2
-  can stay off until the security review (§11) passes.
+  (`SH_SANDBOX_MODES_ALLOWED`) decides which modes a user may pick. Its default is `per-exec` until
+  `docs/sbx/security-review.md` has its lease section (§11) and plan 4's live smoke test passes;
+  then `per-exec,lease`. Level 2 stays off until the security review covers it. The worker has no
+  opt-in of its own, so this list is the switch.
 - Every change writes an audit record: who, old mode, new mode, epoch.
 
 The routes, as built (plan 3; `docs/api/openapi.yaml`):
@@ -516,8 +518,9 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
     `SANDBOX_MODE_UNSPECIFIED` (0): the relay zeroes all four lease fields on an Exec that carries the
     harness exec token, because the harness never uses leases. The worker serves both as per-`Exec`.
   - `Exec.keepalive` is the client's own opt-in (§4) and passes through.
-  - A mode value the worker does not know is refused as `lease_unsupported`, never served as
-    per-`Exec`.
+  - A mode value a microVM worker does not know is refused as `lease_unsupported`, never served as
+    per-`Exec`. The container tier, which has no lease mode, ignores the mode and serves every Exec
+    per-`Exec`, an unknown value included; that direction never gives an Exec more than per-`Exec`.
   - The idle timeout reaches the worker only on an Exec: it is a setting of the lease the Exec starts
     or joins, and `set_mode` does not carry it.
 - The worker keeps the highest `mode_epoch` it has seen for each sandbox. It **refuses an Exec with a
