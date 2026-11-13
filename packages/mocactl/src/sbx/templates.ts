@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { TOKEN_MARGIN_S, WORKSPACE } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
@@ -288,11 +288,17 @@ export function readCreateInputs(
   if (o.gateRecord !== undefined) {
     let raw: Buffer;
     try {
-      // Sized before it is read: a wrong file (an image tarball) is refused, not loaded.
-      const size = statSync(o.gateRecord).size;
-      if (size > GATE_RECORD_MAX_BYTES)
-        return `--gate-record ${o.gateRecord} is ${size} bytes: a gate record is at most 1 MiB (the create's body limit)`;
-      raw = readFileSync(o.gateRecord);
+      // Sized before it is read, through the one handle it is read from (so the size checked is the
+      // file read): a wrong file (an image tarball) is refused, not loaded.
+      const fd = openSync(o.gateRecord, 'r');
+      try {
+        const size = fstatSync(fd).size;
+        if (size > GATE_RECORD_MAX_BYTES)
+          return `--gate-record ${o.gateRecord} is ${size} bytes: a gate record is at most 1 MiB (the create's body limit)`;
+        raw = readFileSync(fd);
+      } finally {
+        closeSync(fd);
+      }
     } catch (err) {
       return `cannot read --gate-record ${o.gateRecord}: ${(err as Error).message}`;
     }
