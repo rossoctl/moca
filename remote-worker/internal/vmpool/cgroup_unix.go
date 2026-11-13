@@ -43,3 +43,13 @@ func pidSharesCallersProcessGroup(pid int) bool {
 	}
 	return pgid == syscall.Getpgrp()
 }
+
+// pidStillRunning reports whether pid names a process that has not yet exited — the
+// question sweepOneCgroup's wait asks of every pid still listed after its SIGKILLs.
+// kill(2) with signal 0 delivers nothing and only checks: ESRCH means the process is
+// gone, and EPERM means it exists but belongs to someone this process may not signal,
+// which is still running.
+func pidStillRunning(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}

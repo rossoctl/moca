@@ -39,12 +39,17 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/journalctl"
 export PATH="$TMP/bin:$PATH" SBX_UNIT_DIR="$TMP/units" SBX_ENV_DIR="$TMP/etc" SBX_SRV="$TMP/srv"
 export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1
 INSTALL="$SRC/deploy/sbx/install-host.sh"
-mkdir -p "$SBX_SRV/snapshots/default" "$SBX_SRV/snapshots/py312"
+# A snapshot as build-snapshot.sh writes it, as far as install-host.sh reads one: its guest RAM.
+snap() { mkdir -p "$SBX_SRV/snapshots/$1"; printf '{\n  "hash": "x",\n  "guest_ram_mb": %s\n}\n' "${2:-256}" >"$SBX_SRV/snapshots/$1/manifest.json"; }
+snap default
+snap py312
 # moca-egress is the operator's binary, and the worker waits for its control socket: fake both, so
 # every install below passes the binary check and the socket wait. A socket FILE is all `-S` tests.
 export SBX_BIN_DIR="$TMP/usrbin" MOCA_EGRESS_SOCKET="$TMP/run/control.sock" MOCA_EGRESS_READY_TIMEOUT=2
 mkdir -p "$SBX_BIN_DIR" "$TMP/run"
 fake_egress() { : >"$SBX_BIN_DIR/moca-egress"; chmod +x "$SBX_BIN_DIR/moca-egress"; }
+export SBX_WORKER_BIN="$SBX_BIN_DIR/microvm-worker"
+: >"$SBX_WORKER_BIN"; chmod +x "$SBX_WORKER_BIN"
 fake_socket() { rm -f "$MOCA_EGRESS_SOCKET"; python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$MOCA_EGRESS_SOCKET"; }
 fake_egress
 fake_socket
@@ -116,6 +121,7 @@ bash "$INSTALL" --uninstall $LONG >"$TMP/out" 2>&1 || fail 'uninstall the longes
 grep -qF "left in place: $SBX_SRV/workspaces/$LONG and $jb" "$TMP/out" || fail "uninstall does not name the jail: $(cat "$TMP/out")"
 DEEP="$TMP/$(printf 'x%.0s' {1..40})"
 mkdir -p "$DEEP/snapshots/default"
+cp "$SBX_SRV/snapshots/default/manifest.json" "$DEEP/snapshots/default/"
 rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"$TMP/out" 2>&1 || rc=$?
 [[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
 [[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
@@ -124,7 +130,7 @@ pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits
 # A snapshot with template-build.sh's record ($SBX_SRV/templates/<snapshot>.json): the worker env
 # points the worker at it and names the template, so the worker checks the record at start. A record
 # for another worker is refused before anything is written; no record writes neither line (above).
-mkdir -p "$SBX_SRV/snapshots/py-tools-0123456789ab" "$SBX_SRV/templates"
+snap py-tools-0123456789ab && mkdir -p "$SBX_SRV/templates"
 printf '{"schema":"moca-sbx-template/1","id":"py-tools","worker":"sbx_py_tools_0123456789ab","snapshot":"py-tools-0123456789ab"}\n' \
   >"$SBX_SRV/templates/py-tools-0123456789ab.json"
 bash "$INSTALL" "$(bundle sbx_py_tools_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail 'install a worker with a template record'
@@ -270,8 +276,13 @@ bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || f
 : >"$MOCK_LOG"
 bash "$INSTALL" --uninstall sbx_default >"$TMP/out" 2>&1 || fail 'uninstall sbx_default again'
 [[ "$(tail -1 "$MOCK_LOG")" == 'systemctl daemon-reload' ]] || fail "daemon-reload is not the last step of the undo: $(tail -1 "$MOCK_LOG")"
+# sbx.slice is stopped before its file goes: removed alone, it stays loaded in systemd until a reboot.
+grep -qx 'systemctl stop sbx.slice' "$MOCK_LOG" || fail 'the last uninstall does not stop sbx.slice'
+[[ "$(grep -n 'systemctl stop sbx.slice' "$MOCK_LOG" | cut -d: -f1)" -lt "$(grep -n 'systemctl daemon-reload' "$MOCK_LOG" | tail -1 | cut -d: -f1)" ]] ||
+  fail 'sbx.slice is stopped after the daemon-reload'
+! grep -q 'systemctl stop sbx-worker@.service' "$MOCK_LOG" || fail 'tried to stop the template unit file itself'
 [[ ! -e "$SBX_UNIT_DIR/sbx-worker@.service" ]] || fail 'reinstall + uninstall left the template unit'
-pass '--uninstall of the last worker removes the shared unit and sbx.slice, then daemon-reloads; workspace data stays'
+pass '--uninstall of the last worker stops sbx.slice, removes it and the shared unit, then daemon-reloads; workspace data stays'
 
 # The janitor (spec §8.3): --janitor BUNDLE_DIR installs the script, its env, its token and the two
 # units, enables the timer and records all of it as its own manifest kind; --uninstall-janitor
@@ -401,14 +412,26 @@ grep -qx 'ExecStart=/usr/local/bin/moca-egress' "$U" || fail 'egress unit lost i
 [[ "$(mode "$E")" == 644 ]] || fail "the egress env file is not 0644 ($(mode "$E"))"
 grep -qxF "MOCA_EGRESS_ALLOW=$EXPECTED_ALLOW" "$E" || fail 'allowlist not seeded from deploy/sbx/egress-allow.env'
 grep -qx 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock' "$SBX_ENV_DIR/workers/sbx_eg.env" || fail 'worker not wired to the egress socket'
-grep '^After=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker not ordered after moca-egress'
-grep '^Wants=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker does not want moca-egress'
+D="$SBX_UNIT_DIR/sbx-worker@sbx_eg.service.d/egress.conf"
+[[ "$(cat "$D" 2>/dev/null)" == $'[Unit]\nAfter=moca-egress.service\nWants=moca-egress.service' ]] || fail "the egress worker's drop-in is not After=/Wants=moca-egress: $(cat "$D" 2>&1)"
+! grep -v '^#' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress' || fail 'the shared worker unit names moca-egress: every worker would start it'
 grep -qx 'systemctl enable moca-egress.service' "$MOCK_LOG" || fail 'moca-egress not enabled'
 e="$(grep -nx 'systemctl restart moca-egress.service\|systemctl start moca-egress.service' "$MOCK_LOG" | head -1 | cut -d: -f1)"
 w="$(grep -nx 'systemctl restart sbx-worker@sbx_eg.service' "$MOCK_LOG" | cut -d: -f1)"
 [[ -n "$e" && -n "$w" ]] && ((e < w)) || fail "moca-egress not started before the worker (egress line '$e', worker line '$w')"
 grep -qx "egress unit $U $(sha_of "$U")" "$EM" && grep -qx "egress file $E $(sha_of "$E")" "$EM" || fail "egress files and their digests not in the manifest: $(cat "$EM")"
 pass 'installs moca-egress before the worker, seeds the allowlist, wires the socket, records it'
+
+# A --no-egress worker never depends on moca-egress, whatever unit of it the host has; re-installing
+# the egress worker with --no-egress drops its drop-in, and --uninstall removes it.
+bash "$INSTALL" "$(bundle sbx_noeg)" --snapshot default --no-egress >"$TMP/out" 2>&1 || fail "install --no-egress beside an egress worker: $(cat "$TMP/out")"
+[[ ! -e "$SBX_UNIT_DIR/sbx-worker@sbx_noeg.service.d" ]] || fail 'a --no-egress worker got a moca-egress drop-in'
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default --no-egress >"$TMP/out" 2>&1 || fail 're-install the egress worker with --no-egress'
+[[ ! -e "$SBX_UNIT_DIR/sbx-worker@sbx_eg.service.d" ]] || fail 'a re-install with --no-egress kept the moca-egress drop-in'
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install the egress worker with egress'
+[[ -f "$D" ]] || fail 'the drop-in did not come back with egress'
+bash "$INSTALL" --uninstall sbx_noeg >"$TMP/out" 2>&1 || fail 'uninstall the --no-egress worker'
+pass 'only an egress worker depends on moca-egress (its own drop-in); --no-egress drops it'
 
 # A second worker shares the one moca-egress: nothing to restart, and the unit stays when one worker goes.
 : >"$MOCK_LOG"
@@ -584,7 +607,11 @@ ebundle() { # ebundle [API_CA]: an egress bundle as setup.sh writes it
 fp_of() { openssl x509 -in "$1" -outform DER | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1; }
 snap_with() { # snap_with NAME FINGERPRINT-or-empty
   mkdir -p "$SBX_SRV/snapshots/$1"
-  if [[ -n "$2" ]]; then printf '{\n  "hash": "x",\n  "egress_ca_sha256": "sha256:%s"\n}\n' "$2" >"$SBX_SRV/snapshots/$1/manifest.json"; else rm -f "$SBX_SRV/snapshots/$1/manifest.json"; fi
+  if [[ -n "$2" ]]; then
+    printf '{\n  "hash": "x",\n  "guest_ram_mb": 256,\n  "egress_ca_sha256": "sha256:%s"\n}\n' "$2" >"$SBX_SRV/snapshots/$1/manifest.json"
+  else
+    printf '{\n  "hash": "x",\n  "guest_ram_mb": 256\n}\n' >"$SBX_SRV/snapshots/$1/manifest.json"
+  fi
 }
 [[ ! -s "$EM" ]] || fail 'the credentials block does not start from a clean host'
 bash "$INSTALL" "$(bundle sbx_cr)" --snapshot default >"$TMP/out" 2>&1 || fail 'install the worker before --egress'
@@ -650,8 +677,15 @@ for case in missing mismatch; do
   grep -qF "WARNING: worker sbx_cr runs snapshot fpwarn, which does not trust this host's CA; guests will see TLS failures on intercepted hosts until it is reinstalled on a snapshot built with --egress-ca" "$TMP/out" ||
     fail "no warning for a $case fingerprint"
 done
+# A --no-egress worker's guest has no network: no warning for it, whatever its snapshot.
+cp "$SBX_ENV_DIR/workers/sbx_cr.env" "$SBX_ENV_DIR/workers/sbx_off.env"
+sed -i.bak -e '/^MOCA_EGRESS_CONTROL_SOCK=/d' "$SBX_ENV_DIR/workers/sbx_off.env" && rm -f "$SBX_ENV_DIR/workers/sbx_off.env.bak"
+bash "$INSTALL" --egress "$(ebundle)" >"$TMP/out" 2>&1 || fail '--egress beside a --no-egress worker'
+grep -q 'WARNING: worker sbx_cr runs snapshot fpwarn' "$TMP/out" || fail 'the egress worker on an untrusting snapshot is no longer warned about'
+! grep -q 'WARNING: worker sbx_off' "$TMP/out" || fail 'a --no-egress worker was warned about'
+rm -f "$SBX_ENV_DIR/workers/sbx_off.env"
 sed -i.bak 's/^SH_SNAPSHOT_IMAGE=.*/SH_SNAPSHOT_IMAGE=fpok/' "$SBX_ENV_DIR/workers/sbx_cr.env" && rm -f "$SBX_ENV_DIR/workers/sbx_cr.env.bak"
-pass '--egress warns for a worker whose snapshot lacks or mismatches the CA fingerprint, and stays quiet for a match'
+pass '--egress warns for a worker whose snapshot lacks or mismatches the CA fingerprint, and stays quiet for a match or a --no-egress worker'
 
 # Uninstall: the drop-in, token and api CA go; the CA stays.
 bash "$INSTALL" --egress "$(ebundle api)" >"$TMP/out" 2>&1 || fail '--egress for the uninstall case'
@@ -687,3 +721,59 @@ pass '--egress refuses a moca-egress.service this script did not install'
 # Clean up the kept CA: the host is empty again.
 rm -rf "$CD"; sed -i.bak '/^egress credential /d' "$EM"; rm -f "$EM.bak"
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end of the credentials block: $(cat "$EM")"
+
+# The guest RAM comes from the snapshot's manifest, never the unit's 256: a 4096 MiB snapshot sized as
+# 256 would be admitted at a sixteenth of its cost and run in a cgroup too small for its memfile.
+snap big 4096
+bash "$INSTALL" "$(bundle sbx_big)" --snapshot big --budget-mb 16384 >"$TMP/out" 2>&1 || fail 'install a 4096 MiB snapshot'
+grep -qx 'SH_GUEST_RAM_MB=4096' "$SBX_ENV_DIR/workers/sbx_big.env" || fail 'SH_GUEST_RAM_MB is not the manifest guest_ram_mb'
+bash "$INSTALL" "$(bundle sbx_small)" --snapshot default >"$TMP/out" 2>&1 || fail 'install a 256 MiB snapshot'
+grep -qx 'SH_GUEST_RAM_MB=256' "$SBX_ENV_DIR/workers/sbx_small.env" || fail "sbx_small: SH_GUEST_RAM_MB is not its snapshot's 256"
+for w in sbx_big sbx_small; do bash "$INSTALL" --uninstall "$w" >"$TMP/out" 2>&1 || fail "uninstall $w"; done
+# A budget that cannot hold one session ((4096 + 32) x 3 + 1024 = 13408) is refused, naming the need.
+: >"$MOCK_LOG"
+! bash "$INSTALL" "$(bundle sbx_big)" --snapshot big --budget-mb 8192 >"$TMP/out" 2>&1 || fail 'accepted a budget below one session'
+grep -q 'needs at least 13408 MiB' "$TMP/out" || fail 'the budget refusal does not name the 13408 MiB need'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a small budget'
+# A manifest without guest_ram_mb, or no manifest at all, is refused before systemd is touched.
+for case in field file; do
+  mkdir -p "$SBX_SRV/snapshots/noram"
+  if [[ $case == field ]]; then printf '{"hash": "x"}\n' >"$SBX_SRV/snapshots/noram/manifest.json"; else rm -f "$SBX_SRV/snapshots/noram/manifest.json"; fi
+  : >"$MOCK_LOG"
+  ! bash "$INSTALL" "$(bundle sbx_noram)" --snapshot noram >"$TMP/out" 2>&1 || fail "installed a snapshot with no guest_ram_mb ($case)"
+  grep -q 'has no guest_ram_mb' "$TMP/out" || fail "the no-guest_ram_mb refusal ($case) does not say why"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing no guest_ram_mb ($case)"
+done
+pass "the worker's SH_GUEST_RAM_MB is its snapshot's guest_ram_mb; a manifest without it, or a budget below one session, is refused"
+
+# SBX_WORKER_BIN: the unit runs that binary (never deploy/microvm's /usr/local/bin/microvm-worker),
+# and a missing one is refused before systemd is touched.
+bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with SBX_WORKER_BIN'
+grep -qx "ExecStart=$SBX_WORKER_BIN" "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'the unit does not run SBX_WORKER_BIN'
+bash "$INSTALL" --uninstall sbx_bin >"$TMP/out" 2>&1 || fail 'uninstall sbx_bin'
+: >"$MOCK_LOG"
+! SBX_WORKER_BIN="$TMP/nowhere/microvm-worker" bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with a missing SBX_WORKER_BIN'
+grep -q "no worker binary $TMP/nowhere/microvm-worker" "$TMP/out" || fail 'the missing-binary refusal does not name the path'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a missing worker binary'
+# Unset, it is SBX0's own build under libexec, never the /usr/local/bin one another install runs.
+: >"$MOCK_LOG"
+! env -u SBX_WORKER_BIN bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with the default SBX_WORKER_BIN on a host without it'
+grep -q 'no worker binary /usr/local/libexec/sbx/microvm-worker' "$TMP/out" || fail 'the default SBX_WORKER_BIN is not /usr/local/libexec/sbx/microvm-worker'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing the missing default worker binary'
+# A path ExecStart's sed rewrite could not carry (# or &) is refused, even if it exists and runs.
+odd="$TMP/odd#dir/microvm-worker"; mkdir -p "${odd%/*}"; : >"$odd"; chmod +x "$odd"
+: >"$MOCK_LOG"
+! SBX_WORKER_BIN="$odd" bash "$INSTALL" "$(bundle sbx_bin)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with a SBX_WORKER_BIN holding #'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing an unusable SBX_WORKER_BIN'
+pass 'the unit runs SBX_WORKER_BIN (default /usr/local/libexec/sbx/microvm-worker); a missing one is refused before systemd'
+
+# The budget check's copies of the unit's standby depth and reserve match the unit, so they cannot drift.
+for k in STANDBY_DEPTH MEMORY_RESERVE_MB; do
+  unit="$(sed -n "s/^Environment=SH_${k}=//p" "$SRC/deploy/sbx/sbx-worker@.service")"
+  script="$(grep -oE "(^| )${k}=[0-9]+" "$INSTALL" | head -n1 | cut -d= -f2)"
+  [[ -n "$unit" && "$unit" == "$script" ]] || fail "install-host.sh's $k ($script) is not the unit's ($unit)"
+done
+pass "install-host.sh's standby depth and memory reserve are the unit's"

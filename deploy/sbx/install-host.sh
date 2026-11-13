@@ -13,8 +13,13 @@
 # When deploy/sbx/template-onboarding/template-build.sh wrote a template record for IMAGE
 # ($SBX_SRV/templates/IMAGE.json), the worker env carries SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so
 # the worker checks that record against its snapshot at start; a record for another worker is refused.
-# Needs microvm-worker, firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md;
-# moca-egress: CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress).
+# Needs firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md; moca-egress:
+# CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress), and microvm-worker.
+# SBX_WORKER_BIN (an absolute path; default /usr/local/libexec/sbx/microvm-worker, SBX0's own build)
+# is the microvm-worker SBX0's workers run, never deploy/microvm's /usr/local/bin one, so SBX0 beside
+# a P4 worker never runs or replaces the binary that one runs; a missing one is refused before systemd.
+# The worker's guest RAM (SH_GUEST_RAM_MB) is the snapshot's (guest_ram_mb in its manifest.json), and
+# --budget-mb must hold one session of it.
 #
 # Guest egress (#623, P4.1): a worker install also installs and starts moca-egress, the host's
 # allowlisted egress proxy, before the worker, and wires the worker to its control socket
@@ -30,7 +35,10 @@
 #     seeded from MOCA_EGRESS_ALLOW in the environment or else deploy/sbx/egress-allow.env beside
 #     this script, so an operator's edit survives a re-run. Restart moca-egress by hand after
 #     editing it or rebuilding the binary.
-#   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK and installs no egress unit.
+#   - The worker's Wants=/After=moca-egress.service is its own drop-in,
+#     sbx-worker@<id>.service.d/egress.conf, never the shared unit's.
+#   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK, the drop-in or an egress unit,
+#     so it never starts any moca-egress.service the host has; --egress warns only about egress workers.
 #
 # Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
 # worker's directories under $SBX_SRV. Never another install on the same host. Every file it writes
@@ -64,6 +72,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 : "${SBX_BIN_DIR:=/usr/local/bin}"
+# The worker binary the template unit runs: SBX0's own build, never deploy/microvm's /usr/local/bin
+# one (see the header).
+: "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
 # moca-egress's control socket: the path inside the unit is fixed (RuntimeDirectory=moca-egress); the
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
@@ -90,6 +101,9 @@ default_egress_allow() {
 # the image size defaults to microvm-worker's own.
 DEFAULT_IMAGE_MB=2048
 DEFAULT_BUDGET_MB=8192
+# The unit's own values (sbx-worker@.service: SH_STANDBY_DEPTH, SH_MEMORY_RESERVE_MB) and the VMM's
+# fixed per-VM cost outside guest RAM (vmpool.DefaultVMOverheadBytes), for check_snapshot_ram.
+STANDBY_DEPTH=2 MEMORY_RESERVE_MB=1024 VM_OVERHEAD_MB=32
 
 log() { printf '==> %s\n' "$*"; }
 die() { echo "deploy/sbx/install-host.sh: $*" >&2; exit 1; }
@@ -317,6 +331,28 @@ snapshot_ca_fingerprint() {
   sed -n 's/.*"egress_ca_sha256"[[:space:]]*:[[:space:]]*"sha256:\([0-9a-f]\{64\}\)".*/\1/p' "$m" | head -1
 }
 
+# snapshot_guest_ram_mb IMAGE -> the guest_ram_mb recorded in the snapshot's manifest.json, or nothing.
+snapshot_guest_ram_mb() {
+  local m="$SBX_SRV/snapshots/$1/manifest.json"
+  [[ -f "$m" ]] || return 0
+  sed -n 's/.*"guest_ram_mb"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$m" | head -1
+}
+
+# The guest RAM is the snapshot's, not a setting: the memfile IS the guest's RAM image, and the worker
+# sizes admission and each VM's cgroup by SH_GUEST_RAM_MB (the unit's 256 otherwise), which nothing
+# checks against the snapshot. And the budget must hold one session: the VM it runs on plus its
+# standbys (SH_STANDBY_DEPTH), each the guest RAM plus the VMM's fixed overhead
+# (vmpool.DefaultVMOverheadBytes), over the unit's SH_MEMORY_RESERVE_MB.
+check_snapshot_ram() {
+  local m="$SBX_SRV/snapshots/$SNAPSHOT/manifest.json" need
+  W_GUEST_MB="$(snapshot_guest_ram_mb "$SNAPSHOT")"
+  [[ "$W_GUEST_MB" =~ ^[1-9][0-9]*$ ]] ||
+    die "snapshot $SNAPSHOT has no guest_ram_mb in $m: rebuild it with deploy/microvm/build-snapshot.sh"
+  need=$(((W_GUEST_MB + VM_OVERHEAD_MB) * (1 + STANDBY_DEPTH) + MEMORY_RESERVE_MB))
+  ((BUDGET_MB >= need)) ||
+    die "--budget-mb $BUDGET_MB cannot hold one session of snapshot $SNAPSHOT (guest $W_GUEST_MB MiB): it needs at least $need MiB ((guest + $VM_OVERHEAD_MB) x (1 + $STANDBY_DEPTH standbys) + the $MEMORY_RESERVE_MB reserve)"
+}
+
 # check_snapshot_ca: with credentials on (the drop-in exists) the snapshot must trust this host's CA.
 check_snapshot_ca() {
   [[ -f "$(egress_dropin)" ]] || return 0
@@ -392,6 +428,8 @@ warn_untrusting_workers() {
     id="$(basename "$f" .env)"
     img="$(env_value SH_SNAPSHOT_IMAGE "$f")"
     [[ -n "$img" ]] || continue
+    # A --no-egress worker's guest has no network, so it never meets the CA: no warning for it.
+    [[ -n "$(env_value MOCA_EGRESS_CONTROL_SOCK "$f")" ]] || continue
     got="$(snapshot_ca_fingerprint "$img")"
     [[ -n "$got" && "$got" == "$want" ]] ||
       printf "WARNING: worker %s runs snapshot %s, which does not trust this host's CA; guests will see TLS failures on intercepted hosts until it is reinstalled on a snapshot built with --egress-ca\n" "$id" "$img" >&2
@@ -427,7 +465,8 @@ uninstall_egress_credentials() {
 install_units() {
   install -d -m 0755 "$SBX_UNIT_DIR"
   install -m 0644 "$SCRIPT_DIR/sbx.slice" "$SBX_UNIT_DIR/sbx.slice"
-  sed "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" "$SCRIPT_DIR/sbx-worker@.service" \
+  sed -e "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" \
+    -e "s#^ExecStart=/usr/local/bin/microvm-worker\$#ExecStart=$SBX_WORKER_BIN#" "$SCRIPT_DIR/sbx-worker@.service" \
     >"$SBX_UNIT_DIR/sbx-worker@.service"
   chmod 0644 "$SBX_UNIT_DIR/sbx-worker@.service"
   record "unit $SBX_UNIT_DIR/sbx.slice"
@@ -435,7 +474,8 @@ install_units() {
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
-# W_IMAGE_MB. It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
+# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and W_TEMPLATE.
+# It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
 validate_worker() {
   local env="$BUNDLE/worker.env" id addr tok idle image_mb
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
@@ -453,11 +493,15 @@ validate_worker() {
   image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
   image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"
   [[ "$image_mb" =~ ^[1-9][0-9]*$ ]] || die "SH_WORKSPACE_IMAGE_MB in $env must be a whole number of MiB"
+  # Plain path characters only: it is written into ExecStart with sed, where # or & would break it.
+  [[ "$SBX_WORKER_BIN" =~ ^/[A-Za-z0-9._/-]+$ && -x "$SBX_WORKER_BIN" ]] ||
+    die "no worker binary $SBX_WORKER_BIN: build it with CGO_ENABLED=0 go build -o $SBX_WORKER_BIN ./remote-worker/cmd/microvm-worker (SBX_WORKER_BIN must be an absolute path of plain characters: letters, digits, . _ - /)"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
   [[ "$BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((BUDGET_MB > 1024)) || die '--budget-mb must be a whole number of MiB above 1024 (the unit reserve)'
   check_snapshot_ca
+  check_snapshot_ram
   check_jail_path "$id"
   check_template_record "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
@@ -484,7 +528,7 @@ check_template_record() {
 }
 
 install_worker() {
-  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" ca=''
+  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" guest_mb="$W_GUEST_MB" ca=''
   install -d -m 0700 "$SBX_ENV_DIR" "$SBX_ENV_DIR/workers"
   if [[ -f "$BUNDLE/relay-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$BUNDLE/relay-ca.crt" || die "$BUNDLE/relay-ca.crt holds no PEM certificate"
@@ -498,7 +542,7 @@ install_worker() {
     {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
-      printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT"
+      printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\nSH_GUEST_RAM_MB=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT" "$guest_mb"
       [[ -z "$W_RECORD" ]] || printf 'SH_TEMPLATE_RECORD=%s\nSANDBOX_TEMPLATE=%s\n' "$W_RECORD" "$W_TEMPLATE"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
@@ -509,6 +553,18 @@ install_worker() {
   chmod 0600 "$SBX_ENV_DIR/workers/$id.env"
   printf '[Unit]\nDescription=SBX0 sandbox worker %s (slice)\n\n[Slice]\nMemorySwapMax=0\n' "$id" \
     >"$SBX_UNIT_DIR/sbx-$id.slice"
+  # The worker's dependency on moca-egress, only with egress: Wants= + After=, not Requires=, so a
+  # moca-egress restart does not stop the worker (why: deploy/microvm/moca-egress.service). A
+  # re-install with --no-egress removes it.
+  local dropin_dir="$SBX_UNIT_DIR/sbx-worker@$id.service.d"
+  if [[ -n "$NO_EGRESS" ]]; then
+    rm -f "$dropin_dir/egress.conf"
+    rmdir "$dropin_dir" 2>/dev/null || true
+  else
+    install -d -m 0755 "$dropin_dir"
+    printf '[Unit]\nAfter=moca-egress.service\nWants=moca-egress.service\n' >"$dropin_dir/egress.conf"
+    chmod 0644 "$dropin_dir/egress.conf"
+  fi
   record "worker sbx-worker@$id $SBX_ENV_DIR/workers/$id.env $SBX_UNIT_DIR/sbx-$id.slice"
   systemctl daemon-reload
   # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
@@ -587,6 +643,9 @@ remove_shared_units() {
   ! grep -q '^worker ' "$SBX_ENV_DIR/manifest" || return 0
   while read -r kind path; do
     [[ "$kind" == unit && -n "$path" ]] || continue
+    # Removing a slice's file leaves the slice loaded in systemd (empty) until a reboot: stop it
+    # first. Its worker slices were stopped by their own uninstalls, so nothing runs in it.
+    [[ "$path" != *.slice ]] || systemctl stop "$(basename "$path")" || true
     rm -f "$path"
     drop_manifest_lines -x -e "unit $path"
     log "removed $path (no SBX0 worker left on this host)"
@@ -731,7 +790,9 @@ uninstall_worker() {
   systemctl disable --now "sbx-worker@$id.service" || true
   # A stop that hit TimeoutStopSec can leave the worker's VMs in its slice; stopping the slice ends them.
   systemctl stop "sbx-$id.slice" || true
-  rm -f "$SBX_ENV_DIR/workers/$id.env" "$SBX_ENV_DIR/workers/$id-relay-ca.crt" "$SBX_UNIT_DIR/sbx-$id.slice"
+  rm -f "$SBX_ENV_DIR/workers/$id.env" "$SBX_ENV_DIR/workers/$id-relay-ca.crt" "$SBX_UNIT_DIR/sbx-$id.slice" \
+    "$SBX_UNIT_DIR/sbx-worker@$id.service.d/egress.conf"
+  rmdir "$SBX_UNIT_DIR/sbx-worker@$id.service.d" 2>/dev/null || true
   # Fixed strings, so worker `a` never takes `ba`'s lines: `@a ` and `/a-relay-ca.crt` are not
   # substrings of `@ba ` and `/ba-relay-ca.crt`.
   [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -e "worker sbx-worker@$id " -e "/$id-relay-ca.crt"

@@ -490,3 +490,93 @@ func TestParentCgroupIsSliceRelativeAndDerivable(t *testing.T) {
 		}
 	}
 }
+
+// withSweepExitWait shortens sweepExitWait for one test, so a test of the bound does not
+// sit out the full production wait.
+func withSweepExitWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := sweepExitWait
+	sweepExitWait = d
+	t.Cleanup(func() { sweepExitWait = prev })
+}
+
+// withSweepKill substitutes how the sweep signals a pid, for one test.
+func withSweepKill(t *testing.T, kill func(int) error) {
+	t.Helper()
+	prev := sweepKill
+	sweepKill = kill
+	t.Cleanup(func() { sweepKill = prev })
+}
+
+// TestSweepOrphansWaitsForAKilledProcessThatIsSlowToExit is #797's first half. A VMM does
+// not leave its cgroup the instant it is SIGKILLed: the kernel tears down its guest memory
+// and its descriptors first, and the sweep used to give up after 200 ms and count the cgroup
+// as swept anyway, while the VMM still answered on its API socket. Here the kill is delivered
+// 300 ms late, which stands in for that teardown: past the old 200 ms, inside the sweep's
+// bound. The sweep must still be waiting when the process exits, and only then count it.
+func TestSweepOrphansWaitsForAKilledProcessThatIsSlowToExit(t *testing.T) {
+	pid, reaped := startSleeper(t, true)
+	withSweepKill(t, func(p int) error {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = killPidIgnoringAbsent(p)
+		}()
+		return nil
+	})
+	root := fakeSlice(t, map[string][]string{"vm-12": {strconv.Itoa(pid)}})
+
+	start := time.Now()
+	res, err := SweepOrphans(root)
+	if err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	// Returning BEFORE the process was gone is the bug itself.
+	select {
+	case <-reaped:
+	default:
+		t.Fatalf("SweepOrphans returned after %s with its killed process still running — it stopped waiting before the process exited", time.Since(start))
+	}
+	if res.Swept != 1 || len(res.Stuck) != 0 {
+		t.Fatalf("Swept=%d Stuck=%v, want 1 and none: the process exited inside the wait", res.Swept, res.Stuck)
+	}
+	if _, err := os.Stat(filepath.Join(root, "vm-12")); !os.IsNotExist(err) {
+		t.Fatalf("vm-12's cgroup directory was not removed: stat err = %v", err)
+	}
+}
+
+// TestSweepOrphansReportsACgroupWhoseProcessOutlivesTheWaitAsStuck is #797's second half: a
+// process still running when the bounded wait ends is reported, by name, as not swept — never
+// counted in Swept, and its directory left in place, since something is still running in it.
+// No real process outlives SIGKILL on demand, so the kill is replaced with one that does
+// nothing, and the wait is shortened so the test does not sit out the production bound.
+func TestSweepOrphansReportsACgroupWhoseProcessOutlivesTheWaitAsStuck(t *testing.T) {
+	pid, reaped := startSleeper(t, true)
+	withSweepKill(t, func(int) error { return nil })
+	withSweepExitWait(t, 100*time.Millisecond)
+	root := fakeSlice(t, map[string][]string{
+		"vm-13": {strconv.Itoa(pid)},
+		"vm-14": {}, // already empty: still swept, so one stuck cgroup does not stop the rest
+	})
+
+	res, err := SweepOrphans(root)
+	if err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	if len(res.Stuck) != 1 || res.Stuck[0] != "vm-13" {
+		t.Fatalf("Stuck = %v, want exactly [vm-13]", res.Stuck)
+	}
+	if res.Swept != 1 {
+		t.Fatalf("Swept = %d, want 1 (vm-14 only): a cgroup whose process is still running must not be counted", res.Swept)
+	}
+	if len(res.Skipped) != 0 {
+		t.Fatalf("Skipped = %v, want none: a stuck cgroup is not a guard refusal", res.Skipped)
+	}
+	if _, err := os.Stat(filepath.Join(root, "vm-13")); err != nil {
+		t.Fatalf("vm-13's cgroup directory was removed with its process still running: %v", err)
+	}
+	select {
+	case <-reaped:
+		t.Fatal("the stand-in process exited, so this test staged nothing stuck")
+	default:
+	}
+}

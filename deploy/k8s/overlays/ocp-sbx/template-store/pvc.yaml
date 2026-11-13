@@ -1,0 +1,8 @@
+# The template store's volume (SH_PROVENANCE_DIR). Left in place when the switch is turned off, so
+# the catalog and the provenance records survive; they are the deployment's record (spec §7.2).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: moca-sbx-templates, namespace: moca-sbx }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }

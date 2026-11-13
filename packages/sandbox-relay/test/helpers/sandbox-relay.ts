@@ -11,8 +11,12 @@ import {
   SandboxExecClient,
   SandboxWorkerService,
   Stream,
-  type Exec,
+  Exec,
+  LeaseEvent,
+  LeaseControlResult,
   type ExecEvent,
+  type LeaseControlFrame,
+  type LeaseKeepaliveFrame,
   type ServerFrame,
   type WorkerFrame,
 } from '@moca/k8s-sandbox';
@@ -22,6 +26,7 @@ import {
   SANDBOX_SCOPE_EXEC,
   makeSigner,
   mintSandboxToken,
+  mintSetModeToken,
 } from '@moca/control-plane';
 import { makeExecAuth, startRelay, type RelayServerDeps } from '../../src/main.js';
 import { workerReqId } from '../../src/sandbox-auth.js';
@@ -72,6 +77,23 @@ export const token = (over: MintOver = {}, signer = K.signer) =>
 export const tokenB = (over: MintOver = {}) =>
   token({ sub: 'github:2', tenant: 'github:2', sbx: 'sbx-bbbb', wsk: 'sbx-bbbb', ...over });
 
+export type SetModeOver = Partial<Parameters<typeof mintSetModeToken>[1]>;
+/** A set-mode token (`moca-sandbox-mode+jwt`) for the same sandbox as `token()`. */
+export const setModeToken = (over: SetModeOver = {}, signer = K.signer) =>
+  mintSetModeToken(signer, {
+    sub: 'github:1',
+    sbx: 'sbx-aaaa',
+    wrk: 'sbx_default',
+    wsk: 'sbx-aaaa',
+    mode: 'lease',
+    modeEpoch: 2,
+    idleTimeoutS: 0,
+    notAfter: now() + 3600,
+    iss: ISS,
+    now: now(),
+    ...over,
+  });
+
 /** Hand-signed sandbox claims, for the cases mintSandboxToken cannot produce. */
 export const claims = (over: Record<string, unknown> = {}) => ({
   iss: ISS,
@@ -96,13 +118,21 @@ export type Reply = Array<
   | { chunk: { data: string; stream?: Stream } }
   | { end: { exitCode: number; truncated?: boolean } }
   | { error: { message: string } }
+  | { lease: Omit<Partial<LeaseEvent>, 'reqId'> }
 >;
+
+/** How a fake worker answers one LeaseControlFrame: a result without its ctl_id, or silence. */
+export type LeaseReply = (
+  f: LeaseControlFrame,
+) => Omit<Partial<LeaseControlResult>, 'ctlId'> | undefined;
 
 /**
  * A fake worker. `auto`: answers each Exec with a chunk (its workspace key, so each caller's frames
  * are recognisable) and an End after `delayMs`, or with `reply(exec)` when given. `hold`: answers
  * only when released, or with an ExecError when aborted (the Go worker's behaviour). `deaf`: never
  * answers anything. `attachToken` is presented as the attach bearer (a workload sandbox's).
+ * Lease frames are recorded; a LeaseControlFrame is answered only through `lease`, and without it
+ * never, as a worker on code older than lease mode would.
  */
 export async function worker(
   addr: string,
@@ -111,9 +141,12 @@ export async function worker(
   delayMs = 0,
   reply?: (e: Exec) => Reply,
   attachToken?: string,
+  lease?: LeaseReply,
 ) {
   const execs: Exec[] = [];
   const aborts: number[] = [];
+  const controls: LeaseControlFrame[] = [];
+  const keepalives: LeaseKeepaliveFrame[] = [];
   const client = new WorkerClient(addr, credentials.createInsecure()) as unknown as Client & {
     attach: (md?: Metadata) => ClientDuplexStream<WorkerFrame, ServerFrame>;
   };
@@ -137,6 +170,8 @@ export async function worker(
           stream.write({
             end: { reqId, exitCode: f.end.exitCode, truncated: f.end.truncated ?? false },
           } as WorkerFrame);
+        else if ('lease' in f)
+          stream.write({ lease: LeaseEvent.fromPartial({ ...f.lease, reqId }) } as WorkerFrame);
         else stream.write({ error: { reqId, message: f.error.message } } as WorkerFrame);
       }
       return;
@@ -146,7 +181,20 @@ export async function worker(
     } as WorkerFrame);
     stream.write({ end: { reqId: e.reqId, exitCode: 0, truncated: false } } as WorkerFrame);
   };
+  const answerControl = (ctlId: number, r: Omit<Partial<LeaseControlResult>, 'ctlId'>) =>
+    stream.write({ leaseResult: LeaseControlResult.fromPartial({ ...r, ctlId }) } as WorkerFrame);
   stream.on('data', (f: ServerFrame) => {
+    if (f.leaseControl) {
+      const ctl = f.leaseControl;
+      controls.push(ctl);
+      const r = lease?.(ctl);
+      if (r) answerControl(ctl.ctlId, r);
+      return;
+    }
+    if (f.keepalive) {
+      keepalives.push(f.keepalive);
+      return;
+    }
     if (f.abort) {
       aborts.push(f.abort.reqId);
       if (mode === 'hold')
@@ -178,7 +226,11 @@ export async function worker(
   return {
     execs,
     aborts,
+    controls,
+    keepalives,
     close,
+    /** Answer a LeaseControlFrame by its ctl_id, whenever the test chooses. */
+    answerControl,
     /** Answer a held Exec by its WORKER req_id. */
     release: (wid: number) => {
       const e = execs.find((x) => x.reqId === wid);
@@ -231,6 +283,8 @@ export function exec(
     reqId?: number;
     command?: string;
     workload?: string;
+    /** Exec fields the client sets beyond the defaults (the mode fields, keepalive). */
+    fields?: Partial<Exec>;
   },
 ) {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
@@ -240,14 +294,15 @@ export function exec(
     {
       sandboxId: opts.sandboxId ?? 'sbx_default',
       workload: opts.workload ?? '',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: opts.reqId ?? ++req,
         command: opts.command ?? 'true',
         stdin: new Uint8Array(),
         timeoutS: 5,
         streaming: true,
         workspaceKey: opts.wsk ?? 'sbx-aaaa',
-      },
+        ...opts.fields,
+      }),
     },
     md,
   );
@@ -280,6 +335,6 @@ export function abort(
 
 /** Every req_id an event carries, whichever oneof it is. */
 export const idsOf = (events: ExecEvent[]) =>
-  events.map((ev) => ev.chunk?.reqId ?? ev.end?.reqId ?? ev.error?.reqId);
+  events.map((ev) => ev.chunk?.reqId ?? ev.end?.reqId ?? ev.error?.reqId ?? ev.lease?.reqId);
 export const stdoutOf = (events: ExecEvent[]) =>
   events.map((ev) => (ev.chunk ? Buffer.from(ev.chunk.data).toString() : '')).join('');

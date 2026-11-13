@@ -34,6 +34,16 @@
 #                           SBX_TEMPLATES_FILE, owned by exactly one host). Unset: one host, kvm,
 #                           owning every template worker
 #   SBX_EGRESS_CREDENTIAL_TTL_SECONDS   optional; 5-300 (the control plane's default is 60)
+#   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
+#                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
+#                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
+#                           docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+#                           (the pin before #670). Unset: the base's image, as before
+#   SBX_TEMPLATE_STORE      optional; unset, 0 or 1 (template lifecycle spec §3.1, §7.2). 1 gives the
+#                           control plane its template store: a PVC for SH_PROVENANCE_DIR (the
+#                           template catalog and the provenance records; SBX_TEMPLATES_FILE is
+#                           imported into it once, at the first start, and ignored after that).
+#                           Unset or 0 changes nothing; turning it off leaves the PVC in place
 #   SBX_WORKSPACE_IMAGE_MB  optional; default 2048 (microvm-worker's SH_WORKSPACE_IMAGE_MB)
 #   SBX_{ATTACH,EXEC,API}_TLS_{CERT,KEY}   optional; otherwise self-signed (attach, exec) or the
 #                           router's default certificate (API)
@@ -47,8 +57,9 @@
 # Re-runnable: every token, password, key and certificate is generated once and kept. A worker
 # dropped from SBX_WORKERS has its token revoked and its bundle deleted; the relay reads worker
 # tokens on each attach, so that acts at once. Both pods read everything else only at boot, so the
-# generated overlay stamps a hash of the settings and the public keyset on both pod templates, and
-# any change to them rolls both. Secret values never reach argv or the log: they travel through jq's
+# generated overlay stamps a hash on each pod template, over what that pod reads (the control
+# plane's over every setting and the public keyset; the relay's over its own settings and the
+# keyset), and a change rolls the pods that read it. Secret values never reach argv or the log: they travel through jq's
 # environment or a builtin printf into a pipe, and messages name keys only.
 #
 # Writes deploy/sbx/.generated/: the applied overlay, workers/<id>/ (worker.env [+ relay-ca.crt],
@@ -88,6 +99,8 @@ validate() {
   [[ "${SBX_EXEC_HOST:-}" =~ $HOST_RE ]] || die 'SBX_EXEC_HOST is required and must be a DNS name'
   [[ "$SBX_ATTACH_HOST" != "$SBX_EXEC_HOST" ]] || die 'SBX_ATTACH_HOST and SBX_EXEC_HOST must differ (one certificate each)'
   [[ -n "${SBX_IMAGE:-}" && "$SBX_IMAGE" != *[[:space:]]* ]] || die 'SBX_IMAGE is required (the relay image)'
+  [[ -z "${SBX_REDIS_IMAGE:-}" || "$SBX_REDIS_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] ||
+    die 'SBX_REDIS_IMAGE must be pinned by digest: repository[:tag]@sha256:<64 hex>'
   [[ -n "${SBX_WORKERS:-}" ]] || die 'SBX_WORKERS is required: the template worker ids, space-separated'
   local seen=' ' w
   for w in $SBX_WORKERS; do
@@ -153,6 +166,7 @@ validate() {
 
   validate_templates
   validate_egress
+  validate_store
 
   local pair
   for pair in ATTACH EXEC API; do
@@ -161,6 +175,16 @@ validate() {
       die "$cert and $key must both name readable files, or both be unset"
   done
   NS="$SBX_NAMESPACE"
+}
+
+# SBX_TEMPLATE_STORE (template lifecycle spec §3.1, §7.2). Sets STORE_ON.
+STORE_ON=''
+validate_store() {
+  case "${SBX_TEMPLATE_STORE:-}" in
+    '' | 0) return 0 ;;
+    1) STORE_ON=1 ;;
+    *) die 'SBX_TEMPLATE_STORE must be unset, 0 or 1' ;;
+  esac
 }
 
 # SBX_EGRESS_CREDENTIALS and what it takes (spec §4.3). Sets EGRESS_ON, EGRESS_IDS (host ids, in
@@ -312,7 +336,7 @@ ensure_redis_secret() {
   [[ -n "$pw" ]] || { log 'generating the Redis password'; pw="$(rand_hex)"; }
   (
     export S_0="$pw" S_1="redis://:$pw@redis.$NS.svc:6379"
-    S_2="$(printf 'requirepass %s\nappendonly yes\ndir /data\n' "$pw")"
+    S_2="$(printf 'requirepass %s\nappendonly yes\ndir /data\nmaxmemory 200mb\nmaxmemory-policy noeviction\n' "$pw")"
     export S_2
     apply_secret moca-redis REDIS_PASSWORD REDIS_URL redis.conf
   )
@@ -504,10 +528,14 @@ apply_configmap() {
 }
 
 # moca-settings (the keys base/control-plane.yaml reads) and sbx-settings (the sandbox profile's and
-# the relay's), then SETTINGS_HASH: what both pods read at boot, with the public keyset, so a change
-# to any of it rolls both (write_overlay). Runs after route_cert: it reads exec-ca.crt.
+# the relay's), then two hashes of what each pod reads at boot (write_overlay stamps them, so a change
+# rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
+# keyset and the certificates; RELAY_HASH covers only the relay's (ocp-sbx/patch-relay.yaml: the
+# issuer and the in-flight cap) with the keyset and the certificates. So a template, subject or quota
+# change rolls the control plane alone and leaves running Execs be (RUNBOOK §5). Runs after
+# route_cert: it reads exec-ca.crt.
 ensure_settings() {
-  local ca='' moca sbx keys attach_crt exec_crt egress
+  local ca='' moca sbx relay keys attach_crt exec_crt egress
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
   moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
@@ -542,6 +570,15 @@ ensure_settings() {
     [[ -z "$EGRESS_ON" ]] || printf '%s\n' "$egress"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
   [[ "$SETTINGS_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the settings (openssl dgst)'
+  # The relay's env from sbx-settings, by key, as patch-relay.yaml names them.
+  relay=('SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' "SH_SANDBOX_MAX_INFLIGHT=$SBX_MAX_INFLIGHT")
+  RELAY_HASH="$({
+    printf '%s\n' "${relay[@]}"
+    json_value "$keys" PUBLIC_KEYS
+    json_value "$attach_crt" tls.crt
+    json_value "$exec_crt" tls.crt
+  } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
+  [[ "$RELAY_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the relay settings (openssl dgst)'
 }
 
 # route_cert SECRET HOST CERT KEY CAFILE: install the operator's certificate, or make a self-signed one
@@ -606,20 +643,26 @@ write_overlay() {
     printf '# GENERATED by deploy/sbx/setup.sh on every run. Do not edit; gitignored.\n'
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n'
     printf 'namespace: %s\nresources:\n  - %s\n' "$NS" "$OVERLAY_REL"
-    [[ -z "$EGRESS_ON" ]] || printf 'components:\n  - %s/egress-credentials\n' "$OVERLAY_REL"
+    if [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
+      printf 'components:\n'
+      [[ -z "$EGRESS_ON" ]] || printf '  - %s/egress-credentials\n' "$OVERLAY_REL"
+      [[ -z "$STORE_ON" ]] || printf '  - %s/template-store\n' "$OVERLAY_REL"
+    fi
     printf 'patches:\n'
     printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_ATTACH_HOST"
     printf '  - target: { kind: Route, name: sbx-exec }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_EXEC_HOST"
     printf '  - target: { kind: Route, name: sbx-api }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_API_HOST"
     # Both pods read their settings and keys only at boot: a new hash changes their pod templates,
-    # so the apply rolls them. The control plane's template has no annotations map; p4-relay gives
-    # the relay's one, so there this adds a key.
+    # so the apply rolls them, each on its own hash (ensure_settings). The control plane's template
+    # has no annotations map; p4-relay gives the relay's one, so there this adds a key.
     printf '  - target: { kind: Deployment, name: moca-control-plane }\n    patch: |-\n'
     printf '      - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
     printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n'
-    printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$SETTINGS_HASH"
+    printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$RELAY_HASH"
     printf 'images:\n'
     image_entry ghcr.io/rossoctl/moca "$SBX_IMAGE"
+    # The base names Valkey; an override renames that image, so the StatefulSet's pod spec is untouched.
+    [[ -z "${SBX_REDIS_IMAGE:-}" ]] || image_entry docker.io/valkey/valkey "$SBX_REDIS_IMAGE"
   } >"$GEN/kustomization.yaml"
 }
 

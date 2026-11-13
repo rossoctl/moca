@@ -1,0 +1,157 @@
+{
+  "schema": "example-builder/moca-microvm/1",
+  "instance_id": "django__django-11133",
+  "image": {
+    "repository": "images/moca-microvm",
+    "tag": "django__django-11133-28cf8ca78670",
+    "digest": "sha256:3d3e705ff379defc6684c220f97fc8701df4e06fce8fa8841c13d3ff8cef7746"
+  },
+  "testbed_image": {
+    "repository": "registry.example/testbed",
+    "tag": "django__django-11133-ebc8c56f91a3",
+    "digest": "sha256:bb55b7ad24ffb49d0eaa0675d1a7f27c835ec9fc6fe58385ec9e1e7a34c02a56"
+  },
+  "baseline_commit": "bc348023edb4c8d64fad72126c7ca47b03cfc728",
+  "test_cmd": "source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed && export LANG=en_US.UTF-8 && export LANGUAGE=en_US:en && export LC_ALL=en_US.UTF-8 && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1",
+  "recipe": {
+    "platform_layer_sha256": "94905f7e63231c632a28b9d5c1b775a5e1b092a36551707f1bb14a92b0703b35",
+    "dockerfile_sha256": "28cf8ca78670625a0d40898b78acdf4021d23544ff9867b308641101e63d833c",
+    "emitter": "oci-moca-microvm/1"
+  },
+  "layout": {
+    "testbed_src": "/opt/testbed-src",
+    "testbed_link": "/testbed -> /workspace",
+    "linked": [
+      "python",
+      "python3",
+      "pip",
+      "pip3",
+      "pytest",
+      "py.test"
+    ],
+    "gitconfig": {
+      "safe.directory": [
+        "/workspace",
+        "/testbed",
+        "/opt/testbed-src"
+      ],
+      "identity": "none (commits refused)"
+    },
+    "guest": {
+      "user": "root",
+      "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "home": "/tmp/home",
+      "rootfs": "read-only",
+      "network": "none",
+      "seed": "cp -a /opt/testbed-src/. /workspace/",
+      "snapshot_flags": [
+        "--skip-git-identity-check",
+        "--guest-home /tmp/home"
+      ]
+    }
+  },
+  "gate": {
+    "passed": true,
+    "kind": "guest emulation in a container, not the VM",
+    "network": "none",
+    "rootfs": "read-only",
+    "user": "root"
+  },
+  "observed": {
+    "fingerprint": {
+      "head": "bc348023edb4c8d64fad72126c7ca47b03cfc728",
+      "tree": "11289694a9c6c1129addb27d9109242c0a37606b",
+      "files": "6100",
+      "contents": "1c755298d80fcb54cd6dc53d580fcf35153c345172df1ac362c2f482d0526837",
+      "meta": "0060f232d569de49bb99a1834af0b1e33ec6e062a80306e795a0aa9cc8866e43",
+      "instance_record": "ffd7d9944dfcc7bece6fe40eaf1262b003b9e69df96f79dcd1b3bdd95cdaae5b",
+      "tracked_list": "4910d4463bd8ab51aea52bbc074d1a64d8a3740eccab0b6074a2590012a52ccc"
+    },
+    "testbed": {
+      "git_version": "git version 2.34.1",
+      "whoami": "root",
+      "uid": "0",
+      "workdir": "/workspace",
+      "commit_count": "1",
+      "commit_subject": "baseline",
+      "git_status": null,
+      "dot_git_present": "yes",
+      "instance_record": {
+        "instance_id": "django__django-11133",
+        "base_commit": "879cc3da6249e920b8d54518a0ae06de835d7373",
+        "image_digest": "swebench/sweb.eval.x86_64.django_1776_django-11133@sha256:914093363dbe12def92c5d36e9bdc5270cce5ed0aa6f3daad8bc4ef0389c29bf",
+        "dataset": "SWE-bench/SWE-bench_Lite",
+        "split": "test",
+        "testbed_head": "95d0ab8311f8180cdd9c02006be1dc16cc706548",
+        "testbed_tree": "11289694a9c6c1129addb27d9109242c0a37606b"
+      },
+      "tracked_count": "6067",
+      "agent_can_commit": "no",
+      "os_release": "ubuntu 22.04",
+      "testbed_writable": true,
+      "context_files_found": 0,
+      "test_cmd_ms": 912
+    },
+    "guest": {
+      "id": "root 0",
+      "which_python": "/usr/local/bin/python",
+      "python_realpath": "/opt/miniconda3/envs/testbed/bin/python3.6",
+      "import_file": "/workspace/django/__init__.py",
+      "missing_tools": [],
+      "git_status_lines": "0",
+      "git_identity": "none",
+      "rootfs": "readonly",
+      "testbed_link": "/workspace",
+      "credential_env_names": []
+    },
+    "etc_hosts_exported_sha256": "672f53473c9c6f189f2c658dcd4ab1eb0f2a42df241333787b8897cde4ed4fdf"
+  },
+  "image_size_bytes": 3050528710,
+  "build_ms": 129347,
+  "built_at": "2026-10-15T23:34:17Z",
+  "builder": {
+    "arch": "x86_64",
+    "engine": "podman",
+    "network": "host"
+  },
+  "saved": {
+    "file": "django__django-11133.tar",
+    "sha256": "dd353cc0ed815dbd3acd0ffc1017db57ea0b5c68bb706e9373f0a196c0e3d6a3",
+    "local_tag": "moca-microvm:django__django-11133-28cf8ca78670"
+  },
+  "pushed_from": "the build host, with a push-only key, after the host build",
+  "template": {
+    "schema": "moca-sbx-template-spec/1",
+    "id": "django-django-11133",
+    "image": "images/moca-microvm@sha256:3d3e705ff379defc6684c220f97fc8701df4e06fce8fa8841c13d3ff8cef7746",
+    "guest_ram_mb": 4096,
+    "vcpus": 2,
+    "guest_home": "/tmp/home",
+    "skip_git_identity_check": true,
+    "guest_home_gitconfig": false,
+    "egress": false,
+    "seed": "cp -a /opt/testbed-src/. /workspace/",
+    "description": "SWE-bench django__django-11133 (lite) at its baseline bc348023edb4; seed with: cp -a /opt/testbed-src/. /workspace/",
+    "tools": [
+      "bash",
+      "git",
+      "python3",
+      "rg"
+    ],
+    "etc_hosts_sha256": "672f53473c9c6f189f2c658dcd4ab1eb0f2a42df241333787b8897cde4ed4fdf",
+    "proved_in_vm": true,
+    "probe_status": "vm",
+    "source_record_digest": "sha256:3d3e705ff379defc6684c220f97fc8701df4e06fce8fa8841c13d3ff8cef7746",
+    "notes": [
+      "the probe's cmd uses `source`: run it through bash -c, as moca's guest agent does; the guest's /bin/sh is dash, so a client wrapping it in sh -c fails"
+    ],
+    "probe": {
+      "cmd": "source /opt/miniconda3/bin/activate && conda activate testbed && cd /testbed && export LANG=en_US.UTF-8 && export LANGUAGE=en_US:en && export LC_ALL=en_US.UTF-8 && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 basic",
+      "timeout_s": 900,
+      "expect_rc": 0,
+      "expect": [
+        "^OK\\b"
+      ]
+    }
+  }
+}
