@@ -41,6 +41,15 @@ RUN npm run build -w packages/ai && \
     npm run build -w packages/coding-agent
 WORKDIR /app
 
+# The test runner is not shipped. vitest 2 pulls vite 5, whose esbuild 0.21.5 binary is built with
+# Go 1.20.12 (CVE-2024-24790, critical), and a cluster admission policy that blocks images with old
+# critical CVEs (RHACS "Block Critical CVE older than 180 days") then refuses every deployment of
+# the image, rollbacks included. Nothing at runtime imports vite or vitest; tsx brings its own,
+# current esbuild. The check fails the build if an esbuild older than 0.25 is still in the tree.
+RUN rm -rf node_modules/.pnpm/vite@* node_modules/.pnpm/vite-node@* node_modules/.pnpm/vitest@* \
+      node_modules/.pnpm/@vitest+* node_modules/.pnpm/esbuild@0.21.* node_modules/.pnpm/@esbuild+*@0.21.* && \
+    test -z "$(find node_modules/.pnpm -maxdepth 1 \( -name 'esbuild@0.2[0-4].*' -o -name '@esbuild+*@0.2[0-4].*' \))"
+
 # Stage 2: slim runtime
 FROM node:24-alpine
 # kubectl is spawned by the control plane's K8sSecretStore on deploy/k8s
