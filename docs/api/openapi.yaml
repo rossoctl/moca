@@ -156,7 +156,7 @@ components:
             X11, X12, X14, X15; deploy/sbx/template-onboarding/governance/GATING-RULES.md)
         quota:
           type: string
-          enum: [templates, buildsQueued]
+          enum: [templates, buildsQueued, owned]
           description: 'quota_exceeded on a template create: which quota'
     Session:
       type: object
@@ -541,7 +541,8 @@ components:
           minimum: 0
           description: >-
             templates a subject owns with a build registered or on its way there (a template whose
-            builds all failed, were cancelled or retired is not counted)
+            builds all failed, were cancelled or retired is not counted, and a new build of it is
+            checked against this quota like a new id)
         buildsQueued:
           type: integer
           minimum: 0
@@ -549,6 +550,12 @@ components:
             builds of a subject's templates not yet built (queued, building or probing), charged to
             the template's owner
         active: { type: integer, minimum: 0 }
+        owned:
+          type: integer
+          minimum: 0
+          description: >-
+            template ids a subject owns in any status (a failed or cancelled-only template too),
+            checked for a new id only; 200 when the policy does not set it
     PolicyView:
       type: object
       required: [policy, digest, record]
@@ -1735,7 +1742,7 @@ paths:
         build); a refusal on a new id writes an audit-log line instead, and one on another subject's
         id is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
-        `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
+        `429 quota_exceeded` with `quota` (`templates`, `buildsQueued` or `owned`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for
         a build host; follow it at `build`. A create whose inputs match a build of the caller's
         template that is registered or on its way (§3.2) queues nothing and answers that build with
@@ -2283,8 +2290,8 @@ paths:
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
         The policy's quotas and the caller's use: templates owned (with a build registered or on its
-        way there), builds queued, building or probing, and
-        templates held active (0 until activation exists). On the sandbox profile, `sandboxes` is
+        way there), builds queued, building or probing, templates held active (0 until activation
+        exists), and template ids owned in any status (`owned`). On the sandbox profile, `sandboxes` is
         SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's
         live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
@@ -2295,12 +2302,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [subject, templates, buildsQueued, active]
+                required: [subject, templates, buildsQueued, active, owned]
                 properties:
                   subject: { type: string }
                   templates: { $ref: '#/components/schemas/LimitUse' }
                   buildsQueued: { $ref: '#/components/schemas/LimitUse' }
                   active: { $ref: '#/components/schemas/LimitUse' }
+                  owned: { $ref: '#/components/schemas/LimitUse' }
                   sandboxes: { $ref: '#/components/schemas/LimitUse' }
         '400':
           description: '`invalid_request`: this deployment stores no templates'
