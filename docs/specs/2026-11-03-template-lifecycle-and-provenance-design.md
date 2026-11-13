@@ -187,7 +187,8 @@ a refusal on another subject's id is only answered, and one on an id no template
 line to the capped audit log instead, naming the subject, the id and the failed rules, so no subject
 opens provenance streams without bound), and nothing is queued. Over a quota
 (§6.2: templates owned with a build registered or on its way there, so one whose builds all failed
-or were cancelled holds no slot; builds queued, building or probing at once, charged to the
+or were cancelled holds no slot, and takes one again, checked like a new id, when it gets a new
+build; builds queued, building or probing at once, charged to the
 template's owner even when an admin adds the build) is `429 quota_exceeded` naming which
 (`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
 for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that

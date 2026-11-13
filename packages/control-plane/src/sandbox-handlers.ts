@@ -534,7 +534,11 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
       if (reused) return cur!;
       const u = await usage(cat, charged);
-      if (!cur && u.templates >= quota.templates) {
+      // A template takes a slot when it holds none yet: a new id, or one whose builds all failed,
+      // were cancelled or were retired (usage does not count it). Checking only new ids would let
+      // a subject bring such templates back past the quota.
+      const holdsSlot = cur?.builds.some((x) => REUSABLE.has(x.status)) ?? false;
+      if (!holdsSlot && u.templates >= quota.templates) {
         throw new CpError(
           'quota_exceeded',
           `at most ${quota.templates} templates per subject`,

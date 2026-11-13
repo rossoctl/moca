@@ -475,6 +475,31 @@ describe('POST /v1/templates/{id}/builds/{build}/cancel (§5.1)', () => {
     expect((await create(d, body({ id: 'other-template' }))).status).toBe(202);
   });
 
+  it('checks the templates quota when a template that holds no slot gets a new build', async () => {
+    const d = stored({ ...benchmarkPolicy, quota: { templates: 1, buildsQueued: 10, active: 1 } });
+    await cancel(d, handleOf(await create(d)));
+    expect((await create(d, body({ id: 'other-template' }))).status).toBe(202);
+    const again = { spec: { ...spec, description: 'built again' } };
+    const viaBuilds = await HANDLERS.createTemplateBuild!(
+      ctx({ principal: alice, params: { id: ID }, body: body(again) }),
+      d,
+    ).catch((x) => x);
+    expect(viaBuilds.extra).toEqual({ quota: 'templates' });
+    expect((await create(d, body(again)).catch((x) => x)).extra).toEqual({ quota: 'templates' });
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.templates.used).toBe(1);
+    // A template that holds its slot still takes new builds at the limit.
+    const more = await HANDLERS.createTemplateBuild!(
+      ctx({
+        principal: alice,
+        params: { id: 'other-template' },
+        body: body({ id: 'other-template', ...again }),
+      }),
+      d,
+    );
+    expect(more.status).toBe(202);
+  });
+
   it('refuses another subject, an unknown build, and a build already failed', async () => {
     const d = stored();
     const h = handleOf(await create(d));

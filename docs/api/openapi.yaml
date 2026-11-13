@@ -541,7 +541,8 @@ components:
           minimum: 0
           description: >-
             templates a subject owns with a build registered or on its way there (a template whose
-            builds all failed, were cancelled or retired is not counted)
+            builds all failed, were cancelled or retired is not counted, and a new build of it is
+            checked against this quota like a new id)
         buildsQueued:
           type: integer
           minimum: 0
