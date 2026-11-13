@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
+import { Exec } from '@moca/k8s-sandbox';
 import { createRelay } from '../src/relay.js';
 import type { RecordStore } from '@moca/harness';
 
@@ -40,14 +41,17 @@ describe('relay Exec/Abort routing', () => {
 
     const events: any[] = [];
     const pump = (async () => {
-      for await (const ev of relay.routeExec('sbx-1', {
-        reqId: 1,
-        command: 'echo hi',
-        stdin: new Uint8Array(),
-        timeoutS: 0,
-        streaming: true,
-        workspaceKey: '',
-      }))
+      for await (const ev of relay.routeExec(
+        'sbx-1',
+        Exec.fromPartial({
+          reqId: 1,
+          command: 'echo hi',
+          stdin: new Uint8Array(),
+          timeoutS: 0,
+          streaming: true,
+          workspaceKey: '',
+        }),
+      ))
         events.push(ev);
     })();
 
@@ -85,14 +89,17 @@ describe('relay Exec/Abort routing', () => {
   it('Exec for an absent sandboxId throws', async () => {
     const relay = createRelay({ records, validateToken: () => true } as never);
     await expect(async () => {
-      for await (const _ of relay.routeExec('ghost', {
-        reqId: 1,
-        command: 'x',
-        stdin: new Uint8Array(),
-        timeoutS: 0,
-        streaming: true,
-        workspaceKey: '',
-      }))
+      for await (const _ of relay.routeExec(
+        'ghost',
+        Exec.fromPartial({
+          reqId: 1,
+          command: 'x',
+          stdin: new Uint8Array(),
+          timeoutS: 0,
+          streaming: true,
+          workspaceKey: '',
+        }),
+      ))
         void _;
     }).rejects.toThrow(/no live worker/);
   });
@@ -116,14 +123,17 @@ describe('relay Exec/Abort routing', () => {
     const events: any[] = [];
     let finished = false;
     const pump = (async () => {
-      for await (const ev of relay.routeExec('sbx-1', {
-        reqId: 1,
-        command: 'sleep 100',
-        stdin: new Uint8Array(),
-        timeoutS: 0,
-        streaming: true,
-        workspaceKey: '',
-      }))
+      for await (const ev of relay.routeExec(
+        'sbx-1',
+        Exec.fromPartial({
+          reqId: 1,
+          command: 'sleep 100',
+          stdin: new Uint8Array(),
+          timeoutS: 0,
+          streaming: true,
+          workspaceKey: '',
+        }),
+      ))
         events.push(ev);
       finished = true;
     })();
@@ -165,14 +175,17 @@ describe('relay Exec/Abort routing', () => {
 
     const events: any[] = [];
     const pump = (async () => {
-      for await (const ev of relay.routeExec('sbx-1', {
-        reqId: 7,
-        command: 'sleep 5',
-        stdin: new Uint8Array(),
-        timeoutS: 0,
-        streaming: true,
-        workspaceKey: '',
-      }))
+      for await (const ev of relay.routeExec(
+        'sbx-1',
+        Exec.fromPartial({
+          reqId: 7,
+          command: 'sleep 5',
+          stdin: new Uint8Array(),
+          timeoutS: 0,
+          streaming: true,
+          workspaceKey: '',
+        }),
+      ))
         events.push(ev);
     })();
 
@@ -182,14 +195,17 @@ describe('relay Exec/Abort routing', () => {
 
     await expect(
       (async () => {
-        for await (const _ of relay.routeExec('sbx-1', {
-          reqId: 7,
-          command: 'echo hi',
-          stdin: new Uint8Array(),
-          timeoutS: 0,
-          streaming: true,
-          workspaceKey: '',
-        }))
+        for await (const _ of relay.routeExec(
+          'sbx-1',
+          Exec.fromPartial({
+            reqId: 7,
+            command: 'echo hi',
+            stdin: new Uint8Array(),
+            timeoutS: 0,
+            streaming: true,
+            workspaceKey: '',
+          }),
+        ))
           void _;
       })(),
     ).rejects.toThrow(/req_id 7 already in flight/);
@@ -217,14 +233,17 @@ describe('relay Exec/Abort routing', () => {
 
     const events: any[] = [];
     void (async () => {
-      for await (const ev of relay.routeExec('sbx-1', {
-        reqId: 11,
-        command: 'cat /workspace/README.md',
-        stdin: new Uint8Array(),
-        timeoutS: 0,
-        streaming: true,
-        workspaceKey: 'leaf-abc123',
-      }))
+      for await (const ev of relay.routeExec(
+        'sbx-1',
+        Exec.fromPartial({
+          reqId: 11,
+          command: 'cat /workspace/README.md',
+          stdin: new Uint8Array(),
+          timeoutS: 0,
+          streaming: true,
+          workspaceKey: 'leaf-abc123',
+        }),
+      ))
         events.push(ev);
     })();
 
