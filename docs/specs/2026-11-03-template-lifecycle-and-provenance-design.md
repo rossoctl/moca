@@ -312,9 +312,14 @@ A claimed build's job is the spec as the policy checked it: the template's id an
 image always win over keys of the same name in the spec, and the guest size is always named
 `guest_ram_mb` (the API also takes `guest_mb`; `template-build.sh` reads only `guest_ram_mb`). A
 report is accepted only for a build handed to that host, and a failed or cancelled build takes no
-more reports. On `built` the control plane stores T and S byte for byte, writes a `build` record
+more reports; the check is made again inside the template's update, with the report's records, so
+an owner's cancel that lands while a report is being written stands and no record says it
+registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
-template's first registered build takes the `default` tag.
+template's first registered build takes the `default` tag. A build id names one build of a
+template: a build whose manifest hash another build of the template already has (the same image
+and spec created again under another profile or gate record, which the build finds already built)
+is rejected, rule `T.unique`, naming that build.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
@@ -322,7 +327,10 @@ reason and log (`SBX_REGISTRY`, URLs, registry hosts, IP addresses, 12-digit acc
 keeps the full log on the host (a 0700 directory). T and S go byte for byte, so they cannot be
 redacted: one that names `SBX_REGISTRY` is not sent, and the build fails `leak_refused`. A
 failure's reason leads with a code a client can branch on: `pull_failed`, `probe_failed`,
-`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`.
+`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`; or `agent_error`, when the agent
+cannot carry on with a build it claimed (a gate record it cannot fetch or whose bytes do not match
+its sha256, a report not accepted, no template record or manifest after the build). An agent that
+is still running reports every build it claimed: `built`, or `failed` on any other way out.
 
 **The build host handles untrusted images** in a self-serve model. The image is pulled only from a
 registry the policy allows (§8.1), its export runs as today (`build-rootfs.sh`, as root, owners

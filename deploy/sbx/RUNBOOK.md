@@ -639,7 +639,11 @@ uploaded log are redacted (`SBX_REGISTRY` exactly, then URLs, registry hosts, IP
 leads with a code a client can branch on: `pull_failed`, `probe_failed`, `disk_floor`,
 `spec_refused`, `build_failed`, or `leak_refused` (step `report`): the template record or manifest,
 which go byte for byte, names `SBX_REGISTRY`, so the build is reported failed and neither is sent.
-Name the image in the spec without its registry; `SBX_REGISTRY` supplies it at the pull. Text that
+Name the image in the spec without its registry; `SBX_REGISTRY` supplies it at the pull. A build
+the agent claimed but cannot carry on with is reported failed `agent_error`, with the agent's own
+fixed wording and its step (`gate`: a gate record it could not fetch, or whose bytes do not match;
+`report`: a report the control plane did not take, or no template record or manifest after the
+build), so it does not stay `building`. Text that
 reached the store before a redaction rule existed is removed offline with
 `template-onboarding/redact-provenance.py` (its `--catalog-only` mode for a build's stored log).
 

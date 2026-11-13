@@ -233,6 +233,16 @@ function registrationResults(
   return out;
 }
 
+/** The statuses a host may still report on: claimed, and not yet registered, rejected or failed. */
+const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
+
+/** Refuses a report on a build that is not this host's, or that takes no more reports. */
+function reportable(y: TemplateBuild, host: string): void {
+  if (y.claim?.host !== host) throw new CpError('not_found', 'no such build claimed by this host');
+  if (!REPORTABLE.has(y.status))
+    throw new CpError('invalid_request', `the build is ${y.status}; it takes no more reports`);
+}
+
 export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
@@ -450,32 +460,38 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const b = asRecord(ctx.body);
     const event = b.event;
     const stream = `template/${doc.id}`;
-    const terminal = new Set(['built', 'registered', 'rejected', 'failed', 'retired']);
-    if (terminal.has(build.status) && build.status !== 'built') {
-      throw new CpError(
-        'invalid_request',
-        `the build is ${build.status}; it takes no more reports`,
-      );
-    }
-    const setBuild = (patch: Partial<TemplateBuild>) =>
-      cat.update(doc.id, async (cur) => ({
-        ...cur!,
-        builds: cur!.builds.map((y) => (y.handle === build.handle ? { ...y, ...patch } : y)),
-      }));
+    // A quick refusal on what this request read; the same check runs again inside every write
+    // below, in the template's update queue, because the build can change in between (an owner's
+    // cancel), and a report never overwrites a build the host may no longer report on.
+    reportable(build, host);
+    const withBuild = (mutate: (y: TemplateBuild, c: TemplateDoc) => Promise<TemplateDoc>) =>
+      cat.update(doc.id, async (cur) => {
+        const y = cur?.builds.find((x) => x.handle === build.handle);
+        if (!cur || !y) throw new CpError('not_found', 'no such build claimed by this host');
+        reportable(y, host);
+        return mutate(y, cur);
+      });
+    const patched = (c: TemplateDoc, y: TemplateBuild, patch: Partial<TemplateBuild>) => ({
+      ...c,
+      builds: c.builds.map((x) => (x === y ? { ...x, ...patch } : x)),
+    });
     if (event === 'building' || event === 'probing') {
-      await setBuild({ status: event });
+      await withBuild(async (y, c) => patched(c, y, { status: event }));
       return { status: 200, body: { status: event } };
     }
     if (event === 'failed') {
       const step = typeof b.step === 'string' ? b.step.slice(0, 64) : 'unknown';
       const message = typeof b.message === 'string' ? b.message.slice(0, 4096) : 'the build failed';
-      await prov.append({
-        stream,
-        kind: 'build',
-        subject: `host:${host}`,
-        body: { handle: build.handle!, outcome: 'failed', step, message },
+      // The record is written inside the update, so a refused report leaves none.
+      await withBuild(async (y, c) => {
+        await prov.append({
+          stream,
+          kind: 'build',
+          subject: `host:${host}`,
+          body: { handle: build.handle!, outcome: 'failed', step, message },
+        });
+        return patched(c, y, { status: 'failed', reason: { message, step } });
       });
-      await setBuild({ status: 'failed', reason: { message, step } });
       return { status: 200, body: { status: 'failed' } };
     }
     if (event !== 'built')
@@ -498,62 +514,75 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     }
     const tSha = await prov.putBlob(Buffer.from(b.templateRecord, 'utf8'));
     const sSha = await prov.putBlob(Buffer.from(b.manifest, 'utf8'));
-    const buildRec = await prov.append({
-      stream,
-      kind: 'build',
-      subject: `host:${host}`,
-      body: {
-        handle: build.handle!,
-        outcome: 'built',
-        manifest_hash: String(t.manifest_hash ?? ''),
-        template_record_sha256: tSha,
-        manifest_sha256: sSha,
-        worker: String(t.worker ?? ''),
-        snapshot: String(t.snapshot ?? ''),
-      },
-    });
-    // Registration (§8.2): automatic, by policy, never a person.
-    const results = registrationResults(build, t, sm);
-    const failed = results.find((r) => !r.passed);
     const { record: policyRecord } = await policy.current();
-    const outcome = failed ? 'rejected' : 'registered';
-    await prov.append({
-      stream,
-      kind: 'check',
-      subject: 'policy',
-      body: {
-        policy: policyRecord,
-        profile: build.profile,
-        at: 'registration',
-        build: recordDigest(buildRec.record),
-        outcome,
-        results: results as unknown as Record<string, unknown>[],
-      },
-    });
     const manifestHash = String(t.manifest_hash);
-    await cat.update(doc.id, async (cur) => {
-      const c = cur!;
-      const builds = c.builds.map((y) =>
-        y.handle !== build.handle
-          ? y
-          : failed
-            ? {
-                ...y,
-                status: 'rejected' as const,
-                reason: { message: failed.message ?? failed.rule, rule: failed.rule },
-              }
-            : {
-                ...y,
-                status: 'registered' as const,
-                buildId: manifestHash,
-                worker: String(t.worker ?? ''),
-              },
+    // Set inside the update (a closure TypeScript's narrowing does not follow).
+    const verdict: { failed?: { rule: string; message?: string } } = {};
+    // The status re-check, the registration check and both records happen inside the update, so
+    // a cancel either lands first (this report is refused, and no record says it registered) or
+    // after (it finds the build registered or rejected, and refuses).
+    await withBuild(async (y, c) => {
+      const buildRec = await prov.append({
+        stream,
+        kind: 'build',
+        subject: `host:${host}`,
+        body: {
+          handle: build.handle!,
+          outcome: 'built',
+          manifest_hash: String(t.manifest_hash ?? ''),
+          template_record_sha256: tSha,
+          manifest_sha256: sSha,
+          worker: String(t.worker ?? ''),
+          snapshot: String(t.snapshot ?? ''),
+        },
+      });
+      // Registration (§8.2): automatic, by policy, never a person.
+      const results = registrationResults(y, t, sm);
+      // A build id names one build of a template: a second build of the same snapshot (the same
+      // image and spec, created again with another gate record or profile) is not registered
+      // beside the first.
+      const twin = c.builds.find((x) => x !== y && x.buildId === manifestHash);
+      results.push(
+        twin
+          ? {
+              rule: 'T.unique',
+              passed: false,
+              message: `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+            }
+          : { rule: 'T.unique', passed: true },
       );
+      const failed = results.find((r) => !r.passed);
+      verdict.failed = failed;
+      await prov.append({
+        stream,
+        kind: 'check',
+        subject: 'policy',
+        body: {
+          policy: policyRecord,
+          profile: y.profile,
+          at: 'registration',
+          build: recordDigest(buildRec.record),
+          outcome: failed ? 'rejected' : 'registered',
+          results: results as unknown as Record<string, unknown>[],
+        },
+      });
+      const next = failed
+        ? patched(c, y, {
+            status: 'rejected',
+            reason: { message: failed.message ?? failed.rule, rule: failed.rule },
+          })
+        : patched(c, y, {
+            status: 'registered',
+            buildId: manifestHash,
+            worker: String(t.worker ?? ''),
+          });
       // A first registered build of a template takes `default` (§3.2); later ones are tagged by the owner.
-      const tags =
-        !failed && c.tags.default === undefined ? { ...c.tags, default: manifestHash } : c.tags;
-      return { ...c, builds, tags };
+      return !failed && c.tags.default === undefined
+        ? { ...next, tags: { ...c.tags, default: manifestHash } }
+        : next;
     });
+    const { failed } = verdict;
+    const outcome = failed ? 'rejected' : 'registered';
     return {
       status: 200,
       body: { status: outcome, ...(failed ? { rule: failed.rule } : { buildId: manifestHash }) },
