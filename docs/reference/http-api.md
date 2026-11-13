@@ -250,7 +250,8 @@ stops its worker); waiting for the snapshot's removal from every host (`heldBy` 
 The admin routes came with API 1.9.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one
 subject's override (`PUT /v1/quota/{subject}`, `github:<numeric id>` or `oidc:<provider sub>`; a body of `null` removes
 it). Overrides live in the policy (`quotaBySubject`), so each change is a `policy` record naming the admin, enforced at
-once; `GET /v1/quota` shows the limits that apply to the caller and `quotaSource` (`subject` or `default`). An admin also
+once; `?expect=` (JSON, the value read) makes it a compare-and-set, 409 `quota_changed` with nothing written when the
+quota is no longer that value; `GET /v1/quota` shows the limits that apply to the caller and `quotaSource` (`subject` or `default`). An admin also
 rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{build}/reject {reason}`): it becomes
 `rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire, and a
 sandbox create naming it is 400 `unknown_template`. A `reject` record names the admin, the reason and the build's `build`
@@ -261,7 +262,7 @@ Another user's session returns 404, not 403. Control-plane error codes and statu
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
-`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
+`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `quota_changed`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
 (`quota_exceeded`, `bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
 (`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in

@@ -143,7 +143,8 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/templates/{id}/deactivate',
     reads: ['templateId', 'released'],
   },
-  // `sbx templates quota` (template lifecycle spec §5.2): read the policy, write, compare.
+  // `sbx templates quota` (template lifecycle spec §5.2): read the policy, then write it as a
+  // compare-and-set (`?expect=`), refused 409 quota_changed if it changed in between.
   { method: 'get', path: '/v1/policy', reads: ['policy', 'digest', 'record'] },
   {
     method: 'put',
@@ -183,6 +184,8 @@ const CODES_USED = [
   'template_not_found',
   'async_quota_exhausted',
   'turn_not_cancellable',
+  // `sbx templates quota`: the write's compare-and-set found the quota changed (sbx/commands.ts).
+  'quota_changed',
 ];
 
 function responseSchema(op: any): any {

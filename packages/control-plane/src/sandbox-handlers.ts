@@ -1268,6 +1268,12 @@ function quotaBody(v: unknown): Policy['quota'] {
   } as Policy['quota'];
 }
 
+/** Whether two quotas (or two absent overrides, null) hold the same three counters. */
+const sameQuota = (a: Policy['quota'] | null, b: Policy['quota'] | null): boolean =>
+  a === null || b === null
+    ? a === b
+    : a.templates === b.templates && a.buildsQueued === b.buildsQueued && a.active === b.active;
+
 /** POST /v1/templates/{id}/retire (§5.1): every build of the template not yet retired. */
 async function retireTemplate(ctx: RequestCtx, deps: CpDeps) {
   const r = await retireBuilds(ctx, deps, () => true);
@@ -1462,6 +1468,27 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'the default quota is set, never removed');
     // Stored as the three counters alone: a key beyond them is refused, never kept in the policy.
     const body = ctx.body === null ? null : quotaBody(ctx.body);
+    // A compare-and-set (`?expect=`, JSON: the quota the client read, null for no override): the
+    // write is made only if the target's quota is that value now, else 409 quota_changed with
+    // nothing written, so another admin's change in between is never overwritten unseen.
+    const expectRaw = ctx.query.get('expect');
+    let expected: Policy['quota'] | null | undefined;
+    if (expectRaw !== null) {
+      let v: unknown;
+      try {
+        v = JSON.parse(expectRaw);
+      } catch {
+        throw new CpError('invalid_request', 'expect must be a quota, or null, as JSON');
+      }
+      expected = v === null ? null : quotaBody(v);
+      if (
+        expected !== null &&
+        ![expected.templates, expected.buildsQueued, expected.active].every(
+          (n) => Number.isSafeInteger(n) && n >= 0,
+        )
+      )
+        throw new CpError('invalid_request', 'expect must hold whole numbers, as a quota does');
+    }
     // The read, the change and the write are one step of the policy store (update), so a quota or
     // policy another admin writes meanwhile is never dropped by this write.
     let before: unknown;
@@ -1476,6 +1503,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         if (body === null) delete next.quotaBySubject![subject];
         else next.quotaBySubject![subject] = body as Policy['quota'];
       }
+      if (expected !== undefined && !sameQuota(before as Policy['quota'] | null, expected))
+        throw new CpError(
+          'quota_changed',
+          `${subject}'s quota changed since it was read: nothing written; read it again, then write`,
+        );
       if (Object.keys(next.quotaBySubject!).length === 0) delete next.quotaBySubject;
       const bad = policyProblems(next);
       if (bad.length) throw new CpError('invalid_request', bad.join('; '));

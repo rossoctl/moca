@@ -124,6 +124,7 @@ components:
             - template_not_active
             - template_retired
             - build_in_use
+            - quota_changed
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -2473,6 +2474,14 @@ paths:
       security: [{ sessionToken: [] }]
       parameters:
         - { name: subject, in: path, required: true, schema: { type: string } }
+        - name: expect
+          in: query
+          required: false
+          description: >-
+            A compare-and-set: the target's quota the client read, as JSON (a Quota, or `null` for
+            a subject with no override). The write is made only if the quota is that value now;
+            else `409 quota_changed`, with nothing written.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -2505,6 +2514,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403':
           description: '`forbidden` (not an admin) or `not_enrolled`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`quota_changed`: `expect` is not the quota now; nothing written'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

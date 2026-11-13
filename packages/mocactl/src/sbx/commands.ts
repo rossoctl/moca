@@ -440,30 +440,6 @@ export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
   return undefined;
 }
 
-/** The loud failure of an admin write: the value changed between this command's read and its write. */
-function raced(c: SbxCtx, what: string, read: string, before: string, now: string): number {
-  c.io.err(
-    `sbx: ${what} was changed by someone else between read and write: ${read} / ${before} / ${now} ` +
-      '(read / before this write / now): check it, and write again if need be',
-  );
-  return SBX_EXIT.failed;
-}
-
-/** Canonical JSON (keys sorted), to compare a value read with an answer's `before`. */
-function canonical(v: unknown): string {
-  const sort = (x: unknown): unknown =>
-    Array.isArray(x)
-      ? x.map(sort)
-      : x && typeof x === 'object'
-        ? Object.fromEntries(
-            Object.keys(x as object)
-              .sort()
-              .map((k) => [k, sort((x as Record<string, unknown>)[k])]),
-          )
-        : x;
-  return JSON.stringify(sort(v ?? null));
-}
-
 const quotaText = (q: SbxQuota | null | undefined) =>
   q
     ? `templates ${q.templates}, builds queued ${q.buildsQueued}, active ${q.active}`
@@ -472,8 +448,9 @@ const quotaText = (q: SbxQuota | null | undefined) =>
 /**
  * `sbx templates quota TARGET (--templates N --builds-queued N --active N | --clear)` (template
  * lifecycle spec §5.2; admins). Names the control plane it writes to and refuses a login issued for
- * another deployment; reads the current value first (`GET /v1/policy`), writes, then compares the
- * answer's `before` with the read: a difference is a concurrent write, reported loudly (exit 1).
+ * another deployment; reads the current value first (`GET /v1/policy`), then writes it as a
+ * compare-and-set (`?expect=` the value read): if another admin changed the quota in between, the
+ * control plane writes nothing (`409 quota_changed`), and this reports the value now (exit 1).
  * Prints old -> new and the new policy's digest and record.
  */
 export async function cmdSetQuota(
@@ -490,20 +467,25 @@ export async function cmdSetQuota(
     c.io.err(`sbx: admin write to ${sanitizeRemote(c.url)}`);
     const pol = (await c.api.getPolicy()).policy;
     const read = target === 'default' ? pol.quota : (pol.quotaBySubject?.[target] ?? null);
-    const r = await c.api.putQuota(target, quota);
+    let r: Awaited<ReturnType<typeof c.api.putQuota>>;
+    try {
+      r = await c.api.putQuota(target, quota, read);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.code !== 'quota_changed') throw err;
+      const p2 = (await c.api.getPolicy()).policy;
+      const now = target === 'default' ? p2.quota : (p2.quotaBySubject?.[target] ?? null);
+      c.io.err(
+        `sbx: nothing written: ${sanitizeRemote(target)}'s quota was changed by someone else after ` +
+          `this command read it (read ${quotaText(read)}, now ${quotaText(now)}): check it, then run ` +
+          'the command again',
+      );
+      return SBX_EXIT.failed;
+    }
     if (c.json) c.io.out(JSON.stringify({ ...r, read }) + '\n');
     else
       c.io.out(
         `${sanitizeRemote(r.target)}: ${quotaText(read)} -> ${quota === null ? 'the default' : quotaText(quota)}` +
           ` (policy ${sanitizeRemote(r.policy)}, record ${sanitizeRemote(r.record)})\n`,
-      );
-    if (canonical(r.before) !== canonical(read))
-      return raced(
-        c,
-        `${sanitizeRemote(target)}'s quota`,
-        quotaText(read),
-        quotaText(r.before),
-        quotaText(r.quota),
       );
     return SBX_EXIT.ok;
   } catch (err) {

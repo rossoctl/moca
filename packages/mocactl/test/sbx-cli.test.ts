@@ -809,6 +809,8 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
   ];
   const Q = { templates: 5, buildsQueued: 2, active: 1 };
   const OLD = { templates: 3, buildsQueued: 1, active: 1 };
+  // The compare-and-set's query: the value the command read.
+  const ifRead = (v: unknown) => `?${new URLSearchParams({ expect: JSON.stringify(v) })}`;
 
   it('reads, writes and prints old -> new with the policy digest; names the control plane', async () => {
     const { home, env, io } = setup();
@@ -822,7 +824,7 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
     expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     expect(cp.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       'GET /v1/policy',
-      'PUT /v1/quota/github%3A9',
+      `PUT /v1/quota/github%3A9${ifRead(OLD)}`,
     ]);
     expect(cp.calls.at(-1)!.body).toEqual(Q);
     expect(io.outs.join('')).toBe(
@@ -845,7 +847,10 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
     });
     const opts = { home, fetchImpl: cp.fetchImpl };
     expect(await sbxMain(['templates', 'quota', 'github:9', '--clear'], env, io, opts)).toBe(0);
-    expect(cp.calls.at(-1)).toMatchObject({ method: 'PUT', path: '/v1/quota/github%3A9' });
+    expect(cp.calls.at(-1)).toMatchObject({
+      method: 'PUT',
+      path: `/v1/quota/github%3A9${ifRead(OLD)}`,
+    });
     expect(cp.calls.at(-1)!.body).toBeNull();
     expect(io.outs.join('')).toContain(
       'github:9: templates 3, builds queued 1, active 1 -> the default',
@@ -859,25 +864,43 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
     );
   });
 
-  it('fails loudly when the quota changed between its read and its write', async () => {
+  it('writes nothing when the quota changed after its read, and reports the value now (exit 1)', async () => {
     const { home, env, io } = setup();
+    let reads = 0;
     const cp = fakeCp({
+      // The first read sees OLD; another admin then writes, so the second read sees theirs.
       'GET /v1/policy': () => ({
         status: 200,
-        body: policyView({ quotaBySubject: { 'github:9': OLD } }),
+        body: policyView({
+          quotaBySubject: { 'github:9': reads++ === 0 ? OLD : { ...OLD, templates: 4 } },
+        }),
       }),
-      'PUT /v1/quota/github%3A9': () => answer('github:9', Q, { ...OLD, templates: 4 }),
+      'PUT /v1/quota/github%3A9': () => ({
+        status: 409,
+        body: { error: 'quota_changed', message: "github:9's quota changed since it was read" },
+      }),
     });
     expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+    expect(cp.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /v1/policy',
+      `PUT /v1/quota/github%3A9${ifRead(OLD)}`,
+      'GET /v1/policy',
+    ]);
     expect(io.errs.join('\n')).toContain(
-      "github:9's quota was changed by someone else between read and write: templates 3, builds queued 1, active 1 / templates 4, builds queued 1, active 1 / templates 5, builds queued 2, active 1",
+      "nothing written: github:9's quota was changed by someone else after this command read it (read templates 3, builds queued 1, active 1, now templates 4, builds queued 1, active 1)",
     );
-    io.outs.length = 0;
-    expect(await sbxMain([...ARGS, '--json'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
-    expect(JSON.parse(io.outs.join(''))).toMatchObject({
-      read: { templates: 3 },
-      before: { templates: 4 },
+    expect(io.outs.join('')).toBe('');
+  });
+
+  it('expects no override when the subject has none', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({ status: 200, body: policyView() }),
+      'PUT /v1/quota/github%3A9': (req) => answer('github:9', req.body, null),
     });
+    expect(await sbxMain(ARGS, env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/github%3A9${ifRead(null)}`);
+    expect(io.outs.join('')).toContain('github:9: the default -> templates 5');
   });
 
   it("refuses a login another deployment's control plane issued, before any read or write", async () => {

@@ -72,9 +72,10 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  set a subject's template quotas (TARGET
                                                  github:<numeric id> or oidc:<provider sub>) or the
                                                  default (TARGET default); --clear removes a
-                                                 subject's override (admins only). Reads, writes,
-                                                 compares: prints old -> new, exit 1 if it changed
-                                                 between the read and the write
+                                                 subject's override (admins only). Reads, then
+                                                 writes only if unchanged since the read: prints
+                                                 old -> new; exit 1, nothing written, if another
+                                                 admin changed it in between
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check

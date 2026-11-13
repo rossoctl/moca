@@ -359,7 +359,9 @@ registered build that later turns out wrong.
   each change is a new `policy` record (the whole policy) naming the admin, and the answer carries
   its digest and the quota before. The read, the change and the write are one step of the policy
   store, so two admins' writes made together (for two subjects, or a quota and a `PUT /v1/policy`)
-  never drop each other's change. It is enforced at once, on the next create, queued build and
+  never drop each other's change; a write with `?expect=` (the value the client read) is made only
+  if the target's quota is still that value, else `409 quota_changed` with nothing written. It is
+  enforced at once, on the next create, queued build and
   activation: a subject's limits are its override, else the default (§6.2). `GET /v1/quota` shows
   the limits that apply to the caller and `quotaSource` (`subject` or `default`). The default is
   set, never removed. A subject is never `test:<n>` (a synthetic test user, enrolled by the
@@ -378,9 +380,10 @@ registered build that later turns out wrong.
 - **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N`,
   or `--clear` for a subject's override (admins). Like every admin write it names the control
   plane it writes to and refuses a login issued for another deployment, then reads the value
-  (`GET /v1/policy`), writes, and compares the answer's `before` with its read: it prints old ->
-  new with the policy's digest and record, and exits 1 loudly when the value changed between its
-  read and its write.
+  (`GET /v1/policy`) and writes it as a compare-and-set (`?expect=` the value read): it prints old
+  -> new with the policy's digest and record, and when another admin changed the value after its
+  read, the control plane writes nothing (`409 quota_changed`) and the command exits 1, naming the
+  value now.
 
 Known limits:
 

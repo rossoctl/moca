@@ -1492,6 +1492,42 @@ describe('admin quotas (§5.2)', () => {
     });
   });
 
+  it('writes with ?expect= only when the quota is the value expected (409 quota_changed, nothing written)', async () => {
+    const d = await setup();
+    const q = { templates: 5, buildsQueued: 2, active: 1 };
+    const putIf = (subject: string, body: unknown, expect: string) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject },
+          body,
+          query: new URLSearchParams({ expect }),
+        }),
+        d,
+      );
+    // No override yet: `null` is the value expected.
+    expect((await putIf(alice.sub, q, 'null')).status).toBe(200);
+    const n = (await d.provenance!.chain('policy')).length;
+    // Another admin's write came in between: this one still expects no override.
+    expect(await refusal(() => putIf(alice.sub, { ...q, active: 2 }, 'null'))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf(alice.sub, null, JSON.stringify({ ...q, active: 9 })))).toBe(
+      'quota_changed',
+    );
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    expect((await d.policy!.current()).policy.quotaBySubject![alice.sub]).toEqual(q);
+    // The value now, in any key order, is taken; so is the default's.
+    const now = JSON.stringify({ active: 1, buildsQueued: 2, templates: 5 });
+    expect((await putIf(alice.sub, null, now)).body).toMatchObject({ quota: null, before: q });
+    const def = JSON.stringify((await d.policy!.current()).policy.quota);
+    expect((await putIf('default', q, def)).status).toBe(200);
+    expect(await refusal(() => putIf('default', q, def))).toBe('quota_changed');
+    // An expect that is no quota is refused before any read.
+    expect(await refusal(() => putIf(alice.sub, q, '{'))).toBe('invalid_request');
+    expect(await refusal(() => putIf(alice.sub, q, '{"templates":1}'))).toBe('invalid_request');
+  });
+
   it("enforces a subject's templates quota on create", async () => {
     const d = await setup();
     attachedNow = [];

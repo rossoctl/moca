@@ -16,7 +16,10 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   Quota, or `null` to remove a subject's override (the default is never removed). Each change is a
   new `policy` record naming the admin. Answers `{target, subject, quota, before, policy, record}`:
   the quota now and before (null: no override), the new policy's digest and the record's. Enforced
-  at once on creates, queued builds and activations.
+  at once on creates, queued builds and activations. A quota holds the three counters only (another
+  key is `400 invalid_request`). An optional `?expect=` (JSON: the quota the client read, `null` for
+  no override) makes the write a compare-and-set: when the target's quota is not that value now,
+  nothing is written and the answer is the new code `409 quota_changed`.
 - Policy gains `quotaBySubject`, the per-subject overrides of `quota`, keyed by subject; a key that
   is not a subject, or a malformed quota, is `400 invalid_request`.
 - GET /v1/quota answers the limits that apply to the caller (its override, else the default) and
