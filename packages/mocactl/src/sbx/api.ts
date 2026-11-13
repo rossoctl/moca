@@ -44,16 +44,11 @@ export interface SbxDiscovery {
 /** A template quota (openapi Quota, template lifecycle spec §6.2); owned is optional. */
 export type SbxQuota = { templates: number; buildsQueued: number; active: number; owned?: number };
 
-/** The policy as `GET /v1/policy` answers it, as much of it as a quota write reads (§8). */
-export interface SbxPolicyView {
-  policy: { quota: SbxQuota; quotaBySubject?: Record<string, SbxQuota> };
-  digest: string;
-  record: string;
-}
-
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
+  /** The `b-<26 hex>` handle its create answered (its buildId for an imported build). */
+  handle?: string;
   status: string;
   profile: string;
   readiness: string | null;
@@ -67,8 +62,8 @@ export interface SbxBuild {
   tags: string[];
   createdAt: number;
   provenance: string | null;
-  /** The handle the create answered; equal to buildId for an imported build. */
-  handle?: string;
+  /** On a `failed` or `rejected` build, why (`step` `cancelled` for a cancel); null otherwise. */
+  reason?: { message: string; step?: string; rule?: string } | null;
   /** On GET /v1/templates/{id} and the builds routes. */
   spec?: {
     guest_mb?: number;
@@ -118,6 +113,65 @@ export interface SbxTemplateFull extends SbxTemplate {
   builds: SbxBuild[];
 }
 
+/** What a create answers (openapi TemplateQueued): the build to follow. */
+export interface SbxQueued {
+  templateId: string;
+  buildId: string | null;
+  /** The build's path, `/v1/templates/{id}/builds/{handle}` (or its buildId once registered). */
+  build: string;
+  status: string;
+  reused?: boolean;
+}
+
+/** The body of a template create (openapi TemplateCreate). */
+export interface SbxTemplateCreate {
+  id?: string;
+  image: string;
+  spec: Record<string, unknown>;
+  profile?: string;
+  /** The gate record file as sent, byte for byte. */
+  gateRecord?: string;
+  visibility?: string;
+}
+
+export type SbxLimitUse = { limit: number; used: number };
+
+/** `GET /v1/quota`: the caller's template quotas and use, and on the sandbox profile its live-sandbox cap. */
+export interface SbxQuotaView {
+  subject: string;
+  templates: SbxLimitUse;
+  buildsQueued: SbxLimitUse;
+  active: SbxLimitUse;
+  sandboxes?: SbxLimitUse;
+}
+
+/** A policy profile (openapi Policy.profiles). */
+export interface SbxProfile {
+  requires: string[];
+  envelope: {
+    maxGuestMb: number;
+    maxVcpus: number;
+    maxWorkspaceMb: number;
+    exact?: { guestMb: number; vcpus: number };
+  };
+}
+
+/** `GET /v1/policy` (openapi PolicyView): profiles for a dry run, quotas for a quota write. */
+export interface SbxPolicyView {
+  policy: {
+    schema: string;
+    profiles: Record<string, SbxProfile>;
+    defaultProfile: string;
+    allowedRegistries: string[];
+    trustedGateRecords: string[];
+    quota: SbxQuota;
+    /** The per-subject overrides (a quota write reads them, §5.2). */
+    quotaBySubject?: Record<string, SbxQuota>;
+  };
+  digest: string;
+  record: string;
+}
+
 export class SandboxApiClient extends ControlPlaneClient {
   sandboxDiscovery(): Promise<SbxDiscovery> {
     return this.json('GET', '/v1/discovery', { auth: false });
@@ -132,7 +186,7 @@ export class SandboxApiClient extends ControlPlaneClient {
     return this.json('GET', `/v1/templates/${encodeURIComponent(id)}`);
   }
 
-  /** One build, by its build id (`GET /v1/templates/{id}/builds/{build}`). */
+  /** One build, by build id or by the create's handle (`GET /v1/templates/{id}/builds/{b}`). */
   getTemplateBuild(id: string, build: string): Promise<SbxBuild> {
     return this.json(
       'GET',
@@ -166,7 +220,33 @@ export class SandboxApiClient extends ControlPlaneClient {
         });
   }
 
-  /** The deployment's template policy (`GET /v1/policy`): its quotas, among the rest. */
+  /** Create a template, or a new build of one's own (lifecycle spec §4): `POST /v1/templates`. */
+  createTemplate(body: SbxTemplateCreate): Promise<SbxQueued> {
+    return this.json('POST', '/v1/templates', { body });
+  }
+
+  /** A new build of one's own template: `POST /v1/templates/{id}/builds` (the body's id ignored). */
+  createTemplateBuild(id: string, body: SbxTemplateCreate): Promise<SbxQueued> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/builds`, { body });
+  }
+
+  /** Withdraw a queued, building or probing build (the owner, or an admin). */
+  cancelTemplateBuild(
+    id: string,
+    build: string,
+  ): Promise<{ templateId: string; build: string; status: 'failed' }> {
+    return this.json(
+      'POST',
+      `/v1/templates/${encodeURIComponent(id)}/builds/${encodeURIComponent(build)}/cancel`,
+    );
+  }
+
+  /** The caller's template quotas and use, and the live-sandbox cap (§6.2). */
+  getQuota(): Promise<SbxQuotaView> {
+    return this.json('GET', '/v1/quota');
+  }
+
+  /** The deployment's template policy (§8): profiles, registries, quotas, and its digest. */
   getPolicy(): Promise<SbxPolicyView> {
     return this.json('GET', '/v1/policy');
   }
