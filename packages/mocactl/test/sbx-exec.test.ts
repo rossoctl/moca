@@ -30,6 +30,7 @@ const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   stderr: Buffer.from('err\n'),
   exitCode: 0,
   truncated: false,
+  lease: [],
   ...over,
 });
 

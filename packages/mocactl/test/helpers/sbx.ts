@@ -222,6 +222,7 @@ export function localWorkspace(o: { capBytes?: number; without?: string[] } = {}
             stderr,
             exitCode: typeof code === 'number' ? code : -1,
             truncated: cut,
+            lease: [],
           });
         },
       );

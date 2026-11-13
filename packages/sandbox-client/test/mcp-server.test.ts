@@ -23,6 +23,7 @@ const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   stderr: Buffer.alloc(0),
   exitCode: 0,
   truncated: false,
+  lease: [],
   ...over,
 });
 const closers: Array<() => Promise<unknown>> = [];

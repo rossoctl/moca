@@ -10,10 +10,23 @@ export {
   type ExecFailureKind,
   type ExecOptions,
   type ExecResult,
+  type LeaseOpName,
   type SandboxTokenGrant,
   type TokenFn,
   type TokenRequest,
 } from './exec-conn.js';
+export {
+  LeaseControlError,
+  NoticeDedupe,
+  leaseNotice,
+  leaseStatusView,
+  modeName,
+  type LeaseControlErrorCode,
+  type LeaseState,
+  type LeaseStatusView,
+  type SandboxModeName,
+} from './lease.js';
+export type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 export {
   FILE_TOOL_TIMEOUT_S,
   MAX_BYTES,

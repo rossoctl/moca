@@ -7,10 +7,17 @@ import { join } from 'node:path';
 import { Server, ServerCredentials, status, type ServerWritableStream } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  LeaseEvent,
+  LeaseOp,
+  LeaseStatus,
   SandboxExecService,
+  SandboxMode,
   type AbortRequest,
   type ExecEvent,
   type ExecRequest,
+  type LeaseControlRequest,
+  type LeaseControlResponse,
+  type LeaseKeepaliveRequest,
 } from '../src/gen/sandbox/v1/sandbox.js';
 import {
   CLIENT_CHANNEL_OPTIONS,
@@ -22,6 +29,7 @@ import {
   type ExecConnOptions,
   type TokenRequest,
 } from '../src/exec-conn.js';
+import { LeaseControlError } from '../src/lease.js';
 
 type Behaviour = (call: ServerWritableStream<ExecRequest, ExecEvent>, n: number) => void;
 const closers: Array<() => unknown> = [];
@@ -29,9 +37,37 @@ afterEach(async () => {
   for (const c of closers.splice(0).reverse()) await c();
 });
 
-async function fakeRelay(behave: Behaviour, tls?: { cert: Buffer; key: Buffer }) {
+type UnaryAnswer<R> = { code: number; details: string } | R;
+interface LeaseBehaviour {
+  control?: (req: LeaseControlRequest) => UnaryAnswer<LeaseControlResponse>;
+  keepalive?: (req: LeaseKeepaliveRequest) => UnaryAnswer<object>;
+}
+
+type Unary<Req> = { request: Req; metadata: { get(k: string): unknown[] } };
+/** A unary handler that records the call and answers `answer`'s response or status. */
+function unary<Req, Res>(
+  calls: { req: Req; auth: string | undefined }[],
+  answer: ((req: Req) => UnaryAnswer<Res>) | undefined,
+) {
+  return (c: Unary<Req>, cb: (e: object | null, r?: Res) => void) => {
+    calls.push({ req: c.request, auth: c.metadata.get('authorization')[0] as string | undefined });
+    const a = answer ? answer(c.request) : ({} as Res);
+    if (a && typeof a === 'object' && 'code' in a && 'details' in a) {
+      return cb(Object.assign(new Error(a.details as string), a));
+    }
+    cb(null, a as Res);
+  };
+}
+
+async function fakeRelay(
+  behave: Behaviour,
+  tls?: { cert: Buffer; key: Buffer },
+  lease: LeaseBehaviour = {},
+) {
   const seen: { req: ExecRequest; auth: string | undefined }[] = [];
   const aborts: { req: AbortRequest; auth: string | undefined }[] = [];
+  const controls: { req: LeaseControlRequest; auth: string | undefined }[] = [];
+  const keepalives: { req: LeaseKeepaliveRequest; auth: string | undefined }[] = [];
   const cancelled: number[] = [];
   const server = new Server();
   server.addService(SandboxExecService, {
@@ -51,6 +87,8 @@ async function fakeRelay(behave: Behaviour, tls?: { cert: Buffer; key: Buffer })
       aborts.push({ req: c.request, auth: c.metadata.get('authorization')[0] as string });
       cb(null, {});
     },
+    leaseControl: unary(controls, lease.control),
+    leaseKeepalive: unary(keepalives, lease.keepalive),
   });
   const creds = tls
     ? ServerCredentials.createSsl(null, [{ cert_chain: tls.cert, private_key: tls.key }], false)
@@ -59,7 +97,7 @@ async function fakeRelay(behave: Behaviour, tls?: { cert: Buffer; key: Buffer })
     server.bindAsync('127.0.0.1:0', creds, (e, p) => (e ? rej(e) : res(p))),
   );
   closers.push(() => server.forceShutdown());
-  return { addr: `127.0.0.1:${port}`, seen, aborts, cancelled };
+  return { addr: `127.0.0.1:${port}`, seen, aborts, cancelled, controls, keepalives };
 }
 
 /** A TCP proxy in front of a fake relay whose live connections can be cut, as a load balancer does. */
@@ -145,6 +183,7 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
       stderr: Buffer.from('err'),
       exitCode: 3,
       truncated: false,
+      lease: [],
     });
     const { req, auth } = r.seen[0]!;
     expect(auth).toBe('Bearer stale');
@@ -767,5 +806,195 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     });
     await expect(c.exec('x')).rejects.toBe(boom);
     expect(r.seen).toHaveLength(0);
+  });
+});
+
+describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
+  const T = 1_800_000_000_000;
+  const leaseEv = (over: Partial<LeaseEvent>) =>
+    LeaseEvent.fromPartial({ atUnixMs: T, mode: SandboxMode.SANDBOX_MODE_LEASE, ...over });
+  const end = leaseEv({ state: 'end', reason: 'idle', ageMs: 5000 });
+  const start = leaseEv({ state: 'start', atUnixMs: T + 1 });
+
+  it("collects the lease events an Exec's response carried, in order, before its End", async () => {
+    const r = await fakeRelay((call) => {
+      call.write(chunk('out'));
+      call.write({ lease: end } as ExecEvent);
+      call.write({ lease: start } as ExecEvent);
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      call.end();
+    });
+    const res = await conn(r.addr).c.exec('x');
+    expect(res.lease).toEqual([end, start]);
+    expect(res.stdout).toEqual(Buffer.from('out'));
+    expect(res.exitCode).toBe(0);
+  });
+
+  it('keeps the lease events on a timeout result too', async () => {
+    const r = await fakeRelay((call, n) => {
+      call.write({ lease: start } as ExecEvent);
+      execError('timeout:5')(call, n);
+    });
+    const res = await conn(r.addr).c.exec('x');
+    expect(res).toMatchObject({ timedOutS: 5, lease: [start] });
+  });
+
+  it('carries the lease events on a failed Exec: lease_ended( may have run', async () => {
+    const r = await fakeRelay((call, n) => {
+      call.write({ lease: end } as ExecEvent);
+      execError('lease_ended(grace_limit)')(call, n);
+    });
+    const e = await conn(r.addr)
+      .c.exec('x')
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect(e).toMatchObject({ kind: 'machinery', mayHaveRun: true, lease: [end] });
+    const none = await fakeRelay(fail(status.UNKNOWN, 'no live worker'));
+    await expect(conn(none.addr).c.exec('x')).rejects.toMatchObject({ lease: [] });
+  });
+
+  it('classifies stale_mode: and lease_unsupported: as refused before the start', async () => {
+    for (const m of ['stale_mode: x', 'lease_unsupported: this worker has no lease mode']) {
+      const r = await fakeRelay(execError(m));
+      await expect(conn(r.addr).c.exec('x')).rejects.toMatchObject({
+        kind: 'machinery',
+        mayHaveRun: false,
+        message: `sandbox failure: ${m}`,
+      });
+      expect(r.seen).toHaveLength(1);
+    }
+  });
+
+  it('sets Exec.keepalive from the keepalive option, false by default', async () => {
+    const r = await fakeRelay(ok);
+    await conn(r.addr).c.exec('x');
+    await conn(r.addr, { keepalive: true }).c.exec('y');
+    expect(r.seen.map((s) => s.req.exec!.keepalive)).toEqual([false, true]);
+  });
+
+  it("round-trips leaseControl('status') under the sandbox token", async () => {
+    const r = await fakeRelay(ok, undefined, {
+      control: () => ({
+        status: LeaseStatus.fromPartial({
+          mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+          epochKnown: true,
+          state: 'active',
+          ageMs: 1234,
+          idleTimeoutS: 900,
+          pending: end,
+        }),
+      }),
+    });
+    const { c, asks } = conn(r.addr);
+    expect(await c.leaseControl('status')).toEqual({
+      mode: 'lease+processes',
+      epochKnown: true,
+      state: 'active',
+      ageMs: 1234,
+      idleTimeoutS: 900,
+      pending: end,
+    });
+    expect(asks).toEqual([{ force: false, minValidS: 60 }]);
+    expect(r.controls).toEqual([
+      {
+        req: { sandboxId: 'sbx_default', op: LeaseOp.LEASE_OP_STATUS, setModeToken: '' },
+        auth: 'Bearer stale',
+      },
+    ]);
+  });
+
+  it('sends each op, the set-mode token only with set_mode, and reads a bare status as per-exec', async () => {
+    const r = await fakeRelay(ok, undefined, { control: () => ({ status: undefined }) });
+    const { c } = conn(r.addr);
+    const bare = {
+      mode: 'per-exec',
+      epochKnown: false,
+      state: 'none',
+      ageMs: 0,
+      idleTimeoutS: 0,
+    };
+    expect(await c.leaseControl('reset')).toEqual(bare);
+    expect(await c.leaseControl('set_mode', 'mode.jwt')).toEqual(bare);
+    expect(await c.leaseControl('sandbox_deleted', 'ignored')).toEqual(bare);
+    expect(r.controls.map((x) => [x.req.op, x.req.setModeToken])).toEqual([
+      [LeaseOp.LEASE_OP_RESET, ''],
+      [LeaseOp.LEASE_OP_SET_MODE, 'mode.jwt'],
+      [LeaseOp.LEASE_OP_SANDBOX_DELETED, ''],
+    ]);
+    for (const [mode, name] of [
+      [SandboxMode.SANDBOX_MODE_UNSPECIFIED, 'per-exec'],
+      [SandboxMode.SANDBOX_MODE_PER_EXEC, 'per-exec'],
+      [SandboxMode.SANDBOX_MODE_LEASE, 'lease'],
+    ] as const) {
+      const m = await fakeRelay(ok, undefined, {
+        control: () => ({ status: LeaseStatus.fromPartial({ mode, state: 'expiring' }) }),
+      });
+      expect(await conn(m.addr).c.leaseControl('status')).toMatchObject({
+        mode: name,
+        state: 'expiring',
+      });
+    }
+  });
+
+  it('maps each §8.3 status to a LeaseControlError code; failed carries the wire string', async () => {
+    const table = [
+      [status.UNAUTHENTICATED, 'unauthenticated'],
+      [status.PERMISSION_DENIED, 'denied'],
+      [status.INVALID_ARGUMENT, 'invalid'],
+      [status.RESOURCE_EXHAUSTED, 'busy'],
+      [status.DEADLINE_EXCEEDED, 'timeout'],
+      [status.UNAVAILABLE, 'unavailable'],
+      [status.CANCELLED, 'cancelled'],
+      [status.FAILED_PRECONDITION, 'failed'],
+    ] as const;
+    for (const [code, name] of table) {
+      const details = code === status.FAILED_PRECONDITION ? 'stale_mode: epoch 3 < 4' : 'nope';
+      const r = await fakeRelay(ok, undefined, { control: () => ({ code, details }) });
+      const e = await conn(r.addr)
+        .c.leaseControl('status')
+        .catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(LeaseControlError);
+      expect(e).toMatchObject({ code: name, grpcCode: code, message: details });
+      expect((e as LeaseControlError).wire).toBe(
+        code === status.FAILED_PRECONDITION ? details : undefined,
+      );
+      expect(r.controls).toHaveLength(1); // never retried
+    }
+    // Any other status is a failure with no wire string.
+    const r = await fakeRelay(ok, undefined, {
+      control: () => ({ code: status.INTERNAL, details: 'boom' }),
+    });
+    const e = await conn(r.addr)
+      .c.leaseControl('reset')
+      .catch((x: unknown) => x);
+    expect(e).toMatchObject({ code: 'failed', grpcCode: status.INTERNAL, wire: undefined });
+  });
+
+  it('sends leaseKeepalive under the sandbox token, and maps its errors', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr);
+    await expect(c.leaseKeepalive()).resolves.toBeUndefined();
+    expect(r.keepalives).toEqual([{ req: { sandboxId: 'sbx_default' }, auth: 'Bearer stale' }]);
+    const denied = await fakeRelay(ok, undefined, {
+      keepalive: () => ({ code: status.PERMISSION_DENIED, details: 'not permitted' }),
+    });
+    await expect(conn(denied.addr).c.leaseKeepalive()).rejects.toMatchObject({
+      name: 'LeaseControlError',
+      code: 'denied',
+    });
+  });
+
+  it('propagates a token source failure from a lease call unchanged, sending nothing', async () => {
+    const r = await fakeRelay(ok);
+    const boom = new Error('sandbox sbx_x was deleted');
+    const { c } = conn(r.addr, {
+      token: async () => {
+        throw boom;
+      },
+    });
+    await expect(c.leaseControl('status')).rejects.toBe(boom);
+    await expect(c.leaseKeepalive()).rejects.toBe(boom);
+    expect(r.controls).toHaveLength(0);
+    expect(r.keepalives).toHaveLength(0);
   });
 });

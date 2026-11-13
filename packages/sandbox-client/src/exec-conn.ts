@@ -3,10 +3,16 @@ import * as tls from 'node:tls';
 import { credentials, Metadata, status, type ServiceError } from '@grpc/grpc-js';
 import {
   Exec as ExecMessage,
+  LeaseControlRequest,
+  LeaseKeepaliveRequest,
+  LeaseOp,
   SandboxExecClient,
   Stream,
   type ExecEvent,
+  type LeaseControlResponse,
+  type LeaseEvent,
 } from './gen/sandbox/v1/sandbox.js';
+import { LeaseControlError, leaseStatusView, type LeaseStatusView } from './lease.js';
 
 /**
  * The sandbox/v1 exec client for SBX0's clients (spec §6.5, §7): TLS to the exec Route, keepalive
@@ -30,6 +36,8 @@ export interface ExecResult {
   timedOutS?: number;
   /** Set when the requested `timeoutS` was cut to fit the sandbox token's life (spec §6.5). */
   capped?: boolean;
+  /** Every lease event the Exec's response carried, in order (spec §5); empty without a lease. */
+  lease: LeaseEvent[];
 }
 
 /**
@@ -55,6 +63,13 @@ export type ExecFailureKind = 'machinery' | 'busy' | 'template_busy' | 'token_ex
  * workspace key, no live worker), leaves it false.
  */
 export class ExecMachineryError extends Error {
+  /**
+   * The lease events the failed Exec's response carried before it failed, in order: the worker
+   * sends them before an error too (`lease_ended(<reason>)`, `stale_mode`), so a client learns of a
+   * lease end even when that Exec failed (spec §5).
+   */
+  lease: LeaseEvent[] = [];
+
   constructor(
     message: string,
     readonly grpcCode?: number,
@@ -122,6 +137,11 @@ export interface ExecConnOptions {
   sandboxExpiresAt?: number;
   /** The clock, in epoch milliseconds (tests). */
   now?: () => number;
+  /**
+   * Sets `Exec.keepalive` (default false): the client's opt-in to the lease's keepalive-loss rule
+   * (spec §4), for a client that sends `leaseKeepalive()` every 30 s.
+   */
+  keepalive?: boolean;
 }
 
 export interface ExecOptions {
@@ -156,6 +176,21 @@ const FALLBACK_TIMEOUT_S = 120;
 const MIN_LIFETIME_S = 2 * TOKEN_MARGIN_S + 1;
 /** The client-side backstop deadline is `timeout_s` plus this (spec §6.5: never wait forever). */
 const BACKSTOP_MARGIN_S = 90;
+/**
+ * The client-side backstops of the lease calls: the relay's own timeouts (spec §8.3: 15 s for
+ * status, 31 min for reset, set_mode and sandbox_deleted) plus a margin, so the relay's answer
+ * comes first. A keepalive is answered at once.
+ */
+const LEASE_STATUS_BACKSTOP_MS = 30_000;
+const LEASE_MUTATE_BACKSTOP_MS = 32 * 60_000;
+const LEASE_KEEPALIVE_BACKSTOP_MS = 15_000;
+const LEASE_OPS = {
+  status: LeaseOp.LEASE_OP_STATUS,
+  reset: LeaseOp.LEASE_OP_RESET,
+  set_mode: LeaseOp.LEASE_OP_SET_MODE,
+  sandbox_deleted: LeaseOp.LEASE_OP_SANDBOX_DELETED,
+} as const;
+export type LeaseOpName = keyof typeof LEASE_OPS;
 
 /** The worker's ExecError for a command that ran out of `timeout_s`. */
 const TIMEOUT_MESSAGE = /^timeout:(\d+)$/;
@@ -169,7 +204,7 @@ const TEMPLATE_BUSY = /^(?:busy: queue full|memory-budget:|max-runs:)/;
  * that closed before End, a wait failure. Those may have run part of the command.
  */
 const NOT_STARTED =
-  /^(?:invalid-workspace-key:|empty-workspace-key:|spawn-failure:|req_id collision:|workspace \/|start bash:|stdin pipe:|stdout pipe:|stderr pipe:|vmpool: closed|vmpool: popped VM is bound|remote-worker is unix-only)/;
+  /^(?:invalid-workspace-key:|empty-workspace-key:|spawn-failure:|req_id collision:|workspace \/|start bash:|stdin pipe:|stdout pipe:|stderr pipe:|vmpool: closed|vmpool: popped VM is bound|remote-worker is unix-only|stale_mode:|lease_unsupported:)/;
 
 /** Random, unique per call, and below 2^53: the relay decodes the uint64 as a JavaScript number. */
 export function newReqId(): number {
@@ -258,6 +293,50 @@ export class SandboxExecConn {
   close = (): void => {
     this.client.close();
   };
+
+  /**
+   * One lease operation on this sandbox's lease (spec §8.3), under the sandbox token as an Exec.
+   * `setModeToken` is sent with `set_mode` only. Never retried: a failure is a LeaseControlError
+   * (a token source failure propagates unchanged).
+   */
+  leaseControl = async (op: LeaseOpName, setModeToken?: string): Promise<LeaseStatusView> => {
+    const md = await this.bearer();
+    const req = LeaseControlRequest.fromPartial({
+      sandboxId: this.o.sandboxId,
+      op: LEASE_OPS[op],
+      setModeToken: op === 'set_mode' ? (setModeToken ?? '') : '',
+    });
+    const backstopMs = op === 'status' ? LEASE_STATUS_BACKSTOP_MS : LEASE_MUTATE_BACKSTOP_MS;
+    const res = await new Promise<LeaseControlResponse>((resolve, reject) =>
+      this.client.leaseControl(req, md, { deadline: Date.now() + backstopMs }, (e, r) =>
+        e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(r),
+      ),
+    );
+    return leaseStatusView(res.status);
+  };
+
+  /** Records harness liveness for a live lease (spec §4, §8.3); the relay answers OK at once. */
+  leaseKeepalive = async (): Promise<void> => {
+    const md = await this.bearer();
+    const req = LeaseKeepaliveRequest.fromPartial({ sandboxId: this.o.sandboxId });
+    await new Promise<void>((resolve, reject) =>
+      this.client.leaseKeepalive(
+        req,
+        md,
+        { deadline: Date.now() + LEASE_KEEPALIVE_BACKSTOP_MS },
+        (e) =>
+          e ? reject(LeaseControlError.fromStatus(e.code, e.details || e.message)) : resolve(),
+      ),
+    );
+  };
+
+  /** The sandbox token as call metadata, from the token source as an Exec's first ask. */
+  private async bearer(): Promise<Metadata> {
+    const { token } = await this.o.token({ force: false, minValidS: TOKEN_MARGIN_S });
+    const md = new Metadata();
+    md.set('authorization', `Bearer ${token}`);
+    return md;
+  }
 
   private learn(g: SandboxTokenGrant): void {
     if (g.lifetimeS <= 0) return;
@@ -372,6 +451,7 @@ export class SandboxExecConn {
           timeoutS,
           streaming: true,
           workspaceKey: this.o.workspaceKey,
+          keepalive: this.o.keepalive ?? false,
         }),
       },
       md,
@@ -383,17 +463,28 @@ export class SandboxExecConn {
     return new Promise<ExecResult>((resolve, reject) => {
       const out: Buffer[] = [];
       const err: Buffer[] = [];
+      const lease: LeaseEvent[] = [];
       let started = false;
       /** A chunk arrived: the command was running (final review M2). */
       let output = false;
       let aborted = false;
       let end: { exitCode: number; truncated: boolean } | undefined;
       let execError: string | undefined;
-      const result = (r: { exitCode: number; truncated: boolean; timedOutS?: number }) => ({
+      const result = (r: {
+        exitCode: number;
+        truncated: boolean;
+        timedOutS?: number;
+      }): ExecResult => ({
         stdout: Buffer.concat(out),
         stderr: Buffer.concat(err),
         ...r,
+        lease,
       });
+      /** Rejects with `e`, carrying the lease events that arrived before the failure. */
+      const fail = (e: Error) => {
+        if (e instanceof ExecMachineryError) e.lease = lease;
+        reject(e);
+      };
       const onAbort = () => {
         aborted = true;
         // The relay also aborts at the worker when it sees the cancel; this says so explicitly.
@@ -439,6 +530,8 @@ export class SandboxExecConn {
           end = { exitCode: ev.end.exitCode, truncated: ev.end.truncated };
         } else if (ev.error) {
           execError = ev.error.message ?? '';
+        } else if (ev.lease) {
+          lease.push(ev.lease);
         }
       });
       call.on('error', (e: ServiceError) => {
@@ -449,20 +542,20 @@ export class SandboxExecConn {
         const details = e.details || e.message;
         const outcome = outcomeOf(execError ?? details);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return reject(workerFailure(execError, e.code, true));
-        if (!started && e.code === status.UNAUTHENTICATED) return reject(new NotStarted(details));
+        if (execError !== undefined) return fail(workerFailure(execError, e.code, true));
+        if (!started && e.code === status.UNAUTHENTICATED) return fail(new NotStarted(details));
         if (!started && e.code === status.PERMISSION_DENIED) {
-          return reject(new ExecRefusedError(details, e.code));
+          return fail(new ExecRefusedError(details, e.code));
         }
         // Only the relay's "sandbox busy" is busy: grpc-js message-size limits are RESOURCE_EXHAUSTED too.
         if (e.code === status.RESOURCE_EXHAUSTED && details.startsWith('sandbox busy')) {
-          return reject(new ExecMachineryError(details, e.code, 'busy'));
+          return fail(new ExecMachineryError(details, e.code, 'busy'));
         }
         if (
           e.code === status.DEADLINE_EXCEEDED &&
           details.startsWith('sandbox token expired during the Exec')
         ) {
-          return reject(
+          return fail(
             new ExecMachineryError(
               `${details}: the command outlived its sandbox token and was cancelled`,
               e.code,
@@ -472,7 +565,7 @@ export class SandboxExecConn {
         }
         if (e.code === status.DEADLINE_EXCEEDED) {
           // Not the relay's token expiry (matched by its text above): this client's own deadline.
-          return reject(
+          return fail(
             new ExecMachineryError(
               `sandbox failure: no answer within ${backstopS}s, the client-side backstop deadline ` +
                 `(timeout_s ${timeoutS} + ${backstopS - timeoutS}s): ${details}`,
@@ -482,8 +575,8 @@ export class SandboxExecConn {
             ),
           );
         }
-        if (TEMPLATE_BUSY.test(details)) return reject(workerFailure(details, e.code));
-        reject(
+        if (TEMPLATE_BUSY.test(details)) return fail(workerFailure(details, e.code));
+        fail(
           new ExecMachineryError(
             `sandbox failure: ${status[e.code] ?? e.code}: ${details}`,
             e.code,
@@ -498,8 +591,8 @@ export class SandboxExecConn {
         if (end) return resolve(result(end));
         const outcome = outcomeOf(execError);
         if (outcome) return resolve(outcome);
-        if (execError !== undefined) return reject(workerFailure(execError, undefined, true));
-        reject(
+        if (execError !== undefined) return fail(workerFailure(execError, undefined, true));
+        fail(
           new ExecMachineryError(
             'sandbox failure: the exec stream ended without an End event',
             undefined,

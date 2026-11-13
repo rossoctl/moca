@@ -30,6 +30,7 @@ const res = (o: Partial<ExecResult> = {}): ExecResult => ({
   stderr: Buffer.alloc(0),
   exitCode: 0,
   truncated: false,
+  lease: [],
   ...o,
 });
 
