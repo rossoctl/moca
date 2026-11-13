@@ -92,6 +92,8 @@ export class MembersStore {
   private fallbackWarnedAtS = Number.NEGATIVE_INFINITY;
   /** The cached version's inode, size and mtime: any one moving means another file. */
   private cacheKey = '';
+  /** Bumped by each write(), so a read that started before it never stores its older version. */
+  private writes = 0;
   readonly bootstrap: Bootstrap;
 
   constructor(opts: { dir: string; provenance: ProvenanceStore; bootstrap: Bootstrap }) {
@@ -110,32 +112,42 @@ export class MembersStore {
    * The store as on disk, through the cache (re-read when the file's inode, size or mtime moved). The
    * stat and the bytes come from ONE open file: the file is replaced by rename, so the handle always
    * reads the version whose stat it reported, never a newer one swapped in between a check and a read.
+   *
+   * It returns the doc for the version THIS call opened, never the shared cache after an await: a
+   * reader outside the serial lock (every request's `membershipNow`) may finish late, and `change()`
+   * must not clone whatever that reader left in the cache. A reader that started before the latest
+   * `write()` doesn't store its older version in the cache either.
    */
   async doc(): Promise<MembersDoc> {
+    const gen = this.writes;
     let fh;
     try {
       fh = await openFile(this.path, 'r');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        this.cache = { members: {} };
-        this.cacheKey = '';
-        return this.cache;
+        const empty: MembersDoc = { members: {} };
+        if (gen === this.writes) {
+          this.cache = empty;
+          this.cacheKey = '';
+        }
+        return empty;
       }
       throw err;
     }
     try {
       const key = statKey(await fh.stat());
-      if (key !== this.cacheKey) {
-        const parsed = JSON.parse(await fh.readFile('utf8')) as MembersDoc;
-        if (!parsed || typeof parsed.members !== 'object')
-          throw new Error('members.json is invalid');
+      // The cache and its key are set together, synchronously, so a matching key means this cache.
+      if (key === this.cacheKey) return this.cache;
+      const parsed = JSON.parse(await fh.readFile('utf8')) as MembersDoc;
+      if (!parsed || typeof parsed.members !== 'object') throw new Error('members.json is invalid');
+      if (gen === this.writes) {
         this.cache = parsed;
         this.cacheKey = key;
       }
+      return parsed;
     } finally {
       await fh.close();
     }
-    return this.cache;
   }
 
   private async write(doc: MembersDoc): Promise<void> {
@@ -157,6 +169,7 @@ export class MembersStore {
       await unlink(tmp).catch(() => undefined);
       throw err;
     }
+    this.writes += 1;
     this.cache = doc;
     this.cacheKey = key;
   }
