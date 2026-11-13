@@ -181,7 +181,9 @@ build_one() { # build_one JOB_JSON
   if ((rc != 0)); then
     FAILED=$((FAILED + 1))
     local last
-    last="$(grep -v '^[[:space:]]*$' "$WORK/$handle.log" | tail -n 1 | redact | cut -c1-500)"
+    # A build that died with no output (killed, out of memory) leaves no non-blank line: grep then
+    # exits 1, which pipefail and errexit would turn into the end of the whole poll.
+    last="$( { grep -v '^[[:space:]]*$' "$WORK/$handle.log" || true; } | tail -n 1 | redact | cut -c1-500)"
     # A fixed code a client can branch on, from template-build.sh's own wording; then the redacted line.
     local code=build_failed
     case "$last" in

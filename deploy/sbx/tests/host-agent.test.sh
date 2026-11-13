@@ -215,4 +215,20 @@ jq -e '.event == "failed" and .step == "probe" and (.message | startswith("probe
   fail 'a probe failure is not reported with step probe'
 pass 'reports a probe failure with step probe, beside its code'
 
+# 11. A build that dies with no output (killed, out of memory) is still reported failed, and the
+#     poll goes on to its summary (an empty log once ended the whole run under errexit).
+job ''
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+printf '\n\n'
+exit 137
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a build with an empty log failed the poll'
+jq -e '.event == "failed" and .step == "build" and (.message | startswith("build_failed: template-build.sh exit 137"))' "$R" >/dev/null ||
+  fail 'a build with an empty log is not reported failed'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"errors":0' "$TMP/out" || fail 'no summary after an empty build log'
+pass 'a build that dies with no output is reported failed, and the poll ends with its summary'
+
 echo 'all host-agent.sh tests passed'
