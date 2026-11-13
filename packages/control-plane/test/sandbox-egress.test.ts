@@ -15,6 +15,7 @@ import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
 import {
   EGRESS_TOTAL_BYTES,
+  EGRESS_DROP_REPORT_MAX,
   EGRESS_DROP_WINDOW_S,
   EGRESS_GRACE_S,
   EGRESS_LOG_CAP,
@@ -293,6 +294,15 @@ describe('POST /v1/hosts/{host}/egress', () => {
     }
     expect(((await read(d, far.id)).body as Body).summary.complete).toBe(true);
     expect(((await read(d, old.id)).body as Body).summary.complete).toBe(true);
+    // A report's count is taken up to EGRESS_DROP_REPORT_MAX: a malformed one cannot write a huge
+    // count into every sandbox, nor overflow the counter.
+    const huge = { ...drop, dropped: Number.MAX_SAFE_INTEGER };
+    expect(await post(d, 'host-1', [huge, huge])).toMatchObject({
+      dropped: 2 * EGRESS_DROP_REPORT_MAX,
+    });
+    expect(((await read(d, a.id)).body as Body).summary.droppedBy.proxy).toBe(
+      7 + 2 * EGRESS_DROP_REPORT_MAX,
+    );
   });
 
   it(`caps a log at ${EGRESS_LOG_CAP} events; the overflow is counted as dropped`, async () => {

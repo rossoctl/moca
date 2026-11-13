@@ -2587,7 +2587,7 @@ paths:
         every other event is refused and counted. One naming such a sandbox that is not exactly a
         proxy Event (an unknown field, a wrong type) is not stored, and counted as dropped there.
         An `audit_dropped` event (no VM) is charged to every sandbox on this host's workers live
-        within 60 s before it. A log holds at most 10,000 events and 4 MiB of lines, and all logs
+        within 60 s before it, its count taken up to 1,000,000. A log holds at most 10,000 events and 4 MiB of lines, and all logs
         together at most 64 MiB of lines; the rest count as dropped (`cap`, `budget`).
         Idempotent by (host, cursor): a post repeating the host's last cursor appends nothing and
         answers as the first.

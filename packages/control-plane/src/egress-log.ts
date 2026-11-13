@@ -83,6 +83,13 @@ export const EGRESS_GRACE_S = 600;
  * incomplete, never the reverse.
  */
 export const EGRESS_DROP_WINDOW_S = 60;
+/**
+ * One `audit_dropped` report's count is taken up to this many (a larger one counts as this many):
+ * the charge goes to every sandbox in the window, so one malformed report must not write a huge
+ * count into all of them, nor overflow a counter (Redis HINCRBY) and fail the whole post. A log so
+ * charged is incomplete either way.
+ */
+export const EGRESS_DROP_REPORT_MAX = 1_000_000;
 const MAX_STRING = 4096;
 const MAX_LINE = 8192;
 

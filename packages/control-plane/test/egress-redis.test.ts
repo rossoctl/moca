@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  EGRESS_DROP_REPORT_MAX,
   EGRESS_LOG_BYTES,
   EGRESS_LOG_CAP,
+  EGRESS_POST_MAX,
   EGRESS_TOTAL_BYTES,
   MemoryEgressStore,
   RedisEgressStore,
@@ -236,6 +238,22 @@ describe.each([
       expect(Number(await client.get(`${p}total`))).toBe(5 * L);
       const keys = await client.keys(`${p}*`);
       if (keys.length) await client.del(keys);
+    });
+
+    it('takes the largest charge a post can carry without overflowing a counter', async () => {
+      const { store, prefix, done } = isolated();
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const charge = EGRESS_POST_MAX * EGRESS_DROP_REPORT_MAX;
+      for (const c of ['c1', 'c2'])
+        await store.append(
+          'host-1',
+          c,
+          [{ ...group('sbx-a', 0, exp), proxyDropped: charge }],
+          0,
+          0,
+        );
+      expect(await client.hGet(`${prefix}sbx-a:meta`, 'proxy')).toBe(String(2 * charge));
+      await done();
     });
 
     it("keeps the total as a running sum; a lost total is summed again from the logs' sizes", async () => {

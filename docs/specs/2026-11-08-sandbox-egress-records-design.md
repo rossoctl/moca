@@ -111,7 +111,9 @@ provenance.
   digest. Record kinds are unchanged.
 - **Drops:** a proxy `audit_dropped` report (no VM) is charged to every sandbox on that host's workers
   that existed within 60 s before it: a sandbox may be marked incomplete when it lost nothing, never
-  complete when it did. `complete` means `dropped == 0`.
+  complete when it did. `complete` means `dropped == 0`. One report's count is taken up to
+  1,000,000 (a larger one counts as that), so a malformed report cannot write a huge count into
+  every sandbox or overflow a counter.
 - **Export:** `GET /v1/sandboxes/{id}/egress?format=ndjson` returns the whole log
   (`application/x-ndjson`), streamed a store page at a time, so the control plane never holds a
   whole log for it; a store failure mid-stream cuts the body short. Its sha256 equals the end record's, so a grader checks a copy offline:
