@@ -1217,7 +1217,8 @@ paths:
                         plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
                         caller may see (`400 unknown_template` otherwise), recorded as the session's
                         sandboxBuildId; and, with host agents, activation on first use
-                        (`409 template_not_active`)
+                        (`409 template_not_active`), which only a subject enrolled for sandboxes
+                        starts (`403 not_enrolled` otherwise, combined control plane spec §3.4)
                     activate:
                       type: boolean
                       default: true
@@ -1248,10 +1249,19 @@ paths:
                     description: false when the catalog could not be read and the id was accepted unchecked
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: |
+            `not_enrolled` (combined profile): the session's template is not active and nobody is
+            starting it, and the caller is not enrolled for sandboxes, so it cannot start it. With
+            `sandbox.activate: false` the answer is 409 instead, as for anyone.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: |
             `template_not_active` (Retry-After): the session's template is not active yet, its
-            activation started unless `sandbox.activate` is false; `no_active_slot` (Retry-After),
+            activation started (by an enrolled caller) unless `sandbox.activate` is false, or
+            already started by another subject; `no_active_slot` (Retry-After),
             `template_unavailable`: as activate (template lifecycle spec §6.4)
           content:
             application/json:

@@ -67,6 +67,7 @@ import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import {
   isEnrolled,
+  isEnrolledForSandbox,
   notEnrolled,
   type SandboxConfig,
   type SandboxTemplate,
@@ -957,12 +958,13 @@ export const HANDLERS: Record<string, Handler> = {
     }
     // With a template store, a session's template resolves through the catalog as a sandbox's does
     // (combined control plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
-    // caller may see, and activation on first use (§6.4) where host agents run the workers.
+    // caller may see. Its activation on first use (§6.4) comes last, below, once nothing else can
+    // refuse the create.
     let resolved: { id: string; buildId: string } | undefined;
+    let forUse: Awaited<ReturnType<typeof resolveForUse>> | undefined;
     if (requestedTemplate !== undefined && deps.templates && deps.provenance) {
-      const t = await resolveForUse(deps, p, requestedTemplate);
-      await requireActive(deps, p, t, activateField !== false);
-      resolved = { id: t.id, buildId: t.buildId };
+      forUse = await resolveForUse(deps, p, requestedTemplate);
+      resolved = { id: forUse.id, buildId: forUse.buildId };
     }
     const templates = deps.config.sessionTemplates;
     if (requestedTemplate !== undefined && !resolved && !templates) {
@@ -1007,6 +1009,19 @@ export const HANDLERS: Record<string, Handler> = {
     const choice = requestedModel
       ? await chooseFor({ owner: p.sub, credentialName }, requestedModel, deps)
       : undefined;
+
+    // Activation on first use, after every other check, so a create refused for another reason
+    // holds no lease. Only a subject enrolled for sandboxes takes one: on `combined` any login may
+    // create a session, but activation is enrolled-only, as on the activate route (spec §3.2).
+    if (forUse) {
+      await requireActive(
+        deps,
+        p,
+        forUse,
+        activateField !== false,
+        isEnrolledForSandbox(p.sub, p.roles ?? [], deps.config),
+      );
+    }
 
     const sessionId = deps.newId();
     const rec: SessionRecord = {

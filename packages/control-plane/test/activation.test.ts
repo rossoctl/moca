@@ -635,6 +635,59 @@ describe('activation on first use (§6.4)', () => {
     });
   });
 
+  it('on combined, a session create by a subject not enrolled never takes a lease (spec §3.2, §3.4)', async () => {
+    const d = await setup();
+    d.config.routeProfile = 'combined';
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    const outsider = { ...alice, sub: 'github:5555', tenant: 'github:5555' } as typeof alice;
+    await seedCredential(d, outsider.sub);
+    const session = (principal: typeof alice, sandbox: Record<string, unknown>) =>
+      HANDLERS.createSession!(ctx({ principal, body: { sandbox } }), d);
+    // Nobody is starting it: refused, as the activate route would refuse this subject; no lease.
+    expect(await refusal(() => session(outsider, { template: 't1' }))).toMatchObject({
+      code: 'not_enrolled',
+      readiness: 'inactive',
+    });
+    // activate: false answers as for anyone: 409, nothing started.
+    expect(
+      await refusal(() => session(outsider, { template: 't1', activate: false })),
+    ).toMatchObject({ code: 'template_not_active', readiness: 'inactive' });
+    expect(await leases(d, 't1')).toHaveLength(0);
+    // An enrolled subject's lease starts it: the outsider waits on it, still taking none.
+    await activate(d, 't1', alice);
+    expect(await refusal(() => session(outsider, { template: 't1' }))).toMatchObject({
+      code: 'template_not_active',
+      readiness: 'activating',
+      retryAfterS: 30,
+    });
+    expect((await leases(d, 't1')).map((l) => l.subject)).toEqual([alice.sub]);
+    // Once active, its session is created.
+    attachedNow = ['sbx_t1'];
+    expect((await session(outsider, { template: 't1' })).status).toBe(201);
+    expect((await leases(d, 't1')).map((l) => l.subject)).toEqual([alice.sub]);
+  });
+
+  it('takes no lease for a session create that another check refuses', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    const r = await refusal(() =>
+      HANDLERS.createSession!(
+        ctx({
+          principal: alice,
+          body: { sandbox: { template: 't1' }, configRef: `sha256:${'e'.repeat(64)}` },
+        }),
+        d,
+      ),
+    );
+    expect(r.code).toBe('config_bundle_not_found');
+    expect(await leases(d, 't1')).toHaveLength(0);
+  });
+
   it('with activate: false, answers 409 and starts nothing', async () => {
     const d = await setup();
     attachedNow = [];

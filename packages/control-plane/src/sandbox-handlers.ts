@@ -1035,12 +1035,18 @@ export const FIRST_USE_RETRY_S = 30;
  * host down), readiness is the worker's presence alone: an attached worker serves, and an absent one is refused rather
  * than left to wait at the relay. A build imported from SH_SANDBOX_TEMPLATES (no snapshot, so no
  * host ever holds it) is never gated: the deployment runs its worker.
+ *
+ * `mayActivate` false (a session's create by a subject not enrolled for sandboxes, combined spec
+ * §3.4) never takes a lease: activation is enrolled-only, as on the activate route. Such a caller
+ * waits (409) on a build another subject's lease is starting, and is refused (403 not_enrolled) one
+ * nobody is starting, which only an enrolled subject can.
  */
 export async function requireActive(
   deps: CpDeps,
   p: TokenClaims,
   t: { doc: TemplateDoc; build: TemplateBuild },
   activate: boolean,
+  mayActivate = true,
 ): Promise<void> {
   if (hostViewsOf(deps).length === 0 && !deps.config.templateHosts?.length) return;
   // A build imported from SH_SANDBOX_TEMPLATES is the deployment's to run, never a host's: no gate,
@@ -1054,8 +1060,18 @@ export async function requireActive(
   // A caller that already holds a live lease on the build (a retry of its own first use, say) is
   // only told to wait: no renewal and no new `activate` record on every retry.
   const leased = liveLeases(t.build, facts.nowS).some((l) => l.subject === p.sub);
+  if (activate && !mayActivate && !leased && readiness !== 'activating') {
+    throw new CpError(
+      'not_enrolled',
+      `template '${t.doc.id}' is ${readiness}, and this account (${p.sub}) is not enrolled in the ` +
+        'sandbox service, so it cannot activate it: an enrolled user must activate it first',
+      undefined,
+      { readiness },
+    );
+  }
   if (
     activate &&
+    mayActivate &&
     !leased &&
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {

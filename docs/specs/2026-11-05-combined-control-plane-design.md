@@ -67,8 +67,8 @@ branch on the profile get one rule each:
 
 **Login stays open as on `harness`** (any GitHub account; test users if configured), and
 **enrollment moves from the login to the routes:** on `combined`, every sandbox route and every
-template write (create, build, cancel, activate, deactivate, policy PUT) checks it, and a test user
-is refused there (`not_enrolled`). Sessions, models and bundles stay open to any logged-in subject,
+template write (create, build, cancel, activate, deactivate, policy PUT) checks it, and so does a
+session's activation on first use (§3.4); a test user is refused there (`not_enrolled`). Sessions, models and bundles stay open to any logged-in subject,
 as on `harness`, and so do the template, policy and quota reads (on `sandbox` they stay
 enrolled-only). In the code: `isEnrolled` is the login gate (open on `combined`),
 `isEnrolledForSandbox` the route gate (`requireEnrolledPrincipal`), and `requireReader` the reads.
@@ -94,6 +94,10 @@ the `sandbox` profile.
 - **First use (lifecycle §6.4) for sessions:** the same `requireActive` rule. On a deployment with
   host agents, a session on a build that is not active takes the caller's lease and answers
   `409 template_not_active` with `Retry-After`; `sandbox.activate: false` starts nothing.
+  Activation stays enrolled-only (§3.2): a caller not enrolled for sandboxes takes no lease. It
+  waits (409) on a build another subject's lease is starting, and is refused (`403 not_enrolled`)
+  on one nobody is starting. The activation is the create's last check, after the `configRef`,
+  credential and model checks, so a create refused for another reason holds no lease.
   `mocactl`'s `SessionManager.create` retries it for up to 10 minutes, as `sbx create` does, saying
   why in headless runs.
 - **Turns by build:** the session records `sandboxBuildId`. `microvm-worker` adds a build label,
