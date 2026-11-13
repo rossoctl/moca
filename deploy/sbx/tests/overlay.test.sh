@@ -123,12 +123,17 @@ for k in SH_CREDENTIAL_STORE SH_CREDENTIAL_NAMESPACE SH_SANDBOX_NAMESPACE SH_SAN
 done
 for k in SH_ALLOWED_SUBJECTS SH_SANDBOX_TEMPLATES SH_SANDBOX_EXEC_ENDPOINT SH_SANDBOX_EXEC_CA \
   SH_SANDBOX_TOKEN_ISSUER SH_SANDBOX_LIFETIME_SECONDS SH_SANDBOX_TOKEN_TTL_SECONDS SH_SANDBOX_RETENTION_SECONDS \
-  SH_SANDBOX_MAX_PER_SUBJECT SH_SANDBOX_MAX_TOTAL; do
+  SH_SANDBOX_MAX_PER_SUBJECT SH_SANDBOX_MAX_TOTAL SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
   [[ "$(cp_env "$k" | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)"')" == "sbx-settings/$k" ]] ||
     fail "the control plane does not read $k from sbx-settings"
 done
 [[ "$(cp_env SH_SANDBOX_EXEC_CA | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
   fail 'SH_SANDBOX_EXEC_CA must be optional (absent when the exec certificate is issued)'
+# The lease policy keys are optional: absent, the control plane's defaults apply (per-exec, 1800 s).
+for k in SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
+  [[ "$(cp_env "$k" | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
+    fail "$k must be optional (the control plane defaults it)"
+done
 [[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]}]' ]] ||
   fail "the control plane mounts more or less than its signing key and the janitor token: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'

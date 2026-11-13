@@ -24,6 +24,14 @@
 #   SBX_RETENTION_DAYS      optional; 1-90, default 14: how long a terminated sandbox stays listed
 #   SBX_MAX_PER_SUBJECT, SBX_MAX_TOTAL   optional; live-sandbox quotas, default 3 and 40
 #   SBX_MAX_INFLIGHT        optional; 1-8, default 2: Execs one sandbox may have in flight
+#   SBX_MODES_ALLOWED       optional; default per-exec: the sandbox modes a user may pick, a comma list
+#                           of per-exec, lease and lease+processes (lease-mode spec §8.1). Lease mode
+#                           stays off (per-exec) until the live smoke and the security review's lease
+#                           section (README)
+#   SBX_IDLE_CEILING_S      optional; 300-999999, default 1800: the longest lease idle timeout an owner
+#                           may set, in seconds. Also every worker bundle's SH_LEASE_IDLE_CEILING_S, so
+#                           the control plane and the workers clamp alike; at least 300, the worker's
+#                           default idle timeout, which it refuses to start above its ceiling
 #   SBX_EGRESS_CREDENTIALS  optional; unset, 0 or 1 (SBX0.2b, spec §4.3). 1 turns on user-scoped egress
 #                           credentials: the control plane's file store (a PVC) and credential routes,
 #                           a KEK and one bearer per KVM host in the Secret sbx-egress, and an egress
@@ -90,6 +98,8 @@ SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
 COUNT6_RE='^[1-9][0-9]{0,5}$'
 COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+MODE_RE='(per-exec|lease|lease\+processes)'
+MODES_RE="^$MODE_RE(,$MODE_RE)*\$"
 
 validate() {
   [[ -z "${SBX_CLIENTS:-}" ]] ||
@@ -129,6 +139,7 @@ validate() {
 
   : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
+  : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}"
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
   [[ "$SBX_TOKEN_TTL_MINUTES" =~ ^([5-9]|[1-5][0-9]|60)$ ]] || die 'SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
   [[ "$SBX_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]] || die 'SBX_RETENTION_DAYS must be a whole number of days, 1-90'
@@ -148,6 +159,13 @@ validate() {
   [[ -z "${SBX_API_CA_FILE:-}" ]] || { [[ -f "$SBX_API_CA_FILE" && -r "$SBX_API_CA_FILE" ]] && grep -q -- '-----BEGIN CERTIFICATE-----' "$SBX_API_CA_FILE"; } ||
     die 'SBX_API_CA_FILE must name a readable PEM certificate file (the CA the janitor trusts for the API Route)'
   [[ "$SBX_MAX_INFLIGHT" =~ ^[1-8]$ ]] || die 'SBX_MAX_INFLIGHT must be 1-8'
+  # The control plane's modesAllowedFromEnv names, with no spaces; it refuses to boot on any other.
+  [[ "$SBX_MODES_ALLOWED" =~ $MODES_RE ]] ||
+    die 'SBX_MODES_ALLOWED must be a comma list of per-exec, lease and lease+processes, no spaces'
+  # The control plane's floor is 30 s, but the same value is the workers' SH_LEASE_IDLE_CEILING_S, and
+  # a worker refuses to start with a ceiling below its default idle timeout, 300 s.
+  [[ "$SBX_IDLE_CEILING_S" =~ $COUNT6_RE ]] && ((SBX_IDLE_CEILING_S >= 300)) ||
+    die "SBX_IDLE_CEILING_S must be a whole number of seconds, 300-999999 (a worker's ceiling must be at least its default idle timeout, 300 s)"
   local v
   for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
     [[ "${!v:-}" =~ $COUNT6_RE ]] || die "$v must be a positive whole number of at most six digits"
@@ -563,7 +581,8 @@ ensure_settings() {
     "SH_SANDBOX_EXEC_ENDPOINT=$SBX_EXEC_HOST:443" 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane'
     "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S" "SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
     "SH_SANDBOX_RETENTION_SECONDS=$RETENTION_S" "SH_SANDBOX_MAX_PER_SUBJECT=$SBX_MAX_PER_SUBJECT"
-    "SH_SANDBOX_MAX_TOTAL=$SBX_MAX_TOTAL" "SH_SANDBOX_MAX_INFLIGHT=$SBX_MAX_INFLIGHT")
+    "SH_SANDBOX_MAX_TOTAL=$SBX_MAX_TOTAL" "SH_SANDBOX_MAX_INFLIGHT=$SBX_MAX_INFLIGHT"
+    "SH_SANDBOX_MODES_ALLOWED=$SBX_MODES_ALLOWED" "SH_SANDBOX_IDLE_CEILING_S=$SBX_IDLE_CEILING_S")
   [[ -z "$ca" ]] || sbx+=("SH_SANDBOX_EXEC_CA=$ca")
   if [[ -n "$EGRESS_ON" ]]; then
     sbx+=("SH_EGRESS_HOSTS=$EGRESS_HOSTS_JSON")
@@ -732,8 +751,9 @@ write_bundles() {
       [[ -n "$tok" ]] || die "moca-relay-sandbox-tokens has no token for worker $id: re-run setup.sh"
       mkdir -p "$d"
       # SH_WORKSPACE_IDLE: the lifetime plus two days (SBX0 §5.4); install-host.sh takes it from here.
-      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\nSH_WORKSPACE_IDLE=%sh\nSH_WORKSPACE_IMAGE_MB=%s\n' \
-        "$SBX_ATTACH_HOST" "$id" "$tok" "$WORKSPACE_IDLE_H" "$SBX_WORKSPACE_IMAGE_MB" >"$d/worker.env"
+      # SH_LEASE_IDLE_CEILING_S: the control plane's SH_SANDBOX_IDLE_CEILING_S, so both clamp alike.
+      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\nSH_WORKSPACE_IDLE=%sh\nSH_WORKSPACE_IMAGE_MB=%s\nSH_LEASE_IDLE_CEILING_S=%s\n' \
+        "$SBX_ATTACH_HOST" "$id" "$tok" "$WORKSPACE_IDLE_H" "$SBX_WORKSPACE_IMAGE_MB" "$SBX_IDLE_CEILING_S" >"$d/worker.env"
       if [[ -f "$GEN/attach-ca.crt" ]]; then cp "$GEN/attach-ca.crt" "$d/relay-ca.crt"; else rm -f "$d/relay-ca.crt"; fi
     done
     chmod 700 "$GEN" "$GEN"/workers "$GEN"/workers/* 2>/dev/null || true
