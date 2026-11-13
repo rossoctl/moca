@@ -708,7 +708,16 @@ describe('sbx quota, policy', () => {
     );
     expect(w.out()).toContain('registries <default>\n');
     expect(w.out()).toContain(
-      'trusted gate records 0; quota templates 100, builds queued 10, active 8\n',
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, ' +
+        'owned not set (sbx quota shows the limit in force)\n',
+    );
+    const q = { templates: 100, buildsQueued: 10, active: 8, owned: 200 };
+    const w2 = world({
+      'GET /v1/policy': () => ({ status: 200, body: policyView({ quota: q }) }),
+    });
+    expect(await w2.run(['policy'])).toBe(0);
+    expect(w2.out()).toContain(
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, owned 200\n',
     );
     expect(w.out()).toContain(`policy sha256:${'d'.repeat(64)} (record sha256:${'e'.repeat(64)})`);
     expect(await w.run(['policy', '--json'])).toBe(0);

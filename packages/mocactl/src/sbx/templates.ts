@@ -108,10 +108,15 @@ export async function cmdPolicy(c: SbxCtx): Promise<number> {
       );
     }
     c.io.out(`registries ${p.allowedRegistries.map(sanitizeRemote).join(', ') || 'none'}\n`);
+    // A policy that sets no owned still has one in force (the control plane's built-in default,
+    // where it has the counter); this names no number for it, as an older control plane has none,
+    // and points to `sbx quota`, which shows the limit that applies.
     c.io.out(
       `trusted gate records ${p.trustedGateRecords.length}; quota templates ${p.quota.templates}, ` +
-        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}` +
-        (p.quota.owned !== undefined ? `, owned ${p.quota.owned}` : '') +
+        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}, ` +
+        (p.quota.owned !== undefined
+          ? `owned ${p.quota.owned}`
+          : 'owned not set (sbx quota shows the limit in force)') +
         '\n',
     );
     c.io.out(`policy ${sanitizeRemote(v.digest)} (record ${sanitizeRemote(v.record)})\n`);
