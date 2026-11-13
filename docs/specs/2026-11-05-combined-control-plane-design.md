@@ -61,7 +61,9 @@ branch on the profile get one rule each:
 - `/v1/credentials*` keeps the harness store and behaviour, and the sandbox `sandbox-egress` kind is
   accepted only when egress is configured (as on `sandbox`). The egress gate applies on `combined`
   only to the sandbox-only route (`/v1/egress/credential`), so the credential routes stay mounted
-  for the harness users.
+  for the harness users. As on `sandbox`, two `sandbox-egress` credentials of one subject never
+  hold one destination (`destination_conflict`), and `/v1/egress/credential` serves only an owner
+  enrolled for sandboxes (`isEnrolledForSandbox`, §3.2).
 
 ### 3.2 Who may call what
 

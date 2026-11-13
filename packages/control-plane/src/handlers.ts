@@ -1215,7 +1215,10 @@ export const HANDLERS: Record<string, Handler> = {
         'the sandbox service stores only consumer: sandbox-egress credentials',
       );
     }
-    if (sandbox) {
+    // Two egress credentials of one subject never hold one destination: keyed on the consumer, so
+    // it holds on `combined` (whose credential routes keep the harness behaviour) as on `sandbox`.
+    const servesSandboxes = sandbox || deps.config.routeProfile === 'combined';
+    if (servesSandboxes && cred.descriptor.consumer === 'sandbox-egress') {
       const mine = new Set(cred.descriptor.destination.hosts);
       for (const other of await deps.credentials.list(p.sub)) {
         if (other.consumer !== 'sandbox-egress' || other.name === name) continue;
