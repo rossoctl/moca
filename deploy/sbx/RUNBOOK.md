@@ -53,6 +53,10 @@ gitignored).
    ```
 
    It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`).
+   When `<image>` was built by `deploy/sbx/template-onboarding/template-build.sh`, its template record
+   (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
+   `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
+   for another worker is refused before anything is written.
 
 6. **The janitor,** once per KVM host:
 
@@ -635,29 +639,40 @@ uploaded log are redacted (`SBX_REGISTRY` exactly, then URLs, registry hosts, IP
 leads with a code a client can branch on: `pull_failed`, `probe_failed`, `disk_floor`,
 `spec_refused`, `build_failed`, or `leak_refused` (step `report`): the template record or manifest,
 which go byte for byte, names `SBX_REGISTRY`, so the build is reported failed and neither is sent.
-Name the image in the spec without its registry; `SBX_REGISTRY` supplies it at the pull. Text that
+Name the image in the spec without its registry; `SBX_REGISTRY` supplies it at the pull. A build
+the agent claimed but cannot carry on with is reported failed `agent_error`, with the agent's own
+fixed wording and its step (`gate`: a gate record it could not fetch, or whose bytes do not match;
+`report`: a report the control plane did not take, or no template record or manifest after the
+build), so it does not stay `building`. Text that
 reached the store before a redaction rule existed is removed offline with
 `template-onboarding/redact-provenance.py` (its `--catalog-only` mode for a build's stored log).
 
 **Activation: the agent runs the workers the control plane wants.** A client takes a lease on a
 registered build (`POST /v1/templates/{id}/activate`, or `mocactl sbx templates activate ID`), or a
 sandbox create on an inactive build takes one (activation on first use: `409 template_not_active`
-with `Retry-After`, retried by `mocactl`). A build is wanted running only while a lease stands. Each
+with `Retry-After`, retried by `mocactl`). A build is wanted running only while a lease stands. The
+templates declared in `SBX_TEMPLATES_FILE` (`SH_SANDBOX_TEMPLATES`) are not affected: their workers
+are the deployment's to run, they take no lease, and a create on one is never gated. Each
 host's wanted state (`GET /v1/hosts/<id>/wanted`) lists the leased builds placed on it, at most
 `SBX_ACTIVE_LIMIT` of them, in `run`, and the builds it holds with no lease and no live sandbox in
 `stop`. After each build poll, and every 15 s in `sbx-host-agent-wanted.service` (`host-agent.sh
---wanted-only`: no claim, no build), the agent starts each `run` worker whose `sbx-worker@<id>` unit
-is installed and not active, stops each `stop` worker whose unit is active, and reports each start,
+--wanted-only`: no claim, no build), the agent stops each `stop` worker whose unit is active, then
+starts each `run` worker whose `sbx-worker@<id>` unit is installed and not active, and reports each start,
 refusal and stop (`attached`, `refused`, `detached`) as provenance; readiness is the relay's
 attached record, never these reports. A worker with a live sandbox is never stopped: it drains
 first. A lock (`/srv/sbx/.activation.lock`) keeps the two units from starting or stopping workers at
-once; the one without it skips, saying so. Size the limits:
+once; the one without it skips, saying so. A host whose last inventory is over 6 minutes old (three
+build polls) is left out of placement and of `GET /v1/templates`' hosts until it reports again, so
+a stopped or removed agent takes no new placement and no slot. Size the limits:
 
 - `SBX_ACTIVE_LIMIT` is how many workers the host runs at once: each pins its snapshot's guest
   memory whole from its start, with its standby VMs, so size it from the host's memory and the
   templates' guest sizes, leaving the host's own reserve. 0 (unset) places nothing on the host.
+  Every worker that stays running counts against it: the leased builds placed or running on the
+  host (the inventory says which units run; a running build stays on its host), and an unleased
+  one still draining a live sandbox, until it stops.
 - `SBX_IDLE_LIMIT_S` is the default lease length a client gets when it names none (the largest of
-  the hosts' that hold the build; else 3600 s). A lease is renewed by activating again.
+  the hosts' that hold the build, clamped to 60-86400 s; else 3600 s). A lease is renewed by activating again.
 - The policy's `quota.active` caps the builds one subject holds a lease on at once
   (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the use.
 
