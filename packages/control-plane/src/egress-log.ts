@@ -8,9 +8,10 @@ import { canonicalJson } from './provenance.js';
  * internal/egress/audit.go `Event`) as they are; each event whose `sid` is a sandbox's workspace
  * key is appended, in arrival order, to that sandbox's log.
  *
- * What is stored is the event exactly as the proxy wrote it, as one canonical JSON line
- * (provenance.ts's canonicalJson): an event naming any field the proxy's Event does not is refused,
- * never trimmed, so nothing reaches the log that the proxy did not log.
+ * What is stored is the event's fields and values as the proxy wrote them, as one canonical JSON
+ * line (provenance.ts's canonicalJson; the bytes may differ from the proxy's, e.g. in escaping): an
+ * event naming any field the proxy's Event does not is refused, never trimmed, so nothing reaches
+ * the log that the proxy did not log.
  *
  * The log's digest is `sha256:` + the hex sha256 of its NDJSON export: every stored line, in
  * arrival order, each followed by one `\n` (the empty log's is the sha256 of no bytes). It is
