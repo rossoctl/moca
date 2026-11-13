@@ -1721,6 +1721,35 @@ describe('place, alone', () => {
     const ended = place(docs, hosts, 0, new Set());
     expect(ended.placed.get(hash('a'))).toBe('h1');
   });
+  it("counts an admin-rejected build's worker draining a live sandbox, as a retired one's", () => {
+    const r = doc('r', hash('r'), 0);
+    const rejected = (rule: string): TemplateDoc => ({
+      ...r,
+      builds: [
+        {
+          ...r.builds[0]!,
+          status: 'rejected',
+          leases: [],
+          reason: { message: 'broken', rule, step: 'rejected' },
+        },
+      ],
+    });
+    const hosts = [
+      {
+        id: 'h1',
+        holds: { [hash('r')]: 'r', [hash('a')]: 'a' },
+        activeLimit: 1,
+        running: [hash('r')],
+      },
+    ];
+    const busy = new Set(['w_r']);
+    const draining = place([rejected('admin'), doc('a', hash('a'), 1)], hosts, 0, busy);
+    expect(draining.used.get('h1')).toBe(1);
+    expect(draining.unplaced.get(hash('a'))).toBe('no_slot');
+    expect(place([rejected('admin'), doc('a', hash('a'), 1)], hosts, 0).placed.get(hash('a'))).toBe(
+      'h1',
+    );
+  });
   it('reads readiness unknown when presence is unreadable', () => {
     expect(readinessOf(doc('a', hash('a'), 0).builds[0]!, 0, null, null)).toBe('unknown');
   });
