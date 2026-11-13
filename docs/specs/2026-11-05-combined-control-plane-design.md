@@ -108,7 +108,9 @@ the `sandbox` profile.
   `sandboxBuildId` for a manifest-hash build (never an `imported:` one); the data plane
   (`turn-auth`, `run-turn`) passes it to `selectPoolSandbox`, which keeps only workers labelled with
   it and refuses the turn when none is attached. So a session pinned to a build never runs on
-  another.
+  another. The label is the worker's own claim, from its Hello: the relay does not check it
+  against the attach token, so a compromised worker can claim any build. That is the trust
+  `moca.dev/template` already has, and no new exposure.
 - **Upgrade order:** sandboxes route by worker id and ignore the label; an unpinned session matches
   by template as before; only a pinned session refuses a worker without the label. So the worker
   rebuild must precede the first pinned Moca Pi session on a combined deployment, and nothing else
@@ -141,6 +143,13 @@ profiles' credentials, the relay's two Exec callers, one namespace and no cluste
 store on, its own addresses, the supervisor's Route (`SBX_MOCA_HOST`); tested without a cluster in
 `deploy/sbx/tests/setup.test.sh`. It writes to `deploy/sbx/.generated-<namespace>/`, so the same
 checkout leaves an SBX0 namespace's generated files alone.
+
+**The isolation boundary changes.** The relay takes two kinds of Exec caller on one listener: the
+harness's exec token (`MOCA_RELAY_EXEC_TOKEN`, checked first in `execCaller`) and the per-sandbox
+tokens. The harness's token is not scoped to a sandbox: it allows Exec into any attached worker, so
+on `combined` also into the sandboxes of enrolled users. A compromised supervisor, which holds that
+token, therefore reaches those sandboxes; with SBX0 in a namespace of its own it reaches none. A
+deployment that needs that separation keeps the two profiles in two namespaces.
 
 Run it in a new namespace, so an SBX0 deployment stays as it is; the templates are brought in by
 create there (the template store does not move between namespaces).
@@ -179,6 +188,8 @@ Increments 1-5 are code and tests only; 6 and 7 need a cluster (and a KVM host f
 ## 6. Limits
 
 - On `combined` a non-enrolled login can use sessions, as on `harness` (§3.2).
+- On `combined` the harness's exec token reaches every attached worker, the sandboxes of enrolled
+  users included (§3.6): a supervisor compromise is no longer contained to the harness's workers.
 - With no model-catalog hosts, a session's `model` is accepted unverified (`modelVerified: false`).
 - A session needs an inference credential even if it runs no turn.
 - `credentials` of the egress kind on `combined` only when egress is configured.
