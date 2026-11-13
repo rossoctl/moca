@@ -68,6 +68,8 @@ function controlPlane() {
           { id: 'default', worker: 'sbx_default', description: 'bash', tools: ['bash'] },
         ]),
         SH_SANDBOX_TOKEN_ISSUER: ISS,
+        // Lease mode is off by default (ruling R20); this deployment opts in to level 1.
+        SH_SANDBOX_MODES_ALLOWED: 'per-exec,lease',
       }),
     },
     sandboxes: new MemorySandboxStore(),
