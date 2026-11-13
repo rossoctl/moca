@@ -51,6 +51,18 @@ Optional inputs:
 | `SBX_JANITOR_WAIT_MINUTES`             | 60      | how long after a sandbox ends the janitor frees its workspace (below)                                                                               |
 | `SBX_API_CA_FILE`                      | none    | a PEM CA the host janitor trusts for the API Route (below)                                                                                          |
 
+**Lease mode (SBX0.3)** has two control-plane settings
+([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` does not
+set them yet, so a deployment runs with their defaults:
+
+| Variable                    | Default          | Rule                                                                                                                                                                                           |
+| --------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SH_SANDBOX_MODES_ALLOWED`  | `per-exec,lease` | the modes a user may pick, a comma list of `per-exec`, `lease` and `lease+processes`. `per-exec` is always allowed, listed or not. Keep `lease+processes` off until the security review passes |
+| `SH_SANDBOX_IDLE_CEILING_S` | 1800             | the longest lease idle timeout an owner may set, in seconds; at least 30, or the control plane refuses to boot. An owner who sets none gets the worker's default, 300 s                        |
+
+The relay needs nothing new for lease mode: it verifies set-mode tokens with the sandbox token
+keyset and issuer it already has.
+
 The templates file lists one template per worker in `SBX_WORKERS`. A template id is lower-case
 letters, digits and dashes, and unique; `tools` is what `mocactl sbx` shows:
 

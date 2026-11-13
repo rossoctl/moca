@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.5.0
+  version: 1.6.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -357,7 +357,8 @@ components:
           minimum: 0
           description: |
             raised by 1 on every PUT /v1/sandboxes/{id}/mode, so a worker can refuse an Exec whose
-            token carries an older mode (`stale_mode`); 0 until the first change
+            token carries an older mode (`stale_mode`). A sandbox created `per-exec` starts at 0, one
+            created in a lease mode at 1
     Template:
       type: object
       description: A template (template lifecycle spec §3.2, §4)

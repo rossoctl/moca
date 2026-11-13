@@ -3,6 +3,30 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.6.0
+
+Sandbox modes ([lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §8.1–§8.2), served
+only on the `sandbox` route profile.
+
+- `Sandbox` gains `mode` (`per-exec`, `lease` or `lease+processes`), `idleTimeoutS` (0 = the worker's
+  default) and `modeEpoch`. A sandbox created `per-exec` starts at epoch 0, one created in a lease
+  mode at 1.
+- POST /v1/sandboxes accepts `mode` (default `per-exec`) and `idleTimeoutS` (30 to
+  `SH_SANDBOX_IDLE_CEILING_S`, default 1800; omitted means the worker's default, an explicit 0 is
+  400 `invalid_request`).
+- New PUT /v1/sandboxes/{id}/mode: changes the mode and the idle timeout, raises `modeEpoch` by 1 on
+  every accepted call, audits `sandbox_mode_changed`, and returns the sandbox with a `setModeToken`
+  for the client's `LeaseControl set_mode`.
+- New POST /v1/sandboxes/{id}/mode-token: a `setModeToken` for the mode and epoch the record holds
+  now, raising nothing.
+- Both mode routes are owner only (an admin gets 404 on another user's sandbox) and take only the
+  owner's user API token; a sandbox token is a 401. A set-mode token is a JWT with
+  `typ: moca-sandbox-mode+jwt`, valid 300 s.
+- New error code `mode_not_allowed` (403): a lease mode the deployment's `SH_SANDBOX_MODES_ALLOWED`
+  (default `per-exec,lease`) does not list. `per-exec` is always allowed.
+- Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
+  reads as `per-exec`, epoch 0.
+
 ## 1.5.0
 
 Self-serve template create, gated by policy ([#737](https://github.com/rossoctl/moca/issues/737)),

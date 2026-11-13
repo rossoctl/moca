@@ -1,10 +1,16 @@
 # SBX0.3 — Lease mode for `mocactl sbx` sandboxes — Design
 
-Version: 0.2 — November 12, 2026 (draft for review)
-Status: Design. Not approved. Plan 1 (guest agent and image, #706) is built; nothing else is.
+Version: 0.3 — November 12, 2026 (draft for review)
+Status: Design. Not approved. Built: plan 1 (guest agent and image, #706), plan 2 (the worker's
+leases, #763) and plan 3 (the wire: the control plane, the relay and the worker's frames). The
+clients (`mocactl sbx`, the MCP server; plan 4) are not.
 v0.2 folds in E17a's calibration (§1.1, §17): level 1 is re-scoped (§2), free-page reporting moves
 into v1 (§6, §14), lease VMs get page-cache headroom in their cgroup (§6), and the idle timeout and
 the memory model are set together (§4).
+v0.3 records what plan 3 decided on the wire: a lease event rides before the Exec's `End` and is
+delivered at least once (§5); the `mode-token` route, the epoch a create starts at and the idle
+timeout's bounds (§8.1); the third claim and the set-mode token (§8.2); the relay's limits and
+status codes for the new calls (§8.3).
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
 registered in [the milestone registry](README.md).
 Decision record: [ADR-0048](../adrs/0048-sbx-lease-mode.md), which revises
@@ -338,9 +344,27 @@ processes are gone; stopped: devserver (pid 412)`.
 - **`mocactl sbx`** prints an unseen notice on the user's next command, so that a user whose harness
   had exited still learns of it.
 
-On the wire, `sandbox/v1` gets an additive `LeaseEvent {state, reason, at, processes[]}`. It rides on
-the first `ExecEvent` of the response and on a new status call (§8). The worker keeps the last end
-event for each sandbox until a client has seen it.
+On the wire, `sandbox/v1` gets an additive
+`LeaseEvent {req_id, state, reason, at_unix_ms, mode, age_ms, processes[]}`. `state` is `start`,
+`end` or `expiring`; `reason` is an end reason (§4.1), set only on an `end`; `processes` stays empty
+until level 2 (§7).
+
+- **It rides on a lease Exec's response, before its `End`.** The worker sends it under the Exec's
+  `req_id` after the command's output and before the terminal frame. It does the same before an
+  `error` (`stale_mode`, `lease_ended(<reason>)`, a timeout), so a client learns that the lease ended
+  even when that Exec failed. `LeaseControl status` also returns it, as `LeaseStatus.pending` (§8.3).
+- **The worker keeps one pending event for each sandbox,** the last start or end, until a lease
+  Exec's response has carried it. It is acknowledged by its `at_unix_ms` (milliseconds) once it is
+  queued on a stream. An event that could not be queued (the connection ended) stays pending, and the
+  next lease Exec carries it.
+- **Delivery is at least once.** Two overlapping lease Execs on one sandbox can both carry the same
+  pending event. A client dedupes on `at_unix_ms`.
+- **`expiring`** rides on every lease Exec while the lease is past its maximum duration. It is not
+  acknowledged.
+- **A per-exec Exec carries no lease event,** so a client that never asked for a lease never sees
+  one. A downgrade's `mode_change` end is therefore reported through the `set_mode` result's status
+  (`LeaseStatus.pending`), not on an Exec. The event stays pending, and the first lease Exec after a
+  later upgrade carries it. Plan 4's notice work decides whether `set_mode` acknowledges it instead.
 
 ## 6. Admission and reclaim
 
@@ -449,15 +473,53 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
   can stay off until the security review (§11) passes.
 - Every change writes an audit record: who, old mode, new mode, epoch.
 
+The routes, as built (plan 3; `docs/api/openapi.yaml`):
+
+| Route                                | Takes                                                  | Answers                                                                      |
+| ------------------------------------ | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `POST /v1/sandboxes`                 | `mode` (default `per-exec`), `idleTimeoutS` (optional) | the sandbox, at epoch 0 for `per-exec` and epoch 1 for a lease mode          |
+| `PUT /v1/sandboxes/{id}/mode`        | `mode` (required), `idleTimeoutS` (optional)           | `{sandbox, setModeToken}`: the sandbox at its new epoch, and a token for it  |
+| `POST /v1/sandboxes/{id}/mode-token` | no body                                                | `{setModeToken}` for the mode and epoch the record holds now; raises nothing |
+
+- **Owner only.** An admin calling either mode route on another user's sandbox gets the same 404 as
+  anyone else, as with minting a sandbox token: a mode is what the owner's Execs may do. A sandbox
+  token or a set-mode token is refused (401).
+- **Every accepted `PUT` raises `modeEpoch` by 1,** the same mode included.
+- **A lease create starts at epoch 1, a per-exec one at 0.** The worker serves every epoch-0 Exec as
+  unversioned per-`Exec` (plan 2), so a lease at 0 could never be served. At 1, the worker serves it
+  per-`Exec` until the first `set_mode` makes the workspace's epoch known (§8.2). The client sends
+  that `set_mode` right after the create, with a token from `mode-token` (plan 4).
+- **`per-exec` is always allowed,** whatever `SH_SANDBOX_MODES_ALLOWED` lists, so going back to it is
+  never refused by policy. The list governs the lease modes. A mode it does not list is refused with
+  403 `mode_not_allowed`.
+- **`idleTimeoutS`** must be at least 30 and at most `SH_SANDBOX_IDLE_CEILING_S` (default 1800; a
+  ceiling below 30 refuses to boot). Omitted, it is stored as 0, which means the worker's default
+  (300 s, §4); a `PUT` that omits it stores 0, not the previous value. An explicit 0 is refused (400).
+  It is accepted with `per-exec` too, where it has no effect.
+- **The audit record** is `sandbox_mode_changed` with `fromMode`, `toMode` and `modeEpoch`. The old
+  mode comes from the atomic update, not from an earlier read, so it is right under concurrent `PUT`s.
+
 ### 8.2 The mode reaches the worker in the token
 
-- The sandbox token gains two claims, `mode` and `mode_epoch`. The relay already verifies the token.
-  It **sets** `Exec.mode` and `Exec.mode_epoch` from the claims on every frame it routes, overwriting
-  whatever the client sent. This is new: today the relay only compares client fields to claims
-  (`sandbox-caller.ts:256-261`). The worker trusts only relay-set values.
+- The sandbox token gains three claims, `mode`, `mode_epoch` and `idle_timeout_s` (the record's
+  `idleTimeoutS`; 0 = the worker's default). The relay already verifies the token. It **sets**
+  `Exec.mode`, `Exec.mode_epoch` and `Exec.idle_timeout_s` from the claims on every frame it routes,
+  overwriting whatever the client sent. This is new: before plan 3 the relay only compared client
+  fields to claims. The worker trusts only relay-set values.
+  - A token without the claims (minted before them) reads as `per-exec`, epoch 0, idle 0. A malformed
+    claim is refused, never read as the default.
+  - The claim `per-exec` goes out as `SANDBOX_MODE_PER_EXEC` (1). Only the harness path sends
+    `SANDBOX_MODE_UNSPECIFIED` (0): the relay zeroes all four lease fields on an Exec that carries the
+    harness exec token, because the harness never uses leases. The worker serves both as per-`Exec`.
+  - `Exec.keepalive` is the client's own opt-in (§4) and passes through.
+  - A mode value the worker does not know is refused as `lease_unsupported`, never served as
+    per-`Exec`.
+  - The idle timeout reaches the worker only on an Exec: it is a setting of the lease the Exec starts
+    or joins, and `set_mode` does not carry it.
 - The worker keeps the highest `mode_epoch` it has seen for each sandbox. It **refuses an Exec with a
-  lower epoch** (`stale_mode`). Then a token minted before a downgrade cannot keep using a higher mode
-  for its remaining 15 minutes.
+  lower epoch** (`stale_mode: <detail>`). Then a token minted before a downgrade cannot keep using a
+  higher mode for its remaining 15 minutes. A `set_mode` at the stored epoch is a retry and succeeds;
+  only a lower one is `stale_mode`.
 - **The epoch survives a worker restart.** The worker writes it next to the workspace on the host
   disk (the workspace already survives a restart) and reads it back before serving. A missing or
   unreadable file fails closed. The sandbox runs `per-exec`, and **no Exec epoch can restore a higher
@@ -466,10 +528,23 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
   (the record's current `modeEpoch`) under the sandbox token key with a distinct `typ`, so an Exec
   token cannot stand in for it. `mocactl` sends it on every mode change, and `mocactl sbx get` re-sends
   it when the worker reports an unknown epoch.
-- **A downgrade takes effect right away.** After the `PUT`, `mocactl` mints a fresh token and sends a
-  `LeaseControl {set_mode}` call through the relay with it. The worker applies the new epoch: from
+- **The set-mode token,** as built (plan 3):
+  - `typ` `moca-sandbox-mode+jwt`, `aud` `moca-sandbox`, the sandbox token's issuer and signing key;
+  - claims `sub`, `sbx`, `wrk`, `wsk`, `mode`, `mode_epoch`, `idle_timeout_s`, `iat`, `exp` and `jti`,
+    every one required;
+  - valid 300 s, and never past the sandbox's own expiry: it is sent once, right after it is minted;
+  - minted by `PUT .../mode` (for the new epoch) and by `POST .../mode-token` (for the current one);
+  - the relay verifies it against the same keyset as sandbox tokens, with the same 30 s clock
+    leeway, and requires its `sbx`, `wrk` and `wsk` to equal the sandbox token's on the call. The
+    `LeaseControlFrame`'s mode and epoch come from it alone. Every failure answers the same
+    `PERMISSION_DENIED` message, so a client learns nothing about the token it holds; the reason goes
+    to the audit line only.
+- **A downgrade takes effect right away.** The `PUT` returns a set-mode token for the new epoch, and
+  `mocactl` sends a `LeaseControl {set_mode}` call through the relay with it (authorized by any valid
+  sandbox token for the sandbox). The worker applies the new epoch: from
   `lease+processes` to `lease` it stops every tracked process (notice, audit), and to `per-exec` it
-  ends the lease (`mode_change`). An Exec in flight finishes first, bounded by `grace_limit`.
+  ends the lease (`mode_change`). An Exec in flight finishes first, bounded by `grace_limit`. The
+  call returns once the lease has ended, and its status carries the `mode_change` end (§5).
 - **An upgrade** takes effect from the next Exec that carries the new epoch.
 - If `LeaseControl` cannot reach the worker, the downgrade still lands at the next Exec, and the lease
   idles out at worst. `mocactl` reports that the change is pending.
@@ -479,14 +554,57 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
 | Call                                                                                     | Sent by                                                                                                               | Purpose                                      |
 | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | `LeaseKeepalive {sandbox_id}`                                                            | the MCP server, every 30 s while the harness runs (opt-in, §4)                                                        | §4 keepalive                                 |
-| `LeaseControl {sandbox_id, op: set_mode \| reset \| status}`                             | `mocactl` (`set_mode`, `reset`, `status`), the MCP server (`status` for `sandbox_info`, `reset` for the `reset` tool) | §8.2, §4, §5                                 |
+| `LeaseControl {sandbox_id, op: set_mode \| reset \| status, set_mode_token}`             | `mocactl` (`set_mode`, `reset`, `status`), the MCP server (`status` for `sandbox_info`, `reset` for the `reset` tool) | §8.2, §4, §5                                 |
 | `Exec.kind` = `command \| process_start \| process_list \| process_logs \| process_stop` | the MCP server                                                                                                        | §7, keeping one authorization and audit path |
 
-All of them carry the sandbox token, and the relay routes them like `Exec`. No new kind of token.
+All of them carry the sandbox token, and the relay routes them like `Exec`. `set_mode` also carries
+the set-mode token (§8.2), which the relay checks before anything reaches the worker.
 
 - **`reset`** is both an MCP tool and `mocactl sbx reset <id>`. It ends the lease (`reset`). The
   agent may call it: it can only lower what survives.
 - **`mocactl sbx get`** shows the stored mode, and the live lease state from `LeaseControl status`.
+
+**On the wire (plan 3).** `LeaseControl` answers a `LeaseStatus {mode, epoch_known, state, age_ms,
+idle_timeout_s, pending}`, read after the op; `pending` is the unacknowledged event (§5). The relay
+sends the worker a `ServerFrame.lease_control` with a `ctl_id`, the token's workspace and, for
+`set_mode`, the set-mode token's mode and epoch, and the worker answers a `WorkerFrame.lease_result`
+under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no answer.
+
+- **Who may call them:** a sandbox-token caller only, on its own worker (`sandbox_id` equal to the
+  token's `wrk`) and its own workspace (the token's `wsk`, which the relay fills in). The harness
+  exec token is refused: the harness never uses leases.
+- **At most 4 `LeaseControl` calls in flight per sandbox** at the relay. A fifth is refused at once.
+  A client that cancels its call frees its place at once; the worker's late answer is then dropped.
+- **Per-op timeouts at the relay:** 15 s for `status`, and 31 minutes for `reset` and `set_mode`
+  (the worker's 30-minute `grace_limit`, for which ending a lease can block, plus 60 s). A worker on
+  code older than lease mode ignores the frame, so its silence ends at this timeout, never in a hung
+  call.
+- **`LeaseKeepalive` is fire-and-forget.** The relay answers OK once the caller checks pass, even
+  with no worker attached; on the worker it is a no-op without a live lease. It is not audited, since
+  a client may send one every few seconds.
+- **The worker** runs lease calls off its receive loop and its Exec slots, at most 16 at once across
+  every sandbox it serves (then `busy: too many lease calls in flight`). The container tier has no
+  lease mode and answers every `LeaseControl` with `lease_unsupported: this worker has no lease mode`.
+- **One audit line per `LeaseControl`,** marker `sandbox_lease_control`: `sub`, `sbx`, `wrk`, `op`,
+  `ms`, `outcome`, a `reason` when there is one, and for `set_mode`, once its token verified, `mode`
+  and `modeEpoch`. Like every SBX record, it has no command text.
+
+| `LeaseControl` ends with | When                                                                                | Audit `outcome` |
+| ------------------------ | ----------------------------------------------------------------------------------- | --------------- |
+| OK                       | the worker answered without an error                                                | `ok`            |
+| `FAILED_PRECONDITION`    | the worker answered with an error; the message is its wire string                   | `failed`        |
+| `UNAUTHENTICATED`        | no sandbox token, or one that did not verify                                        | `refused`       |
+| `PERMISSION_DENIED`      | `sandbox_id` is not the token's worker; the harness token; a set-mode token refused | `refused`       |
+| `INVALID_ARGUMENT`       | no `op`, or one this relay does not know                                            | `refused`       |
+| `RESOURCE_EXHAUSTED`     | `sandbox busy: <n> lease controls already in flight`                                | `busy`          |
+| `DEADLINE_EXCEEDED`      | only the per-op timeout: the worker did not answer in time                          | `timeout`       |
+| `UNAVAILABLE`            | no live worker, the frame could not be written, or the worker disconnected first    | `error`         |
+| `CANCELLED`              | the client cancelled the call before the worker answered                            | `cancelled`     |
+
+The worker's wire strings, on an Exec's `ExecError.message` or in `LeaseControlResult.error`:
+`lease_ended(<reason>)` for an Exec cut by a lease end (§4, §4.1), `stale_mode: <detail>` for an
+older epoch (§8.2), `lease_unsupported: <detail>` for a worker or a mode without leases, and `busy:`
+for a refusal at the worker's own cap.
 
 ### 8.4 Worker
 
@@ -588,6 +706,11 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
   `mocactl sbx mode` (TTY rule for upgrades), `reset` and `get`; the pending-downgrade message.
 - **Relay (vitest):** `mode` and `mode_epoch` set from the token's claims, a client-sent value overwritten; `LeaseKeepalive` and `LeaseControl`
   routing; token checks the same as `Exec`.
+- **Across components (vitest, `lease-wire.transport.test.ts`):** the control plane's own handlers
+  create the sandbox, change its mode and mint both tokens; the relay carries them to a fake worker.
+  A lease create's claims reach the Exec at epoch 1, a mode change raises the epoch, `set_mode`
+  carries the new one, and a token minted before the change still reaches the worker at its old
+  epoch, whose `stale_mode` refusal reaches the client.
 - **Worker and guest agent (Go):** the gates in §9; the lease state machine with the fake clock (every
   transition and every end reason); measured charge and reclaim order; reclaim, then refuse with `memory-budget`; the
   per-Exec cgroup kill, including `D`-state handling and `teardown_failed`; the privilege drop (Exec uid,

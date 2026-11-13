@@ -46,7 +46,10 @@ export interface SandboxRecord {
   mode: SandboxModeName;
   /** The owner's lease idle timeout in seconds; 0 = the worker's default. */
   idleTimeoutS: number;
-  /** Raised by 1 on every setMode, so the worker can refuse an older mode (0 = never set). */
+  /**
+   * Raised by 1 on every setMode, so the worker can refuse an older mode. A per-exec create starts
+   * at 0, a lease create at 1.
+   */
   modeEpoch: number;
 }
 
