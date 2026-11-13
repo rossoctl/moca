@@ -9,7 +9,7 @@ import {
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
-import { liveLeases, place, readinessOf, type Placement } from './activation.js';
+import { hostManaged, liveLeases, place, readinessOf, type Placement } from './activation.js';
 import { hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
@@ -795,12 +795,24 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
       { readiness: 'unavailable' },
     );
   }
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const r = await takeLease(deps, p, d0, target, b.leaseSeconds, 'owner');
   return {
     status: 200,
     body: { templateId: d0.id, buildId: target.buildId, leaseUntil: r.until, host: r.host },
   };
 }
+
+/**
+ * The refusal of a lease on a build no host can hold (activation.ts hostManaged): one imported from
+ * SH_SANDBOX_TEMPLATES, whose worker the deployment runs. It needs no activation: a sandbox is
+ * created on it whenever its worker is attached, as on a deployment without host agents.
+ */
+const deploymentRun = (id: string) =>
+  new CpError(
+    'invalid_request',
+    `template '${id}' is run by the deployment (SH_SANDBOX_TEMPLATES); it takes no activation lease`,
+  );
 
 /**
  * The deployment-wide activation lock. takeLease checks the subject's active quota and the hosts'
@@ -840,6 +852,7 @@ async function takeLease(
   leaseSeconds: unknown,
   reason: 'owner' | 'first_use',
 ): Promise<{ until: number; host: string | null }> {
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const { cat } = writable(deps);
   return activationLock(cat).run('activation', () =>
     takeLeaseLocked(deps, p, d0, target, leaseSeconds, reason),
@@ -1007,7 +1020,8 @@ export const FIRST_USE_RETRY_S = 30;
  * by the deployment, SH_TEMPLATE_HOSTS unset) nothing changes: the create succeeds as before.
  * With hosts configured but none reported yet (a fresh deploy, a restart, a host down), readiness
  * is the worker's presence alone: an attached worker serves, and an absent one is refused rather
- * than left to wait at the relay.
+ * than left to wait at the relay. A build imported from SH_SANDBOX_TEMPLATES (no snapshot, so no
+ * host ever holds it) is never gated: the deployment runs its worker.
  */
 async function requireActive(
   deps: CpDeps,
@@ -1016,6 +1030,9 @@ async function requireActive(
   activate: boolean,
 ): Promise<void> {
   if (hostViewsOf(deps).length === 0 && !deps.config.templateHosts?.length) return;
+  // A build imported from SH_SANDBOX_TEMPLATES is the deployment's to run, never a host's: no gate,
+  // as on a deployment without host agents.
+  if (!hostManaged(t.build)) return;
   const facts = await readinessFacts(deps);
   const readiness = readinessOf(t.build, facts.nowS, facts.placement, facts.attached);
   if (readiness === 'active') return;

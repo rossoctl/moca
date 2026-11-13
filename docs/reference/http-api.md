@@ -230,7 +230,8 @@ grant, renewals unlimited); a build is wanted running only while a lease stands,
 installed workers by each host's wanted state. A build no host holds is 409 `template_unavailable`; one whose holders are
 all at their active limit with leased builds is 409 `no_active_slot` with `Retry-After`; over the subject's `active` quota
 is 429 `quota_exceeded`. With template hosts configured, a sandbox create on a build that is not active takes the
-caller's lease and answers 409 `template_not_active` with `Retry-After` (`activate: false` starts nothing).
+caller's lease and answers 409 `template_not_active` with `Retry-After` (`activate: false` starts nothing). A template
+imported from `SH_SANDBOX_TEMPLATES` is never gated (the deployment runs its worker) and takes no lease.
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,

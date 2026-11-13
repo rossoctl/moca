@@ -32,7 +32,9 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
   registered build that is not `active` takes the caller's lease (`reason: first_use` on its record;
   refused as activate would be) and answers `409 template_not_active` with `readiness` and
   `Retry-After: 30`. New body field `activate` (default true; false starts nothing). No sandbox
-  record is kept while waiting. Without template hosts, nothing changes. The `sandbox` record's
+  record is kept while waiting. Without template hosts, nothing changes. A template imported from
+  `SH_SANDBOX_TEMPLATES` is never gated, and activate refuses it with `400 invalid_request`: the
+  deployment runs its worker, and its readiness is that worker's presence alone. The `sandbox` record's
   `lease` is now the digest of the caller's `activate` record (null without a lease).
 - Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
   any host reports it is the presence alone, as before.

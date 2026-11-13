@@ -646,7 +646,9 @@ reached the store before a redaction rule existed is removed offline with
 **Activation: the agent runs the workers the control plane wants.** A client takes a lease on a
 registered build (`POST /v1/templates/{id}/activate`, or `mocactl sbx templates activate ID`), or a
 sandbox create on an inactive build takes one (activation on first use: `409 template_not_active`
-with `Retry-After`, retried by `mocactl`). A build is wanted running only while a lease stands. Each
+with `Retry-After`, retried by `mocactl`). A build is wanted running only while a lease stands. The
+templates declared in `SBX_TEMPLATES_FILE` (`SH_SANDBOX_TEMPLATES`) are not affected: their workers
+are the deployment's to run, they take no lease, and a create on one is never gated. Each
 host's wanted state (`GET /v1/hosts/<id>/wanted`) lists the leased builds placed on it, at most
 `SBX_ACTIVE_LIMIT` of them, in `run`, and the builds it holds with no lease and no live sandbox in
 `stop`. After each build poll, and every 15 s in `sbx-host-agent-wanted.service` (`host-agent.sh

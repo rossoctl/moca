@@ -7,6 +7,7 @@ import { writeError } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
 import { HostRegistry } from '../src/host-handlers.js';
 import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenance.js';
+import type { SandboxTemplate } from '../src/sandbox-config.js';
 import { FileTemplateCatalog, type TemplateDoc } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
@@ -25,14 +26,14 @@ const hash = (c: string) => `sha256:${c.repeat(64)}`;
 
 let seq = 0;
 let now = NOW_MS;
-async function setup(quotaActive = 8): Promise<TestDeps> {
+async function setup(quotaActive = 8, declared: SandboxTemplate[] = []): Promise<TestDeps> {
   now = NOW_MS;
   const dir = mkdtempSync(join(tmpdir(), 'cp-act-'));
   const provenance = new ProvenanceStore({ dir, now: () => now });
   const d = makeDeps({
     newId: () => `${(++seq).toString(16).padStart(26, '0')}000000`,
     now: () => now,
-    templates: new FileTemplateCatalog({ dir, declared: [], provenance, now: () => now }),
+    templates: new FileTemplateCatalog({ dir, declared, provenance, now: () => now }),
     provenance,
     policy: new FilePolicyStore({ dir, provenance }),
     hosts: new HostRegistry(),
@@ -435,6 +436,35 @@ describe('activation on first use (§6.4)', () => {
     d.hosts = new HostRegistry();
     attachedNow = ['sbx_t1'];
     expect((await createSandbox(d, { template: 't1' })).status).toBe(201);
+  });
+
+  it('never gates a template imported from SH_SANDBOX_TEMPLATES, beside a host-built one', async () => {
+    const d = await setup(8, [{ id: 'py', worker: 'sbx_py', description: 'py', tools: [] }]);
+    attachedNow = ['sbx_py'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    d.config.templateHosts = [{ id: 'host-1', token: 'f'.repeat(64) }];
+    // Hosts configured, none reported yet: the imported template serves, the host-built one waits.
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    expect((await refusal(() => createSandbox(d, { template: 't1' }))).code).toBe(
+      'template_not_active',
+    );
+    // After the first inventory: the imported one still serves, and is active, never deactivating.
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    expect(await readiness(d, 'py')).toBe('active');
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    // Its worker detached: inactive, and the create is the relay's to answer, as without hosts.
+    attachedNow = [];
+    expect(await readiness(d, 'py')).toBe('inactive');
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    // It takes no lease, so it is never placed and no host is asked to run or stop it.
+    expect(await activate(d, 'py').catch((x) => x.code)).toBe('invalid_request');
+    expect(await leases(d, 'py')).toHaveLength(0);
+    const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect([...w.run, ...w.stop].map((x: Body) => x.template)).not.toContain('py');
+    // The host-built one, leased by alice's first try and now attached, serves (bob: alice's
+    // live-sandbox cap is spent above).
+    attachedNow = ['sbx_t1'];
+    expect((await createSandbox(d, { template: 't1' }, bob)).status).toBe(201);
   });
 
   it('changes nothing without host agents: the create succeeds as before', async () => {

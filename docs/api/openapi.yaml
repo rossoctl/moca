@@ -2072,7 +2072,10 @@ paths:
                     type: [string, 'null']
                     description: the host it is placed on; null while no host agent has reported
         '400':
-          description: '`invalid_request` (a lease outside 60-86400 s; also: this deployment stores no templates)'
+          description: |
+            `invalid_request` (a lease outside 60-86400 s; a template imported from
+            SH_SANDBOX_TEMPLATES, which the deployment runs and which takes no lease; also: this
+            deployment stores no templates)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2500,7 +2503,8 @@ paths:
         `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
-        is refused. Without template hosts the create succeeds as before. The `sandbox` record's
+        is refused. Without template hosts the create succeeds as before, and so it does on a template
+        imported from SH_SANDBOX_TEMPLATES (no host holds it: the deployment runs its worker). The `sandbox` record's
         `lease` is the digest of the `activate` record of the caller's live lease on the build.
       security: [{ sessionToken: [] }]
       requestBody:
