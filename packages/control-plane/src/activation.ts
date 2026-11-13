@@ -73,10 +73,10 @@ export function wantedBuilds(
 /**
  * Placement (§6.2). Each host's count starts at the workers that stay running on it whatever this
  * pass decides: the wanted builds it runs, and the unleased ones it runs whose worker has a live
- * sandbox (`busy`: they drain, and are never stopped under one). Then, in the wanted order (first
- * leased, first placed), a build already running on a holder stays there (the first by id, when
- * more than one runs it), counted already; any other goes to a holder under its activeLimit, the
- * one with the lowest count, then by id. A build no host holds is `not_held`; one whose every
+ * sandbox (`busy`: they drain, and are never stopped under one), retired builds included. Then, in
+ * the wanted order (first leased, first placed), a build already running on a holder stays there
+ * (the first by id, when more than one runs it), counted already; any other goes to a holder under
+ * its activeLimit, the one with the lowest count, then by id. A build no host holds is `not_held`; one whose every
  * holder is full is `no_slot`.
  */
 export function place(
@@ -90,8 +90,11 @@ export function place(
   const wanted = wantedBuilds(docs, nowS);
   const wantedIds = new Set(wanted.map((w) => w.build.buildId));
   const workerOf = new Map<string, string>();
+  // A retired build's worker still draining a live sandbox keeps running too (§5.1), so it counts.
   for (const d of docs)
-    for (const b of d.builds) if (b.status === 'registered') workerOf.set(b.buildId, b.worker);
+    for (const b of d.builds)
+      if (b.status === 'registered' || (b.status === 'retired' && b.worker !== ''))
+        workerOf.set(b.buildId, b.worker);
   const stays = (id: string) =>
     workerOf.has(id) && (wantedIds.has(id) || busy.has(workerOf.get(id)!));
   const used = new Map(hosts.map((h) => [h.id, (h.running ?? []).filter(stays).length]));

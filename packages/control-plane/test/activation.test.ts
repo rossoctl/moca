@@ -1317,6 +1317,30 @@ describe('place, alone', () => {
     ]);
     expect(p.unplaced.get(hash('a'))).toBe('no_slot');
   });
+  it("counts a retired build's worker draining a live sandbox against its host, until the sandbox ends", () => {
+    const r = doc('r', hash('r'), 0);
+    const retired: TemplateDoc = {
+      ...r,
+      builds: [{ ...r.builds[0]!, status: 'retired', leases: [] }],
+    };
+    const docs = [retired, doc('a', hash('a'), 1)];
+    const hosts = [
+      {
+        id: 'h1',
+        holds: { [hash('r')]: 'r', [hash('a')]: 'a' },
+        activeLimit: 1,
+        running: [hash('r')],
+      },
+    ];
+    // A sandbox still runs on the retired build's worker: it drains, and keeps h1's one slot.
+    const draining = place(docs, hosts, 0, new Set(['w_r']));
+    expect(draining.used.get('h1')).toBe(1);
+    expect(draining.placed.has(hash('r'))).toBe(false);
+    expect(draining.unplaced.get(hash('a'))).toBe('no_slot');
+    // Once the sandbox ends, the slot is free.
+    const ended = place(docs, hosts, 0, new Set());
+    expect(ended.placed.get(hash('a'))).toBe('h1');
+  });
   it('reads readiness unknown when presence is unreadable', () => {
     expect(readinessOf(doc('a', hash('a'), 0).builds[0]!, 0, null, null)).toBe('unknown');
   });

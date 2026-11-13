@@ -414,7 +414,8 @@ run at once), its `idleLimitSeconds` (the default lease length, §6.3), its `bui
 disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its operator sizes them
 from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
 `active {limit, used}`, where `used` counts the workers that stay running on it: the leased builds
-placed or running there, and the unleased ones still draining a live sandbox. The inventory says,
+placed or running there, and the unleased ones still draining a live sandbox, retired ones (§5.1)
+included. The inventory says,
 per held build, whether its worker's unit is `running`; the host's `attached` and `detached` reports
 keep that current between inventories.
 

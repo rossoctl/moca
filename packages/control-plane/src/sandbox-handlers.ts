@@ -1104,14 +1104,14 @@ async function buildsInUse(
   const out = new Map<string, string>();
   if (!deps.sandboxes) return out;
   const busyBuilds = new Set<string>();
-  const busyWorkers = new Set<string>();
+  const legacyWorkers = new Set<string>();
   for (const r of await deps.sandboxes.listAll(nowS)) {
     if (!isLive(r, nowS)) continue;
     if (r.buildId) busyBuilds.add(r.buildId);
-    else busyWorkers.add(r.worker);
+    else legacyWorkers.add(r.worker);
   }
   for (const x of builds) {
-    if (busyBuilds.has(x.buildId) || (x.worker !== '' && busyWorkers.has(x.worker)))
+    if (busyBuilds.has(x.buildId) || (x.worker !== '' && legacyWorkers.has(x.worker)))
       out.set(x.buildId, 'still serves a live sandbox');
   }
   return out;
