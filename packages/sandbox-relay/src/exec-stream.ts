@@ -184,5 +184,6 @@ export function withReqId(ev: ExecEvent, reqId: number): ExecEvent {
   if (ev.chunk) return { chunk: { ...ev.chunk, reqId } };
   if (ev.end) return { end: { ...ev.end, reqId } };
   if (ev.error) return { error: { ...ev.error, reqId } };
+  if (ev.lease) return { lease: { ...ev.lease, reqId } };
   return ev;
 }

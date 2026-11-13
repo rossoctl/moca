@@ -1,6 +1,6 @@
 import { Server, ServerCredentials, type ServerWritableStream } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SandboxExecService } from '@moca/k8s-sandbox';
+import { Exec, SandboxExecService } from '@moca/k8s-sandbox';
 import { makeRelayExecClient } from '../src/select-sandbox.js';
 
 const servers: Server[] = [];
@@ -30,14 +30,14 @@ describe('the worker authenticates to relay SandboxExec (MI1 R5)', () => {
     await new Promise<void>((resolve) => {
       const call = client.exec({
         sandboxId: 's',
-        exec: {
+        exec: Exec.fromPartial({
           reqId: 1,
           command: 'true',
           stdin: new Uint8Array(),
           timeoutS: 5,
           streaming: true,
           workspaceKey: '',
-        },
+        }),
       });
       call.on('data', () => {});
       call.on('end', () => resolve());

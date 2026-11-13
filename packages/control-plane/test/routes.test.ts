@@ -69,6 +69,9 @@ describe('the route table', () => {
         'GET /v1/sandboxes/{id}',
         'DELETE /v1/sandboxes/{id}',
         'POST /v1/sandboxes/{id}/token',
+        // Lease-mode spec §8.1-§8.2.
+        'PUT /v1/sandboxes/{id}/mode',
+        'POST /v1/sandboxes/{id}/mode-token',
         'GET /v1/janitor/sandboxes',
       ].sort(),
     );
