@@ -498,12 +498,18 @@ components:
       required: [image, spec]
       properties:
         id: { type: string, description: 'the template id (lowercased); ignored on /{id}/builds' }
-        image: { type: string, description: 'repository@sha256:<64 hex>, from an allowed registry' }
+        image:
+          type: string
+          description: >-
+            [host[:port]/]path@sha256:<64 hex>, in the distribution reference grammar (lowercase
+            path components, no tag beside the digest), from an allowed registry (hosts compare
+            case-insensitively)
         spec:
           type: object
           description: |
             a template spec (`moca-sbx-template-spec/1`; samples in
-            deploy/sbx/template-onboarding/examples/): guest_mb (or guest_ram_mb), vcpus,
+            deploy/sbx/template-onboarding/examples/): guest_ram_mb (or its alias guest_mb, never
+            both: M7.guest; stored as guest_ram_mb), vcpus,
             workspace_mb?, egress, seed, probe, tools, description, and optionally guest_home,
             skip_git_identity_check, guest_home_gitconfig, probe_status, source_record_digest. An
             `id` or `image` in it must equal the create's own (M7.spec_id, M7.spec_image)
@@ -555,7 +561,10 @@ components:
             type: object
             required: [requires, envelope]
             properties:
-              requires: { type: array, items: { type: string }, description: gating rule ids }
+              requires:
+                type: array
+                items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
+                description: gating rule ids beyond the base rules; an unknown id is refused
               envelope:
                 type: object
                 required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
@@ -565,9 +574,10 @@ components:
                   maxWorkspaceMb: { type: integer }
                   exact:
                     type: object
+                    required: [guestMb, vcpus]
                     properties:
-                      guestMb: { type: integer }
-                      vcpus: { type: integer }
+                      guestMb: { type: integer, minimum: 1 }
+                      vcpus: { type: integer, minimum: 1 }
         defaultProfile: { type: string }
         allowedRegistries:
           type: array
@@ -584,8 +594,18 @@ components:
       type: object
       required: [templates, buildsQueued, active]
       properties:
-        templates: { type: integer, minimum: 0 }
-        buildsQueued: { type: integer, minimum: 0 }
+        templates:
+          type: integer
+          minimum: 0
+          description: >-
+            templates a subject owns with a build registered or on its way there (a template whose
+            builds all failed, were cancelled or retired is not counted)
+        buildsQueued:
+          type: integer
+          minimum: 0
+          description: >-
+            builds of a subject's templates not yet built (queued, building or probing), charged to
+            the template's owner
         active: { type: integer, minimum: 0 }
     PolicyView:
       type: object
@@ -1776,7 +1796,9 @@ paths:
         is checked against the deployment's policy (GET /v1/policy) before anything is queued: a
         refusal is `422 policy_refused` with `rule`, the gating rule's id
         (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
-        template's stream. Ids are unique per deployment: another subject's id is
+        template's stream when the template exists and is the caller's (an admin's, adding a
+        build); a refusal on a new id writes an audit-log line instead, and one on another subject's
+        id is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
         `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for
@@ -2317,10 +2339,11 @@ paths:
       operationId: getQuota
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
-        The policy's quotas and the caller's use: templates owned, builds queued or building, and
-        builds the caller holds a live activation lease on (§6.3). On the sandbox profile,
-        `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
-        the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
+        The policy's quotas and the caller's use: templates owned (with a build registered or on its
+        way there), builds queued, building or probing, and builds the caller holds a live activation
+        lease on (§6.3). On the sandbox profile, `sandboxes` is SBX0's per-subject cap on live
+        sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's live ones; absent elsewhere. Needs
+        SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       responses:
         '200':
@@ -3104,13 +3127,18 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in, from the SESSION (the turn record does not copy
-                      it); absent whenever the deployment declares no tiers
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |
-                      the session's model and the limits recorded when it was chosen; absent when the
-                      session names none, and the worker then uses its deployment default
+                      the model the TURN RECORD pinned at submission, with the limits recorded when
+                      it was chosen; absent when the submission named none, and the worker then uses
+                      its deployment default. Pinned, so switching the session's model while this
+                      turn is still queued does not move it onto the new one.
                     required: [id]
                     properties:
                       id: { type: string }
