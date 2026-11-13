@@ -587,4 +587,29 @@ describe.skipIf(!havePython)('verify-provenance.py --egress', () => {
     expect(runVerifier(doc, '--egress', `${SBX}=/nonexistent/x`).status).toBe(2);
     expect(runVerifier(doc, '--egress', SBX).status).toBe(2);
   });
+
+  it('fails closed on a record whose events is not an int count or whose sha256 is not sha256:<64 hex>', async () => {
+    const one = NDJSON.split('\n')[0]! + '\n';
+    // In Python True == 1: a one-line file must not match `events: true`. (Canonical JSON holds
+    // integers only, so a float cannot be in an export at all.)
+    for (const events of [true, '1', -1]) {
+      const r = runVerifier(
+        await ended(egressOf(one, { events })),
+        '--egress',
+        `${SBX}=${file(one)}`,
+      );
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("the record's events is");
+    }
+    for (const sha256 of ['x', 42, `sha256:${'A'.repeat(64)}`]) {
+      const r = runVerifier(
+        await ended(egressOf(one, { sha256 })),
+        '--egress',
+        `${SBX}=${file(one)}`,
+      );
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("the record's sha256 is");
+      expect(r.out).toContain('not sha256:<64 hex>');
+    }
+  });
 });

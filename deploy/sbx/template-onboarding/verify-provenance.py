@@ -133,6 +133,16 @@ def check_egress(doc, sandbox_id, data):
             named = body["egress"]
     if named is None:
         return [f"egress {sandbox_id}: no sandbox record of the export names its egress log"], None
+    # Fail closed on the record's own shape: in Python True == 1 and 1.0 == 1, so `events` must be
+    # a non-negative int that is not a bool, and `sha256` a sha256:<64 hex> string.
+    events, digest = named.get("events"), named.get("sha256")
+    shape = []
+    if not isinstance(events, int) or isinstance(events, bool) or events < 0:
+        shape.append(f"egress {sandbox_id}: the record's events is {events!r}, not a count")
+    if not isinstance(digest, str) or not DIGEST_RE.match(digest):
+        shape.append(f"egress {sandbox_id}: the record's sha256 is {digest!r}, not sha256:<64 hex>")
+    if shape:
+        return shape, None
     errors = []
     got = "sha256:" + hashlib.sha256(data).hexdigest()
     if got != named.get("sha256"):
@@ -194,6 +204,8 @@ def main(argv):
     for h in streams:
         print(f"ok {h['stream']}: {h['count']} records, head {h['head']}")
     for sandbox_id, n in named.items():
+        if n is None:
+            continue
         state = "complete" if n.get("complete") else f"INCOMPLETE, {n.get('dropped')} dropped"
         by = n.get("droppedBy")
         if not n.get("complete") and isinstance(by, dict):
