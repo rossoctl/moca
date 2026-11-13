@@ -190,13 +190,13 @@ ln -s "$TMP/host/dev" "$FIXTURE/dev"
 bash "$SCRIPT" --out "$TMP/out-ln4" --image example/img:1 >"$TMP/run-ln4.log" 2>&1
 check "/dev a symlink out of the tree: exit 1" "$?" "1"
 make_fixture "${ALL_TOOLS[@]}"
-mkdir -p "$FIXTURE/private/etc"
+mkdir -p "$FIXTURE/real/etc"
 rm -rf "${FIXTURE:?}/etc"
-ln -s private/etc "$FIXTURE/etc"
+ln -s real/etc "$FIXTURE/etc"
 bash "$SCRIPT" --out "$TMP/out-ln5" --image example/img:1 >"$TMP/run-ln5.log" 2>&1
 check "a relative /etc symlink inside the tree still builds" "$?" "0"
 check "the provenance lands inside the tree" \
-  "$(grep -c '^image=example/img:1$' "$TMP/out-ln5/private/etc/moca-rootfs-source")" "1"
+  "$(grep -c '^image=example/img:1$' "$TMP/out-ln5/real/etc/moca-rootfs-source")" "1"
 
 echo "== a non-empty --out is refused and left untouched"
 mkdir -p "$TMP/out3"; echo keep >"$TMP/out3/precious"
