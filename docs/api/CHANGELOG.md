@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.9.0
+## 1.10.0
 
 Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
@@ -32,6 +32,55 @@ for the builds (else `400 invalid_request`), and answer only a host listed in `S
   writes a `build` record, checks them against the create's request and registers the build (its
   `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
   rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
+## 1.9.0
+
+A subject's own gate record, trusted for its own templates, and repositories allowed per registry
+([#738](https://github.com/rossoctl/moca/issues/738)), per the
+[subject trust spec](../specs/2026-11-08-subject-trust-gate-records-design.md). Trust is decided by
+who submits a gate record, never by anything inside it. Every change is additive.
+
+- `Profile` adds `selfAttest`, `selfAttestEgress` and `requireOfflineGate`. The default policy adds
+  `benchmark-self` (the `benchmark` rules, no network) and `general-self` (no X11; `spec.egress` may
+  be true, the KVM host's allowlisted egress); `benchmark` stays curated (its records must be in
+  `trustedGateRecords`).
+- On a `selfAttest` profile, a record not in `trustedGateRecords` passes `X1.trusted` for the
+  creating subject's own templates. New create rules, each in the `check` record and named by a
+  `422 policy_refused`: `X1.self.scope` (another subject already self-attested the same sha256;
+  a build made while the record was trusted claims nothing, and a build that failed releases its
+  claim),
+  `X12.self` (the record must show commits refused, whatever the spec), `X1.self.egress`
+  (`spec.egress` false unless the profile allows it) and `X1.offline`.
+- `X1.offline`: on a profile that requires X1 (unless `requireOfflineGate: false`, as on
+  `general-self`), a general-gate record needs `gate.floor_checked_offline: true` (fail closed); a
+  curated family record predates the field and passes. The general-gate schema is the setting
+  `SH_GATE_RECORD_SCHEMA` (default `moca-gate-record/1`; a malformed value refuses to boot), and
+  GET /v1/policy answers it as `gateRecordSchema`, so a client's dry run applies the rule as the
+  deployment does (an older control plane without the field reads as the default).
+- The `gate` provenance record's `source` adds `self`, with `scope`: the subject the record counts
+  for, the template's owner (the submitter, except on an admin's build for another subject's
+  template).
+- `Template` and `TemplateBuild` add `attestation` (`deployment | self`), recomputed on every read
+  from the current policy: `self` for a build made on a `selfAttest` profile whose record is not
+  trusted now, whatever its trust at create. `TemplateBuild` adds `gateFloorCheckedOffline`, and
+  `gateFloorMetOffline` for a gate from a `network_needed` contract. A template with a registered
+  self-attested build reads `visibility: private`, whatever is stored.
+- New error code `self_attested` (409): a self-attested create asking for `deployment`
+  visibility, or a self-attested build added to a deployment-visible template. PATCH
+  /v1/templates/{id} answers the same refusal for `visibility: deployment` on a template with a
+  self-attested build, registered or on its way there, and PUT /v1/templates/{id}/owner for a
+  transfer of such a template to another subject.
+- PUT /v1/policy: a removal from `trustedGateRecords` that makes builds of deployment-visible
+  templates self-attested names them as `narrowed: [{template, buildId}]` in its answer and in its
+  `policy` record; those templates read as private from then on, and their owners keep using them.
+- `Policy` adds the optional `allowedRepositories`: per registry host (as the policy reads it,
+  Docker Hub as `docker.io`), the repositories a create may name there, each an exact path
+  (`library/python`) or a prefix (`library/*`), matched on whole path segments; a Docker Hub
+  official name reads as `library/<name>`. New create rule `registry.repository`, which also
+  refuses there an image path outside the entries' grammar (uppercase, or an empty, `.` or `..`
+  segment). A registry with
+  no list allows every repository, as before; a registry listed there must also be in
+  `allowedRegistries`. Its keys compare case-insensitively, as `allowedRegistries` does.
 
 ## 1.8.0
 
