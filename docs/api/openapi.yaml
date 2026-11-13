@@ -2719,13 +2719,18 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in, from the SESSION (the turn record does not copy
-                      it); absent whenever the deployment declares no tiers
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |
-                      the session's model and the limits recorded when it was chosen; absent when the
-                      session names none, and the worker then uses its deployment default
+                      the model the TURN RECORD pinned at submission, with the limits recorded when
+                      it was chosen; absent when the submission named none, and the worker then uses
+                      its deployment default. Pinned, so switching the session's model while this
+                      turn is still queued does not move it onto the new one.
                     required: [id]
                     properties:
                       id: { type: string }
