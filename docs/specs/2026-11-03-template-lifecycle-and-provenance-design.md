@@ -309,11 +309,14 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
 - **Never cuts off running work.** A retire is refused `409 build_in_use` while a live sandbox runs
   on a build it names (the build the sandbox resolved to at creation, not its worker, which two
   builds from one image can share; a sandbox record without a build id counts for every build on
-  its worker): delete the sandbox (or let it end), then retire. A worker is never stopped
+  its worker; judged on the template as read under the lock, not the request's earlier read):
+  delete the sandbox (or let it end), then retire. A worker is never stopped
   under a live sandbox either (§6.3).
 - **Recorded.** Each build retired writes a `retire` record naming the caller, `from` (the status
   before), `buildRecord` (the digest of its `build` record; null for a build never built) and the
-  reason; its earlier records stay. The answer lists each build with its id, readiness and the
+  reason; its earlier records stay. The record is written within the catalog update that retires
+  the build, so a record that cannot be written leaves the build as it was (a retry retires it), and
+  no build is retired without its record. The answer lists each build with its id, readiness and the
   record's digest, so a client ties it to the trace. Idempotent: an already retired build is listed
   with `record: null`, and no second record is written.
 - **Not reversible.** A new build (`POST /v1/templates/{id}/builds`) is the way back; a retired id

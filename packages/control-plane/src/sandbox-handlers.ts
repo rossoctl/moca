@@ -1192,13 +1192,18 @@ async function retireBuilds(
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1024))
     throw new CpError('invalid_request', 'reason must be a string of at most 1024 characters');
   const done: TemplateBuild[] = [];
+  const records = new Map<string, string>();
   // Under the activation lock, so an activation never writes a lease onto a build retired after
   // it resolved the build: it re-reads the build's status under the same lock (takeLeaseLocked).
   await activationLock(cat).run('activation', async () => {
-    // Read before the catalog update, so no store lookup runs inside it.
-    const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
+    // The template is read again under the lock: the request's read (d0) may be older than a
+    // build registered, or a sandbox created on one, since. Read before the catalog update, so no
+    // sandbox-store lookup runs inside it.
+    const d1 = (await cat.get(d0.id)) ?? d0;
+    const inUse = await buildsInUse(deps, d1.builds.filter(which), seconds(deps));
     await cat.update(d0.id, async (cur) => {
       done.length = 0;
+      records.clear();
       const targets = cur!.builds.filter(which);
       if (targets.length === 0)
         throw new CpError('template_not_found', 'no such build of this template');
@@ -1209,6 +1214,24 @@ async function retireBuilds(
           `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then retire`,
         );
       done.push(...targets.filter((x) => x.status !== 'retired'));
+      // Each `retire` record is written inside the update, as a host's build report writes its
+      // own: a record that cannot be written leaves the build as it was, so a retry retires it
+      // with its record, and no build is retired without one.
+      for (const x of done) {
+        const rec = await prov.append({
+          stream: `template/${d0.id}`,
+          kind: 'retire',
+          subject: p.sub,
+          body: {
+            build: x.handle ?? x.buildId,
+            ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
+            buildRecord: await buildRecordOf(prov, d0.id, x),
+            from: x.status,
+            ...(typeof reason === 'string' ? { reason } : {}),
+          },
+        });
+        records.set(x.handle ?? x.buildId, rec.digest);
+      }
       return {
         ...cur!,
         builds: cur!.builds.map((x) =>
@@ -1217,22 +1240,6 @@ async function retireBuilds(
       };
     });
   });
-  const records = new Map<string, string>();
-  for (const x of done) {
-    const rec = await prov.append({
-      stream: `template/${d0.id}`,
-      kind: 'retire',
-      subject: p.sub,
-      body: {
-        build: x.handle ?? x.buildId,
-        ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
-        buildRecord: await buildRecordOf(prov, d0.id, x),
-        from: x.status,
-        ...(typeof reason === 'string' ? { reason } : {}),
-      },
-    });
-    records.set(x.handle ?? x.buildId, rec.digest);
-  }
   if (done.length > 0)
     await auditBestEffort(deps, 'template_retired', d0.id, {
       subject: p.sub,

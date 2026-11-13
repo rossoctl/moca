@@ -1175,6 +1175,52 @@ describe('retire (§5.1)', () => {
     expect(await refusal(() => retireBuild(d, 't1', hash('2')))).toBe('build_in_use');
   });
 
+  it('judges build_in_use on the template as read under the lock, not the request read', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The retire's first read of t1 is from before build 2 existed.
+    const cat = d.templates!;
+    const get = cat.get.bind(cat);
+    const stale = (await get('t1'))!;
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    await activate(d, 't1', alice, { build: hash('2') });
+    await sandbox(d, `t1@${hash('2')}`);
+    let first = true;
+    cat.get = async (id: string) => {
+      if (first) {
+        first = false;
+        return stale;
+      }
+      return get(id);
+    };
+    // Build 2 serves a live sandbox: the whole template is refused, and nothing is retired.
+    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
+    expect((await get('t1'))!.builds.map((x) => x.status)).toEqual(['registered', 'registered']);
+  });
+
+  it('retires nothing when its retire record cannot be written; a retry retires it', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let fail = true;
+    prov.append = async (input) => {
+      if (input.kind === 'retire' && fail) throw new Error('the store is full');
+      return append(input);
+    };
+    await expect(retire(d, 't1')).rejects.toThrow('the store is full');
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    fail = false;
+    const r = (await retire(d, 't1')).body as Body;
+    expect(r.builds[0].record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(
+      (await prov.chain('template/t1')).filter((x) => x.kind === 'retire').map(recordDigestOf),
+    ).toEqual([r.builds[0].record]);
+  });
+
   it('judges build_in_use by worker for a sandbox record without a build id', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
