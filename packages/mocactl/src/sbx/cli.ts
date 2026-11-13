@@ -45,6 +45,7 @@ import { PushError, repoRoot } from './push.js';
 import { findSandboxFile, readBinding, readBoundSandbox, SANDBOX_ID_RE } from './state.js';
 import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from './sync.js';
 import { type AgentopExec } from './agentop.js';
+import { openCallRecord, type CallRecorder } from './call-record.js';
 import {
   cmdCancelBuild,
   cmdCreateTemplates,
@@ -105,7 +106,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  .sbx/ (unless --keep-config) (refused while the
                                                  sandbox has changes not yet pulled, unless --force,
                                                  or when that cannot be checked)
-  mocactl sbx token [ID] [--json]                print a fresh sandbox token (15 minutes by default)
+  mocactl sbx token [ID] [--renew-every S] [--json]
+                                                 print a fresh sandbox token (15 minutes by default);
+                                                 --renew-every: a new line every S seconds until stopped
   mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
   mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
@@ -168,6 +171,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx credentials delete NAME            delete one
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1)
+--record F (every command that calls the API but token, login, logout and credentials): one
+NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
 login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
@@ -188,13 +193,13 @@ export interface SbxDeps {
   /** The gRPC connection (tests pass a fake). */
   execFactory?: ExecFactory;
   /**
-   * The template commands' waits, and `run`'s wait between tries after a refusal before start
-   * (default: the runtime's sleep).
+   * The template commands' and `token --renew-every`'s waits, and `run`'s wait between tries
+   * after a refusal before start (default: the runtime's sleep).
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** `run`'s jitter, 0 to 1 (default Math.random). */
   random?: () => number;
-  /** The template commands' clock, epoch ms (default: the runtime's). */
+  /** The template commands' and `--record`'s clock, epoch ms (default: the runtime's). */
   now?: () => number;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
   claudeVersion?: () => Promise<string | undefined> | string | undefined;
@@ -336,6 +341,11 @@ const NO_JSON = new Set([
 ]);
 /** The commands that open without the login check: they log in, out, or check it themselves (R7). */
 const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
+/**
+ * The commands `--record F` is refused on: a token printed on purpose, the login itself, and
+ * credentials, whose secrets are the request.
+ */
+const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
 /** The `templates` subcommands; all but `create` take one template ID. */
 const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel'];
 /** The `templates` subcommands that take --build, and those that take --timeout (a wait). */
@@ -369,6 +379,7 @@ const SYNC_FLAGS: [
     | 'cortex'
     | 'keep-config'
     | 'no-browser'
+    | 'renew-every'
     | 'seed'
   ),
   string[],
@@ -383,7 +394,19 @@ const SYNC_FLAGS: [
   ['cortex', ['up']],
   ['keep-config', ['rm']],
   ['no-browser', ['login']],
+  ['renew-every', ['token']],
 ];
+
+/** A whole number of seconds, at least 1, for `flag`; null (after saying why) when malformed. */
+function wholeSeconds(io: Io, flag: string, raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    io.err(`sbx: --${flag} must be a whole number of seconds, at least 1 (got '${raw}')`);
+    return null;
+  }
+  return n;
+}
 /** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
 
@@ -407,6 +430,21 @@ export async function sbxMain(
   env: NodeJS.ProcessEnv,
   io: Io,
   deps: SbxDeps = {},
+): Promise<number> {
+  const opened: { recorder?: CallRecorder } = {};
+  try {
+    return await sbxMainWith(argv, env, io, deps, opened);
+  } finally {
+    opened.recorder?.close();
+  }
+}
+
+async function sbxMainWith(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  io: Io,
+  deps: SbxDeps,
+  record: { recorder?: CallRecorder },
 ): Promise<number> {
   let parsed;
   try {
@@ -437,6 +475,8 @@ export async function sbxMain(
         host: { type: 'string', multiple: true },
         kind: { type: 'string' },
         preset: { type: 'string' },
+        'renew-every': { type: 'string' },
+        record: { type: 'string' },
         spec: { type: 'string', multiple: true },
         id: { type: 'string' },
         image: { type: 'string' },
@@ -539,6 +579,12 @@ export async function sbxMain(
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  if (values.record !== undefined && NO_RECORD.has(command)) {
+    io.err(`sbx: ${command} takes no --record (it would record a secret)\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  const renewEvery = wholeSeconds(io, 'renew-every', values['renew-every']);
+  if (renewEvery === null) return SBX_EXIT.usage;
   const credFlag = (['host', 'kind', 'preset'] as const).find((f) => values[f] !== undefined);
   if (credFlag && !(command === 'credentials' && arg === 'add')) {
     io.err(`sbx: --${credFlag} only applies to credentials add\n${SBX_USAGE}`);
@@ -785,6 +831,22 @@ export async function sbxMain(
   // and the environment still win (R5j).
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
   const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
+  // --record F: every HTTP attempt this command makes, the login's refresh included, so the record
+  // is opened (or refused) before the runtime's clients exist. Exec calls are gRPC, not recorded.
+  if (values.record !== undefined) {
+    const r = openCallRecord(values.record, `sbx ${command}`, deps.now);
+    if ('error' in r) {
+      io.err(`sbx: ${r.error}`);
+      return SBX_EXIT.usage;
+    }
+    record.recorder = r;
+    const base = resolveSbxUrl(
+      flagUrl,
+      env,
+      loadConfig(resolvePaths(env, deps.home ?? homedir())).config,
+    );
+    deps = { ...deps, fetchImpl: r.wrap(deps.fetchImpl ?? fetch, base ?? 'http://invalid') };
+  }
   const opened = await openSbx({ controlPlaneUrl: flagUrl }, env, io, deps, {
     login: OWN_LOGIN.has(command),
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
@@ -867,7 +929,7 @@ export async function sbxMain(
     case 'doctor':
       return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
     case 'token':
-      return cmdToken(ctx, id!);
+      return cmdToken(ctx, id!, renewEvery);
     case 'run':
       return cmdRun(ctx, id!, script!, timeout, deps.execFactory, runRetry(env, deps, ctx));
     case 'put':
