@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { buildHandler, startControlPlane } from '../src/server.js';
+import { GRANT_TYP } from '../src/grant.js';
+import { makeSigner, publicKeyFromBase64 } from '../src/token.js';
 import { TestUserProvider } from '../src/identity.js';
 import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
 
@@ -480,5 +482,99 @@ describe('a feature-gated route is UNROUTED when its feature is off (ADR-0045)',
     expect([ok.status, (ok.json() as { subject: string }).subject]).toEqual([200, 'test:2']);
     // An unrouted path is still 404, so the two cases stay distinguishable in the right direction.
     expect((await request('POST', '/v1/no/such/path')).status).toBe(404);
+  });
+});
+
+describe('the grant lifecycle over real HTTP (MI1 §6.1-§6.2)', () => {
+  const exchange = { Authorization: 'Bearer shared-abc' }; // notsecret
+
+  async function session(body: object): Promise<string> {
+    const created = await request('POST', '/v1/sessions', {
+      body,
+      headers: { Authorization: `Bearer ${await apiToken()}` },
+    });
+    return (created.json() as { token: string }).token;
+  }
+
+  const part = (t: string, i: number) =>
+    JSON.parse(Buffer.from(t.split('.')[i]!, 'base64url').toString());
+
+  it('404s both routes with no ring configured, and leaves /internal/credentials alone', async () => {
+    // The first of the two boot checks: a deployment that has never generated a grant key must
+    // behave exactly as it did before this slice. 404 for a body, an empty body and no body alike,
+    // because the gate runs before the body is read -- an `invalid_request` would reveal the route.
+    for (const path of ['/internal/turn-grants', '/internal/grants/refresh']) {
+      for (const opts of [{}, { body: {} }, { body: { token: 'x', grant: 'x' } }]) {
+        const res = await request('POST', path, { ...opts, headers: exchange });
+        expect([path, res.status, res.json()]).toEqual([path, 404, { error: 'not_found' }]);
+      }
+    }
+    const creds = await request('POST', '/internal/credentials', {
+      body: { token: await session({}) },
+      headers: exchange,
+    });
+    expect([creds.status, (creds.json() as { mode: string }).mode]).toEqual([200, 'direct']);
+  });
+
+  it('issues and refreshes a pair once the ring is configured', async () => {
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const grantSigner = makeSigner(
+      privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+      'MOCA_GRANT_SIGNING_KEY',
+    );
+    server.close();
+    d = makeDeps({
+      config: { exchangeToken: 'shared-abc' }, // notsecret
+      grantSigner,
+      grantVerifyKeys: new Map([
+        [grantSigner.kid, publicKeyFromBase64(grantSigner.publicKeyBase64)],
+      ]),
+    });
+    await seedCredential(d);
+    server = startControlPlane(d, 0);
+    await new Promise<void>((r) => server.once('listening', () => r()));
+    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+    const token = await session({ credentials: { inference: 'my-anthropic' } });
+    const issued = await request('POST', '/internal/turn-grants', {
+      body: { token },
+      headers: exchange,
+    });
+    expect(issued.status).toBe(200);
+    const first = issued.json() as {
+      inferenceGrant: string;
+      sandboxGrant: string;
+      turnExp: number;
+    };
+
+    for (const [grant, aud] of [
+      [first.inferenceGrant, 'moca-inference'],
+      [first.sandboxGrant, 'moca-sandbox'],
+    ] as const) {
+      expect(part(grant, 0)).toEqual({ alg: 'EdDSA', typ: GRANT_TYP, kid: grantSigner.kid });
+      const c = part(grant, 1);
+      // The defaults, read off the wire rather than off the config object: 300 s of grant inside a
+      // 1800 s turn, which is what makes a worker refresh and what stops it refreshing forever.
+      expect([c.aud, c.exp - c.iat, c.turn_exp - c.iat]).toEqual([aud, 300, 1800]);
+      expect(c.turn_exp).toBe(first.turnExp);
+    }
+    // The NAME, not the secret -- the property the whole slice exists for.
+    expect(part(first.inferenceGrant, 1).cred).toBe('my-anthropic');
+
+    const refreshed = await request('POST', '/internal/grants/refresh', {
+      body: { grant: first.inferenceGrant },
+      headers: exchange,
+    });
+    expect(refreshed.status).toBe(200);
+    expect((refreshed.json() as { turnExp: number }).turnExp).toBe(first.turnExp);
+    // A session token in the `grant` field is the mistake a worker actually makes; 401 is the answer.
+    const wrong = await request('POST', '/internal/grants/refresh', {
+      body: { grant: token },
+      headers: exchange,
+    });
+    expect([wrong.status, (wrong.json() as { error: string }).error]).toEqual([
+      401,
+      'grant_invalid',
+    ]);
   });
 });
