@@ -10,7 +10,7 @@ import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
 import { hostManaged, liveLeases, place, readinessOf, type Placement } from './activation.js';
-import { freshHosts, hostViewsOf } from './host-handlers.js';
+import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
@@ -276,7 +276,9 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
   const placement =
-    hosts.length > 0 ? place(docs ?? (await catalog(deps).list()), hosts, nowS) : null;
+    hosts.length > 0
+      ? place(docs ?? (await catalog(deps).list()), hosts, nowS, await busyWorkers(deps, nowS))
+      : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -750,13 +752,13 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /**
- * Per host: its limits, its use (builds placed on it now) and its disk (§4, §6.2), as its agent
+ * Per host: its limits, its use (the workers placement counts on it: placed, running, draining) and
+ * its disk (§4, §6.2), as its agent
  * last reported them. Empty when no host has reported, never meaning "no limit"; a host silent for
  * over HOST_STALE_S is left out, as placement leaves it out.
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
-  const used = new Map<string, number>();
-  for (const h of f.placement?.placed.values() ?? []) used.set(h, (used.get(h) ?? 0) + 1);
+  const used = f.placement?.used ?? new Map<string, number>();
   return freshHosts(deps).map(([id, h]) => ({
     id,
     active: { limit: h.limits.activeLimit, used: used.get(id) ?? 0 },
@@ -927,11 +929,12 @@ async function takeLeaseLocked(
       ? d
       : { ...d, builds: d.builds.map((x) => (x.buildId === target.buildId ? withLease(x) : x)) },
   );
-  const pl = place(trial, hosts, nowS);
+  const busy = await busyWorkers(deps, nowS);
+  const pl = place(trial, hosts, nowS, busy);
   // A held build is never evicted to make room (§6.3): placement breaks a tie of equal `since` (whole
   // seconds) by buildId, so a lease taken in the same second as a placed one could otherwise sort
   // ahead of it and push it off its host. Such a lease waits, as one that does not fit.
-  const before = place(docs, hosts, nowS);
+  const before = place(docs, hosts, nowS, busy);
   const displaces = [...before.placed.keys()].some(
     (x) => x !== target.buildId && !pl.placed.has(x),
   );

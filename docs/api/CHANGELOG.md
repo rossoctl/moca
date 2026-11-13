@@ -23,8 +23,12 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
   admin with `all: true`, everyone's), answering `{templateId, released}`, with a `deactivate`
   record when any is dropped.
 - New GET /v1/hosts/{host}/wanted (host bearer): `run`, the leased builds placed on this host within
-  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox; new
-  `WantedWorker` schema.
+  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox (and a leased
+  build it runs while placement keeps it on another host); new `WantedWorker` schema. Placement is
+  sticky (a running build stays on its host) and counts every worker that stays running on a host:
+  leased builds placed or running there, and unleased ones draining a live sandbox.
+- POST /v1/hosts/{host}/inventory: each `holds` entry gains `running` (boolean, default false):
+  whether the build's worker unit runs on the host.
 - New POST /v1/hosts/{host}/workers/report `{buildId, event, reason?}` (host bearer): `attached`,
   `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>`;
   readiness still comes from the relay.
@@ -38,7 +42,8 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
   `lease` is now the digest of the caller's `activate` record (null without a lease).
 - Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
   any host reports it is the presence alone, as before.
-- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}`, `idleLimitSeconds`
+- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}` (`used`: the
+  workers placement counts on it), `idleLimitSeconds`
   and `disk {freeGb, floorGb}`. A host whose last inventory is over 6 minutes old is left out of
   it and of placement until it reports again.
 - GET /v1/quota: `active.used` counts the builds the caller holds a live lease on.

@@ -652,8 +652,8 @@ are the deployment's to run, they take no lease, and a create on one is never ga
 host's wanted state (`GET /v1/hosts/<id>/wanted`) lists the leased builds placed on it, at most
 `SBX_ACTIVE_LIMIT` of them, in `run`, and the builds it holds with no lease and no live sandbox in
 `stop`. After each build poll, and every 15 s in `sbx-host-agent-wanted.service` (`host-agent.sh
---wanted-only`: no claim, no build), the agent starts each `run` worker whose `sbx-worker@<id>` unit
-is installed and not active, stops each `stop` worker whose unit is active, and reports each start,
+--wanted-only`: no claim, no build), the agent stops each `stop` worker whose unit is active, then
+starts each `run` worker whose `sbx-worker@<id>` unit is installed and not active, and reports each start,
 refusal and stop (`attached`, `refused`, `detached`) as provenance; readiness is the relay's
 attached record, never these reports. A worker with a live sandbox is never stopped: it drains
 first. A lock (`/srv/sbx/.activation.lock`) keeps the two units from starting or stopping workers at
@@ -664,6 +664,9 @@ a stopped or removed agent takes no new placement and no slot. Size the limits:
 - `SBX_ACTIVE_LIMIT` is how many workers the host runs at once: each pins its snapshot's guest
   memory whole from its start, with its standby VMs, so size it from the host's memory and the
   templates' guest sizes, leaving the host's own reserve. 0 (unset) places nothing on the host.
+  Every worker that stays running counts against it: the leased builds placed or running on the
+  host (the inventory says which units run; a running build stays on its host), and an unleased
+  one still draining a live sandbox, until it stops.
 - `SBX_IDLE_LIMIT_S` is the default lease length a client gets when it names none (the largest of
   the hosts' that hold the build, clamped to 60-86400 s; else 3600 s). A lease is renewed by activating again.
 - The policy's `quota.active` caps the builds one subject holds a lease on at once

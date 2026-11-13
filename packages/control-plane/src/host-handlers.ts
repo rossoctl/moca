@@ -59,6 +59,11 @@ export interface HostState {
   at: number;
   /** manifest hash -> template id, what the host holds. */
   holds: Record<string, string>;
+  /**
+   * The held builds whose worker unit runs: as the last inventory said, then kept current by the
+   * host's attached and detached reports, so placement counts what the host really runs.
+   */
+  running: string[];
   limits: {
     activeLimit: number;
     idleLimitSeconds: number;
@@ -97,7 +102,17 @@ export function hostViewsOf(deps: CpDeps): HostView[] {
     id,
     holds: h.holds,
     activeLimit: h.limits.activeLimit,
+    running: h.running,
   }));
+}
+
+/** The workers with a live sandbox: never stopped under one, so they drain and keep their slot. */
+export async function busyWorkers(deps: CpDeps, nowS: number): Promise<Set<string>> {
+  const busy = new Set<string>();
+  if (deps.sandboxes) {
+    for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  }
+  return busy;
 }
 
 /** The hosts whose last inventory is at most HOST_STALE_S old, by id. */
@@ -216,28 +231,31 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
-   * live lease. A worker is never stopped under a live sandbox: it drains first, so a build with
-   * one is in neither list.
+   * live lease, or that it runs while placement keeps them on another host. A worker is never
+   * stopped under a live sandbox: it drains first, so a build with one is in neither list.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
     const { cat } = catalogOf(deps);
     const nowS = seconds(deps);
     const docs = await cat.list();
-    const p = place(docs, hostViewsOf(deps), nowS);
+    const busy = await busyWorkers(deps, nowS);
+    const p = place(docs, hostViewsOf(deps), nowS, busy);
     const mine = deps.hosts?.get(host);
-    const busy = new Set<string>();
-    if (deps.sandboxes) {
-      for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
-    }
     const run: Record<string, unknown>[] = [];
     const stop: Record<string, unknown>[] = [];
     for (const d of docs) {
       for (const b of d.builds) {
         if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
-        if (p.placed.get(b.buildId) === host) run.push(entry);
-        else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) stop.push(entry);
+        if (p.placed.get(b.buildId) === host) {
+          run.push(entry);
+          continue;
+        }
+        // Stopped when no lease is left, or when it runs here while placement keeps it on another
+        // host (one worker id on two hosts): this host's copy stops. Never under a live sandbox.
+        const unleased = liveLeases(b, nowS).length === 0;
+        if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
       }
     }
     return { status: 200, body: { run, stop } };
@@ -264,6 +282,11 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError('not_found', 'no registered build this host holds');
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
+    // What the host runs, as placement counts it, without waiting for its next inventory: started
+    // (attached) runs; stopped (detached) and not started (refused) do not.
+    const st = deps.hosts!.get(host)!;
+    const others = st.running.filter((x) => x !== buildId);
+    st.running = event === 'attached' ? [...others, buildId] : others;
     await prov.append({
       stream: `template/${doc.id}`,
       kind: event === 'detached' ? 'deactivate' : 'activate',
@@ -277,6 +300,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const host = hostOf(ctx);
     const b = asRecord(ctx.body);
     const holds: Record<string, string> = {};
+    const running: string[] = [];
     const inv = Array.isArray(b.holds) ? b.holds : [];
     for (const h of inv) {
       const r = asRecord(h);
@@ -286,6 +310,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         typeof r.template === 'string'
       ) {
         holds[r.manifestHash] = r.template;
+        if (r.running === true) running.push(r.manifestHash);
       }
     }
     const l = asRecord(b.limits);
@@ -296,7 +321,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFreeGb: nonNeg(l.diskFreeGb) ?? 0,
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
-    deps.hosts?.set(host, { at: seconds(deps), holds, limits });
+    deps.hosts?.set(host, { at: seconds(deps), holds, running, limits });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 

@@ -339,15 +339,20 @@ Known limits: a claimed build is not re-queued if the agent dies mid-build; one 
 run at once), its `idleLimitSeconds` (the default lease length, §6.3), its `buildConcurrency` and its
 disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its operator sizes them
 from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
-`active {limit, used}`, where `used` is the leased builds placed on it now.
+`active {limit, used}`, where `used` counts the workers that stay running on it: the leased builds
+placed or running there, and the unleased ones still draining a live sandbox. The inventory says,
+per held build, whether its worker's unit is `running`; the host's `attached` and `detached` reports
+keep that current between inventories.
 
 **Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
 Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
 use.
 
 **Placement:** a wanted build (one with a live lease, §6.3) is placed on a host whose last inventory
-holds its snapshot (by manifest hash) and that is under its `activeLimit`: the one with the fewest
-builds placed, then by id, in the order the leases began (first leased, first placed). A build no
+holds its snapshot (by manifest hash). Placement is sticky: a build already running on a holder stays
+there, so a lease ending elsewhere never moves a running worker to another host. Any other goes to
+a holder under its `activeLimit`, the one with the fewest workers counted (above), then by id, in
+the order the leases began (first leased, first placed). A build no
 reporting host holds is not placed (`unavailable`); one whose every holder is full waits
 (`unavailable`), and is never placed by evicting a leased build. A host whose last inventory is
 more than 6 minutes old (three build polls) is left out of placement, of the hosts block and of
@@ -379,9 +384,10 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   (`409 no_active_slot`) rather than displacing it. The lock is in the control plane's process, so
   one process per template store is what makes it enough.
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
-  host) and `stop` (the builds it holds with no lease and no live sandbox). The agent starts each
-  `run` worker that is installed and not running (`sbx-worker@<id>`), stops each `stop` worker that
-  runs, and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
+  host) and `stop` (the builds it holds with no lease and no live sandbox, and a leased build it
+  runs while placement keeps it on another host, so one worker id never runs on two hosts). The
+  agent stops each `stop` worker that runs, then starts each `run` worker that is installed and not
+  running (`sbx-worker@<id>`), and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
   `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`.
   Readiness never comes from a report: `active` is the relay's attached record. A worker that is
   not installed is reported `refused`, never installed by the agent.

@@ -15,9 +15,9 @@
 #                                                 so an activation waits seconds, not behind a build)
 #
 # The wanted state (GET /v1/hosts/<id>/wanted): `run` lists the leased builds placed on this host,
-# `stop` the ones it holds with no lease and no live sandbox. The agent starts each `run` worker whose
-# sbx-worker@<id> unit is installed and not active, and stops each `stop` worker whose unit is active,
-# reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
+# `stop` the ones it holds with no lease and no live sandbox (or that another host is placed on). The
+# agent stops each `stop` worker whose unit is active, then starts each `run` worker whose
+# sbx-worker@<id> unit is installed and not active, reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
 # /v1/hosts/<id>/workers/report. Readiness is the relay's attached record, never these reports. A
 # lock ($SBX_SRV/.activation.lock, flock) keeps a build poll and a --wanted-only run from applying
 # the wanted state at once: the one that does not get it skips, saying so.
@@ -119,15 +119,18 @@ held_records() {
   done
 }
 
-# The snapshots this host holds, by manifest hash, as template-build.sh's records name them, and
-# its limits.
+# The snapshots this host holds, by manifest hash, as template-build.sh's records name them, each
+# with whether its worker's unit is running (the control plane counts running workers against
+# SBX_ACTIVE_LIMIT and keeps a running build on this host), and its limits.
 inventory() {
-  local f out="$WORK/inventory.json"
+  local f w r out="$WORK/inventory.json"
   {
     printf '{"holds":['
     local sep=''
     while IFS= read -r f; do
-      printf '%s%s' "$sep" "$(jq -c '{template: .id, manifestHash: .manifest_hash}' "$f")"
+      w="$(jq -r '.worker // ""' "$f")" r=false
+      if [[ "$w" =~ $WORKER_RE ]] && systemctl is-active --quiet "sbx-worker@$w.service"; then r=true; fi
+      printf '%s%s' "$sep" "$(jq -c --argjson r "$r" '{template: .id, manifestHash: .manifest_hash, running: $r}' "$f")"
       sep=','
     done < <(held_records)
     printf '],"limits":{"activeLimit":%d,"idleLimitSeconds":%d,"buildConcurrency":%d,"diskFreeGb":%d,"diskFloorGb":%d}}' \
@@ -261,6 +264,17 @@ activation() {
   if ! jq -e '(.run | type) == "array" and (.stop | type) == "array"' >/dev/null 2>&1 <<<"$wanted"; then
     error 'wanted state malformed'; exec 9>&-; return 0
   fi
+  # Stops first, so a slot a stopped worker frees is free before a start uses it.
+  while IFS=$'\t' read -r w b; do
+    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to stop is malformed'; continue; }
+    unit="sbx-worker@$w.service"
+    systemctl is-active --quiet "$unit" || continue
+    if systemctl stop "$unit"; then
+      STOPPED=$((STOPPED + 1)); worker_report "$b" detached; say "{\"agent\":\"stopped\",\"worker\":\"$w\"}"
+    else
+      error "stop $unit failed"
+    fi
+  done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
   while IFS=$'\t' read -r w b; do
     [[ "$w" =~ $WORKER_RE ]] || { error 'a wanted worker id is malformed'; continue; }
     unit="sbx-worker@$w.service"
@@ -277,16 +291,6 @@ activation() {
       worker_report "$b" refused "systemctl start $unit failed"; error "start $unit failed"
     fi
   done < <(jq -r '.run[] | [.worker, .buildId] | @tsv' <<<"$wanted")
-  while IFS=$'\t' read -r w b; do
-    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to stop is malformed'; continue; }
-    unit="sbx-worker@$w.service"
-    systemctl is-active --quiet "$unit" || continue
-    if systemctl stop "$unit"; then
-      STOPPED=$((STOPPED + 1)); worker_report "$b" detached; say "{\"agent\":\"stopped\",\"worker\":\"$w\"}"
-    else
-      error "stop $unit failed"
-    fi
-  done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
   exec 9>&-
 }
 

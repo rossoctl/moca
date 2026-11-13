@@ -108,7 +108,7 @@ pass 'a claimed build is built and reported built with its template record and m
 job ''
 printf '{"builds":[]}' >"$TMP/state/claim-answer"
 run || fail 'second poll'
-jq -e '.holds == [{template: "django-django-11133", manifestHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]' "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null ||
+jq -e '.holds == [{template: "django-django-11133", manifestHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", running: false}]' "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null ||
   fail 'the inventory does not name the held snapshot'
 pass 'the inventory names the snapshots held, by manifest hash'
 
@@ -258,6 +258,20 @@ run || fail 'stop poll'
 grep -q 'systemctl stop sbx-worker@sbx_t1.service' "$MOCK_LOG" || fail 'did not stop the unwanted worker'
 jq -e '.event == "detached" and .buildId == "sha256:1"' "$W" >/dev/null || fail 'detach not reported'
 grep -q '"stopped":1' "$TMP/out" || fail 'the stop is not in the summary'
+# The inventory says which held builds' worker units run: a record whose worker's unit is active.
+jq -n '{schema: "moca-sbx-template/1", id: "t1", worker: "sbx_t1", snapshot: "t1-x", manifest_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"}' \
+  >"$SBX_SRV/templates/t1-x.json"
+printf '{"run":[{"worker":"sbx_t1","buildId":"sha256:1"}],"stop":[]}' >"$TMP/state/wanted-answer"
+run || fail 'restart poll'
+run || fail 'running-inventory poll'
+jq -e '.holds | map(select(.template == "t1")) == [{template: "t1", manifestHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111", running: true}]' \
+  "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null || fail 'the inventory does not say the running worker runs'
+# Stops come before starts, so a freed slot is free before a start takes it.
+printf '{"run":[{"worker":"sbx_t2","buildId":"sha256:2"}],"stop":[{"worker":"sbx_t1","buildId":"sha256:1"}]}' >"$TMP/state/wanted-answer"
+: >"$TMP/workers/sbx_t2.env"; : >"$MOCK_LOG"
+run || fail 'stop-and-start poll'
+[[ "$(grep -E 'systemctl (start|stop) ' "$MOCK_LOG" | cut -d' ' -f2 | tr '\n' ' ')" == 'stop start ' ]] || fail 'did not stop before starting'
+rm -f "$TMP/workers/sbx_t2.env" "$SBX_SRV/templates/t1-x.json" "$TMP/state/active-sbx-worker@sbx_t2.service"
 printf '{"run":[{"worker":"../x","buildId":"sha256:1"}],"stop":[]}' >"$TMP/state/wanted-answer"
 run || fail 'malformed wanted poll'
 grep -q 'systemctl start' "$MOCK_LOG" && fail 'started a malformed worker id'
