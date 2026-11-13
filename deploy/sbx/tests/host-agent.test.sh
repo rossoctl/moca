@@ -609,7 +609,7 @@ entry c8 "$EV" >>"$TMP/state/journal"
 egress_run || fail 'the no-egressSids run failed'
 [[ ! -e "$TMP/state/egress-posts" ]] || fail 'sent without egressSids'
 grep -q '^journalctl' "$MOCK_LOG" && fail 'read the journal without egressSids'
-grep -q 'the wanted state has no egressSids (a control plane older than openapi 1.9.0); nothing sent, the cursor kept' "$TMP/out" ||
+grep -q 'the wanted state has no egressSids (a control plane older than openapi 1.10.0); nothing sent, the cursor kept' "$TMP/out" ||
   fail 'no error line for a missing egressSids'
 [[ "$(<"$TMP/srv/egress.cursor")" == c7 ]] || fail 'the cursor moved without egressSids'
 printf '{"run":[],"stop":[],"egressSids":["%s"]}' "$SID" >"$TMP/state/wanted-answer"

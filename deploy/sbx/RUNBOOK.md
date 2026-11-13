@@ -502,7 +502,7 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   (a sandbox created in between, at its first egress) reads the wanted state again, after the journal
   read, before anything is left out; if that read fails, nothing is sent and the cursor stays. The
   proxy's `audit_dropped` reports are sent. Against a control plane
-  whose wanted state has no `egressSids` (older than openapi 1.9.0), the agent sends nothing and says
+  whose wanted state has no `egressSids` (older than openapi 1.10.0), the agent sends nothing and says
   so in an error line, keeping its cursor.
 - **A time budget:** a run starts no new batch 120 s after its egress step began, so slow posts never
   hold the wanted unit (`TimeoutStartSec` 5 min) and its activations. The cursor stays at the last
