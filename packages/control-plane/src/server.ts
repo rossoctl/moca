@@ -114,12 +114,13 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         req.method ?? '',
         req.url ?? '',
         deps.config.routeProfile ?? 'harness',
-        // Both gates, in one object. ADR-0045: a feature-gated route is unmounted when its
+        // Every gate, in one object. ADR-0045: a feature-gated route is unmounted when its
         // feature is off, so it 404s before the body below is read -- otherwise an empty body
         // would answer 400 invalid_json and thereby reveal that the route exists.
         {
           egress: deps.config.sandbox?.egress !== undefined,
           testUsers: !!deps.testUsers,
+          grants: deps.grantSigner !== undefined,
         },
       );
       if (!matched) {

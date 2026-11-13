@@ -103,7 +103,7 @@ export function keyIdFor(publicKey: KeyObject): string {
 /**
  * A keyset entry that does not parse. `kind` is what is wrong with it, so a caller that reports the
  * error under its own variable name (the sandbox relay's SH_SANDBOX_TOKEN_PUBLIC_KEYS) classifies on
- * it rather than on the message, which names SH_SESSION_TOKEN_PUBLIC_KEYS and quotes the entry.
+ * it rather than on the message, which names `parseKeyset`'s `label` and quotes the entry.
  */
 export class KeysetError extends Error {
   constructor(
@@ -121,18 +121,23 @@ export class KeysetError extends Error {
  * Accepting a LIST is what makes rotation possible without a flag day (spec §5.2). A malformed or
  * mislabelled entry THROWS rather than being skipped: a silently dropped key is a deployment that
  * rejects every token minted with it, discovered only in production.
+ *
+ * `label` is the variable name the error messages quote. It defaults to the session keyset's, so
+ * every existing caller is unchanged; MI1 §6.1's grant ring is a SECOND keyset in the same format
+ * (`MOCA_GRANT_PUBLIC_KEYS`) and passes its own, because a boot error naming the wrong variable
+ * sends an operator to edit a setting that is already correct.
  */
-export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
+export function parseKeyset(
+  raw: string | undefined,
+  label = 'SH_SESSION_TOKEN_PUBLIC_KEYS',
+): Map<string, KeyObject> {
   const keys = new Map<string, KeyObject>();
   for (const entry of (raw ?? '').split(',')) {
     const trimmed = entry.trim();
     if (!trimmed) continue;
     const idx = trimmed.indexOf(':');
     if (idx <= 0) {
-      throw new KeysetError(
-        'format',
-        `SH_SESSION_TOKEN_PUBLIC_KEYS entry '${trimmed}' is not '<kid>:<base64 SPKI>'`,
-      );
+      throw new KeysetError('format', `${label} entry '${trimmed}' is not '<kid>:<base64 SPKI>'`);
     }
     const kid = trimmed.slice(0, idx).trim();
     let key: KeyObject;
@@ -141,7 +146,7 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
     } catch (err) {
       throw new KeysetError(
         'key',
-        `SH_SESSION_TOKEN_PUBLIC_KEYS entry '${kid}' is not a base64 Ed25519 SPKI ` +
+        `${label} entry '${kid}' is not a base64 Ed25519 SPKI ` +
           `(a wrong curve is rejected here, not per request): ${String(err)}`,
       );
     }
@@ -149,7 +154,7 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
     if (derived !== kid) {
       throw new KeysetError(
         'kid',
-        `SH_SESSION_TOKEN_PUBLIC_KEYS entry kid '${kid}' does not match its key (expected '${derived}')`,
+        `${label} entry kid '${kid}' does not match its key (expected '${derived}')`,
       );
     }
     keys.set(kid, key);
@@ -164,8 +169,15 @@ export function parseKeyset(raw: string | undefined): Map<string, KeyObject> {
  * base64 SPKI. Refuses a public key: the data plane holds only public halves, and "the harness cannot
  * mint" must be a property of this API rather than of its callers' discipline (spec §8.1,
  * token-forgery row).
+ *
+ * `label` names the variable the error messages quote, defaulting to the session key's so every
+ * existing caller is unchanged. MI1 §6.1's grant ring is a second signer over the same primitive
+ * (`MOCA_GRANT_SIGNING_KEY`) and passes its own.
  */
-export function makeSigner(privateKeyPem: string): {
+export function makeSigner(
+  privateKeyPem: string,
+  label = 'SH_SESSION_TOKEN_PRIVATE_KEY',
+): {
   kid: string;
   publicKeyBase64: string;
   signJws(typ: string, claims: object): string;
@@ -181,10 +193,10 @@ export function makeSigner(privateKeyPem: string): {
           type: 'pkcs8',
         });
   } catch (err) {
-    throw new Error(`SH_SESSION_TOKEN_PRIVATE_KEY is not a usable private key: ${String(err)}`);
+    throw new Error(`${label} is not a usable private key: ${String(err)}`);
   }
   if (key.asymmetricKeyType !== 'ed25519') {
-    throw new Error(`session token signing key must be ed25519, got ${key.asymmetricKeyType}`);
+    throw new Error(`${label} must be an ed25519 key, got ${key.asymmetricKeyType}`);
   }
   const publicKey = createPublicKey(key);
   const kid = keyIdFor(publicKey);
