@@ -81,6 +81,7 @@ MOCK
 cat >"$TMP/bin/install-host" <<'MOCK'
 #!/usr/bin/env bash
 printf 'install-host %s\n' "$*" >>"$MOCK_LOG"
+[[ -z "${MOCK_UNINSTALL_FAIL:-}" ]] || { echo '==> stopping'; echo 'install-host.sh: the unit would not stop' >&2; exit 1; }
 [[ "$1" == --uninstall ]] && rm -f "$SBX_ENV_DIR/workers/$2.env"
 MOCK
 chmod +x "$TMP/bin/curl" "$TMP/bin/template-build" "$TMP/bin/systemctl" "$TMP/bin/flock" "$TMP/bin/install-host"
@@ -405,9 +406,59 @@ grep -q 'workers/report' "$MOCK_LOG" && fail 'a mismatched removal was reported'
 jq -n '{run: [], stop: [], remove: [{template: "x", buildId: "../../etc", worker: "sbx_x"}]}' >"$TMP/state/wanted-answer"
 wo || fail 'the malformed removal run failed'
 grep -q 'build id to remove is malformed' "$TMP/out" || fail 'a malformed build id was not refused'
+# The name check before the delete: a record that matches but names no plain entry under snapshots/
+# (a parent, a hidden entry, a path, an empty or missing name, a non-string) deletes nothing and
+# reports nothing.
+H2="sha256:$(printf 'd%.0s' {1..64})" W2=sbx_bad_1
+mkdir -p "$TMP/srv/snapshots/.hidden" "$TMP/srv/snapshots/a/b" "$TMP/srv/snapshots/null"
+rm_wanted() { jq -n --arg h "$1" --arg w "$2" '{run: [], stop: [], remove: [{template: "x", buildId: $h, worker: $w}]}' >"$TMP/state/wanted-answer"; }
+rm_wanted "$H2" "$W2"
+for name in '".."' '".hidden"' '"a/b"' '""' 'null' '42' '["x"]' '{}' 'absent'; do
+  if [[ "$name" == absent ]]; then
+    jq -n --arg h "$H2" --arg w "$W2" '{schema: "moca-sbx-template/1", worker: $w, manifest_hash: $h}'
+  else
+    jq -n --arg h "$H2" --arg w "$W2" --argjson n "$name" '{schema: "moca-sbx-template/1", worker: $w, snapshot: $n, manifest_hash: $h}'
+  fi >"$TMP/srv/templates/bad-1.json"
+  wo || fail "the removal run with snapshot $name failed"
+  grep -q 'a template record names a bad snapshot' "$TMP/out" || fail "a record naming snapshot $name was not refused"
+  [[ -f "$TMP/srv/templates/bad-1.json" && -d "$TMP/srv/snapshots/.hidden" && -d "$TMP/srv/snapshots/a/b" &&
+    -d "$TMP/srv/snapshots/null" && -d "$TMP/srv/snapshots/keep-1" && -f "$TMP/srv/templates/keep-1.json" ]] ||
+    fail "a record naming snapshot $name deleted something"
+  ! grep -q 'install-host\|workers/report' "$MOCK_LOG" || fail "a record naming snapshot $name was uninstalled or reported"
+done
+rm -f "$TMP/srv/templates/bad-1.json"
+# An uninstall that fails keeps the snapshot and its record, sends no report, and says why (its last
+# lines: the log goes with the run's work directory). No install-host.sh at SBX_INSTALL_HOST, the same.
+H3="sha256:$(printf 'c%.0s' {1..64})" W3=sbx_unin_1
+mkdir -p "$TMP/srv/snapshots/unin-1"; : >"$TMP/srv/snapshots/unin-1/manifest.json"
+jq -n --arg h "$H3" --arg w "$W3" '{schema: "moca-sbx-template/1", worker: $w, snapshot: "unin-1", manifest_hash: $h}' >"$TMP/srv/templates/unin-1.json"
+: >"$TMP/workers/$W3.env"
+rm_wanted "$H3" "$W3"
+MOCK_UNINSTALL_FAIL=1 wo || fail 'the run with a failing uninstall failed'
+grep -q "install-host.sh --uninstall $W3 failed: ==> stopping install-host.sh: the unit would not stop" "$TMP/out" ||
+  fail 'a failed uninstall does not carry its last lines'
+[[ -f "$TMP/srv/snapshots/unin-1/manifest.json" && -f "$TMP/srv/templates/unin-1.json" ]] || fail 'a failed uninstall lost the snapshot or its record'
+! grep -q 'workers/report' "$MOCK_LOG" || fail 'a failed uninstall was reported'
+SBX_INSTALL_HOST="$TMP/no-such-install-host" wo || fail 'the run with no install-host.sh failed'
+grep -q "no install-host.sh at $TMP/no-such-install-host" "$TMP/out" || fail 'a missing install-host.sh is not named'
+[[ -f "$TMP/srv/snapshots/unin-1/manifest.json" && -f "$TMP/srv/templates/unin-1.json" ]] || fail 'a missing install-host.sh lost the snapshot or its record'
+! grep -q 'workers/report' "$MOCK_LOG" || fail 'a removal with no install-host.sh was reported'
+# A snapshot that cannot be deleted keeps its record (the next run retries) and is not reported;
+# once it can be, it goes. Skipped as root, whom a read-only directory does not stop.
+if [[ "$(id -u)" != 0 ]]; then
+  chmod 0555 "$TMP/srv/snapshots"
+  wo || { chmod 0755 "$TMP/srv/snapshots"; fail 'the run with an undeletable snapshot failed'; }
+  chmod 0755 "$TMP/srv/snapshots"
+  grep -q 'could not delete snapshot unin-1: kept its record' "$TMP/out" || fail 'a failed delete does not say so'
+  [[ -f "$TMP/srv/templates/unin-1.json" ]] || fail 'a failed delete dropped the record'
+  ! grep -q 'workers/report' "$MOCK_LOG" || fail 'a failed delete was reported'
+fi
+wo || fail 'the retried removal failed'
+[[ ! -e "$TMP/srv/snapshots/unin-1" && ! -e "$TMP/srv/templates/unin-1.json" ]] || fail 'the retried removal left the snapshot or its record'
+jq -e --arg h "$H3" '.event == "removed" and .buildId == $h' "$TMP/state/POST_v1_hosts_host-1_workers_report" >/dev/null || fail 'the retried removal was not reported'
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 wo || fail 'a wanted state without remove failed'
 grep -q '"removed":0,"errors":0' "$TMP/out" || fail 'a wanted state without remove (an older control plane) is not taken'
-pass 'removes a retired build only when named and matched by its own record, never a running worker, and reports it'
+pass 'removes a retired build only when named and matched by its own record, never a running worker or a bad snapshot name; a failed uninstall or delete keeps the record and is not reported'
 
 echo 'all host-agent.sh tests passed'

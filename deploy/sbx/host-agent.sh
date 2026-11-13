@@ -347,7 +347,8 @@ removal() {
         { rec="$f"; break; }
     done
     [[ -n "$rec" ]] || { error "no template record here for build $b of worker $w"; continue; }
-    snap="$(jq -r .snapshot "$rec")"
+    # A string only: a missing or non-string `snapshot` is empty (never the word null), and refused.
+    snap="$(jq -r '.snapshot | strings' "$rec" 2>/dev/null)" || snap=''
     # One plain entry under snapshots/: no slash, and no leading dot (no ., .. or hidden entry).
     [[ "$snap" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { error 'a template record names a bad snapshot'; continue; }
     if systemctl is-active --quiet "sbx-worker@$w.service"; then
@@ -355,10 +356,17 @@ removal() {
       continue
     fi
     if [[ -f "$SBX_ENV_DIR/workers/$w.env" ]]; then
-      "$SBX_INSTALL_HOST" --uninstall "$w" --keep-shared >"$WORK/uninstall-$w.log" 2>&1 || { error "install-host.sh --uninstall $w failed"; continue; }
+      # A unit from before SBX_INSTALL_HOST was set points nowhere: say where, every run, until fixed.
+      [[ -x "$SBX_INSTALL_HOST" ]] || { error "no install-host.sh at $SBX_INSTALL_HOST (set SBX_INSTALL_HOST): worker $w not removed"; continue; }
+      # $WORK goes at exit: the uninstall's last lines go with the error, to the journal.
+      "$SBX_INSTALL_HOST" --uninstall "$w" --keep-shared >"$WORK/uninstall-$w.log" 2>&1 ||
+        { error "install-host.sh --uninstall $w failed: $(tail -n 3 "$WORK/uninstall-$w.log" | tr '\n' ' ')"; continue; }
     fi
-    rm -rf -- "${SBX_SRV:?}/snapshots/$snap"
-    rm -f -- "$rec"
+    # The record goes only once the snapshot is gone, so a failed delete is retried next run and the
+    # snapshot is never left on disk with no record to find it by.
+    rm -rf -- "${SBX_SRV:?}/snapshots/$snap" && [[ ! -e "$SBX_SRV/snapshots/$snap" ]] ||
+      { error "could not delete snapshot $snap: kept its record, retried next run"; continue; }
+    rm -f -- "$rec" || { error "could not delete the template record of $snap"; continue; }
     REMOVED=$((REMOVED + 1)); worker_report "$b" removed; say "{\"agent\":\"removed\",\"worker\":\"$w\"}"
   done < <(jq -r '.remove[] | [.worker, .buildId] | @tsv' <<<"$1")
 }
