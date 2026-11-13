@@ -31,6 +31,8 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
     sessionId: 's-1',
     cfg: '',
     credentialName: 'anthropic',
+    model: '',
+    sandboxTier: '',
     caps: { tokens: 1000 },
     idempotencyKey: 's-1',
     envelope: { item: { item_id: 'i1', file: 'f', pattern: 'p' } },
@@ -58,6 +60,34 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       const got = await store.get('t-caps');
       expect(got?.caps).toEqual({});
       expect(got?.endedAt).toBeUndefined();
+      await done();
+    });
+
+    it('round-trips the pinned model, its limits and the tier (#388)', async () => {
+      const { store, done } = await make();
+      // The point of the pin is that the turn spends what its SUBMISSION chose, so these three must
+      // survive the hash -- `modelLimits` as JSON, the other two as plain strings. Asserted in the
+      // contract rather than in one suite because the fake and real Redis must agree: a limits field
+      // that came back as a string from one of them would reach the harness as `max_tokens`.
+      await store.create(
+        rec({
+          turnId: 't-pin',
+          model: 'claude-opus-4-8',
+          modelLimits: { contextWindow: 200000, maxTokens: 32000 },
+          sandboxTier: 'microvm',
+        }),
+      );
+      expect(await store.get('t-pin')).toMatchObject({
+        model: 'claude-opus-4-8',
+        modelLimits: { contextWindow: 200000, maxTokens: 32000 },
+        sandboxTier: 'microvm',
+      });
+      // A record that pinned no model reads back as '' with no limits, never as undefined: that is
+      // how "the session named none" is stored, and the exchange leaves `model` out for it.
+      await store.create(rec({ turnId: 't-none' }));
+      const none = await store.get('t-none');
+      expect(none?.model).toBe('');
+      expect(none?.modelLimits).toBeUndefined();
       await done();
     });
 
