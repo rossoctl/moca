@@ -37,8 +37,12 @@
 #     it (a Moca P6 session's, served by the same proxy) is not sent, only counted (egressNotOurs).
 #     An audit_dropped report (a count, no sid) is sent. A control plane whose wanted state has no
 #     egressSids (older than openapi 1.8.0) gets nothing: an error line, no journal read, the cursor kept.
-#     The list comes from activation()'s read of the wanted state, never a second request; a run whose
-#     activation was skipped for the lock reads it once itself.
+#     The list comes from activation()'s read of the wanted state; a run whose activation was skipped
+#     for the lock reads it once itself. That read comes before the journal read, so a sandbox created
+#     in between would be missing from it: a batch with any sid not in the list reads the wanted state
+#     again, after the journal read, and is selected with both lists (one request per such batch), so
+#     the first events of a new sandbox are not passed over. If that read fails, nothing is sent and
+#     the cursor stays.
 #   - A time budget: no new batch is started 120 s (EGRESS_BUDGET_S) after the step began, so slow
 #     posts never hold the wanted unit (TimeoutStartSec 5 min) and its activations; the cursor stays at
 #     the last batch taken, and the next run goes on from there.
@@ -408,6 +412,38 @@ egress_post() {
   esac
 }
 
+# Selects the batch to post from the journal entries in ENTRIES into egress.pending.json.all:
+# {cursor, events, oversized} and the local counts notOurs and unreadable. MARK_BOOT and MARK_MONO
+# are the position mark (entries of that boot at or before it were sent already).
+egress_select() { # egress_select ENTRIES MARK_BOOT MARK_MONO
+  # Each entry's MESSAGE is a proxy event when it is a JSON object from moca-egress; others are skipped.
+  # A MESSAGE that is not text (journalctl prints bytes that are not UTF-8 as an array of numbers)
+  # cannot be read for its sid: it is counted (unreadable) and said in an error line, never silent.
+  # An event over 8 KiB (a guest's long path) is not sent; its sid is, as `oversized`, and the
+  # control plane counts it as dropped in that sandbox's log. Nothing in an event is changed.
+  # Only this host's sandboxes' events, and the proxy's audit_dropped reports (no sid); `notOurs`
+  # counts the others, which stay on the host (it is read aside, and never posted).
+  (umask 077 && jq -cs --arg b "$2" --argjson m "$3" --slurpfile s "$WORK/egress.sids" '(last | .__CURSOR) as $c
+      | [.[] | select(._BOOT_ID != $b or ((.__MONOTONIC_TIMESTAMP // "0") | tonumber) > $m)]
+      | [.[] | .MESSAGE | strings | (try fromjson catch null) | objects | select(.via == "moca-egress")] as $every
+      | [$every[] | select((.decision == "audit_dropped" and ((.sid // "") == "")) or (.sid as $x | $s[0] | index([$x]) != null))] as $all
+      | {cursor: $c, notOurs: (($every | length) - ($all | length)),
+         unreadable: ([.[] | select(.MESSAGE != null and (.MESSAGE | type) != "string")] | length),
+         events: [$all[] | select((tojson | utf8bytelength) <= 8192)],
+         oversized: [$all[] | select((tojson | utf8bytelength) > 8192) | (.sid // "" | tostring | .[0:128])]}' \
+    "$1" >"$SBX_SRV/egress.pending.json.all")
+}
+
+# Reads the wanted state again and adds its egressSids to the list (a union: a sid the first read
+# named is kept). Fails, changing nothing, when the read or its egressSids fails.
+egress_sids_refresh() {
+  local fresh="$WORK/wanted.fresh"
+  (umask 077 && api GET "/v1/hosts/$SBX_HOST_ID/wanted" >"$fresh") || return 1
+  jq -e '.egressSids | type == "array" and all(type == "string")' "$fresh" >/dev/null 2>&1 || return 1
+  (umask 077 && jq -cs '.[0] + .[1].egressSids | unique' "$WORK/egress.sids" "$fresh" >"$WORK/egress.sids.tmp") &&
+    mv -f "$WORK/egress.sids.tmp" "$WORK/egress.sids"
+}
+
 # The egress step (see the header). Reads the journal only; never acts on moca-egress.
 egress() {
   systemctl is-active --quiet moca-egress.service 2>/dev/null || return 0
@@ -468,22 +504,19 @@ egress() {
     mb='' mm=-1
     if [[ -f "$SBX_SRV/egress.catchup" && -s "$SBX_SRV/egress.mark" ]]; then read -r mb mm <"$SBX_SRV/egress.mark" || true; fi
     [[ "$mm" =~ ^[0-9]+$ ]] || { mb='' mm=-1; }
-    # Each entry's MESSAGE is a proxy event when it is a JSON object from moca-egress; others are skipped.
-    # A MESSAGE that is not text (journalctl prints bytes that are not UTF-8 as an array of numbers)
-    # cannot be read for its sid: it is counted (unreadable) and said in an error line, never silent.
-    # An event over 8 KiB (a guest's long path) is not sent; its sid is, as `oversized`, and the
-    # control plane counts it as dropped in that sandbox's log. Nothing in an event is changed.
-    # Only this host's sandboxes' events, and the proxy's audit_dropped reports (no sid); `notOurs`
-    # counts the others, which stay on the host (it is read aside, and never posted).
-    (umask 077 && jq -cs --arg b "$mb" --argjson m "$mm" --slurpfile s "$sids" '(last | .__CURSOR) as $c
-        | [.[] | select(._BOOT_ID != $b or ((.__MONOTONIC_TIMESTAMP // "0") | tonumber) > $m)]
-        | [.[] | .MESSAGE | strings | (try fromjson catch null) | objects | select(.via == "moca-egress")] as $every
-        | [$every[] | select((.decision == "audit_dropped" and ((.sid // "") == "")) or (.sid as $x | $s[0] | index([$x]) != null))] as $all
-        | {cursor: $c, notOurs: (($every | length) - ($all | length)),
-           unreadable: ([.[] | select(.MESSAGE != null and (.MESSAGE | type) != "string")] | length),
-           events: [$all[] | select((tojson | utf8bytelength) <= 8192)],
-           oversized: [$all[] | select((tojson | utf8bytelength) > 8192) | (.sid // "" | tostring | .[0:128])]}' \
-      "$entries" >"$pending.all" && jq -c 'del(.notOurs, .unreadable)' "$pending.all" >"$pending") ||
+    # A sid not in the list may be a sandbox created after the list was read (activation()'s GET
+    # comes before this journal read): then the list is read again, now, after the read, and the
+    # batch selected again with both lists, so a new sandbox's first events are never passed over.
+    egress_select "$entries" "$mb" "$mm" ||
+      { rm -f "$pending.all"; error 'egress: the journal batch did not parse'; break; }
+    if [[ "$(jq .notOurs "$pending.all")" != 0 ]]; then
+      if ! egress_sids_refresh; then
+        rm -f "$pending.all"; error 'egress: the wanted state unreadable after the journal read; nothing sent, the cursor kept'; break
+      fi
+      egress_select "$entries" "$mb" "$mm" ||
+        { rm -f "$pending.all"; error 'egress: the journal batch did not parse'; break; }
+    fi
+    (umask 077 && jq -c 'del(.notOurs, .unreadable)' "$pending.all" >"$pending") ||
       { rm -f "$pending" "$pending.all"; error 'egress: the journal batch did not parse'; break; }
     EG_NOT_OURS=$((EG_NOT_OURS + $(jq .notOurs "$pending.all")))
     n_bad="$(jq .unreadable "$pending.all")"

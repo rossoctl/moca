@@ -46,7 +46,10 @@ case "$method $path" in
 "GET /v1/hosts/host-1/blobs/"*) printf '{"sha256":"x","base64":"%s"}' "$(printf '%s' "$MOCK_GATE" | base64)" ;;
 "POST /v1/hosts/host-1/builds/"*/log) echo '{"appended":1}' ;;
 "POST /v1/hosts/host-1/builds/"*/report) echo '{"status":"registered","buildId":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}' ;;
-"GET /v1/hosts/host-1/wanted") cat "$MOCK_STATE/wanted-answer" ;;
+"GET /v1/hosts/host-1/wanted")
+  # wanted-later: the answer from a run's second read on (a sandbox created after the first).
+  if [[ -f "$MOCK_STATE/wanted-later" && -f "$MOCK_STATE/wanted-read" ]]; then cat "$MOCK_STATE/wanted-later"; else cat "$MOCK_STATE/wanted-answer"; fi
+  touch "$MOCK_STATE/wanted-read" ;;
 "POST /v1/hosts/host-1/workers/report") echo '{"recorded":"x"}' ;;
 "POST /v1/hosts/host-1/egress")
   # As the agent calls it: -o ANSWER -w '%{http_code}', no -f. egress-fail: no answer at all;
@@ -418,7 +421,7 @@ entry() { jq -cn --arg c "$1" --arg m "$2" --arg t "${3:-${1#c}}" '{__CURSOR: $c
 # entries FROM TO MESSAGE: entry c<FROM> ... c<TO>, all MESSAGE, in one jq run (a jq per entry is slow).
 entries() { jq -cn --argjson a "$1" --argjson b "$2" --arg m "$3" 'range($a; $b + 1) | {__CURSOR: "c\(.)", __MONOTONIC_TIMESTAMP: "\(.)", _BOOT_ID: "b1", MESSAGE: $m, _SYSTEMD_UNIT: "moca-egress.service"}'; }
 { entry c1 "$EV"; entry c2 'moca-egress: serving 3 allowlist entries'; entry c3 "$EV2"; } >"$TMP/state/journal"
-egress_run() { : >"$MOCK_LOG"; rm -f "$TMP/state/egress-posts"; bash "$A" --wanted-only >"$TMP/out" 2>&1; }
+egress_run() { : >"$MOCK_LOG"; rm -f "$TMP/state/egress-posts" "$TMP/state/wanted-read"; bash "$A" --wanted-only >"$TMP/out" 2>&1; }
 # Off: the unit is not active, even if it is enabled (a stopped proxy: nothing to ship).
 rm -f "$TMP/state/active-moca-egress.service" "$TMP/srv/egress.cursor" "$TMP/srv/egress.pending.json"
 touch "$TMP/state/enabled-moca-egress.service"
@@ -561,26 +564,48 @@ jq -e --argjson a "$EV" --argjson d "$DROP" '.events == [$a, $d] and .cursor == 
   fail 'the post is not exactly our event and the drop report'
 grep -q 'p6-session-0001\|api.example.com' "$TMP/state/egress-posts" "$TMP/out" && fail "another client's event left the host"
 grep -q '"egressRead":4,"egressAccepted":2,.*"egressNotOurs":2' "$TMP/out" || fail 'egressNotOurs is not counted'
-[[ "$(grep -c 'GET.*/v1/hosts/host-1/wanted\|/v1/hosts/host-1/wanted$' "$MOCK_LOG")" == 1 ]] || fail 'the wanted state was read twice'
+# A sid not in the list: the wanted state read again after the journal read (activation's and that one).
+[[ "$(grep -c '/v1/hosts/host-1/wanted' "$MOCK_LOG")" == 2 ]] || fail 'a batch with another sid did not read the wanted state again'
 [[ "$(<"$TMP/srv/egress.cursor")" == c4 ]] || fail 'the cursor after a filtered batch'
-# A run whose activation is skipped for the lock reads the wanted state once, for egress.
+# A run whose activation is skipped for the lock reads the wanted state once, for egress; a batch of
+# our sandbox's events only reads it no more.
 entry c5 "$EV" >>"$TMP/state/journal"
 touch "$TMP/state/locked-9" # the activation lock only
 egress_run || fail 'the locked egress run failed'
 rm -f "$TMP/state/locked-9"
 [[ "$(grep -c '/v1/hosts/host-1/wanted' "$MOCK_LOG")" == 1 ]] || fail 'a lock-skipped run did not read the wanted state once'
 jq -e '.cursor == "c5"' "$TMP/state/egress-posts" >/dev/null || fail 'a lock-skipped run did not ship'
+# A sandbox created after activation's read of the wanted state: its first events are in the journal
+# read, its sid only in the second read. They are sent, not counted egressNotOurs.
+NEW=sbx-fedcba9876543210fedcba9876
+EVN="$(jq -c --arg s "$NEW" '.sid = $s' <<<"$EV")"
+entry c6 "$EVN" >>"$TMP/state/journal"
+printf '{"run":[],"stop":[],"egressSids":["%s","%s"]}' "$SID" "$NEW" >"$TMP/state/wanted-later"
+egress_run || fail 'the new-sandbox run failed'
+jq -e --argjson n "$EVN" '.events == [$n] and .cursor == "c6"' "$TMP/state/egress-posts" >/dev/null ||
+  fail "a new sandbox's first events were not sent"
+grep -q '"egressNotOurs":0' "$TMP/out" || fail "a new sandbox's events were counted egressNotOurs"
+# That second read failing: nothing sent, the cursor kept, an error line; the next run sends them.
+entry c7 "$(jq -c '.host = "files.example.com"' <<<"$EVN")" >>"$TMP/state/journal"
+printf x >"$TMP/state/wanted-later"
+egress_run || fail 'the failed-refresh run failed'
+[[ ! -e "$TMP/state/egress-posts" && "$(<"$TMP/srv/egress.cursor")" == c6 ]] || fail 'sent or moved the cursor without the second read'
+grep -q 'egress: the wanted state unreadable after the journal read; nothing sent, the cursor kept' "$TMP/out" || fail 'the failed second read is not said'
+printf '{"run":[],"stop":[],"egressSids":["%s","%s"]}' "$SID" "$NEW" >"$TMP/state/wanted-later"
+egress_run || fail 'the run after the failed refresh failed'
+jq -e '.cursor == "c7" and (.events | length) == 1' "$TMP/state/egress-posts" >/dev/null || fail 'the run after a failed second read did not send'
+rm -f "$TMP/state/wanted-later"
 # An older control plane: no egressSids, nothing sent, the cursor kept, an error line.
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
-entry c6 "$EV" >>"$TMP/state/journal"
+entry c8 "$EV" >>"$TMP/state/journal"
 egress_run || fail 'the no-egressSids run failed'
 [[ ! -e "$TMP/state/egress-posts" ]] || fail 'sent without egressSids'
 grep -q '^journalctl' "$MOCK_LOG" && fail 'read the journal without egressSids'
 grep -q 'the wanted state has no egressSids (a control plane older than openapi 1.8.0); nothing sent, the cursor kept' "$TMP/out" ||
   fail 'no error line for a missing egressSids'
-[[ "$(<"$TMP/srv/egress.cursor")" == c5 ]] || fail 'the cursor moved without egressSids'
+[[ "$(<"$TMP/srv/egress.cursor")" == c7 ]] || fail 'the cursor moved without egressSids'
 printf '{"run":[],"stop":[],"egressSids":["%s"]}' "$SID" >"$TMP/state/wanted-answer"
-pass 'ships only the wanted state egressSids events and drop reports, counts the rest egressNotOurs; nothing without egressSids'
+pass 'ships only the wanted state egressSids events (read again after the journal for an unknown sid) and drop reports, counts the rest egressNotOurs; nothing without egressSids'
 
 # 17. The time budget: no new batch after EGRESS_BUDGET_S (120 s; 5 s here, by the test copy below,
 #     with 3 s posts: SECONDS counts whole seconds, so the margins are wide),

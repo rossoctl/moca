@@ -395,7 +395,10 @@ Paths are logged without query, fragment or userinfo, and an injected credential
 - **Only this host's sandboxes' events leave it.** The wanted state names them (`egressSids`: the
   workspace keys of the sandboxes on this host's workers, live or ended within 600 s); an event with
   any other `sid`, such as a Moca P6 session's on the same proxy, stays in the journal and is only
-  counted (`egressNotOurs`). The proxy's `audit_dropped` reports are sent. Against a control plane
+  counted (`egressNotOurs`). The list is read before the journal, so a batch with a `sid` not in it
+  (a sandbox created in between, at its first egress) reads the wanted state again, after the journal
+  read, before anything is left out; if that read fails, nothing is sent and the cursor stays. The
+  proxy's `audit_dropped` reports are sent. Against a control plane
   whose wanted state has no `egressSids` (older than openapi 1.8.0), the agent sends nothing and says
   so in an error line, keeping its cursor.
 - **A time budget:** a run starts no new batch 120 s after its egress step began, so slow posts never
