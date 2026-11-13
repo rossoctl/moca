@@ -232,11 +232,31 @@ async function egressDigest(store: EgressStore, id: string) {
   };
 }
 
+/** The egress log's NDJSON export, a store page at a time: each line and its `\n`. */
+async function* ndjson(store: EgressStore, id: string): AsyncGenerator<string> {
+  let chunk = '';
+  let n = 0;
+  for await (const line of allLines(store, id)) {
+    chunk += `${line}\n`;
+    if (++n % EGRESS_STREAM_LINES === 0) {
+      yield chunk;
+      chunk = '';
+    }
+  }
+  if (chunk) yield chunk;
+}
+const EGRESS_STREAM_LINES = 1000;
+
 /**
  * Seals each ended sandbox's egress log once its grace has passed (egress-log.ts EGRESS_GRACE_S),
  * in the janitor's sweep after recordExpiries. A log that changed after its end record named it
  * (events that arrived in the grace) gets one more `sandbox` record, `state: 'egress'`, naming the
  * final log: the newest `sandbox` record of a sandbox that carries `egress` is its log's digest.
+ *
+ * The seal comes last, after the record is written: a sweep that fails before it (the chain, the
+ * digest or the append) leaves the log unsealed, so the next sweep does the work again. Past the
+ * grace the host post takes no events for the sandbox, so the log no longer changes, and the
+ * compare with the chain's newest record keeps a repeated sweep from writing a second record.
  */
 async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Promise<void> {
   const store = deps.egress;
@@ -247,27 +267,30 @@ async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Pr
   );
   const chains = new Map<string, Awaited<ReturnType<ProvenanceStore['chain']>>>();
   for (const r of due) {
-    if (!(await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS))) continue;
-    if (!deps.provenance) continue;
-    const stream = `template/${r.template}`;
-    if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
-    const named = chains
-      .get(stream)!
-      .filter(
-        (x) =>
-          x.kind === 'sandbox' &&
-          (x.body as { sandboxId?: string }).sandboxId === r.id &&
-          (x.body as { egress?: unknown }).egress !== undefined,
-      )
-      .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
-    const now = await egressDigest(store, r.id);
-    if (named && named.sha256 === now.sha256 && named.dropped === now.dropped) continue;
-    await deps.provenance.append({
-      stream,
-      kind: 'sandbox',
-      subject: 'janitor',
-      body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
-    });
+    if ((await store.meta(r.id)).sealed) continue;
+    if (deps.provenance) {
+      const stream = `template/${r.template}`;
+      if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
+      const named = chains
+        .get(stream)!
+        .filter(
+          (x) =>
+            x.kind === 'sandbox' &&
+            (x.body as { sandboxId?: string }).sandboxId === r.id &&
+            (x.body as { egress?: unknown }).egress !== undefined,
+        )
+        .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
+      const now = await egressDigest(store, r.id);
+      if (!named || named.sha256 !== now.sha256 || named.dropped !== now.dropped) {
+        await deps.provenance.append({
+          stream,
+          kind: 'sandbox',
+          subject: 'janitor',
+          body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
+        });
+      }
+    }
+    await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS);
   }
 }
 
@@ -1342,7 +1365,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
 
   /**
    * A sandbox's egress log, for whoever may read the sandbox (GET /v1/sandboxes/{id}):
-   * `{events, next, summary}` a page at a time (`after` is the last page's `next`), or with
+   * `{events, next, summary}` a page at a time (`after` is the last page's `next`; `summary` on the
+   * first page, null after it), or with
    * `format=ndjson` the whole log, whose sha256 is `summary.sha256` and the end record's.
    */
   getSandboxEgress: async (ctx, deps) => {
@@ -1352,9 +1376,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     if (format !== null && format !== 'json' && format !== 'ndjson')
       throw new CpError('invalid_request', "format must be 'json' or 'ndjson'");
     if (format === 'ndjson') {
-      let out = '';
-      for await (const line of allLines(deps.egress, rec.id)) out += `${line}\n`;
-      return { status: 200, body: out, contentType: 'application/x-ndjson' };
+      // Streamed a store page at a time (server.ts writeStream), never built whole in memory.
+      return {
+        status: 200,
+        body: ndjson(deps.egress, rec.id),
+        contentType: 'application/x-ndjson',
+      };
     }
     const after = ctx.query.get('after');
     if (after !== null && !ENTRY_ID_RE.test(after))
@@ -1369,7 +1396,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       body: {
         events: page.map((e) => JSON.parse(e.line) as unknown),
         next: page.length === limit ? page[page.length - 1]!.id : null,
-        summary: await summarize(deps.egress, rec.id),
+        // On the first page only: the summary reads the whole log, so a page after it (`after`)
+        // costs that page alone, and paging a log through is linear in its length.
+        summary: after === null ? await summarize(deps.egress, rec.id) : null,
       },
     };
   },

@@ -76,41 +76,57 @@ provenance.
 
 - **Store, in the control plane:**
   - **Where:** Redis (where the sandbox records live): a stream `sh:sbx:egress:<sandboxId>` (one
-    canonical line per event, capped at 10,000 per sandbox and 200,000 across all logs, the excess
-    counted as dropped), a hash `…:meta` (drop counts, sealed), a key per host
-    (`sh:sbx:egress:host:<host>`, its last cursor, for replays), and an index of the sandboxes with
-    a log (`sh:sbx:egress:index`), over which the total is summed; it drops entries whose log has
-    expired. Kept as long as the
-    sandbox record: its end plus the sandbox retention (`SH_SANDBOX_RETENTION_SECONDS`, 14 days).
+    canonical line per event, capped at 10,000 events and 4 MiB of lines per sandbox and 64 MiB of
+    lines across all logs, the excess counted as dropped), a hash `…:meta` (drop counts, sealed), a
+    key per host (`sh:sbx:egress:host:<host>`, its last cursor, for replays), and the budget's keys:
+    each log's bytes (`sh:sbx:egress:bytes`), the logs by expiry (`sh:sbx:egress:expiry`) and their
+    running total (`sh:sbx:egress:total`). The caps are in bytes because a line may be up to 8 KiB
+    and its `host` and `path` come from the guest. A post costs its own events plus the logs whose
+    expiry has passed (at most 500 per post, their bytes given back), not the number of logs
+    retained. Kept as long as the sandbox record: its end plus the sandbox retention
+    (`SH_SANDBOX_RETENTION_SECONDS`, 14 days).
   - **Who:** an event is stored only when its `sid` is the workspace key of a sandbox on a worker of
     a build this host holds, ended at most 600 s ago; every other event is refused and counted.
+    **What this rests on:** "a build this host holds" is the host's own last inventory, which
+    nothing checks against placement or against the host that attached the worker. Hosts are
+    trusted (each has its own bearer), so this keeps a host's events to its own sandboxes when its
+    inventory is true; it is not a guarantee against a host that claims a build it does not run,
+    which can write into that build's sandboxes' logs. Placement could not settle it either: it is
+    computed from the same inventories, and a sandbox's worker may have run on another host during
+    its life.
 - **Read:**
   - `GET /v1/sandboxes/{id}/egress?after=<next>&limit=N` (1-1000, default 100), for whoever may read
     the sandbox (its owner or an admin), gives `{events, next, summary}`;
-  - `summary`: `byHost` (count, decisions, bytes up and down per destination host), `total`,
+  - `summary`, on the first page only (null after it, so paging a log through reads it once):
+    `byHost` (count, decisions, bytes up and down per destination host), `total`,
     `dropped`, `droppedBy` (`proxy`, `cap`, `budget`, `invalid`), `complete`, `sealed`, `sha256`.
 - **The digest:** `sha256:` and the hex sha256 of the NDJSON export: each stored event's canonical
   JSON (the provenance canonicalization) followed by one newline, in arrival order.
 - **Provenance:** the sandbox's `terminated` record (deleted or expired) gains
-  `egress: {events, sha256, dropped, droppedBy, complete}`. Late events are accepted for 600 s after the end;
-  the janitor's sweep then seals the log and, if it changed since the end record, appends one more
-  `sandbox` record with `state: 'egress'` naming the final log. The newest `sandbox` record that
-  names `egress` is the log's digest. Record kinds are unchanged.
+  `egress: {events, sha256, dropped, droppedBy, complete}`. Late events are accepted for 600 s after
+  the end; then the janitor's sweep, if the log changed since the end record, appends one more
+  `sandbox` record with `state: 'egress'` naming the final log, and seals the log. The seal comes
+  last, so a sweep that fails before it is done again by the next one (the compare with the newest
+  record keeps it to one record). The newest `sandbox` record that names `egress` is the log's
+  digest. Record kinds are unchanged.
 - **Drops:** a proxy `audit_dropped` report (no VM) is charged to every sandbox on that host's workers
   that existed within 60 s before it: a sandbox may be marked incomplete when it lost nothing, never
-  complete when it did. `complete` means `dropped == 0`.
+  complete when it did. `complete` means `dropped == 0`. One report's count is taken up to
+  1,000,000 (a larger one counts as that), so a malformed report cannot write a huge count into
+  every sandbox or overflow a counter.
 - **Export:** `GET /v1/sandboxes/{id}/egress?format=ndjson` returns the whole log
-  (`application/x-ndjson`). Its sha256 equals the end record's, so a grader checks a copy offline:
+  (`application/x-ndjson`), streamed a store page at a time, so the control plane never holds a
+  whole log for it; a store failure mid-stream cuts the body short. Its sha256 equals the end record's, so a grader checks a copy offline:
   `verify-provenance.py EXPORT --egress <sandbox id>=<file>`.
 
 ## 4. The API
 
-| Route                                         | Who                                | Answer                                                  |
-| --------------------------------------------- | ---------------------------------- | ------------------------------------------------------- |
-| `POST /v1/hosts/{host}/egress`                | a host agent, as itself            | `{accepted, refused, capped, invalid, dropped, cursor}` |
-| `GET /v1/sandboxes/{id}/egress`               | the owner, an admin                | `{events, next, summary}`                               |
-| `GET /v1/sandboxes/{id}/egress?format=ndjson` | the owner, an admin                | the log, NDJSON                                         |
-| `GET /v1/hosts/{host}/wanted`                 | a host agent, as itself (existing) | gains `egressSids`                                      |
+| Route                                         | Who                                | Answer                                                              |
+| --------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------- |
+| `POST /v1/hosts/{host}/egress`                | a host agent, as itself            | `{accepted, refused, capped, overBudget, invalid, dropped, cursor}` |
+| `GET /v1/sandboxes/{id}/egress`               | the owner, an admin                | `{events, next, summary}`                                           |
+| `GET /v1/sandboxes/{id}/egress?format=ndjson` | the owner, an admin                | the log, NDJSON                                                     |
+| `GET /v1/hosts/{host}/wanted`                 | a host agent, as itself (existing) | gains `egressSids`                                                  |
 
 Errors: 404 `sandbox_not_found` for an unknown sandbox or another subject's, as for the other sandbox
 routes. CLI: `mocactl sbx egress [ID] [--json | --ndjson | --verify]`.
@@ -134,7 +150,8 @@ routes. CLI: `mocactl sbx egress [ID] [--json | --ndjson | --verify]`.
 
 1. **Who may read a sandbox's egress:** the sandbox's owner and admins, the same as the other
    sandbox routes. No separate grader role.
-2. **Retention:** the sandbox record's (`SBX_RETENTION_DAYS`, 14 days today).
+2. **Retention:** the sandbox record's (`SH_SANDBOX_RETENTION_SECONDS`, 14 days by default;
+   `deploy/sbx/setup.sh` sets it from `SBX_RETENTION_DAYS`).
 3. **A loss budget:** if the proxy dropped events for a sandbox (`audit_dropped`), the sandbox's end
    record marks its egress log incomplete, with the drop count, and the grader decides whether that
    rep is still valid.

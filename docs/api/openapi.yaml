@@ -340,10 +340,10 @@ components:
           required: [proxy, cap, budget, invalid]
           properties:
             proxy: { type: integer, description: "charged by the proxy's audit_dropped reports" }
-            cap: { type: integer, description: 'over the 10,000-event cap per log' }
+            cap: { type: integer, description: "over a log's cap: 10,000 events or 4 MiB of lines" }
             budget:
               type: integer
-              description: "over the deployment's 200,000-event budget for all logs together"
+              description: "over the deployment's 64 MiB budget of lines for all logs together"
             invalid: { type: integer, description: named this sandbox but were not a proxy Event }
         complete: { type: boolean, description: dropped is 0 }
         sealed:
@@ -2587,8 +2587,8 @@ paths:
         every other event is refused and counted. One naming such a sandbox that is not exactly a
         proxy Event (an unknown field, a wrong type) is not stored, and counted as dropped there.
         An `audit_dropped` event (no VM) is charged to every sandbox on this host's workers live
-        within 60 s before it. A log holds at most 10,000 events, and all logs together at most
-        200,000 (about 64 MB of Redis); the rest count as dropped (`cap`, `budget`).
+        within 60 s before it, its count taken up to 1,000,000. A log holds at most 10,000 events and 4 MiB of lines, and all logs
+        together at most 64 MiB of lines; the rest count as dropped (`cap`, `budget`).
         Idempotent by (host, cursor): a post repeating the host's last cursor appends nothing and
         answers as the first.
       security: [{ hostToken: [] }]
@@ -2632,9 +2632,9 @@ paths:
                   accepted: { type: integer }
                   refused:
                     { type: integer, description: "no sandbox of this host's, or its log sealed" }
-                  capped: { type: integer, description: "over a log's 10,000" }
-                  overBudget:
-                    { type: integer, description: 'over the 200,000 of all logs together' }
+                  capped:
+                    { type: integer, description: "over a log's cap (10,000 events or 4 MiB)" }
+                  overBudget: { type: integer, description: 'over the 64 MiB of all logs together' }
                   invalid:
                     type: integer
                     description: "named a sandbox of this host's but not a proxy Event, or oversized"
@@ -2884,7 +2884,8 @@ paths:
         name only, but a secret a guest puts in a URL path segment is logged as sent.
 
         `format=ndjson` returns the whole log, one canonical JSON event per line, each ended by
-        `\n`. Its sha256 is `summary.sha256`, and the sandbox's end record's `egress.sha256` (or a
+        `\n`, streamed (chunked); a store failure after the first chunk cuts it short, so check
+        its sha256. Its sha256 is `summary.sha256`, and the sandbox's end record's `egress.sha256` (or a
         later `sandbox` record with `state: egress`, when events arrived after the end).
       security: [{ sessionToken: [] }]
       parameters:
@@ -2914,7 +2915,13 @@ paths:
                       type: [string, 'null'],
                       description: "the next page's `after`; null at the end",
                     }
-                  summary: { $ref: '#/components/schemas/EgressSummary' }
+                  summary:
+                    description: |
+                      the whole log's summary, on the first page (no `after`); null on the pages
+                      after it, so paging a log through reads it once
+                    oneOf:
+                      - { $ref: '#/components/schemas/EgressSummary' }
+                      - { type: 'null' }
             application/x-ndjson:
               schema: { type: string }
         '400':

@@ -14,13 +14,15 @@ Every change is additive.
   gives `{events, next, summary}`. The events are the proxy's audit events exactly as it wrote them
   (new `EgressEvent` schema), in arrival order. `summary` (new `EgressSummary` schema) is
   `{byHost: {host: {count, decisions, bytesUp, bytesDown}}, total, dropped, droppedBy: {proxy, cap,
-budget, invalid}, complete, sealed, sha256}`.
+budget, invalid}, complete, sealed, sha256}`, on the first page (no `after`); null on the pages
+  after it.
 - `?format=ndjson` gives the whole log as `application/x-ndjson`: each event's canonical JSON, each
   followed by `\n`. Its sha256 is `summary.sha256`.
 - New POST /v1/hosts/{host}/egress `{events, cursor, oversized?}` (host bearer): the host agent's
   batches of up to 1000 events and its journal cursor, idempotent by (host, cursor), answering
   `{accepted, refused, capped, overBudget, invalid, dropped, cursor}`. A log holds at most 10,000
-  events and all logs together at most 200,000; the rest count as dropped.
+  events and 4 MiB of lines, and all logs together at most 64 MiB of lines; the rest count as
+  dropped.
 - GET /v1/hosts/{host}/wanted gains `egressSids`, the workspace keys whose events the host ships (the
   set the egress route accepts); the agent sends no other sandbox's or session's events.
 - The `sandbox` provenance record that ends a sandbox (`state: terminated`) gains

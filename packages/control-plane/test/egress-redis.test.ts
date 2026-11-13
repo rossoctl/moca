@@ -2,10 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  EGRESS_DROP_REPORT_MAX,
+  EGRESS_LOG_BYTES,
   EGRESS_LOG_CAP,
-  EGRESS_TOTAL_BUDGET,
+  EGRESS_POST_MAX,
+  EGRESS_TOTAL_BYTES,
   MemoryEgressStore,
   RedisEgressStore,
+  compareEntryIds,
   summarize,
   type EgressRedisLike,
   type EgressStore,
@@ -43,13 +47,24 @@ const REAL = JSON.stringify({
   via: 'moca-egress',
   vm_id: 'sbx_t1-0123456789abcdef',
 });
-const line = (i: number) => `{"bytes_up":${i},"decision":"tunnel","host":"a.example.com"}`;
+// Every line is L bytes (i < 9000), so the byte budgets below read as counts of lines.
+const line = (i: number) => `{"bytes_up":${1000 + i},"decision":"tunnel","host":"a.example.com"}`;
+const L = Buffer.byteLength(line(0));
 const group = (sandboxId: string, n: number, expireAtS: number, from = 0) => ({
   sandboxId,
   lines: Array.from({ length: n }, (_, i) => line(from + i)),
   proxyDropped: 0,
   invalid: 0,
   expireAtS,
+});
+
+describe('compareEntryIds', () => {
+  it('orders stream ids by ms, then seq, numerically', () => {
+    expect(compareEntryIds('9-0', '10-0')).toBe(-1);
+    expect(compareEntryIds('10-2', '10-10')).toBe(-1);
+    expect(compareEntryIds('10-10', '10-10')).toBe(0);
+    expect(compareEntryIds('18446744073709551615-1', '18446744073709551615-0')).toBe(1);
+  });
 });
 
 describe.each([
@@ -98,15 +113,34 @@ describe.each([
     await done();
   });
 
+  it('pages after an id that is not in the log by id order, as XRANGE does', async () => {
+    const { store, done } = make();
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    await store.append('host-1', 'c1', [group('sbx-a', 3, exp)], 0, 0);
+    const all = await store.page('sbx-a', null, 10);
+    const [ms, seq] = all[1]!.id.split('-');
+    // An id just after the 2nd entry's, which need not be in the log (in the memory store it is
+    // not), one before every entry, and one after them all.
+    const between = `${ms}-${BigInt(seq!) + 1n}`;
+    const want = all.filter((e) => compareEntryIds(e.id, between) > 0).map((e) => e.line);
+    expect((await store.page('sbx-a', between, 10)).map((e) => e.line)).toEqual(want);
+    expect((await store.page('sbx-a', '0-0', 10)).map((e) => e.line)).toEqual(
+      all.map((e) => e.line),
+    );
+    expect(await store.page('sbx-a', '99999999999999-0', 10)).toEqual([]);
+    await done();
+  });
+
   it('holds all logs together to the budget; an expired log gives its share back', async () => {
-    // A budget of 10 and a cap of 6 on a fresh store of each kind, so the numbers stay readable.
+    // A budget of 10 lines and a cap of 6 on a fresh store of each kind, so the numbers stay readable.
+    const limits = { cap: 6, budgetBytes: 10 * L };
     const small =
       name === 'memory'
-        ? { store: new MemoryEgressStore(6, 10), prefix: '', done: async () => {} }
+        ? { store: new MemoryEgressStore(limits), prefix: '', done: async () => {} }
         : (() => {
             const p = `test:egress:${process.pid}:${randomUUID()}:`;
             return {
-              store: new RedisEgressStore(redis, 3600, p, { cap: 6, budget: 10 }),
+              store: new RedisEgressStore(redis, 3600, p, limits),
               prefix: p,
               done: async () => {
                 const keys = await client.keys(`${p}*`);
@@ -114,7 +148,7 @@ describe.each([
               },
             };
           })();
-    const { store, prefix, done } = small;
+    const { store, done } = small;
     const exp = Math.floor(Date.now() / 1000) + 3600;
     expect(await store.append('host-1', 'c1', [group('sbx-a', 8, exp)], 0, 0)).toMatchObject({
       accepted: 6,
@@ -134,9 +168,10 @@ describe.each([
       accepted: 0,
       overBudget: 1,
     });
-    // sbx-a's log expires (passively, in Redis: its keys are gone); its 6 come back, no sweep needed.
+    // sbx-a's log expires (in Redis: its keys are gone with its expiry); its 6 come back at the next
+    // append, no sweep needed.
     if (name === 'memory') (store as MemoryEgressStore).expire('sbx-a');
-    else await client.del([`${prefix}sbx-a`, `${prefix}sbx-a:meta`]);
+    else await store.expireAt('sbx-a', Math.floor(Date.now() / 1000) - 1);
     // 10 - (3 + 1) = 6 free: sbx-d takes 6, and its 7th is over its own cap of 6, not the budget.
     expect(await store.append('host-1', 'c3', [group('sbx-d', 7, exp)], 0, 0)).toMatchObject({
       accepted: 6,
@@ -146,16 +181,44 @@ describe.each([
     await done();
   });
 
+  it('caps a log by its bytes too: guest-sized lines stop at the byte cap, counted as cap drops', async () => {
+    const limits = { capBytes: 3 * L + 10, budgetBytes: 100 * L };
+    const p = `test:egress:${process.pid}:${randomUUID()}:`;
+    const store =
+      name === 'memory'
+        ? new MemoryEgressStore(limits)
+        : new RedisEgressStore(redis, 3600, p, limits);
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    expect(await store.append('host-1', 'c1', [group('sbx-a', 5, exp)], 0, 0)).toMatchObject({
+      accepted: 3,
+      capped: 2,
+      overBudget: 0,
+    });
+    // A line over what is left of the cap is capped; the log stays at 3 lines.
+    const big = { ...group('sbx-a', 0, exp), lines: [`{"host":"${'x'.repeat(4000)}"}`] };
+    expect(await store.append('host-1', 'c2', [big], 0, 0)).toMatchObject({ capped: 1 });
+    expect(await summarize(store, 'sbx-a')).toMatchObject({ total: 3, droppedBy: { cap: 3 } });
+    // Another log is not held by this one's cap.
+    expect(await store.append('host-1', 'c3', [group('sbx-b', 3, exp)], 0, 0)).toMatchObject({
+      accepted: 3,
+    });
+    if (name === 'redis') {
+      expect(Number(await client.get(`${p}total`))).toBe(6 * L);
+      const keys = await client.keys(`${p}*`);
+      if (keys.length) await client.del(keys);
+    }
+  });
+
   if (name === 'redis') {
     it('cannot pass the budget with two hosts posting at once (one Lua script per post)', async () => {
       const p = `test:egress:${process.pid}:${randomUUID()}:`;
-      const store = new RedisEgressStore(redis, 3600, p, { cap: 1000, budget: 1500 });
+      const store = new RedisEgressStore(redis, 3600, p, { cap: 1000, budgetBytes: 1500 * L });
       // A second connection, so the two posts really race on the server.
       const other = createClient({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379' });
       await other.connect();
       const store2 = new RedisEgressStore(other as unknown as EgressRedisLike, 3600, p, {
         cap: 1000,
-        budget: 1500,
+        budgetBytes: 1500 * L,
       });
       const exp = Math.floor(Date.now() / 1000) + 3600;
       const posts = [];
@@ -172,6 +235,7 @@ describe.each([
       for (let i = 0; i < 10; i++)
         stored += (await client.xLen(`${p}sbx-a${i}`)) + (await client.xLen(`${p}sbx-b${i}`));
       expect(stored).toBe(1500);
+      expect(Number(await client.get(`${p}total`))).toBe(1500 * L);
       other.destroy();
       const keys = await client.keys(`${p}*`);
       if (keys.length) await client.del(keys);
@@ -179,7 +243,7 @@ describe.each([
 
     it('takes back the budget of a log whose keys expired passively (EXPIREAT in the past)', async () => {
       const p = `test:egress:${process.pid}:${randomUUID()}:`;
-      const store = new RedisEgressStore(redis, 3600, p, { cap: 100, budget: 5 });
+      const store = new RedisEgressStore(redis, 3600, p, { cap: 100, budgetBytes: 5 * L });
       const now = Math.floor(Date.now() / 1000);
       await store.append('host-1', 'c1', [group('sbx-old', 5, now + 3600)], 0, 0);
       expect(
@@ -197,7 +261,44 @@ describe.each([
         accepted: 5,
         overBudget: 0,
       });
-      expect(await client.sMembers(`${p}index`)).toEqual(['sbx-new']);
+      expect(await client.zRange(`${p}expiry`, 0, -1)).toEqual(['sbx-new']);
+      expect(await client.hGetAll(`${p}bytes`)).toEqual({ 'sbx-new': String(5 * L) });
+      expect(Number(await client.get(`${p}total`))).toBe(5 * L);
+      const keys = await client.keys(`${p}*`);
+      if (keys.length) await client.del(keys);
+    });
+
+    it('takes the largest charge a post can carry without overflowing a counter', async () => {
+      const { store, prefix, done } = isolated();
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const charge = EGRESS_POST_MAX * EGRESS_DROP_REPORT_MAX;
+      for (const c of ['c1', 'c2'])
+        await store.append(
+          'host-1',
+          c,
+          [{ ...group('sbx-a', 0, exp), proxyDropped: charge }],
+          0,
+          0,
+        );
+      expect(await client.hGet(`${prefix}sbx-a:meta`, 'proxy')).toBe(String(2 * charge));
+      await done();
+    });
+
+    it("keeps the total as a running sum; a lost total is summed again from the logs' sizes", async () => {
+      const p = `test:egress:${process.pid}:${randomUUID()}:`;
+      const store = new RedisEgressStore(redis, 3600, p, { cap: 100, budgetBytes: 8 * L });
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      await store.append('host-1', 'c1', [group('sbx-a', 3, exp), group('sbx-b', 2, exp)], 0, 0);
+      expect(Number(await client.get(`${p}total`))).toBe(5 * L);
+      // The deletion moves the log's expiry, and the index follows it.
+      await store.expireAt('sbx-a', exp + 60);
+      expect(await client.zScore(`${p}expiry`, 'sbx-a')).toBe(exp + 60);
+      await client.del(`${p}total`);
+      expect(await store.append('host-1', 'c2', [group('sbx-c', 4, exp)], 0, 0)).toMatchObject({
+        accepted: 3,
+        overBudget: 1,
+      });
+      expect(Number(await client.get(`${p}total`))).toBe(8 * L);
       const keys = await client.keys(`${p}*`);
       if (keys.length) await client.del(keys);
     });
@@ -219,6 +320,7 @@ describe.each([
     });
 
     it(`stops at ${EGRESS_LOG_CAP} entries and counts the rest as cap drops`, async () => {
+      expect([EGRESS_LOG_BYTES, EGRESS_TOTAL_BYTES]).toEqual([4 * 1024 * 1024, 64 * 1024 * 1024]);
       const { store, prefix, done } = isolated();
       const exp = Math.floor(Date.now() / 1000) + 600;
       const k = `${prefix}sbx-c`;

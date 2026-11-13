@@ -1,16 +1,21 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HANDLERS } from '../src/handlers.js';
+import { apiIssuer, HANDLERS } from '../src/handlers.js';
 import { HostRegistry } from '../src/host-handlers.js';
+import { buildHandler } from '../src/server.js';
+import { CpError } from '../src/errors.js';
 import { canonicalJson, ProvenanceStore } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
 import {
-  EGRESS_TOTAL_BUDGET,
+  EGRESS_TOTAL_BYTES,
+  EGRESS_DROP_REPORT_MAX,
   EGRESS_DROP_WINDOW_S,
   EGRESS_GRACE_S,
   EGRESS_LOG_CAP,
@@ -143,6 +148,15 @@ const post = async (d: TestDeps, host: string, events: unknown[], cursor = `c${+
 
 const read = async (d: TestDeps, id: string, q: Record<string, string> = {}, principal = alice) =>
   HANDLERS.getSandboxEgress!(ctx({ principal, params: { id }, query: new URLSearchParams(q) }), d);
+
+/** A streamed NDJSON body (server.ts writes it chunk by chunk), read whole. */
+async function text(body: unknown): Promise<string> {
+  let out = '';
+  for await (const c of body as AsyncIterable<string>) out += c;
+  return out;
+}
+const ndjsonOf = async (d: TestDeps, id: string) =>
+  text((await read(d, id, { format: 'ndjson' })).body);
 
 const sha = (s: string) => `sha256:${createHash('sha256').update(s).digest('hex')}`;
 
@@ -280,6 +294,15 @@ describe('POST /v1/hosts/{host}/egress', () => {
     }
     expect(((await read(d, far.id)).body as Body).summary.complete).toBe(true);
     expect(((await read(d, old.id)).body as Body).summary.complete).toBe(true);
+    // A report's count is taken up to EGRESS_DROP_REPORT_MAX: a malformed one cannot write a huge
+    // count into every sandbox, nor overflow the counter.
+    const huge = { ...drop, dropped: Number.MAX_SAFE_INTEGER };
+    expect(await post(d, 'host-1', [huge, huge])).toMatchObject({
+      dropped: 2 * EGRESS_DROP_REPORT_MAX,
+    });
+    expect(((await read(d, a.id)).body as Body).summary.droppedBy.proxy).toBe(
+      7 + 2 * EGRESS_DROP_REPORT_MAX,
+    );
   });
 
   it(`caps a log at ${EGRESS_LOG_CAP} events; the overflow is counted as dropped`, async () => {
@@ -342,7 +365,7 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     expect(((await read(d, a.id, {}, admin)).body as Body).events).toHaveLength(1);
   });
 
-  it('pages by next, and its NDJSON export hashes to the summary sha256', async () => {
+  it('pages by next (the summary on the first page), and its NDJSON export hashes to its sha256', async () => {
     const d = await setup();
     const a = await create(d, 't1');
     const events = Array.from({ length: 5 }, (_, i) => ev(a.id, { bytes_up: i }));
@@ -352,11 +375,21 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     const p3 = (await read(d, a.id, { limit: '2', after: p2.next })).body as Body;
     expect([...p1.events, ...p2.events, ...p3.events]).toEqual(events);
     expect(p3.next).toBeNull();
+    // The summary comes with the first page only; a later page reads that page alone.
+    expect([p2.summary, p3.summary]).toEqual([null, null]);
+    const store = d.egress!;
+    const page = store.page.bind(store);
+    let reads = 0;
+    store.page = async (...args) => (reads++, page(...args));
+    await read(d, a.id, { limit: '2', after: p1.next });
+    expect(reads).toBe(1);
+    store.page = page;
     const nd = await read(d, a.id, { format: 'ndjson' });
     expect(nd.contentType).toBe('application/x-ndjson');
     // The digest's definition: sha256 over each event's canonical JSON, each followed by "\n".
     const want = events.map((e) => `${canonicalJson(e)}\n`).join('');
-    expect(nd.body).toBe(want);
+    expect(typeof nd.body).not.toBe('string'); // streamed, never built whole
+    expect(await text(nd.body)).toBe(want);
     expect(p1.summary.sha256).toBe(sha(want));
     // The empty log's digest is the sha256 of no bytes.
     const empty = await create(d, 't1');
@@ -364,6 +397,63 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     expect(await codeOf(() => read(d, a.id, { limit: '0' }))).toBe('invalid_request');
     expect(await codeOf(() => read(d, a.id, { after: 'x' }))).toBe('invalid_request');
     expect(await codeOf(() => read(d, a.id, { format: 'csv' }))).toBe('invalid_request');
+  });
+
+  it('streams the NDJSON export over HTTP, a store page at a time, byte for byte the digest', async () => {
+    const d = await setup();
+    const a = await create(d, 't1');
+    const events = Array.from({ length: 2500 }, (_, i) => ev(a.id, { bytes_up: i }));
+    for (let i = 0; i < events.length; i += 1000)
+      await post(d, 'host-1', events.slice(i, i + 1000));
+    const server = createServer(buildHandler(d));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const token = d.signer.mint({
+        sub: alice.sub,
+        tenant: alice.tenant,
+        roles: [],
+        scope: ['api'],
+        ttlSeconds: 3600,
+        now: nowS(),
+        iss: apiIssuer(d.config),
+      });
+      const res = await fetch(`${base}/v1/sandboxes/${a.id}/egress?format=ndjson`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('application/x-ndjson');
+      expect(res.headers.get('transfer-encoding')).toBe('chunked');
+      const body = await res.text();
+      expect(body).toBe(events.map((e) => `${canonicalJson(e)}\n`).join(''));
+      const first = (await read(d, a.id)).body as Body;
+      expect(first.summary.sha256).toBe(sha(body));
+      // A store that fails before the first chunk still answers its error; one that fails after it
+      // cuts the body short, never a complete-looking log.
+      const store = d.egress!;
+      const page = store.page.bind(store);
+      let calls = 0;
+      const failAt = (n: number) =>
+        (store.page = async (...args) => {
+          if (++calls === n) throw new CpError('redis_unavailable', 'redis is not answering');
+          return page(...args);
+        });
+      const get = () =>
+        fetch(`${base}/v1/sandboxes/${a.id}/egress?format=ndjson`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+      failAt(1);
+      expect((await get()).status).toBe(503);
+      calls = 0;
+      failAt(2);
+      const cut = await get();
+      expect(cut.status).toBe(200);
+      const partial = await cut.text().catch(() => null);
+      expect(partial === null || partial.length < body.length).toBe(true);
+      store.page = page;
+    } finally {
+      server.close();
+    }
   });
 });
 
@@ -379,7 +469,7 @@ describe("the sandbox's end record names its egress log", () => {
     const a = await create(d, 't1');
     await post(d, 'host-1', [ev(a.id), ev(a.id, { host: 'cdn.example.com' })]);
     await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: a.id } }), d);
-    const nd1 = (await read(d, a.id, { format: 'ndjson' })).body as string;
+    const nd1 = await ndjsonOf(d, a.id);
     const [end] = await ends(d, a.id);
     expect(end!.body).toMatchObject({
       state: 'terminated',
@@ -408,11 +498,38 @@ describe("the sandbox's end record names its egress log", () => {
     await janitor();
     const after = await ends(d, a.id);
     expect(after).toHaveLength(2);
-    const nd2 = (await read(d, a.id, { format: 'ndjson' })).body as string;
+    const nd2 = await ndjsonOf(d, a.id);
     expect(after[1]).toMatchObject({
       subject: 'janitor',
       body: { state: 'egress', egress: { events: 3, sha256: sha(nd2), complete: true } },
     });
+    expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(true);
+  });
+
+  it('a sweep that fails before the seal leaves the log unsealed, and the next sweep records it', async () => {
+    const d = await setup();
+    const a = await create(d, 't1');
+    await post(d, 'host-1', [ev(a.id)]);
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: a.id } }), d);
+    now += 30_000;
+    await post(d, 'host-1', [ev(a.id, { decision: 'aborted' })]); // late: the end record named 1
+    now += EGRESS_GRACE_S * 1000;
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let fail = 1;
+    prov.append = async (r) => {
+      if ((r.body as Body).state === 'egress' && fail-- > 0) throw new Error('append failed');
+      return append(r);
+    };
+    const janitor = () =>
+      HANDLERS.janitorSandboxes!({ ...ctx({}), janitorAuthorized: true } as never, d);
+    await expect(janitor()).rejects.toThrow('append failed');
+    expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(false);
+    await janitor();
+    await janitor();
+    const after = await ends(d, a.id);
+    expect(after).toHaveLength(2);
+    expect(after[1]!.body).toMatchObject({ state: 'egress', egress: { events: 2 } });
     expect(((await read(d, a.id)).body as Body).summary.sealed).toBe(true);
   });
 
@@ -450,9 +567,11 @@ describe("the sandbox's end record names its egress log", () => {
   });
 
   it('a log over the total budget: the end record and the late egress record name droppedBy.budget', async () => {
-    expect(EGRESS_TOTAL_BUDGET).toBe(200_000);
+    expect(EGRESS_TOTAL_BYTES).toBe(64 * 1024 * 1024);
     expect(EGRESS_LOG_CAP).toBe(10_000);
-    const d = await setup({ egress: new MemoryEgressStore(10, 3) });
+    // A budget of three events' lines (a sandbox id is 32 characters, as newId makes them here).
+    const one = Buffer.byteLength(canonicalJson(ev('0'.repeat(32))));
+    const d = await setup({ egress: new MemoryEgressStore({ cap: 10, budgetBytes: 3 * one }) });
     const a = await create(d, 't1');
     expect(await post(d, 'host-1', [ev(a.id), ev(a.id), ev(a.id), ev(a.id)])).toMatchObject({
       accepted: 3,
