@@ -66,7 +66,12 @@ export function buildJobSpec(
   return { ...rest, ...(guest !== undefined ? { guest_ram_mb: guest } : {}), id, image };
 }
 
-/** The workers of the builds a host holds (its last inventory): whose sandboxes it may report. */
+/**
+ * The workers of the builds a host holds (its last inventory): whose sandboxes it may report. The
+ * inventory is the host's own claim, not checked against placement or the attaching host: hosts
+ * are trusted, so a host's events reach only its own sandboxes when its inventory is true, and a
+ * host that claims a build it does not run can write into that build's sandboxes' egress logs.
+ */
 async function hostWorkers(deps: CpDeps, host: string): Promise<Set<string>> {
   const holds = deps.hosts?.get(host)?.holds ?? {};
   const out = new Set<string>();

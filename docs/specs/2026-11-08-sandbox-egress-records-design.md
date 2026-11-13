@@ -87,6 +87,13 @@ provenance.
     (`SH_SANDBOX_RETENTION_SECONDS`, 14 days).
   - **Who:** an event is stored only when its `sid` is the workspace key of a sandbox on a worker of
     a build this host holds, ended at most 600 s ago; every other event is refused and counted.
+    **What this rests on:** "a build this host holds" is the host's own last inventory, which
+    nothing checks against placement or against the host that attached the worker. Hosts are
+    trusted (each has its own bearer), so this keeps a host's events to its own sandboxes when its
+    inventory is true; it is not a guarantee against a host that claims a build it does not run,
+    which can write into that build's sandboxes' logs. Placement could not settle it either: it is
+    computed from the same inventories, and a sandbox's worker may have run on another host during
+    its life.
 - **Read:**
   - `GET /v1/sandboxes/{id}/egress?after=<next>&limit=N` (1-1000, default 100), for whoever may read
     the sandbox (its owner or an admin), gives `{events, next, summary}`;
