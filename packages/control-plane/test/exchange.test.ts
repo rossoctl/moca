@@ -9,7 +9,7 @@ import {
   viewTier,
 } from '../src/exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
-import { OwnershipIndex, type CpRedisLike } from '../src/ownership.js';
+import { OwnershipIndex, type CpRedisLike, type SessionRecord } from '../src/ownership.js';
 import { bundleKey, DEFAULT_BUNDLE_TTL_SECONDS } from '@moca/config-bundle';
 import { makeDeps, ctx, alice, codeOf, seedBundle, seedCredential } from './helpers/deps.js';
 
@@ -125,7 +125,9 @@ describe('placeholderFor', () => {
 
 describe('sessionTier (P6.3 spec §3.3)', () => {
   const tiers = { names: ['container', 'microvm'], default: 'container' };
-  const base = {
+  // Typed, so the no-`sandboxTier` case below still reaches the narrowed parameter: an untyped
+  // literal with no field in common with `Pick<SessionRecord, 'sandboxTier'>` is a weak-type error.
+  const base: SessionRecord = {
     sessionId: 's',
     owner: 'o',
     tenant: 'o',

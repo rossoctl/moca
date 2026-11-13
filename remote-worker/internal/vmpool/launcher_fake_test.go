@@ -13,7 +13,8 @@ func osStat(p string) (os.FileInfo, error) { return os.Stat(p) }
 
 // fakeLauncher is the whole Phase A test substrate: in-process VMs, no KVM. It
 // ENFORCES the invariants the pool must not violate — Resume before Run, exactly
-// one Run per VM, no use after Destroy — so a pool bug fails loudly here rather
+// one Run per VM (a lease VM excepted, for lease Runs only), no use after
+// Destroy — so a pool bug fails loudly here rather
 // than surfacing in Phase D as a density number nobody can explain.
 type fakeLauncher struct {
 	mu        sync.Mutex
@@ -147,11 +148,14 @@ type fakeVM struct {
 	lc           *fakeLauncher
 	id, key, dir string
 
-	mu        sync.Mutex
-	resumed   bool
-	runs      int
-	destroyed bool
-	cpuReads  int // CgroupCPU's step counter (exec_timing_test.go)
+	mu      sync.Mutex
+	resumed bool
+	runs    int
+	// perExecRuns counts the Runs without Command.Lease: a VM that has served one may
+	// never serve another Run of either kind.
+	perExecRuns int
+	destroyed   bool
+	cpuReads    int // CgroupCPU's step counter (exec_timing_test.go)
 }
 
 func (v *fakeVM) Key() string { return v.key }
@@ -199,9 +203,15 @@ func (v *fakeVM) Run(ctx context.Context, c Command, out Sink) (Result, error) {
 	}
 	v.runs++
 	n := v.runs
+	if !c.Lease {
+		v.perExecRuns++
+	}
+	perExec := v.perExecRuns
 	v.mu.Unlock()
-	if n > 1 {
-		// The property the whole slice exists for.
+	if n > 1 && perExec > 0 {
+		// The property the whole slice exists for. A lease VM (spec §3) is the one
+		// exception, and only while every Run it has served is a lease Run: a per-Exec
+		// Run on a lease VM, or a lease Run after a per-Exec one, is the same bug.
 		return Result{}, fmt.Errorf("fakeVM %s: Run called %d times — a VM must serve exactly one Exec", v.id, n)
 	}
 	if fn := v.lc.getRunFn(); fn != nil {

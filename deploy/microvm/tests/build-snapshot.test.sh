@@ -1615,6 +1615,13 @@ check "host-side guest_client stderr is captured, not discarded" \
   "$(printf '%s' "$gitid_body" | grep -cF '2>/dev/null')" "0"
 check "the identity check names #415 for the reader who hits the failure" \
   "$([ "$(printf '%s' "$gitid_body" | grep -c '#415')" -ge 1 ] && echo yes || echo no)" "yes"
+# A guest with no git passes (no commit to fail): the guest command tests for git first and
+# prints no-git, and the host takes exactly that as a pass; anything else still goes through the
+# real commit.
+check "the identity check passes a guest with no git" \
+  "$(printf '%s' "$gitid_body" | grep -cF 'command -v git >/dev/null 2>&1 || { echo no-git; exit 0; }')" "1"
+check "only the exact no-git answer, with exit 0, skips the commit" \
+  "$(printf '%s' "$gitid_body" | grep -cF '[ "$rc" -eq 0 ] && [ "$(printf '"'"'%s'"'"' "$out" | tr -d '"'"'[:space:]'"'"')" = "no-git" ]')" "1"
 
 echo "== egress (P4.1): proxy env + inert placeholder baked into init, build-time listener probe, no NIC"
 # The parked bash inherits the agent's env, which is init's env, so every Exec sees these.
@@ -1655,6 +1662,49 @@ check "check_egress_listener is called as often as check_git_identity" \
   "$(grep -c '^  check_egress_listener "' "$SCRIPT")" "$(grep -c '^  check_git_identity "' "$SCRIPT")"
 check "at least one VMM arm calls check_egress_listener" \
   "$([ "$(grep -c '^  check_egress_listener "' "$SCRIPT")" -ge 2 ] && echo yes || echo no)" "yes"
+
+echo "== the guest has /dev/fd and /dev/std* (bash process substitution), checked at build time"
+init_text="$(sed -n "/^  cat >\"\$STAGE\/rootfs-tree\/sbin\/init\" <<'INIT'\$/,/^INIT\$/p" "$SCRIPT")"
+for l in '/proc/self/fd /dev/fd' '/proc/self/fd/0 /dev/stdin' '/proc/self/fd/1 /dev/stdout' '/proc/self/fd/2 /dev/stderr'; do
+  check "init links ${l#* } -> ${l%% *}, never fatally" \
+    "$(printf '%s\n' "$init_text" | grep -cF "ln -s $l || true")" "1"
+done
+check "the links come after /proc is mounted" \
+  "$(printf '%s\n' "$init_text" | awk '/^mount -t proc/{p=NR} /ln -s \/proc\/self\/fd \/dev\/fd/{l=NR} END{print (p && l > p) ? "yes" : "no"}')" "yes"
+check "check_dev_fd runs <(...) and reads /dev/stdin in the guest" \
+  "$([ "$(fn_body check_dev_fd | grep -cF 'cat <(echo fd-ok) && echo stdin-ok | cat /dev/stdin')" -ge 1 ] && echo yes || echo no)" "yes"
+check "check_dev_fd fails the build" \
+  "$([ "$(fn_body check_dev_fd | grep -cF 'exit 1')" -ge 1 ] && echo yes || echo no)" "yes"
+check "check_dev_fd is called as often as check_git_identity" \
+  "$(grep -c '^  check_dev_fd "' "$SCRIPT")" "$(grep -c '^  check_git_identity "' "$SCRIPT")"
+
+echo "== the guest's /var keeps the image's files and is writable (overlay, then copy, then tmpfs)"
+check "init mounts an overlay on /var with the image's /var as its lower dir" \
+  "$(printf '%s\n' "$init_text" | grep -cF 'mount -t overlay overlay -o lowerdir=/var,upperdir=/.moca-var/upper,workdir=/.moca-var/work /var')" "1"
+check "its upper and work dirs are on a tmpfs outside /var" \
+  "$(printf '%s\n' "$init_text" | grep -cF 'mount -t tmpfs -o mode=0700 tmpfs /.moca-var')" "1"
+check "without overlayfs it copies the image's /var and binds it" \
+  "$(printf '%s\n' "$init_text" | grep -cF 'cp -a /var/. /.moca-var/copy/ && mount --bind /.moca-var/copy /var')" "1"
+check "the last resort is the old empty tmpfs" \
+  "$(printf '%s\n' "$init_text" | grep -cxF '  mount -t tmpfs tmpfs /var')" "1"
+check "no unconditional tmpfs over /var is left" \
+  "$(printf '%s\n' "$init_text" | grep -cxF 'mount -t tmpfs tmpfs /var')" "0"
+check "the build makes the /.moca-var mount point and refuses one outside the tree" \
+  "$(sed -n '/^assemble_rootfs() {/,/^}/p' "$SCRIPT" | grep -cxF '  for d in usr/local/bin sbin tmp var workspace .moca-var; do')" "1"
+check "check_var reads the probe file and writes /var, removing what it wrote" \
+  "$([ "$(fn_body check_var | grep -cF 'echo x >/var/.moca-var-check && rm -f /var/.moca-var-check')" -ge 1 ] && echo yes || echo no)" "yes"
+check "check_var fails the build" "$([ "$(fn_body check_var | grep -cF 'exit 1')" -ge 1 ] && echo yes || echo no)" "yes"
+check "check_var is called as often as check_git_identity" \
+  "$(grep -c '^  check_var "' "$SCRIPT")" "$(grep -c '^  check_git_identity "' "$SCRIPT")"
+TMPDIR_PICK="$(mktemp)"
+# The probe pick, on a scratch tree: a plain-named regular file, smallest path; none for an empty /var.
+printf '%s\n' 'STAGE="$1"' "$(sed -n '/^  VAR_PROBE="\$(cd/,/head -1 || true)"$/p' "$SCRIPT")" 'printf "%s" "$VAR_PROBE"' >"$TMPDIR_PICK"
+w="$(mktemp -d)"; mkdir -p "$w/rootfs-tree/var/lib/texmf" "$w/rootfs-tree/var/cache"
+: >"$w/rootfs-tree/var/lib/texmf/pdflatex.fmt"; : >"$w/rootfs-tree/var/cache/a b"
+check "VAR_PROBE picks a plain-named file" "$(bash "$TMPDIR_PICK" "$w")" "lib/texmf/pdflatex.fmt"
+rm -rf "$w/rootfs-tree/var"/*
+check "VAR_PROBE is empty for an empty /var" "$(bash "$TMPDIR_PICK" "$w")" ""
+rm -rf "$w" "$TMPDIR_PICK"
 # T7 regression fence: a NIC arriving quietly would void the no-network property.
 check "no network-interfaces config anywhere in the build" \
   "$(grep -c 'network-interfaces' "$SCRIPT")" "0"
@@ -1692,6 +1742,8 @@ EOI
     echo "STAGE='$w/stage'"
     echo "EGRESS_CA='$EGT/ca.crt'"
     fn_body validate_egress_ca
+    fn_body tree_dir_target
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1733,6 +1785,23 @@ check "tree with neither tool: install_egress_ca fails" "$([ "$(eg_harness none 
 check "neither tool: the message is the documented one" \
   "$(grep -cF -- '--egress-ca: the rootfs has neither update-ca-certificates nor update-ca-trust' "$w/out")" "1"
 
+# The CA directory, or a directory above it, as an absolute symlink out of the tree: the build
+# refuses, and the directory outside gains nothing.
+for kind in debian rhel; do
+  w="$EGT/link-$kind"; mkdir -p "$w/outside"
+  if [ "$kind" = debian ]; then link=usr/local/share; else link=etc/pki/ca-trust/source/anchors; fi
+  mkdir -p "$w/stage/rootfs-tree/$(dirname "$link")"
+  ln -s "$w/outside" "$w/stage/rootfs-tree/$link"
+  check "$kind: a CA directory linked out of the tree is refused" "$([ "$(eg_harness "$kind" "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "$kind: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+  check "$kind: nothing is written outside the tree" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "0"
+done
+w="$EGT/link-file"; mkdir -p "$w/stage/rootfs-tree/usr/local/share/ca-certificates"
+printf 'OUTSIDE\n' >"$w/outside.crt"
+ln -s "$w/outside.crt" "$w/stage/rootfs-tree/usr/local/share/ca-certificates/moca-egress.crt"
+check "debian: a CA file that is a symlink is refused" "$([ "$(eg_harness debian "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "debian: the file outside is untouched" "$(cat "$w/outside.crt")" "OUTSIDE"
+
 echo "== SBX0.2b: the CA file is validated before anything is staged"
 mkdir -p "$EGT/tmp1"
 out=$(TMPDIR="$EGT/tmp1" bash "$SCRIPT" --kernel /k --rootfs /r --agent /a --image t --egress-ca "$EGT/ca.key" 2>&1); rc=$?
@@ -1768,6 +1837,8 @@ for drift in real drifted; do
   {
     echo 'chroot() { local t="$1"; shift; local c="$1"; shift; "$t$c" "$@"; }'
     echo "STAGE='$w/stage'; EGRESS_CA='$EGT/ca.crt'"
+    fn_body tree_dir_target
+    fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
   } >"$w/run.sh"
@@ -1790,7 +1861,7 @@ for mode in with without chv; do
   [ "$mode" = chv ] && vmm=cloud-hypervisor
   {
     echo 'log() { :; }'
-    echo "STAGE='$mw/stage'; IMAGE=i; VMM=$vmm; INSTANCE_TYPE=t; GUEST_RAM_MB=256; MANIFEST_CAPABILITIES=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+    echo "STAGE='$mw/stage'; IMAGE=i; VMM=$vmm; INSTANCE_TYPE=t; GUEST_RAM_MB=256; VCPUS=1; MANIFEST_CAPABILITIES=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
     if [ "$mode" = with ]; then
       echo "EGRESS_CA='$EGT/ca.crt'"
       fn_body validate_egress_ca
@@ -1815,8 +1886,8 @@ check "the field comes after hash (outside it)" \
   "$(awk '/"hash"/{h=NR} /egress_ca_sha256/{e=NR} END{print (h<e)?"yes":"no"}' "$mw/with.json")" "yes"
 check "the manifest's kernel_release is the probed guest kernel" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_release"])' "$mw/without.json")" "6.1.155-guest"
-check "the Firecracker manifest's features are [lease-v1]" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1']"
+check "the Firecracker manifest's features are [lease-v1, balloon-fpr-v1]" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/without.json")" "['lease-v1', 'balloon-fpr-v1']"
 # CHV cannot serve a lease: chvWrapCommand mounts the workspace inside every Run.
 check "the Cloud Hypervisor manifest's features are []" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"])' "$mw/chv.json")" "[]"
@@ -1825,6 +1896,41 @@ check "the with-flag manifest is valid JSON" \
 check "assemble_rootfs calls install_egress_ca only when the flag is set" \
   "$(fn_body assemble_rootfs | grep -cF '[ -n "$EGRESS_CA" ] && install_egress_ca')" "1"
 rm -rf "$EGT"
+
+echo "== balloon-fpr-v1: the Firecracker golden snapshot carries a reporting-only balloon"
+# Spec §6 "Free-page reporting" and §16 item 5: one golden snapshot, for every mode, with a
+# virtio-balloon that only reports freed pages (nothing ever inflates it). The device must be
+# configured pre-boot, so the PUT sits between /machine-config and InstanceStart; a restored
+# VM gets it back from the snapshot, so verify_restore_firecracker never sends it.
+#
+# A recorder, not a grep: boot_quiesce_snapshot_firecracker's own api_put/api_patch
+# statements (comments stripped, continuation lines joined) run against stubs that log
+# each call's method, path and EXPANDED body, so the order and the exact JSON are what
+# Firecracker would receive.
+BT="$(mktemp -d "${TMPDIR:-/tmp}/bs-balloon-test.XXXXXX")"
+# shellcheck disable=SC2016 # the stubs and the grep pattern are literal, not expanded here
+{
+  printf '%s\n' 'api_put() { printf "PUT %s %s\n" "$2" "$3" >>"$REC"; }' \
+    'api_patch() { printf "PATCH %s %s\n" "$2" "$3" >>"$REC"; }' \
+    "REC='$BT/calls'; api_sock=/run/api.sock; GUEST_RAM_MB=256"
+  printf '%s\n' "$fc_build_body" | grep -v '^[[:space:]]*#' | sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' |
+    grep -E '^[[:space:]]*api_(put|patch) "\$api_sock"'
+} >"$BT/run.sh"
+bash "$BT/run.sh" >"$BT/out" 2>&1
+balloon_call='PUT /balloon {"amount_mib":0,"deflate_on_oom":false,"free_page_reporting":true}'
+mc_n=$(grep -n '^PUT /machine-config ' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+bl_n=$(grep -nxF "$balloon_call" "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+start_n=$(grep -nxF 'PUT /actions {"action_type":"InstanceStart"}' "$BT/calls" 2>/dev/null | head -n1 | cut -d: -f1)
+check "the Firecracker build sends PUT /balloon exactly once, with the reporting-only body" \
+  "$(grep -c '^PUT /balloon ' "$BT/calls" 2>/dev/null)|$(grep -cxF "$balloon_call" "$BT/calls" 2>/dev/null)" "1|1"
+check "PUT /balloon comes right after /machine-config and right before InstanceStart" \
+  "$([ -n "$mc_n" ] && [ -n "$bl_n" ] && [ -n "$start_n" ] &&
+    [ "$bl_n" -eq $((mc_n + 1)) ] && [ "$start_n" -eq $((bl_n + 1)) ] && echo yes || echo no)" "yes"
+check "the restore path never configures the balloon (it comes back from the snapshot)" \
+  "$(fn_body verify_restore_firecracker | grep -c '/balloon')" "0"
+check "the Cloud Hypervisor arm is unchanged (no balloon)" \
+  "$(fn_body boot_quiesce_snapshot_cloud_hypervisor | grep -ci 'balloon')" "0"
+rm -rf "$BT"
 
 echo "== lease-v1 image"
 # Lease mode (one VM, many Execs, each as uid 7000 in its own cgroup) needs cgroup2
@@ -1880,6 +1986,8 @@ LT="$(mktemp -d "${TMPDIR:-/tmp}/bs-lease-test.XXXXXX")"
 id_harness() { # $1 = work dir; the tree's etc/passwd and etc/group are already there
   {
     echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
+    fn_body tree_write_target
     fn_body add_sbx_identity
     echo 'add_sbx_identity'
   } >"$1/run.sh"
@@ -1911,6 +2019,44 @@ check "gid 7000 under another name: the message names it" "$(grep -cF 'staff7:x:
 check "gid 7000 under another name: passwd untouched" "$(grep -c '^sbx:' "$w/stage/rootfs-tree/etc/passwd")" "0"
 w="$LT/name"; id_tree "$w" $'sbx:x:1234:1234::/home/sbx:/bin/sh\n' $'root:x:0:\n'
 check "the name sbx under another uid: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+# The image's etc/passwd, etc/group or etc itself as an absolute symlink out of the tree: refused,
+# and the file outside untouched.
+for f in passwd group; do
+  w="$LT/link-$f"; id_tree "$w" $'root:x:0:0:root:/root:/bin/bash\n' $'root:x:0:\n'
+  printf 'OUTSIDE\n' >"$w/outside"
+  rm -f "$w/stage/rootfs-tree/etc/$f"; ln -s "$w/outside" "$w/stage/rootfs-tree/etc/$f"
+  check "etc/$f linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "etc/$f linked out of the tree: the refusal says so" "$(grep -c "/etc/$f is a symlink" "$w/out")" "1"
+  check "etc/$f linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
+done
+w="$LT/link-etc"; mkdir -p "$w/outside" "$w/stage/rootfs-tree"
+printf 'OUTSIDE\n' >"$w/outside/passwd"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc"
+check "etc linked out of the tree: refused" "$([ "$(id_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc linked out of the tree: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+check "etc linked out of the tree: the file outside is untouched" "$(cat "$w/outside/passwd")" "OUTSIDE"
+check "etc linked out of the tree: nothing new outside" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "1"
+# The etc/gitconfig append, run from assemble_rootfs's own lines.
+gc_harness() { # $1 = work dir
+  {
+    echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
+    fn_body tree_write_target
+    sed -n '/^  tree_write_target etc\/gitconfig$/,/^GITCONFIG$/p' "$SCRIPT"
+  } >"$1/run.sh"
+  bash "$1/run.sh" >"$1/out" 2>&1
+  echo $?
+}
+# shellcheck disable=SC2016 # the pattern is literal
+check "assemble_rootfs checks etc/gitconfig right before appending to it" \
+  "$(sed -n '/^  tree_write_target etc\/gitconfig$/{n;p;}' "$SCRIPT" | grep -cF 'cat >>"$STAGE/rootfs-tree/etc/gitconfig"')" "1"
+w="$LT/gc-plain"; mkdir -p "$w/stage/rootfs-tree"
+check "a plain tree: the gitconfig append succeeds" "$(gc_harness "$w")" "0"
+check "a plain tree: the credential helper is there" "$(grep -c 'password=moca-placeholder' "$w/stage/rootfs-tree/etc/gitconfig")" "1"
+w="$LT/gc-link"; mkdir -p "$w/stage/rootfs-tree/etc"; printf 'OUTSIDE\n' >"$w/outside"
+ln -s "$w/outside" "$w/stage/rootfs-tree/etc/gitconfig"
+check "etc/gitconfig linked out of the tree: refused" "$([ "$(gc_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "etc/gitconfig linked out of the tree: the file outside is untouched" "$(cat "$w/outside")" "OUTSIDE"
 
 # check_lease_support, run against a stub guest_client printing each possible answer.
 ls_harness() { # $1 = work dir, $2 = what the guest prints
@@ -1960,6 +2106,188 @@ bash "$LT/fail/run.sh" >"$LT/fail/out" 2>&1; rc=$?
 check "lease support: a transport failure fails" "$([ "$rc" != 0 ] && echo yes || echo no)" "yes"
 check "lease support: a transport failure shows guest_client's diagnostics" "$(grep -c 'dial: refused' "$LT/fail/out")" "1"
 rm -rf "$LT"
+echo "== --skip-git-identity-check and --guest-home are opt-in and off by default"
+# Images that refuse agent commits on purpose (benchmark testbeds: the patch must stay a diff
+# against an untouched baseline) carry no git identity, and the guest's HOME is otherwise the
+# kernel's HOME=/ on a read-only rootfs. Both flags exist for that; neither may change a default
+# build.
+usage_text="$(bash "$SCRIPT" --help 2>&1)"
+check "usage names --skip-git-identity-check" \
+  "$(printf '%s' "$usage_text" | grep -c -- '--skip-git-identity-check')" "2"
+check "usage names --guest-home" \
+  "$(printf '%s' "$usage_text" | grep -c -- '--guest-home')" "3"
+check "the identity check is skipped only behind the flag" \
+  "$(printf '%s' "$gitid_body" | grep -c 'if \[ "\$SKIP_GIT_IDENTITY_CHECK" = 1 \]; then')" "1"
+check "the skip is logged, never silent" \
+  "$(printf '%s' "$gitid_body" | grep -c 'log "skipping the git identity check')" "1"
+check "by default the identity check is required" \
+  "$(grep -c '^SKIP_GIT_IDENTITY_CHECK=0$' "$SCRIPT")" "1"
+check "by default no HOME is set for the guest" "$(grep -c '^GUEST_HOME=""$' "$SCRIPT")" "1"
+check "the HOME insertion is guarded by --guest-home" \
+  "$(grep -c '^  elif \[ -n "\$GUEST_HOME" \]; then$' "$SCRIPT")" "1"
+check "root's git config is copied only with --guest-home-gitconfig (off by default)" \
+  "$(grep -c '^GUEST_HOME_GITCONFIG=0$' "$SCRIPT") $(grep -c '^  if \[ -n "\$GUEST_HOME" \] && \[ "\$GUEST_HOME_GITCONFIG" = 1 \]; then$' "$SCRIPT")" "1 1"
+rc=0
+out="$(bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --guest-home /home/x 2>&1)" || rc=$?
+check "a --guest-home outside /tmp is refused before any build step (exit 2)" "$rc" "2"
+check "the refusal names the rule" \
+  "$(printf '%s' "$out" | grep -c 'must be a path under /tmp')" "1"
+# The insertion itself, with the same sed the script runs. GNU sed only: the script runs on the
+# KVM host (Linux), and BSD sed's `a` syntax differs.
+if sed --version >/dev/null 2>&1; then
+  t="$(mktemp)"
+  printf '#!/bin/sh\nmount -t tmpfs -o mode=1777 tmpfs /tmp\nexport PATH=/usr/bin:/bin\nexec agent\n' >"$t"
+  GUEST_HOME=/tmp/home # read by the eval'd block below
+  export GUEST_HOME
+  STAGE="$(mktemp -d)"; mkdir -p "$STAGE/rootfs-tree/sbin"; cp "$t" "$STAGE/rootfs-tree/sbin/init"
+  blk="$(sed -n '/^  if \[ -n "\$GUEST_HOME" \] && \[ "\$GUEST_HOME_GITCONFIG" = 1 \]; then/,/^  fi/p' "$SCRIPT")"
+  init0="$(cat "$t")"
+  # Default: no copy of root's git config (an image whose root identity must not reach the agent).
+  GUEST_HOME_GITCONFIG=0 eval "$blk"
+  cp "$STAGE/rootfs-tree/sbin/init" "$t"
+  check "by default init gets only mkdir and export HOME right after PATH" \
+    "$(sed -n '4,5p' "$t" | tr '\n' '|')" "mkdir -p /tmp/home|export HOME=/tmp/home|"
+  check "by default root's git config is never copied" "$(grep -c '/root/.gitconfig' "$t")" "0"
+  # --guest-home-gitconfig: the copy of root's git config, between mkdir and export HOME.
+  printf '%s\n' "$init0" >"$STAGE/rootfs-tree/sbin/init"
+  GUEST_HOME_GITCONFIG=1 eval "$blk"
+  cp "$STAGE/rootfs-tree/sbin/init" "$t"; rm -rf "$STAGE"
+  check "with --guest-home-gitconfig init also copies root's git config" \
+    "$(sed -n '4,7p' "$t" | tr '\n' '|')" \
+    "mkdir -p /tmp/home|[ ! -f /root/.gitconfig ] || cp /root/.gitconfig /tmp/home/.gitconfig || true|[ ! -d /root/.config/git ] || { mkdir -p /tmp/home/.config && cp -R /root/.config/git /tmp/home/.config/git; } || true|export HOME=/tmp/home|"
+  check "the init stays valid sh" "$(sh -n "$t" && echo yes || echo no)" "yes"
+  check "init still execs the agent last" "$(tail -1 "$t")" "exec agent"
+  rm -f "$t"
+else
+  echo "  skip: the init insertion check needs GNU sed (runs on the KVM host)"
+fi
+
+echo "== --vcpus is opt-in, default 1, validated, and reaches both VMMs and the manifest"
+usage_text="$(bash "$SCRIPT" --help 2>&1)"
+check "usage names --vcpus" "$(printf '%s' "$usage_text" | grep -c -- '--vcpus')" "2"
+check "by default the guest has 1 vCPU" "$(grep -c '^VCPUS=1$' "$SCRIPT")" "1"
+check "firecracker's machine-config takes the count" "$(grep -c 'vcpu_count\\":\$VCPUS' "$SCRIPT")" "1"
+check "no hardcoded vcpu_count is left" "$(grep -c 'vcpu_count\\":1' "$SCRIPT")" "0"
+check "cloud-hypervisor's --cpus takes the count" "$(grep -c -- '--cpus "boot=\$VCPUS"' "$SCRIPT")" "1"
+check "the manifest records it" "$(grep -c '"vcpus": \$VCPUS,' "$SCRIPT")" "1"
+for bad in 0 33 two -1; do
+  rc=0
+  out="$(bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --vcpus "$bad" 2>&1)" || rc=$?
+  check "--vcpus $bad is refused before any build step (exit 2)" "$rc" "2"
+done
+check "the refusal names the rule" "$(printf '%s' "$out" | grep -c 'from 1 to 32')" "1"
+
+echo "== the option checks match the whole value: an embedded newline is refused"
+# grep matches line by line, so a check written as printf | grep -Eq passed a value whose first line
+# was valid. Each of these values reaches init, a sed script, the VMM's config or the manifest.
+nl=$'\n'
+for case_ in "--guest-home|/tmp/home${nl}x" "--guest-home|/tmp/home${nl}touch /x" \
+  "--vcpus|4${nl},\"x\":1" "--vcpus|4${nl}" "--verify-timeout-s|60${nl}x"; do
+  opt="${case_%%|*}" val="${case_#*|}"
+  rc=0
+  bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --verify-command true "$opt" "$val" >/dev/null 2>&1 || rc=$?
+  check "$opt with an embedded newline is refused before any build step (exit 2)" "$rc" "2"
+done
+check "no option is checked with grep any more" \
+  "$(sed -n '/^# The three option checks/,/^OUT=/p' "$SCRIPT" | grep -c 'grep -E')" "0"
+# shellcheck disable=SC2016 # the patterns are literal
+check "the HOME insertion is checked with or without --guest-home-gitconfig" \
+  "$(grep -B1 'grep -qx "export HOME=$GUEST_HOME"' "$SCRIPT" | head -1 | grep -c '^  if \[ -n "\$GUEST_HOME" \]; then$')" "1"
+
+echo "== assemble_rootfs never writes through the image's symlinks"
+# An image's /sbin/init is commonly an ABSOLUTE symlink (/lib/systemd/systemd); writing through it
+# hits the build host's file. The fix unlinks the targets first and refuses out-of-tree directories.
+asm_body="$(sed -n '/^assemble_rootfs() {/,/^}/p' "$SCRIPT")"
+check "init and agent are unlinked before they are written" \
+  "$(printf '%s' "$asm_body" | grep -c 'rm -f "$STAGE/rootfs-tree/sbin/init" "$STAGE/rootfs-tree/usr/local/bin/agent"')" "1"
+unlink_line=$(printf '%s\n' "$asm_body" | grep -n 'rm -f "$STAGE/rootfs-tree/sbin/init"' | cut -d: -f1)
+write_line=$(printf '%s\n' "$asm_body" | grep -n 'cat >"$STAGE/rootfs-tree/sbin/init"' | cut -d: -f1)
+check "the unlink comes before the write" "$([ "$unlink_line" -lt "$write_line" ] && echo yes || echo no)" "yes"
+check "every directory assemble_rootfs makes is checked by tree_dir_target" \
+  "$(printf '%s' "$asm_body" | grep -cxF '  for d in usr/local/bin sbin tmp var workspace .moca-var; do')" "1"
+check "assemble_rootfs runs no mkdir of its own (only tree_dir_target makes directories)" \
+  "$(printf '%s\n' "$asm_body" | grep -v '^\s*#' | grep -c 'mkdir -p "$STAGE/rootfs-tree/')" "0"
+# The loop itself, run from assemble_rootfs's own lines on scratch trees: a directory the build
+# makes, or one above it, as an absolute symlink out of the tree is refused BEFORE anything is
+# created through it.
+ad_harness() { # $1 = work dir
+  {
+    echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
+    printf '%s\n' "$asm_body" | sed -n '/^  for d in usr\/local\/bin sbin tmp var workspace .moca-var; do$/,/^  done$/p'
+  } >"$1/run.sh"
+  bash "$1/run.sh" >"$1/out" 2>&1
+  echo $?
+}
+AD="$(mktemp -d "${TMPDIR:-/tmp}/bs-asmdir-test.XXXXXX")"
+w="$AD/plain"; mkdir -p "$w/stage/rootfs-tree/usr"
+check "a plain tree: the directories are made" "$(ad_harness "$w")" "0"
+check "a plain tree: all six exist" \
+  "$(cd "$w/stage/rootfs-tree" && for d in usr/local/bin sbin tmp var workspace .moca-var; do [ -d "$d" ] && echo y; done | wc -l | tr -d ' ')" "6"
+w="$AD/inside"; mkdir -p "$w/stage/rootfs-tree/usr/sbin"; ln -s usr/sbin "$w/stage/rootfs-tree/sbin"
+check "a symlink that stays inside the tree (sbin -> usr/sbin) is accepted" "$(ad_harness "$w")" "0"
+for link in usr/local sbin tmp var workspace .moca-var; do
+  w="$AD/link-$(printf '%s' "$link" | tr '/.' '__')"; mkdir -p "$w/outside" "$w/stage/rootfs-tree/$(dirname "$link")"
+  ln -s "$w/outside" "$w/stage/rootfs-tree/$link"
+  check "/$link linked out of the tree: refused" "$([ "$(ad_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "/$link linked out of the tree: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+  check "/$link linked out of the tree: nothing is created outside" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "0"
+done
+w="$AD/dangling"; mkdir -p "$w/stage/rootfs-tree/usr"; ln -s "$AD/nowhere" "$w/stage/rootfs-tree/usr/local"
+check "a dangling absolute symlink is refused" "$([ "$(ad_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "a dangling absolute symlink: nothing is created at its target" "$([ -e "$AD/nowhere" ] && echo yes || echo no)" "no"
+rm -rf "$AD"
+# The mechanism itself, on a scratch tree: an absolute symlink is replaced, its target untouched.
+t="$(mktemp -d)"; mkdir -p "$t/host" "$t/tree/sbin"; printf 'HOST\n' >"$t/host/init"
+ln -s "$t/host/init" "$t/tree/sbin/init"
+rm -f "$t/tree/sbin/init"; printf 'GUEST\n' >"$t/tree/sbin/init"
+check "the host file behind the symlink is untouched" "$(cat "$t/host/init")" "HOST"
+check "the tree gets a regular file" "$([ -f "$t/tree/sbin/init" ] && [ ! -L "$t/tree/sbin/init" ] && echo yes || echo no)" "yes"
+rm -rf "$t"
+
+echo "== --verify-command is opt-in: by default the verify step still runs \`true\`"
+usage_text="$(bash "$SCRIPT" --help 2>&1)"
+check "usage names --verify-command" "$(printf '%s' "$usage_text" | grep -c -- '--verify-command')" "3"
+check "usage names --verify-timeout-s" "$(printf '%s' "$usage_text" | grep -c -- '--verify-timeout-s')" "2"
+check "by default no verify command is set" "$(grep -c '^VERIFY_COMMAND=""$' "$SCRIPT")" "1"
+check "both verify arms run the one helper" "$(grep -c '^  run_verify_command "$vsock_uds" || exit_code=$?$' "$SCRIPT")" "2"
+check "no verify arm runs a hardcoded \`true\` any more" \
+  "$(grep -c -- '-timeout-s 30 -command true' "$SCRIPT")" "0"
+for bad in 0 86401 ten -5; do
+  rc=0
+  out="$(bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --verify-command true --verify-timeout-s "$bad" 2>&1)" || rc=$?
+  check "--verify-timeout-s $bad is refused before any build step (exit 2)" "$rc" "2"
+done
+check "the refusal names the rule" "$(printf '%s' "$out" | grep -c 'from 1 to 86400')" "1"
+rc=0
+bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --verify-command '' >/dev/null 2>&1 || rc=$?
+check "an empty --verify-command is a usage error (exit 2)" "$rc" "2"
+
+# The guest command itself, from the script's own functions, run here under bash with the mount
+# lines stubbed (no guest): the command's exit code comes back, and only its log's tail.
+# shellcheck disable=SC2034 # VERIFY_COMMAND is read by the eval'd verify_guest_command
+{
+eval "$(fn_body verify_guest_command)"
+VERIFY_COMMAND=""
+check "without --verify-command the guest runs exactly \`true\`" "$(verify_guest_command firecracker)" "true"
+VERIFY_COMMAND='echo seeded; printf "x%.0s" $(seq 1 20000); echo; echo "42 passed"; exit 3'
+for vmm in firecracker cloud-hypervisor; do
+  g="$(verify_guest_command "$vmm")"
+  case "$vmm" in
+    firecracker) want_mount='mount -o rw,noatime /dev/vdb /workspace' ;;
+    cloud-hypervisor) want_mount='mount -t virtiofs workspace /workspace' ;;
+  esac
+  check "$vmm: the workspace is mounted as the worker mounts it, before the command" \
+    "$(printf '%s\n' "$g" | head -n1 | grep -cF "$want_mount")" "1"
+  t="$(mktemp -d)"
+  g_local="$(printf '%s\n' "$g" | sed -e '1d' -e "s|cd /workspace|cd $t|" -e "s|/tmp/.verify-command.log|$t/log|g")"
+  rc=0; out="$(bash -c "$g_local")" || rc=$?
+  check "$vmm: the command's exit code comes back" "$rc" "3"
+  check "$vmm: the output's tail comes back" "$(printf '%s\n' "$out" | tail -n1)" "42 passed"
+  check "$vmm: at most 16 KiB of it" "$([ "${#out}" -le 16384 ] && echo yes || echo no)" "yes"
+  rm -rf "$t"
+done
+}
 
 if [ "$fails" -eq 0 ]; then echo "PASS"; else echo "FAIL ($fails)"; fi
 exit "$fails"

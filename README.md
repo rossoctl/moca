@@ -21,8 +21,9 @@ metal, or plain Kubernetes.
 
 The result is a **leaf-session backend**: an external orchestrator dispatches isolated units of
 agent work ("leaves") over a simple HTTP + shared-volume contract — sync turns, detachable
-streaming turns, and human-gated runs, with async fan-out and scheduled dispatch owed P6
-follow-ups ([ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md)).
+streaming turns, human-gated runs, and opt-in async fan-out
+([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md)), with scheduled dispatch still
+owed a P6 follow-up ([ADR-0034](docs/adrs/0034-vm-process-manager-socket-handoff.md)).
 
 ## Maturity
 
@@ -66,7 +67,7 @@ Criteria for Stable and the support policy are in
 | One process per session                             | Many sessions per worker; scale by **adding pods or sizing up**     |
 | One invocation model                                | Sync, detachable streaming, human-gated                             |
 
-The economics measurement ([experiment](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md),
+The economics measurement ([experiment](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e01-e07-knative/EXPERIMENTS.md),
 run on the since-removed scale-to-zero path) showed the serverless shape consuming roughly a
 quarter of the pod-seconds of an always-on agent. P6 trades scale-to-zero for density — many
 sessions per worker with admission control — and keeps what that experiment bought on the
@@ -201,10 +202,12 @@ The pipeline archetypes describe how an orchestrator dispatches leaves:
 
 B is served by the P6 runtime today. Archetypes A (async fan-out) and C (scheduled dispatch) ran
 only on the earlier scale-to-zero deployment, removed in November 2026
-([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)), and **neither runs on P6 yet**.
-Async fan-out has a decision record and design
-([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md)) and is tracked in
-[#686](https://github.com/rossoctl/moca/issues/686); scheduled dispatch has no design yet
+([ADR-0041](docs/adrs/0041-deprecate-knative-keda-deployment.md)). **A now runs on P6**: a drain
+loop in the ordinary turn worker, opt-in behind `SH_ASYNC_DRAIN=1` and `MOCA_TENANCY=single`
+([ADR-0047](docs/adrs/0047-p6-async-fan-out-in-worker-drain.md),
+[#686](https://github.com/rossoctl/moca/issues/686)) — see
+[dispatch archetypes](docs/concepts/dispatch-archetypes.md) for the operator steps and the two
+limits. Scheduled dispatch has no design yet
 ([#536](https://github.com/rossoctl/moca/issues/536)).
 
 ---
@@ -240,12 +243,12 @@ moca/
 
 Behaviour and economics are backed by reproducible experiments rather than claims:
 
-- **[`moca-experiments/knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/knative/EXPERIMENTS.md)**
+- **[`moca-experiments/experiments/e01-e07-knative/EXPERIMENTS.md`](https://github.com/rossoctl/moca-experiments/blob/main/experiments/e01-e07-knative/EXPERIMENTS.md)**
   — cluster experiments E1 (economics), E3 (mobility), E4 (recovery), run live on Kind. Moved to
   a separate repo 2026-09-25 (see `docs/specs/2026-09-24-ra1-density-cutover-and-repo-rearchitecture-design.md`).
 - **[`docs/archive/experiment-results.md`](docs/archive/experiment-results.md)**: E2 (reconstruction cost) and E5
   (budget enforcement), a dated write-up from June 2026. The code these ran from now lives in
-  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments).
+  [`moca-experiments/experiments/`](https://github.com/rossoctl/moca-experiments/tree/main/experiments/e02-e05-harness).
 
 ---
 
@@ -288,7 +291,7 @@ Start at the [documentation map](docs/index.md).
 
 This is explorative work and every deployment path is Preview (see [Maturity](#maturity)). The
 warm-worker-pool runtime, durable resume, sandbox isolation (container and microVM tiers), and the
-multi-user control plane are built. Async fan-out and scheduled dispatch do not run on P6 yet —
-async fan-out is designed (ADR-0047) and awaiting implementation. Interfaces may change.
+multi-user control plane are built. Async fan-out runs opt-in behind `SH_ASYNC_DRAIN` under single
+tenancy (ADR-0047); scheduled dispatch does not run on P6 yet. Interfaces may change.
 
 Licensed under the [Apache License 2.0](LICENSE).

@@ -46,7 +46,9 @@ type Stats struct {
 	// the field — and it is the only visibility on it after the first log line.
 	TimeoutsClamped uint64
 	// BudgetEvictions counts standbys shed by evictForBudgetLocked: user-visible memory
-	// refusals (#452) that were turned into somebody else's cold acquire instead.
+	// refusals (#452) that were turned into somebody else's cold acquire instead. The
+	// lease ticker sheds standbys the same way, and counts them here, when measured lease
+	// charges have grown past the budget (sweepLeases).
 	//
 	// READ IT AGAINST Refusals[RefuseMemoryBudget], because only the pair distinguishes
 	// the two states. Evictions rising while that stays flat is the mechanism absorbing
@@ -60,6 +62,17 @@ type Stats struct {
 	// ColdAcquires[ColdParked] means this is churning standbys rather than relieving
 	// anything.
 	BudgetEvictions uint64
+
+	// Lease mode (lease.go), all zero on a worker that never served a lease. LeaseVMs
+	// counts live lease VMs, idle or not; LeaseExecuting those inside an Exec's Run
+	// (InFlight counts per-Exec VMs only). LeaseCommittedBytes is the lease component
+	// of CommittedBytes (spec §6's third accounting class). LeaseEnds counts ended
+	// leases by spec §4.1 reason, worker_restart included (counted by the process that
+	// reports it).
+	LeaseVMs            int
+	LeaseExecuting      int
+	LeaseCommittedBytes int64
+	LeaseEnds           map[LeaseEndReason]uint64
 }
 
 // counters is the mutable half. A mutex over two small maps rather than atomics
@@ -75,10 +88,11 @@ type counters struct {
 	barrierUnobs      uint64
 	timeoutsClamped   uint64
 	budgetEvictions   uint64
+	leaseEnds         map[LeaseEndReason]uint64
 }
 
 func newCounters() *counters {
-	return &counters{cold: map[ColdCause]uint64{}, refusals: map[RefusalReason]uint64{}}
+	return &counters{cold: map[ColdCause]uint64{}, refusals: map[RefusalReason]uint64{}, leaseEnds: map[LeaseEndReason]uint64{}}
 }
 
 func (c *counters) warmAcquire() { c.mu.Lock(); c.warm++; c.mu.Unlock() }
@@ -96,6 +110,9 @@ func (c *counters) destroyFailed() { c.mu.Lock(); c.destroyFailures++; c.mu.Unlo
 func (c *counters) barrierUnobserved() { c.mu.Lock(); c.barrierUnobs++; c.mu.Unlock() }
 
 func (c *counters) timeoutClamped() { c.mu.Lock(); c.timeoutsClamped++; c.mu.Unlock() }
+
+// leaseEnded is called with pool.mu held (endLeaseLocked), safe for evicted's reason.
+func (c *counters) leaseEnded(r LeaseEndReason) { c.mu.Lock(); c.leaseEnds[r]++; c.mu.Unlock() }
 
 // evicted is called with pool.mu HELD (evictForBudgetLocked). Safe, and the only
 // counter that is: counters has its own mutex and never reaches back into the pool, so
@@ -119,5 +136,9 @@ func (c *counters) snapshot(into *Stats) {
 	into.Refusals = make(map[RefusalReason]uint64, len(c.refusals))
 	for k, v := range c.refusals {
 		into.Refusals[k] = v
+	}
+	into.LeaseEnds = make(map[LeaseEndReason]uint64, len(c.leaseEnds))
+	for k, v := range c.leaseEnds {
+		into.LeaseEnds[k] = v
 	}
 }

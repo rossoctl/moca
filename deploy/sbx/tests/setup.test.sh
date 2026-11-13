@@ -847,7 +847,54 @@ grep -q "worker 'sbx_nt' serves no template" "$TMP/out" || fail "non-template eg
 pass 'egress hosts take only template workers: the default host skips others, an explicit one is refused'
 pass 'refuses a bad switch, a worker listed twice or owned by no host, bad ids, bad separators and an out-of-range TTL'
 
-# 15. SBX_REDIS_IMAGE: Redis 7 for data a Redis 7.4 wrote (Valkey 9 cannot read RDB format 12).
+# 15. The template store (template lifecycle spec §3.1, §7.2) behind SBX_TEMPLATE_STORE=1.
+reset_state
+run_setup true || fail 'store off failed'
+cp "$K" "$TMP/store-off.yaml"
+run_setup export SBX_TEMPLATE_STORE=0 || fail 'SBX_TEMPLATE_STORE=0 failed'
+cmp -s "$TMP/store-off.yaml" "$K" || fail 'SBX_TEMPLATE_STORE=0 differs from unset'
+! grep -q 'template-store' "$K" "$MOCK_LOG" || fail 'store off touched the store'
+render
+! grep -q 'moca-sbx-templates\|SH_PROVENANCE_DIR' "$TMP/render.yaml" || fail 'store off renders the store'
+pass 'store off (unset or 0) changes nothing'
+
+run_setup export SBX_TEMPLATE_STORE=1 || fail "store on failed: $(cat "$TMP/out")"
+grep -q -- '- ../../k8s/overlays/ocp-sbx/template-store' "$K" || fail 'the overlay does not include the template-store component'
+render
+grep -q 'claimName: moca-sbx-templates' "$TMP/render.yaml" && grep -q 'value: /var/lib/moca/templates' "$TMP/render.yaml" || fail 'the store volume does not render'
+h1="$(pod_hash moca-control-plane)"
+run_setup export SBX_TEMPLATE_STORE=1 || fail 'store re-run'
+render
+[[ "$(pod_hash moca-control-plane)" == "$h1" ]] || fail 'a re-run moved the settings hash'
+pass 'store on: the component, the store volume at SH_PROVENANCE_DIR, a re-run unchanged'
+
+# With egress too: both components, each with its own volume, and egress's credentials sources kept.
+run_setup export SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 || fail 'store with egress failed'
+grep -q -- '- ../../k8s/overlays/ocp-sbx/egress-credentials' "$K" && grep -q -- '- ../../k8s/overlays/ocp-sbx/template-store' "$K" ||
+  fail 'with egress and the store, the overlay does not list both components'
+render
+grep -q 'claimName: moca-sbx-templates' "$TMP/render.yaml" && grep -q 'claimName: moca-sbx-credentials' "$TMP/render.yaml" &&
+  grep -q 'name: sbx-egress' "$TMP/render.yaml" && grep -q 'name: moca-mu1' "$TMP/render.yaml" ||
+  fail 'with egress and the store, a volume or a credentials source is missing'
+pass 'with egress on as well, both volumes mount and the credentials volume keeps moca-mu1 and sbx-egress'
+
+# Turning it off drops the component and leaves the PVC: setup.sh deletes nothing of the store.
+run_setup true || fail 'store off again failed'
+! grep -q 'template-store' "$K" || fail 'the overlay still names the store after turning it off'
+! grep -qE 'delete.*(pvc|persistentvolumeclaim).*moca-sbx-templates' "$MOCK_LOG" || fail 'turning the store off deleted its PVC'
+pass 'turning the store off drops the component and leaves its PVC'
+
+for r in 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
+  'export SBX_TEMPLATE_STORE=yes => SBX_TEMPLATE_STORE must be unset, 0 or 1'; do
+  bad="${r%% => *}" want="${r#* => }"
+  reset_state
+  ! run_setup eval "$bad" || fail "accepted: $bad"
+  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
+  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
+done
+pass 'refuses a bad store switch before anything is applied'
+
+# 16. SBX_REDIS_IMAGE: Redis 7 for data a Redis 7.4 wrote (Valkey 9 cannot read RDB format 12).
 reset_state
 R7='docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499'
 run_setup export SBX_REDIS_IMAGE="$R7" || fail "SBX_REDIS_IMAGE run failed: $(cat "$TMP/out")"

@@ -195,6 +195,9 @@ pass 'the attach and exec Routes are passthrough'
 ! grep -q 'SH_CREDENTIAL_STORE\|SH_CREDENTIAL_DIR\|moca-sbx-credentials\|sbx-egress' "$OUT" || fail 'the off shape mentions the credential store or sbx-egress'
 [[ "$(obj Deployment moca-control-plane | jq -r '.spec.strategy.type // "default"')" != Recreate ]] || fail 'the off shape runs the control plane as Recreate'
 pass 'egress off: no PVC, no credential store, no Recreate, no sbx-egress'
+! grep -q 'SH_PROVENANCE_DIR\|moca-sbx-templates' "$OUT" || fail 'the off shape mentions the template store'
+[[ -z "$(q '.[] | select(.kind == "PersistentVolumeClaim") | .metadata.name')" ]] || fail 'the off shape renders a PVC'
+pass 'template store off: no PVC, no SH_PROVENANCE_DIR'
 
 ON="$(cd -P "$TMPD" && pwd)/on"
 mkdir -p "$ON"
@@ -234,3 +237,30 @@ cp_ports="$(obj NetworkPolicy moca-control-plane | jq -r '[.spec.egress[].ports[
 [[ " $cp_ports " == *' 443 '* && " $cp_ports " == *' 6379 '* && " $cp_ports " != *' 6443 '* ]] || fail "egress on changed the control plane's egress ports: $cp_ports"
 [[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] || fail 'egress on opened ingress to the control plane'
 pass 'egress on: PVC (RWO 1Gi) mounted at /var/lib/moca/credentials, Recreate, store=file, sbx-egress projected beside moca-mu1, no service account token, NetworkPolicy unchanged'
+
+# The template store (template lifecycle spec §3.1, §7.2): the component alone, as setup.sh lists it
+# behind SBX_TEMPLATE_STORE=1.
+STORE="$(cd -P "$TMPD" && pwd)/store"
+mkdir -p "$STORE"
+srel() { python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$1" "$STORE"; }
+printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - %s\ncomponents:\n  - %s\n' \
+  "$(srel "$ROOT/deploy/k8s/overlays/ocp-sbx")" "$(srel "$ROOT/deploy/k8s/overlays/ocp-sbx/template-store")" >"$STORE/kustomization.yaml"
+kubectl kustomize "$STORE" >"$OUT" || fail 'the overlay with the template-store component does not render'
+KUBECONFIG=/dev/null kubectl label --local -f "$OUT" sbx-render- -o json | jq -s . >"$JSON"
+CP="$(obj Deployment moca-control-plane)"
+[[ -n "$CP" ]] || fail 'could not isolate the control-plane Deployment (store on)'
+PVC="$(obj PersistentVolumeClaim moca-sbx-templates)"
+[[ -n "$PVC" ]] || fail 'missing PersistentVolumeClaim/moca-sbx-templates'
+[[ "$(jq -c '[.spec.accessModes, .spec.resources.requests.storage]' <<<"$PVC")" == '[["ReadWriteOnce"],"1Gi"]' ]] || fail "the store PVC is not RWO 1Gi: $(jq -c .spec <<<"$PVC")"
+[[ "$(jq -r .metadata.namespace <<<"$PVC")" == moca-sbx ]] || fail 'the store PVC is outside the overlay namespace'
+vol="$(jq -r '.spec.template.spec.volumes[] | select(.persistentVolumeClaim.claimName == "moca-sbx-templates") | .name' <<<"$CP")"
+[[ -n "$vol" ]] || fail 'the control plane does not volume the store PVC'
+[[ "$(jq -r --arg v "$vol" '.spec.template.spec.containers[] | select(.name == "control-plane") | .volumeMounts[] | select(.name == $v) | .mountPath' <<<"$CP")" == /var/lib/moca/templates ]] ||
+  fail 'the store PVC is not mounted at /var/lib/moca/templates'
+[[ "$(cp_env SH_PROVENANCE_DIR | jq -r .value)" == /var/lib/moca/templates ]] || fail 'SH_PROVENANCE_DIR is not /var/lib/moca/templates'
+[[ "$(jq -r .spec.strategy.type <<<"$CP")" == Recreate && "$(jq -r '.spec.strategy.rollingUpdate // "none"' <<<"$CP")" == none ]] || fail 'the control plane is not strategy Recreate (store on)'
+# Nothing else of the control plane changes: its credentials volume is moca-mu1's alone, no egress store.
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | (.secret.secretName // (.projected.sources[]?.secret.name))]' <<<"$CP")" == '["moca-mu1"]' ]] ||
+  fail "store on changed the credentials volume: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+[[ -z "$(cp_env SH_CREDENTIAL_STORE)" ]] || fail 'store on turned on the credential store'
+pass 'template store on: PVC (RWO 1Gi) mounted at /var/lib/moca/templates as SH_PROVENANCE_DIR, Recreate, credentials unchanged'

@@ -71,7 +71,7 @@ func (b *recordingBinder) log() []string {
 // jailer's argv is "--id <id> ...", so the script derives the jail from $2.
 func egressLauncher(t *testing.T, b EgressBinder) (Launcher, string, string) {
 	t.Helper()
-	base := shortdir.New(t, "fceg", len("/firecracker/vm-6/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fceg", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 	marker := filepath.Join(base, "jailer-marker")
 	jailer := filepath.Join(base, "jailer")
 	script := "#!/bin/sh\njail=" + base + "/firecracker/$2/root\n" +
@@ -279,22 +279,47 @@ func TestEgressOffLeavesRestoreUnchanged(t *testing.T) {
 }
 
 func TestFirecrackerRefusesAnEgressSocketPathTooLong(t *testing.T) {
-	base := "/tmp/" + strings.Repeat("a", 85) // 90 chars
+	// The egress path (<jail>/run/v.sock_<port>) is never longer than the API socket path
+	// (<jail>/run/firecracker.socket) for a port of up to 10 digits, so a base too long for it is
+	// refused by the API check whether egress is on or off; the egress check stays as a guard for
+	// a longer egress path. Both refuse a 90-byte base, naming sun_path and a length.
+	base := "/tmp/" + strings.Repeat("a", 85)
+	for _, egress := range []bool{false, true} {
+		opts := FirecrackerOptions{
+			JailerBin: "/j", FirecrackerBin: "/usr/bin/firecracker", ChrootBase: base, SnapshotDir: "/s",
+		}
+		if egress {
+			opts.Egress = &recordingBinder{}
+		}
+		_, err := NewFirecrackerLauncher(opts)
+		if err == nil || !strings.Contains(err.Error(), "sun_path") {
+			t.Fatalf("egress=%v: a 90-byte base was accepted or the error does not name sun_path: %v", egress, err)
+		}
+	}
+	opts := FirecrackerOptions{EgressPort: 4294967295, ChrootBase: base, FirecrackerBin: "/usr/bin/firecracker"}
+	if len(opts.maxEgressSocketPath()) > len(opts.maxAPISocketPath()) {
+		t.Fatal("the egress socket path can be longer than the API socket path: the API check no longer covers it")
+	}
+}
+
+func TestFirecrackerRefusesAnAPISocketPathTooLong(t *testing.T) {
+	// The API socket is dialled with egress off too. 61 + "/firecracker/vm-<20>/root/run/firecracker.socket"
+	// (64) = 125 bytes: refused. A chroot base named after a long template id hits it.
 	opts := FirecrackerOptions{
-		JailerBin: "/j", FirecrackerBin: "/usr/bin/firecracker", ChrootBase: base, SnapshotDir: "/s",
+		JailerBin: "/j", FirecrackerBin: "/usr/bin/firecracker", SnapshotDir: "/s",
+		ChrootBase: "/srv/sbx/jail/sbx_example_org_example_proj_12345_0123456789ab",
 	}
-	if _, err := NewFirecrackerLauncher(opts); err != nil {
-		t.Fatalf("egress off must accept a long base: %v", err)
-	}
-	opts.Egress = &recordingBinder{}
 	_, err := NewFirecrackerLauncher(opts)
 	if err == nil {
-		t.Fatal("a too-long egress socket path was accepted")
+		t.Fatal("a too-long API socket path was accepted with egress off")
 	}
-	opts.setDefaults()
-	want := len(opts.maxEgressSocketPath())
-	if !strings.Contains(err.Error(), "sun_path") || !strings.Contains(err.Error(), strconvItoa(want)) {
-		t.Errorf("error %q should name sun_path and the length %d", err, want)
+	want := len(opts.maxAPISocketPath())
+	if !strings.Contains(err.Error(), "API socket path") || !strings.Contains(err.Error(), strconvItoa(want)) {
+		t.Errorf("error %q should name the API socket path and the length %d", err, want)
+	}
+	opts.ChrootBase = "/srv/sbx/jail/j0123456789ab"
+	if _, err := NewFirecrackerLauncher(opts); err != nil {
+		t.Fatalf("a short base was refused: %v", err)
 	}
 }
 
@@ -335,5 +360,45 @@ func TestLauncherFromEnvWiresEgressFromControlSock(t *testing.T) {
 	}
 	if lc2.(*firecrackerLauncher).opts.Egress != nil {
 		t.Error("egress must stay off when the control socket is unset")
+	}
+}
+
+// A jailer (or a Firecracker) that fails says why on stdout/stderr; the restore's error carries
+// the tail of it, instead of only the socket timeout.
+func TestFirecrackerRestoreErrorCarriesTheJailerOutput(t *testing.T) {
+	base := shortdir.New(t, "fcout", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
+	jailer := filepath.Join(base, "jailer")
+	script := "#!/bin/sh\necho 'jailer: Failed to chroot: Os { code: 2 }' >&2\necho second line\nexit 1\n"
+	if err := os.WriteFile(jailer, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lc, err := NewFirecrackerLauncher(FirecrackerOptions{
+		JailerBin: jailer, FirecrackerBin: filepath.Join(base, "firecracker"),
+		ChrootBase: base, SnapshotDir: base, UID: os.Getuid(), GID: os.Getgid(),
+	})
+	if err != nil {
+		t.Fatalf("NewFirecrackerLauncher: %v", err)
+	}
+	seedSnapshot(t, base)
+	err = restoreShort(lc, base, "vm-5")
+	if err == nil {
+		t.Fatal("a restore whose jailer exits 1 succeeded")
+	}
+	for _, want := range []string{"API socket never appeared", "jailer output:", "Failed to chroot: Os { code: 2 }", "second line"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+func TestTailBufferKeepsTheLastBytes(t *testing.T) {
+	tb := newTailBuffer(8)
+	if got := tb.String(); got != "(none)" {
+		t.Fatalf("empty = %q", got)
+	}
+	_, _ = tb.Write([]byte("abcdef\n"))
+	_, _ = tb.Write([]byte("ghij\n"))
+	if got := tb.String(); got != "ef | ghij" {
+		t.Fatalf("tail = %q, want the last 8 bytes on one line", got)
 	}
 }
