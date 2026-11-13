@@ -114,3 +114,21 @@ cmp -s "$TMP/templates.json" "$TMP/tpl.before" || fail 'a refusal changed the te
 rc=0; bash "$REG" --env-file "$TMP/sbx.env" "$TMP/r1.json" --retire x >"$TMP/out" 2>&1 || rc=$?
 [[ "$rc" == 2 ]] || fail 'a record and --retire together were not a usage error'
 pass 'refuses a non-record, a worker clash, an SBX_WORKERS it cannot rewrite, SBX_EGRESS_HOSTS, two actions'
+
+# 7. Symlinked files: the env and templates files are links (as a config checkout often links them);
+# the write goes through to each target with the target's mode, and the links stay links.
+reset
+mkdir -p "$TMP/real"
+mv "$TMP/sbx.env" "$TMP/real/sbx.env" && ln -s real/sbx.env "$TMP/sbx.env"
+mv "$TMP/templates.json" "$TMP/real/templates.json" && chmod 640 "$TMP/real/templates.json"
+ln -s "$TMP/real/templates.json" "$TMP/templates.json"
+run "$TMP/r1.json" || fail 'an add through symlinks failed'
+[[ -L "$TMP/sbx.env" && -L "$TMP/templates.json" ]] || fail 'a symlinked file was replaced by a regular file'
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+[[ "$(mode_of "$TMP/real/sbx.env")" == 600 && "$(mode_of "$TMP/real/templates.json")" == 640 ]] ||
+  fail "a target lost its mode: env $(mode_of "$TMP/real/sbx.env"), templates $(mode_of "$TMP/real/templates.json")"
+[[ "$(workers)" == "sbx_default $W1" ]] || fail "SBX_WORKERS through the link is '$(workers)'"
+jq -e 'length == 2' "$TMP/real/templates.json" >/dev/null || fail 'the templates target was not written'
+[[ -z "$(find "$TMP" "$TMP/real" -maxdepth 1 \( -name 'sbx.env.??????' -o -name 'templates.json.??????' \) -print)" ]] || fail 'a temporary file was left behind'
+pass 'a symlinked env or templates file is written through to its target, keeping the target'"'"'s mode; the links stay'
+rm -f "$TMP/sbx.env" "$TMP/templates.json"
