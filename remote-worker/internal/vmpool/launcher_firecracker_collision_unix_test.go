@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,14 +24,15 @@ import (
 //
 // The chroot base comes from shortdir rather than t.TempDir() on purpose: the jail's
 // API socket path is a unix socket, and sun_path caps out at 104 bytes on darwin (108
-// on linux). t.TempDir() on darwin is already ~70 bytes before the 45-byte
+// on linux). t.TempDir() on darwin is already ~70 bytes before the
 // /firecracker/<id>/root/run/firecracker.socket suffix is appended, which would make
-// this test fail on path length rather than on the property under test. That suffix
-// length is passed to shortdir.New, so a TMPDIR too long to hold it costs a fallback to
-// /tmp rather than an EINVAL from bind.
+// this test fail on path length rather than on the property under test. The suffix
+// passed to shortdir.New is the worst case, with the longest id nextIDLocked can mint
+// (vm- plus 20 digits), because that is what NewFirecrackerLauncher's validate checks:
+// a TMPDIR too long to hold it costs a fallback to /tmp rather than a refused launcher.
 func collisionLauncher(t *testing.T) (Launcher, string, string) {
 	t.Helper()
-	base := shortdir.New(t, "fcguard", len("/firecracker/vm-6/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fcguard", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 
 	marker := filepath.Join(base, "jailer-was-spawned")
 	jailer := filepath.Join(base, "jailer")
@@ -165,7 +168,7 @@ func TestFirecrackerProceedsPastTheCollisionGuardWhenTheJailIsFree(t *testing.T)
 // its 5 s timeout. opts.cgroupRoot points the pool at a temp tree because Cgroup2Root names the
 // host's real cgroupfs.
 func TestRestoreCleanupReturnsThePooledCgroupOnAFailedRestore(t *testing.T) {
-	base := shortdir.New(t, "fccg", len("/firecracker/vm-42/root/run/firecracker.socket"))
+	base := shortdir.New(t, "fccg", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 
 	jailer := filepath.Join(base, "jailer")
 	if err := os.WriteFile(jailer, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -215,5 +218,149 @@ func TestRestoreCleanupReturnsThePooledCgroupOnAFailedRestore(t *testing.T) {
 	}
 	if pool.mintedCount() != 1 {
 		t.Fatalf("minted=%d; the returned cgroup should have been reused", pool.mintedCount())
+	}
+}
+
+// TestWaitForHeldJailsWaitsForAKilledVMMToLetGoOfItsSocket is #797's wait before Probe. A
+// SIGKILLed VMM can still be answering on its API socket while the kernel tears it down, and
+// Probe's first Restore then meets it in the collision guard above and fails the start. The
+// listener here closes 300 ms in, standing in for that teardown: WaitForHeldJails must still
+// be waiting then, and return with nothing held once it has gone.
+func TestWaitForHeldJailsWaitsForAKilledVMMToLetGoOfItsSocket(t *testing.T) {
+	lc, base, _ := collisionLauncher(t)
+	jailRoot := filepath.Join(base, "firecracker", "vm-1", "root")
+	if err := os.MkdirAll(filepath.Join(jailRoot, "run"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(jailRoot, apiSockRelPath))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = ln.Close()
+		close(closed)
+	}()
+	t.Cleanup(func() { <-closed })
+
+	if held := WaitForHeldJails(lc, 5*time.Second); len(held) != 0 {
+		t.Fatalf("WaitForHeldJails = %v, want none: the listener closed well inside the bound", held)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("WaitForHeldJails returned while vm-1's API socket still had a listener — Probe would collide with it")
+	}
+}
+
+// TestWaitForHeldJailsNamesTheJailsStillHeldWhenItGivesUp is the bound's other side: a VMM
+// still answering when the wait ends is named, so the start fails saying which id, and only
+// that one. A free jail (a stale socket file, no listener) is not held — the same distinction
+// the collision guard makes — and a directory that is not a pool VM id is not asked at all.
+func TestWaitForHeldJailsNamesTheJailsStillHeldWhenItGivesUp(t *testing.T) {
+	lc, base, _ := collisionLauncher(t)
+	occupyJail(t, base, "vm-2")
+	occupyJail(t, base, "vm-x") // not an id this pool makes (ids are decimal)
+	free := filepath.Join(base, "firecracker", "vm-3", "root")
+	if err := os.MkdirAll(filepath.Join(free, "run"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale, err := net.Listen("unix", filepath.Join(free, apiSockRelPath))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// Leave the socket FILE behind with nothing accept()ing on it, as a crashed VMM does.
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = stale.Close()
+
+	start := time.Now()
+	held := WaitForHeldJails(lc, 150*time.Millisecond)
+	if len(held) != 1 || held[0] != "vm-2" {
+		t.Fatalf("WaitForHeldJails = %v, want exactly [vm-2]", held)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("WaitForHeldJails gave up after %s, before its 150ms bound", elapsed)
+	}
+}
+
+// TestWaitForHeldJailsIsANoOpForALauncherWithNoJails: only the Firecracker arm has jails to
+// ask, so any other launcher returns at once with nothing held rather than delaying the start.
+func TestWaitForHeldJailsIsANoOpForALauncherWithNoJails(t *testing.T) {
+	if held := WaitForHeldJails(&fakeLauncher{}, time.Hour); len(held) != 0 {
+		t.Fatalf("WaitForHeldJails = %v for a launcher with no jails, want none", held)
+	}
+}
+
+// TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears pins the teardown on the path
+// the startup probe failed on in #797 ("API socket never appeared"): the process Restore
+// spawned must be dead when Restore returns, or a failed probe leaves a VMM of its own behind
+// for the next start to sweep. The fake jailer records its pid and then stays alive without
+// ever binding the socket, as a VMM that hangs before its API comes up would; a cancelled
+// context ends the socket wait early instead of after its 5 s.
+func TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears(t *testing.T) {
+	base := shortdir.New(t, "fcpk", len("/firecracker/vm-1/root/run/firecracker.socket"))
+	pidFile := filepath.Join(base, "jailer.pid")
+	jailer := filepath.Join(base, "jailer")
+	if err := os.WriteFile(jailer, []byte("#!/bin/sh\necho $$ >"+pidFile+"\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatalf("write fake jailer: %v", err)
+	}
+	// The snapshot components Restore hardlinks before it spawns anything, so it gets as far as
+	// the socket wait.
+	snap := filepath.Join(base, "snap")
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{fileVMState, fileMemory, fileKernel, fileRootfs, fileAgent} {
+		if err := os.WriteFile(filepath.Join(snap, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lc, err := NewFirecrackerLauncher(FirecrackerOptions{
+		JailerBin:      jailer,
+		FirecrackerBin: filepath.Join(base, "firecracker"),
+		ChrootBase:     base,
+		SnapshotDir:    snap,
+		UID:            os.Getuid(),
+		GID:            os.Getgid(),
+	})
+	if err != nil {
+		t.Fatalf("NewFirecrackerLauncher: %v", err)
+	}
+	prevMkfs := mkfsExt4
+	mkfsExt4 = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { mkfsExt4 = prevMkfs })
+
+	// Cancelled once the jailer has recorded its pid, not after a fixed delay: under load a
+	// fixed delay can end the wait before the shell has run at all, and then there is nothing
+	// to assert on. If the pid never appears, the socket wait's own 5 s bound ends Restore.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if b, err := os.ReadFile(pidFile); err == nil && strings.HasSuffix(string(b), "\n") {
+				break
+			}
+		}
+		cancel()
+	}()
+	_, err = lc.Restore(ctx, RestoreRequest{
+		ID: "vm-1", Key: "probe", WorkspaceDir: t.TempDir(), GuestRAMBytes: 256 << 20,
+	})
+	if err == nil || !strings.Contains(err.Error(), "API socket never appeared") {
+		t.Fatalf("Restore = %v, want the socket-wait failure", err)
+	}
+
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("the fake jailer never ran, so this test staged nothing: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("parsing the fake jailer's pid: %v", err)
+	}
+	if pidStillRunning(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("the jailer Restore started (pid %d) was still running after Restore failed — the failed restore left its VMM behind", pid)
 	}
 }

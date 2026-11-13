@@ -263,6 +263,14 @@ for c in moca-settings sbx-settings; do [[ -f "$MOCK_STATE/configmap-$c.json" ]]
 ! has_key moca-relay MOCA_RELAY_EXEC_TOKEN || fail 'minted a harness exec token (SBX0 1b has none)'
 pass 'creates every Secret and ConfigMap, one worker token per worker, no exec or client tokens'
 
+# Redis refuses writes past 200 MB (under its container's 256 MiB) instead of being OOM-killed, and
+# evicts nothing: every session and sandbox record is in it.
+RC="$(secret_val moca-redis redis.conf)"
+grep -qx 'maxmemory 200mb' <<<"$RC" && grep -qx 'maxmemory-policy noeviction' <<<"$RC" ||
+  fail "redis.conf has no 200mb noeviction limit: $(grep -v requirepass <<<"$RC")"
+grep -qx 'appendonly yes' <<<"$RC" && grep -qx 'dir /data' <<<"$RC" || fail 'redis.conf lost its persistence lines'
+pass 'redis.conf caps Redis at 200mb with noeviction'
+
 priv="$(secret_val moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY)"
 [[ "$priv" =~ ^[A-Za-z0-9+/]+=*$ ]] || fail 'no signing key, or not one line of base64'
 keyset="$(secret_val sbx-token-keys PUBLIC_KEYS)"
@@ -333,9 +341,9 @@ grep -q 'newName: ghcr.io/example/moca' "$K" && grep -q 'newTag: sbx-1b' "$K" ||
 render
 grep -q 'host: sbx-api.apps.example.invalid' "$TMP/render.yaml" || fail 'the rendered API Route has the placeholder host'
 cp_hash="$(pod_hash moca-control-plane)" relay_hash="$(pod_hash sandbox-relay)"
-[[ "$cp_hash" =~ ^[0-9a-f]{16}$ && "$relay_hash" == "$cp_hash" ]] ||
-  fail "want one settings hash on both pod templates: control plane '$cp_hash', relay '$relay_hash'"
-pass 'applies an overlay that renders with the namespace, three hosts, the image and one settings hash on both pods'
+[[ "$cp_hash" =~ ^[0-9a-f]{16}$ && "$relay_hash" =~ ^[0-9a-f]{16}$ && "$relay_hash" != "$cp_hash" ]] ||
+  fail "want a settings hash on each pod template, each its own: control plane '$cp_hash', relay '$relay_hash'"
+pass 'applies an overlay that renders with the namespace, three hosts, the image and a settings hash on each pod'
 
 W="$GEN/workers/sbx_py312"
 grep -qx 'RELAY_ADDR=sbx-attach.apps.example.invalid:443' "$W/worker.env" || fail 'worker bundle RELAY_ADDR'
@@ -385,7 +393,8 @@ run_setup true || fail 'second run failed'
 [[ "$(secret_val moca-mu1 SH_JANITOR_TOKEN)" == "$jtok" && "$(cat "$GEN/janitor/janitor.token")" == "$jtok" ]] ||
   fail 'a re-run rotated the janitor token'
 render
-[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the settings hash moved on a re-run with the same inputs'
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" && "$(pod_hash sandbox-relay)" == "$relay_hash" ]] ||
+  fail 'a settings hash moved on a re-run with the same inputs'
 pass 'a re-run keeps every token, password, key and certificate, and the settings hash'
 
 # 4a. A list separated by newlines or tabs is the same list: nothing is revoked, nothing rotates.
@@ -412,8 +421,8 @@ grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the refusal does not name th
 grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused run rewrote a bundle'
 pass 'refuses a lifetime change that alters SH_WORKSPACE_IDLE without SBX_ACK_HOSTS=1, naming it and install-host.sh'
 
-# Acknowledged: applied, with the hosts to reinstall named. A settings change moves the hash on both
-# pods (so the apply rolls them); the idle follows.
+# Acknowledged: applied, with the hosts to reinstall named. The in-flight cap is the relay's too, so
+# it moves the hash on both pods (the apply rolls them); the idle follows.
 run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 SBX_ACK_HOSTS=1 || fail 'an acknowledged longer lifetime failed'
 grep -q 'WARNING: SH_WORKSPACE_IDLE changes from 216h to 288h' "$TMP/out" || fail 'the acknowledged run does not warn'
 grep -q 're-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
@@ -422,8 +431,8 @@ grep -q 're-run deploy/sbx/install-host.sh now on the host of each of: sbx_defau
   fail 'lifetime or in-flight cap not written'
 grep -qx 'SH_WORKSPACE_IDLE=288h' "$GEN/workers/sbx_default/worker.env" || fail 'the idle does not follow the lifetime (10 d -> 288h)'
 render
-[[ "$(pod_hash moca-control-plane)" != "$cp_hash" && "$(pod_hash sandbox-relay)" == "$(pod_hash moca-control-plane)" ]] ||
-  fail 'a settings change did not move the hash on both pods'
+[[ "$(pod_hash moca-control-plane)" != "$cp_hash" && "$(pod_hash sandbox-relay)" != "$relay_hash" ]] ||
+  fail 'a change to the in-flight cap did not move the hash on both pods'
 pass 'with SBX_ACK_HOSTS=1 a lifetime change applies, warns, and the idle and the hash follow'
 
 # A bundle from 1a carries no SH_WORKSPACE_IDLE: the refusal says that, not "SBX_LIFETIME_DAYS changed".
@@ -443,8 +452,19 @@ pass 'an unchanged lifetime needs no ack and gives no warning'
 
 run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
 render
-[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash is not a function of the settings'
-pass 'the settings hash is a function of the settings'
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" && "$(pod_hash sandbox-relay)" == "$relay_hash" ]] ||
+  fail 'a hash is not a function of the settings'
+pass 'the settings hashes are a function of the settings'
+
+# 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
+# and not the relay, so running Execs survive it (RUNBOOK §5).
+run_setup export SBX_TEMPLATES_FILE="$TMP/one.json" SBX_ALLOWED_SUBJECTS='github:1' SBX_MAX_PER_SUBJECT=7 ||
+  fail 'a run with one template, one subject and a new quota failed'
+render
+[[ "$(pod_hash moca-control-plane)" != "$cp_hash" ]] || fail 'a template change did not move the control plane hash'
+[[ "$(pod_hash sandbox-relay)" == "$relay_hash" ]] || fail 'a template, subject or quota change moved the relay hash'
+run_setup true || fail 'the run back to the defaults failed'
+pass 'a template, subject or quota change rolls the control plane and not the relay'
 
 # 4c. The token lifetime and the retention are inputs, written in seconds, and in the hash.
 run_setup export SBX_TOKEN_TTL_MINUTES=30 SBX_RETENTION_DAYS=30 || fail 'a run with a token TTL and retention failed'
@@ -629,8 +649,9 @@ raw_val() { jq -r --arg k "$2" '.data[$k] // empty' "$MOCK_STATE/secret-$1.json"
 applied_names() { awk '{print $1, $2}' "$MOCK_STATE/applies.log" | sort -u | tr '\n' ';'; }
 
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
-# set and SETTINGS_HASH are today's, written out here as the golden copy (a hash recomputed from
-# today's definition: the settings lines, the keyset and the two route certificates).
+# set and both hashes are today's, written out here as the golden copy (each recomputed from today's
+# definition: the control plane's from every settings line, the relay's from its two, each with the
+# keyset and the two route certificates).
 reset_state
 run_setup true || fail 'first run (egress off) failed'
 HASH="$({
@@ -639,6 +660,12 @@ HASH="$({
     'SH_SANDBOX_EXEC_ENDPOINT=sbx-exec.apps.example.invalid:443' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' \
     'SH_SANDBOX_LIFETIME_SECONDS=604800' 'SH_SANDBOX_TOKEN_TTL_SECONDS=900' 'SH_SANDBOX_RETENTION_SECONDS=1209600' \
     'SH_SANDBOX_MAX_PER_SUBJECT=3' 'SH_SANDBOX_MAX_TOTAL=40' 'SH_SANDBOX_MAX_INFLIGHT=2' "SH_SANDBOX_EXEC_CA=$(cat "$GEN/exec-ca.crt")"
+  raw_val sbx-token-keys PUBLIC_KEYS
+  raw_val moca-relay-tls tls.crt
+  raw_val sbx-exec-tls tls.crt
+} | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
+RELAY_HASH="$({
+  printf '%s\n' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' 'SH_SANDBOX_MAX_INFLIGHT=2'
   raw_val sbx-token-keys PUBLIC_KEYS
   raw_val moca-relay-tls tls.crt
   raw_val sbx-exec-tls tls.crt
@@ -666,7 +693,7 @@ patches:
       - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "$HASH" } }
   - target: { kind: Deployment, name: sandbox-relay }
     patch: |-
-      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "$HASH" }
+      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "$RELAY_HASH" }
 images:
   - name: ghcr.io/rossoctl/moca
     newName: ghcr.io/example/moca
@@ -685,7 +712,7 @@ jq -e '.data | keys == ["SH_ALLOWED_SUBJECTS","SH_SANDBOX_EXEC_CA","SH_SANDBOX_E
 cp "$K" "$TMP/off-kustomization.yaml"
 run_setup export SBX_EGRESS_CREDENTIALS=0 SBX_EGRESS_HOSTS=ignored-while-off || fail 'SBX_EGRESS_CREDENTIALS=0 failed'
 cmp -s "$TMP/off-kustomization.yaml" "$K" || fail 'SBX_EGRESS_CREDENTIALS=0 differs from unset'
-pass 'egress off (unset or 0): kustomization.yaml, ConfigMaps, applied objects and SETTINGS_HASH are byte-identical to today'"'"'s'
+pass 'egress off (unset or 0): kustomization.yaml, ConfigMaps, applied objects and both hashes are byte-identical to today'"'"'s'
 
 # 14b. On: the KEK and one token per host in sbx-egress, generated once and kept; the bundle; the overlay.
 EG=(export SBX_EGRESS_CREDENTIALS=1)
@@ -819,3 +846,63 @@ grep -q "worker 'sbx_nt' serves no template" "$TMP/out" || fail "non-template eg
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing a non-template egress worker'
 pass 'egress hosts take only template workers: the default host skips others, an explicit one is refused'
 pass 'refuses a bad switch, a worker listed twice or owned by no host, bad ids, bad separators and an out-of-range TTL'
+
+# 15. The template store (template lifecycle spec §3.1, §7.2) behind SBX_TEMPLATE_STORE=1.
+reset_state
+run_setup true || fail 'store off failed'
+cp "$K" "$TMP/store-off.yaml"
+run_setup export SBX_TEMPLATE_STORE=0 || fail 'SBX_TEMPLATE_STORE=0 failed'
+cmp -s "$TMP/store-off.yaml" "$K" || fail 'SBX_TEMPLATE_STORE=0 differs from unset'
+! grep -q 'template-store' "$K" "$MOCK_LOG" || fail 'store off touched the store'
+render
+! grep -q 'moca-sbx-templates\|SH_PROVENANCE_DIR' "$TMP/render.yaml" || fail 'store off renders the store'
+pass 'store off (unset or 0) changes nothing'
+
+run_setup export SBX_TEMPLATE_STORE=1 || fail "store on failed: $(cat "$TMP/out")"
+grep -q -- '- ../../k8s/overlays/ocp-sbx/template-store' "$K" || fail 'the overlay does not include the template-store component'
+render
+grep -q 'claimName: moca-sbx-templates' "$TMP/render.yaml" && grep -q 'value: /var/lib/moca/templates' "$TMP/render.yaml" || fail 'the store volume does not render'
+h1="$(pod_hash moca-control-plane)"
+run_setup export SBX_TEMPLATE_STORE=1 || fail 'store re-run'
+render
+[[ "$(pod_hash moca-control-plane)" == "$h1" ]] || fail 'a re-run moved the settings hash'
+pass 'store on: the component, the store volume at SH_PROVENANCE_DIR, a re-run unchanged'
+
+# With egress too: both components, each with its own volume, and egress's credentials sources kept.
+run_setup export SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 || fail 'store with egress failed'
+grep -q -- '- ../../k8s/overlays/ocp-sbx/egress-credentials' "$K" && grep -q -- '- ../../k8s/overlays/ocp-sbx/template-store' "$K" ||
+  fail 'with egress and the store, the overlay does not list both components'
+render
+grep -q 'claimName: moca-sbx-templates' "$TMP/render.yaml" && grep -q 'claimName: moca-sbx-credentials' "$TMP/render.yaml" &&
+  grep -q 'name: sbx-egress' "$TMP/render.yaml" && grep -q 'name: moca-mu1' "$TMP/render.yaml" ||
+  fail 'with egress and the store, a volume or a credentials source is missing'
+pass 'with egress on as well, both volumes mount and the credentials volume keeps moca-mu1 and sbx-egress'
+
+# Turning it off drops the component and leaves the PVC: setup.sh deletes nothing of the store.
+run_setup true || fail 'store off again failed'
+! grep -q 'template-store' "$K" || fail 'the overlay still names the store after turning it off'
+! grep -qE 'delete.*(pvc|persistentvolumeclaim).*moca-sbx-templates' "$MOCK_LOG" || fail 'turning the store off deleted its PVC'
+pass 'turning the store off drops the component and leaves its PVC'
+
+for r in 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
+  'export SBX_TEMPLATE_STORE=yes => SBX_TEMPLATE_STORE must be unset, 0 or 1'; do
+  bad="${r%% => *}" want="${r#* => }"
+  reset_state
+  ! run_setup eval "$bad" || fail "accepted: $bad"
+  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
+  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
+done
+pass 'refuses a bad store switch before anything is applied'
+
+# 16. SBX_REDIS_IMAGE: Redis 7 for data a Redis 7.4 wrote (Valkey 9 cannot read RDB format 12).
+reset_state
+R7='docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499'
+run_setup export SBX_REDIS_IMAGE="$R7" || fail "SBX_REDIS_IMAGE run failed: $(cat "$TMP/out")"
+render
+grep -q 'image: docker.io/redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499' "$TMP/render.yaml" || fail 'redis does not render as the pinned Redis 7'
+! grep -q 'valkey/valkey' "$TMP/render.yaml" || fail 'valkey is still rendered with SBX_REDIS_IMAGE set'
+reset_state
+! run_setup export SBX_REDIS_IMAGE=docker.io/redis:7-alpine || fail 'accepted an unpinned SBX_REDIS_IMAGE'
+grep -q 'SBX_REDIS_IMAGE must be pinned by digest' "$TMP/out" || fail 'the refusal does not say why'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing SBX_REDIS_IMAGE'
+pass 'SBX_REDIS_IMAGE renders Redis by digest in place of Valkey; an unpinned one is refused before anything is applied'

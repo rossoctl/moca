@@ -35,6 +35,11 @@ var ErrShortResponse = errors.New("vmpool: guest closed before End")
 // undiagnosable at 200 VMs a second.
 var ErrGuest = errors.New("vmpool: guest error")
 
+// ErrCommandTooLarge means the command, once wrapped and encoded, is larger than the
+// guest's one request frame (guestagent.MaxFrame). Refused before anything is sent;
+// large content goes in stdin, which is split across frames.
+var ErrCommandTooLarge = errors.New("vmpool: command too large")
+
 // ErrLeaseEnded means the Exec's lease ended under it: the lease sweep cut it at the
 // grace limit (spec §4: "An Exec in flight then fails with a lease_ended(grace_limit)
 // error, not a generic failure"). The error returned is a *LeaseEndedError carrying the

@@ -21,7 +21,9 @@ export const URL_ = 'https://sbx-api.example.invalid';
 export const SBX = 'sbx-0123456789abcdef0123456789';
 
 export type Req = { method: string; path: string; body: unknown; auth?: string };
-export type Handler = (req: Req) => { status: number; body?: unknown } | Error;
+export type Handler = (
+  req: Req,
+) => { status: number; body?: unknown; headers?: Record<string, string> } | Error;
 
 /** A scripted control plane: one handler per "METHOD /path", recording every call. */
 export function fakeCp(routes: Record<string, Handler>) {
@@ -41,7 +43,7 @@ export function fakeCp(routes: Record<string, Handler>) {
     if (r instanceof Error) throw r;
     return new Response(r.body === undefined ? null : JSON.stringify(r.body), {
       status: r.status,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...r.headers },
     });
   }) as typeof fetch;
   return { fetchImpl, calls };
@@ -86,6 +88,32 @@ export function setup(opts: { loggedIn?: boolean; expired?: boolean } = { logged
   };
   return { home, env, paths, io };
 }
+
+/** `GET /v1/policy`'s answer: the default policy (template-policy.ts DEFAULT_POLICY), its two profiles. */
+export const policyView = (over: Record<string, unknown> = {}) => ({
+  policy: {
+    schema: 'moca-template-policy/1',
+    profiles: {
+      base: { requires: [], envelope: { maxGuestMb: 16_384, maxVcpus: 8, maxWorkspaceMb: 16_384 } },
+      benchmark: {
+        requires: ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'],
+        envelope: {
+          maxGuestMb: 4096,
+          maxVcpus: 2,
+          maxWorkspaceMb: 8192,
+          exact: { guestMb: 4096, vcpus: 2 },
+        },
+      },
+    },
+    defaultProfile: 'base',
+    allowedRegistries: ['<default>'],
+    trustedGateRecords: [],
+    quota: { templates: 100, buildsQueued: 10, active: 8 },
+    ...over,
+  },
+  digest: `sha256:${'d'.repeat(64)}`,
+  record: `sha256:${'e'.repeat(64)}`,
+});
 
 /** A sandbox as the control plane returns it (`SbxSandbox`, loosely typed for scripted bodies). */
 export type FakeSandbox = {

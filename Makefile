@@ -28,7 +28,7 @@ test:
 # deploy/k8s/tests covers setup.sh, the Kubernetes deployment of P6 (kubectl/kind/docker/oc mocked).
 # scripts/tests covers install-mocactl.sh, the mocactl one-line installer (curl/node mocked).
 test-deploy:
-	@failed=''; for t in deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh deploy/sbx/tests/*.test.sh scripts/tests/*.test.sh; do \
+	@failed=''; for t in deploy/claude/tests/*.test.sh deploy/microvm/tests/*.test.sh deploy/vm/tests/*.test.sh deploy/compose/tests/*.test.sh deploy/k8s/tests/*.test.sh deploy/sbx/tests/*.test.sh deploy/sbx/template-onboarding/tests/*.test.sh scripts/tests/*.test.sh; do \
 		echo "== $$t"; \
 		bash "$$t" || failed="$$failed $$t"; \
 	done; \
@@ -46,7 +46,7 @@ test-deploy:
 # Widening this to a glob would make the target fail for reasons that are not regressions. Add a
 # suite here once it is 3.2-clean.
 #
-# These three honour $$BASH rather than PATH's first bash, so /bin/bash below really is what runs
+# These four honour $$BASH rather than PATH's first bash, so /bin/bash below really is what runs
 # both them and the scripts they test -- which is the other half of #440.
 test-deploy-bash32:
 	@v="$$(/bin/bash --version 2>/dev/null | head -1)"; \
@@ -56,7 +56,7 @@ test-deploy-bash32:
 	*) echo "skip - /bin/bash is not 3.x ($$v); this target checks the macOS interpreter"; exit 0 ;; \
 	esac; \
 	echo "== /bin/bash is $$v"; \
-	failed=''; for t in deploy/k8s/tests/setup.test.sh deploy/k8s/tests/smoke.test.sh deploy/microvm/tests/setup-microvm.test.sh; do \
+	failed=''; for t in deploy/k8s/tests/setup.test.sh deploy/k8s/tests/smoke.test.sh deploy/microvm/tests/setup-microvm.test.sh deploy/sbx/tests/templates-check.test.sh; do \
 		echo "== $$t"; \
 		/bin/bash "$$t" || failed="$$failed $$t"; \
 	done; \
