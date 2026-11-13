@@ -649,6 +649,8 @@ install_worker() {
       [[ -z "$W_RECORD" ]] || printf 'SH_TEMPLATE_RECORD=%s\nSANDBOX_TEMPLATE=%s\n' "$W_RECORD" "$W_TEMPLATE"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
+      # The verify cache under SBX0's own tree, where template-build.sh's seed writes it.
+      printf 'SH_VERIFY_CACHE_DIR=%s\n' "$SBX_SRV/verify-cache"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
     } >"$SBX_ENV_DIR/workers/$id.env"

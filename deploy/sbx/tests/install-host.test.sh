@@ -128,6 +128,7 @@ grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py312.json" "$B" || fail "$B: SH
 ! grep -q '^SH_TEMPLATE_RECORD=' "$A" || fail "$A: SH_TEMPLATE_RECORD set with no record"
 grep -qx 'SANDBOX_TEMPLATE=py312' "$B" || fail "$B: SANDBOX_TEMPLATE is not the record's id"
 ! grep -q '^SANDBOX_TEMPLATE=' "$A" || fail "$A: SANDBOX_TEMPLATE set with no record"
+grep -qx "SH_VERIFY_CACHE_DIR=$SBX_SRV/verify-cache" "$B" || fail 'the verify cache is not under SBX_SRV'
 pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size, the template record and its id as SANDBOX_TEMPLATE when there is one"
 
 # The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
