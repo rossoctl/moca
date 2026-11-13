@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 	"github.com/rossoctl/moca/remote-worker/internal/session"
@@ -510,5 +512,134 @@ func TestLeaseSinkSendsEventBeforeTerminal(t *testing.T) {
 	}
 	if leaseAt < 0 || endAt < 0 || leaseAt > endAt {
 		t.Errorf("lease frame at %d, End at %d: want the event before the terminal frame", leaseAt, endAt)
+	}
+}
+
+// abortedLeaseRunner is a lease Exec that runs until its context ends -- an Abort, or the
+// connection's end -- and only then reports a lease event, as vmpool.Runner's
+// deliverLeaseEvents does after an aborted Exec. leaseErr is the sink's answer.
+type abortedLeaseRunner struct {
+	started  chan struct{}
+	mu       sync.Mutex
+	called   bool
+	leaseErr error
+}
+
+func (r *abortedLeaseRunner) Run(ctx context.Context, _ wexec.Spec, sink wexec.Sink) (int32, error) {
+	close(r.started)
+	<-ctx.Done()
+	err := sink.(wexec.LeaseSink).Lease(&pb.LeaseEvent{State: "ended", Reason: "idle", AtUnixMs: 1700000000456})
+	r.mu.Lock()
+	r.called, r.leaseErr = true, err
+	r.mu.Unlock()
+	return -1, wexec.ErrAborted
+}
+
+func (r *abortedLeaseRunner) result() (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.called, r.leaseErr
+}
+
+// Review #4559538346: a lease event reported after the connection has ended must be refused
+// (errLeaseNotQueued), so the runner leaves it pending for the next lease Exec (spec §5). The
+// outbound buffer has room, so a sink that only asked the enqueue would be told "queued" and
+// the pool would acknowledge an event nobody will ever send.
+func TestLeaseEventAfterDisconnectIsNotQueued(t *testing.T) {
+	st := newFakeStream()
+	r := &abortedLeaseRunner{started: make(chan struct{})}
+	s := session.New(testConfig(), r)
+	sv := serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+	st.exec(&pb.Exec{ReqId: 41, Command: "sleep 60", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, ModeEpoch: 1})
+	<-r.started
+	st.close() // the connection ends while the lease Exec runs
+	_ = sv.wait(t, "after the stream closed")
+
+	called, err := r.result()
+	if !called {
+		t.Fatal("the runner never reported its lease event")
+	}
+	if !errors.Is(err, session.ErrLeaseNotQueued) {
+		t.Errorf("Lease after the connection ended = %v, want ErrLeaseNotQueued so the event stays pending", err)
+	}
+}
+
+// The other side of the same rule: an Abort ends the Exec, not the connection, so the event
+// it reports still goes out (ahead of the Exec's terminal frame) and may be acknowledged.
+func TestLeaseEventAfterAbortIsQueued(t *testing.T) {
+	st := newFakeStream()
+	r := &abortedLeaseRunner{started: make(chan struct{})}
+	s := session.New(testConfig(), r)
+	serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+	st.exec(&pb.Exec{ReqId: 42, Command: "sleep 60", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, ModeEpoch: 1})
+	<-r.started
+	st.abort(42)
+	waitFor(t, "terminal frame", func() bool { return terminalFor(st.sent(), 42) != nil })
+
+	if called, err := r.result(); !called || err != nil {
+		t.Fatalf("Lease after an Abort: called %v, error %v; want the event queued", called, err)
+	}
+	found := false
+	for _, f := range st.sent() {
+		if ev := f.GetLease(); ev != nil && ev.GetReqId() == 42 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no lease frame for req_id 42 after the Abort")
+	}
+}
+
+// Review #4559538351: the lease fields are part of what an Exec means, so a req_id reused
+// across modes, epochs, idle timeouts or the keepalive opt-in runs fresh instead of being
+// answered from the other Exec's cached terminal frame (which would skip its stale_mode check
+// and its lease-event delivery).
+func TestReqIDReusedAcrossLeaseFieldsRunsFresh(t *testing.T) {
+	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
+	for _, tc := range []struct {
+		name   string
+		first  *pb.Exec
+		second *pb.Exec
+	}{
+		{"mode", &pb.Exec{Mode: pb.SandboxMode_SANDBOX_MODE_PER_EXEC}, &pb.Exec{Mode: lease}},
+		{"mode_epoch", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 2}},
+		{"idle_timeout_s", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 1, IdleTimeoutS: 600}},
+		{"keepalive", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 1, Keepalive: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStream()
+			r := &scriptedRunner{code: 0}
+			s := session.New(testConfig(), r)
+			serve(t, s, st)
+			waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+			exec := func(overlay *pb.Exec) *pb.Exec {
+				e := &pb.Exec{ReqId: 61, Command: "true", TimeoutS: 10, WorkspaceKey: "leaf-a"}
+				proto.Merge(e, overlay)
+				return e
+			}
+			st.exec(exec(tc.first))
+			waitFor(t, "first terminal", func() bool { return terminalFor(st.sent(), 61) != nil })
+			settle() // the reused id must reach the cache, not the in-flight slot
+
+			st.exec(exec(tc.second))
+			waitFor(t, "a second run or a cached replay", func() bool {
+				n := 0
+				for _, f := range st.sent() {
+					if f.GetEnd() != nil && f.GetEnd().GetReqId() == 61 {
+						n++
+					}
+				}
+				return n >= 2
+			})
+			if r.count() != 2 {
+				t.Errorf("runner calls = %d, want 2: an Exec differing only in %s was answered from the cache",
+					r.count(), tc.name)
+			}
+		})
 	}
 }

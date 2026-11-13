@@ -77,7 +77,28 @@ func specMode(m pb.SandboxMode) string {
 // this Exec's req_id, through the same blocking enqueue as its chunks, so it rides ahead of
 // the terminal frame runOne sends after Run returns. The event is cloned before the req_id
 // is stamped, so the runner's value is left as it was.
+//
+// It refuses once the connection has ended (errLeaseNotQueued), and checks that FIRST:
+// enqueue tries its non-blocking sends before it looks at the connection, so after
+// cancelConn it still reports "queued" whenever the buffer has room, and the frame is then
+// discarded. That is the common lease-disconnect path -- the connection's end aborts the
+// lease Exec, and the runner reports its event after -- and the runner acknowledges whatever
+// this queues, so the event would be lost instead of staying pending (spec §5). The chunk
+// path keeps enqueue's behaviour: a chunk has no acknowledgement to get wrong.
+//
+// A race remains: the connection can end between the check and the send. It is accepted,
+// not closed, because it is no different from the connection ending just after a frame was
+// queued, or after Send handed it to gRPC: no worker-side check can see whether the relay
+// received a frame, and spec §5 calls the event best-effort for exactly that reason ("if the
+// stream breaks between the two, the event is lost"; LeaseControl status still shows the
+// lease's state). The check closes the window that is not a race: an Exec that only returns
+// because the connection already ended.
 func (f *frameSink) Lease(ev *pb.LeaseEvent) error {
+	select {
+	case <-f.connDone:
+		return errLeaseNotQueued
+	default:
+	}
 	out := proto.Clone(ev).(*pb.LeaseEvent)
 	out.ReqId = f.reqID
 	if !f.send(&pb.WorkerFrame{Msg: &pb.WorkerFrame_Lease{Lease: out}}) {

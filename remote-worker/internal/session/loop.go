@@ -517,7 +517,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 					s.inflight.Add(-1)
 					continue
 				}
-				s.runOne(sl.ctx, enqueue, e)
+				s.runOne(sl.ctx, connCtx.Done(), enqueue, e)
 				c.reg.finish(e.GetReqId())
 				s.inflight.Add(-1)
 			}
@@ -589,7 +589,7 @@ func (s *Session) recvLoop(ctx context.Context, c *conn) error {
 // never got the first answer, so dropping the replay strands that caller too.
 func (s *Session) accept(ctx context.Context, c *conn, e *pb.Exec) error {
 	reqID := e.GetReqId()
-	fp := Fingerprint(e.GetCommand(), e.GetStdin(), e.GetTimeoutS(), e.GetStreaming())
+	fp := Fingerprint(e)
 
 	slotCtx, cancel := context.WithCancel(ctx)
 
@@ -719,6 +719,9 @@ type frameSink struct {
 	reqID uint64
 	// send is the blocking enqueue; false means the frame was not queued (see Lease).
 	send func(*pb.WorkerFrame) bool
+	// connDone is the connection's done channel, which Lease checks before it sends: send
+	// alone still queues into a buffer with room after the connection has ended.
+	connDone <-chan struct{}
 	// dropped counts STDOUT bytes only — see Dropped.
 	dropped int
 }
@@ -761,8 +764,10 @@ func (f *frameSink) Dropped(stream pb.Stream, n int) {
 
 // runOne executes one exec and sends exactly one terminal frame (spec §5).
 // send is the blocking enqueue: runOne runs on a pool goroutine, not the recv
-// goroutine, so backpressure here is correct rather than dangerous.
-func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame) bool, e *pb.Exec) {
+// goroutine, so backpressure here is correct rather than dangerous. connDone is the
+// connection's done channel, not ctx's: an Abort ends ctx, but the connection lives on,
+// so a lease event the aborted Exec reports can still be queued (see frameSink.Lease).
+func (s *Session) runOne(ctx context.Context, connDone <-chan struct{}, send func(*pb.WorkerFrame) bool, e *pb.Exec) {
 	reqID := e.GetReqId()
 	if ctx.Err() != nil {
 		// Aborted while queued: never spawn bash, but still owe a terminal frame.
@@ -771,7 +776,7 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame) bool, e
 		return
 	}
 
-	sink := &frameSink{reqID: reqID, send: send}
+	sink := &frameSink{reqID: reqID, send: send, connDone: connDone}
 	code, err := s.runner.Run(ctx, wexec.Spec{
 		ReqID:        reqID,
 		Command:      e.GetCommand(),
@@ -818,7 +823,7 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame) bool, e
 	// exit, would make every later redelivery of that req_id answer -1 forever
 	// (spec §6.2: dedup protects completed execs only).
 	if cacheable {
-		s.cache.Put(reqID, Fingerprint(e.GetCommand(), e.GetStdin(), e.GetTimeoutS(), e.GetStreaming()), frame)
+		s.cache.Put(reqID, Fingerprint(e), frame)
 	}
 	send(frame)
 }

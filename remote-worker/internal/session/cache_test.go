@@ -4,9 +4,16 @@ import (
 	"fmt"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
+
+// fp fingerprints a per-exec Exec from the four fields the cache keyed on before lease mode.
+func fp(command string, stdin []byte, timeoutS uint32, streaming bool) [32]byte {
+	return session.Fingerprint(&pb.Exec{Command: command, Stdin: stdin, TimeoutS: timeoutS, Streaming: streaming})
+}
 
 func endFrame(reqID uint64, code int32) *pb.WorkerFrame {
 	return &pb.WorkerFrame{Msg: &pb.WorkerFrame_End{End: &pb.End{ReqId: reqID, ExitCode: code}}}
@@ -14,7 +21,7 @@ func endFrame(reqID uint64, code int32) *pb.WorkerFrame {
 
 func TestCacheMissOnUnknownReqID(t *testing.T) {
 	c := session.NewCache(4)
-	_, hit, collision := c.Lookup(1, session.Fingerprint("cat f", nil, 10, false))
+	_, hit, collision := c.Lookup(1, fp("cat f", nil, 10, false))
 	if hit || collision {
 		t.Fatalf("hit=%v collision=%v, want false/false for an unseen req_id", hit, collision)
 	}
@@ -23,10 +30,10 @@ func TestCacheMissOnUnknownReqID(t *testing.T) {
 // A genuine redelivery is byte-identical, so it re-emits the cached frame.
 func TestCacheHitOnMatchingFingerprint(t *testing.T) {
 	c := session.NewCache(4)
-	fp := session.Fingerprint("cat f", []byte("payload"), 10, false)
-	c.Put(7, fp, endFrame(7, 0))
+	want := fp("cat f", []byte("payload"), 10, false)
+	c.Put(7, want, endFrame(7, 0))
 
-	frame, hit, collision := c.Lookup(7, fp)
+	frame, hit, collision := c.Lookup(7, want)
 	if !hit || collision {
 		t.Fatalf("hit=%v collision=%v, want true/false", hit, collision)
 	}
@@ -42,9 +49,9 @@ func TestCacheHitOnMatchingFingerprint(t *testing.T) {
 // command's output.
 func TestCacheCollisionOnDifferentFingerprint(t *testing.T) {
 	c := session.NewCache(4)
-	c.Put(1, session.Fingerprint("rm -rf /b", nil, 10, false), endFrame(1, 0))
+	c.Put(1, fp("rm -rf /b", nil, 10, false), endFrame(1, 0))
 
-	frame, hit, collision := c.Lookup(1, session.Fingerprint("cat /a", nil, 10, false))
+	frame, hit, collision := c.Lookup(1, fp("cat /a", nil, 10, false))
 	if hit {
 		t.Fatal("hit=true: a colliding req_id must not return the other command's result")
 	}
@@ -59,17 +66,17 @@ func TestCacheCollisionOnDifferentFingerprint(t *testing.T) {
 // Same stdin, different command — and the reverse — must not collide. Guards
 // against a naive concatenation where ("a","b") and ("ab","") hash alike.
 func TestFingerprintSeparatesCommandFromStdin(t *testing.T) {
-	if session.Fingerprint("a", []byte("b"), 10, false) == session.Fingerprint("ab", nil, 10, false) {
+	if fp("a", []byte("b"), 10, false) == fp("ab", nil, 10, false) {
 		t.Error("fingerprint does not separate command from stdin")
 	}
-	if session.Fingerprint("cat f", []byte("x"), 10, false) == session.Fingerprint("cat f", []byte("y"), 10, false) {
+	if fp("cat f", []byte("x"), 10, false) == fp("cat f", []byte("y"), 10, false) {
 		t.Error("fingerprint ignores stdin")
 	}
 	// A bare separator byte is not injective once the command itself can contain
 	// that byte: with only a NUL between the fields, ("a\x00b", nil) and
 	// ("a", "b\x00") hash alike. Length prefixes are what make the encoding
 	// unambiguous for ANY input, not just the inputs bash would accept.
-	if session.Fingerprint("a\x00b", nil, 10, false) == session.Fingerprint("a", []byte("b\x00"), 10, false) {
+	if fp("a\x00b", nil, 10, false) == fp("a", []byte("b\x00"), 10, false) {
 		t.Error("fingerprint collides on a NUL-bearing command: the encoding is not injective")
 	}
 }
@@ -78,7 +85,7 @@ func TestFingerprintSeparatesCommandFromStdin(t *testing.T) {
 // must not be answered from a different budget's cache entry (see the contract-level
 // TestContractReconnectDedupHonorsLargerTimeout for the behavioral consequence).
 func TestFingerprintSeparatesTimeoutS(t *testing.T) {
-	if session.Fingerprint("sleep 3", nil, 1, false) == session.Fingerprint("sleep 3", nil, 30, false) {
+	if fp("sleep 3", nil, 1, false) == fp("sleep 3", nil, 30, false) {
 		t.Error("fingerprint ignores timeout_s")
 	}
 }
@@ -86,21 +93,48 @@ func TestFingerprintSeparatesTimeoutS(t *testing.T) {
 // streaming is in scope for the same reason: a redelivery with a different
 // delivery mode is not the same exec and must not hit the other mode's entry.
 func TestFingerprintSeparatesStreaming(t *testing.T) {
-	if session.Fingerprint("echo hello", nil, 10, false) == session.Fingerprint("echo hello", nil, 10, true) {
+	if fp("echo hello", nil, 10, false) == fp("echo hello", nil, 10, true) {
 		t.Error("fingerprint ignores streaming")
+	}
+}
+
+// The lease fields are in scope too (review #4559538351): two Execs identical except for
+// mode, mode_epoch, idle_timeout_s or keepalive are different Execs. Each field is
+// fixed-width, so a value cannot slide into its neighbour: mode 1 at epoch 0 is not mode 0
+// at epoch 1.
+func TestFingerprintSeparatesLeaseFields(t *testing.T) {
+	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
+	ref := &pb.Exec{Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3}
+	for name, other := range map[string]*pb.Exec{
+		"mode":           {Command: "true", TimeoutS: 10, Mode: pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, ModeEpoch: 3},
+		"mode_epoch":     {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 4},
+		"idle_timeout_s": {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3, IdleTimeoutS: 600},
+		"keepalive":      {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3, Keepalive: true},
+	} {
+		if session.Fingerprint(ref) == session.Fingerprint(other) {
+			t.Errorf("fingerprint ignores %s", name)
+		}
+	}
+	a := &pb.Exec{Command: "true", Mode: pb.SandboxMode_SANDBOX_MODE_PER_EXEC}
+	b := &pb.Exec{Command: "true", ModeEpoch: 1}
+	if session.Fingerprint(a) == session.Fingerprint(b) {
+		t.Error("fingerprint aliases mode and mode_epoch: the encoding is not fixed-width")
+	}
+	if session.Fingerprint(ref) != session.Fingerprint(proto.Clone(ref).(*pb.Exec)) {
+		t.Error("a genuine redelivery's fingerprint differs")
 	}
 }
 
 func TestCacheEvictsOldestBeyondMax(t *testing.T) {
 	c := session.NewCache(3)
 	for i := uint64(1); i <= 4; i++ {
-		c.Put(i, session.Fingerprint(fmt.Sprintf("cmd%d", i), nil, 10, false), endFrame(i, 0))
+		c.Put(i, fp(fmt.Sprintf("cmd%d", i), nil, 10, false), endFrame(i, 0))
 	}
-	if _, hit, _ := c.Lookup(1, session.Fingerprint("cmd1", nil, 10, false)); hit {
+	if _, hit, _ := c.Lookup(1, fp("cmd1", nil, 10, false)); hit {
 		t.Error("req_id 1 still cached: nothing was evicted at max=3")
 	}
 	for i := uint64(2); i <= 4; i++ {
-		if _, hit, _ := c.Lookup(i, session.Fingerprint(fmt.Sprintf("cmd%d", i), nil, 10, false)); !hit {
+		if _, hit, _ := c.Lookup(i, fp(fmt.Sprintf("cmd%d", i), nil, 10, false)); !hit {
 			t.Errorf("req_id %d missing: wrong entry evicted", i)
 		}
 	}
@@ -109,7 +143,7 @@ func TestCacheEvictsOldestBeyondMax(t *testing.T) {
 // A hit refreshes recency, so the touched entry outlives an older neighbour.
 func TestCacheLookupRefreshesRecency(t *testing.T) {
 	c := session.NewCache(2)
-	fp1, fp2, fp3 := session.Fingerprint("c1", nil, 10, false), session.Fingerprint("c2", nil, 10, false), session.Fingerprint("c3", nil, 10, false)
+	fp1, fp2, fp3 := fp("c1", nil, 10, false), fp("c2", nil, 10, false), fp("c3", nil, 10, false)
 	c.Put(1, fp1, endFrame(1, 0))
 	c.Put(2, fp2, endFrame(2, 0))
 	if _, hit, _ := c.Lookup(1, fp1); !hit { // touch 1 so 2 becomes oldest

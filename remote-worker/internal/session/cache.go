@@ -12,13 +12,13 @@ import (
 const CacheSize = 256
 
 // Fingerprint hashes what makes an exec the same exec: command, stdin, timeout_s,
-// and streaming, each LENGTH-PREFIXED (command and stdin) or fixed-width (timeout_s,
-// streaming). A bare separator byte is not injective — with only a NUL between two
-// string fields, ("a\x00b", nil) and ("a", "b\x00") hash alike. That is not
-// exploitable here (a NUL-bearing command cannot survive cmd.Start(), so it can
-// never be the source of a cached entry), but this scheme is the reference other
-// language ports will copy, and a length prefix makes the encoding unambiguous for
-// any input rather than only for the inputs bash accepts.
+// streaming and the lease fields (mode, mode_epoch, idle_timeout_s, keepalive), each
+// LENGTH-PREFIXED (command and stdin) or fixed-width (the rest). A bare separator byte is
+// not injective — with only a NUL between two string fields, ("a\x00b", nil) and
+// ("a", "b\x00") hash alike. That is not exploitable here (a NUL-bearing command cannot
+// survive cmd.Start(), so it can never be the source of a cached entry), but this scheme is
+// the reference other language ports will copy, and a length prefix makes the encoding
+// unambiguous for any input rather than only for the inputs bash accepts.
 //
 // timeout_s and streaming are in scope for the same reason command and stdin are:
 // a genuine redelivery carries the same Exec message, so all four fields are stable
@@ -27,22 +27,36 @@ const CacheSize = 256
 // delivery mode be answered from the wrong entry — a second replica's "sleep 3" at
 // timeout_s=30 failed off a first replica's cached timeout_s=1 ExecError in under a
 // millisecond, never running, ten times inside its own budget.
-func Fingerprint(command string, stdin []byte, timeoutS uint32, streaming bool) [32]byte {
+//
+// The lease fields are in scope by the same rule: they change what the exec means. A
+// collision between a per-exec and a lease Exec, or across two epochs, answered from the
+// cache would skip the worker's stale_mode check and its lease-event delivery. The mode is
+// hashed as the wire's enum value (UNSPECIFIED and PER_EXEC differ, which costs nothing: a
+// redelivery carries the same value), mode_epoch as a full 8 bytes.
+func Fingerprint(e *pb.Exec) [32]byte {
 	h := sha256.New()
 	var n [8]byte
-	binary.BigEndian.PutUint64(n[:], uint64(len(command)))
-	h.Write(n[:])
-	h.Write([]byte(command))
-	binary.BigEndian.PutUint64(n[:], uint64(len(stdin)))
-	h.Write(n[:])
-	h.Write(stdin)
-	binary.BigEndian.PutUint64(n[:], uint64(timeoutS))
-	h.Write(n[:])
-	if streaming {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
+	putLen := func(v uint64) {
+		binary.BigEndian.PutUint64(n[:], v)
+		h.Write(n[:])
 	}
+	putBool := func(b bool) {
+		if b {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+	putLen(uint64(len(e.GetCommand())))
+	h.Write([]byte(e.GetCommand()))
+	putLen(uint64(len(e.GetStdin())))
+	h.Write(e.GetStdin())
+	putLen(uint64(e.GetTimeoutS()))
+	putBool(e.GetStreaming())
+	putLen(uint64(uint32(e.GetMode())))
+	putLen(e.GetModeEpoch())
+	putLen(uint64(e.GetIdleTimeoutS()))
+	putBool(e.GetKeepalive())
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out
