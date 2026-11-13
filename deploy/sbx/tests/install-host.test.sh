@@ -679,7 +679,7 @@ pass 'a re-run rewrites the unit, keeps the first recorded value; the unit'"'"'s
 : >"$MOCK_LOG"
 bash "$INSTALL" --uninstall sbx_ra >"$TMP/out" 2>&1 || fail 'the last uninstall with read-ahead'
 [[ "$(cat "$DISK/queue/read_ahead_kb")" == 128 ]] || fail "the last uninstall did not restore 128: $(cat "$DISK/queue/read_ahead_kb")"
-grep -qx 'systemctl disable sbx-read-ahead.service' "$MOCK_LOG" || fail 'sbx-read-ahead was not disabled'
+grep -qx 'systemctl disable --now sbx-read-ahead.service' "$MOCK_LOG" || fail 'sbx-read-ahead was not disabled and stopped'
 [[ ! -e "$RAU" && ! -e "$RAO" && ! -e "$RAH" ]] || fail 'the last uninstall left a read-ahead file'
 [[ ! -s "$EM" ]] || fail "the manifest is not empty after the last uninstall: $(cat "$EM")"
 pass 'the last uninstall restores the recorded value, disables and removes the unit, helper and record'

@@ -468,13 +468,16 @@ remove_read_ahead() {
   else
     echo "WARNING: no recorded read-ahead to restore; the device keeps its current value until a reboot" >&2
   fi
-  systemctl disable sbx-read-ahead.service || true
+  # --now: the boot started the oneshot (RemainAfterExit), so a plain disable would leave it loaded
+  # and active until the next boot; it has no ExecStop, so stopping it changes no device setting.
+  systemctl disable --now sbx-read-ahead.service || true
   while read -r kind path; do
     [[ "$kind" == readahead && -n "$path" ]] || continue
     rm -f "$path"
     drop_manifest_lines -x -e "readahead $path"
     log "removed $path"
   done < <(grep '^readahead ' "$SBX_ENV_DIR/manifest" || true)
+  systemctl daemon-reload || true
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE and
