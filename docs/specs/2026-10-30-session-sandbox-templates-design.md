@@ -116,7 +116,9 @@ untemplated workers. A deployment that templates some workers must keep at least
 worker (per tier it uses) for them, as the tier design keeps a default tier; with every worker
 templated, such a leaf fails with `SandboxPoolEmptyError`, which names no template. A **prompt
 leaf** of a templated session (a queued turn, or a `/v1/runs` prompt run under its token) passes
-the session's template and build (§5.2).
+the session's template and build (§5.2). A workload run (`workloadId`) is the exception: it runs on
+its workload's sandboxes, which belong to no template, so it takes none of the session's template,
+build or seed, and returns no patch.
 
 ## 5. The seed
 

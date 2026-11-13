@@ -362,10 +362,22 @@ export function validateItem(o: unknown): LeafItem | null {
  * a session's model applies to interactive turns only. Strip sessionModel from the config
  * passed to runLeaf's executeTurn paths.
  */
-export function leafTurnConfig(config?: TurnConfig): TurnConfig | undefined {
+export function leafTurnConfig(
+  config?: TurnConfig,
+  opts: { untemplated?: boolean } = {},
+): TurnConfig | undefined {
   if (!config) return undefined;
   const { sessionModel: _, ...rest } = config;
-  return rest;
+  if (!opts.untemplated) return rest;
+  // A workload run's turn: none of the session's template, as for its selection (runPromptLeaf).
+  const {
+    sandboxTemplate: _t,
+    sandboxSeed: _s,
+    sandboxSeedSource: _o,
+    sandboxBuildId: _b,
+    ...untemplated
+  } = rest;
+  return untemplated;
 }
 
 /**
@@ -521,7 +533,10 @@ async function runPromptLeaf(
   const promptTimings = leaseTimings(process.env);
   const workload = env.internalContext?.workload;
   const ownerScope = env.internalContext?.ownerScope;
-  const template = config?.sandboxTemplate || undefined;
+  // A workload run runs on its workload's sandboxes, which belong to no template (they carry no
+  // template label), so a templated session's workload run takes none of its template, build or
+  // seed: selecting by them would find no sandbox and answer a retryable 503 forever.
+  const template = workload === undefined ? config?.sandboxTemplate || undefined : undefined;
   // Checked before selection, unlike the rest of internalContext: they decide which sandbox to lease.
   // An owner scope is required with a workload, and meaningless without one.
   if (
@@ -696,7 +711,7 @@ async function runPromptLeaf(
           ? `${env.prompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
           : env.prompt,
       sessionId: env.sessionId,
-      config: leafTurnConfig(config),
+      config: leafTurnConfig(config, { untemplated: workload !== undefined }),
       createIfAbsent: true,
       selection,
       sandbox: turnSandbox,
