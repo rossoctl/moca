@@ -16,7 +16,8 @@ Every change is additive; the new routes mount on both route profiles and need `
   for `default`) get the new build; those already created keep theirs. A `tag` record per tag that changes
   (`{tag, buildId, before}`); a tag already on the build answers `record: null`.
 - New DELETE /v1/templates/{id}/tags/{tag} (the owner, or an admin): removes a tag; its build is not deleted. `default`
-  is moved, never removed (`400 invalid_request`). A `tag` record with `buildId: null`.
+  is moved, never removed (`400 invalid_request`); a tag name outside the tag grammar is `400 invalid_request`
+  too. A `tag` record with `buildId: null`.
 - New PATCH /v1/templates/{id} `{description?, visibility?}` (the owner, or an admin): a `visibility` record
   (`{field, value, before}`) per field that changes.
 - New PUT /v1/templates/{id}/owner `{owner}` (an admin): the new owner, `github:<numeric id>` or `oidc:<provider sub>`

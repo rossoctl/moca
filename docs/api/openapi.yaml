@@ -2149,7 +2149,7 @@ paths:
                   before: { type: string }
                   record: { type: string }
         '400':
-          description: '`invalid_request`: the default tag, or this deployment stores no templates'
+          description: '`invalid_request`: the default tag, a tag name not matching `^[a-z0-9][a-z0-9-]{0,30}$`, or this deployment stores no templates'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

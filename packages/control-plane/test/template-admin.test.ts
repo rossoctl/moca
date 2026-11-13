@@ -201,6 +201,32 @@ describe('tags (§3.2, §5.1)', () => {
     expect((await chain(d)).some((x) => x.kind === 'tag')).toBe(false);
   });
 
+  it('takes a tag named as an Object.prototype property as any other tag', async () => {
+    const d = stored();
+    await registered(d, 2);
+    // `constructor` matches the tag grammar; it is not on the template until moved there.
+    expect(await codeOf(() => servedBuild(d, `${ID}:constructor`))).toBe('unknown_template');
+    expect(await codeOf(() => untag(d, 'constructor'))).toBe('template_not_found');
+    const r = (await move(d, { tags: ['constructor'], build: hash('2') })).body as Body;
+    expect(r.tags).toEqual([
+      { tag: 'constructor', buildId: hash('2'), before: null, record: expect.stringMatching(HASH) },
+    ]);
+    expect((await chain(d)).at(-1)).toMatchObject({
+      kind: 'tag',
+      body: { tag: 'constructor', buildId: hash('2'), before: null },
+    });
+    expect((await tagsOf(d)).find((t) => t.tag === 'constructor')).toMatchObject({
+      buildId: hash('2'),
+      assignedBy: alice.sub,
+    });
+    expect(await servedBuild(d, `${ID}:constructor`)).toBe(hash('2'));
+    expect(((await untag(d, 'constructor')).body as Body).before).toBe(hash('2'));
+    // A removal names a tag by the tag grammar, checked before the lock is taken.
+    for (const t of ['toString', '__proto__', 'hasOwnProperty', 'Bad Tag', ''])
+      expect(await codeOf(() => untag(d, t))).toBe('invalid_request');
+    expect((await tagsOf(d)).map((t) => t.tag)).toEqual(['default']);
+  });
+
   it("lets an admin move and remove another subject's tags; the record names the admin", async () => {
     const d = stored();
     await registered(d, 2);
