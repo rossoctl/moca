@@ -75,6 +75,7 @@ function parseHttpUrl(s: string): URL | undefined {
  */
 export class DiscoveringHarness implements HarnessApi {
   private client?: Promise<HarnessClient>;
+  private found?: string;
 
   constructor(
     private readonly discover: (signal?: AbortSignal) => Promise<string>,
@@ -83,7 +84,10 @@ export class DiscoveringHarness implements HarnessApi {
 
   private resolve(): Promise<HarnessClient> {
     if (!this.client) {
-      const pending = this.discover().then((url) => new HarnessClient(url, this.fetchImpl));
+      const pending = this.discover().then((url) => {
+        this.found = url;
+        return new HarnessClient(url, this.fetchImpl);
+      });
       this.client = pending;
       pending.catch(() => {
         if (this.client === pending) this.client = undefined;
@@ -96,6 +100,11 @@ export class DiscoveringHarness implements HarnessApi {
     return (await this.resolve()).baseUrl();
   }
 
+  /** The URL discovered so far, without asking: `run --record` reads it to place a turn's path. */
+  discoveredUrl(): string | undefined {
+    return this.found;
+  }
+
   async health(opts: { signal?: AbortSignal } = {}): Promise<HealthReport> {
     // An abandoned probe (the banner's timeout or unmount) must abort its fetch — but the shared
     // discovery in resolve() belongs to whoever awaits it, so aborting that would kill a turn
@@ -103,6 +112,7 @@ export class DiscoveringHarness implements HarnessApi {
     // an abortable one-off discovery whose success warms the cache for everyone after it.
     if (!this.client && opts.signal) {
       const url = await this.discover(opts.signal);
+      this.found ??= url;
       const client = new HarnessClient(url, this.fetchImpl);
       if (!this.client) this.client = Promise.resolve(client);
       return client.health(opts);
