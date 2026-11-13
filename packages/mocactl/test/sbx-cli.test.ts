@@ -522,6 +522,35 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.outs.join('')).toBe(`${TOKEN.token}\n`);
   });
 
+  it('token --renew-every: a fresh token per period, one line each, until stopped', async () => {
+    const { home, env, io } = setup();
+    let n = 0;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, token: `${TOKEN.token}${n++}` },
+      }),
+    });
+    const ac = new AbortController();
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      if (slept.length === 2) ac.abort();
+    };
+    const deps = { home, fetchImpl: cp.fetchImpl, sleep, signal: ac.signal };
+    expect(await sbxMain(['token', SBX, '--renew-every', '600'], env, io, deps)).toBe(0);
+    expect(io.outs.join('')).toBe(`${TOKEN.token}0\n${TOKEN.token}1\n`);
+    expect(slept).toEqual([600_000, 600_000]);
+    // Only on token, and only a whole number of seconds, at least 1: refused before any request.
+    const calls = cp.calls.length;
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['ls', '--renew-every', '5'], env, io, d)).toBe(2);
+    expect(await sbxMain(['token', SBX, '--renew-every', '0'], env, io, d)).toBe(2);
+    expect(await sbxMain(['token', SBX, '--renew-every', '1.5'], env, io, d)).toBe(2);
+    expect(io.errs.join('\n')).toContain('--renew-every must be a whole number of seconds');
+    expect(cp.calls.length).toBe(calls);
+  });
+
   it('says why a terminated sandbox gives no token', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
