@@ -1715,7 +1715,7 @@ check "the last resort is the old empty tmpfs" \
 check "no unconditional tmpfs over /var is left" \
   "$(printf '%s\n' "$init_text" | grep -cxF 'mount -t tmpfs tmpfs /var')" "0"
 check "the build makes the /.moca-var mount point and refuses one outside the tree" \
-  "$(asm="$(sed -n '/^assemble_rootfs() {/,/^}/p' "$SCRIPT")"; printf '%s' "$asm" | grep -cF '"$STAGE/rootfs-tree/.moca-var"'; printf '%s' "$asm" | grep -cF 'for d in sbin usr/local/bin .moca-var; do')" "$(printf '1\n1')"
+  "$(sed -n '/^assemble_rootfs() {/,/^}/p' "$SCRIPT" | grep -cxF '  for d in usr/local/bin sbin tmp var workspace .moca-var; do')" "1"
 check "check_var reads the probe file and writes /var, removing what it wrote" \
   "$([ "$(fn_body check_var | grep -cF 'echo x >/var/.moca-var-check && rm -f /var/.moca-var-check')" -ge 1 ] && echo yes || echo no)" "yes"
 check "check_var fails the build" "$([ "$(fn_body check_var | grep -cF 'exit 1')" -ge 1 ] && echo yes || echo no)" "yes"
@@ -1767,6 +1767,7 @@ EOI
     echo "STAGE='$w/stage'"
     echo "EGRESS_CA='$EGT/ca.crt'"
     fn_body validate_egress_ca
+    fn_body tree_dir_target
     fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
@@ -1861,6 +1862,7 @@ for drift in real drifted; do
   {
     echo 'chroot() { local t="$1"; shift; local c="$1"; shift; "$t$c" "$@"; }'
     echo "STAGE='$w/stage'; EGRESS_CA='$EGT/ca.crt'"
+    fn_body tree_dir_target
     fn_body tree_write_target
     fn_body install_egress_ca
     echo 'install_egress_ca'
@@ -1953,6 +1955,20 @@ lines = ["moca-snapshot-manifest/2"] + [f"{k}:{v}" for k, v in [
 print("ok" if m["hash"] == "sha256:" + hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest() else "mismatch")
 PY
 )" "ok"
+# The capabilities are sorted by byte, as Go's sort.Strings is, whatever the build host's locale:
+# en_US collates "a" before "B", byte order puts "B" first. (A host without that locale sorts by byte
+# anyway, and the check still holds.)
+{
+  echo 'log() { :; }'
+  echo "STAGE='$mv2/stage'; ROOTFS='$mv2/rootfs'; IMAGE=i; VMM=firecracker; INSTANCE_TYPE=t; GUEST_RAM_MB=256; VCPUS=1; EGRESS_CA=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+  printf '%s\n' "MANIFEST_CAPABILITIES='a"$'\n'"B'"
+  sed -n '/^write_manifest() {/,/^MANIFEST$/p' "$SCRIPT"
+  echo '}'
+  echo 'write_manifest'
+} >"$mv2/run-locale.sh"
+LC_ALL=en_US.UTF-8 bash "$mv2/run-locale.sh" >/dev/null 2>&1
+check "the manifest's capabilities are in byte order under an en_US locale" \
+  "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["capabilities"]))' "$mv2/stage/manifest.json" 2>/dev/null)" "B,a"
 check "the Go golden lines hash to the digest snapshot_test.go pins" \
   "$(printf 'moca-snapshot-manifest/2\nimage:i\nvmm:firecracker\ninstance_type:t\nkernel_release:k\nguest_ram_mb:256\nvcpus:1\ncapabilities:bash,git\nbuilt_at:2026-11-03T00:00:00Z\nkernel:sha256:k\nrootfs:sha256:r\nagent:sha256:a\nvmstate:sha256:v\nmemfile:sha256:m\nch_config:\negress_ca:\nsource_image_digest:sha256:s\n' | sha256sum | cut -d' ' -f1)" \
   "$(sed -n 's/^const manifestV2Golden = "\([0-9a-f]*\)"$/\1/p' "$(dirname "$SCRIPT")/../../remote-worker/internal/vmpool/snapshot_test.go")"
@@ -2047,6 +2063,7 @@ LT="$(mktemp -d "${TMPDIR:-/tmp}/bs-lease-test.XXXXXX")"
 id_harness() { # $1 = work dir; the tree's etc/passwd and etc/group are already there
   {
     echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
     fn_body tree_write_target
     fn_body add_sbx_identity
     echo 'add_sbx_identity'
@@ -2100,6 +2117,7 @@ check "etc linked out of the tree: nothing new outside" "$(find "$w/outside" -mi
 gc_harness() { # $1 = work dir
   {
     echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
     fn_body tree_write_target
     sed -n '/^  tree_write_target etc\/gitconfig$/,/^GITCONFIG$/p' "$SCRIPT"
   } >"$1/run.sh"
@@ -2236,6 +2254,23 @@ for bad in 0 33 two -1; do
 done
 check "the refusal names the rule" "$(printf '%s' "$out" | grep -c 'from 1 to 32')" "1"
 
+echo "== the option checks match the whole value: an embedded newline is refused"
+# grep matches line by line, so a check written as printf | grep -Eq passed a value whose first line
+# was valid. Each of these values reaches init, a sed script, the VMM's config or the manifest.
+nl=$'\n'
+for case_ in "--guest-home|/tmp/home${nl}x" "--guest-home|/tmp/home${nl}touch /x" \
+  "--vcpus|4${nl},\"x\":1" "--vcpus|4${nl}" "--verify-timeout-s|60${nl}x"; do
+  opt="${case_%%|*}" val="${case_#*|}"
+  rc=0
+  bash "$SCRIPT" --kernel k --rootfs r --agent a --image i --verify-command true "$opt" "$val" >/dev/null 2>&1 || rc=$?
+  check "$opt with an embedded newline is refused before any build step (exit 2)" "$rc" "2"
+done
+check "no option is checked with grep any more" \
+  "$(sed -n '/^# The three option checks/,/^OUT=/p' "$SCRIPT" | grep -c 'grep -E')" "0"
+# shellcheck disable=SC2016 # the patterns are literal
+check "the HOME insertion is checked with or without --guest-home-gitconfig" \
+  "$(grep -B1 'grep -qx "export HOME=$GUEST_HOME"' "$SCRIPT" | head -1 | grep -c '^  if \[ -n "\$GUEST_HOME" \]; then$')" "1"
+
 echo "== assemble_rootfs never writes through the image's symlinks"
 # An image's /sbin/init is commonly an ABSOLUTE symlink (/lib/systemd/systemd); writing through it
 # hits the build host's file. The fix unlinks the targets first and refuses out-of-tree directories.
@@ -2245,8 +2280,40 @@ check "init and agent are unlinked before they are written" \
 unlink_line=$(printf '%s\n' "$asm_body" | grep -n 'rm -f "$STAGE/rootfs-tree/sbin/init"' | cut -d: -f1)
 write_line=$(printf '%s\n' "$asm_body" | grep -n 'cat >"$STAGE/rootfs-tree/sbin/init"' | cut -d: -f1)
 check "the unlink comes before the write" "$([ "$unlink_line" -lt "$write_line" ] && echo yes || echo no)" "yes"
-check "sbin and usr/local/bin must resolve inside the tree" \
-  "$(printf '%s' "$asm_body" | grep -c 'refusing to write through it')" "1"
+check "every directory assemble_rootfs makes is checked by tree_dir_target" \
+  "$(printf '%s' "$asm_body" | grep -cxF '  for d in usr/local/bin sbin tmp var workspace .moca-var; do')" "1"
+check "assemble_rootfs runs no mkdir of its own (only tree_dir_target makes directories)" \
+  "$(printf '%s\n' "$asm_body" | grep -v '^\s*#' | grep -c 'mkdir -p "$STAGE/rootfs-tree/')" "0"
+# The loop itself, run from assemble_rootfs's own lines on scratch trees: a directory the build
+# makes, or one above it, as an absolute symlink out of the tree is refused BEFORE anything is
+# created through it.
+ad_harness() { # $1 = work dir
+  {
+    echo "STAGE='$1/stage'"
+    fn_body tree_dir_target
+    printf '%s\n' "$asm_body" | sed -n '/^  for d in usr\/local\/bin sbin tmp var workspace .moca-var; do$/,/^  done$/p'
+  } >"$1/run.sh"
+  bash "$1/run.sh" >"$1/out" 2>&1
+  echo $?
+}
+AD="$(mktemp -d "${TMPDIR:-/tmp}/bs-asmdir-test.XXXXXX")"
+w="$AD/plain"; mkdir -p "$w/stage/rootfs-tree/usr"
+check "a plain tree: the directories are made" "$(ad_harness "$w")" "0"
+check "a plain tree: all six exist" \
+  "$(cd "$w/stage/rootfs-tree" && for d in usr/local/bin sbin tmp var workspace .moca-var; do [ -d "$d" ] && echo y; done | wc -l | tr -d ' ')" "6"
+w="$AD/inside"; mkdir -p "$w/stage/rootfs-tree/usr/sbin"; ln -s usr/sbin "$w/stage/rootfs-tree/sbin"
+check "a symlink that stays inside the tree (sbin -> usr/sbin) is accepted" "$(ad_harness "$w")" "0"
+for link in usr/local sbin tmp var workspace .moca-var; do
+  w="$AD/link-$(printf '%s' "$link" | tr '/.' '__')"; mkdir -p "$w/outside" "$w/stage/rootfs-tree/$(dirname "$link")"
+  ln -s "$w/outside" "$w/stage/rootfs-tree/$link"
+  check "/$link linked out of the tree: refused" "$([ "$(ad_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+  check "/$link linked out of the tree: the refusal says so" "$(grep -c 'resolves outside the tree' "$w/out")" "1"
+  check "/$link linked out of the tree: nothing is created outside" "$(find "$w/outside" -mindepth 1 | wc -l | tr -d ' ')" "0"
+done
+w="$AD/dangling"; mkdir -p "$w/stage/rootfs-tree/usr"; ln -s "$AD/nowhere" "$w/stage/rootfs-tree/usr/local"
+check "a dangling absolute symlink is refused" "$([ "$(ad_harness "$w")" != 0 ] && echo yes || echo no)" "yes"
+check "a dangling absolute symlink: nothing is created at its target" "$([ -e "$AD/nowhere" ] && echo yes || echo no)" "no"
+rm -rf "$AD"
 # The mechanism itself, on a scratch tree: an absolute symlink is replaced, its target untouched.
 t="$(mktemp -d)"; mkdir -p "$t/host" "$t/tree/sbin"; printf 'HOST\n' >"$t/host/init"
 ln -s "$t/host/init" "$t/tree/sbin/init"

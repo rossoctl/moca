@@ -21,6 +21,7 @@ printf 'podman %s\n' "$*" >>"$MOCK_LOG"
 case "$1 $2" in
 'image exists') exit 1 ;;
 'image inspect') echo "${MOCK_DIGEST:?}" ;;
+'pull '*) [[ -z "${MOCK_PULL_FAIL:-}" ]] || { echo 'mock: unauthorized' >&2; exit 125; } ;;
 esac
 exit 0
 MOCK
@@ -41,10 +42,12 @@ cat >"$TMP/bin/build-snapshot" <<'MOCK'
 printf 'build-snapshot\n' >>"$MOCK_LOG"
 printf '%s\n' "$@" >"$MOCK_STATE/snapshot-args"
 printf '%s\n' "${SH_VERIFY_CACHE_DIR:-}" >"$MOCK_STATE/snapshot-cache-dir"
-out='' ca=''
+out='' ca='' vmm='' ksha=''
 while (($#)); do
   case "$1" in
   --out) out="$2"; shift 2 ;;
+  --vmm) vmm="$2"; shift 2 ;;
+  --kernel) ksha="sha256:$({ sha256sum "$2" 2>/dev/null || shasum -a 256 "$2"; } | cut -d' ' -f1)"; shift 2 ;;
   --verify-command) printf '%s' "$2" >"$MOCK_STATE/verify-command"; shift 2 ;;
   --egress-ca) ca="sha256:$(openssl x509 -in "$2" -outform DER | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"; shift 2 ;;
   *) shift ;;
@@ -52,7 +55,8 @@ while (($#)); do
 done
 [[ -z "${MOCK_SNAPSHOT_FAIL:-}" ]] || { echo 'build-snapshot.sh: the fresh snapshot restored but the --verify-command exited 91' >&2; exit 1; }
 mkdir -p "$out"
-jq -n --arg h "${MOCK_HASH:-h1}" --arg ca "$ca" '{hash: $h, built_at: "2026-10-30T00:00:00Z", guest_ram_mb: 4096}
+jq -n --arg h "${MOCK_HASH:-h1}" --arg ca "$ca" --arg vmm "$vmm" --arg k "$ksha" \
+  '{hash: $h, built_at: "2026-10-30T00:00:00Z", guest_ram_mb: 4096, vmm: $vmm, kernel_sha256: $k}
   + (if $ca == "" then {} else {egress_ca_sha256: $ca} end)' >"$out/manifest.json"
 MOCK
 chmod +x "$TMP/bin/"*
@@ -188,6 +192,40 @@ spec '.description = "another"'
 run || fail 'the changed spec failed'
 grep -q 'build-snapshot' "$MOCK_LOG" || fail 'a changed spec was not rebuilt'
 pass 'skips a snapshot already built from the same spec; --force or a changed spec rebuilds'
+
+# 4b. The build inputs a snapshot depends on beyond the spec's description: each one changed, with no
+# --force, rebuilds rather than reusing the snapshot.
+rebuilt() { # rebuilt WHAT [ARGS]: a re-run with ARGS (after spec, if changed) builds the snapshot
+  run "${@:2}" || fail "$1: the re-run failed: $(cat "$TMP/out")"
+  grep -q build-snapshot "$MOCK_LOG" && ! grep -q 'already built' "$TMP/out" || fail "$1 was taken as already built"
+}
+spec; run --force || fail 'the base build failed'
+rebuilt 'another --vmm' --vmm cloud-hypervisor
+run --vmm cloud-hypervisor || fail 'the same --vmm re-run failed'
+grep -q 'already built' "$TMP/out" || fail 'the same --vmm was rebuilt'
+rebuilt 'back to the default --vmm'
+printf 'another kernel\n' >"$TMP/vmlinux2"
+rebuilt 'another --kernel' --kernel "$TMP/vmlinux2"
+rebuilt 'back to the first --kernel'
+spec '.guest_home = "/tmp/other"'; rebuilt 'another guest_home'
+spec 'del(.guest_home)'; rebuilt 'no guest_home'
+spec '.skip_git_identity_check = false'; rebuilt 'skip_git_identity_check switched off'
+jq -e 'has("skip_git_identity_check") | not' "$SBX_SRV/templates/$NAME.json" >/dev/null || fail 'the record still says skip_git_identity_check'
+HOSTS_SHA0="$({ sha256sum 2>/dev/null || shasum -a 256; } <<<'127.0.0.1 localhost' | cut -d' ' -f1)"
+spec ".etc_hosts_sha256 = \"$HOSTS_SHA0\""; rebuilt 'a new etc_hosts_sha256'
+jq -e --arg h "$HOSTS_SHA0" '.etc_hosts_sha256 == $h and .guest_home == "/tmp/home"' "$SBX_SRV/templates/$NAME.json" >/dev/null ||
+  fail 'the record lacks etc_hosts_sha256 or guest_home'
+spec ".etc_hosts_sha256 = \"$HOSTS_SHA0\""; run || fail 'the same etc_hosts_sha256 re-run failed'
+grep -q 'already built' "$TMP/out" || fail 'the same etc_hosts_sha256 was rebuilt'
+grep -q 'needed after a guest agent change' "$TMP/out" || fail 'already built does not say --force is needed after an agent change'
+pass 'already built only with the same --vmm, --kernel, guest_home, skip_git_identity_check and etc_hosts_sha256; says --force is needed after an agent change'
+
+# 4c. A failed pull stops the build there, naming the image, not later at the digest check.
+spec
+rc=0; MOCK_PULL_FAIL=1 run --force || rc=$?
+[[ "$rc" == 1 ]] && grep -q "could not pull registry.example.invalid/moca-microvm@$DIGEST" "$TMP/out" || fail "a failed pull was not named: rc $rc, $(cat "$TMP/out")"
+! grep -q 'podman image inspect' "$MOCK_LOG" && ! grep -q build-rootfs "$MOCK_LOG" || fail 'a failed pull went on to inspect or build'
+pass 'a failed pull fails the build at once, naming the image'
 
 # 5. Refusals that must leave nothing behind: low disk, a digest mismatch, a failed probe.
 spec

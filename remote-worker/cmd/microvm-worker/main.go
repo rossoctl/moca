@@ -765,11 +765,7 @@ func main() {
 			get("SANDBOX_ID"), strings.TrimSpace(get("SANDBOX_TEMPLATE"))); err != nil {
 			log.Fatalf("microvm-worker: %v", err)
 		}
-		if man.SourceImageDigest == "" {
-			log.Printf("microvm-worker: template record %s matches; the snapshot's manifest predates source_image_digest, so its image digest was not compared", rec)
-		} else {
-			log.Printf("microvm-worker: template record %s matches the snapshot (manifest %s, image %s)", rec, man.Hash, man.SourceImageDigest)
-		}
+		log.Printf("microvm-worker: template record %s matches the snapshot (manifest %s, image %s)", rec, man.Hash, man.SourceImageDigest)
 	}
 	unpin, err := vmpool.PinMemoryFile(filepath.Join(snapDir, "memfile"))
 	if err != nil {
