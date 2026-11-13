@@ -12,6 +12,7 @@ import {
   type ExchangeResponse,
 } from './exchange.js';
 import type { CpDeps } from './handlers.js';
+import { holdPinnedWorker } from './host-handlers.js';
 import { isTerminalState, type TurnCaps } from './turn-record.js';
 
 /**
@@ -205,6 +206,9 @@ export async function exchangeTurnCredential(
   // a turn queued an hour ago and the session now agree. A template the deployment no longer
   // declares is still sent, without a seed, so the turn is refused rather than run untemplated.
   // Both are resolved above, before the audit.
+  // A queued turn of a session pinned to a build keeps that build's worker, as an interactive one:
+  // after the audit and every refusal, so a refused claim holds nothing.
+  if (rec.sandboxTemplate) await holdPinnedWorker(rec, deps);
   return {
     turnId: turn.turnId,
     mode,

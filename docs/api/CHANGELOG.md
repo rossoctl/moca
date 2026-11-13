@@ -45,9 +45,16 @@ Sessions and sandboxes from one combined control plane
   it as POST /v1/sandboxes does: `id`, `id:tag` or `id@sha256:…`, else 400 `unknown_template`; the
   build is kept for the session's life. `sandbox.activate` (default true) and activation on first
   use apply: 409 `template_not_active` with Retry-After, or `no_active_slot`,
-  `template_unavailable`.
+  `template_unavailable`. Only a subject enrolled for sandboxes starts an activation; on `combined`
+  another subject waits (409) on one already starting and is refused (`403 not_enrolled`) on a
+  template nobody is starting. The activation is the create's last check, so a create refused for
+  another reason holds no lease.
 - The `Session` view adds `sandboxBuildId` and `templateManifestHash` beside `sandboxTemplate`.
 - POST /internal/credentials returns `sandboxBuildId` for a session pinned to a manifest-hash build.
+  Each exchange of such a session (and of its queued turns) keeps that build's worker running for
+  the hosts' idle limit from the turn, as a live sandbox does (GET /v1/hosts/{host}/wanted leaves it
+  out of `stop`), when the session's subject is enrolled for sandboxes; it starts no worker and
+  takes no lease. A turn of a subject not enrolled runs while the worker is up but extends nothing.
 
 The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.2.0: a session pinned
 to a build runs only on workers labelled `moca.dev/build` with it, and its turn is refused (503

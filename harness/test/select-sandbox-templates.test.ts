@@ -172,4 +172,24 @@ describe('selectPoolSandbox: affinity across a template change', () => {
     expect(sel?.sandboxId).toBe('py-2');
     expect(sel?.workspaceReset?.reason).toBe('retiered');
   });
+
+  it('an affine worker now serving another build of the template moves a pinned session at once', async () => {
+    const A = 'sha256:' + 'a'.repeat(64);
+    const B = 'sha256:' + 'b'.repeat(64);
+    const of = (id: string, build: string) =>
+      rec(id, { [TEMPLATE_LABEL]: 'dj', [BUILD_LABEL]: build });
+    const { lease } = fakeLease();
+    const aff = fakeAffinity({ 's-1': { sandboxId: 'w-1', tier: '' } });
+    const sel = await selectPoolSandbox(
+      env(),
+      '/h',
+      's-1',
+      opts({ template: 'dj', build: A }),
+      deps([of('w-1', B), of('w-2', A)], lease, { affinity: aff.store }),
+    );
+    expect(sel?.sandboxId).toBe('w-2');
+    expect(sel?.workspaceReset).toEqual({ from: 'w-1', reason: 'retiered' });
+    // No grace: waiting cannot bring the worker back to the pinned build.
+    expect(aff.calls.some((c) => c.startsWith('detachedSince'))).toBe(false);
+  });
 });

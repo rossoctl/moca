@@ -61,14 +61,16 @@ branch on the profile get one rule each:
 - `/v1/credentials*` keeps the harness store and behaviour, and the sandbox `sandbox-egress` kind is
   accepted only when egress is configured (as on `sandbox`). The egress gate applies on `combined`
   only to the sandbox-only route (`/v1/egress/credential`), so the credential routes stay mounted
-  for the harness users.
+  for the harness users. As on `sandbox`, two `sandbox-egress` credentials of one subject never
+  hold one destination (`destination_conflict`), and `/v1/egress/credential` serves only an owner
+  enrolled for sandboxes (`isEnrolledForSandbox`, §3.2).
 
 ### 3.2 Who may call what
 
 **Login stays open as on `harness`** (any GitHub account; test users if configured), and
 **enrollment moves from the login to the routes:** on `combined`, every sandbox route and every
-template write (create, build, cancel, activate, deactivate, policy PUT) checks it, and a test user
-is refused there (`not_enrolled`). Sessions, models and bundles stay open to any logged-in subject,
+template write (create, build, cancel, activate, deactivate, policy PUT) checks it, and so does a
+session's activation on first use (§3.4); a test user is refused there (`not_enrolled`). Sessions, models and bundles stay open to any logged-in subject,
 as on `harness`, and so do the template, policy and quota reads (on `sandbox` they stay
 enrolled-only). In the code: `isEnrolled` is the login gate (open on `combined`),
 `isEnrolledForSandbox` the route gate (`requireEnrolledPrincipal`), and `requireReader` the reads.
@@ -94,6 +96,10 @@ the `sandbox` profile.
 - **First use (lifecycle §6.4) for sessions:** the same `requireActive` rule. On a deployment with
   host agents, a session on a build that is not active takes the caller's lease and answers
   `409 template_not_active` with `Retry-After`; `sandbox.activate: false` starts nothing.
+  Activation stays enrolled-only (§3.2): a caller not enrolled for sandboxes takes no lease. It
+  waits (409) on a build another subject's lease is starting, and is refused (`403 not_enrolled`)
+  on one nobody is starting. The activation is the create's last check, after the `configRef`,
+  credential and model checks, so a create refused for another reason holds no lease.
   `mocactl`'s `SessionManager.create` retries it for up to 10 minutes, as `sbx create` does, saying
   why in headless runs.
 - **Turns by build:** the session records `sandboxBuildId`. `microvm-worker` adds a build label,
@@ -102,7 +108,27 @@ the `sandbox` profile.
   `sandboxBuildId` for a manifest-hash build (never an `imported:` one); the data plane
   (`turn-auth`, `run-turn`) passes it to `selectPoolSandbox`, which keeps only workers labelled with
   it and refuses the turn when none is attached. So a session pinned to a build never runs on
-  another.
+  another. The label is the worker's own claim, from its Hello: the relay does not check it
+  against the attach token, so a compromised worker can claim any build. That is the trust
+  `moca.dev/template` already has, and no new exposure.
+- **A pinned session keeps its worker while in use:** nothing else would. The first-use lease
+  runs out (by default after the hosts' idle limit, 3600 s), and an active build takes no lease for
+  a later session, so the host agent would stop the worker between turns and the next turn would
+  find none. So each turn's credential exchange (interactive or queued) keeps the build's worker
+  for the hold, the same length as a default lease, from that turn, as a live sandbox keeps its
+  worker (`busyWorkers`): it is not stopped while held, and keeps its slot. A hold keeps a worker
+  that runs; it never starts one, and never counts as a lease or against `quota.active`. Only the
+  turns of a subject enrolled for sandboxes hold (the rule first-use leases follow): a subject who
+  is not enrolled has its turns run on an active build while the worker is up, but they extend
+  nothing, so they cannot keep a build running after its owner and every lease holder have released
+  it (deactivate, the host's capacity).
+  **Failure mode:** a session with no turn for longer than the hold (or across a control-plane
+  restart, which forgets the holds as it forgets host state until the next turn) can find its
+  worker stopped; its next turn is refused (`503 sandbox_unavailable`), and a subject not enrolled
+  cannot start it again. **Recovery:** an enrolled subject activates the template
+  (`mocactl sbx templates activate ID --wait`, or `POST /v1/templates/{id}/activate`), and the
+  session's turns run again once its worker is attached; the session keeps its build, so nothing
+  else changes.
 - **Upgrade order:** sandboxes route by worker id and ignore the label; an unpinned session matches
   by template as before; only a pinned session refuses a worker without the label. So the worker
   rebuild must precede the first pinned Moca Pi session on a combined deployment, and nothing else
@@ -135,6 +161,13 @@ profiles' credentials, the relay's two Exec callers, one namespace and no cluste
 store on, its own addresses, the supervisor's Route (`SBX_MOCA_HOST`); tested without a cluster in
 `deploy/sbx/tests/setup.test.sh`. It writes to `deploy/sbx/.generated-<namespace>/`, so the same
 checkout leaves an SBX0 namespace's generated files alone.
+
+**The isolation boundary changes.** The relay takes two kinds of Exec caller on one listener: the
+harness's exec token (`MOCA_RELAY_EXEC_TOKEN`, checked first in `execCaller`) and the per-sandbox
+tokens. The harness's token is not scoped to a sandbox: it allows Exec into any attached worker, so
+on `combined` also into the sandboxes of enrolled users. A compromised supervisor, which holds that
+token, therefore reaches those sandboxes; with SBX0 in a namespace of its own it reaches none. A
+deployment that needs that separation keeps the two profiles in two namespaces.
 
 Run it in a new namespace, so an SBX0 deployment stays as it is; the templates are brought in by
 create there (the template store does not move between namespaces).
@@ -173,6 +206,11 @@ Increments 1-5 are code and tests only; 6 and 7 need a cluster (and a KVM host f
 ## 6. Limits
 
 - On `combined` a non-enrolled login can use sessions, as on `harness` (§3.2).
+- A pinned session idle for longer than the hold can lose its worker, until an enrolled subject
+  activates the template again (§3.4). A subject not enrolled holds no worker at all: its session
+  runs only while some lease or an enrolled subject's turns keep the worker up.
+- On `combined` the harness's exec token reaches every attached worker, the sandboxes of enrolled
+  users included (§3.6): a supervisor compromise is no longer contained to the harness's workers.
 - With no model-catalog hosts, a session's `model` is accepted unverified (`modelVerified: false`).
 - A session needs an inference credential even if it runs no turn.
 - `credentials` of the egress kind on `combined` only when egress is configured.

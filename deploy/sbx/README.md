@@ -183,7 +183,9 @@ removes it. Re-run `--janitor` with a new bundle after changing `SBX_JANITOR_WAI
 plane on the `combined` route profile, serving Moca Pi sessions (the supervisor and its Route) and
 sandboxes from one template store, so a session and a sandbox can run on the same build under one
 activation lease ([design](../../docs/specs/2026-11-05-combined-control-plane-design.md)). Use a
-namespace of its own, not an SBX0 one. It needs, beside the inputs above:
+namespace of its own, not an SBX0 one: the run refuses, before applying anything, a namespace whose
+`moca-mu1` holds `SH_JANITOR_TOKEN` but no `SH_EXCHANGE_TOKEN`, or that has the `sbx-api` Route,
+unless `SBX_CONVERT_TO_COMBINED=1` says the conversion is meant. It needs, beside the inputs above:
 
     SBX_PROFILE=combined
     SBX_MOCA_HOST=<supervisor route host>      # a fourth distinct host; SBX_MOCA_TLS_{CERT,KEY} optional

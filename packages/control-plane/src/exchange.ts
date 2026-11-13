@@ -4,6 +4,7 @@ import { touchBundle } from './bundle-budget.js';
 import { firstBinding, inferenceAuthHeader, type InferenceAuthHeader } from './credential-store.js';
 import { CpError } from './errors.js';
 import type { CpConfig, CpDeps } from './handlers.js';
+import { holdPinnedWorker } from './host-handlers.js';
 import type { InferenceTarget } from './model-catalog.js';
 import type { SessionModel } from './models.js';
 import type { SessionRecord } from './ownership.js';
@@ -468,6 +469,10 @@ export async function exchangeCredential(
   }
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
+  // A turn of a session pinned to a build keeps that build's worker running between turns. After
+  // the audit and every refusal (the template and seed are resolved above), so a refused exchange
+  // holds nothing; best effort, it never refuses one itself.
+  if (template) await holdPinnedWorker(rec, deps);
   return {
     mode,
     anthropicAuthToken: mode === 'placeholder' ? placeholderFor(rec.owner) : secretValue,
