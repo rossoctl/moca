@@ -12,8 +12,9 @@ import {
 } from '../src/activation.js';
 import { writeError } from '../src/errors.js';
 import { HANDLERS } from '../src/handlers.js';
-import { HostRegistry, parseHostMemory } from '../src/host-handlers.js';
+import { HOST_STALE_S, HostRegistry, parseHostMemory } from '../src/host-handlers.js';
 import { ProvenanceStore, recordDigest as recordDigestOf } from '../src/provenance.js';
+import type { SandboxTemplate } from '../src/sandbox-config.js';
 import { FileTemplateCatalog, type TemplateDoc } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
 import { DEFAULT_POLICY } from '../src/template-policy.js';
@@ -32,14 +33,14 @@ const hash = (c: string) => `sha256:${c.repeat(64)}`;
 
 let seq = 0;
 let now = NOW_MS;
-async function setup(quotaActive = 8): Promise<TestDeps> {
+async function setup(quotaActive = 8, declared: SandboxTemplate[] = []): Promise<TestDeps> {
   now = NOW_MS;
   const dir = mkdtempSync(join(tmpdir(), 'cp-act-'));
   const provenance = new ProvenanceStore({ dir, now: () => now });
   const d = makeDeps({
     newId: () => `${(++seq).toString(16).padStart(26, '0')}000000`,
     now: () => now,
-    templates: new FileTemplateCatalog({ dir, declared: [], provenance, now: () => now }),
+    templates: new FileTemplateCatalog({ dir, declared, provenance, now: () => now }),
     provenance,
     policy: new FilePolicyStore({ dir, provenance }),
     hosts: new HostRegistry(),
@@ -109,6 +110,7 @@ const inventory = (
   host: string,
   holds: Record<string, string>,
   activeLimit: number,
+  running: string[] = [],
   memory?: Record<string, unknown>,
 ) =>
   HANDLERS.hostInventory!(
@@ -119,6 +121,7 @@ const inventory = (
         holds: Object.entries(holds).map(([manifestHash, template]) => ({
           manifestHash,
           template,
+          ...(running.includes(manifestHash) ? { running: true } : {}),
         })),
         limits: { activeLimit, idleLimitSeconds: 3600 },
         ...(memory ? { memory } : {}),
@@ -181,11 +184,49 @@ describe('activation (§6.2-§6.3)', () => {
     for (let i = 0; i < 3; i++) {
       await activate(d, 't1', alice, { leaseSeconds: 86_400 });
       now += 43_200_000;
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
     }
     expect(await readiness(d, 't1')).not.toBe('inactive');
     await expect(activate(d, 't1', alice, { leaseSeconds: 86_401 })).rejects.toMatchObject({
       code: 'invalid_request',
     });
+  });
+
+  it("clamps the default lease from the holders' idle limits, and range-checks only an explicit one", async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const idle = (host: string, holds: Record<string, string>, idleLimitSeconds: number) =>
+      HANDLERS.hostInventory!(
+        asHost(
+          host,
+          {},
+          {
+            holds: Object.entries(holds).map(([manifestHash, template]) => ({
+              manifestHash,
+              template,
+            })),
+            limits: { activeLimit: 2, idleLimitSeconds },
+          },
+        ),
+        d,
+      );
+    const nowS = () => Math.floor(now / 1000);
+    // Over a day: the default is a day, never a refusal of a request that named no lease.
+    await idle('host-1', { [hash('1')]: 't1' }, 172_800);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 86_400);
+    // Under a minute: the default is a minute.
+    await idle('host-1', { [hash('1')]: 't1' }, 5);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 60);
+    // Only the hosts that hold the build: another host's longer idle limit is not this build's.
+    await idle('host-1', { [hash('1')]: 't1' }, 0);
+    await idle('host-2', {}, 7200);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 3600);
+    // An explicit lease is the client's, and checked.
+    for (const leaseSeconds of [59, 86_401, 'x', 1.5]) {
+      await expect(activate(d, 't1', alice, { leaseSeconds })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    }
   });
 
   it('never evicts a leased build: over the limit is 409 no_active_slot with Retry-After', async () => {
@@ -222,6 +263,26 @@ describe('activation (§6.2-§6.3)', () => {
     });
     now += 601_000;
     expect((await activate(d, 't2', bob)).status).toBe(200);
+  });
+
+  it("answers Retry-After from the build's own holders: when one of their leased builds loses its last lease", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await registered(d, 't3', hash('3'), 'sbx_t3');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 1);
+    await inventory(d, 'host-2', { [hash('3')]: 't3' }, 1);
+    // A lease ending soon on another host's build frees nothing for t2.
+    expect(((await activate(d, 't3', alice, { leaseSeconds: 60 })).body as Body).host).toBe(
+      'host-2',
+    );
+    // t1 holds host-1's slot until its last lease ends (1200 s), not its first (600 s).
+    await activate(d, 't1', bob, { leaseSeconds: 600 });
+    await activate(d, 't1', alice, { leaseSeconds: 1200 });
+    const e = await activate(d, 't2', bob).catch((x) => x);
+    expect(e.code).toBe('no_active_slot');
+    expect(e.retryAfterS).toBe(1200);
   });
 
   it('never evicts for a lease taken in the same second: the tie on since does not reorder placement', async () => {
@@ -297,6 +358,156 @@ describe('activation (§6.2-§6.3)', () => {
     ]);
   });
 
+  it('keeps a running build on its host: an earlier lease ending moves nothing', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await registered(d, 't3', hash('3'), 'sbx_t3');
+    const both = { [hash('1')]: 't1', [hash('2')]: 't2' };
+    await inventory(d, 'host-1', { ...both, [hash('3')]: 't3' }, 1);
+    await inventory(d, 'host-2', both, 1);
+    expect(((await activate(d, 't2', bob)).body as Body).host).toBe('host-1');
+    now += 1000;
+    expect(((await activate(d, 't1')).body as Body).host).toBe('host-2');
+    const report = (host: string, h: string, event: string) =>
+      HANDLERS.hostWorkerReport!(asHost(host, {}, { buildId: h, event }), d);
+    await report('host-1', hash('2'), 'attached');
+    await report('host-2', hash('1'), 'attached');
+    // t2's lease ends: t1 stays on host-2, which runs it; host-1 is told to stop t2, not to run t1.
+    await HANDLERS.deactivateTemplate!(ctx({ principal: bob, params: { id: 't2' }, body: {} }), d);
+    expect((await HANDLERS.hostWanted!(asHost('host-2'), d)).body).toMatchObject({
+      run: [{ template: 't1' }],
+    });
+    const w1 = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect(w1.run).toEqual([]);
+    expect(w1.stop).toContainEqual({ template: 't2', buildId: hash('2'), worker: 'sbx_t2' });
+    await report('host-1', hash('2'), 'detached');
+    // host-1's slot is free for a build only it holds; the hosts block counts what each runs.
+    expect(((await activate(d, 't3')).body as Body).host).toBe('host-1');
+    const hb = ((await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body).hosts;
+    expect(hb.map((h: Body) => [h.id, h.active.used])).toEqual([
+      ['host-1', 1],
+      ['host-2', 1],
+    ]);
+  });
+
+  it("counts a draining worker against its host's activeLimit until its last sandbox ends", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    const holds = { [hash('1')]: 't1', [hash('2')]: 't2' };
+    await inventory(d, 'host-1', holds, 1);
+    await activate(d, 't1');
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'attached' }),
+      d,
+    );
+    const sb = (
+      await HANDLERS.createSandbox!(ctx({ principal: alice, body: { template: 't1' } }), d)
+    ).body as Body;
+    await HANDLERS.deactivateTemplate!(
+      ctx({ principal: alice, params: { id: 't1' }, body: {} }),
+      d,
+    );
+    // t1 has no lease but drains a live sandbox: never stopped, and it keeps host-1's one slot.
+    const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect([...w.run, ...w.stop].map((x: Body) => x.template)).not.toContain('t1');
+    expect((await activate(d, 't2', bob).catch((x) => x)).code).toBe('no_active_slot');
+    // Its last sandbox ends: it is to stop, and its slot is free.
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    expect(((await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body).stop).toContainEqual({
+      template: 't1',
+      buildId: hash('1'),
+      worker: 'sbx_t1',
+    });
+    expect(((await activate(d, 't2', bob)).body as Body).host).toBe('host-1');
+  });
+
+  it("stops a host's copy of a leased build that another host runs and is placed on", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const holds = { [hash('1')]: 't1' };
+    await inventory(d, 'host-1', holds, 2, [hash('1')]);
+    await inventory(d, 'host-2', holds, 2, [hash('1')]);
+    expect(((await activate(d, 't1')).body as Body).host).toBe('host-1');
+    expect((await HANDLERS.hostWanted!(asHost('host-2'), d)).body).toEqual({
+      run: [],
+      stop: [{ template: 't1', buildId: hash('1'), worker: 'sbx_t1' }],
+    });
+  });
+
+  it('leaves out a host whose last inventory is older than HOST_STALE_S, until it reports again', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    const both = { [hash('1')]: 't1', [hash('2')]: 't2' };
+    await inventory(d, 'host-1', both, 1);
+    await inventory(d, 'host-2', both, 1);
+    now += (HOST_STALE_S - 60) * 1000;
+    await inventory(d, 'host-2', both, 1);
+    now += 61_000;
+    // host-1 is silent past the limit: no placement on it, no slot of its counted, not listed.
+    expect(((await activate(d, 't1')).body as Body).host).toBe('host-2');
+    expect((await activate(d, 't2').catch((x) => x)).code).toBe('no_active_slot');
+    const hb = ((await HANDLERS.listTemplates!(ctx({ principal: alice }), d)).body as Body).hosts;
+    expect(hb.map((h: Body) => h.id)).toEqual(['host-2']);
+    // It reports again: back in placement, its slot free for the other build.
+    await inventory(d, 'host-1', both, 1);
+    expect((await activate(d, 't2')).status).toBe(200);
+    // Every host silent: readiness is the workers' presence alone, as before any host reported.
+    now += (HOST_STALE_S + 1) * 1000;
+    attachedNow = ['sbx_t1'];
+    expect(await readiness(d, 't1')).toBe('active');
+    expect(await readiness(d, 't2')).toBe('inactive');
+  });
+
+  it("records a repeated refusal once while the build stays in the host's run", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const refusals = async () =>
+      (await d.provenance!.chain('template/t1')).filter(
+        (x) => x.subject === 'host:host-1' && (x.body as Body).event === 'refused',
+      ).length;
+    const refuse = (reason: string) =>
+      HANDLERS.hostWorkerReport!(
+        asHost('host-1', {}, { buildId: hash('1'), event: 'refused', reason }),
+        d,
+      );
+    const poll = async (reason: string) => {
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      expect(((await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body).run).toHaveLength(1);
+      return (await refuse(reason)).body as Body;
+    };
+    expect(await poll('worker not installed')).toEqual({ recorded: 'refused' });
+    for (let i = 0; i < 3; i++)
+      expect(await poll('worker not installed')).toEqual({ recorded: null });
+    expect(await refusals()).toBe(1);
+    // A different reason is new, and so is the same one after any other report.
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'attached' }),
+      d,
+    );
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    expect(await refusals()).toBe(3);
+    // Once the build leaves the host's run, a later refusal is a new episode, recorded.
+    await HANDLERS.deactivateTemplate!(
+      ctx({ principal: alice, params: { id: 't1' }, body: {} }),
+      d,
+    );
+    await HANDLERS.hostWanted!(asHost('host-1'), d);
+    await activate(d, 't1');
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    expect(await refusals()).toBe(4);
+  });
+
   it("records a host's attach and detach reports for a build it holds, and refuses others", async () => {
     const d = await setup();
     await registered(d, 't1', hash('1'), 'sbx_t1');
@@ -353,11 +564,27 @@ describe('activation on first use (§6.4)', () => {
     expect(w.run).toEqual([{ template: 't1', buildId: hash('1'), worker: 'sbx_t1' }]);
     // No sandbox was kept while waiting.
     expect(await d.sandboxes!.listByOwner(alice.sub, Math.floor(now / 1000))).toHaveLength(0);
-    // Still activating: the retry waits again, without a second lease.
-    expect((await refusal(() => createSandbox(d, { template: 't1' }))).code).toBe(
+    // Still activating: the retries wait again, without a second lease, a renewal or a record.
+    const firstUse = async () =>
+      (await d.provenance!.chain('template/t1')).filter((x) => x.kind === 'activate').length;
+    const before = await firstUse();
+    const until = (await leases(d, 't1'))[0]!.until;
+    now += 30_000;
+    for (let i = 0; i < 3; i++) {
+      expect(await refusal(() => createSandbox(d, { template: 't1' }))).toEqual({
+        code: 'template_not_active',
+        readiness: 'activating',
+        retryAfterS: 30,
+      });
+    }
+    expect(await leases(d, 't1')).toHaveLength(1);
+    expect((await leases(d, 't1'))[0]!.until).toBe(until);
+    expect(await firstUse()).toBe(before);
+    // Another subject's first use takes its own lease.
+    expect((await refusal(() => createSandbox(d, { template: 't1' }, bob))).code).toBe(
       'template_not_active',
     );
-    expect(await leases(d, 't1')).toHaveLength(1);
+    expect(await firstUse()).toBe(before + 1);
     attachedNow = ['sbx_t1'];
     const r = await createSandbox(d, { template: 't1' });
     expect(r.status).toBe(201);
@@ -412,6 +639,35 @@ describe('activation on first use (§6.4)', () => {
     d.hosts = new HostRegistry();
     attachedNow = ['sbx_t1'];
     expect((await createSandbox(d, { template: 't1' })).status).toBe(201);
+  });
+
+  it('never gates a template imported from SH_SANDBOX_TEMPLATES, beside a host-built one', async () => {
+    const d = await setup(8, [{ id: 'py', worker: 'sbx_py', description: 'py', tools: [] }]);
+    attachedNow = ['sbx_py'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    d.config.templateHosts = [{ id: 'host-1', token: 'f'.repeat(64) }];
+    // Hosts configured, none reported yet: the imported template serves, the host-built one waits.
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    expect((await refusal(() => createSandbox(d, { template: 't1' }))).code).toBe(
+      'template_not_active',
+    );
+    // After the first inventory: the imported one still serves, and is active, never deactivating.
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    expect(await readiness(d, 'py')).toBe('active');
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    // Its worker detached: inactive, and the create is the relay's to answer, as without hosts.
+    attachedNow = [];
+    expect(await readiness(d, 'py')).toBe('inactive');
+    expect((await createSandbox(d, { template: 'py' })).status).toBe(201);
+    // It takes no lease, so it is never placed and no host is asked to run or stop it.
+    expect(await activate(d, 'py').catch((x) => x.code)).toBe('invalid_request');
+    expect(await leases(d, 'py')).toHaveLength(0);
+    const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect([...w.run, ...w.stop].map((x: Body) => x.template)).not.toContain('py');
+    // The host-built one, leased by alice's first try and now attached, serves (bob: alice's
+    // live-sandbox cap is spent above).
+    attachedNow = ['sbx_t1'];
+    expect((await createSandbox(d, { template: 't1' }, bob)).status).toBe(201);
   });
 
   it('changes nothing without host agents: the create succeeds as before', async () => {
@@ -825,6 +1081,39 @@ describe('memory-aware placement', () => {
     );
   });
 
+  it('sticky placement and the memory rule together: running is the union of both reports', () => {
+    const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
+    // Running by the held build's `running` flag only (an attached report newer than the memory
+    // report): kept on h2 though h1 sorts first, counted against h2's limit, its memory paid for.
+    const h1 = host('h1', [hash('a'), hash('b')], 100_000);
+    const h2 = { ...host('h2', [hash('a'), hash('b')], G - 1, {}, 1), running: [hash('a')] };
+    const p = place(docs, [h1, h2], 100);
+    expect(p.placed.get(hash('a'))).toBe('h2');
+    expect(p.placed.get(hash('b'))).toBe('h1');
+    expect(p.used.get('h2')).toBe(1);
+    expect(p.memory.get('h2')).toMatchObject({ usedMib: G, pendingMib: G });
+    // Running by runningWorkers only: the same; braked (stale) and at its limit, it still keeps it.
+    const w2 = host('h2', [hash('a')], 0, { running: ['w_a'] }, 1, 0);
+    const q = place(docs, [h1, w2], 100);
+    expect(q.placed.get(hash('a'))).toBe('h2');
+    expect(q.used.get('h2')).toBe(1);
+    // Started since the inventory (an attached report; not in its runningWorkers): MemAvailable
+    // cannot show it yet, so its cost comes off that bound too, and b no longer fits beside it.
+    const fresh = {
+      ...host('h2', [hash('a'), hash('b')], G + 10, { totalMib: 1_000_000 }),
+      running: [hash('a')],
+    };
+    const r = place(docs, [fresh], 100);
+    expect(r.placed.get(hash('a'))).toBe('h2');
+    expect(r.memory.get('h2')).toMatchObject({ usedMib: G, pendingMib: G });
+    expect(r.unplaced.get(hash('b'))).toBe('memory');
+    const listed = { ...fresh, memory: { ...fresh.memory!, running: ['w_a'] } };
+    expect(place(docs, [listed], 100).placed.get(hash('b'))).toBe('h2');
+    // A memory file reported wrong overrides stickiness: that host is never chosen for it.
+    const bad = { ...h2, memory: { ...h2.memory!, memfileMismatch: [hash('a')] } };
+    expect(place(docs, [h1, bad], 100).placed.get(hash('a'))).toBe('h1');
+  });
+
   it('a host without memory figures places exactly by activeLimit, as before', () => {
     const docs = [doc('a', hash('a'), 1, 4096), doc('b', hash('b'), 2, 4096)];
     const bare: HostView = {
@@ -910,7 +1199,7 @@ describe('memory-aware placement through the routes', () => {
     attachedNow = [];
     await registered(d, 't1', hash('1'), 'sbx_t1');
     await registered(d, 't2', hash('2'), 'sbx_t2', bob);
-    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, mem(G + 100));
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, [], mem(G + 100));
     await activate(d, 't1', alice, { leaseSeconds: 600 });
     const e = await activate(d, 't2', bob).catch((x) => x);
     expect(e.code).toBe('no_active_slot');
@@ -954,7 +1243,7 @@ describe('memory-aware placement through the routes', () => {
     expect(c.code).toBe('template_not_active');
     expect(c.extra).toMatchObject({ readiness: 'unavailable', reason: 'memory' });
     // At the active limit with memory to spare, the refusal is as before: no reason field.
-    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 1, mem(100_000));
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 1, [], mem(100_000));
     const e2 = await activate(d, 't2', bob).catch((x) => x);
     expect(e2.code).toBe('no_active_slot');
     expect(e2.extra).toEqual({ readiness: 'unavailable' });
@@ -983,6 +1272,7 @@ describe('memory-aware placement through the routes', () => {
       'host-1',
       { [hash('1')]: 't1' },
       4,
+      [],
       mem(16384, {
         memPressureFull10: 0.5,
         runningWorkers: ['sbx_x'],
@@ -1010,7 +1300,7 @@ describe('memory-aware placement through the routes', () => {
   it('a stale inventory takes no new start; a memfile mismatch on every holder is template_unavailable', async () => {
     const d = await setup();
     await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, mem(100_000));
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, [], mem(100_000));
     now += 61_000;
     const e = await activate(d, 't1').catch((x) => x);
     expect(e.code).toBe('no_active_slot');
@@ -1022,12 +1312,13 @@ describe('memory-aware placement through the routes', () => {
       'host-1',
       { [hash('1')]: 't1' },
       4,
+      [],
       mem(100_000, { memfileMismatch: [hash('1')] }),
     );
     const m = await activate(d, 't1').catch((x) => x);
     expect(m.code).toBe('template_unavailable');
     expect(m.extra).toEqual({ readiness: 'unavailable', reason: 'memfile_mismatch' });
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, mem(100_000));
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 4, [], mem(100_000));
     expect((await activate(d, 't1')).status).toBe(200);
   });
 
@@ -1035,7 +1326,7 @@ describe('memory-aware placement through the routes', () => {
     const d = await setup();
     await registered(d, 't1', hash('1'), 'sbx_t1');
     await registered(d, 't2', hash('2'), 'sbx_t2');
-    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, mem(100_000));
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4, [], mem(100_000));
     await activate(d, 't1');
     now += 1000;
     await activate(d, 't2');
@@ -1046,6 +1337,7 @@ describe('memory-aware placement through the routes', () => {
       'host-1',
       { [hash('1')]: 't1', [hash('2')]: 't2' },
       4,
+      [],
       mem(G + 10, { runningWorkers: ['sbx_t1'] }),
     );
     const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
@@ -1057,7 +1349,7 @@ describe('memory-aware placement through the routes', () => {
     attachedNow = [];
     await registered(d, 't1', hash('1'), 'sbx_t1');
     await registered(d, 't2', hash('2'), 'sbx_t2', bob);
-    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 8, mem(2 * G - 1));
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 8, [], mem(2 * G - 1));
     const prov = d.provenance!;
     const orig = prov.append.bind(prov);
     let open!: () => void;

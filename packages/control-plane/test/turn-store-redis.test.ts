@@ -58,6 +58,8 @@ const rec = (over: Partial<TurnRecord> = {}): TurnRecord => ({
   sessionId: 's-1',
   cfg: '',
   credentialName: 'anthropic',
+  model: '',
+  sandboxTier: '',
   caps: {},
   idempotencyKey: 's-1',
   envelope: {},

@@ -44,6 +44,19 @@ func verifyTemplateRecord(path string, man vmpool.Manifest, snapshot, sandboxID,
 	if r.Schema != templateRecordSchema {
 		return fmt.Errorf("template record %s: schema %q, want %q", path, r.Schema, templateRecordSchema)
 	}
+	// A record is template-build.sh's, and template-build.sh only builds version-2 manifests
+	// from a rootfs that records its image digest. A version-1 manifest, or one without
+	// source_image_digest, is a state the tooling never creates (an old snapshot directory,
+	// or a hand-edited manifest): refuse it rather than skip the image comparison.
+	if man.HashVersion != vmpool.HashVersionAll {
+		return fmt.Errorf("template record %s: the snapshot's manifest is hash version %d, want %d: "+
+			"rebuild the template: its manifest predates hash version %d",
+			path, man.HashVersion, vmpool.HashVersionAll, vmpool.HashVersionAll)
+	}
+	if man.SourceImageDigest == "" {
+		return fmt.Errorf("template record %s: the snapshot's manifest records no source_image_digest, "+
+			"so the record's image cannot be compared: rebuild the template with template-build.sh", path)
+	}
 	var bad []string
 	differ := func(what, record, here string) {
 		if record != here {
@@ -63,15 +76,11 @@ func verifyTemplateRecord(path string, man vmpool.Manifest, snapshot, sandboxID,
 		differ("id", r.ID, template)
 	}
 	// The image digest the rootfs was exported from (build-rootfs.sh's
-	// /etc/moca-rootfs-source, copied into a version-2 manifest as source_image_digest).
-	// A version-1 manifest does not carry it: the check is skipped, and says so in the log.
-	if man.SourceImageDigest != "" {
-		_, dig, ok := strings.Cut(r.Image, "@")
-		if !ok {
-			bad = append(bad, fmt.Sprintf("image: record %q is not pinned by digest", r.Image))
-		} else {
-			differ("image digest", dig, man.SourceImageDigest)
-		}
+	// /etc/moca-rootfs-source, copied into the manifest as source_image_digest).
+	if _, dig, ok := strings.Cut(r.Image, "@"); !ok {
+		bad = append(bad, fmt.Sprintf("image: record %q is not pinned by digest", r.Image))
+	} else {
+		differ("image digest", dig, man.SourceImageDigest)
 	}
 	if len(bad) > 0 {
 		return fmt.Errorf("template record %s does not describe this worker's snapshot (%s): "+
