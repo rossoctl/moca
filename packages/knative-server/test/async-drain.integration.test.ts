@@ -136,6 +136,10 @@ async function submit(): Promise<{ turnId: string; sessionId: string }> {
     sessionId,
     cfg: '',
     credentialName: 'default',
+    // Neither pinned: the turn runs on the deployment's own defaults, as a submission that named
+    // no model and no tier does (#388).
+    model: '',
+    sandboxTier: '',
     caps: {},
     idempotencyKey: sessionId,
     envelope: { sessionId, kind: 'prompt', prompt: 'hi' },
