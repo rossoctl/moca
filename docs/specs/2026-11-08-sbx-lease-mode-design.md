@@ -1,9 +1,10 @@
 # SBX0.3 — Lease mode for `mocactl sbx` sandboxes — Design
 
-Version: 0.3 — November 12, 2026 (draft for review)
+Version: 0.4 — November 13, 2026 (draft for review)
 Status: Design. Not approved. Built: plan 1 (guest agent and image, #706), plan 2 (the worker's
-leases, #763) and plan 3 (the wire: the control plane, the relay and the worker's frames). The
-clients (`mocactl sbx`, the MCP server; plan 4) are not.
+leases, #763), plan 3 (the wire: the control plane, the relay and the worker's frames, #802) and
+plan 4 (the clients: `mocactl sbx`, the MCP server and the static `sbx` client). Lease mode stays
+off by default (`SH_SANDBOX_MODES_ALLOWED=per-exec`, §8.1). Level 2 (plan 5) is not built.
 v0.2 folds in E17a's calibration (§1.1, §17): level 1 is re-scoped (§2), free-page reporting moves
 into v1 (§6, §14), lease VMs get page-cache headroom in their cgroup (§6), and the idle timeout and
 the memory model are set together (§4).
@@ -11,6 +12,9 @@ v0.3 records what plan 3 decided on the wire: a lease event rides before the Exe
 best-effort notice (§5); the `mode-token` route, the epoch a create starts at and the idle
 timeout's bounds (§8.1); the third claim and the set-mode token (§8.2); the relay's limits and
 status codes for the new calls (§8.3).
+v0.4 records what plan 4 built in the clients: the notice copy and where each client shows it (§5),
+the mode commands and the deploy inputs (§8.2), and `sandbox_deleted`, keepalive coalescing and the
+worker's status cap (§8.3).
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
 registered in [the milestone registry](README.md).
 Decision record: [ADR-0048](../adrs/0048-sbx-lease-mode.md), which revises
@@ -370,6 +374,40 @@ until level 2 (§7).
   (`LeaseStatus.pending`), not on an Exec. The event stays pending, and the first lease Exec after a
   later upgrade carries it. Plan 4's notice work decides whether `set_mode` acknowledges it instead.
 
+**As built (plan 4).** The copy, in `packages/sandbox-client/src/lease.ts` (`leaseNotice`), with a Go
+port in the static client (`remote-worker/cmd/sbx/notice.go`):
+
+| Event      | Line                                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| `end`      | `[sandbox] guest restarted (<reason>, <HH:MM>): /tmp, installs outside /workspace and background processes are gone` |
+| `expiring` | `[sandbox] guest restarts within <N> min (max_duration)`, N = max(1, ceil((`ends_by_unix_ms` − now) / 60 000))       |
+| `start`    | `[sandbox] new guest (<mode>, <HH:MM>)`, shown only when no end is shown in the same result                          |
+
+- **`<HH:MM>`** is the event's `at_unix_ms` in local 24-hour time. An end with `processes` adds
+  `; stopped: <name> (pid <n>)` for each (plan 5 fills it). One result shows only its last
+  `expiring` line.
+- **`expiring` carries its deadline.** `LeaseEvent` gains `ends_by_unix_ms = 8`, set on `expiring`
+  only: the lease's hard end, its `at_unix_ms` plus `grace_limit`. Its `at_unix_ms` is the lease's
+  start plus `max_duration`, the instant the worker's deadline counts from, so every repeat carries
+  the same value (ruling P4-R2); its `reason` is `max_duration`. A worker that predates the field
+  sends 0, and the line reads `[sandbox] guest restarts soon (max_duration)` (P4-R8).
+- **The MCP server** puts the lines first in each tool result, a failed Exec's events included
+  (P4-R5), deduped on `at_unix_ms` for the server's life. The events of a call that was cancelled,
+  whose result nobody reads, are held for the next result. `sandbox_info` adds `mode`, `lease`
+  (`none`, `active` or `expiring`), `age`, `idle timeout`, `last end` and `tracked processes: none`
+  (until plan 5). A `per-exec` sandbox makes no lease call and shows `lease: none (per-exec)`
+  (P4-R9); a failed status shows `lease: unknown (<code>)`.
+- **`mocactl sbx`** prints the lines on stderr. `run`, `get`, `mode` and `reset` print each event
+  the user has not seen. What was seen is kept per sandbox in `<state dir>/sbx/notices.json`, as the
+  newest `at_unix_ms` shown (P4-R14); `rm` forgets the sandbox. An `expiring` line is shown every
+  time and marks nothing seen.
+- **The static `sbx` client** prints the same lines on stderr, each `at_unix_ms` once per run.
+- **`set_mode` does not acknowledge the `mode_change` end.** The event stays pending at the worker
+  until a lease Exec carries it, and the clients dedupe it. `mocactl sbx mode` reports it on stdout,
+  as `lease ended (mode_change)`, and `mocactl sbx reset` reports its own end as
+  `lease ended (reset)`; each marks that event seen without a notice line (P4-R17), so it is said
+  once.
+
 ## 6. Admission and reclaim
 
 - **A third accounting class.** A lease VM is neither a standby nor an `inFlight` per-`Exec` VM. It
@@ -568,6 +606,49 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
 - If `LeaseControl` cannot reach the worker, the downgrade still lands at the next Exec, and the lease
   idles out at worst. `mocactl` reports that the change is pending.
 
+**As built (plan 4), `mocactl sbx`.** Result lines go to stdout, and notices and diagnostics to stderr
+(P4-R15).
+
+- **`create --mode M [--idle-timeout S]`.** A lease mode is an upgrade, so it needs a terminal on
+  stdin: without one, `sbx: an upgrade needs a terminal: run it yourself`, exit 2, and nothing is
+  created. After the create, `mocactl` mints a set-mode token from `POST .../mode-token` and sends
+  `set_mode` once; on `PERMISSION_DENIED` it mints one more and retries once (ruling R11). It prints
+  `mode <m> (epoch <n>)` on stderr. `UNAVAILABLE` or `DEADLINE_EXCEEDED` is pending, exit 0, with
+  the warning
+  `sbx: lease pending (<code>): the sandbox runs per-Exec until "mocactl sbx get <id>" re-sends the mode`.
+  `--json` adds `setMode`: `{outcome: applied}`, `{outcome: pending, code}` or `{error}`. Ctrl-C
+  during the `set_mode` is pending too (`cancelled`), exit 130 (P4-R12). A control plane that
+  ignored the mode is named (P4-R13):
+  `sbx: <id> is per-exec, not <m>: the control plane did not take the mode`.
+- **`mode <mode> [ID] [--idle-timeout S]`.** It reads the record first, and refuses an upgrade
+  without a terminal (exit 2) before the `PUT`. The `PUT` keeps the record's `idleTimeoutS` unless
+  `--idle-timeout` is given. If that kept value is refused (400 `invalid_request`, a lowered
+  ceiling), it retries once without it and says so on stderr (P4-R18). Then it sends the `PUT`'s
+  set-mode token. Applied, it prints `mode <m> (epoch <n>)`, and `lease ended (mode_change)` when a
+  downgrade ended a live lease. Pending, it exits 0 and prints
+  `mode <m> stored (epoch <n>); the worker could not be reached (<code>): it applies at the next command`.
+  Ctrl-C prints the same with `cancelled` and exits 130.
+- **`get [ID] [--json]`** shows the record's mode, epoch and idle timeout, and the lease from
+  `LeaseControl status` (a `per-exec` record makes no call: `none (per-exec)`). When the worker
+  answers `epoch_known: false`, it mints a fresh set-mode token, sends it, and says
+  `re-sent mode <m>: applied` (or `pending`) on stderr.
+- **`ls`** shows each sandbox's mode.
+
+**As built (plan 4), the worker's state files.** Every worker writes `.lease-state/.boot`
+(`lease=on` or `lease=off`) under its workspace root, a lease-off one too. A lease-on boot after
+`lease=off`, or with no marker, sets `root_wrote` on every known state before it serves, because a
+lease-off worker records no per-`Exec` root writes (§3.3; P4-R4). The janitor removes
+`.lease-state/<wsk>.json` with a deleted sandbox's workspace, and also when the worker already
+reclaimed that workspace (P4-R3). A kept state is written back only while its file exists, so a file
+the janitor removed is not recreated.
+
+**As built (plan 4), the deploy inputs.** `deploy/sbx/setup.sh` takes `SBX_MODES_ALLOWED` (default
+`per-exec`: lease stays off) and `SBX_IDLE_CEILING_S` (default 1800). They become the control
+plane's `SH_SANDBOX_MODES_ALLOWED` and `SH_SANDBOX_IDLE_CEILING_S`, and the ceiling also goes into
+every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the control plane and the workers clamp alike.
+The ceiling's minimum there is 300 s, not the control plane's 30, because the worker refuses to boot
+with a ceiling below its 300 s default idle timeout (P4-R19).
+
 ### 8.3 New calls on `sandbox/v1` (additive)
 
 | Call                                                                                     | Sent by                                                                                                               | Purpose                                      |
@@ -631,6 +712,31 @@ The worker's wire strings, on an Exec's `ExecError.message` or in `LeaseControlR
 `lease_ended(<reason>)` for an Exec cut by a lease end (§4, §4.1), `stale_mode: <detail>` for an
 older epoch (§8.2), `lease_unsupported: <detail>` for a worker or a mode without leases, and `busy:`
 for a refusal at the worker's own cap.
+
+**As built (plan 4).**
+
+- **`LEASE_OP_SANDBOX_DELETED = 4`** ends the lease with `sandbox_deleted`. It takes no mode and no
+  epoch; the relay ignores a set-mode token sent with it. At the relay it is a mutate op like
+  `reset`: the 31-minute timeout, the same cap of 4 in flight, and a `sandbox_lease_control` line
+  with `op` `sandbox_deleted`. `mocactl sbx rm` reads the record first (P4-R16) and, for a lease
+  mode, sends it before the `DELETE`. It is best-effort: any failure, or 15 s without an answer,
+  and the `DELETE` goes ahead. Ctrl-C during it deletes nothing (exit 130).
+- **Keepalives are coalesced.** The relay writes at most one keepalive frame per workspace to each
+  worker per second (`LEASE_KEEPALIVE_COALESCE_MS`). The others are answered OK and not written.
+- **`mocactl sbx mcp` sends the keepalive.** While its current sandbox token's `mode` claim is a
+  lease mode, it sets `Exec.keepalive` and calls `LeaseKeepalive` every 30 s. A token minted for
+  `per-exec` stops both (ruling P4-R6). `mocactl sbx run` and the static client send no keepalive.
+- **`reset`.** `mocactl sbx reset [ID]` asks for the status first, and prints `no lease` when there
+  is none; with a `per-exec` token it makes no call and prints the same. Otherwise it prints
+  `lease ended (reset)`. The MCP `reset` tool answers `no lease to reset`, or
+  `lease ended (reset): the next command starts a new guest`.
+- **The worker caps `status` too:** at most 32 in flight per worker, apart from the two mutating
+  caps, refused `busy:` at once past it. A `status` still takes no mutating slot, so blocked
+  `reset` and `set_mode` calls cannot deny it.
+- **`SH_LEASE_GRACE_S` above 1800 refuses to boot.** A `reset` or a downgrade can block for the
+  grace limit, and the relay times them out at 31 minutes.
+- **The static client** (`remote-worker/cmd/sbx`) exits 125 on `stale_mode:` and
+  `lease_unsupported:`, with the wire string, and never retries them.
 
 ### 8.4 Worker
 
