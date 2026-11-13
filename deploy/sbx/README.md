@@ -142,9 +142,12 @@ worker's token reaches the relay only when the kubelet syncs the Secret, about a
 attaches may be refused. Re-running it restarts the worker once, with the new env file.
 It also installs `moca-egress.service` (one per host, the guests' allowlisted egress proxy; allowlist
 in `/etc/sbx/moca-egress.env`) before the first worker: [the runbook](RUNBOOK.md#guest-egress).
+It installs `/usr/local/libexec/sbx-reap-vms.sh` too, the unit's `ExecStopPost=`: a worker's VMs run
+in `pool-N` cgroups beside the unit's own, which a stop does not reach, so after every exit it kills
+those of that worker's slice and waits for them to empty ([the runbook](RUNBOOK.md#10-a-kvm-host-outage)).
 `install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
 `/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
-a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace data under
+a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`. Workspace data under
 `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
 it.
 
