@@ -35,7 +35,10 @@ export interface SbxCtx {
   io: Io;
   json: boolean;
   signal?: AbortSignal;
-  /** The template commands' sleep and clock (default the runtime's); tests pass fakes. */
+  /**
+   * The template commands' sleep and clock, and `token --renew-every`'s sleep (default the
+   * runtime's); tests pass fakes.
+   */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
   /**
@@ -359,14 +362,24 @@ export async function cmdRm(c: SbxCtx, id: string, o: { goneOk?: boolean } = {})
   }
 }
 
-export async function cmdToken(c: SbxCtx, id: string): Promise<number> {
+/**
+ * `sbx token`: a fresh sandbox token on stdout. With `renewEveryS`, a new one every S seconds, one
+ * line each, until stopped (the signal; exit 0), so a long-lived client can read its next token
+ * from a pipe rather than run mocactl again.
+ */
+export async function cmdToken(c: SbxCtx, id: string, renewEveryS?: number): Promise<number> {
   try {
-    const t = await c.api.mintSandboxToken(id);
-    c.io.out(
-      (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
-    );
-    return SBX_EXIT.ok;
+    for (;;) {
+      const t = await c.api.mintSandboxToken(id);
+      c.io.out(
+        (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
+      );
+      if (renewEveryS === undefined) return SBX_EXIT.ok;
+      await (c.sleep ?? c.rt.sleep)(renewEveryS * 1000, c.signal);
+      if (c.signal?.aborted) return SBX_EXIT.ok;
+    }
   } catch (err) {
+    if (c.signal?.aborted) return SBX_EXIT.ok;
     return failed(c, err);
   }
 }
