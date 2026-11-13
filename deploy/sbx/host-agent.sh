@@ -321,7 +321,7 @@ activation() {
       worker_report "$b" refused "systemctl start $unit failed"; error "start $unit failed"
     fi
   done < <(jq -r '.run[] | [.worker, .buildId] | @tsv' <<<"$wanted")
-  # A control plane older than API 1.10.0 sends no `remove`.
+  # A control plane older than API 1.11.0 sends no `remove`.
   [[ "$(jq -r '.remove | type' <<<"$wanted")" != array ]] || removal "$wanted"
   exec 9>&-
 }
