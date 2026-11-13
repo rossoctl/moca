@@ -1,7 +1,7 @@
 /**
  * The control plane's typed boundary errors. Codes are `snake_case` and bodies are
  * `{ error, message?, sessionId? }`, matching the data plane's existing `invalid_json` /
- * `session_not_found` / `prompt_required` (packages/knative-server/src/server.ts). Mapped to a
+ * `session_not_found` / `prompt_required` (packages/server/src/server.ts). Mapped to a
  * status in exactly one place, so a handler never picks a status itself (spec §9.1).
  */
 /**
@@ -93,14 +93,14 @@ const STATUS: Record<CpErrorCode, number> = {
   bundle_quota_exceeded: 429,
   // 404: a session asked for a digest nobody uploaded (or that expired) -- promote it first.
   config_bundle_not_found: 404,
-  // Spelled as knative-server's existing /v1/turn code on purpose: same concept, second call site.
+  // Spelled as `@moca/server`'s existing /v1/turn code on purpose: same concept, second call site.
   configRef_invalid: 400,
-  // Spelled as knative-server's existing /runs code on purpose: same concept, second call site.
+  // Spelled as `@moca/server`'s existing /runs code on purpose: same concept, second call site.
   envelope_invalid: 400,
   // 429: the per-owner queued-turn quota (async fan-out spec §4.3). The body names the owner's
   // current count, so a client backs off against a number rather than guessing.
   async_quota_exhausted: 429,
-  // 501, spelled as the data plane's own refusal (knative-server server.ts:972): same concept,
+  // 501, spelled as the data plane's own refusal (`@moca/server` server.ts:972): same concept,
   // second call site. An async turn naming a workload is refused at submission so the 501 stays
   // synchronous instead of becoming a dead-letter (async spec §4.2).
   workload_runs_unavailable: 501,
@@ -116,7 +116,7 @@ const STATUS: Record<CpErrorCode, number> = {
   // from the other claim refusals, and NOT the 404-not-403 of spec §8.1 -- the argument lives in
   // openapi.yaml's `/internal/turn-credentials` 404 description, and has to be reread when M2 stops
   // returning a real key, so it is stated in one place rather than four.
-  // The harness emits a same-named `turn_not_found` of its own (knative-server server.ts); the two
+  // The harness emits a same-named `turn_not_found` of its own (`@moca/server` server.ts); the two
   // are distinct codes at distinct hops that happen to share a name, not one code reused.
   turn_not_found: 404,
   // 409: the record exists but is `cancelled` or already terminal, so no credential is minted

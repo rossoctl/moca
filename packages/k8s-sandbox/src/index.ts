@@ -2,7 +2,7 @@ export { k8sSandboxExtension } from './extension.js';
 export type { SandboxTransport, SandboxContext, FastTier } from './transport.js';
 // #245. A caller above the seam chooses a tier by reading this, so it is part of the
 // package's surface rather than an internal label.
-// #452. The ERROR is exported because knative-server maps it to 503 by name and the leaf
+// #452. The ERROR is exported because `@moca/server` maps it to 503 by name and the leaf
 // paths classify a turn by it; CAPACITY_REFUSAL because its coupling test must read the
 // same regex the transport uses, not a copy of it.
 export { CAPACITY_REFUSAL, SandboxCapacityRefusedError } from './transport.js';

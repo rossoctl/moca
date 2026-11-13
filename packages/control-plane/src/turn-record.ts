@@ -192,7 +192,7 @@ const str = (v: unknown): boolean => typeof v === 'string' && v.length > 0;
 
 /**
  * Validate a submission body (§4.1) into the envelope to store. The three kinds mirror the data
- * plane's `isLeafEnvelope` / `isPromptEnvelope` / `isSolveEnvelope` (knative-server server.ts) so one
+ * plane's `isLeafEnvelope` / `isPromptEnvelope` / `isSolveEnvelope` (`@moca/server` server.ts) so one
  * body is accepted by both paths. `sessionId` is NOT read from the body: the handler supplies the
  * path's session id, which is what keeps the leaf's result under a key this session's delete can
  * reach (`leaf:result:<sid>:<turnId>`, TurnStore.deleteSessionTurns).

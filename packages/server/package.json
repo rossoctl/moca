@@ -1,5 +1,5 @@
 {
-  "name": "@moca/knative-server",
+  "name": "@moca/server",
   "type": "module",
   "version": "0.0.0",
   "exports": {

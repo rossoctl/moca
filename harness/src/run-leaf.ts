@@ -101,9 +101,9 @@ export function toSessionId(sessionId: string): string {
   return cleaned.slice(start, end) || 'leaf';
 }
 
-/** A workload key: the workload record's Context name (knative-server workloads.ts). */
+/** A workload key: the workload record's Context name (`@moca/server` workloads.ts). */
 const WORKLOAD_KEY = /^w-[0-9a-f]{32}$/;
-/** An owner scope: `recordScope(owner)`, 32 hex (knative-server workloads.ts). */
+/** An owner scope: `recordScope(owner)`, 32 hex (`@moca/server` workloads.ts). */
 const OWNER_SCOPE = /^[0-9a-f]{32}$/;
 
 export interface LeafItem {
@@ -137,7 +137,7 @@ export interface LeafEnvelope {
      * The workload key (`w-<32 hex>`) when the workload has sandboxes of its own (workload
      * sandboxes spec §3.3): the run then selects only those, never the shared pool. Absent for a
      * phase 1 workload, which runs on the shared pool as before. The server sets it for a workload
-     * created with `sandboxes` (knative-server workloads.ts).
+     * created with `sandboxes` (`@moca/server` workloads.ts).
      */
     workload?: string;
     /**
@@ -294,7 +294,7 @@ export type ProduceSolve = (
  * `""` reached leaves and silently ran bare because `if (env.configRef)` could not tell it
  * apart from "no config requested". Trim catches a whitespace-only value too. `null` is the
  * deliberate exception — present yet treated as absent — matching `configRefValid` at the
- * knative-server boundary so the two layers can't drift. Returns the failure to use, or
+ * `@moca/server` boundary so the two layers can't drift. Returns the failure to use, or
  * null when the field is acceptable (absent, null, or a real digest).
  */
 export function emptyConfigRefFailure(env: LeafEnvelope): LeafResult | null {

@@ -34,7 +34,7 @@ treats `session_id` as opaque and holds no separate "run" identity.
 
 - As an English verb ("run to completion" vs. "one turn").
 - In the frozen, legacy data-plane route names `POST /runs` and its deprecated alias
-  `POST /run-leaf` (`packages/knative-server/src/server.ts`) — kept as-is; a second rename
+  `POST /run-leaf` (`packages/server/src/server.ts`) — kept as-is; a second rename
   cycle isn't worth the churn.
 
 If a genuine grouping identity is ever needed inside the harness (e.g. parent/child lineage for a
@@ -75,8 +75,7 @@ worker, and never touches a response byte
 
 A process forked by the supervisor that runs the model loop and serves many sessions, with a bounded
 number of concurrent turns each (`SH_TURNS_PER_WORKER`). Workers and the supervisor are the same
-image. The worker entry point lives in `packages/knative-server/src/worker.ts`; the package name is
-historical. Not to be confused with a sandbox worker (below).
+image. The worker entry point lives in `packages/server/src/worker.ts`. Not to be confused with a sandbox worker (below).
 
 ## sandbox
 
@@ -124,5 +123,5 @@ the human-gate design. There is no human-gate path on `/turn`.
 
 ## handler
 
-The HTTP request handler in `packages/knative-server/src/server.ts` that serves `/turn`, `/runs` and
-the other routes. The P6 worker serves the same handler, which is why the package name is historical.
+The HTTP request handler in `packages/server/src/server.ts` that serves `/turn`, `/runs` and
+the other routes. The P6 worker serves the same handler.

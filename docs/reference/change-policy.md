@@ -20,7 +20,7 @@ notes. A **Legacy** surface does not change except for security and breakage fix
 
 ## What is the contract today
 
-- **HTTP routes.** The route table in `packages/knative-server/src/routes.ts` marks each route's `surface` as
+- **HTTP routes.** The route table in `packages/server/src/routes.ts` marks each route's `surface` as
   `client` or `internal`, and a contract test keeps the OpenAPI document and that table in step. Only `client` routes
   are described in the OpenAPI files. The control-plane document (`docs/api/openapi.yaml`) says `version: 1.3.0` (per-session model
   selection, then the sandbox service's routes, then the async turn routes, added to it); the harness document (`docs/api/harness-openapi.yaml`) says `version: 1.0.0`. The `/v1`

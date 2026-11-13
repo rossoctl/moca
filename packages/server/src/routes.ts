@@ -1,5 +1,5 @@
 /**
- * The declaration of record for every route the knative-server handler serves.
+ * The declaration of record for every route the data-plane handler serves.
  *
  * The control plane dispatches FROM its table (its src/routes.ts is the router); the data
  * plane's handler is a chain of `if` blocks in server.ts, so this table is a declaration OF the

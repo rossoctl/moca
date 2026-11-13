@@ -136,7 +136,7 @@ const RUNTIME_FIELDS = [
   'turnStartedAt',
   'turnEndedAt',
   // P6.3 spec §6: where the last leased turn ran, and when the session last lost its workspace
-  // (knative-server runtimeFieldsForTurn). Display-only, read by the resources view's `placement`.
+  // (`@moca/server` runtimeFieldsForTurn). Display-only, read by the resources view's `placement`.
   'sandboxId',
   'sandboxTier',
   'workspaceResetAt',

@@ -8,7 +8,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const RUNNER_GO = resolve(REPO_ROOT, 'remote-worker/internal/exec/runner.go');
 
 /**
- * Loud-throw reader (same shape as knative-server's worker-deployment test): a
+ * Loud-throw reader (same shape as `@moca/server`'s worker-deployment test): a
  * reformatted or renamed Go constant must fail the extraction, never limp through
  * as NaN and silently pass the comparison.
  */

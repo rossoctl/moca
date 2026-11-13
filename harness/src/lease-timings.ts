@@ -3,7 +3,7 @@
  *
  * Replaces `Number(env.X ?? '20000')`, which misread two shapes that reach production — `??` does not
  * catch an empty string (`Number('') === 0`) and anything unparseable yields `NaN`. For an interval
- * both clamp to 1 ms, i.e. ~1000 Redis writes a second per in-flight turn. knative-server's `intEnv`
+ * both clamp to 1 ms, i.e. ~1000 Redis writes a second per in-flight turn. `@moca/server`'s `intEnv`
  * (server.ts) is the same answer to the same class of bug, added after it emitted `Retry-After: NaN`;
  * this one is harness-side because that one is not importable from here. Exported for `sandbox-affinity.ts`'s knobs, which have the same failure shapes.
  */

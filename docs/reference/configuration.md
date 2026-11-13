@@ -49,7 +49,7 @@
 
 ## Worker: auth, tenancy and Redis
 
-The worker is `packages/knative-server/src/worker.ts` (the package name is historical). It validates
+The worker is `packages/server/src/worker.ts`. It validates
 `SH_SANDBOX_DISCOVERY`, `SH_REMOTE_SANDBOX` and the tier settings at boot and exits on failure.
 
 | Variable                       | Default                   | Required / notes                                                                                                                                                                                                        | Meaning                                                                  |
@@ -118,7 +118,7 @@ The worker is `packages/knative-server/src/worker.ts` (the package name is histo
 
 Pi finds provider credentials by variable shape (`*_API_KEY`, `*_AUTH_TOKEN`, `*_OAUTH_TOKEN`,
 `HF_TOKEN`, `COPILOT_GITHUB_TOKEN`, and the Bedrock AWS and Vertex ADC sources;
-`packages/knative-server/src/server-process.ts`). Under `MOCA_TENANCY=multi`, `scrubAmbientCredentials`
+`packages/server/src/server-process.ts`). Under `MOCA_TENANCY=multi`, `scrubAmbientCredentials`
 deletes all of them from the worker's environment, not only `ANTHROPIC_API_KEY`.
 
 For authenticated turns, inference credentials come from the control plane per user rather than from

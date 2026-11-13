@@ -56,7 +56,7 @@ Record the commit you ran against (Act 5).
 **Automated siblings.** Prefer these for a pass/fail; the demo is for convincing a room.
 
 - Two subjects, no GitHub: `packages/control-plane/test/two-subject.test.ts` and
-  `packages/knative-server/test/two-subject-turn.test.ts` (#371).
+  `packages/server/test/two-subject-turn.test.ts` (#371).
 - The research turn: `deploy/vm/research-smoke.sh` (#411, `VM_RESEARCH_SMOKE=1`).
 - The P4 tier with auth on: `deploy/microvm/p4-turn-smoke.sh --auth` (#409).
 
@@ -689,7 +689,7 @@ Say these in the room. They are what stops someone over-promising.
   `remote-worker/internal/exec/runner.go` ignores `workspace_key`, #408). The fix is MI1 S5, owner
   binding.
 - **Direct credential mode.** With no injector on this VM, a user's real inference secret reaches
-  the shared harness worker for the length of a turn. That is the `knative-server` process
+  the shared harness worker for the length of a turn. That is the `@moca/server` process
   `sh-supervisor` runs for every user, and it puts the secret in the model request's headers. The
   sandbox never receives it: an Exec carries only the command, stdin, timeout and workspace key, and
   the sandbox's environment allowlist is `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ`. So the agent's bash

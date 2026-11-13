@@ -19,7 +19,7 @@
 # so it runs in the process default tier (spec §3.4): that file must say SH_SANDBOX_DEFAULT_TIER=microvm.
 # An untiered host must be P4-only, as before: there every sandbox would be a candidate.
 #
-# The /turn contract it relies on (packages/knative-server/src/server.ts, harness/src/run-turn.ts):
+# The /turn contract it relies on (packages/server/src/server.ts, harness/src/run-turn.ts):
 #   - a NEW session is created by omitting sessionId; the response names it. A sessionId the backend
 #     has never seen is a 404 session_not_found, so this driver never invents one.
 #   - the response is {sessionId, response, ...}, and `response` is only the final assistant text.

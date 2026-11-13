@@ -1,6 +1,6 @@
 # The data-plane /v1 contract, the twin of openapi.yaml's control-plane document. Pinned by
-# packages/knative-server/test/openapi-contract.test.ts, which asserts this document and
-# packages/knative-server/src/routes.ts describe the same route table, and that the handler
+# packages/server/test/openapi-contract.test.ts, which asserts this document and
+# packages/server/src/routes.ts describe the same route table, and that the handler
 # actually routes everything the table declares — without that pair, "API as a product"
 # degrades into documentation that lies (the control-plane spec §9.3 test 3 argument, verbatim).
 #

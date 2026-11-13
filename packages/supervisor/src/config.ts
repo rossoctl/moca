@@ -108,7 +108,7 @@ export function readConfig(env: NodeJS.ProcessEnv): SupervisorConfig {
   // SH_SANDBOX_DISCOVERY is validated at boot too, but NOT here: `resolveDiscoverySource` lives in
   // @moca/harness and this package ships `dependencies: {}` on purpose -- the supervisor parent is the
   // one process that must never die of a dependency. The check sits in the worker's boot path
-  // (knative-server/src/worker.ts), which already depends on the harness and is also where #249's
+  // (server/src/worker.ts), which already depends on the harness and is also where #249's
   // `assertKeysetUsable` -- the precedent for "validate at boot, not per request" -- already lives.
   return {
     port,

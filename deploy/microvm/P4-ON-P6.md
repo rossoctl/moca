@@ -571,7 +571,7 @@ Verified on 2026-09-30:
 - **The budget ceiling on this rig (#452).** Every run above stayed well inside the budget — the
   largest used 4 Execs — so no run here ever reached the ceiling, shed a standby, or produced a 503.
   The eviction and the 503 mapping are covered by unit tests (`remote-worker/internal/vmpool`,
-  `packages/k8s-sandbox`, `packages/knative-server`); what is **not** verified is the end-to-end
+  `packages/k8s-sandbox`, `packages/server`); what is **not** verified is the end-to-end
   behaviour on a host at its ceiling. Reaching it deliberately needs ~5 sessions each taking a turn
   inside the same 90-second `StandbyIdle` window (see the arithmetic above), or a temporarily small
   `MICROVM_MAX_COMMITTED_MB`.

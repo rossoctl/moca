@@ -293,7 +293,7 @@ export class SandboxPoolSaturatedError extends Error {
  *
  * A SUBCLASS of SandboxPoolSaturatedError on purpose: the three leaf paths classify by `instanceof
  * SandboxPoolSaturatedError` (run-leaf.ts) and must treat this as the same retryable no-capacity
- * outcome. `name` is its own, for knative-server's NO_CAPACITY set (server.ts), which matches names.
+ * outcome. `name` is its own, for `@moca/server`'s NO_CAPACITY set (server.ts), which matches names.
  */
 export class SandboxAffinityPendingError extends SandboxPoolSaturatedError {
   constructor(
@@ -613,7 +613,7 @@ export async function selectPoolSandbox(
      */
     workload?: string;
     /**
-     * The run owner's `recordScope` (32 hex, the hash knative-server's workloads.ts keys the owner's
+     * The run owner's `recordScope` (32 hex, the hash `@moca/server`'s workloads.ts keys the owner's
      * Redis records by). Required with `workload`: a candidate must also carry
      * `moca.dev/owner=<ownerScope>`, a second check on the same signed binding (spec §3.3).
      */
@@ -687,7 +687,7 @@ async function select(
   // `||`, not `??`: a session stored with '' (created before tiers were declared) gets the default.
   const tier = tiers ? opts.tier || tiers.default : '';
   // Workload sandboxes are container-only: /workloads and the provisioner refuse any other
-  // tier (packages/knative-server/src/workloads.ts sandboxesSpec, packages/provisioner).
+  // tier (packages/server/src/workloads.ts sandboxesSpec, packages/provisioner).
   // An incompatible session tier can never be served, so fail as a misconfiguration rather
   // than WorkloadSandboxUnavailableError (a 503 with Retry-After).
   if (workload && tier && tier !== WORKLOAD_SANDBOX_TIER) {

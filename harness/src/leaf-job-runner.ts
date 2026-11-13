@@ -17,8 +17,8 @@ export interface ClaimedTurn {
   /**
    * The per-turn config `runLeaf` takes as its second argument, carrying THIS turn's credential.
    * It cannot be built once for the loop: every claim resolves its own credential, base url, tier
-   * and model. Typed as the harness's own `TurnConfig` rather than `knative-server`'s `TurnAuth`,
-   * because this package is the one `knative-server` depends on, not the other way round.
+   * and model. Typed as the harness's own `TurnConfig` rather than `@moca/server`'s `TurnAuth`,
+   * because this package is the one `@moca/server` depends on, not the other way round.
    */
   config: TurnConfig;
 }
@@ -30,7 +30,7 @@ export interface LeafJobDeps {
    * Mint the credential and flip the record queued->running. `null` means the control plane refused:
    * the turn is cancelled or already terminal, and must not run.
    *
-   * Injected because reaching the control plane is `@moca/knative-server`'s business, and because
+   * Injected because reaching the control plane is `@moca/server`'s business, and because
    * every test of this function would otherwise need an HTTP server.
    */
   claimTurn: (turnId: string, deliveryCount: number) => Promise<ClaimedTurn | null>;

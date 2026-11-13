@@ -1379,7 +1379,7 @@ export function startServer(port = PORT): ReturnType<typeof createServer> {
 }
 
 // Exact entrypoint match — avoids a fragile substring
-// match that would misfire for any argv path containing "knative-server".
+// match that would misfire for any argv path containing "server".
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {
   startServer();

@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/session-backend/package.json ./packages/session-backend/
 COPY packages/k8s-sandbox/package.json ./packages/k8s-sandbox/
-COPY packages/knative-server/package.json ./packages/knative-server/
+COPY packages/server/package.json ./packages/server/
 COPY packages/sandbox-relay/package.json ./packages/sandbox-relay/
 COPY packages/ibac-stub/package.json ./packages/ibac-stub/
 COPY packages/control-plane/package.json ./packages/control-plane/
@@ -62,7 +62,7 @@ RUN mkdir -p /var/lib/moca/credentials && \
 ARG MOCA_VERSION=dev
 ENV MOCA_VERSION=${MOCA_VERSION}
 EXPOSE 8080
-WORKDIR /app/packages/knative-server
-# Default entrypoint: the HTTP server (package name historical — ADR-0041). The P6 supervisor
+WORKDIR /app/packages/server
+# Default entrypoint: the HTTP server. The P6 supervisor
 # forks src/worker.ts instead (deploy/vm, deploy/k8s, deploy/compose).
 CMD ["node", "--import", "tsx", "src/server.ts"]

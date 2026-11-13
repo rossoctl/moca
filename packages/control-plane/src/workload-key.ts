@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 /**
  * The names a workload is known by outside its Redis record (workload sandboxes spec §3.1, §4.1).
- * knative-server's workloads.ts derives them for the record and its Context; moca-provisioner
+ * `@moca/server`'s workloads.ts derives them for the record and its Context; moca-provisioner
  * derives them again, from the owner of a verified API token, for the workload's sandbox objects and
  * its attach token. One module, so the two can never disagree.
  */

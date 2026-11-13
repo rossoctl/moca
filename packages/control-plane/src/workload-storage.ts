@@ -1,6 +1,6 @@
 /**
  * A workload's own PVC (workload sandboxes spec §5.1, §6.3): its size and StorageClass, within the
- * operator's caps. knative-server's workloads.ts checks a create against them, and moca-provisioner
+ * operator's caps. `@moca/server`'s workloads.ts checks a create against them, and moca-provisioner
  * checks again before it creates the claim; one module, so the two can never disagree.
  */
 

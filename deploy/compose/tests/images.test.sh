@@ -36,7 +36,7 @@ pass "every image docker-compose.yml defaults to is published by build.yaml"
 # layer caching. A package whose manifest is not among them gets no node_modules at all -- so no
 # tsx, and `node --import tsx src/main.ts` in its working_dir dies at startup. The compose file
 # runs from packages/supervisor, packages/sandbox-relay and packages/control-plane, and the
-# supervisor forks packages/knative-server/src/worker.ts; each of those, and every workspace package
+# supervisor forks packages/server/src/worker.ts; each of those, and every workspace package
 # they depend on, needs its manifest in before the install.
 install_line="$(grep -nE '^RUN pnpm install' "$DOCKERFILE" | head -1 | cut -d: -f1)"
 [[ -n "$install_line" ]] || fail "no 'RUN pnpm install' in $DOCKERFILE"
@@ -48,7 +48,7 @@ for manifest in "$REPO_ROOT"/packages/*/package.json "$REPO_ROOT"/harness/packag
   name="$(sed -nE 's/^  "name": "([^"]+)".*/\1/p' "$manifest")"
   DIR_OF[$name]="$(dirname "${manifest#"$REPO_ROOT/"}")"
 done
-queue=(packages/supervisor packages/sandbox-relay packages/control-plane packages/knative-server)
+queue=(packages/supervisor packages/sandbox-relay packages/control-plane packages/server)
 declare -A SEEN
 while ((${#queue[@]})); do
   dir="${queue[0]}"

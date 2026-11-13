@@ -326,7 +326,7 @@ describe('GrpcRelayTransport capacity refusals (#452)', () => {
       'memory-budget: committing 301989888 more bytes would reach 4328521728 against a budget of 4294967296',
     );
     await expect(p).rejects.toBeInstanceOf(SandboxCapacityRefusedError);
-    // The NAME is what knative-server maps to 503, so assert it and not just the class:
+    // The NAME is what `@moca/server` maps to 503, so assert it and not just the class:
     // `instanceof` is unsound across package instances there (see the class doc), and a
     // minifier renames the constructor.
     await expect(p).rejects.toMatchObject({ name: 'SandboxCapacityRefusedError' });
