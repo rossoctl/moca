@@ -396,6 +396,19 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       });
       // Registration (§8.2): automatic, by policy, never a person.
       const results = registrationResults(y, t, sm);
+      // A build id names one build of a template: a second build of the same snapshot (the same
+      // image and spec, created again with another gate record or profile) is not registered
+      // beside the first.
+      const twin = c.builds.find((x) => x !== y && x.buildId === manifestHash);
+      results.push(
+        twin
+          ? {
+              rule: 'T.unique',
+              passed: false,
+              message: `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+            }
+          : { rule: 'T.unique', passed: true },
+      );
       const failed = results.find((r) => !r.passed);
       verdict.failed = failed;
       await prov.append({

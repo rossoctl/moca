@@ -179,6 +179,51 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(chain.at(-1)!.body).toMatchObject({ outcome: 'rejected' });
   });
 
+  it('rejects a second build of a snapshot the template already has (one build per build id)', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
+      d,
+    );
+    // The same image and spec again under another profile and no gate record: not a reuse, so a new
+    // build; template-build.sh finds the snapshot already built and reports the same manifest hash.
+    const again = await HANDLERS.createTemplate!(
+      ctx({
+        principal: alice,
+        body: {
+          id: ID,
+          image: IMAGE,
+          spec: { ...REST, source_record_digest: undefined, skip_git_identity_check: false },
+          profile: 'base',
+        },
+      }),
+      d,
+    );
+    expect(again.status).toBe(202);
+    const second = await claimAndBuild(d);
+    expect(second).not.toBe(first);
+    const r = (
+      await HANDLERS.hostBuildReport!(
+        asHost('host-1', { build: second }, { event: 'built', ...records() }),
+        d,
+      )
+    ).body as Body;
+    expect(r).toEqual({ status: 'rejected', rule: 'T.unique' });
+    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+      .body as Body;
+    expect(t.builds.filter((b: Body) => b.buildId === HASH)).toHaveLength(1);
+    expect(t.tags).toEqual({ default: HASH });
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: ID, build: second } }),
+        d,
+      )
+    ).body as Body;
+    expect(b).toMatchObject({ status: 'rejected', reason: { rule: 'T.unique' } });
+    expect(b.reason.message).toContain(first);
+  });
+
   it('records a failed build with its step and message', async () => {
     const d = await setup();
     const build = await claimAndBuild(d);
