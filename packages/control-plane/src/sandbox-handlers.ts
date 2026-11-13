@@ -861,7 +861,9 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
  * placement, the `activate` record and the lease write (record first, so no lease is stored
  * without its record), and nothing that calls a host. A path that only drops leases (deactivate)
  * does not take it: a drop can only free quota or a slot, so an activation that read the leases
- * before a drop judged against more leases than remain, never fewer.
+ * before a drop judged against more leases than remain, never fewer. A retire takes it (§5.1): it
+ * ends a build's use, and takeLease re-reads the build's status under it, so a lease is never
+ * written onto a build retired after the activation resolved it.
  *
  * It is process-local, which suffices because one control plane process owns the store: the
  * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
@@ -918,6 +920,16 @@ async function takeLeaseLocked(
     throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
   const { policy: pol } = await policy.current();
   const docs = await cat.list();
+  // `target` was resolved before the lock; a retire takes the lock too, so this read is current. A
+  // build retired since is refused here, so no lease (none counting against the quota) is written
+  // onto it.
+  const fresh = docs.find((d) => d.id === d0.id)?.builds.find((x) => x.buildId === target.buildId);
+  if (fresh?.status === 'retired')
+    throw new CpError('template_retired', `template '${d0.id}' build ${target.buildId} is retired`);
+  if (fresh?.status !== 'registered')
+    throw new CpError('template_unavailable', 'this build is no longer registered', undefined, {
+      readiness: 'unavailable',
+    });
   // A renewal does not count against itself.
   const held = leasedBy(docs, p.sub, nowS).filter((x) => x.buildId !== target.buildId);
   if (held.length >= pol.quota.active) {
@@ -1091,27 +1103,31 @@ async function retireBuilds(
   const reason = asRecord(ctx.body).reason;
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1024))
     throw new CpError('invalid_request', 'reason must be a string of at most 1024 characters');
-  // Read before the catalog update, so no store lookup runs inside it.
-  const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
   const done: TemplateBuild[] = [];
-  await cat.update(d0.id, async (cur) => {
-    done.length = 0;
-    const targets = cur!.builds.filter(which);
-    if (targets.length === 0)
-      throw new CpError('template_not_found', 'no such build of this template');
-    const busy = targets.find((x) => x.status !== 'retired' && inUse.has(x.buildId));
-    if (busy)
-      throw new CpError(
-        'build_in_use',
-        `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then retire`,
-      );
-    done.push(...targets.filter((x) => x.status !== 'retired'));
-    return {
-      ...cur!,
-      builds: cur!.builds.map((x) =>
-        done.includes(x) ? { ...x, status: 'retired' as const, leases: [] } : x,
-      ),
-    };
+  // Under the activation lock, so an activation never writes a lease onto a build retired after
+  // it resolved the build: it re-reads the build's status under the same lock (takeLeaseLocked).
+  await activationLock(cat).run('activation', async () => {
+    // Read before the catalog update, so no store lookup runs inside it.
+    const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
+    await cat.update(d0.id, async (cur) => {
+      done.length = 0;
+      const targets = cur!.builds.filter(which);
+      if (targets.length === 0)
+        throw new CpError('template_not_found', 'no such build of this template');
+      const busy = targets.find((x) => x.status !== 'retired' && inUse.has(x.buildId));
+      if (busy)
+        throw new CpError(
+          'build_in_use',
+          `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then retire`,
+        );
+      done.push(...targets.filter((x) => x.status !== 'retired'));
+      return {
+        ...cur!,
+        builds: cur!.builds.map((x) =>
+          done.includes(x) ? { ...x, status: 'retired' as const, leases: [] } : x,
+        ),
+      };
+    });
   });
   const records = new Map<string, string>();
   for (const x of done) {

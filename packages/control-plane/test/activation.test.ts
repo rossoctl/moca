@@ -948,6 +948,61 @@ describe('retire (§5.1)', () => {
     });
   });
 
+  it('an activation that resolved the build before a retire writes no lease onto it', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    // The activation reads the template (build registered), then the retire runs to its end
+    // before the activation takes its lease.
+    const cat = d.templates!;
+    const get = cat.get.bind(cat);
+    let race = true;
+    cat.get = async (id: string) => {
+      const doc = await get(id);
+      if (race) {
+        race = false;
+        await retire(d, 't1');
+      }
+      return doc;
+    };
+    expect(await refusal(() => activate(d, 't1'))).toBe('template_retired');
+    const b = (await get('t1'))!.builds[0];
+    expect(b).toMatchObject({ status: 'retired', leases: [] });
+    expect((await d.provenance!.chain('template/t1')).some((r) => r.kind === 'activate')).toBe(
+      false,
+    );
+    const q = (await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body as Body;
+    expect(q.active.used).toBe(0);
+  });
+
+  it('a retire waits for an activation taking its lease, then drops that lease', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    // A retire arrives while the activation is between its checks and its lease write (its
+    // `activate` record is written first). Under the lock the retire waits for the lease, then
+    // drops it; without it, the retire would finish first and the lease land on a retired build.
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let retiring: Promise<unknown> | null = null;
+    prov.append = async (input) => {
+      const rec = await append(input);
+      if (input.kind === 'activate' && !retiring) {
+        retiring = retire(d, 't1');
+        await Promise.race([retiring, new Promise((r) => setTimeout(r, 200))]);
+      }
+      return rec;
+    };
+    expect((await activate(d, 't1')).status).toBe(200);
+    await retiring;
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'retired',
+      leases: [],
+    });
+  });
+
   it("refuses another subject and a bad reason; an admin may retire anyone's", async () => {
     const d = await setup();
     attachedNow = [];
