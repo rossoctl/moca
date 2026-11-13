@@ -38,7 +38,8 @@ who submits a gate record, never by anything inside it. Every change is additive
 - New error code `self_attested` (409): a self-attested create asking for `deployment`
   visibility, or a self-attested build added to a deployment-visible template. PATCH
   /v1/templates/{id} answers the same refusal for `visibility: deployment` on a template with a
-  self-attested build, registered or on its way there.
+  self-attested build, registered or on its way there, and PUT /v1/templates/{id}/owner for a
+  transfer of such a template to another subject.
 - PUT /v1/policy: a removal from `trustedGateRecords` that makes builds of deployment-visible
   templates self-attested names them as `narrowed: [{template, buildId}]` in its answer and in its
   `policy` record; those templates read as private from then on, and their owners keep using them.

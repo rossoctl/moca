@@ -2384,6 +2384,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: the template has a self-attested build, registered or on its way
+            there: it keeps its owner until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/policy:
     get:
       operationId: getPolicy

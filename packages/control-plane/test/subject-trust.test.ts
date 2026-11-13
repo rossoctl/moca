@@ -504,6 +504,29 @@ describe('promotion and removal of trust (self-attestation)', () => {
     expect((await view(d, 't-self', bob)).visibility).toBe('deployment');
   });
 
+  it('refuses an owner transfer while a build is self-attested, and allows it once trusted', async () => {
+    const d = await setup();
+    await create(d);
+    const transfer = () =>
+      HANDLERS.transferTemplateOwner!(
+        ctx({ principal: admin, params: { id: 't-self' }, body: { owner: bob.sub } }),
+        d,
+      );
+    // Queued, then registered: refused either way, with no owner record written.
+    expect(await codeOf(transfer)).toBe('self_attested');
+    await register(d, 't-self', HASH);
+    expect(await codeOf(transfer)).toBe('self_attested');
+    expect((await d.templates!.get('t-self'))!.owner).toBe(alice.sub);
+    expect((await d.provenance!.chain('template/t-self')).some((x) => x.kind === 'owner')).toBe(
+      false,
+    );
+    // An admin trusts the record: the transfer goes through.
+    await putPolicy(d, { ...(await d.policy!.current()).policy, trustedGateRecords: [SHA] });
+    const r = (await transfer()).body as Body;
+    expect(r.owner).toBe(bob.sub);
+    expect((await d.templates!.get('t-self'))!.owner).toBe(bob.sub);
+  });
+
   it('narrows a visible template to private on removal, names it in the policy record, and refuses others', async () => {
     const d = await setup();
     await create(d);

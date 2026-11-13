@@ -104,7 +104,9 @@ shows `gateFloorCheckedOffline`, and, from a `network_needed` gate, `gateFloorMe
 - A self-attested template is **private**. A create asking for `deployment` visibility and a
   self-attested build added to a deployment-visible template are each refused `409 self_attested`,
   until an admin trusts the record. A visibility edit to `deployment` (`PATCH /v1/templates/{id}`) on
-  a template with a self-attested build, registered or on its way there, is refused the same way.
+  a template with a self-attested build, registered or on its way there, is refused the same way,
+  and so is an admin's transfer of such a template to another subject (`PUT
+/v1/templates/{id}/owner`): the gate record counts for its submitter's own templates only.
 - A template's **visibility in effect** is `private` while any of its registered builds is
   self-attested now, whatever is stored, so every list, read and use follows the current policy.
 - **Decision (i):** when an admin removes a record's sha256 from `trustedGateRecords`, a

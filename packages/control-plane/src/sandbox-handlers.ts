@@ -1340,10 +1340,19 @@ async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
     );
   let before = null as string | null;
   let record: string | null = null;
+  const trusted = await trustedSet(deps);
   await cat.update(d0.id, async (cur) => {
     if (!cur) throw new CpError('template_not_found', 'no such template');
     before = cur.owner;
     if (before === owner) return cur;
+    // Self-attestation (subject-trust spec §6): a subject's own gate record counts for that subject's
+    // own templates only, so a template with a self-attested build, registered or on its way there,
+    // is not handed to another subject until an admin trusts the record.
+    if (cur.builds.some((x) => REUSABLE.has(x.status) && attestationOf(x, trusted) === 'self'))
+      throw new CpError(
+        'self_attested',
+        "a self-attested template keeps its owner until an admin trusts its gate record (trustedGateRecords): the record counts for its submitter's own templates only",
+      );
     [record] = await appendRecords(prov, [
       { stream: `template/${d0.id}`, kind: 'owner', subject: p.sub, body: { owner, before } },
     ]);
