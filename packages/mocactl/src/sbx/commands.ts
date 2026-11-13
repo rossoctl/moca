@@ -15,7 +15,8 @@ import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
  * `mocactl sbx`'s exit codes (SBX0 §6.1), as `mocactl auth token`'s beyond 0 and 2; 5 when a wait
- * (`templates activate --wait`) ran out of time.
+ * (`templates follow`, a create waiting for a queue slot, `templates activate --wait`) ran out of
+ * time; 130 when Ctrl-C stopped it, as `sbx run` and `sbx rm`.
  */
 export const SBX_EXIT = {
   ok: 0,
@@ -24,6 +25,7 @@ export const SBX_EXIT = {
   loginRequired: 3,
   unreachable: 4,
   timedOut: 5,
+  interrupted: 130,
 } as const;
 
 export interface SbxCtx {
@@ -33,6 +35,9 @@ export interface SbxCtx {
   io: Io;
   json: boolean;
   signal?: AbortSignal;
+  /** The template commands' sleep and clock (default the runtime's); tests pass fakes. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  now?: () => number;
   /**
    * The control-plane URL when it came from `--control-plane-url` or MOCACTL_SBX_URL rather than
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
@@ -99,10 +104,24 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
       `sbx: ${describeError(err)}: a retired template or build is never served again; ` +
         'use another build (mocactl sbx templates show ID) or another template',
     );
+  } else if (err instanceof ApiError) {
+    io.err(`sbx: ${refusalText(err)}`);
   } else {
     io.err(`sbx: ${describeError(err)}`);
   }
   return SBX_EXIT.failed;
+}
+
+/**
+ * A refusal in one line, with what the body says beside its code: the policy rule a create failed
+ * (`422 policy_refused`), or the quota it is over (`429 quota_exceeded`). Server text is sanitized
+ * (describeError).
+ */
+export function refusalText(err: ApiError): string {
+  const text = describeError(err);
+  if (err.rule !== undefined) return `refused by policy rule ${sanitizeRemote(err.rule)}: ${text}`;
+  if (err.quota !== undefined) return `over your ${sanitizeRemote(err.quota)} quota: ${text}`;
+  return text;
 }
 
 /**
