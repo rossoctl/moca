@@ -38,6 +38,9 @@ const rec = (id: string, worker: string, over: Partial<SandboxRecord> = {}): San
   labels: {},
   createdAt: NOW_S - 10,
   expiresAt: NOW_S + 1000,
+  mode: 'per-exec',
+  idleTimeoutS: 0,
+  modeEpoch: 0,
   ...over,
 });
 
