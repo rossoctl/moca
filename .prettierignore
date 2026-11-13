@@ -12,3 +12,7 @@ gen/
 # other worktrees, dirtying branches that have nothing to do with the current one.
 .worktrees/
 .claude/worktrees/
+
+# Gate records copied from their image builder: their sha256 is the evidence a template record cites
+# (deploy/sbx/template-onboarding/governance/GATING-RULES.md X10), so they stay byte-identical.
+*.gate-record.json
