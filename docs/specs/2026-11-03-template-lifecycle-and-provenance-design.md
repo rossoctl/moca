@@ -191,7 +191,8 @@ or were cancelled holds no slot, and takes one again, checked like a new id, whe
 build; builds queued, building or probing at once, charged to the
 template's owner even when an admin adds the build; template ids owned in any status, checked for a
 new id only, so a create-then-cancel loop cannot open documents and provenance streams without
-bound) is `429 quota_exceeded` naming which
+bound; retired ids count too, and a retired id is spent, so this is in effect a lifetime cap per
+subject that only an admin raises) is `429 quota_exceeded` naming which
 (`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
 for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate

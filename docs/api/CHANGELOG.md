@@ -29,7 +29,9 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
   its way there, a new build of one that holds no slot checked like a new id; `buildsQueued`,
   queued, building or probing; `active`; `owned`, template ids owned in any status, a failed or
   cancelled-only one included, 200 when the policy does not set it), and on the sandbox profile the
-  live-sandbox cap (`sandboxes`).
+  live-sandbox cap (`sandboxes`). `owned` counts retired ids too, and a retired id is never served
+  again, so it is in effect a lifetime cap per subject: a user who retires as they go reaches it in
+  time, and only an admin raises it.
 - New error codes `policy_refused` (422, with `rule`, the gating rule's id from
   `deploy/sbx/template-onboarding/governance/GATING-RULES.md`) and `template_exists` (409: ids are
   unique per deployment, the first creator owns one). `quota_exceeded` on a create names the quota
