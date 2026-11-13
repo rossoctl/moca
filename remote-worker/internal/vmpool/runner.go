@@ -3,6 +3,7 @@ package vmpool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -30,18 +31,28 @@ type Runner struct {
 var execLog = log.Printf
 
 func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, error) {
-	// ExecPhased, not Exec: Exec delegates to it with a throwaway Phases, so this costs
-	// nothing extra and makes the relayed path report the same decomposition vmpoolctl
-	// already gets. Without it the worker's hot path was unmeasurable (see diag.go).
-	var ph Phases
+	var (
+		ph  Phases
+		res Result
+	)
 	start := time.Now()
-	res, err := r.Pool.ExecPhased(ctx, s.WorkspaceKey, Exec{
-		ReqID:     s.ReqID,
-		Command:   s.Command,
-		Stdin:     s.Stdin,
-		TimeoutS:  s.TimeoutS,
-		Streaming: s.Streaming,
-	}, &sinkAdapter{sink: sink}, &ph)
+	mode, err := specMode(s)
+	if err == nil {
+		// ExecPhased, not Exec: Exec delegates to it with a throwaway Phases, so this costs
+		// nothing extra and makes the relayed path report the same decomposition vmpoolctl
+		// already gets. Without it the worker's hot path was unmeasurable (see diag.go).
+		res, err = r.Pool.ExecPhased(ctx, s.WorkspaceKey, Exec{
+			ReqID:       s.ReqID,
+			Command:     s.Command,
+			Stdin:       s.Stdin,
+			TimeoutS:    s.TimeoutS,
+			Streaming:   s.Streaming,
+			Mode:        mode,
+			ModeEpoch:   s.ModeEpoch,
+			IdleTimeout: time.Duration(s.IdleTimeoutS) * time.Second,
+			Keepalive:   s.Keepalive,
+		}, &sinkAdapter{sink: sink}, &ph)
+	}
 	logPhases(&ph)
 	if r.Timing {
 		logExecTiming(s.ReqID, s.WorkspaceKey, start, time.Since(start), &ph, res.ExitCode, err)
@@ -59,6 +70,12 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		sink.Dropped(pb.Stream_STREAM_STDERR, int(res.DroppedStderr))
 	}
 
+	// Lease events ride before the result, and before an error too (stale_mode,
+	// lease_ended, a timeout): the client learns the lease ended even when this Exec failed.
+	if mode != ModePerExec {
+		r.deliverLeaseEvents(s.WorkspaceKey, sink)
+	}
+
 	switch {
 	case err == nil:
 		return res.ExitCode, nil
@@ -70,10 +87,123 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		return 0, wexec.ErrAborted
 	default:
 		// Refusals, key mismatches and spawn failures all become ExecError. They stay
-		// distinguishable in the message and are already counted in Stats, which is
-		// what spec §7.3's "ExecErrors by cause" row reads.
-		return 0, err
+		// distinguishable in the message. The pool's refusals are already counted in
+		// Stats, which is what spec §7.3's "ExecErrors by cause" row reads; the one
+		// refusal built here, specMode's lease_unsupported for a mode this worker does
+		// not know, never reached the pool and is not. The lease errors take their wire
+		// strings (wireError).
+		return 0, wireError(err)
 	}
+}
+
+// specMode is the Spec's mode as the pool's: "" is per-exec, and a string vmpool cannot
+// name -- the session's "unknown(<n>)" for an enum this worker does not know -- is refused
+// lease_unsupported, never read as per-exec.
+func specMode(s wexec.Spec) (Mode, error) {
+	if s.Mode == "" {
+		return ModePerExec, nil
+	}
+	m, err := ParseMode(s.Mode)
+	if err != nil {
+		return ModePerExec, refusal(RefuseLeaseUnsupported, "Exec for %q: %v", s.WorkspaceKey, err)
+	}
+	return m, nil
+}
+
+// deliverLeaseEvents reports key's lease on the Exec's response, through the session's
+// wexec.LeaseSink: the pending event, acknowledged only once the sink has queued it (an
+// event not queued stays pending, so the next Exec carries it), and an "expiring" notice
+// while the lease is past its maximum duration. Called for an Exec whose mode is not
+// per-exec only: a client that never asked for a lease never sees an event.
+func (r Runner) deliverLeaseEvents(key string, sink wexec.Sink) {
+	ls, ok := sink.(wexec.LeaseSink)
+	if !ok {
+		return
+	}
+	info := r.Pool.LeaseStatus(key)
+	if ev := info.Pending; ev != nil {
+		if err := ls.Lease(leaseEventProto(ev)); err == nil {
+			r.Pool.AckLeaseEvent(key, ev.At)
+		}
+	}
+	if info.State == LeaseExpiring {
+		_ = ls.Lease(&pb.LeaseEvent{State: LeaseExpiring})
+	}
+}
+
+// wireError gives the lease errors their wire strings (spec §4, §8.2), which a client
+// matches on: lease_ended(<reason>), stale_mode: <detail> and lease_unsupported:
+// <detail>. Every other error is returned unchanged.
+func wireError(err error) error {
+	var le *LeaseEndedError
+	if errors.As(err, &le) {
+		return fmt.Errorf("lease_ended(%s)", le.Reason)
+	}
+	var re *RefusalError
+	if errors.As(err, &re) {
+		switch re.Reason {
+		case RefuseStaleMode:
+			return fmt.Errorf("stale_mode: %s", re.Detail)
+		case RefuseLeaseUnsupported:
+			return fmt.Errorf("lease_unsupported: %s", re.Detail)
+		}
+	}
+	return err
+}
+
+// LeaseControl answers the relay's LeaseControl frame (session.LeaseController): status
+// reads the lease, reset ends it, set_mode applies a verified mode change; each returns
+// the status after the op. Reset and a set_mode downgrade BLOCK until the lease has ended
+// (up to LeaseGraceLimit); the session runs this off its receive loop. ctx is ignored: the
+// Pool's lease calls take none, so an op runs to completion once started.
+func (r Runner) LeaseControl(_ context.Context, key string, op pb.LeaseOp, mode pb.SandboxMode, epoch uint64) (*pb.LeaseStatus, error) {
+	switch op {
+	case pb.LeaseOp_LEASE_OP_STATUS:
+	case pb.LeaseOp_LEASE_OP_RESET:
+		if err := r.Pool.EndLease(key, LeaseEndReset); err != nil {
+			return nil, wireError(err)
+		}
+	case pb.LeaseOp_LEASE_OP_SET_MODE:
+		m, err := ModeFromProto(mode)
+		if err != nil {
+			return nil, wireError(refusal(RefuseLeaseUnsupported, "SetMode for %q: %v", key, err))
+		}
+		if err := r.Pool.SetMode(key, m, epoch); err != nil {
+			return nil, wireError(err)
+		}
+	default:
+		return nil, fmt.Errorf("vmpool: unknown lease op %s", op)
+	}
+	return leaseStatusProto(r.Pool.LeaseStatus(key)), nil
+}
+
+// LeaseKeepalive records a keepalive for key's live lease (session.LeaseController). It
+// only takes the pool lock, so it is safe on the session's receive loop. Its only errors
+// are an invalid key and a closed pool, neither of which a keepalive can act on.
+func (r Runner) LeaseKeepalive(key string) { _ = r.Pool.Keepalive(key) }
+
+func leaseEventProto(ev *LeaseEvent) *pb.LeaseEvent {
+	return &pb.LeaseEvent{
+		State:    ev.State,
+		Reason:   string(ev.Reason),
+		AtUnixMs: ev.At.UnixMilli(),
+		Mode:     ev.Mode.Proto(),
+		AgeMs:    uint64(max(ev.Age.Milliseconds(), 0)),
+	}
+}
+
+func leaseStatusProto(info LeaseInfo) *pb.LeaseStatus {
+	st := &pb.LeaseStatus{
+		Mode:         info.Mode.Proto(),
+		EpochKnown:   info.EpochKnown,
+		State:        info.State,
+		AgeMs:        uint64(max(info.Age.Milliseconds(), 0)),
+		IdleTimeoutS: uint32(info.IdleTimeout / time.Second),
+	}
+	if info.Pending != nil {
+		st.Pending = leaseEventProto(info.Pending)
+	}
+	return st
 }
 
 // sinkAdapter bridges vmpool.Sink to wexec.Sink.

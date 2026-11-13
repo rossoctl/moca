@@ -8,6 +8,7 @@ import {
 } from './transport.js';
 import { makeReqIdSource } from './req-id.js';
 import {
+  Exec,
   Stream,
   type AbortRequest,
   type ExecEvent,
@@ -70,7 +71,7 @@ export function GrpcRelayTransport(
       const call = client.exec({
         sandboxId,
         workload: opts.workload ?? '',
-        exec: {
+        exec: Exec.fromPartial({
           reqId,
           command,
           stdin: execOpts.stdin ? new Uint8Array(execOpts.stdin) : new Uint8Array(),
@@ -89,7 +90,7 @@ export function GrpcRelayTransport(
           // for every caller not on the microVM path, e.g. the container worker, which
           // ignores this field entirely). See the opts.workspaceKey doc comment above.
           workspaceKey: opts.workspaceKey ?? '',
-        },
+        }),
       });
 
       const stdout: Buffer[] = [];

@@ -104,6 +104,12 @@ type Session struct {
 	// handed to Send. An Exec's terminal frame is queued before inflight drops, so Idle reads
 	// inflight first and then this: a terminal frame still behind chunks keeps the session busy.
 	unsent atomic.Int64
+	// leaseSlots holds one token per mutating LeaseControl call running, across every
+	// connection, and leaseByKey counts them per workspace key (under leaseMu): see
+	// leaseControlCap and takeLeaseSlot.
+	leaseSlots chan struct{}
+	leaseMu    sync.Mutex
+	leaseByKey map[string]int
 }
 
 // Idle reports that no admitted Exec is queued or running, and that every frame queued for the
@@ -123,7 +129,7 @@ func New(cfg Config, r wexec.Runner) *Session {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
 	}
-	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize)}
+	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize), leaseSlots: make(chan struct{}, leaseControlCap), leaseByKey: map[string]int{}}
 }
 
 // slot tracks one accepted exec so an Abort can reach it whether it is running
@@ -132,9 +138,9 @@ type slot struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	// fp fingerprints the exec occupying this slot. accept needs it to tell a
-	// genuine redelivery of THIS exec (same command+stdin, terminal frame already
-	// owed) from a req_id collision between harness replicas carrying different
-	// work under the same id (spec §3.1) — the two demand opposite handling.
+	// genuine redelivery of THIS exec (the same Exec by Fingerprint, terminal frame
+	// already owed) from a req_id collision carrying different work under the same id
+	// (spec §3.1) — the two demand opposite handling.
 	fp [32]byte
 }
 
@@ -266,8 +272,36 @@ const (
 type conn struct {
 	st      Stream
 	trySend func(*pb.WorkerFrame) bool
-	queue   chan *pb.Exec
-	reg     *execRegistry
+	// sendLate is the blocking enqueue for a producer Serve does NOT wait for (a LeaseControl
+	// goroutine). It reports false, and queues nothing, once the connection has ended.
+	sendLate func(*pb.WorkerFrame) bool
+	queue    chan *pb.Exec
+	reg      *execRegistry
+}
+
+// lateGate lets a goroutine that Serve does not wait for enqueue safely. Serve closes
+// outbound once its own producers are done; a send on a closed channel panics, even inside a
+// select. Holders of the read lock may enqueue; Serve takes the write lock, after cancelling
+// the connection (so a held enqueue returns promptly), and marks the gate shut before it
+// closes outbound.
+type lateGate struct {
+	mu     sync.RWMutex
+	closed bool
+}
+
+func (g *lateGate) send(enqueue func(*pb.WorkerFrame) bool, f *pb.WorkerFrame) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.closed {
+		return false
+	}
+	return enqueue(f)
+}
+
+func (g *lateGate) shut() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
 }
 
 // Serve runs one connection to exhaustion and returns why it ended. The caller
@@ -366,7 +400,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		}
 	}()
 
-	// enqueue is the blocking sender used by producers (heartbeat, the pool).
+	// enqueue is the blocking sender used by producers (heartbeat, the pool). It reports
+	// whether the frame was queued: false only when connCtx ended first.
 	// Backpressure here is correct: neither is the recv goroutine, so blocking
 	// them cannot stall a read of an Abort frame.
 	//
@@ -378,7 +413,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// reserve; the semaphore just adds a second place to hit it. Frames abandoned
 	// this way are not silently lost work: the connection is already dying, the
 	// harness re-dials, and the dedup cache answers the redelivery (spec §5, §6.2).
-	enqueue := func(f *pb.WorkerFrame) {
+	enqueue := func(f *pb.WorkerFrame) bool {
 		// Non-blocking attempts first, so behaviour is unchanged whenever there is
 		// room. select picks at random among ready cases, so without these a done
 		// connCtx could abandon a frame that would have fit.
@@ -388,7 +423,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 			select {
 			case chunkSlots <- struct{}{}:
 			case <-connCtx.Done():
-				return
+				return false
 			}
 		}
 		// A held slot does NOT guarantee room here, so this wait is real rather than
@@ -401,14 +436,16 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		s.unsent.Add(1)
 		select {
 		case outbound <- outFrame{frame: f}:
-			return
+			return true
 		default:
 		}
 		select {
 		case outbound <- outFrame{frame: f}:
+			return true
 		case <-connCtx.Done():
 			s.unsent.Add(-1)
 			<-chunkSlots // hand the slot back; nothing will ever drain this frame
+			return false
 		}
 	}
 	// trySend is the non-blocking sender used by the recv goroutine (via accept).
@@ -437,8 +474,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		default:
 			s.unsent.Add(-1)
 			log.Printf("session: WARNING the terminal-frame reserve (%d slots) is undrained, so the "+
-				"terminal frame for req_id %d cannot be queued; treating egress as wedged and "+
-				"dropping the connection so the harness re-dials", TerminalReserve, reqIDOf(f))
+				"terminal frame for %s cannot be queued; treating egress as wedged and "+
+				"dropping the connection so the harness re-dials", TerminalReserve, frameRef(f))
 			return false
 		}
 	}
@@ -459,11 +496,13 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 		}
 	}()
 
+	gate := &lateGate{}
 	c := &conn{
-		st:      st,
-		trySend: trySend,
-		queue:   make(chan *pb.Exec, QueueCap),
-		reg:     newExecRegistry(),
+		st:       st,
+		trySend:  trySend,
+		sendLate: func(f *pb.WorkerFrame) bool { return gate.send(enqueue, f) },
+		queue:    make(chan *pb.Exec, QueueCap),
+		reg:      newExecRegistry(),
 	}
 
 	for i := 0; i < s.cfg.MaxConcurrent; i++ {
@@ -478,7 +517,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 					s.inflight.Add(-1)
 					continue
 				}
-				s.runOne(sl.ctx, enqueue, e)
+				s.runOne(sl.ctx, connCtx.Done(), enqueue, e)
 				c.reg.finish(e.GetReqId())
 				s.inflight.Add(-1)
 			}
@@ -492,7 +531,8 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// spawning a real bash child only to kill it immediately.
 	cancelConn() // stop heartbeats and kill in-flight/queued children
 	close(c.queue)
-	wg.Wait() // producers done: no more enqueues to outbound
+	wg.Wait()   // producers done: no more enqueues to outbound from them
+	gate.shut() // nor from a LeaseControl goroutine still running
 	close(outbound)
 	wgSender.Wait()
 	return recvErr
@@ -524,6 +564,15 @@ func (s *Session) recvLoop(ctx context.Context, c *conn) error {
 			// Abort for an unknown req_id is a no-op (spec §8). The "leaves it in the
 			// map" reasoning now lives on execRegistry.abort.
 			c.reg.abort(m.Abort.GetReqId())
+		case *pb.ServerFrame_LeaseControl:
+			// Off this loop: the call itself runs on its own goroutine (it can block for
+			// minutes), and a refusal goes through trySend like accept's.
+			if err := s.leaseControl(ctx, c, m.LeaseControl); err != nil {
+				return err
+			}
+		case *pb.ServerFrame_Keepalive:
+			// Inline: LeaseController.LeaseKeepalive must not block.
+			s.leaseKeepalive(m.Keepalive)
 		}
 	}
 }
@@ -540,7 +589,7 @@ func (s *Session) recvLoop(ctx context.Context, c *conn) error {
 // never got the first answer, so dropping the replay strands that caller too.
 func (s *Session) accept(ctx context.Context, c *conn, e *pb.Exec) error {
 	reqID := e.GetReqId()
-	fp := Fingerprint(e.GetCommand(), e.GetStdin(), e.GetTimeoutS(), e.GetStreaming())
+	fp := Fingerprint(e)
 
 	slotCtx, cancel := context.WithCancel(ctx)
 
@@ -598,16 +647,18 @@ func (s *Session) accept(ctx context.Context, c *conn, e *pb.Exec) error {
 		return nil
 	case claimCollision:
 		cancel()
-		// NOT a redelivery: different command+stdin under an id already in flight,
-		// which a req_id salt collision across harness replicas still makes reachable
-		// (spec §3.1) — and the in-flight window is where it is widest, since
+		// NOT a redelivery: a different Exec (command, mode, epoch or workspace) under an
+		// id already in flight, which a req_id salt collision across harness replicas
+		// still makes reachable (spec §3.1) — and the in-flight window is where it is widest, since
 		// the cache cannot catch it while the original is incomplete. Coalescing
 		// here would swallow genuinely different work: it would never run and never
 		// get a frame at all. Refuse it instead. That cannot be a second terminal
 		// frame for the same logical exec, precisely because it is a different one.
-		log.Printf("session: req_id %d reused for a different command while the original is still "+
-			"in flight; refusing it (req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
-		if !c.trySend(errFrame(reqID, "req_id collision: a different command is already in flight for this id")) {
+		log.Printf("session: req_id %d reused for a different Exec (command, mode, epoch or workspace) "+
+			"while the original is still in flight; refusing it (req_id is only probabilistically "+
+			"unique across replicas — see spec §3.1)", reqID)
+		if !c.trySend(errFrame(reqID, "req_id collision: a different Exec (command, mode, epoch or "+
+			"workspace) is already in flight for this id")) {
 			return ErrEgressWedged
 		}
 		return nil
@@ -635,8 +686,8 @@ func (s *Session) enqueueAdmitted(
 	c *conn, e *pb.Exec, reqID uint64, cancel context.CancelFunc, collision bool,
 ) error {
 	if collision {
-		log.Printf("session: req_id %d reused for a different command; running it fresh "+
-			"(req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
+		log.Printf("session: req_id %d reused for a different Exec (command, mode, epoch or workspace); "+
+			"running it fresh (req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
 	}
 
 	// Counted before the send, so a pool goroutine that finishes it at once cannot go below zero.
@@ -668,7 +719,11 @@ func (s *Session) enqueueAdmitted(
 // read once, after Run returns, to set End.truncated (#189).
 type frameSink struct {
 	reqID uint64
-	send  func(*pb.WorkerFrame)
+	// send is the blocking enqueue; false means the frame was not queued (see Lease).
+	send func(*pb.WorkerFrame) bool
+	// connDone is the connection's done channel, which Lease checks before it sends: send
+	// alone still queues into a buffer with room after the connection has ended.
+	connDone <-chan struct{}
 	// dropped counts STDOUT bytes only — see Dropped.
 	dropped int
 }
@@ -711,8 +766,10 @@ func (f *frameSink) Dropped(stream pb.Stream, n int) {
 
 // runOne executes one exec and sends exactly one terminal frame (spec §5).
 // send is the blocking enqueue: runOne runs on a pool goroutine, not the recv
-// goroutine, so backpressure here is correct rather than dangerous.
-func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.Exec) {
+// goroutine, so backpressure here is correct rather than dangerous. connDone is the
+// connection's done channel, not ctx's: an Abort ends ctx, but the connection lives on,
+// so a lease event the aborted Exec reports can still be queued (see frameSink.Lease).
+func (s *Session) runOne(ctx context.Context, connDone <-chan struct{}, send func(*pb.WorkerFrame) bool, e *pb.Exec) {
 	reqID := e.GetReqId()
 	if ctx.Err() != nil {
 		// Aborted while queued: never spawn bash, but still owe a terminal frame.
@@ -721,7 +778,7 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.
 		return
 	}
 
-	sink := &frameSink{reqID: reqID, send: send}
+	sink := &frameSink{reqID: reqID, send: send, connDone: connDone}
 	code, err := s.runner.Run(ctx, wexec.Spec{
 		ReqID:        reqID,
 		Command:      e.GetCommand(),
@@ -729,6 +786,10 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.
 		TimeoutS:     e.GetTimeoutS(),
 		Streaming:    e.GetStreaming(),
 		WorkspaceKey: e.GetWorkspaceKey(),
+		Mode:         specMode(e.GetMode()),
+		ModeEpoch:    e.GetModeEpoch(),
+		IdleTimeoutS: e.GetIdleTimeoutS(),
+		Keepalive:    e.GetKeepalive(),
 	}, sink)
 
 	var frame *pb.WorkerFrame
@@ -764,7 +825,7 @@ func (s *Session) runOne(ctx context.Context, send func(*pb.WorkerFrame), e *pb.
 	// exit, would make every later redelivery of that req_id answer -1 forever
 	// (spec §6.2: dedup protects completed execs only).
 	if cacheable {
-		s.cache.Put(reqID, Fingerprint(e.GetCommand(), e.GetStdin(), e.GetTimeoutS(), e.GetStreaming()), frame)
+		s.cache.Put(reqID, Fingerprint(e), frame)
 	}
 	send(frame)
 }
@@ -782,17 +843,22 @@ func errFrame(reqID uint64, msg string) *pb.WorkerFrame {
 	return &pb.WorkerFrame{Msg: &pb.WorkerFrame_Error{Error: &pb.ExecError{ReqId: reqID, Message: msg}}}
 }
 
-// reqIDOf extracts the req_id carried by a WorkerFrame, for logging when
-// trySend drops a frame. Frames with no req_id (Hello, Heartbeat) report 0.
-func reqIDOf(f *pb.WorkerFrame) uint64 {
+// frameRef names what a WorkerFrame answers, for logging when trySend drops a frame:
+// "req_id N" for an Exec's frames, "ctl_id N" for a LeaseControl's result. Frames with
+// neither (Hello, Heartbeat) report "req_id 0".
+func frameRef(f *pb.WorkerFrame) string {
 	switch m := f.Msg.(type) {
 	case *pb.WorkerFrame_End:
-		return m.End.GetReqId()
+		return fmt.Sprintf("req_id %d", m.End.GetReqId())
 	case *pb.WorkerFrame_Error:
-		return m.Error.GetReqId()
+		return fmt.Sprintf("req_id %d", m.Error.GetReqId())
 	case *pb.WorkerFrame_Chunk:
-		return m.Chunk.GetReqId()
+		return fmt.Sprintf("req_id %d", m.Chunk.GetReqId())
+	case *pb.WorkerFrame_Lease:
+		return fmt.Sprintf("req_id %d", m.Lease.GetReqId())
+	case *pb.WorkerFrame_LeaseResult:
+		return fmt.Sprintf("ctl_id %d", m.LeaseResult.GetCtlId())
 	default:
-		return 0
+		return "req_id 0"
 	}
 }
