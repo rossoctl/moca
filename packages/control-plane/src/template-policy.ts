@@ -512,4 +512,13 @@ export interface PolicyStore {
   current(): Promise<{ policy: Policy; record: string }>;
   /** Store a new policy, and record it. */
   set(policy: Policy, subject: string): Promise<{ policy: Policy; record: string }>;
+  /**
+   * Read the policy, change it and store the change as one step: no other set or update runs
+   * between the read and the write, so a change made meanwhile is never lost. `mutate` gets the
+   * current policy and its record and returns the new policy, or throws to write nothing.
+   */
+  update(
+    mutate: (cur: Policy, record: string) => Policy,
+    subject: string,
+  ): Promise<{ policy: Policy; record: string }>;
 }

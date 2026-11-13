@@ -1435,24 +1435,28 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         'invalid_request',
         `the quota's target is 'default' or a subject, ${MEMBER_SUBJECT_FORMS}`,
       );
-    const { policy: cur } = await store.current();
     const body = ctx.body;
     if (isDefault && body === null)
       throw new CpError('invalid_request', 'the default quota is set, never removed');
-    const next: Policy = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
+    // The read, the change and the write are one step of the policy store (update), so a quota or
+    // policy another admin writes meanwhile is never dropped by this write.
     let before: unknown;
-    if (isDefault) {
-      before = cur.quota;
-      next.quota = body as Policy['quota'];
-    } else {
-      before = cur.quotaBySubject?.[subject] ?? null;
-      if (body === null) delete next.quotaBySubject![subject];
-      else next.quotaBySubject![subject] = body as Policy['quota'];
-    }
-    if (Object.keys(next.quotaBySubject!).length === 0) delete next.quotaBySubject;
-    const bad = policyProblems(next);
-    if (bad.length) throw new CpError('invalid_request', bad.join('; '));
-    const { record } = await store.set(next, p.sub);
+    let next!: Policy;
+    const { record } = await store.update((cur) => {
+      next = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
+      if (isDefault) {
+        before = cur.quota;
+        next.quota = body as Policy['quota'];
+      } else {
+        before = cur.quotaBySubject?.[subject] ?? null;
+        if (body === null) delete next.quotaBySubject![subject];
+        else next.quotaBySubject![subject] = body as Policy['quota'];
+      }
+      if (Object.keys(next.quotaBySubject!).length === 0) delete next.quotaBySubject;
+      const bad = policyProblems(next);
+      if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+      return next;
+    }, p.sub);
     await auditBestEffort(deps, 'quota_set', subject, { subject: p.sub, decision: 'quota_set' });
     return {
       status: 200,

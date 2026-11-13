@@ -357,7 +357,9 @@ registered build that later turns out wrong.
 
 - **Quotas are policy.** An override lives in the policy (`quotaBySubject`, keyed by subject), so
   each change is a new `policy` record (the whole policy) naming the admin, and the answer carries
-  its digest and the quota before. It is enforced at once, on the next create, queued build and
+  its digest and the quota before. The read, the change and the write are one step of the policy
+  store, so two admins' writes made together (for two subjects, or a quota and a `PUT /v1/policy`)
+  never drop each other's change. It is enforced at once, on the next create, queued build and
   activation: a subject's limits are its override, else the default (§6.2). `GET /v1/quota` shows
   the limits that apply to the caller and `quotaSource` (`subject` or `default`). The default is
   set, never removed. A subject is never `test:<n>` (a synthetic test user, enrolled by the
