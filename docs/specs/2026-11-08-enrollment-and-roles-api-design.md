@@ -55,8 +55,9 @@ two cluster writes for one API call.
   issue. A revoked admin loses the role at its next request. A token's `roles` claim reports what
   held when it was minted.
 - **An admin grant may carry an expiry** (`until`, epoch seconds, at most 366 days ahead, so a
-  value in milliseconds is refused rather than read as a date that never comes). Past it, the role is no longer
-  held. The store keeps the grant, and the first request that sees it lapsed writes a `role` record
+  value in milliseconds is refused rather than read as a date that never comes; mocactl's
+  `--until` stops at 365 days, a day of room for a client clock ahead of the server's). Past it,
+  the role is no longer held. The store keeps the grant, and the first request that sees it lapsed writes a `role` record
   (`expired`), once.
 - **Only the settings' admins change access.** Enrolling, unenrolling, granting and revoking need an
   admin named in `SH_ADMIN_SUBJECTS`. An API-granted admin holds the role on every other admin route

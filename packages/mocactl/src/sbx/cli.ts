@@ -95,7 +95,7 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx admin subjects grant SUBJECT [--until DURATION|EPOCH] [--json]
   mocactl sbx admin subjects revoke SUBJECT [--json]
                                                  grant or revoke the admin role; --until (e.g. 30m, 2h,
-                                                 1d, or epoch seconds; at most 366 days ahead) makes it
+                                                 1d, or epoch seconds; at most 365 days ahead) makes it
                                                  lapse by itself (each
                                                  change prints old -> new, and fails if the value
                                                  changed between its read and its write)
@@ -587,7 +587,7 @@ export async function sbxMain(
     until = parseUntil(values.until, Math.floor(Date.now() / 1000));
     if (until === undefined) {
       io.err(
-        `sbx: --until must be a duration (30m, 2h, 1d) or epoch seconds (not milliseconds) in the future, at most 366 days ahead (got '${sanitizeRemote(values.until)}')\n${SBX_USAGE}`,
+        `sbx: --until must be a duration (30m, 2h, 1d) or epoch seconds (not milliseconds) in the future, at most 365 days ahead (got '${sanitizeRemote(values.until)}')\n${SBX_USAGE}`,
       );
       return SBX_EXIT.usage;
     }
@@ -971,10 +971,11 @@ export async function sbxMain(
 
 /**
  * `--until` for `admin subjects grant`: a duration from now (`30m`, `2h`, `1d`) or
- * epoch seconds, in the future either way and at most 366 days ahead (the control plane's own
- * bound, so epoch milliseconds are refused); undefined when it is neither.
+ * epoch seconds, in the future either way and at most 365 days ahead; undefined when it is
+ * neither. The control plane's own bound is 366 days from ITS clock (so epoch milliseconds are
+ * refused); a day less here leaves room for a client clock that runs ahead of the server's.
  */
-const MAX_GRANT_SECONDS = 366 * 86_400;
+const MAX_GRANT_SECONDS = 365 * 86_400;
 export function parseUntil(raw: string, nowS: number): number | undefined {
   const d = /^([1-9][0-9]*)([mhd])$/.exec(raw);
   const n = d
