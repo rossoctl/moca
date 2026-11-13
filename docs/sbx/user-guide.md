@@ -773,6 +773,9 @@ Other messages:
   `mocactl sbx policy` lists the profiles' envelopes. **"over your … quota"**: `mocactl sbx quota`.
 - **Exit 5**: a `templates follow`, or a create waiting for a queue slot, ran out of time, with what
   it was waiting for; nothing was undone. Run it again, or with a longer `--timeout`.
+- **Exit 130**: Ctrl-C stopped a `templates follow`, or a create waiting for a queue slot. A build
+  already queued goes on (`templates cancel ID --build B` withdraws it); a spec not yet posted was
+  not.
 - **"sandbox busy: …"**: another call on your sandbox is still running (another terminal, or a
   parallel agent). Wait for it, or retry.
 - **"the sandbox expires in N s; pull your work now"**: the sandbox is in its last minute, too

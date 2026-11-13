@@ -203,7 +203,7 @@ async function pollBuild(
     const left = end - now();
     if (left <= 0) return 'timeout';
     await sleep(Math.min(POLL_MS, left), c.signal);
-    if (c.signal?.aborted) throw new Error('interrupted');
+    if (c.signal?.aborted) throw new Interrupted();
   }
 }
 
@@ -224,7 +224,10 @@ function buildEnd(c: SbxCtx, id: string, b: SbxBuild): number {
   return SBX_EXIT.failed;
 }
 
-/** `templates follow ID [--build B] [--timeout S]`: until the build ends; exit 0 only on registered. */
+/**
+ * `templates follow ID [--build B] [--timeout S]`: until the build ends; exit 0 only on registered,
+ * 5 past the timeout, 130 on Ctrl-C (the build goes on: `templates cancel` withdraws it).
+ */
 export async function cmdFollowTemplate(
   c: SbxCtx,
   id: string,
@@ -241,6 +244,7 @@ export async function cmdFollowTemplate(
     if (b === 'timeout') return timedOut(c, `${id} ${build} to end`, timeoutS);
     return buildEnd(c, id, b);
   } catch (err) {
+    if (err instanceof Interrupted || c.signal?.aborted) return interrupted(c);
     return failed(c, err);
   }
 }

@@ -79,7 +79,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates follow ID [--build BUILD] [--timeout S] [--json]
                                                  poll a build (default: the newest) until registered,
                                                  failed, rejected or cancelled; exit 0 only on
-                                                 registered (S default 3600)
+                                                 registered, 1 on any other end, 5 past S (default
+                                                 3600), 130 on Ctrl-C (the build goes on)
   mocactl sbx templates cancel ID --build BUILD [--json]
                                                  withdraw a queued, building or probing build
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]

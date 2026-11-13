@@ -779,6 +779,24 @@ describe('templates create, build, follow, cancel', () => {
     expect(w.err()).toContain('empty has no build to follow');
   });
 
+  it('follow: Ctrl-C is exit 130, not a failed build', async () => {
+    const w = world({
+      [`GET ${BUILD_PATH}`]: () => ({
+        status: 200,
+        body: handled({ buildId: HANDLE, status: 'building', readiness: null }),
+      }),
+    });
+    const ac = new AbortController();
+    expect(
+      await w.run(['templates', 'follow', 'my-python', '--build', HANDLE], {
+        signal: ac.signal,
+        sleep: async () => ac.abort(),
+      }),
+    ).toBe(130);
+    expect(w.err()).toContain('sbx: interrupted (exit 130)');
+    expect(w.out()).toBe('');
+  });
+
   it('cancel: posts the cancel, and reports a build past cancelling', async () => {
     let ok = true;
     const w = world({
