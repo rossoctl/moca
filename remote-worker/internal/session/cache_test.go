@@ -125,6 +125,23 @@ func TestFingerprintSeparatesLeaseFields(t *testing.T) {
 	}
 }
 
+// workspace_key is in scope: one worker serves many sandboxes, so a req_id reused across two
+// workspaces with an otherwise identical Exec must not be answered from the other sandbox's
+// cache entry -- that would hand one sandbox another's result.
+func TestFingerprintSeparatesWorkspaceKey(t *testing.T) {
+	a := &pb.Exec{Command: "cat secret", TimeoutS: 10, WorkspaceKey: "sbx-a"}
+	b := &pb.Exec{Command: "cat secret", TimeoutS: 10, WorkspaceKey: "sbx-b"}
+	if session.Fingerprint(a) == session.Fingerprint(b) {
+		t.Error("fingerprint ignores workspace_key")
+	}
+	// Length-prefixed: the key cannot borrow bytes from the command.
+	c := &pb.Exec{Command: "ab", WorkspaceKey: "c"}
+	d := &pb.Exec{Command: "a", WorkspaceKey: "bc"}
+	if session.Fingerprint(c) == session.Fingerprint(d) {
+		t.Error("fingerprint aliases command and workspace_key: the encoding is not injective")
+	}
+}
+
 func TestCacheEvictsOldestBeyondMax(t *testing.T) {
 	c := session.NewCache(3)
 	for i := uint64(1); i <= 4; i++ {

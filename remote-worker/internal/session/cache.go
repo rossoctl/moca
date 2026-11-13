@@ -12,8 +12,8 @@ import (
 const CacheSize = 256
 
 // Fingerprint hashes what makes an exec the same exec: command, stdin, timeout_s,
-// streaming and the lease fields (mode, mode_epoch, idle_timeout_s, keepalive), each
-// LENGTH-PREFIXED (command and stdin) or fixed-width (the rest). A bare separator byte is
+// streaming, workspace_key and the lease fields (mode, mode_epoch, idle_timeout_s, keepalive),
+// each LENGTH-PREFIXED (command, stdin and workspace_key) or fixed-width (the rest). A bare separator byte is
 // not injective — with only a NUL between two string fields, ("a\x00b", nil) and
 // ("a", "b\x00") hash alike. That is not exploitable here (a NUL-bearing command cannot
 // survive cmd.Start(), so it can never be the source of a cached entry), but this scheme is
@@ -27,6 +27,10 @@ const CacheSize = 256
 // delivery mode be answered from the wrong entry — a second replica's "sleep 3" at
 // timeout_s=30 failed off a first replica's cached timeout_s=1 ExecError in under a
 // millisecond, never running, ten times inside its own budget.
+//
+// workspace_key is in scope because one worker serves many sandboxes: the cache is per
+// Session, not per workspace, so a req_id reused across two workspaces with an otherwise
+// identical Exec would otherwise be answered with the other sandbox's result.
 //
 // The lease fields are in scope by the same rule: they change what the exec means. A
 // collision between a per-exec and a lease Exec, or across two epochs, answered from the
@@ -53,6 +57,8 @@ func Fingerprint(e *pb.Exec) [32]byte {
 	h.Write(e.GetStdin())
 	putLen(uint64(e.GetTimeoutS()))
 	putBool(e.GetStreaming())
+	putLen(uint64(len(e.GetWorkspaceKey())))
+	h.Write([]byte(e.GetWorkspaceKey()))
 	putLen(uint64(uint32(e.GetMode())))
 	putLen(e.GetModeEpoch())
 	putLen(uint64(e.GetIdleTimeoutS()))
