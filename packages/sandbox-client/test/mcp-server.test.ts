@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   ExecMachineryError,
   ExecRefusedError,
@@ -643,6 +643,37 @@ describe('lease mode (plan 4, spec §5)', () => {
     const r = await call(client, 'reset', {});
     expect(r.isError).toBe(true);
     expect(text(r)).toBe('the lease call failed (timeout): deadline exceeded');
+  });
+
+  it('a cancelled reset stops waiting on its lease call and frees the call queue (M1)', async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const { client, records } = await connect({
+      exec: async () => res(),
+      mode: 'lease',
+      busyWaitMs: 200,
+      lease: async (op, o) => {
+        signals.push(o?.signal);
+        if (op === 'status') return ACTIVE;
+        // The worker holds a reset behind another client's Exec, up to grace_limit (30 min).
+        return new Promise<LeaseStatusView>((_, reject) =>
+          o?.signal?.addEventListener('abort', () =>
+            reject(new LeaseControlError('cancelled', 'the lease call was cancelled')),
+          ),
+        );
+      },
+    });
+    const ac = new AbortController();
+    const p = call(client, 'reset', {}, ac.signal);
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    expect(signals.every((x) => x instanceof AbortSignal && x.aborted)).toBe(true);
+    // The queue is free: the next call runs at once instead of being refused as busy.
+    expect(text(await call(client, 'bash', { command: 'echo ok' }))).toBe('ok\n');
+    expect(records).toMatchObject([
+      { tool: 'reset', execs: 0, ok: false, error: 'cancelled by the client' },
+      { tool: 'bash', ok: true },
+    ]);
   });
 
   it('sandbox_info shows the lease fields', async () => {

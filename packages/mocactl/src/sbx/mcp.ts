@@ -102,7 +102,8 @@ export async function serveSbxMcp(
       throw err;
     }));
   const exec: Exec = async (command, opts) => (await open()).exec(command, opts);
-  const lease: LeaseCall = async (op) => (await open()).leaseControl(op);
+  // The tool call's cancel signal reaches the lease call: a cancelled `reset` stops waiting.
+  const lease: LeaseCall = async (op, opts) => (await open()).leaseControl(op, undefined, opts);
   const info = async () => {
     const now = await c.api.getSandbox(id);
     const current = recordMode(now);

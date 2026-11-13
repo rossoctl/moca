@@ -44,8 +44,14 @@ export const TOOL_NAMES = [
   'reset',
 ] as const;
 
-/** The lease calls a tool may make (spec §8.3): `LeaseControl` status and reset. */
-export type LeaseCall = (op: 'status' | 'reset') => Promise<LeaseStatusView>;
+/**
+ * The lease calls a tool may make (spec §8.3): `LeaseControl` status and reset. An abort of `signal`
+ * cancels the call (a reset may wait up to grace_limit, 30 min).
+ */
+export type LeaseCall = (
+  op: 'status' | 'reset',
+  opts?: { signal?: AbortSignal },
+) => Promise<LeaseStatusView>;
 
 /**
  * What a lease mode tells the model in place of "every call is a fresh VM" (plan 4): one guest
@@ -667,13 +673,15 @@ export function sandboxTools(o: {
       `outside ${ws} and background processes are gone; files under ${ws} stay. Use it when the ` +
       'guest is in a bad state. Costs no VM.',
     inputSchema: { type: 'object', properties: {} },
-    async run() {
+    async run(_a, _exec, signal) {
       // A per-exec sandbox has no lease (and its worker may have no lease calls): nothing to ask.
       const m = o.currentMode ? await o.currentMode() : (o.mode ?? 'per-exec');
       if (m === 'per-exec') return ok(RESET_NONE_TEXT);
       // Only a live lease has a guest to end; asking first keeps a reset of nothing a no-op.
-      if ((await lease('status')).state === 'none') return ok(RESET_NONE_TEXT);
-      await lease('reset');
+      if ((await lease('status', { signal })).state === 'none') return ok(RESET_NONE_TEXT);
+      // The worker holds a reset behind another client's running Exec: a cancelled call stops
+      // waiting, so it does not hold the MCP server's call queue past its cancel.
+      await lease('reset', { signal });
       return ok(RESET_ENDED_TEXT);
     },
   };

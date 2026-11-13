@@ -989,7 +989,12 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
    */
   function leaseSession(
     modes: string[],
-    over: { keepalive?: () => Promise<void>; record?: () => string } = {},
+    over: {
+      keepalive?: () => Promise<void>;
+      record?: () => string;
+      /** Answers `reset` in place of the default; gets the call's signal. */
+      reset?: (signal?: AbortSignal) => Promise<LeaseStatusView>;
+    } = {},
   ) {
     const { home, env, io } = setup();
     let minted = 0;
@@ -1005,6 +1010,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     });
     const flags: boolean[] = [];
     const ops: string[] = [];
+    const signals: (AbortSignal | undefined)[] = [];
     let keepalives = 0;
     const factory: ExecFactory = (o) => ({
       exec: async (command) => {
@@ -1013,10 +1019,12 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
         return res({ stderr: Buffer.alloc(0) });
       },
       close: () => {},
-      leaseControl: async (op) => (
-        ops.push(op),
-        op === 'reset' ? { ...ACTIVE, state: 'none' } : ACTIVE
-      ),
+      leaseControl: async (op, _token, x) => {
+        ops.push(op);
+        signals.push(x?.signal);
+        if (op === 'reset' && over.reset) return over.reset(x?.signal);
+        return op === 'reset' ? { ...ACTIVE, state: 'none' } : ACTIVE;
+      },
       leaseKeepalive: async () => {
         keepalives++;
         await over.keepalive?.();
@@ -1041,6 +1049,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       bash,
       flags,
       ops,
+      signals,
       keepalives: () => keepalives,
       connect: () => client.connect(clientSide),
     };
@@ -1115,6 +1124,31 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     };
     expect(reset.content[0]!.text).toBe(RESET_ENDED_TEXT);
     expect(m.ops).toEqual(['status', 'status', 'reset']);
+    await m.client.close();
+    await m.served;
+  });
+
+  it("the reset tool passes its call's cancel signal to the lease calls (M1)", async () => {
+    const m = leaseSession(['lease'], {
+      // Held behind another client's Exec until the call is cancelled.
+      reset: (signal) =>
+        new Promise((_, reject) =>
+          signal?.addEventListener('abort', () =>
+            reject(new LeaseControlError('cancelled', 'the lease call was cancelled')),
+          ),
+        ),
+    });
+    await m.connect();
+    const ac = new AbortController();
+    const p = m.client.callTool({ name: 'reset', arguments: {} }, undefined, {
+      signal: ac.signal,
+    });
+    await vi.waitFor(() => expect(m.ops).toEqual(['status', 'reset']));
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    expect(m.signals.every((x) => x instanceof AbortSignal && x.aborted)).toBe(true);
+    // The server's call queue is free again: the next call runs.
+    expect((await m.bash('echo')).content[0]!.text).toBe('out\n');
     await m.client.close();
     await m.served;
   });
