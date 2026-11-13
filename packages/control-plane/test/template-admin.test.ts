@@ -532,6 +532,41 @@ describe('owner transfer (§5.2)', () => {
     expect((await chain(d)).length).toBe(n);
   });
 
+  it("checks the new owner's templates quota again when a transfer lands before the write", async () => {
+    const d = stored();
+    await d.policy!.set({ ...policy, quota: { ...policy.quota, templates: 1 } }, admin.sub);
+    await registered(d);
+    await transfer(d, ID, bob.sub);
+    const cat = d.templates!;
+    // bob's one slot is taken by another template; the transferred one holds none (its build
+    // failed), so a new build of it must count against bob's templates quota.
+    const moved = (await cat.get(ID))!;
+    await cat.update!('bobs-other', async () => ({ ...structuredClone(moved), id: 'bobs-other' }));
+    await cat.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'failed' as const })),
+    }));
+    // The first read still names alice, who holds no slot and would pass.
+    const stale = { ...(await cat.get(ID))!, owner: alice.sub };
+    const get = cat.get.bind(cat);
+    let staleReads = 0;
+    cat.get = async (id) => (id === ID && staleReads++ === 0 ? structuredClone(stale) : get(id));
+    const doc = await get(ID);
+    const n = (await chain(d)).length;
+    const err = await HANDLERS.createTemplateBuild!(
+      ctx({
+        principal: admin,
+        params: { id: ID },
+        body: createBody({ spec: { ...spec, description: 'after the transfer' } }),
+      }),
+      d,
+    ).catch((x: unknown) => x);
+    expect(err).toMatchObject({ code: 'quota_exceeded', extra: { quota: 'templates' } });
+    expect(staleReads).toBeGreaterThan(1); // the stale read, then the retry's
+    expect(await get(ID)).toEqual(doc);
+    expect((await chain(d)).length).toBe(n);
+  });
+
   it('refuses a non-admin, and a malformed or unenrolled subject', async () => {
     const d = stored();
     await registered(d);
