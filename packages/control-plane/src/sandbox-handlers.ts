@@ -1245,6 +1245,29 @@ async function retireBuilds(
   };
 }
 
+/**
+ * A quota write's body (§5.2): exactly `templates`, `buildsQueued` and `active`, returned as a new
+ * object of those three, so nothing else the request carried reaches the policy. Their values are
+ * policyProblems' to judge.
+ */
+function quotaBody(v: unknown): Policy['quota'] {
+  const keys = ['templates', 'buildsQueued', 'active'] as const;
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new CpError('invalid_request', 'a quota is an object: templates, buildsQueued, active');
+  const extra = Object.keys(v).filter((k) => !(keys as readonly string[]).includes(k));
+  if (extra.length > 0)
+    throw new CpError(
+      'invalid_request',
+      `a quota holds only templates, buildsQueued, active (not ${extra.join(', ')})`,
+    );
+  const o = v as Record<string, unknown>;
+  return {
+    templates: o.templates,
+    buildsQueued: o.buildsQueued,
+    active: o.active,
+  } as Policy['quota'];
+}
+
 /** POST /v1/templates/{id}/retire (§5.1): every build of the template not yet retired. */
 async function retireTemplate(ctx: RequestCtx, deps: CpDeps) {
   const r = await retireBuilds(ctx, deps, () => true);
@@ -1435,9 +1458,10 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         'invalid_request',
         `the quota's target is 'default' or a subject, ${MEMBER_SUBJECT_FORMS}`,
       );
-    const body = ctx.body;
-    if (isDefault && body === null)
+    if (isDefault && ctx.body === null)
       throw new CpError('invalid_request', 'the default quota is set, never removed');
+    // Stored as the three counters alone: a key beyond them is refused, never kept in the policy.
+    const body = ctx.body === null ? null : quotaBody(ctx.body);
     // The read, the change and the write are one step of the policy store (update), so a quota or
     // policy another admin writes meanwhile is never dropped by this write.
     let before: unknown;

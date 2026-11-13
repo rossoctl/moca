@@ -495,8 +495,16 @@ export function policyProblems(p: unknown): string[] {
       for (const [s, v] of Object.entries(by as Record<string, unknown>)) {
         if (!MEMBER_SUBJECT_RE.test(s))
           out.push(`quotaBySubject: ${s} is not a subject (${MEMBER_SUBJECT_FORMS})`);
-        if (!quotaOk(v))
-          out.push(`quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active`);
+        // An override holds the three counters alone (#748): nothing else is kept in the policy.
+        if (
+          !quotaOk(v) ||
+          Object.keys(v as object).some(
+            (k) => k !== 'templates' && k !== 'buildsQueued' && k !== 'active',
+          )
+        )
+          out.push(
+            `quotaBySubject.${s} must hold whole numbers templates, buildsQueued, active, and nothing else`,
+          );
       }
   }
   return out;

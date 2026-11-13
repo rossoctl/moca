@@ -2464,8 +2464,9 @@ paths:
       description: |
         Template lifecycle spec §5.2. `subject` is `default` (the deployment default) or a subject
         (`github:<numeric id>` or `oidc:<provider sub>`, an override); a body of `null` removes a
-        subject's override, returning it to the default (the default itself is never removed).
-        Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
+        subject's override, returning it to the default (the default itself is never removed). A
+        quota holds `templates`, `buildsQueued` and `active` only: another key is refused, so nothing
+        else is kept in the policy. Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
         in it) naming the admin, whose digest is answered, so the chain shows who set which quota
         when. Enforced at once, on the next create, queued build and activation. Needs
         SH_PROVENANCE_DIR.
@@ -2497,7 +2498,7 @@ paths:
                   policy: { type: string, description: the new policy's digest }
                   record: { type: string, description: the policy record written }
         '400':
-          description: '`invalid_request`: a bad target or quota, or this deployment stores no templates'
+          description: '`invalid_request`: a bad target or quota (also one with a key beyond the three), or this deployment stores no templates'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

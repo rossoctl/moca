@@ -1518,6 +1518,31 @@ describe('admin quotas (§5.2)', () => {
     );
     expect(await refusal(() => putQuota(d, alice.sub, { templates: 1 }))).toBe('invalid_request');
     expect(await refusal(() => putQuota(d, 'default', null))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, alice.sub, [1, 1, 1]))).toBe('invalid_request');
+  });
+
+  it('keeps only the three counters: a quota with another key is refused, by both routes', async () => {
+    const d = await setup();
+    const q = { templates: 1, buildsQueued: 1, active: 1 };
+    const n = (await d.provenance!.chain('policy')).length;
+    expect(await refusal(() => putQuota(d, alice.sub, { ...q, note: 'x' }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => putQuota(d, 'default', { ...q, note: 'x' }))).toBe(
+      'invalid_request',
+    );
+    const bad = { ...DEFAULT_POLICY, quotaBySubject: { [alice.sub]: { ...q, note: 'x' } } };
+    expect(await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: bad }), d))).toBe(
+      'invalid_request',
+    );
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    // What is stored is a fresh object of the three, whatever key order the request used.
+    await putQuota(d, alice.sub, { active: 1, buildsQueued: 1, templates: 1 });
+    expect(Object.keys((await d.policy!.current()).policy.quotaBySubject![alice.sub]!)).toEqual([
+      'templates',
+      'buildsQueued',
+      'active',
+    ]);
   });
 
   it("takes an oidc subject's override as a github one's (#701)", async () => {
