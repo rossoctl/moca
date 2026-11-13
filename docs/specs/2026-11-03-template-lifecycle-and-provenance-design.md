@@ -391,7 +391,10 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   running (`sbx-worker@<id>`), and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
   `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`.
   Readiness never comes from a report: `active` is the relay's attached record. A worker that is
-  not installed is reported `refused`, never installed by the agent.
+  not installed is reported `refused`, never installed by the agent. The agent retries a refused
+  start every 15 s; a `refused` that repeats the host's last one for the build (same reason) while
+  the build stays in the host's `run` is not recorded again, so the append-only stream does not
+  grow by a record a poll.
 - **Live sandboxes:** a worker is never stopped under a live sandbox: an attached build with no
   lease is `deactivating` and drains (no new lease needed for the sandboxes it runs); it is stopped
   once none is left.

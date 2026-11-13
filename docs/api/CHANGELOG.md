@@ -30,7 +30,9 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 - POST /v1/hosts/{host}/inventory: each `holds` entry gains `running` (boolean, default false):
   whether the build's worker unit runs on the host.
 - New POST /v1/hosts/{host}/workers/report `{buildId, event, reason?}` (host bearer): `attached`,
-  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>`;
+  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>` (a
+  `refused` repeating the host's last one for a build still in its `run` is not recorded again:
+  `recorded: null`);
   readiness still comes from the relay.
 - POST /v1/sandboxes: activation on first use. With `SH_TEMPLATE_HOSTS` set, a create on a
   registered build that is not `active` takes the caller's lease (`reason: first_use` on its record;

@@ -64,6 +64,12 @@ export interface HostState {
    * host's attached and detached reports, so placement counts what the host really runs.
    */
   running: string[];
+  /**
+   * buildId -> the last `refused` report (its reason) this host made for a build it is still asked
+   * to run: a repeat is not recorded again (hostWorkerReport). Cleared once the build leaves the
+   * host's `run`, or on any other report for it.
+   */
+  refused?: Record<string, string>;
   limits: {
     activeLimit: number;
     idleLimitSeconds: number;
@@ -252,6 +258,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
           run.push(entry);
           continue;
         }
+        if (mine.refused) delete mine.refused[b.buildId];
         // Stopped when no lease is left, or when it runs here while placement keeps it on another
         // host (one worker id on two hosts): this host's copy stops. Never under a live sandbox.
         const unleased = liveLeases(b, nowS).length === 0;
@@ -264,7 +271,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
-   * holds: an `activate` or `deactivate` record by the host. Readiness still comes from the relay.
+   * holds: an `activate` or `deactivate` record by the host, except a refusal repeating the host's
+   * last one for a build still in its `run` (answered `recorded: null`). Readiness still comes from
+   * the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -287,6 +296,18 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const st = deps.hosts!.get(host)!;
     const others = st.running.filter((x) => x !== buildId);
     st.running = event === 'attached' ? [...others, buildId] : others;
+    // A refusal the same as this host's last one for a build it is still asked to run (the agent
+    // retries every 15 s: a worker not installed, a unit whose start keeps failing) is not appended
+    // again: the template's stream is append-only provenance, and would grow by one record a poll.
+    st.refused ??= {};
+    if (event === 'refused') {
+      if (st.refused[buildId] === (reason ?? '')) {
+        return { status: 200, body: { recorded: null } };
+      }
+      st.refused[buildId] = reason ?? '';
+    } else {
+      delete st.refused[buildId];
+    }
     await prov.append({
       stream: `template/${doc.id}`,
       kind: event === 'detached' ? 'deactivate' : 'activate',
@@ -321,7 +342,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFreeGb: nonNeg(l.diskFreeGb) ?? 0,
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
-    deps.hosts?.set(host, { at: seconds(deps), holds, running, limits });
+    // A host's unrepeated refusals outlive its inventories (each poll replaces the rest).
+    const refused = deps.hosts?.get(host)?.refused ?? {};
+    deps.hosts?.set(host, { at: seconds(deps), holds, running, refused, limits });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 

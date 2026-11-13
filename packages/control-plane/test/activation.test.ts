@@ -456,6 +456,49 @@ describe('activation (§6.2-§6.3)', () => {
     expect(await readiness(d, 't2')).toBe('inactive');
   });
 
+  it("records a repeated refusal once while the build stays in the host's run", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const refusals = async () =>
+      (await d.provenance!.chain('template/t1')).filter(
+        (x) => x.subject === 'host:host-1' && (x.body as Body).event === 'refused',
+      ).length;
+    const refuse = (reason: string) =>
+      HANDLERS.hostWorkerReport!(
+        asHost('host-1', {}, { buildId: hash('1'), event: 'refused', reason }),
+        d,
+      );
+    const poll = async (reason: string) => {
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      expect(((await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body).run).toHaveLength(1);
+      return (await refuse(reason)).body as Body;
+    };
+    expect(await poll('worker not installed')).toEqual({ recorded: 'refused' });
+    for (let i = 0; i < 3; i++)
+      expect(await poll('worker not installed')).toEqual({ recorded: null });
+    expect(await refusals()).toBe(1);
+    // A different reason is new, and so is the same one after any other report.
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'attached' }),
+      d,
+    );
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    expect(await refusals()).toBe(3);
+    // Once the build leaves the host's run, a later refusal is a new episode, recorded.
+    await HANDLERS.deactivateTemplate!(
+      ctx({ principal: alice, params: { id: 't1' }, body: {} }),
+      d,
+    );
+    await HANDLERS.hostWanted!(asHost('host-1'), d);
+    await activate(d, 't1');
+    await poll('systemctl start sbx-worker@sbx_t1.service failed');
+    expect(await refusals()).toBe(4);
+  });
+
   it("records a host's attach and detach reports for a build it holds, and refuses others", async () => {
     const d = await setup();
     await registered(d, 't1', hash('1'), 'sbx_t1');

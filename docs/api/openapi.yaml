@@ -2465,8 +2465,10 @@ paths:
         Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
         worker unit started) and `refused` (not started, with why: not installed, or the start
         failed) write an `activate` record, `detached` (stopped) a `deactivate` record, each with
-        the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
-        attached record.
+        the subject `host:<host>`. A `refused` that repeats this host's last one for the build (the
+        same reason) while the build stays in the host's `run` is not recorded again (`recorded:
+        null`): the agent retries every 15 s, and the stream is append-only. Readiness never comes
+        from a report: `active` is the relay's attached record.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2486,7 +2488,12 @@ paths:
           description: recorded
           content:
             application/json:
-              schema: { type: object, properties: { recorded: { type: string } } }
+              schema:
+                type: object
+                properties:
+                  recorded:
+                    type: [string, 'null']
+                    description: the event recorded; null for a repeated refusal, not recorded
         '400':
           description: '`invalid_request`'
           content:
