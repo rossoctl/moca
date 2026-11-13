@@ -51,7 +51,7 @@
 #                            attached to the relay: the start limit, §6.5); a whole
 #                            number, at least 1 (0 is refused). Not SBX_ACTIVE_LIMIT, which caps running ones
 #   SBX_START_WINDOW_S       default 300: with a control plane that sends no `starting` (older than
-#                            openapi 1.9.0), a worker this agent started less than this many seconds ago,
+#                            openapi 1.10.0), a worker this agent started less than this many seconds ago,
 #                            whose unit is active and which is still wanted, counts as starting. With
 #                            `starting`, the most a listed worker counts as starting: past it, it is
 #                            stuck (an error line each run) and holds no start slot
@@ -102,7 +102,7 @@
 # less those starting now, per run, in the wanted answer's order (oldest lease first); the rest wait
 # for the next run (15 s) and are counted in the summary (startQueued). activation() never waits for
 # a start: `systemctl start` of the Type=simple worker unit returns at once.
-#   - "Starting" comes from the control plane: the wanted answer's `starting` (openapi 1.9.0) lists the
+#   - "Starting" comes from the control plane: the wanted answer's `starting` (openapi 1.10.0) lists the
 #     builds placed here whose worker is not attached to the relay; a listed build whose unit is active
 #     is starting. A control plane without `starting` cannot say what is attached, so the agent counts
 #     its own: the workers it started less than SBX_START_WINDOW_S ago that are still active and wanted.
@@ -582,7 +582,7 @@ activation() {
     fi
     systemctl is-active --quiet "$unit" && continue
     # A build whose memory file does not match its guest size (memory_report) is never started here,
-    # whatever the control plane asks (one older than openapi 1.8.0 does not read memfileMismatch).
+    # whatever the control plane asks (one older than openapi 1.9.0 does not read memfileMismatch).
     if [[ -s "$WORK/memfile-mismatch" ]] && grep -qxF -- "$b" "$WORK/memfile-mismatch"; then
       worker_report "$b" refused 'memfile mismatch: its memory file is not guest_ram_mb x 1 MiB on this host'
       say "{\"agent\":\"refused\",\"worker\":\"$w\",\"why\":\"memfile mismatch\"}"
