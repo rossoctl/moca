@@ -236,6 +236,25 @@ function registrationResults(
 /** The statuses a host may still report on: claimed, and not yet registered, rejected or failed. */
 const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
 
+/**
+ * The build ids and workers of every build that is not retired, in every template. A retired build
+ * that shares either with one (the same snapshot built again, a twin in another template, a worker
+ * id two builds from one image share) names a snapshot or worker still needed: it is never stopped
+ * for the retire (that build's own entries decide whether the worker runs), and it reports no
+ * capacity to wait out (sandbox-handlers.ts buildBody).
+ */
+export function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
+  const ids = new Set<string>();
+  const workers = new Set<string>();
+  for (const d of docs)
+    for (const b of d.builds) {
+      if (b.status === 'retired') continue;
+      ids.add(b.buildId);
+      if (b.worker) workers.add(b.worker);
+    }
+  return (b) => ids.has(b.buildId) || (b.worker !== '' && workers.has(b.worker));
+}
+
 /** Refuses a report on a build that is not this host's, or that takes no more reports. */
 function reportable(y: TemplateBuild, host: string): void {
   if (y.claim?.host !== host) throw new CpError('not_found', 'no such build claimed by this host');
@@ -248,8 +267,10 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
    * live lease, or that it runs while placement keeps them on another host, and the retired ones it
-   * holds (§5.1: no longer wanted, never run again). A worker is never stopped under a live
-   * sandbox: it drains first, so a build with one is in neither list. Removing a retired build's
+   * holds (§5.1: no longer wanted, never run again), except one whose snapshot or worker a build
+   * that is not retired shares (liveSnapshots): that build's entries decide, so one worker is never
+   * in both lists. A worker is never stopped under a live sandbox: it drains first, so a build with
+   * one is in neither list. Removing a retired build's
    * worker and snapshot from the host is not asked here. A build imported from SH_SANDBOX_TEMPLATES
    * (not hostManaged) is in neither list, retired or not: the deployment runs its worker.
    */
@@ -263,12 +284,15 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const mine = deps.hosts?.get(host);
     const run: Record<string, unknown>[] = [];
     const stop: Record<string, unknown>[] = [];
+    const shared = liveSnapshots(docs);
     for (const d of docs) {
       for (const b of d.builds) {
         if (!mine || mine.holds[b.buildId] === undefined || !hostManaged(b)) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
         // A retired build has no lease and is never placed: its worker stops once it is idle.
         if (b.status === 'retired') {
+          // Its snapshot or worker serves a build that is not retired: left alone.
+          if (shared(b)) continue;
           if (mine.refused) delete mine.refused[b.buildId];
           if (b.worker && !busy.has(b.worker)) stop.push(entry);
           continue;

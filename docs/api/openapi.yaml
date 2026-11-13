@@ -421,7 +421,8 @@ components:
             for an active build; and for a retired one whose worker still holds a presence record
             (its host has not stopped it yet), or whose presence cannot be read (`running` null);
             null otherwise, so for a retired build null means its worker is known to be stopped,
-            or that it never had one (retired before it registered)
+            that it never had one (retired before it registered), or that it is `shared` (kept
+            running for a build that is not retired)
           required: [running, inUse]
           properties:
             running:
@@ -434,6 +435,13 @@ components:
               description: |
                 its live sandboxes now; null on the harness profile, which holds no sandbox
                 records (sessions name a template, not a worker)
+        shared:
+          type: boolean
+          description: |
+            true for a retired build whose snapshot or worker a build that is not retired also
+            uses (the same snapshot in another template, or one worker id that two builds from one
+            image share): its worker is not stopped for the retire, since that build's own state
+            decides whether it runs, and its `capacity` is null. False for every other build
         lastUsedAt:
           type: [integer, 'null']
           description: |

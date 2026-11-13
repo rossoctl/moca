@@ -26,9 +26,11 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
 - Readiness gains `retired` (Template, TemplateBuild). TemplateBuild gains `heldBy`, the hosts whose
   last inventory holds its snapshot (null without host agents). A retired build whose worker still
   holds a presence record reports `capacity` `{running, inUse}`, as an active one does (null once
-  its worker is stopped; `running: null` when presence cannot be read).
+  its worker is stopped; `running: null` when presence cannot be read). TemplateBuild gains
+  `shared`, true for a retired build whose snapshot or worker a build that is not retired also
+  uses: its worker is kept for that build, and its `capacity` is null.
 - GET /v1/hosts/{host}/wanted: `stop` also lists the retired builds the host holds with no live
-  sandbox; POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
+  sandbox, except a `shared` one (so one worker is never in both `run` and `stop`); POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
   retired build's worker and snapshot from its host is not part of this version.
 
 ## 1.7.0

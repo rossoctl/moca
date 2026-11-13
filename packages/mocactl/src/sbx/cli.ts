@@ -102,7 +102,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  back). --reason: kept in its record (not with
                                                  --build). --wait: until its worker has stopped
                                                  (default 300 s; exit 5 on a timeout), at once for
-                                                 a build no host holds; waiting for
+                                                 a build no host holds, or one whose worker a
+                                                 build not retired uses; waiting for
                                                  its removal from every host comes with #743
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;

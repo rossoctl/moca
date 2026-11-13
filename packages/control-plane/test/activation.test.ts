@@ -1085,6 +1085,38 @@ describe('retire (§5.1)', () => {
     expect(b).toMatchObject({ status: 'retired', readiness: 'retired', capacity: null });
   });
 
+  it('leaves a retired build whose worker a wanted build shares out of stop, with null capacity', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    // Two builds of t1 from one image, other specs: template-build.sh names both workers alike.
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    await activate(d, 't1', alice, { build: hash('2') });
+    await retireBuild(d, 't1', hash('1'));
+    // Build 2 still wants sbx_t1: it runs, and is not stopped (and restarted) on every poll.
+    const two = { template: 't1', buildId: hash('2'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [two], stop: [] });
+    const read = async (build: string) =>
+      (await HANDLERS.getTemplateBuild!(ctx({ principal: alice, params: { id: 't1', build } }), d))
+        .body as Body;
+    // Its worker is attached, but kept for build 2: nothing to wait out.
+    expect(await read(hash('1'))).toMatchObject({
+      status: 'retired',
+      shared: true,
+      capacity: null,
+    });
+    expect(await read(hash('2'))).toMatchObject({ readiness: 'active', shared: false });
+    // Once build 2 is retired too, the worker is no longer shared: both stop it.
+    await retireBuild(d, 't1', hash('2'));
+    const one = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({ run: [], stop: [two, one] });
+    expect(await read(hash('1'))).toMatchObject({
+      shared: false,
+      capacity: { running: 3, inUse: 0 },
+    });
+  });
+
   it('never retires a build under a live sandbox (409 build_in_use); retires one build alone', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

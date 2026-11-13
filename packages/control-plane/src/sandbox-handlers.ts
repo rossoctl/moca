@@ -17,7 +17,7 @@ import {
   type HostView,
   type Placement,
 } from './activation.js';
-import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
+import { busyWorkers, freshHosts, hostViewsOf, liveSnapshots } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
@@ -279,6 +279,8 @@ interface ReadinessFacts {
   placement: Placement | null;
   /** The hosts as last reported, for each build's `heldBy`; null without host agents. */
   hosts: HostView[] | null;
+  /** Whether a build's snapshot or worker a build that is not retired shares (liveSnapshots). */
+  shared: (b: TemplateBuild) => boolean;
   nowS: number;
 }
 
@@ -289,10 +291,11 @@ const viewsOrNull = (deps: CpDeps, hosts: HostView[]): HostView[] | null =>
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
+  // Every template, not only those the caller sees: sharing is judged across the catalog.
+  const all = docs ?? (await catalog(deps).list());
+  const shared = liveSnapshots(all);
   const placement =
-    hosts.length > 0
-      ? place(docs ?? (await catalog(deps).list()), hosts, nowS, await busyWorkers(deps, nowS))
-      : null;
+    hosts.length > 0 ? place(all, hosts, nowS, await busyWorkers(deps, nowS)) : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -309,6 +312,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       lastUsed: null,
       placement,
       hosts: viewsOrNull(deps, hosts),
+      shared,
       nowS,
     };
   }
@@ -319,7 +323,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, hosts: viewsOrNull(deps, hosts), nowS };
+  return { attached, inUse, lastUsed, placement, hosts: viewsOrNull(deps, hosts), shared, nowS };
 }
 
 /**
@@ -329,6 +333,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
  * a retired build (§5.1); null for any other build that is not registered.
  */
 function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
+  const shared = b.status === 'retired' && f.shared(b);
   const readiness =
     b.status === 'retired'
       ? 'retired'
@@ -344,17 +349,23 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // runs until its host stops it), so a client sees the stop. For a retired build whose
     // presence cannot be read, `running: null`: not known to be stopped, so null capacity means
     // only "read, and not attached". A build retired before it registered has no worker
-    // (`worker` empty), so nothing to stop: null capacity, presence read or not.
+    // (`worker` empty), so nothing to stop: null capacity, presence read or not. Nor does one
+    // whose snapshot or worker a build that is not retired shares (`shared`): its worker is left
+    // running for that build, never stopped for the retire.
     capacity:
       readiness === 'active' ||
       (b.status === 'retired' &&
         b.worker !== '' &&
+        !shared &&
         (f.attached === null || f.attached.has(b.worker)))
         ? {
             running: f.attached === null ? null : (f.attached.get(b.worker) ?? 0),
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
           }
         : null,
+    // A retired build whose snapshot or worker a build that is not retired shares: its worker is
+    // kept for that build. False for every other build.
+    shared,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
     // The hosts whose last inventory holds this build's snapshot (§6.1): ids only, no paths, so a
     // client sees which hosts still hold a retired build. Null without host agents.

@@ -327,8 +327,11 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   that holds the build stops its worker, so a build no host holds has nothing to wait for: without
   host agents (`heldBy` null), or with none holding it (`heldBy` empty, such as an imported
   template whose worker an operator runs), `--wait` returns at once and says that a worker still
-  running is not host-managed, to be stopped where it runs. Past `--timeout` (default 300 s) it
-  exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty) comes with the
+  running is not host-managed, to be stopped where it runs. A retired build whose snapshot or
+  worker a build that is not retired shares (two builds of one template from one image share a
+  worker id) reads `shared: true` and `capacity` null: its worker is kept running for that build and
+  never stopped for the retire, so `--wait` returns at once and says so. Past `--timeout` (default
+  300 s) it exits 5. Waiting for the snapshot's removal from every host (`heldBy` empty) comes with the
   host's removal step (#743). A sandbox
   command refused `template_retired` says that the template or build is never served again.
 
@@ -466,8 +469,10 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
   host) and `stop` (the builds it holds with no lease and no live sandbox, a leased build it runs
   while placement keeps it on another host, so one worker id never runs on two hosts, and the
-  retired builds it holds (§5.1) with no live sandbox; a build imported from SH_SANDBOX_TEMPLATES is
-  in neither list, retired or not). The agent stops each `stop` worker that runs, then starts each
+  retired builds it holds (§5.1) with no live sandbox, except a retired build whose snapshot or
+  worker a build that is not retired shares, which that build's own entries decide, so one worker is
+  never in both lists; a build imported from SH_SANDBOX_TEMPLATES is in neither list, retired or
+  not). The agent stops each `stop` worker that runs, then starts each
   `run` worker that is installed and not running (`sbx-worker@<id>`), and reports each start
   (`attached`), refusal (`refused`, with why) and stop (`detached`) at
   `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`

@@ -681,7 +681,9 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
  * worker (the wanted state's `stop` lists the builds a host holds), so a build no host holds has
  * nothing to wait for: `heldBy` null (no host agents; or absent, from an older control plane) or
  * empty (no host holds it, such as an imported template whose worker an operator runs). Then a
- * worker that still runs is said to be not host-managed, to be stopped where it runs. A wait past
+ * worker that still runs is said to be not host-managed, to be stopped where it runs. Nor does a
+ * `shared` build (its snapshot or worker serves a build that is not retired): its worker is kept
+ * running for that build, and that is said. A wait past
  * --timeout (default RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host
  * comes with the host's removal step (#743).
  */
@@ -714,6 +716,14 @@ export async function cmdRetire(
           b = await c.api.getTemplateBuild(r.templateId, build);
         } catch (err) {
           if (!transient(err)) throw err;
+        }
+        // Its worker serves a build that is not retired too: kept running for it, never stopped.
+        if (b && b.status === 'retired' && b.shared === true) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired; its worker also ` +
+              'serves a build that is not retired, so it keeps running for that build',
+          );
+          break;
         }
         if (b && b.status === 'retired' && b.capacity === null) {
           c.io.err(
