@@ -277,7 +277,11 @@ interface ReadinessFacts {
   lastUsed: Map<string, number> | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
-  /** The hosts as last reported, for each build's `heldBy`; null without host agents. */
+  /**
+   * Every host as last reported, stale ones too, for each build's `heldBy`: it is the snapshot
+   * inventory, not placement, and a silent host still holds what it last reported (it is told to
+   * stop a retired build once it reports again). Null without host agents.
+   */
   hosts: HostView[] | null;
   /** Whether a build's snapshot or worker a build that is not retired shares (liveSnapshots). */
   shared: (b: TemplateBuild) => boolean;
@@ -296,6 +300,16 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
   const shared = liveSnapshots(all);
   const placement =
     hosts.length > 0 ? place(all, hosts, nowS, await busyWorkers(deps, nowS)) : null;
+  // Fresh hosts only for placement (HOST_STALE_S); every reported host for `heldBy`.
+  const holders = viewsOrNull(
+    deps,
+    (deps.hosts?.all() ?? []).map(([id, h]) => ({
+      id,
+      holds: h.holds,
+      activeLimit: h.limits.activeLimit,
+      running: h.running,
+    })),
+  );
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -311,7 +325,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       inUse: null,
       lastUsed: null,
       placement,
-      hosts: viewsOrNull(deps, hosts),
+      hosts: holders,
       shared,
       nowS,
     };
@@ -323,7 +337,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, hosts: viewsOrNull(deps, hosts), shared, nowS };
+  return { attached, inUse, lastUsed, placement, hosts: holders, shared, nowS };
 }
 
 /**
@@ -367,8 +381,9 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // kept for that build. False for every other build.
     shared,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
-    // The hosts whose last inventory holds this build's snapshot (§6.1): ids only, no paths, so a
-    // client sees which hosts still hold a retired build. Null without host agents.
+    // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past
+    // HOST_STALE_S too: ids only, no paths, so a client sees which hosts still hold a retired
+    // build. Null without host agents.
     heldBy:
       f.hosts === null
         ? null

@@ -304,7 +304,8 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   that resolved the build just before a retire is refused `410 template_retired` too: no lease is
   left on a retired build to count against its subject's `active` quota. Readiness reads
   `retired`, and each build lists `heldBy`, the hosts whose last inventory still holds its
-  snapshot.
+  snapshot (a host silent past the staleness limit too: it leaves placement, not `heldBy`, so a
+  `--wait` keeps waiting for the stop it gets once it reports again).
 - **Never cuts off running work.** A retire is refused `409 build_in_use` while a live sandbox runs
   on a build it names (the build the sandbox resolved to at creation, not its worker, which two
   builds from one image can share; a sandbox record without a build id counts for every build on

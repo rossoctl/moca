@@ -1085,6 +1085,24 @@ describe('retire (§5.1)', () => {
     expect(b).toMatchObject({ status: 'retired', readiness: 'retired', capacity: null });
   });
 
+  it('keeps a silent host in heldBy: the build is still its to stop once it reports', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await retire(d, 't1');
+    // The host stops reporting past HOST_STALE_S (it is left out of placement) while its worker
+    // still runs: it still holds the build, so a waiting client keeps waiting.
+    now += (HOST_STALE_S + 1) * 1000;
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+        d,
+      )
+    ).body as Body;
+    expect(b).toMatchObject({ heldBy: ['host-1'], capacity: { running: 3, inUse: 0 } });
+  });
+
   it('leaves a retired build whose worker a wanted build shares out of stop, with null capacity', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

@@ -452,7 +452,9 @@ components:
           items: { type: string }
           description: |
             the ids of the hosts whose last inventory holds this build's snapshot (template lifecycle
-            spec §6.1), sorted; no paths. A retired build stays held until its host removes it.
+            spec §6.1), sorted; no paths. A host that has gone silent (no inventory for
+            HOST_STALE_S, so out of placement) is still listed: it still holds what it last
+            reported. A retired build stays held until its host removes it.
             `[]` when no host holds it; null on a deployment without host agents
         tags: { type: array, items: { type: string } }
         createdAt: { type: integer, description: epoch seconds }
