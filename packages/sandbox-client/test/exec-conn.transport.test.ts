@@ -1093,6 +1093,28 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     expect(r.keepalives).toHaveLength(2);
   });
 
+  it("retries only the relay's token refusal: a failing token source is not retried", async () => {
+    const r = await fakeRelay(ok);
+    const asks: TokenRequest[] = [];
+    const { c } = conn(r.addr, {
+      token: async (o) => {
+        asks.push(o);
+        throw new LeaseControlError('unauthenticated', 'the token source says no');
+      },
+    });
+    await expect(c.leaseControl('status')).rejects.toMatchObject({
+      code: 'unauthenticated',
+      message: 'the token source says no',
+    });
+    await expect(c.leaseKeepalive()).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(asks).toEqual([
+      { force: false, minValidS: 60 },
+      { force: false, minValidS: 60 },
+    ]);
+    expect(r.controls).toHaveLength(0);
+    expect(r.keepalives).toHaveLength(0);
+  });
+
   it('does not retry any other refusal', async () => {
     const r = await fakeRelay(ok, undefined, {
       control: () => ({ code: status.PERMISSION_DENIED, details: 'set_mode not permitted' }),

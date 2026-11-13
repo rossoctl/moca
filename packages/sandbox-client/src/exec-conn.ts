@@ -385,7 +385,8 @@ export class SandboxExecConn {
 
   /**
    * Sends a lease call under the sandbox token; on a token refusal, once more under a forced fresh
-   * token (P4-R7). The ask is an Exec's first: the token must have the 60 s margin left.
+   * token (P4-R7). The ask is an Exec's first: the token must have the 60 s margin left. The first
+   * mint is outside the retry: only the relay's refusal is retried, never a token source failure.
    */
   private async leaseCall<T>(send: (md: Metadata) => Promise<T>): Promise<T> {
     const bearer = async (force: boolean) => {
@@ -394,8 +395,9 @@ export class SandboxExecConn {
       md.set('authorization', `Bearer ${token}`);
       return md;
     };
+    const md = await bearer(false);
     try {
-      return await send(await bearer(false));
+      return await send(md);
     } catch (err) {
       if (!(err instanceof LeaseControlError && err.code === 'unauthenticated')) throw err;
     }
