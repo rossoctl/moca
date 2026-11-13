@@ -113,6 +113,36 @@ A microVM restores from one golden snapshot: kernel, rootfs, guest agent, and a 
 pinned by `manifest.json`. It is built **on the instance type that will run it**. Restore needs
 identical hardware, so `build-snapshot.sh` records the type and the worker checks it at start.
 
+**The manifest's hash (version 2).** `manifest.json` records the sha256 of every file (kernel,
+rootfs, agent, vmstate, memfile; for Cloud Hypervisor `ch-config.json`) and one `hash` over every
+field and digest, marked `"hash_version": 2`, so the hash names the build and any edit to the
+manifest is refused at worker start. The worker re-hashes the kernel, rootfs, agent and vmstate at
+every start, and the memory file only with `SH_VERIFY_MEMFILE=1` (a full read of the guest's RAM).
+The verify cache (on by default; `SH_VERIFY_CACHE=0` turns it off, `SH_VERIFY_CACHE_PATH`
+or `SH_VERIFY_CACHE_DIR` moves it; SBX0 keeps it under `/srv/sbx/verify-cache`) spares the re-read:
+a file is hashed in full once on this host, and while its device, inode, size and mtime are
+unchanged a later start trusts that hash. The trust point is a full check on this host: an entry is
+written only after a full hash matched the manifest, and a cached digest is still compared with the
+manifest at every start. ctime is not in the identity: every VM restore hardlinks the snapshot's
+files into its jail and chowns the links, and the teardown removes them, so ctime moves at every
+restore. The cost is that a same-size rewrite whose mtime is then set back (`touch -d`) is trusted;
+only the snapshot's owner (root) can write those files, and it can rewrite the cache as well. A
+device number that changes across a reboot only means a re-hash.
+`build-snapshot.sh` seeds the cache after it publishes, with the worker's own
+`microvm-worker -verify-snapshot OUT` (`--worker-bin`, default `/usr/local/bin/microvm-worker`;
+best-effort, it never fails a build), while the files are still in the page cache, so a fresh
+snapshot's first start is spared too. The memory file's pin (`PinMemoryFile`) still reads the whole
+memory file at every start.
+Why it matters, as measured on one KVM host with a network block volume as root (28 cold starts,
+4 at a time, snapshots of 7.3-13.6 GiB, before the verify cache, each start reading its whole snapshot):
+at 125 MiB/s all 28 were active after 1,977 s; with the volume raised to 750 MiB/s and 3,000 IOPS,
+after 638 s, the disk reading in 128 KiB requests. 128 KiB is the device's largest request
+(`max_hw_sectors_kb`), so readahead cannot make the reads larger: after the volume, reading fewer
+bytes per start is the lever left, and the verify cache leaves the memory file as the bulk of a
+start's read.
+A snapshot built before version 2 (no `hash_version`) still verifies under its old rule, a hash over
+kernel, rootfs and agent only, until it is rebuilt.
+
 **1. A guest kernel.** Firecracker's CI publishes one. This is its `getting-started.md` recipe,
 kernel only:
 
@@ -685,9 +715,9 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   uses the rootfs's own `update-ca-certificates` (Debian, Ubuntu, Alpine) or `update-ca-trust` (RHEL
   family), and dies if the rootfs has neither. Init then exports `NODE_EXTRA_CA_CERTS`,
   `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`. `manifest.json` gains `egress_ca_sha256`, the SHA-256 of
-  the CA in DER form (`openssl x509 -outform DER | sha256sum`, prefixed `sha256:`). It sits outside
-  `hash`, so a worker that predates it still verifies. Without the flag the rootfs and the manifest
-  are unchanged.
+  the CA in DER form (`openssl x509 -outform DER | sha256sum`, prefixed `sha256:`). It is inside
+  `hash` (version 2); a worker that predates version 2 refuses the snapshot, so upgrade workers
+  first. Without the flag the rootfs and the manifest are unchanged.
 - **Not in this slice:** no credentials (the guest's `GH_TOKEN` is the placeholder `moca-placeholder`),
   no TLS interception, no cert-pinning escape hatch, and `MOCA_TENANCY=multi` is refused at boot.
   Because nothing swaps the placeholder yet, tools that send `GH_TOKEN`/`GITHUB_TOKEN` to GitHub (`gh`,
