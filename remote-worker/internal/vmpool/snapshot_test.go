@@ -279,6 +279,41 @@ func TestManifestV2HashCoversEveryField(t *testing.T) {
 	}
 }
 
+// TestProbeTearsDownItsVMOnEveryFailurePath pins the probe's teardown (#797): a probe that
+// fails is followed at once by the worker's exit, so a VM it restored and did not destroy is
+// left running beside the next start's sweep. Every way Probe can fail AFTER a VM exists must
+// destroy it before returning. (The restore failure itself creates no VM here; the
+// Firecracker launcher's own teardown on that path is pinned in
+// TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears.)
+func TestProbeTearsDownItsVMOnEveryFailurePath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage func(*fakeLauncher)
+	}{
+		{"resume fails", func(lc *fakeLauncher) {
+			lc.setResumeFn(func(*fakeVM, context.Context) error { return errNoKVM })
+		}},
+		{"guest does not answer", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{}, errNoKVM })
+		}},
+		{"true exits non-zero", func(lc *fakeLauncher) {
+			lc.setRunFn(func(*fakeVM, Command, Sink) (Result, error) { return Result{ExitCode: 1}, nil })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, lc, _ := testPool(t)
+			tc.stage(lc)
+			if err := p.Probe(context.Background()); err == nil {
+				t.Fatal("Probe succeeded despite the staged failure")
+			}
+			if lc.createdCount() != 1 || lc.liveCount() != 0 {
+				t.Fatalf("created=%d live=%d after a failed Probe, want 1 and 0 — the probe left its VM behind",
+					lc.createdCount(), lc.liveCount())
+			}
+		})
+	}
+}
+
 func TestManifestV2ChecksVMStateAlwaysAndMemfileOnRequest(t *testing.T) {
 	img := writeSnapshot(t, t.TempDir(), nil)
 	overwrite := func(name, body string) {

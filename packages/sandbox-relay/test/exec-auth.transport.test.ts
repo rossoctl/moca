@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  Exec,
   SandboxExecClient,
   SandboxWorkerService,
   type ServerFrame,
@@ -61,14 +62,14 @@ function execResult(addr: string, token?: string): Promise<{ code: number; detai
     {
       sandboxId: 'sbx-x',
       workload: '',
-      exec: {
+      exec: Exec.fromPartial({
         reqId: 1,
         command: 'true',
         stdin: new Uint8Array(),
         timeoutS: 5,
         streaming: true,
         workspaceKey: 'k',
-      },
+      }),
     },
     md,
   );

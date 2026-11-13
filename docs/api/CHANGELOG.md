@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.9.0
+## 1.10.0
 
 The host agent removes a retired build's worker and snapshot
 ([#743](https://github.com/rossoctl/moca/issues/743)), per the
@@ -21,7 +21,7 @@ Every change is additive.
   the host's next inventory. A `removed` for a build the wanted state leaves out because a build not
   retired shares it is refused `409 build_in_use`.
 
-## 1.8.0
+## 1.9.0
 
 Retire a template, or one build of it ([#749](https://github.com/rossoctl/moca/issues/749)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.1. Every
@@ -52,7 +52,7 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   registered builds from one image share it); POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
   retired build's worker and snapshot from its host is not part of this version.
 
-## 1.7.0
+## 1.8.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
 per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
@@ -102,7 +102,7 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 - New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
   Error schema gains `readiness`, and `quota` the value `active`.
 
-## 1.6.0
+## 1.7.0
 
 Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
@@ -131,6 +131,36 @@ for the builds (else `400 invalid_request`), and answer only a host listed in `S
   writes a `build` record, checks them against the create's request and registers the build (its
   `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
   rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
+## 1.6.0
+
+Sandbox modes ([lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §8.1–§8.2), served
+only on the `sandbox` route profile.
+
+- `Sandbox` gains `mode` (`per-exec`, `lease` or `lease+processes`), `idleTimeoutS` (0 = the worker's
+  default) and `modeEpoch`. A sandbox created `per-exec` starts at epoch 0, one created in a lease
+  mode at 1.
+- POST /v1/sandboxes accepts `mode` (default `per-exec`) and `idleTimeoutS` (30 to
+  `SH_SANDBOX_IDLE_CEILING_S`, whose default is 1800; omitted, the worker's default of 300 s; an
+  explicit 0 is 400 `invalid_request`).
+- New PUT /v1/sandboxes/{id}/mode: changes the mode and the idle timeout, raises `modeEpoch` by 1 on
+  every accepted call, audits `sandbox_mode_changed`, and returns the sandbox with a `setModeToken`
+  for the client's `LeaseControl set_mode`.
+- New POST /v1/sandboxes/{id}/mode-token: a `setModeToken` for the mode and epoch the record holds
+  now, raising nothing.
+- Both mode routes are owner only (an admin gets 404 on another user's sandbox) and take only the
+  owner's user API token; a sandbox token is a 401. A set-mode token is a JWT with
+  `typ: moca-sandbox-mode+jwt`, valid 300 s.
+- New error code `mode_not_allowed` (403): a lease mode the deployment's `SH_SANDBOX_MODES_ALLOWED`
+  (default `per-exec`, so no lease mode until an operator lists one) does not list. `per-exec` is
+  always allowed.
+- Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
+  reads as `per-exec`, epoch 0.
+- Narrowing the policy downgrades existing sandboxes at their next token mint. A sandbox token or
+  `mode-token` minted for a sandbox whose lease mode `SH_SANDBOX_MODES_ALLOWED` no longer lists first
+  sets it to `per-exec` at the next epoch, audited as `sandbox_mode_changed` with the reason
+  `mode_not_allowed`. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps the `idle_timeout_s` claim; the
+  stored `idleTimeoutS` and the epoch are unchanged.
 
 ## 1.5.0
 

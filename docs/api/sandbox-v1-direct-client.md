@@ -14,8 +14,12 @@ file with no imports. A client uses one service, served by the SBX0 sandbox serv
 service SandboxExec {
   rpc Exec(ExecRequest) returns (stream ExecEvent);   // run one command, stream its output
   rpc Abort(AbortRequest) returns (AbortResponse);    // cancel a running command
+  rpc LeaseControl(LeaseControlRequest) returns (LeaseControlResponse);       // lease mode only
+  rpc LeaseKeepalive(LeaseKeepaliveRequest) returns (LeaseKeepaliveResponse); // lease mode only
 }
 ```
+
+The two lease calls matter only for a sandbox in a lease mode: see [Lease mode](#lease-mode).
 
 `SandboxWorker.Attach` in the same file is the workers' side; clients never call it.
 
@@ -24,12 +28,14 @@ service SandboxExec {
 ```
 ExecRequest { sandbox_id, exec: Exec { req_id, command, stdin, timeout_s, streaming, workspace_key } }
   -> stream ExecEvent  chunk { req_id, data, stream: STDOUT | STDERR }   zero or more
+                       lease { req_id, state, reason, at_unix_ms, ... }   lease mode only
                        end   { req_id, exit_code, truncated }             then exactly one
                        error { req_id, message }                          of end / error
 ```
 
 - **Every `Exec` runs `bash -c <command>`** with `/workspace` as the working directory, in a fresh
-  Firecracker VM.
+  Firecracker VM. That is the default mode, `per-exec`; in a lease mode the VM is kept between
+  Execs ([Lease mode](#lease-mode)).
 - **Files under `/workspace` persist** between calls, for the sandbox's lifetime. Nothing else does:
   no process, and no file outside `/workspace`, survives the call.
 - **There is no network** in the VM.
@@ -160,8 +166,85 @@ a non-OK status. There is no exit status to report. Two have an SBX0 meaning of 
 | `RESOURCE_EXHAUSTED`                                                     | The sandbox is busy                                                                                                                    |
 | `DEADLINE_EXCEEDED`                                                      | The token expired during the Exec                                                                                                      |
 | `INVALID_ARGUMENT`                                                       | No `exec` in the request, or `req_id` out of range                                                                                     |
-| `UNKNOWN` today (`UNAVAILABLE` is reserved) with `no live worker for...` | The template's worker is not attached: the template is unavailable                                                                     |
+| `UNKNOWN` today (`UNAVAILABLE` is reserved) with `no live worker for...` | The template's worker is not attached: the template is unavailable (`Exec`; `LeaseControl` answers `UNAVAILABLE`)                      |
 | `INTERNAL`                                                               | An `error` event, as above, including a timeout                                                                                        |
+
+## Lease mode
+
+A sandbox in a lease mode keeps its VM between Execs, so the page cache stays warm and `/tmp` and
+`/var` survive until the lease ends. Every process is still killed at the end of each Exec, and each
+Exec gets a fresh shell. The design is
+[the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) (SBX0.3); the modes are `per-exec`
+(the default), `lease` and `lease+processes`, and the deployment decides which of them a user may
+pick. A sandbox's mode is set on the control plane: `mode` and `idleTimeoutS` on
+`POST /v1/sandboxes`, and `PUT /v1/sandboxes/{id}/mode` to change them ([openapi.yaml](openapi.yaml)).
+
+**The mode reaches the worker in your token.** A sandbox token carries the claims `mode`,
+`mode_epoch` and `idle_timeout_s`, and the relay writes them into every `Exec` it routes, over
+whatever the client sent. Leave `Exec.mode`, `mode_epoch` and `idle_timeout_s` unset. After a mode
+change, mint a fresh token: the old one still carries the old epoch. For a sandbox created
+`per-exec`, a token from before its first mode change carries epoch 0, and it is not refused: the
+worker serves an epoch-0 Exec per-`Exec`, and that ends a live lease. A sandbox created in a lease
+mode starts at epoch 1 (below), so none of its tokens carries 0.
+
+- **`Exec.keepalive`** is the one lease field that is yours. Setting it, or calling
+  `LeaseKeepalive`, turns the keepalive rule on for the rest of the lease: the lease then ends when
+  no keepalive has arrived for 120 s (the worker's default). Use either only from a program that
+  calls `LeaseKeepalive` every 30 s while it runs. Without them, the lease ends by its idle timeout,
+  which a keepalive never resets.
+- **The first `set_mode`.** A sandbox created in a lease mode is at epoch 1, and the worker runs its
+  Execs per-`Exec` until a `LeaseControl set_mode` makes its epoch known. After the create, fetch a
+  set-mode token with `POST /v1/sandboxes/{id}/mode-token` and send it in a `set_mode`. Send it again
+  whenever `LeaseControl status` answers `epoch_known: false` (after a worker lost its state file).
+
+**Lease events.** A lease Exec's response can carry `ExecEvent.lease` events, after the output and
+before the `end` or the `error`. `state` is `start`, `end` (with an end `reason` such as `idle`,
+`reset` or `mode_change`) or `expiring` (the lease ends at its next idle).
+
+- **They are best-effort notices.** An event is delivered once, on the next lease Exec's response,
+  and the worker counts it as delivered when it queues it to send, not when you read it. If the connection
+  breaks in between, the event is lost; `LeaseControl status` still shows the lease's state. Rarely,
+  the same event arrives twice: dedupe on `at_unix_ms`.
+- **`expiring`** repeats on every lease Exec until the lease ends.
+- **A per-exec Exec never carries one.** A downgrade's `mode_change` end therefore comes back in the
+  `set_mode` result's `status.pending`.
+
+**The lease errors**, as an `error` event's message (and in a failed `LeaseControl`'s details):
+
+| Message                    | Means                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `lease_ended(<reason>)`    | The lease ended while this Exec was queued or running (`grace_limit`, `reset`, `mode_change`, ...)                     |
+| `stale_mode: <detail>`     | Your token predates a mode change. Mint a fresh token; nothing ran. An epoch-0 token is never refused this way (above) |
+| `lease_unsupported: <...>` | A microVM worker whose snapshot has no lease mode (no `lease-v1`), or one that does not know the mode; nothing ran     |
+
+The container tier and workers older than lease mode never refuse a lease-mode Exec: they ignore
+the mode and run it per-`Exec`, without lease events. On `LeaseControl`, the container tier answers
+`lease_unsupported` and an older worker does not answer (`DEADLINE_EXCEEDED`, below).
+
+**`LeaseControl {sandbox_id, op, set_mode_token}`** reads the lease (`LEASE_OP_STATUS`), ends it
+(`LEASE_OP_RESET`) or applies a mode change (`LEASE_OP_SET_MODE`). It carries your sandbox token, and
+`set_mode` also a set-mode token (`typ: moca-sandbox-mode+jwt`, valid 300 s) from
+`PUT .../mode` or `POST .../mode-token`. The answer is a `LeaseStatus {mode, epoch_known, state,
+age_ms, idle_timeout_s, pending}`, read after the op. `reset` and a downgrade wait for the lease to
+end, which can take as long as an Exec in flight needs (up to 30 minutes).
+
+| Code                  | Cause                                                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UNAUTHENTICATED`     | Missing, expired or invalid sandbox token                                                                                                                                                   |
+| `PERMISSION_DENIED`   | A harness exec token (the harness never uses leases); `sandbox_id` is not the token's worker or is a workload sandbox; or the set-mode token was refused (one message, whatever the reason) |
+| `INVALID_ARGUMENT`    | No `op`                                                                                                                                                                                     |
+| `RESOURCE_EXHAUSTED`  | `sandbox busy`: the sandbox already has 4 `LeaseControl` calls in flight. Nothing was sent                                                                                                  |
+| `FAILED_PRECONDITION` | The worker refused the op; the details are its message (above, or `busy: too many lease calls in flight`, below)                                                                            |
+| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s (`status`) or 31 minutes (`reset`, `set_mode`): it may predate lease mode                                                                             |
+| `UNAVAILABLE`         | The template's worker is not attached, or it went away before answering                                                                                                                     |
+| `CANCELLED`           | You cancelled the call before the worker answered. The relay frees its place at once, but a `reset` or `set_mode` already sent runs on at the worker: read the outcome with `status`        |
+
+On a `PERMISSION_DENIED` from `set_mode`, fetch a fresh set-mode token once and retry. A worker
+runs at most 2 `reset` or `set_mode` calls per sandbox, and 16 in all, and answers `busy` past
+either; a `status` is never busy at the worker.
+
+**`LeaseKeepalive {sandbox_id}`** answers OK once the token checks pass, even when no worker is
+attached; it does nothing without a live lease. The relay does not audit it.
 
 ## Limits
 
