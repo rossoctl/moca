@@ -1,12 +1,14 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   ExecMachineryError,
   ExecRefusedError,
   type Exec,
   type ExecResult,
 } from '../src/exec-conn.js';
+import { LeaseEvent, SandboxMode } from '../src/gen/sandbox/v1/sandbox.js';
+import { LeaseControlError, type LeaseStatusView } from '../src/lease.js';
 import {
   MCP_INSTRUCTIONS,
   TOKEN_EXPIRED_TEXT,
@@ -15,6 +17,7 @@ import {
   type CallRecord,
   type SandboxMcpOptions,
   line,
+  sandboxRules,
 } from '../src/mcp-server.js';
 import { PI_SCHEMAS } from '../src/schemas.js';
 
@@ -26,6 +29,13 @@ const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   lease: [],
   ...over,
 });
+const NO_LEASE: LeaseStatusView = {
+  mode: 'per-exec',
+  epochKnown: false,
+  state: 'none',
+  ageMs: 0,
+  idleTimeoutS: 0,
+};
 const closers: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const c of closers.splice(0)) await c();
@@ -35,6 +45,7 @@ async function connect(over: Partial<SandboxMcpOptions> & { exec: Exec }) {
   const records: CallRecord[] = [];
   const server = createSandboxMcpServer({
     info: async () => 'template default',
+    lease: async () => NO_LEASE,
     record: (r) => records.push(r),
     ...over,
   });
@@ -68,7 +79,7 @@ class FakeApiError extends Error {
 }
 
 describe('the sandbox MCP server (SBX0 §6.4)', () => {
-  it('lists the eight tools with their schemas and the sandbox rules', async () => {
+  it('lists the nine tools with their schemas and the sandbox rules', async () => {
     const { client } = await connect({ exec: async () => res() });
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual([
@@ -80,6 +91,7 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
       'find',
       'ls',
       'sandbox_info',
+      'reset',
     ]);
     expect(tools[0]!.inputSchema).toMatchObject({ type: 'object', required: ['command'] });
     // Pi's JSON Schemas go over the wire as they are: no zod, no conversion.
@@ -315,7 +327,7 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
     );
     expect(sent).toEqual(['sleep 99']);
     const info = await call(client, 'sandbox_info', {});
-    expect(text(info)).toBe('template default'); // costs no VM: never queued
+    expect(text(info)).toMatch(/^template default\n/); // costs no VM: never queued
     release();
     expect((await first).isError).toBeFalsy();
     expect(text(await call(client, 'bash', { command: 'echo after' }))).toBe('ok\n');
@@ -494,7 +506,210 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
     expect(records).toMatchObject([
       { tool: 'bash', execs: 1, ok: false, error: 'cancelled by the client' },
     ]);
-    expect(text(await call(client, 'sandbox_info', {}))).toBe('template default');
+    expect(text(await call(client, 'sandbox_info', {}))).toMatch(/^template default\n/);
+  });
+});
+
+describe('lease mode (plan 4, spec §5)', () => {
+  // The notice's HH:MM is local time: pin the zone so the copy is exact.
+  let tz: string | undefined;
+  beforeAll(() => {
+    tz = process.env.TZ;
+    process.env.TZ = 'UTC';
+  });
+  afterAll(() => {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  });
+
+  /** 2026-11-13 14:02:30 UTC. */
+  const AT = Date.UTC(2026, 10, 13, 14, 2, 30);
+  const ev = (over: Partial<LeaseEvent>): LeaseEvent =>
+    LeaseEvent.fromPartial({ atUnixMs: AT, mode: SandboxMode.SANDBOX_MODE_LEASE, ...over });
+  const END_IDLE =
+    '[sandbox] guest restarted (idle, 14:02): /tmp, installs outside /workspace and background processes are gone';
+  const PHRASE =
+    'consecutive calls may share one guest until it restarts; no process survives a call; /tmp lasts until the guest restarts';
+  const ACTIVE: LeaseStatusView = {
+    mode: 'lease',
+    epochKnown: true,
+    state: 'active',
+    ageMs: 42_900,
+    idleTimeoutS: 900,
+  };
+  /** A lease fake that answers `status` from `states` in turn (the last repeats) and records ops. */
+  const leaseFake = (...states: LeaseStatusView[]) => {
+    const ops: string[] = [];
+    let i = 0;
+    const lease = async (op: 'status' | 'reset') => {
+      ops.push(op);
+      if (op === 'reset') return NO_LEASE;
+      return states[Math.min(i++, states.length - 1)]!;
+    };
+    return { ops, lease };
+  };
+
+  it('notice deduped on at_unix_ms; rides an error result', async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    const answers: Array<ExecResult | Error> = [res({ lease: [end] }), res({ lease: [end] })];
+    const ended = new ExecMachineryError(
+      'sandbox failure: lease_ended(grace_limit)',
+      9,
+      'machinery',
+      true,
+    );
+    ended.lease = [ev({ state: 'end', reason: 'grace_limit', atUnixMs: AT + 60_000 })];
+    answers.push(ended);
+    const exec: Exec = async () => {
+      const a = answers.shift()!;
+      if (a instanceof Error) throw a;
+      return a;
+    };
+    const { client } = await connect({ exec });
+    expect(text(await call(client, 'bash', { command: 'a' }))).toBe(`${END_IDLE}\nok\n`);
+    expect(text(await call(client, 'bash', { command: 'b' }))).toBe('ok\n');
+    const failed = await call(client, 'bash', { command: 'c' });
+    expect(failed.isError).toBe(true);
+    expect(text(failed)).toBe(
+      '[sandbox] guest restarted (grace_limit, 14:03): /tmp, installs outside /workspace and background processes are gone\n' +
+        "sandbox failure, not your command's output: lease_ended(grace_limit); the command may have partly run",
+    );
+  });
+
+  it("collects edit's two Execs into one result; a start shows only without an end", async () => {
+    const start = ev({ state: 'start', atUnixMs: AT + 1 });
+    let n = 0;
+    const exec: Exec = async () =>
+      n++ === 0
+        ? res({ stdout: Buffer.from('a b\n'), lease: [ev({ state: 'end', reason: 'idle' })] })
+        : res({ lease: [start] });
+    const { client } = await connect({ exec });
+    const r = await call(client, 'edit', { path: 'f', edits: [{ oldText: 'a', newText: 'c' }] });
+    expect(r.isError).toBeFalsy();
+    expect(text(r).split('\n')[0]).toBe(END_IDLE);
+    expect(text(r)).not.toContain('new guest');
+    const later = ev({ state: 'start', atUnixMs: AT + 120_000 });
+    const { client: c2 } = await connect({ exec: async () => res({ lease: [later] }) });
+    expect(text(await call(c2, 'bash', { command: 'x' }))).toBe(
+      '[sandbox] new guest (lease, 14:04)\nok\n',
+    );
+  });
+
+  it('expiring line on every result while expiring', async () => {
+    const now = AT;
+    const expiring = ev({ state: 'expiring', endsByUnixMs: AT + 4 * 60_000 + 1 });
+    const exec: Exec = async () => res({ stdout: Buffer.from('a b\n'), lease: [expiring] });
+    const { client } = await connect({ exec, now: () => now });
+    const line = '[sandbox] guest restarts within 5 min (max_duration)';
+    expect(text(await call(client, 'bash', { command: 'a' }))).toBe(`${line}\na b\n`);
+    expect(text(await call(client, 'bash', { command: 'b' }))).toBe(`${line}\na b\n`);
+    // edit's two Execs both carry it: one line.
+    const r = await call(client, 'edit', { path: 'f', edits: [{ oldText: 'a', newText: 'c' }] });
+    expect(text(r).split(line)).toHaveLength(2);
+  });
+
+  it('reset tool ends the lease', async () => {
+    const f = leaseFake(ACTIVE);
+    const sent: string[] = [];
+    const { client, records } = await connect({
+      exec: async (c) => (sent.push(c), res()),
+      lease: f.lease,
+    });
+    const r = await call(client, 'reset', {});
+    expect(r.isError).toBeFalsy();
+    expect(text(r)).toBe('lease ended (reset): the next command starts a new guest');
+    expect(f.ops).toEqual(['status', 'reset']);
+    expect(sent).toEqual([]);
+    expect(records).toMatchObject([{ tool: 'reset', execs: 0, ok: true }]);
+  });
+
+  it('reset with no lease', async () => {
+    const f = leaseFake(NO_LEASE);
+    const { client } = await connect({ exec: async () => res(), lease: f.lease });
+    expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
+    expect(f.ops).toEqual(['status']);
+  });
+
+  it('a failed reset is a tool error naming the code', async () => {
+    const { client } = await connect({
+      exec: async () => res(),
+      lease: async (op) => {
+        if (op === 'status') return ACTIVE;
+        throw new LeaseControlError('timeout', 'deadline exceeded');
+      },
+    });
+    const r = await call(client, 'reset', {});
+    expect(r.isError).toBe(true);
+    expect(text(r)).toBe('the lease call failed (timeout): deadline exceeded');
+  });
+
+  it('sandbox_info shows the lease fields', async () => {
+    const f = leaseFake(ACTIVE);
+    const exec: Exec = async () => res({ lease: [ev({ state: 'end', reason: 'idle' })] });
+    const { client } = await connect({ exec, lease: f.lease, mode: 'lease' });
+    expect(text(await call(client, 'sandbox_info', {}))).toBe(
+      [
+        'template default',
+        'mode: lease',
+        'lease: active',
+        'age: 42s',
+        'idle timeout: 900s',
+        'last end: none',
+        'tracked processes: none',
+      ].join('\n'),
+    );
+    await call(client, 'bash', { command: 'x' });
+    expect(text(await call(client, 'sandbox_info', {}))).toContain('\nlast end: idle, 14:02\n');
+    expect(f.ops).toEqual(['status', 'status']);
+    const zero = leaseFake({ ...ACTIVE, idleTimeoutS: 0 });
+    const { client: c2 } = await connect({ exec, lease: zero.lease });
+    expect(text(await call(c2, 'sandbox_info', {}))).toContain(
+      '\nidle timeout: 0s (the worker default)\n',
+    );
+  });
+
+  it('sandbox_info survives a status failure', async () => {
+    const { client, records } = await connect({
+      exec: async () => res(),
+      mode: 'lease',
+      lease: async () => {
+        throw new LeaseControlError('unavailable', 'no route');
+      },
+    });
+    const r = await call(client, 'sandbox_info', {});
+    expect(r.isError).toBeFalsy();
+    expect(text(r)).toBe(
+      [
+        'template default',
+        'mode: lease',
+        'lease: unknown (unavailable)',
+        'last end: none',
+        'tracked processes: none',
+      ].join('\n'),
+    );
+    expect(records).toMatchObject([{ tool: 'sandbox_info', ok: true }]);
+  });
+
+  it('lease-mode tool descriptions and rules', async () => {
+    const { client } = await connect({ exec: async () => res(), mode: 'lease' });
+    expect(client.getInstructions()).toBe(sandboxRules('/workspace', 'lease'));
+    expect(client.getInstructions()).toContain(PHRASE);
+    expect(client.getInstructions()).not.toMatch(/fresh VM/);
+    expect(client.getInstructions()).not.toMatch(/nothing else does/);
+    const { tools } = await client.listTools();
+    for (const name of ['bash', 'read', 'write', 'edit', 'grep', 'find', 'ls']) {
+      const d = tools.find((t) => t.name === name)!.description!;
+      expect(d, name).toContain(PHRASE);
+      expect(d, name).not.toMatch(/fresh VM/);
+    }
+    expect(tools.find((t) => t.name === 'reset')!.description).toMatch(/new guest/);
+    // Per-exec keeps today's wording.
+    const { client: pe } = await connect({ exec: async () => res(), mode: 'per-exec' });
+    expect(pe.getInstructions()).toBe(MCP_INSTRUCTIONS);
+    const peTools = (await pe.listTools()).tools;
+    expect(peTools.find((t) => t.name === 'bash')!.description).toMatch(/Every call is a fresh VM/);
+    expect(peTools.find((t) => t.name === 'bash')!.description).not.toContain(PHRASE);
+    expect(sandboxRules('/workspace', 'lease+processes')).toBe(sandboxRules('/workspace', 'lease'));
   });
 });
 

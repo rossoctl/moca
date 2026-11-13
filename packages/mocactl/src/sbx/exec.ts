@@ -1,9 +1,13 @@
 import {
   execFailureText,
   ExecMachineryError,
+  LeaseControlError,
   SandboxExecConn,
   type Exec,
   type ExecConnOptions,
+  type LeaseOpName,
+  type LeaseStatusView,
+  type SandboxModeName,
   type SandboxTokenGrant,
   type TokenFn,
 } from '@moca/sandbox-client';
@@ -13,11 +17,30 @@ import { sanitizeRemote } from '../core/sanitize.js';
 import type { SandboxApiClient, SbxToken } from './api.js';
 import { failed, type SbxCtx } from './commands.js';
 
-/** Builds the gRPC connection; a seam so tests run the commands against a fake. */
-export type ExecFactory = (o: ExecConnOptions) => { exec: Exec; close(): void };
+/** A connection's lease calls (spec §8.3), as `SandboxExecConn` has them. */
+export type LeaseControlFn = (op: LeaseOpName, setModeToken?: string) => Promise<LeaseStatusView>;
+
+/**
+ * Builds the gRPC connection; a seam so tests run the commands against a fake. A fake without the
+ * lease calls answers them `unavailable`.
+ */
+export type ExecFactory = (o: ExecConnOptions) => {
+  exec: Exec;
+  close(): void;
+  leaseControl?: LeaseControlFn;
+  leaseKeepalive?: () => Promise<void>;
+};
 const realFactory: ExecFactory = (o) => {
   const c = new SandboxExecConn(o);
-  return { exec: c.exec, close: c.close };
+  return {
+    exec: c.exec,
+    close: c.close,
+    leaseControl: c.leaseControl,
+    leaseKeepalive: c.leaseKeepalive,
+  };
+};
+const noLeaseCalls = async (): Promise<never> => {
+  throw new LeaseControlError('unavailable', 'this connection has no lease calls');
 };
 
 /** Seconds of token life a held token must keep beyond what the connection asks (spec §6.5). */
@@ -49,6 +72,22 @@ export function jwtTimes(token: string): { iat: number; exp: number } | undefine
   }
 }
 
+/**
+ * The `mode` claim of a sandbox token, read WITHOUT verifying it: informational only (which mode the
+ * token was minted for; the relay and worker enforce it). Anything else is per-exec.
+ */
+export function jwtMode(token: string): SandboxModeName {
+  const payload = token.split('.')[1];
+  if (!payload) return 'per-exec';
+  try {
+    const m = (JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { mode?: unknown })
+      .mode;
+    return m === 'lease' || m === 'lease+processes' ? m : 'per-exec';
+  } catch {
+    return 'per-exec';
+  }
+}
+
 /** What the connection needs of a minted token: `lifetimeS` is `exp − iat`, 0 if unreadable. */
 export function grantOf(t: SbxToken): SandboxTokenGrant {
   const times = jwtTimes(t.token);
@@ -66,12 +105,19 @@ export function sandboxTokenFn(
   api: SandboxApiClient,
   id: string,
   now: () => number = Date.now,
+  /** Called with each token minted, before any caller gets it (`sbx mcp` reads its mode). */
+  onMint?: (t: SbxToken) => void,
 ): { token: TokenFn; first(): Promise<SbxToken> } {
   let cur: SbxToken | undefined;
   let pending: Promise<SbxToken> | undefined;
   const mint = () =>
     (pending ??= api.mintSandboxToken(id).then(
-      (t) => ((pending = undefined), (cur = t)),
+      (t) => {
+        pending = undefined;
+        cur = t;
+        onMint?.(t);
+        return t;
+      },
       (err: unknown) => {
         pending = undefined;
         throw err;
@@ -91,6 +137,8 @@ export function sandboxTokenFn(
 export interface OpenedExec {
   exec: Exec;
   close(): void;
+  leaseControl: LeaseControlFn;
+  leaseKeepalive(): Promise<void>;
   /** The first token, minted before dialing: where to dial and which worker and workspace. */
   token: SbxToken;
   /** The token's lifetime (`exp − iat`), 0 if unreadable: the default timeout is this minus 60. */
@@ -110,9 +158,13 @@ export async function openExec(
     backstopMarginS?: number;
     /** The sandbox's expiresAt, when the caller already has it; else looked up if need be. */
     sandboxExpiresAt?: number;
+    /** Called with each sandbox token minted, the first included. */
+    onToken?: (t: SbxToken) => void;
+    /** The connection's `Exec.keepalive` (default false). */
+    keepalive?: ExecConnOptions['keepalive'];
   } = {},
 ): Promise<OpenedExec> {
-  const t = sandboxTokenFn(api, id);
+  const t = sandboxTokenFn(api, id, Date.now, o.onToken);
   const first = await t.first();
   let sandboxExpiresAt = o.sandboxExpiresAt;
   const life = grantOf(first).lifetimeS;
@@ -132,8 +184,16 @@ export async function openExec(
     token: t.token,
     ...(o.backstopMarginS !== undefined ? { backstopMarginS: o.backstopMarginS } : {}),
     ...(sandboxExpiresAt ? { sandboxExpiresAt } : {}),
+    ...(o.keepalive !== undefined ? { keepalive: o.keepalive } : {}),
   });
-  return { exec: c.exec, close: c.close, token: first, lifetimeS: grantOf(first).lifetimeS };
+  return {
+    exec: c.exec,
+    close: c.close,
+    leaseControl: c.leaseControl ?? noLeaseCalls,
+    leaseKeepalive: c.leaseKeepalive ?? noLeaseCalls,
+    token: first,
+    lifetimeS: grantOf(first).lifetimeS,
+  };
 }
 
 /** `sbx run`'s exit for a sandbox failure: neither the command's code nor its timeout. */

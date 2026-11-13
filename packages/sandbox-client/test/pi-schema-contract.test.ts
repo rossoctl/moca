@@ -32,8 +32,10 @@ describe("the tools keep Pi's names and schemas", () => {
     expect(mine!.inputSchema).toEqual(JSON.parse(JSON.stringify(def.parameters)));
   });
 
-  it("covers exactly Pi's seven tools, plus sandbox_info", () => {
+  it("covers exactly Pi's seven tools, plus sandbox_info and reset", () => {
     expect(Object.keys(PI_SCHEMAS)).toEqual(PI.map((d) => d.name));
-    expect(TOOL_NAMES.filter((n) => n !== 'sandbox_info')).toEqual(PI.map((d) => d.name));
+    expect(TOOL_NAMES.filter((n) => n !== 'sandbox_info' && n !== 'reset')).toEqual(
+      PI.map((d) => d.name),
+    );
   });
 });

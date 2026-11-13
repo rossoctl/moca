@@ -872,6 +872,16 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     expect(r.seen.map((s) => s.req.exec!.keepalive)).toEqual([false, true]);
   });
 
+  it('reads a keepalive function at each Exec (P4-R6)', async () => {
+    const r = await fakeRelay(ok);
+    let on = true;
+    const c = conn(r.addr, { keepalive: () => on }).c;
+    await c.exec('x');
+    on = false;
+    await c.exec('y');
+    expect(r.seen.map((s) => s.req.exec!.keepalive)).toEqual([true, false]);
+  });
+
   it("round-trips leaseControl('status') under the sandbox token", async () => {
     const r = await fakeRelay(ok, undefined, {
       control: () => ({

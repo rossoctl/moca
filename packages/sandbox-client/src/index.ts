@@ -29,15 +29,19 @@ export {
 export type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 export {
   FILE_TOOL_TIMEOUT_S,
+  LEASE_RULE,
   MAX_BYTES,
   MAX_LINES,
   MAX_STDIN_BYTES,
+  RESET_ENDED_TEXT,
+  RESET_NONE_TEXT,
   TOOL_NAMES,
   ToolInputError,
   WORKSPACE,
   q,
   sandboxTools,
   writeFileCommand,
+  type LeaseCall,
   type SandboxTool,
   type ToolResult,
 } from './tools.js';

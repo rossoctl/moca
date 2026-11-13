@@ -9,11 +9,28 @@ import {
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
-import { sandboxTools, ToolInputError, WORKSPACE, type ToolResult } from './tools.js';
+import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
+import {
+  hhmm,
+  LeaseControlError,
+  leaseNotice,
+  NoticeDedupe,
+  type SandboxModeName,
+} from './lease.js';
+import {
+  LEASE_RULE,
+  sandboxTools,
+  ToolInputError,
+  WORKSPACE,
+  type LeaseCall,
+  type ToolResult,
+} from './tools.js';
 
 /**
- * The sandbox MCP server (SBX0 spec §6.4): the eight tools over one sandbox's Exec. Transport-free:
- * `mocactl sbx mcp` connects it to stdio, the tests to an in-memory pair.
+ * The sandbox MCP server (SBX0 spec §6.4): the tools over one sandbox's Exec, and its lease (plan
+ * 4): each result is prefixed with the notices of the lease events its Execs carried, `reset` ends
+ * the lease and `sandbox_info` shows it. Transport-free: `mocactl sbx mcp` connects it to stdio,
+ * the tests to an in-memory pair.
  */
 
 /** One line per tool call for the flight recorder. Never command output. */
@@ -23,7 +40,7 @@ export interface CallRecord {
   tool: string;
   /** Arrival to answer, queueing included. */
   ms: number;
-  /** Execs this call made: 1 per tool, 2 for edit, 0 for sandbox_info and any refused call. */
+  /** Execs this call made: 1 per tool, 2 for edit, 0 for sandbox_info, reset and any refused call. */
   execs: number;
   /** False for a tool error of any kind, the command's own non-zero exit included. */
   ok: boolean;
@@ -33,8 +50,12 @@ export interface CallRecord {
 
 export interface SandboxMcpOptions {
   exec: Exec;
-  /** `sandbox_info`'s text. Costs no Exec, and is never queued. */
+  /** `sandbox_info`'s text, before the lease fields. Costs no Exec, and is never queued. */
   info: () => Promise<string>;
+  /** The sandbox's lease calls: `reset`, and the status `sandbox_info` shows. */
+  lease: LeaseCall;
+  /** The sandbox's mode at start, for the tool and rule texts (default per-exec). */
+  mode?: SandboxModeName;
   /** Called once per call. A recorder that throws never fails the call. */
   record?: (r: CallRecord) => void;
   /** How long a call may wait behind this server's running one before it is refused as busy. */
@@ -57,17 +78,25 @@ export const DEFAULT_BUSY_WAIT_MS = 30_000;
  * every MCP client receives them on connecting, while Claude Code does not load a CLAUDE.md that
  * `sbx up`'s own `Read` deny covers (#568).
  */
-export const sandboxRules = (ws: string): string =>
-  [
+export const sandboxRules = (ws: string, mode: SandboxModeName = 'per-exec'): string => {
+  const noBackground =
+    'Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.';
+  const leased = mode !== 'per-exec';
+  return [
     `The code lives in a remote sandbox at \`${ws}\`: use the \`sandbox\` MCP tools for everything.`,
     '',
-    '- Every tool call runs in a fresh VM, and no process survives it. Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.',
-    `- Files under \`${ws}\` persist between calls; nothing else does.`,
+    leased
+      ? `- Lease mode: ${LEASE_RULE}. ${noBackground}`
+      : `- Every tool call runs in a fresh VM, and no process survives it. ${noBackground}`,
+    leased
+      ? `- Files under \`${ws}\` persist between calls; anything else lasts at most until the guest restarts.`
+      : `- Files under \`${ws}\` persist between calls; nothing else does.`,
     '- There is no network: packages cannot be installed from the internet.',
     '- Calls run one at a time, so batch the work: read several files in one `bash` call, and run the tests in one call after editing.',
   ].join('\n');
+};
 
-/** The server's instructions for the default workspace. */
+/** The server's instructions for the default workspace in per-exec mode. */
 export const MCP_INSTRUCTIONS = sandboxRules(WORKSPACE);
 
 /** The tool error texts that are not the command's own (plan 1c R4). */
@@ -140,6 +169,8 @@ export function execFailureText(
 /** The tool error for anything a tool threw: never shown as the command's output. */
 function describe(err: unknown, expiresAt?: number): string {
   if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
+  if (err instanceof LeaseControlError)
+    return `the lease call failed (${err.code}): ${err.message}`;
   const exec = execFailureText(err);
   if (exec !== undefined) return exec;
   const gone = terminated(err);
@@ -221,13 +252,61 @@ export function line(waitMs: number, now: () => number) {
 
 export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const ws = o.workspace ?? WORKSPACE;
-  const tools = sandboxTools({ info: o.info, workspace: ws });
-  const byName = new Map(tools.map((t) => [t.name, t]));
+  const mode = o.mode ?? 'per-exec';
   const now = o.now ?? Date.now;
+  // One deduper per server: an event repeated on a later result is shown once (spec §5).
+  const dedupe = new NoticeDedupe();
+  let lastEnd: LeaseEvent | undefined;
+
+  /** The lease fields of `sandbox_info`. A failed status is shown, never a failed tool. */
+  const leaseInfo = async (): Promise<string[]> => {
+    const lines: string[] = [];
+    try {
+      const v = await o.lease('status');
+      const idle = `${v.idleTimeoutS}s${v.idleTimeoutS === 0 ? ' (the worker default)' : ''}`;
+      lines.push(
+        `mode: ${v.mode}`,
+        `lease: ${v.state}`,
+        `age: ${Math.floor(v.ageMs / 1000)}s`,
+        `idle timeout: ${idle}`,
+      );
+    } catch (err) {
+      const code = err instanceof LeaseControlError ? err.code : 'unavailable';
+      lines.push(`mode: ${mode}`, `lease: unknown (${code})`);
+    }
+    const end = lastEnd ? `${lastEnd.reason}, ${hhmm(lastEnd.atUnixMs)}` : 'none';
+    // Plan 5 tracks processes; until then there are none to show.
+    lines.push(`last end: ${end}`, 'tracked processes: none');
+    return lines;
+  };
+  const info = async (): Promise<string> => {
+    const [text, lease] = await Promise.all([o.info(), leaseInfo()]);
+    return [text, ...lease].join('\n');
+  };
+
+  /** The notice lines for one result's lease events; a start only when no end is shown. */
+  const notices = (events: LeaseEvent[]): string[] => {
+    const fresh = dedupe.take(events);
+    for (const ev of fresh) {
+      if (ev.state === 'end' && (!lastEnd || ev.atUnixMs >= lastEnd.atUnixMs)) lastEnd = ev;
+    }
+    const ended = fresh.some((ev) => ev.state === 'end');
+    const lines: string[] = [];
+    for (const ev of fresh) {
+      if (ev.state === 'start' && ended) continue;
+      const l = leaseNotice(ev, now());
+      // edit's two Execs both carry an expiring event: one line.
+      if (l !== undefined && !lines.includes(l)) lines.push(l);
+    }
+    return lines;
+  };
+
+  const tools = sandboxTools({ info, workspace: ws, mode, lease: o.lease });
+  const byName = new Map(tools.map((t) => [t.name, t]));
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
   const server = new Server(
     { name: o.name ?? 'moca-sandbox', version: o.version ?? '0.0.0' },
-    { capabilities: { tools: {} }, instructions: sandboxRules(ws) },
+    { capabilities: { tools: {} }, instructions: sandboxRules(ws, mode) },
   );
   const listed: Tool[] = tools.map((t) => ({
     name: t.name,
@@ -264,19 +343,41 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
 
     const tool = byName.get(name);
     if (!tool) return refuse(`unknown tool: ${name}`);
-    const counted: Exec = (command, opts) => {
+    // Every lease event this call's Execs carried, a failed Exec's included (P4-R5).
+    const events: LeaseEvent[] = [];
+    const counted: Exec = async (command, opts) => {
       execs++;
-      return o.exec(command, opts);
+      try {
+        const r = await o.exec(command, opts);
+        events.push(...(r.lease ?? []));
+        return r;
+      } catch (err) {
+        if (err instanceof ExecMachineryError) events.push(...err.lease);
+        throw err;
+      }
+    };
+    /** The result with its notice lines first, before the output or the error text. */
+    const noticed = (r: CallToolResult): CallToolResult => {
+      const lines = notices(events);
+      if (lines.length === 0) return r;
+      const [first, ...rest] = r.content;
+      if (first?.type === 'text') {
+        return {
+          ...r,
+          content: [{ ...first, text: `${lines.join('\n')}\n${first.text}` }, ...rest],
+        };
+      }
+      return { ...r, content: [{ type: 'text', text: lines.join('\n') }, ...r.content] };
     };
     const run = async (): Promise<CallToolResult> => {
       try {
         const r: ToolResult = await tool.run(args, counted, extra.signal);
         record(!r.isError);
-        return r as CallToolResult;
+        return noticed(r as CallToolResult);
       } catch (err) {
         // The SDK sends nothing for a cancelled request; the record says why it ended.
         if (extra.signal.aborted) return refuse(CANCELLED);
-        return refuse(oneLine(describe(err, o.expiresAt)));
+        return noticed(refuse(oneLine(describe(err, o.expiresAt))));
       }
     };
 

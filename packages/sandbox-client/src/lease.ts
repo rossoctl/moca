@@ -98,7 +98,7 @@ export class LeaseControlError extends Error {
 }
 
 /** The event's time as local 24-hour HH:MM. */
-function hhmm(atUnixMs: number): string {
+export function hhmm(atUnixMs: number): string {
   const d = new Date(atUnixMs);
   const two = (n: number) => String(n).padStart(2, '0');
   return `${two(d.getHours())}:${two(d.getMinutes())}`;

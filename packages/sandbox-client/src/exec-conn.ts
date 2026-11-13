@@ -142,9 +142,10 @@ export interface ExecConnOptions {
   now?: () => number;
   /**
    * Sets `Exec.keepalive` (default false): the client's opt-in to the lease's keepalive-loss rule
-   * (spec §4), for a client that sends `leaseKeepalive()` every 30 s.
+   * (spec §4), for a client that sends `leaseKeepalive()` every 30 s. A function is read at each
+   * Exec, after its token, so the flag can follow the mode of each re-minted token (P4-R6).
    */
-  keepalive?: boolean;
+  keepalive?: boolean | (() => boolean);
 }
 
 export interface ExecOptions {
@@ -469,7 +470,10 @@ export class SandboxExecConn {
           timeoutS,
           streaming: true,
           workspaceKey: this.o.workspaceKey,
-          keepalive: this.o.keepalive ?? false,
+          keepalive:
+            typeof this.o.keepalive === 'function'
+              ? this.o.keepalive()
+              : (this.o.keepalive ?? false),
         }),
       },
       md,

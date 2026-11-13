@@ -1,3 +1,4 @@
+import type { SandboxModeName } from '@moca/sandbox-client';
 import { ControlPlaneClient } from '../api/control-plane.js';
 
 /** The sandbox service's HTTP API (SBX0 §5.1), on top of the control-plane client's auth and retry. */
@@ -22,6 +23,8 @@ export interface SbxSandbox {
   expiresAt: number;
   terminatedAt: number | null;
   labels: Record<string, string>;
+  /** The sandbox's mode (lease-mode spec §8.1); absent from an older control plane: per-exec. */
+  mode?: SandboxModeName;
 }
 
 export interface SbxToken {

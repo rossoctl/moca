@@ -7,20 +7,24 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   ExecMachineryError,
   ExecRefusedError,
+  LEASE_RULE,
+  LeaseControlError,
   MAX_STDIN_BYTES,
+  RESET_ENDED_TEXT,
   SANDBOX_BUSY_TEXT,
   TEMPLATE_BUSY_TEXT,
   TOKEN_EXPIRED_TEXT,
   writeFileCommand,
   type ExecConnOptions,
   type ExecResult,
+  type LeaseStatusView,
 } from '@moca/sandbox-client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/errors.js';
 import { DEFAULT_CONFIG, saveAuth, saveConfig } from '../src/config.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
 import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
-import { sandboxTokenFn } from '../src/sbx/exec.js';
+import { jwtMode, sandboxTokenFn, type ExecFactory } from '../src/sbx/exec.js';
 import { busyRetries } from '../src/sbx/run.js';
 import { readRecords, recordCall } from '../src/sbx/recorder.js';
 import { jwt, LOGIN, SBX, TOKEN, TOKEN_IAT, fakeCp, sandbox, setup, URL_ } from './helpers/sbx.js';
@@ -894,6 +898,155 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     ).toBe(1);
     expect(io.errs.join('\n')).toContain('no such sandbox');
     expect(io.outs).toEqual([]);
+  });
+
+  /** A sandbox token whose (unverified) payload carries a `mode` claim. */
+  const modeJwt = (mode: string) => {
+    const b = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    return `${b({ alg: 'EdDSA' })}.${b({ sbx: SBX, iat: TOKEN_IAT, exp: TOKEN.expiresAt, mode })}.sig`;
+  };
+  const ACTIVE: LeaseStatusView = {
+    mode: 'lease',
+    epochKnown: true,
+    state: 'active',
+    ageMs: 5_000,
+    idleTimeoutS: 0,
+  };
+  /**
+   * A lease sandbox's MCP session: each token mint takes the next of `modes` (the last repeats);
+   * a `remint` command forces a mint, as the exec client's retry does.
+   */
+  function leaseSession(modes: string[], over: { keepalive?: () => Promise<void> } = {}) {
+    const { home, env, io } = setup();
+    let minted = 0;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!) },
+      }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'lease' }) }),
+    });
+    const flags: boolean[] = [];
+    const ops: string[] = [];
+    let keepalives = 0;
+    const factory: ExecFactory = (o) => ({
+      exec: async (command) => {
+        await o.token({ force: command === 'remint', minValidS: 60 });
+        flags.push(typeof o.keepalive === 'function' ? o.keepalive() : Boolean(o.keepalive));
+        return res({ stderr: Buffer.alloc(0) });
+      },
+      close: () => {},
+      leaseControl: async (op) => (
+        ops.push(op),
+        op === 'reset' ? { ...ACTIVE, state: 'none' } : ACTIVE
+      ),
+      leaseKeepalive: async () => {
+        keepalives++;
+        await over.keepalive?.();
+      },
+    });
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      execFactory: factory,
+      mcpTransport: serverSide,
+    });
+    const client = new Client({ name: 't', version: '0' });
+    const bash = (command: string) =>
+      client.callTool({ name: 'bash', arguments: { command } }) as Promise<{
+        content: { text: string }[];
+      }>;
+    return {
+      io,
+      served,
+      client,
+      bash,
+      flags,
+      ops,
+      keepalives: () => keepalives,
+      connect: () => client.connect(clientSide),
+    };
+  }
+
+  it("keepalive follows the token's mode; stops on close", async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const m = leaseSession(['lease', 'per-exec', 'lease']);
+      await m.connect();
+      await m.bash('echo'); // the first mint: lease
+      expect(m.keepalives()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(m.keepalives()).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(m.keepalives()).toBe(2);
+      await m.bash('remint'); // the owner downgraded: the next mint says per-exec
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(m.keepalives()).toBe(2);
+      await m.bash('remint'); // and back to lease
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(m.keepalives()).toBe(3);
+      // Exec.keepalive follows each Exec's token.
+      expect(m.flags).toEqual([true, false, true]);
+      await m.client.close();
+      expect(await m.served).toBe(0);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(m.keepalives()).toBe(3);
+      expect(m.io.errs).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a failing keepalive is ignored and logged once', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const m = leaseSession(['lease'], {
+        keepalive: async () => {
+          throw new LeaseControlError('unavailable', 'relay down');
+        },
+      });
+      await m.connect();
+      await m.bash('echo');
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(m.keepalives()).toBe(3);
+      expect(m.io.errs).toEqual([
+        'sbx mcp: lease keepalive failed (unavailable): relay down; further failures are not logged',
+      ]);
+      await m.client.close();
+      await m.served;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a lease sandbox gets the lease texts; reset and sandbox_info reach the connection's lease calls", async () => {
+    const m = leaseSession(['lease']);
+    await m.connect();
+    expect(m.client.getInstructions()).toContain(LEASE_RULE);
+    expect(m.client.getInstructions()).not.toMatch(/fresh VM/);
+    const { tools } = await m.client.listTools();
+    expect(tools.find((t) => t.name === 'bash')!.description).toContain(LEASE_RULE);
+    const info = (await m.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(info.content[0]!.text).toContain(LEASE_RULE);
+    expect(info.content[0]!.text).not.toMatch(/fresh VM/);
+    expect(info.content[0]!.text).toMatch(/\nmode: lease\nlease: active\nage: 5s\n/);
+    const reset = (await m.client.callTool({ name: 'reset', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(reset.content[0]!.text).toBe(RESET_ENDED_TEXT);
+    expect(m.ops).toEqual(['status', 'status', 'reset']);
+    await m.client.close();
+    await m.served;
+  });
+
+  it('jwtMode reads the mode claim; anything else is per-exec', () => {
+    expect(jwtMode(modeJwt('lease+processes'))).toBe('lease+processes');
+    expect(jwtMode(modeJwt('bogus'))).toBe('per-exec');
+    expect(jwtMode(TOKEN.token)).toBe('per-exec');
+    expect(jwtMode('not-a-jwt')).toBe('per-exec');
   });
 
   it('stops serving when the signal aborts', async () => {
