@@ -7,9 +7,10 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # Short: the worker's jail path must fit a Unix socket (install-host.sh checks it), and macOS's
 # default temp directory is too long for that.
 TMP="$(mktemp -d /tmp/ih.XXXX)"
-trap 'rm -rf "$TMP"' EXIT
-export MOCK_LOG="$TMP/mock.log"
-mkdir -p "$TMP/bin"
+# The reaper's tests below leave live `sleep`s in fake cgroup.procs files on a failure: end them too.
+trap 'cat "$TMP"/cgroup/*/*/*/cgroup.procs 2>/dev/null | while read -r p; do kill -KILL "$p" 2>/dev/null || true; done; rm -rf "$TMP"' EXIT
+export MOCK_LOG="$TMP/mock.log" MOCK_ENABLED_DIR="$TMP/enabled"
+mkdir -p "$TMP/bin" "$MOCK_ENABLED_DIR"
 fail() { echo "FAIL: $*" >&2; [[ -f "$TMP/out" ]] && sed 's/^/  | /' "$TMP/out" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
@@ -17,6 +18,12 @@ cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
+# enable and disable keep each unit's boot state as a file in MOCK_ENABLED_DIR (the unit is the last
+# argument: `disable --now UNIT` too), so a test can check what a re-install leaves enabled.
+case "$1" in
+enable) touch "$MOCK_ENABLED_DIR/${!#}" ;;
+disable) rm -f "$MOCK_ENABLED_DIR/${!#}" ;;
+esac
 # MOCK_ACTIVE_RC is every unit's is-active answer; MOCK_EGRESS_ACTIVE_RC overrides moca-egress's.
 [[ "$1" == is-active ]] && { [[ "$3" == moca-egress.service ]] && exit "${MOCK_EGRESS_ACTIVE_RC:-${MOCK_ACTIVE_RC:-0}}"; exit "${MOCK_ACTIVE_RC:-0}"; }
 exit 0
@@ -37,7 +44,7 @@ fi
 MOCK
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/journalctl"
 export PATH="$TMP/bin:$PATH" SBX_UNIT_DIR="$TMP/units" SBX_ENV_DIR="$TMP/etc" SBX_SRV="$TMP/srv"
-export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1
+export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1 SBX_LIBEXEC_DIR="$TMP/libexec"
 INSTALL="$SRC/deploy/sbx/install-host.sh"
 # A snapshot as build-snapshot.sh writes it, as far as install-host.sh reads one: its guest RAM.
 snap() { mkdir -p "$SBX_SRV/snapshots/$1"; printf '{\n  "hash": "x",\n  "guest_ram_mb": %s\n}\n' "${2:-256}" >"$SBX_SRV/snapshots/$1/manifest.json"; }
@@ -212,6 +219,61 @@ grep -A1 -x 'systemctl reset-failed sbx-worker@sbx_py312.service' "$MOCK_LOG" | 
   fail 'reset-failed does not run right before the restart (a failed unit would refuse it)'
 pass 'clears a failed state (reset-failed) right before restarting the worker'
 
+# SBX_WORKER_AT_BOOT (#796): 1, the default, enables the unit for boot; 0 installs and starts it but
+# leaves it disabled; a re-install applies the value it is given. A bad value is refused before any
+# systemctl call or file.
+! grep -qx 'systemctl disable sbx-worker@sbx_py312.service' "$MOCK_LOG" || fail 'the default install disabled the worker'
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_py312.service" ]] || fail 'the default install left the worker disabled'
+for v in 2 yes '' ' 1' 01; do
+  : >"$MOCK_LOG"
+  ! SBX_WORKER_AT_BOOT="$v" bash "$INSTALL" "$(bundle sbx_noboot)" --snapshot default >"$TMP/out" 2>&1 ||
+    fail "accepted SBX_WORKER_AT_BOOT='$v'"
+  grep -q "SBX_WORKER_AT_BOOT='$v' must be 1" "$TMP/out" || fail "the SBX_WORKER_AT_BOOT='$v' refusal does not say why"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing SBX_WORKER_AT_BOOT='$v'"
+  [[ ! -e "$SBX_ENV_DIR/workers/sbx_noboot.env" ]] || fail "wrote the env file before refusing SBX_WORKER_AT_BOOT='$v'"
+done
+pass 'refuses SBX_WORKER_AT_BOOT other than 0 or 1 (2, yes, an explicit empty value, " 1", 01) before touching anything'
+
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=0 bash "$INSTALL" "$(bundle sbx_noboot)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with SBX_WORKER_AT_BOOT=0'
+[[ -f "$SBX_ENV_DIR/workers/sbx_noboot.env" ]] || fail 'SBX_WORKER_AT_BOOT=0 did not install the worker'
+! grep -q 'systemctl enable sbx-worker@sbx_noboot' "$MOCK_LOG" || fail 'SBX_WORKER_AT_BOOT=0 enabled the worker'
+[[ ! -e "$MOCK_ENABLED_DIR/sbx-worker@sbx_noboot.service" ]] || fail 'SBX_WORKER_AT_BOOT=0 left the worker enabled'
+[[ "$(grep -cx 'systemctl restart sbx-worker@sbx_noboot.service' "$MOCK_LOG")" == 1 ]] || fail 'SBX_WORKER_AT_BOOT=0 did not start the worker exactly once'
+grep -A1 -x 'systemctl reset-failed sbx-worker@sbx_noboot.service' "$MOCK_LOG" | grep -qx 'systemctl restart sbx-worker@sbx_noboot.service' ||
+  fail 'SBX_WORKER_AT_BOOT=0: reset-failed does not run right before the restart'
+grep -q 'sbx-worker@sbx_noboot attached to the relay' "$TMP/out" || fail 'SBX_WORKER_AT_BOOT=0 did not wait for the attach'
+bash "$INSTALL" --uninstall sbx_noboot >"$TMP/out" 2>&1 || fail 'uninstall sbx_noboot'
+pass 'SBX_WORKER_AT_BOOT=0 installs the worker and starts it once (and waits for the attach) without enabling it for boot'
+
+# sbx_default was enabled by its install above: a re-install with 0 disables it, one with 1 enables it again.
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'sbx_default is not enabled before the re-install'
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=0 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install sbx_default with SBX_WORKER_AT_BOOT=0'
+grep -qx 'systemctl disable sbx-worker@sbx_default.service' "$MOCK_LOG" || fail 'a re-install with 0 did not disable the worker'
+[[ ! -e "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'a re-install with 0 left the worker enabled'
+[[ "$(grep -cx 'systemctl restart sbx-worker@sbx_default.service' "$MOCK_LOG")" == 1 ]] || fail 'a re-install with 0 did not restart the worker once'
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=1 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install sbx_default with SBX_WORKER_AT_BOOT=1'
+grep -qx 'systemctl enable sbx-worker@sbx_default.service' "$MOCK_LOG" || fail 'a re-install with 1 did not enable the worker'
+! grep -q 'systemctl disable sbx-worker@sbx_default' "$MOCK_LOG" || fail 'a re-install with 1 disabled the worker'
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'a re-install with 1 left the worker disabled'
+pass 'a re-install keeps the chosen boot behavior: 0 disables a unit an earlier install enabled, 1 enables it again'
+
+# #795: the worker's VMs live in pool-N cgroups beside the unit's own, which KillMode=control-group
+# does not reach; the unit's ExecStopPost= helper ends them after every exit.
+REAP="$SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
+grep -qxF "ExecStopPost=-$REAP %i" "$SBX_UNIT_DIR/sbx-worker@.service" ||
+  fail "the unit does not run $REAP %i after the worker exits: $(grep ExecStopPost "$SBX_UNIT_DIR/sbx-worker@.service")"
+[[ -f "$REAP" && "$(stat -c %a "$REAP" 2>/dev/null || stat -f %Lp "$REAP")" == 755 ]] || fail "$REAP is not installed 0755"
+cmp -s "$REAP" "$SRC/deploy/sbx/reap-vms.sh" || fail "$REAP is not deploy/sbx/reap-vms.sh"
+grep -qx "unit $REAP" "$SBX_ENV_DIR/manifest" || fail "the manifest does not record $REAP as a shared unit file"
+: >"$MOCK_LOG"
+! SBX_LIBEXEC_DIR='/tmp/a b' bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a non-plain SBX_LIBEXEC_DIR'
+grep -q 'SBX_LIBEXEC_DIR=.* must be a plain absolute path' "$TMP/out" || fail 'the SBX_LIBEXEC_DIR refusal does not say why'
+! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a non-plain SBX_LIBEXEC_DIR'
+pass "the unit's ExecStopPost= runs the installed, recorded VM reaper; a non-plain SBX_LIBEXEC_DIR is refused first"
+
 : >"$MOCK_LOG"
 ! MOCK_NO_ATTACH=1 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'reported success with no attach'
 grep -q 'journalctl -u sbx-worker@sbx_default _SYSTEMD_INVOCATION_ID=abc123' "$TMP/out" || fail 'no-attach failure does not name the journal'
@@ -273,6 +335,8 @@ grep -qx "unit $SBX_UNIT_DIR/sbx.slice" "$M" || fail 'the manifest lost the shar
 bash "$INSTALL" --uninstall ba >"$TMP/out" 2>&1 || fail 'uninstall ba'
 bash "$INSTALL" --uninstall sbx_default >"$TMP/out" 2>&1 || fail 'uninstall sbx_default (no worker after it)'
 [[ ! -e "$SBX_UNIT_DIR/sbx-worker@.service" && ! -e "$SBX_UNIT_DIR/sbx.slice" ]] || fail 'shared units kept after the last worker'
+[[ ! -e "$REAP" ]] || fail "$REAP kept after the last worker"
+grep -q "removed $REAP" "$TMP/out" || fail "the last uninstall does not say it removed $REAP"
 grep -q "removed $SBX_UNIT_DIR/sbx-worker@.service" "$TMP/out" && grep -q "removed $SBX_UNIT_DIR/sbx.slice" "$TMP/out" ||
   fail 'the last uninstall does not say it removed the shared units'
 [[ ! -s "$M" ]] || fail "the manifest still lists something after the last worker: $(cat "$M")"
@@ -288,12 +352,79 @@ grep -qx 'systemctl stop sbx.slice' "$MOCK_LOG" || fail 'the last uninstall does
   fail 'sbx.slice is stopped after the daemon-reload'
 ! grep -q 'systemctl stop sbx-worker@.service' "$MOCK_LOG" || fail 'tried to stop the template unit file itself'
 [[ ! -e "$SBX_UNIT_DIR/sbx-worker@.service" ]] || fail 'reinstall + uninstall left the template unit'
-pass '--uninstall of the last worker stops sbx.slice, removes it and the shared unit, then daemon-reloads; workspace data stays'
+pass '--uninstall of the last worker stops sbx.slice, removes it, the shared unit and its VM reaper, then daemon-reloads; workspace data stays'
+
+# The reaper itself (deploy/sbx/reap-vms.sh), on a fake cgroup v2 tree under SBX_CGROUP_ROOT. Each
+# fake cgroup holds one real, detached `sleep` (not this shell's child, so a killed one is reaped
+# and kill -0 sees it gone). A fake kernel in the background plays cgroup.kill and cgroup.events:
+# a `1` in cgroup.kill kills the cgroup's pids, after a delay the reaper has to wait out; a cgroup
+# whose pids are all gone is emptied. Either way the cgroup then reports `populated 0`.
+CG="$TMP/cgroup"
+fake_cg() { # fake_cg DIR [nokill]: a populated cgroup holding one live process; nokill = no cgroup.kill
+  mkdir -p "$1"
+  (sleep 300 >/dev/null 2>&1 &
+    echo $! >"$1/cgroup.procs")
+  printf 'populated 1\nfrozen 0\n' >"$1/cgroup.events"
+  [[ "${2-}" == nokill ]] || : >"$1/cgroup.kill"
+}
+alive() { kill -0 "$(cat "$1/cgroup.procs")" 2>/dev/null; }
+fake_kernel() {
+  local d pid live
+  for _ in $(seq 1 200); do
+    for d in "$CG"/*/*/*/; do
+      d="${d%/}"
+      [[ -s "$d/cgroup.procs" ]] || continue
+      if [[ -f "$d/cgroup.kill" ]] && grep -qx 1 "$d/cgroup.kill"; then
+        sleep 0.5
+        while read -r pid; do kill -KILL "$pid" 2>/dev/null || true; done <"$d/cgroup.procs"
+      fi
+      live=''
+      while read -r pid; do ! kill -0 "$pid" 2>/dev/null || live=1; done <"$d/cgroup.procs"
+      [[ -n "$live" ]] || { : >"$d/cgroup.procs"; printf 'populated 0\nfrozen 0\n' >"$d/cgroup.events"; }
+    done
+    sleep 0.05
+  done
+}
+S1="$CG/sbx.slice/sbx-w1.slice" S2="$CG/sbx.slice/sbx-w2.slice"
+fake_cg "$S1/pool-0"
+fake_cg "$S1/pool-1" nokill # a kernel before 5.14: no cgroup.kill, so SIGKILL from cgroup.procs
+fake_cg "$S1/sbx-worker@w1.service"
+fake_cg "$S1/pool-x"
+fake_cg "$S1/vm-vm-3.scope"
+fake_cg "$S2/pool-0"
+mkdir -p "$S1/pool-2" && printf 'populated 0\nfrozen 0\n' >"$S1/pool-2/cgroup.events" && : >"$S1/pool-2/cgroup.kill" # already empty
+fake_kernel &
+KPID=$!
+SBX_CGROUP_ROOT="$CG" SERVICE_RESULT=timeout bash "$SRC/deploy/sbx/reap-vms.sh" w1 >"$TMP/out" 2>&1 || fail 'the reaper failed the stop'
+kill "$KPID" 2>/dev/null || true
+wait "$KPID" 2>/dev/null || true
+for p in pool-0 pool-1; do
+  grep -qx 'populated 0' "$S1/$p/cgroup.events" || fail "$p was not emptied before the reaper returned"
+done
+grep -qx 1 "$S1/pool-0/cgroup.kill" || fail 'pool-0 was not killed through cgroup.kill'
+grep -q '2 VM cgroup(s) of worker w1 emptied' "$TMP/out" || fail 'the reaper does not report the two cgroups it emptied'
+[[ ! -s "$S1/pool-2/cgroup.kill" ]] || fail 'the reaper wrote cgroup.kill of an already empty pool-2'
+for d in "$S1/sbx-worker@w1.service" "$S1/pool-x" "$S1/vm-vm-3.scope" "$S2/pool-0"; do
+  alive "$d" || fail "the reaper killed ${d#"$CG"/}, which is not one of worker w1's pool-N cgroups"
+  [[ ! -f "$d/cgroup.kill" || ! -s "$d/cgroup.kill" ]] || fail "the reaper wrote ${d#"$CG"/}/cgroup.kill"
+  kill -KILL "$(cat "$d/cgroup.procs")" 2>/dev/null || true
+done
+pass "the reaper kills worker w1's pool-N cgroups (cgroup.kill, or SIGKILL without it) and waits for them; w2's slice, the unit's own cgroup and other names untouched"
+
+# It never fails the stop: a missing slice, a bad id and a cgroup that never empties all exit 0.
+SBX_CGROUP_ROOT="$CG" bash "$SRC/deploy/sbx/reap-vms.sh" w9 >"$TMP/out" 2>&1 || fail 'a missing slice failed the stop'
+[[ ! -s "$TMP/out" ]] || fail "a missing slice is not a silent no-op: $(cat "$TMP/out")"
+SBX_CGROUP_ROOT="$CG" bash "$SRC/deploy/sbx/reap-vms.sh" '../w1' >"$TMP/out" 2>&1 || fail 'a bad id failed the stop'
+grep -q 'not a worker id' "$TMP/out" || fail 'a bad id is not logged'
+fake_cg "$S1/pool-5"
+SBX_CGROUP_ROOT="$CG" SBX_REAP_TIMEOUT=1 bash "$SRC/deploy/sbx/reap-vms.sh" w1 >"$TMP/out" 2>&1 || fail 'a cgroup that never empties failed the stop'
+grep -q 'pool-5: still populated after 1s' "$TMP/out" || fail "a cgroup that never empties is not logged: $(cat "$TMP/out")"
+kill -KILL "$(cat "$S1/pool-5/cgroup.procs")" 2>/dev/null || true
+pass 'the reaper exits 0 on a missing slice (silently), a bad id and a cgroup still populated at its timeout (logged)'
 
 # The janitor (spec §8.3): --janitor BUNDLE_DIR installs the script, its env, its token and the two
 # units, enables the timer and records all of it as its own manifest kind; --uninstall-janitor
 # reverses it; uninstalling the last worker leaves it alone.
-export SBX_LIBEXEC_DIR="$TMP/libexec"
 JTOKEN="$(printf 'k%.0s' {1..64})"
 jbundle() { # jbundle [ENV_TEXT]: a janitor bundle as setup.sh writes it
   local d="$TMP/jbundle"
@@ -478,7 +609,7 @@ pass 'the last uninstall removes the egress unit, and the env file unless it was
 # never seeds from it and so never warns.
 COPY="$TMP/scriptcopy/deploy/sbx"
 mkdir -p "$COPY/../microvm"
-cp "$SRC/deploy/sbx/install-host.sh" "$SRC/deploy/sbx/sbx.slice" "$SRC/deploy/sbx/sbx-worker@.service" "$COPY/"
+cp "$SRC/deploy/sbx/install-host.sh" "$SRC/deploy/sbx/sbx.slice" "$SRC/deploy/sbx/sbx-worker@.service" "$SRC/deploy/sbx/reap-vms.sh" "$COPY/"
 cp "$SRC/deploy/microvm/moca-egress.service" "$COPY/../microvm/"
 bash "$COPY/install-host.sh" "$(bundle sbx_fb)" --snapshot default >"$TMP/out" 2>&1 || fail 'install from a script copy without egress-allow.env'
 grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'no fallback warning beside a missing egress-allow.env'
