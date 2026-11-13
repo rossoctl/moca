@@ -115,6 +115,7 @@ describe('redeemInferenceGrant (MI1 §6.3)', () => {
         operatorInferenceToken: 'sk-op',
         allowOperatorFallback: true,
         defaultInferenceEndpoint: 'https://litellm.internal/v1',
+        operatorInferenceHeader: 'x-api-key',
       },
     });
     await seedSession(f); // a session that names NO credential
@@ -133,7 +134,7 @@ describe('redeemInferenceGrant (MI1 §6.3)', () => {
       f,
     );
     expect(r.usedOperatorFallback).toBe(true);
-    expect(r.authHeader).toBe(f.config.operatorInferenceHeader ?? 'authorization');
+    expect(r.authHeader).toBe('x-api-key'); // from config.operatorInferenceHeader, not the default
     // The audit stream is a Redis stream, so read it the way grant-exchange.test.ts:150 does.
     const entries = [...f.streams.values()].flat();
     expect(entries.filter((e) => e.decision === 'operator_fallback_used')).toHaveLength(1);
