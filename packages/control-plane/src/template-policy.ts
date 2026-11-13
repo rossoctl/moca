@@ -14,8 +14,11 @@ import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 
 export const POLICY_SCHEMA = 'moca-template-policy/1';
 
+/** The rule ids a profile's `requires` may name: the ones checkCreate acts on. */
+export const PROFILE_RULES = ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'] as const;
+
 export interface Profile {
-  /** Rule ids beyond the base rules; the benchmark profile's are the X rules. */
+  /** Rule ids beyond the base rules (from PROFILE_RULES); the benchmark profile's are the X rules. */
   requires: string[];
   /** The size envelope: a spec outside it is refused (X15 for benchmark). */
   envelope: {
@@ -34,7 +37,7 @@ export interface Policy {
   /**
    * Registry hosts an image may come from (the first path component of `repository@sha256:...`).
    * A reference with no host (`images/moca-microvm@...`) is the build host's default
-   * registry, allowed as `<default>`.
+   * registry, allowed as `<default>`. Hosts compare case-insensitively.
    */
   allowedRegistries: string[];
   /**
@@ -56,9 +59,9 @@ export const quotaFor = (pol: Policy, subject: string): Quota =>
   pol.quotaBySubject?.[subject] ?? pol.quota;
 
 export interface Quota {
-  /** Templates a subject owns (not retired). */
+  /** Templates a subject owns with a build registered or on its way there. */
   templates: number;
-  /** Builds of a subject's queued or building at once. */
+  /** Builds of a subject's not yet built (queued, building or probing) at once. */
   buildsQueued: number;
   /** Templates a subject holds active at once. */
   active: number;
@@ -86,7 +89,40 @@ export const DEFAULT_POLICY: Policy = {
 
 /** The template id rule (M7); refused past 31 characters, never truncated. */
 export const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
-const IMAGE_RE = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
+
+/**
+ * An image reference pinned by digest, in the distribution reference grammar: an optional
+ * `host[:port]/` (a first component with a `.` or a `:`, or `localhost`), then lowercase path
+ * components `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*` separated by `/`, then `@sha256:<64 hex>`.
+ * No tag: `name:tag@sha256:…` is refused, since the digest alone names the image and the reuse
+ * key compares references as sent. Anything else (`Images/x`, `-x`, `a//b`, `../x`, control
+ * characters) is refused here, before the build host would refuse it, and a path never starts
+ * with `-`, so it is never read as an option by the host's tools.
+ */
+const DOMAIN_RE =
+  /^(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*(?::[0-9]+)?$/;
+const PATH_COMPONENT_RE = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** Splits a reference into its first component and the rest when the first is a registry host. */
+function splitHost(name: string): [string | undefined, string[]] {
+  const parts = name.split('/');
+  const first = parts[0] ?? '';
+  if (parts.length > 1 && (first.includes('.') || first.includes(':') || first === 'localhost'))
+    return [first, parts.slice(1)];
+  return [undefined, parts];
+}
+
+/** Whether `image` is a well-formed reference pinned by digest (M1); see DOMAIN_RE above. */
+export function isPinnedImage(image: string): boolean {
+  const at = image.indexOf('@');
+  if (at < 0 || !DIGEST_RE.test(image.slice(at + 1))) return false;
+  const name = image.slice(0, at);
+  if (name.length > 255) return false;
+  const [host, path] = splitHost(name);
+  if (host !== undefined && !DOMAIN_RE.test(host)) return false;
+  return path.length > 0 && path.every((c) => PATH_COMPONENT_RE.test(c));
+}
 
 export interface CreateInput {
   id: string;
@@ -141,11 +177,9 @@ function sortKeys(v: unknown): unknown {
  * with the build host's default registry.
  */
 export function registryOf(image: string): string {
-  const first = image.split('/')[0] ?? '';
-  const r =
-    image.includes('/') && (first.includes('.') || first.includes(':') || first === 'localhost')
-      ? first
-      : '<default>';
+  const [host] = splitHost(image.split('@')[0] ?? '');
+  // A host name is case-insensitive: `GHCR.io` is `ghcr.io`.
+  const r = host === undefined ? '<default>' : host.toLowerCase();
   return r === 'index.docker.io' ? 'docker.io' : r;
 }
 
@@ -174,21 +208,29 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     TEMPLATE_ID_RE.test(input.id ?? ''),
     `id must match ${TEMPLATE_ID_RE} (refused, never truncated)`,
   );
+  const pinned = typeof input.image === 'string' && isPinnedImage(input.image);
   rule(
     'M1',
-    IMAGE_RE.test(input.image ?? ''),
-    'image must be pinned as repository@sha256:<64 hex>',
+    pinned,
+    'image must be pinned by digest, [host[:port]/]path@sha256:<64 hex> (lowercase path, no tag)',
   );
+  const allowed = policy.allowedRegistries.map((r) => r.toLowerCase());
   rule(
     'registry',
-    IMAGE_RE.test(input.image ?? '') && policy.allowedRegistries.includes(registryOf(input.image)),
-    `image registry ${IMAGE_RE.test(input.image ?? '') ? registryOf(input.image) : '?'} is not allowed (policy allowedRegistries)`,
+    pinned && allowed.includes(registryOf(input.image)),
+    `image registry ${pinned ? registryOf(input.image) : '?'} is not allowed (policy allowedRegistries)`,
   );
-  const guest = s.guest_mb ?? s.guest_ram_mb;
+  // The guest size has one key the build tool reads, guest_ram_mb, and an alias, guest_mb. A spec
+  // with both is refused (even equal): the policy checks one number and the build uses one, never
+  // two that could differ. The stored spec takes guest_ram_mb (normalizeSpec).
+  const bothGuest = s.guest_mb !== undefined && s.guest_ram_mb !== undefined;
+  const guest = bothGuest ? undefined : (s.guest_ram_mb ?? s.guest_mb);
   rule(
     'M7.guest',
-    int(guest) && guest >= 128,
-    'spec.guest_mb must be a whole number of MiB, at least 128',
+    !bothGuest && int(guest) && guest >= 128,
+    bothGuest
+      ? 'spec takes guest_ram_mb or its alias guest_mb, not both'
+      : 'spec.guest_ram_mb (or guest_mb) must be a whole number of MiB, at least 128',
   );
   rule('M7.vcpus', int(s.vcpus) && s.vcpus >= 1 && s.vcpus <= 32, 'spec.vcpus must be 1-32');
   rule(
@@ -293,11 +335,13 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     }
     rule('gate.json', gate !== null, 'gateRecord is not a JSON object');
   }
-  const digest = IMAGE_RE.test(input.image ?? '')
-    ? input.image.slice(input.image.indexOf('@') + 1)
-    : '';
-  // X10 applies whenever the spec names a gate record, whatever the profile.
-  if (s.source_record_digest !== undefined) {
+  const digest = pinned ? input.image.slice(input.image.indexOf('@') + 1) : '';
+  // X10 applies whenever the spec names a gate record, whatever the profile, and so does X1's
+  // check of that record (it passed, and is for this image): the build tool's --gate-record
+  // refuses both, so the control plane refuses them first. A gate record sent at all is checked
+  // the same way, since it is stored with the template's records.
+  const named = s.source_record_digest !== undefined;
+  if (named) {
     rule(
       'X10',
       s.source_record_digest === digest,
@@ -311,17 +355,24 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
   }
   const req = new Set(profile?.requires ?? []);
   const trusted = gateSha !== undefined && policy.trustedGateRecords.includes(gateSha);
-  if (req.has('X1')) {
+  const checkGate = req.has('X1') || named || input.gateRecordBytes !== undefined;
+  if (checkGate) {
     rule(
       'X1',
       gate !== null && gate.gate?.passed === true,
-      'the benchmark profile needs a gate record whose gate passed (X1)',
+      req.has('X1')
+        ? `the ${profileName} profile needs a gate record whose gate passed (X1)`
+        : 'the gate record did not pass its gate (X1)',
     );
+  }
+  if (req.has('X1')) {
     rule(
       'X1.trusted',
       trusted,
       'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
     );
+  }
+  if (checkGate) {
     rule(
       'X1.image',
       gate !== null && gate.image?.digest === digest,
@@ -337,15 +388,19 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
       s.egress === false,
       'a benchmark template has no network: spec.egress must be false (X11)',
     );
-  if (s.skip_git_identity_check === true && gate !== null) {
+  // X12, whatever the profile: a skip of the git identity check is backed by a gate record
+  // showing commits refused, or refused. The build host checks the skip only when given a gate
+  // record, so an unbacked skip would be checked by neither side.
+  if (s.skip_git_identity_check === true) {
     rule(
       'X12',
-      gate.observed?.testbed?.agent_can_commit === 'no' &&
+      gate !== null &&
+        gate.observed?.testbed?.agent_can_commit === 'no' &&
         gate.observed?.guest?.git_identity === 'none',
-      'skip_git_identity_check, but the gate record does not show commits refused (X5: agent_can_commit no, git_identity none, both measured) (X12)',
+      gate === null
+        ? 'skip_git_identity_check needs a gate record showing commits refused (X5) (X12)'
+        : 'skip_git_identity_check, but the gate record does not show commits refused (X5: agent_can_commit no, git_identity none, both measured) (X12)',
     );
-  } else if (req.has('X12') && s.skip_git_identity_check === true) {
-    rule('X12', false, 'skip_git_identity_check needs a gate record showing commits refused (X12)');
   }
   if (req.has('X14')) {
     rule(
@@ -372,6 +427,17 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
   };
 }
 
+/**
+ * The spec as the build tool reads it: the guest size under guest_ram_mb, the one key the build
+ * reads, when the client sent the alias guest_mb. Applied after checkCreate passed (which refuses
+ * a spec with both), and before the spec is stored, recorded or compared for reuse.
+ */
+export function normalizeSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  if (spec.guest_mb === undefined || spec.guest_ram_mb !== undefined) return spec;
+  const { guest_mb, ...rest } = spec;
+  return { ...rest, guest_ram_mb: guest_mb };
+}
+
 /** Validates a policy document an admin PUTs; returns the problems (empty = valid). */
 export function policyProblems(p: unknown): string[] {
   const out: string[] = [];
@@ -385,10 +451,20 @@ export function policyProblems(p: unknown): string[] {
       if (!/^[a-z][a-z0-9-]{0,30}$/.test(n))
         out.push(`profile name ${n} must match ^[a-z][a-z0-9-]{0,30}$`);
       const e = pr?.envelope;
-      if (!Array.isArray(pr?.requires) || !pr.requires.every((r) => typeof r === 'string'))
-        out.push(`${n}.requires must be a list of rule ids`);
+      if (
+        !Array.isArray(pr?.requires) ||
+        !pr.requires.every((r) => (PROFILE_RULES as readonly unknown[]).includes(r))
+      )
+        out.push(`${n}.requires must be a list of rule ids from ${PROFILE_RULES.join(', ')}`);
       if (!e || ![e.maxGuestMb, e.maxVcpus, e.maxWorkspaceMb].every((x) => int(x) && x > 0))
         out.push(`${n}.envelope must hold positive maxGuestMb, maxVcpus, maxWorkspaceMb`);
+      else if (
+        e.exact !== undefined &&
+        (!e.exact ||
+          typeof e.exact !== 'object' ||
+          ![e.exact.guestMb, e.exact.vcpus].every((x) => int(x) && x > 0))
+      )
+        out.push(`${n}.envelope.exact must hold positive whole numbers guestMb, vcpus`);
     }
   }
   if (typeof o.defaultProfile !== 'string' || !o.profiles?.[o.defaultProfile])

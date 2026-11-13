@@ -529,6 +529,25 @@ describe('sbx templates retire (§5.1)', () => {
     });
     expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
     expect(w.slept).toEqual([]);
+    expect(w.io.errs.join('')).toContain(
+      `my-python ${HANDLE}: retired; no host agent holds it, so its worker is not host-managed`,
+    );
+  });
+
+  it('--wait: done at once when no host holds the build (heldBy empty, worker attached)', async () => {
+    // Host agents exist, but none holds this build (an imported template's operator-run worker):
+    // none will stop its worker, so waiting could only time out.
+    for (const capacity of [RUNNING, { running: null, inUse: null }]) {
+      const w = waiting({
+        'POST /v1/templates/my-python/retire': retireRoute,
+        [BUILD_PATH]: () => ({ status: 200, body: retiredRead(capacity, []) }),
+      });
+      expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+      expect(w.slept).toEqual([]);
+      const errs = w.io.errs.join('');
+      expect(errs).toContain('no host agent holds it, so its worker is not host-managed');
+      expect(errs).not.toContain('its worker still runs');
+    }
   });
 
   it('--wait: exits 5 when its worker still runs at --timeout', async () => {
