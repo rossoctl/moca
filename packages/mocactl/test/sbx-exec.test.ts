@@ -79,6 +79,18 @@ function fakeExec(answer: (command: string) => ExecResult | Error = () => res())
 }
 const mint = () =>
   fakeCp({ [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }) });
+/** The end a reset of a live lease leaves pending (the worker's answer to `reset`). */
+const RESET_END = {
+  reqId: 0,
+  state: 'end',
+  reason: 'reset',
+  atUnixMs: 1_800_000_100_000,
+  mode: 2, // SANDBOX_MODE_LEASE
+  ageMs: 5_000,
+  processes: [],
+  endsByUnixMs: 0,
+};
+
 /** TOKEN's lifetime is 900 s: the default timeout and the cap are 840 s (spec §6.5). */
 const CAP = 840;
 
@@ -1023,7 +1035,8 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
         ops.push(op);
         signals.push(x?.signal);
         if (op === 'reset' && over.reset) return over.reset(x?.signal);
-        return op === 'reset' ? { ...ACTIVE, state: 'none' } : ACTIVE;
+        // A reset of the live lease leaves its end pending, as the worker does (spec §5).
+        return op === 'reset' ? { ...ACTIVE, state: 'none', pending: RESET_END } : ACTIVE;
       },
       leaseKeepalive: async () => {
         keepalives++;
@@ -1123,7 +1136,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       content: { text: string }[];
     };
     expect(reset.content[0]!.text).toBe(RESET_ENDED_TEXT);
-    expect(m.ops).toEqual(['status', 'status', 'reset']);
+    expect(m.ops).toEqual(['status', 'reset']);
     await m.client.close();
     await m.served;
   });
@@ -1143,7 +1156,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     const p = m.client.callTool({ name: 'reset', arguments: {} }, undefined, {
       signal: ac.signal,
     });
-    await vi.waitFor(() => expect(m.ops).toEqual(['status', 'reset']));
+    await vi.waitFor(() => expect(m.ops).toEqual(['reset']));
     ac.abort();
     await expect(p).rejects.toThrow();
     expect(m.signals.every((x) => x instanceof AbortSignal && x.aborted)).toBe(true);
@@ -1167,12 +1180,12 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     expect(m.ops).toEqual([]);
     await m.bash('echo'); // the first mint carries lease
     expect(await reset()).toBe(RESET_ENDED_TEXT);
-    expect(m.ops).toEqual(['status', 'reset']);
+    expect(m.ops).toEqual(['reset']);
     const info = (await m.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
       content: { text: string }[];
     };
     expect(info.content[0]!.text).toContain('\nmode: lease\nlease: active\n');
-    expect(m.ops).toEqual(['status', 'reset', 'status']);
+    expect(m.ops).toEqual(['reset', 'status']);
     await m.client.close();
     await m.served;
   });
@@ -1186,7 +1199,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       content: { text: string }[];
     };
     expect(r.content[0]!.text).toBe(RESET_ENDED_TEXT);
-    expect(m.ops).toEqual(['status', 'reset']);
+    expect(m.ops).toEqual(['reset']);
     await m.client.close();
     await m.served;
   });

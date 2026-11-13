@@ -90,7 +90,7 @@ describe('leaseNotice (spec §5 copy)', () => {
 });
 
 describe('NoticeDedupe (spec §5: events may repeat)', () => {
-  it('drops a repeat at_unix_ms, across calls and within one batch', () => {
+  it('drops a repeat event, across calls and within one batch', () => {
     const d = new NoticeDedupe();
     const end = ev({ state: 'end', reason: 'idle' });
     const start = ev({ state: 'start', atUnixMs: AT + 1 });
@@ -98,6 +98,26 @@ describe('NoticeDedupe (spec §5: events may repeat)', () => {
     expect(d.take([{ ...end }, start])).toEqual([]);
     const later = ev({ state: 'end', reason: 'reset', atUnixMs: AT + 2 });
     expect(d.take([later])).toEqual([later]);
+  });
+
+  it('keys on state and at_unix_ms: an end and the next start in one ms are both shown (review #4569829041)', () => {
+    const d = new NoticeDedupe();
+    const end = ev({ state: 'end', reason: 'idle' });
+    const start = ev({ state: 'start' }); // the same at_unix_ms
+    expect(d.take([end, start])).toEqual([end, start]);
+    expect(d.take([end, start])).toEqual([]);
+  });
+
+  it('claims a reset end not yet seen and newer than every event seen, once (review #4569829039)', () => {
+    const d = new NoticeDedupe();
+    const reset = ev({ state: 'end', reason: 'reset', atUnixMs: AT + 5 });
+    d.take([ev({ state: 'start' })]);
+    expect(d.claim(reset)).toBe(true);
+    expect(d.claim(reset)).toBe(false); // already seen
+    expect(d.take([reset])).toEqual([]);
+    const older = ev({ state: 'end', reason: 'reset', atUnixMs: AT - 1 });
+    expect(d.claim(older)).toBe(false); // older than an event seen
+    expect(d.take([older])).toEqual([older]); // a claim that fails marks nothing
   });
 
   it('keeps every expiring event, and an expiring does not hide a later end at the same ms', () => {

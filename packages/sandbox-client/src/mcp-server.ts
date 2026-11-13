@@ -8,7 +8,7 @@ import {
   type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import { ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
+import { ExecAbortedError, ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
 import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 import {
   hhmm,
@@ -341,6 +341,13 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     lease: o.lease,
     // Before the first mint the record read at start may be stale: read it again (one GET).
     currentMode: async () => o.leaseMode?.() ?? (await current()).mode,
+    // The reset's own end, newer than anything seen: `reset`'s text says it, so the next
+    // result's notices do not repeat it (as mocactl's P4-R17), and `last end` names it.
+    resetEnded: (p) => {
+      if (p?.state !== 'end' || p.reason !== 'reset' || !dedupe.claim(p)) return false;
+      noteEnds([p]);
+      return true;
+    },
   });
   const byName = new Map(tools.map((t) => [t.name, t]));
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
@@ -392,7 +399,14 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
         events.push(...(r.lease ?? []));
         return r;
       } catch (err) {
-        if (err instanceof ExecMachineryError) events.push(...err.lease);
+        // A failed, refused or aborted Exec still carried its events: the worker acked them.
+        if (
+          err instanceof ExecMachineryError ||
+          err instanceof ExecRefusedError ||
+          err instanceof ExecAbortedError
+        ) {
+          events.push(...err.lease);
+        }
         throw err;
       }
     };
@@ -412,6 +426,12 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     const run = async (): Promise<CallToolResult> => {
       try {
         const r: ToolResult = await tool.run(args, counted, extra.signal);
+        if (extra.signal.aborted) {
+          // Resolved as the cancel arrived: the SDK discards this result, so its notices wait for
+          // the next one instead of being marked seen here (review #4569829034).
+          held.push(...events);
+          return refuse(CANCELLED);
+        }
         record(!r.isError);
         return noticed(r as CallToolResult);
       } catch (err) {

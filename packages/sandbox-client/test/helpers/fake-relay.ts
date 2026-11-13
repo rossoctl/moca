@@ -4,13 +4,18 @@ import {
   Stream,
   type ExecEvent,
   type ExecRequest,
+  type LeaseEvent,
 } from '../../src/gen/sandbox/v1/sandbox.js';
 
 /**
- * How the fake relay answers one Exec: `stdout` then an End with `exitCode`, or, with `refuse`,
- * the worker's in-stream ExecError carrying that message, then the relay's INTERNAL status.
+ * How the fake relay answers one Exec: its `lease` events first, then `stdout` then an End with
+ * `exitCode`, or, with `refuse`, the worker's in-stream ExecError carrying that message, then the
+ * relay's INTERNAL status. With `hang`, nothing follows the lease events and the stdout: only the
+ * client's cancel ends the call.
  */
-export type FakeExecAnswer = { stdout?: string; exitCode?: number } | { refuse: string };
+export type FakeExecAnswer = { lease?: LeaseEvent[] } & (
+  { stdout?: string; exitCode?: number; hang?: boolean } | { refuse: string }
+);
 
 /**
  * A plain-text sandbox/v1 relay on 127.0.0.1 that answers each Exec from `answer`, given the
@@ -27,6 +32,7 @@ export async function fakeExecRelay(answer: (req: ExecRequest, bearer: string) =
       seen.push({ req: call.request, bearer });
       const reqId = call.request.exec?.reqId ?? 0;
       const a = answer(call.request, bearer);
+      for (const lease of a.lease ?? []) call.write({ lease } as ExecEvent);
       if ('refuse' in a) {
         call.write({ error: { reqId, message: a.refuse } } as ExecEvent);
         call.emit(
@@ -40,6 +46,7 @@ export async function fakeExecRelay(answer: (req: ExecRequest, bearer: string) =
           chunk: { reqId, data: Buffer.from(a.stdout), stream: Stream.STREAM_STDOUT },
         } as ExecEvent);
       }
+      if (a.hang) return;
       call.write({ end: { reqId, exitCode: a.exitCode ?? 0, truncated: false } } as ExecEvent);
       call.end();
     },

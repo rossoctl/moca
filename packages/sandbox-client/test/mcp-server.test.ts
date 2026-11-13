@@ -2,8 +2,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+  ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
+  SandboxExecConn,
   type Exec,
   type ExecResult,
 } from '../src/exec-conn.js';
@@ -20,6 +22,7 @@ import {
   sandboxRules,
 } from '../src/mcp-server.js';
 import { PI_SCHEMAS } from '../src/schemas.js';
+import { fakeExecRelay, type FakeExecAnswer } from './helpers/fake-relay.js';
 
 const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   stdout: Buffer.from('ok\n'),
@@ -537,13 +540,21 @@ describe('lease mode (plan 4, spec §5)', () => {
     ageMs: 42_900,
     idleTimeoutS: 900,
   };
-  /** A lease fake that answers `status` from `states` in turn (the last repeats) and records ops. */
+  /** The end a reset of a live lease leaves pending (the worker keeps it until delivered). */
+  const RESET_END = ev({ state: 'end', reason: 'reset', atUnixMs: AT + 5_000 });
+  /**
+   * A lease fake that answers `status` from `states` in turn (the last repeats) and records ops.
+   * `reset` answers the view after it: RESET_END pending when the first state has a live lease.
+   */
   const leaseFake = (...states: LeaseStatusView[]) => {
     const ops: string[] = [];
     let i = 0;
     const lease = async (op: 'status' | 'reset') => {
       ops.push(op);
-      if (op === 'reset') return NO_LEASE;
+      if (op === 'reset')
+        return states[0]!.state === 'none'
+          ? NO_LEASE
+          : { ...NO_LEASE, mode: 'lease' as const, epochKnown: true, pending: RESET_END };
       return states[Math.min(i++, states.length - 1)]!;
     };
     return { ops, lease };
@@ -619,7 +630,8 @@ describe('lease mode (plan 4, spec §5)', () => {
     const r = await call(client, 'reset', {});
     expect(r.isError).toBeFalsy();
     expect(text(r)).toBe('lease ended (reset): the next command starts a new guest');
-    expect(f.ops).toEqual(['status', 'reset']);
+    // No status first: the text comes from the reset's own answer (review #4569829039).
+    expect(f.ops).toEqual(['reset']);
     expect(sent).toEqual([]);
     expect(records).toMatchObject([{ tool: 'reset', execs: 0, ok: true }]);
   });
@@ -628,7 +640,50 @@ describe('lease mode (plan 4, spec §5)', () => {
     const f = leaseFake(NO_LEASE);
     const { client } = await connect({ exec: async () => res(), lease: f.lease, mode: 'lease' });
     expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
-    expect(f.ops).toEqual(['status']);
+    expect(f.ops).toEqual(['reset']);
+  });
+
+  it("reset's text comes from its own answer, and its end is not noticed again (review #4569829039)", async () => {
+    // The lease ended between a status and the reset: the reset's answer has no reset end.
+    const raced = async (op: 'status' | 'reset') => (op === 'status' ? ACTIVE : NO_LEASE);
+    const { client: c1 } = await connect({ exec: async () => res(), lease: raced, mode: 'lease' });
+    expect(text(await call(c1, 'reset', {}))).toBe('no lease to reset');
+    // The reset's end rides the next Exec (the worker keeps it pending): said once, by reset.
+    const f = leaseFake(ACTIVE);
+    const { client } = await connect({
+      exec: async () => res({ lease: [RESET_END] }),
+      lease: f.lease,
+      mode: 'lease',
+    });
+    expect(text(await call(client, 'reset', {}))).toBe(
+      'lease ended (reset): the next command starts a new guest',
+    );
+    expect(text(await call(client, 'bash', { command: 'x' }))).toBe('ok\n');
+    expect(text(await call(client, 'sandbox_info', {}))).toContain('\nlast end: reset, 14:02\n');
+  });
+
+  it('reset answers no lease for a pending reset end it has already seen (review #4569829039)', async () => {
+    const f = leaseFake(ACTIVE);
+    const { client } = await connect({
+      exec: async () => res({ lease: [RESET_END] }),
+      lease: f.lease,
+      mode: 'lease',
+    });
+    // Another client's reset: its end already shown on this server's result.
+    expect(text(await call(client, 'bash', { command: 'x' })).split('\n')[0]).toMatch(
+      /^\[sandbox\] guest restarted \(reset, 14:02\)/,
+    );
+    expect(text(await call(client, 'reset', {}))).toBe('no lease to reset');
+    // And a reset end older than an event already seen is not this reset's either.
+    const later = ev({ state: 'start', atUnixMs: AT + 60_000 });
+    const g = leaseFake(ACTIVE);
+    const { client: c2 } = await connect({
+      exec: async () => res({ lease: [later] }),
+      lease: g.lease,
+      mode: 'lease',
+    });
+    await call(c2, 'bash', { command: 'x' });
+    expect(text(await call(c2, 'reset', {}))).toBe('no lease to reset');
   });
 
   it('a failed reset is a tool error naming the code', async () => {
@@ -664,7 +719,7 @@ describe('lease mode (plan 4, spec §5)', () => {
     });
     const ac = new AbortController();
     const p = call(client, 'reset', {}, ac.signal);
-    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
     ac.abort();
     await expect(p).rejects.toThrow();
     expect(signals.every((x) => x instanceof AbortSignal && x.aborted)).toBe(true);
@@ -766,7 +821,7 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(text(await call(client, 'reset', {}))).toBe(
       'lease ended (reset): the next command starts a new guest',
     );
-    expect(f.ops).toEqual(['status', 'reset']);
+    expect(f.ops).toEqual(['reset']);
     expect(text(await call(client, 'sandbox_info', {}))).toContain(
       '\nmode: lease\nlease: active\n',
     );
@@ -799,7 +854,7 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(text(await call(client, 'reset', {}))).toBe(
       'lease ended (reset): the next command starts a new guest',
     );
-    expect(f.ops).toEqual(['status', 'reset']);
+    expect(f.ops).toEqual(['reset']);
     expect(infos).toBe(1);
   });
 
@@ -808,7 +863,7 @@ describe('lease mode (plan 4, spec §5)', () => {
     const exec: Exec = (_c, o) =>
       new Promise((_r, reject) => {
         o?.signal?.addEventListener('abort', () => {
-          const e = new ExecMachineryError('sandbox failure: cancelled', 1, 'machinery', true);
+          const e = new ExecAbortedError(o.signal!);
           e.lease = [end];
           reject(e);
         });
@@ -840,12 +895,86 @@ describe('lease mode (plan 4, spec §5)', () => {
         ? ((first = false),
           new Promise((_r, reject) => {
             o?.signal?.addEventListener('abort', () => {
-              const e = new ExecMachineryError('sandbox failure: cancelled', 1, 'machinery', true);
+              const e = new ExecAbortedError(o.signal!);
               e.lease = [end];
               reject(e);
             });
           }))
         : Promise.resolve(res()); // the worker sent it once, on the cancelled Exec
+    const { client } = await connect({ exec });
+    const ac = new AbortController();
+    const p = call(client, 'bash', { command: 'sleep 9' }, ac.signal);
+    await sleep(10);
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    await sleep(10);
+    expect(text(await call(client, 'bash', { command: 'next' }))).toBe(`${END_IDLE}\nok\n`);
+    expect(text(await call(client, 'bash', { command: 'again' }))).toBe('ok\n');
+  });
+
+  /** A real SandboxExecConn against a fake relay answering each Exec from `answers`, in turn. */
+  const overRelay = async (...answers: FakeExecAnswer[]) => {
+    const relay = await fakeExecRelay(() => answers.shift() ?? {});
+    closers.push(async () => relay.close());
+    const conn = new SandboxExecConn({
+      addr: relay.addr,
+      tls: false,
+      sandboxId: 'sbx_default',
+      workspaceKey: 'sbx-aaaa',
+      token: async () => ({
+        token: 't',
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+        lifetimeS: 900,
+      }),
+    });
+    closers.push(async () => conn.close());
+    return { relay, exec: conn.exec };
+  };
+
+  it("a cancelled call's lease events ride the next result, over the real client (review #4569829023)", async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    // The worker sends the end on the Exec that is then cancelled, and acks it: never again.
+    const { relay, exec } = await overRelay(
+      { lease: [end], stdout: 'started', hang: true },
+      { stdout: 'ok\n' },
+      { stdout: 'ok\n' },
+    );
+    const { client } = await connect({ exec });
+    const ac = new AbortController();
+    const p = call(client, 'bash', { command: 'sleep 600' }, ac.signal);
+    await vi.waitFor(() => expect(relay.seen).toHaveLength(1));
+    await sleep(50); // the lease event and the chunk reach the client
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    await sleep(10);
+    expect(text(await call(client, 'bash', { command: 'next' }))).toBe(`${END_IDLE}\nok\n`);
+    expect(text(await call(client, 'bash', { command: 'again' }))).toBe('ok\n');
+  });
+
+  it("a refused Exec's lease events ride its error result (review #4569829028)", async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    const refused = new ExecRefusedError(
+      'token rejected (after a stale_mode refusal and a fresh token)',
+      16,
+      [end],
+    );
+    const { client } = await connect({ exec: throwing(refused) });
+    const r = await call(client, 'bash', { command: 'x' });
+    expect(r.isError).toBe(true);
+    expect(text(r).split('\n')[0]).toBe(END_IDLE);
+  });
+
+  it('a call whose run resolves after its cancel holds its events for the next result (review #4569829034)', async () => {
+    const end = ev({ state: 'end', reason: 'idle' });
+    let first = true;
+    // The Exec's answer lands just as the cancel arrives: the SDK discards the result.
+    const exec: Exec = (_c, o) =>
+      first
+        ? ((first = false),
+          new Promise((resolve) =>
+            o?.signal?.addEventListener('abort', () => resolve(res({ lease: [end] }))),
+          ))
+        : Promise.resolve(res());
     const { client } = await connect({ exec });
     const ac = new AbortController();
     const p = call(client, 'bash', { command: 'sleep 9' }, ac.signal);

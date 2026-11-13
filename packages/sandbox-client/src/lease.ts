@@ -149,19 +149,35 @@ export function noticeLines(fresh: LeaseEvent[], nowMs: number): string[] {
 }
 
 /**
- * Lease events are best-effort and may repeat (spec §5): this passes each `at_unix_ms` once, for
- * the life of the deduper. An `expiring` event is never deduped, since every result carries it
- * while the lease is expiring, and it marks nothing seen.
+ * Lease events are best-effort and may repeat (spec §5): this passes each event, by its state and
+ * `at_unix_ms`, once for the life of the deduper (the state too, so an end and the next lease's
+ * start in the same millisecond are both shown). An `expiring` event is never deduped, since every
+ * result carries it while the lease is expiring, and it marks nothing seen.
  */
 export class NoticeDedupe {
-  private readonly seen = new Set<number>();
+  private readonly seen = new Set<string>();
+  /** The newest `at_unix_ms` marked seen. */
+  private newestMs = -Infinity;
 
   take(evs: LeaseEvent[]): LeaseEvent[] {
-    return evs.filter((ev) => {
-      if (ev.state === 'expiring') return true;
-      if (this.seen.has(ev.atUnixMs)) return false;
-      this.seen.add(ev.atUnixMs);
-      return true;
-    });
+    return evs.filter((ev) => ev.state === 'expiring' || this.mark(ev));
+  }
+
+  /**
+   * Marks `ev` seen with no notice, for a caller that reports it itself (the MCP `reset`, as
+   * mocactl's P4-R17): true when `ev` was not seen yet and is newer than every event seen, so it is
+   * the caller's own; otherwise false, and nothing is marked.
+   */
+  claim(ev: LeaseEvent): boolean {
+    if (ev.state === 'expiring' || ev.atUnixMs <= this.newestMs) return false;
+    return this.mark(ev);
+  }
+
+  private mark(ev: LeaseEvent): boolean {
+    const key = `${ev.state}:${ev.atUnixMs}`;
+    if (this.seen.has(key)) return false;
+    this.seen.add(key);
+    this.newestMs = Math.max(this.newestMs, ev.atUnixMs);
+    return true;
   }
 }

@@ -21,6 +21,7 @@ import {
 } from '../src/gen/sandbox/v1/sandbox.js';
 import {
   CLIENT_CHANNEL_OPTIONS,
+  ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
   SandboxExecConn,
@@ -426,14 +427,17 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     expect(await c.exec('x')).toMatchObject({ exitCode: 0, truncated: true });
   });
 
-  it("cancels at the worker on abort, and rejects with the signal's reason", async () => {
+  it("cancels at the worker on abort, and rejects with an AbortError whose cause is the signal's reason", async () => {
     const r = await fakeRelay((call) => call.write(chunk('started')));
     const { c } = conn(r.addr);
     const ac = new AbortController();
     const p = c.exec('sleep 600', { timeoutS: 60, signal: ac.signal });
     await new Promise((res) => setTimeout(res, 50));
-    ac.abort();
-    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    const reason = new Error('stop');
+    ac.abort(reason);
+    const e = await p.catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecAbortedError);
+    expect(e).toMatchObject({ name: 'AbortError', cause: reason, lease: [] });
     await expect.poll(() => r.aborts.length).toBe(1);
     await expect.poll(() => r.cancelled).toEqual([1]);
     expect(r.aborts[0]).toEqual({
@@ -447,6 +451,7 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     const { c } = conn(r.addr);
     await expect(c.exec('x', { signal: AbortSignal.abort() })).rejects.toMatchObject({
       name: 'AbortError',
+      lease: [],
     });
     expect(r.seen).toHaveLength(0);
   });
@@ -909,6 +914,53 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       lease: [end, start],
     });
     expect(twice.seen).toHaveLength(2);
+  });
+
+  it('carries the lease events that arrived before an abort on its AbortError (review #4569829023)', async () => {
+    const r = await fakeRelay((call) => {
+      call.write({ lease: end } as ExecEvent);
+      call.write(chunk('started'));
+    });
+    const ac = new AbortController();
+    const p = conn(r.addr).c.exec('sleep 600', { timeoutS: 60, signal: ac.signal });
+    await new Promise((res) => setTimeout(res, 50));
+    ac.abort();
+    const e = await p.catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecAbortedError);
+    expect(e).toMatchObject({ name: 'AbortError', lease: [end] });
+    // An abort during the stale_mode retry carries the first attempt's events too.
+    const ac2 = new AbortController();
+    const twice = await fakeRelay((call, n) => {
+      if (n === 1) {
+        call.write({ lease: end } as ExecEvent);
+        return execError('stale_mode: x')(call, n);
+      }
+      call.write({ lease: start } as ExecEvent);
+      setTimeout(() => ac2.abort(), 20);
+    });
+    const e2 = await conn(twice.addr)
+      .c.exec('x', { signal: ac2.signal })
+      .catch((x: unknown) => x);
+    expect(e2).toBeInstanceOf(ExecAbortedError);
+    expect(e2).toMatchObject({ lease: [end, start] });
+  });
+
+  it("keeps a stale_mode refusal's lease events when the retry is refused as unauthenticated (review #4569829028)", async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1) return fail(status.UNAUTHENTICATED, 'token rejected')(call, n);
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const e = await conn(r.addr)
+      .c.exec('x')
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecRefusedError);
+    expect(e).toMatchObject({ grpcCode: status.UNAUTHENTICATED, lease: [end] });
+    expect((e as Error).message).toBe(
+      'token rejected (after a stale_mode refusal and a fresh token)',
+    );
+    expect((e as Error).message).not.toContain('token refresh');
+    expect(r.seen).toHaveLength(2);
   });
 
   it('sets Exec.keepalive from the keepalive option, false by default', async () => {

@@ -87,14 +87,34 @@ export class ExecMachineryError extends Error {
   }
 }
 
-/** The relay refused the call (token, worker, workspace) after the one permitted refresh. */
+/**
+ * The relay refused the call (token, worker, workspace) after the one permitted refresh. `lease`
+ * holds the events a first attempt refused as `stale_mode:` carried, before the retry's own
+ * refusal: the worker acked them, so they are said nowhere else (spec §5).
+ */
 export class ExecRefusedError extends Error {
   constructor(
     message: string,
     readonly grpcCode: number,
+    public lease: LeaseEvent[] = [],
   ) {
     super(message);
     this.name = 'ExecRefusedError';
+  }
+}
+
+/**
+ * The caller aborted the Exec (its `signal`): named `AbortError`, as an abort is, with the signal's
+ * reason as its `cause`. `lease` holds the events the response carried before the abort: the
+ * worker acks an event once it is queued, so a client that drops them never sees them again
+ * (spec §5).
+ */
+export class ExecAbortedError extends Error {
+  lease: LeaseEvent[] = [];
+
+  constructor(readonly signal: AbortSignal) {
+    super('the Exec was aborted', { cause: signal.reason });
+    this.name = 'AbortError';
   }
 }
 
@@ -251,10 +271,6 @@ export function caBundle(extraPem: string, source: RootSource = tls): Buffer {
   return Buffer.from([...roots, extraPem].join('\n'));
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
-}
-
 export class SandboxExecConn {
   private readonly client: SandboxExecClient;
   private readonly now: () => number;
@@ -277,7 +293,7 @@ export class SandboxExecConn {
     if (requested !== undefined && !(Number.isFinite(requested) && requested > 0)) {
       throw new RangeError(`timeoutS must be a positive number of seconds, got ${requested}`);
     }
-    if (opts.signal?.aborted) throw abortReason(opts.signal);
+    if (opts.signal?.aborted) throw new ExecAbortedError(opts.signal);
     const want = requested === undefined ? undefined : Math.ceil(requested);
     // Unique within the sandbox: the relay namespaces it per sandbox.
     let reqId = newReqId();
@@ -288,6 +304,7 @@ export class SandboxExecConn {
     };
     /** The lease events of a stale_mode refusal, which ride before the retry's own. */
     let carried: LeaseEvent[] = [];
+    let staleFirst = false;
     try {
       return await attempt(false);
     } catch (err) {
@@ -296,6 +313,7 @@ export class SandboxExecConn {
         // retry's token carries the new epoch, which the worker's req_id cache fingerprints, so
         // the same id would read there as a collision: it is a different Exec, under a new id.
         carried = err.surfaced.lease;
+        staleFirst = true;
         reqId = newReqId();
       } else if (!(err instanceof NotStarted)) throw err;
     }
@@ -307,13 +325,16 @@ export class SandboxExecConn {
       return carried.length > 0 ? { ...r, lease: [...carried, ...r.lease] } : r;
     } catch (err) {
       if (err instanceof NotStarted) {
-        throw new ExecRefusedError(
-          `${err.message} (after one token refresh)`,
-          status.UNAUTHENTICATED,
-        );
+        // The retry after a stale_mode refusal was a re-mint for the new epoch, not a refresh.
+        const after = staleFirst
+          ? 'after a stale_mode refusal and a fresh token'
+          : 'after one token refresh';
+        throw new ExecRefusedError(`${err.message} (${after})`, status.UNAUTHENTICATED, carried);
       }
       const e = err instanceof StaleMode ? err.surfaced : err;
-      if (e instanceof ExecMachineryError) e.lease = [...carried, ...e.lease];
+      if (e instanceof ExecMachineryError || e instanceof ExecAbortedError) {
+        e.lease = [...carried, ...e.lease];
+      }
       throw e;
     }
   };
@@ -501,7 +522,7 @@ export class SandboxExecConn {
     token: string,
   ): Promise<ExecResult> {
     const signal = opts.signal;
-    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    if (signal?.aborted) return Promise.reject(new ExecAbortedError(signal));
     const md = new Metadata();
     md.set('authorization', `Bearer ${token}`);
     const backstopS = timeoutS + (this.o.backstopMarginS ?? BACKSTOP_MARGIN_S);
@@ -551,7 +572,7 @@ export class SandboxExecConn {
       });
       /** Rejects with `e`, carrying the lease events that arrived before the failure. */
       const fail = (e: Error) => {
-        if (e instanceof ExecMachineryError) e.lease = lease;
+        if (e instanceof ExecMachineryError || e instanceof ExecAbortedError) e.lease = lease;
         else if (e instanceof StaleMode) e.surfaced.lease = lease;
         reject(e);
       };
@@ -565,7 +586,8 @@ export class SandboxExecConn {
           () => {},
         );
         call.cancel();
-        reject(abortReason(signal!));
+        // The events that arrived before the abort ride the rejection (review #4569829023).
+        fail(new ExecAbortedError(signal!));
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       const done = () => signal?.removeEventListener('abort', onAbort);

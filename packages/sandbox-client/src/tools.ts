@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import type { Exec, ExecResult } from './exec-conn.js';
+import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 import { LeaseControlError, type LeaseStatusView, type SandboxModeName } from './lease.js';
 import { PI_SCHEMAS } from './schemas.js';
 
@@ -250,6 +251,11 @@ export function sandboxTools(o: {
   lease?: LeaseCall;
   /** The mode `reset` acts on, asked at each call (default `mode`): it may change mid-session. */
   currentMode?: () => Promise<SandboxModeName>;
+  /**
+   * Whether the pending event a reset answered with is the end this reset made (default: an end
+   * with reason `reset`). The MCP server also marks it seen, so the next result does not repeat it.
+   */
+  resetEnded?: (pending: LeaseEvent | undefined) => boolean;
 }): SandboxTool[] {
   const ws = o.workspace ?? WORKSPACE;
   const leased = (o.mode ?? 'per-exec') !== 'per-exec'; // the texts' mode
@@ -666,6 +672,8 @@ export function sandboxTools(o: {
     (async () => {
       throw new LeaseControlError('unavailable', 'this client has no lease calls');
     });
+  const resetEnded =
+    o.resetEnded ?? ((p: LeaseEvent | undefined) => p?.state === 'end' && p.reason === 'reset');
   const reset: SandboxTool = {
     name: 'reset',
     description:
@@ -677,12 +685,12 @@ export function sandboxTools(o: {
       // A per-exec sandbox has no lease (and its worker may have no lease calls): nothing to ask.
       const m = o.currentMode ? await o.currentMode() : (o.mode ?? 'per-exec');
       if (m === 'per-exec') return ok(RESET_NONE_TEXT);
-      // Only a live lease has a guest to end; asking first keeps a reset of nothing a no-op.
-      if ((await lease('status', { signal })).state === 'none') return ok(RESET_NONE_TEXT);
       // The worker holds a reset behind another client's running Exec: a cancelled call stops
-      // waiting, so it does not hold the MCP server's call queue past its cancel.
-      await lease('reset', { signal });
-      return ok(RESET_ENDED_TEXT);
+      // waiting, so it does not hold the MCP server's call queue past its cancel. A reset of no
+      // lease is a no-op there, so no status is asked first: the text comes from the reset's own
+      // answer, the end it left pending, with no check-then-act between two calls.
+      const after = await lease('reset', { signal });
+      return ok(resetEnded(after.pending) ? RESET_ENDED_TEXT : RESET_NONE_TEXT);
     },
   };
 

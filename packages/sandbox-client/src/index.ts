@@ -1,5 +1,6 @@
 export {
   CLIENT_CHANNEL_OPTIONS,
+  ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
   SandboxExecConn,
