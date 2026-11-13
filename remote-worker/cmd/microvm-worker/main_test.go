@@ -736,3 +736,47 @@ func TestDiagStatsLeaseFieldsOnlyWhenLeasesExist(t *testing.T) {
 		t.Fatalf("lease /stats = %+v, want 2, 1, %d, idle 3", got, 384<<20)
 	}
 }
+
+// TestSettleSweepWaitsForHeldJailsBeforeTheProbe pins #797's wait between the orphan sweep and
+// Probe: after a sweep that removed anything, the worker asks whether any jail's API socket is
+// still held, with sweptJailWait as the bound, and goes on only when none is.
+func TestSettleSweepWaitsForHeldJailsBeforeTheProbe(t *testing.T) {
+	var asked []time.Duration
+	free := func(d time.Duration) []string { asked = append(asked, d); return nil }
+	if err := settleSweep(vmpool.SweepResult{Swept: 1}, free); err != nil {
+		t.Fatalf("settleSweep: %v", err)
+	}
+	if len(asked) != 1 || asked[0] != sweptJailWait {
+		t.Fatalf("held jails asked with %v, want once with sweptJailWait (%s)", asked, sweptJailWait)
+	}
+
+	// A sweep that removed nothing killed nothing, so there is nothing to wait for.
+	asked = nil
+	if err := settleSweep(vmpool.SweepResult{Skipped: []string{"microvm-worker.service"}}, free); err != nil {
+		t.Fatalf("settleSweep after an empty sweep: %v", err)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("held jails asked %d time(s) after a sweep that removed nothing", len(asked))
+	}
+}
+
+// TestSettleSweepFailsTheStartNamingWhatIsStillHeld: a VMM still answering when the wait ends,
+// or a cgroup whose process outlived the sweep's SIGKILL, fails the start with a line naming it,
+// rather than letting Probe collide with it.
+func TestSettleSweepFailsTheStartNamingWhatIsStillHeld(t *testing.T) {
+	held := func(time.Duration) []string { return []string{"vm-1"} }
+	err := settleSweep(vmpool.SweepResult{Swept: 1}, held)
+	if err == nil || !strings.Contains(err.Error(), "vm-1") {
+		t.Fatalf("settleSweep with vm-1 still held = %v, want an error naming vm-1", err)
+	}
+
+	asked := false
+	err = settleSweep(vmpool.SweepResult{Swept: 1, Stuck: []string{"pool-0"}},
+		func(time.Duration) []string { asked = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "pool-0") {
+		t.Fatalf("settleSweep with pool-0 stuck = %v, want an error naming pool-0", err)
+	}
+	if asked {
+		t.Fatal("settleSweep waited on jails after a stuck cgroup, which already fails the start")
+	}
+}
