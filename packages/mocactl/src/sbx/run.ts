@@ -1,10 +1,24 @@
 import { posix } from 'node:path';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { TOKEN_MARGIN_S, WORKSPACE, writeFileCommand } from '@moca/sandbox-client';
+import {
+  execFailureText,
+  TOKEN_MARGIN_S,
+  type Exec,
+  type ExecResult,
+  WORKSPACE,
+  writeFileCommand,
+} from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io } from '../headless.js';
 import { SBX_EXIT, type SbxCtx } from './commands.js';
-import { EXIT_KILLED, execFailed, openExec, type ExecFactory } from './exec.js';
+import {
+  EXIT_BUSY,
+  EXIT_KILLED,
+  execFailed,
+  openExec,
+  refusedBeforeStart,
+  type ExecFactory,
+} from './exec.js';
 import { serveSbxMcp, stdioTransport } from './mcp.js';
 
 /** `put`'s timeout: a write of at most 14 MiB, well inside any token's life (no extra mint). */
@@ -24,6 +38,11 @@ export function parseTimeout(io: Io, raw: string | undefined): number | undefine
   return n;
 }
 
+/** A refusal's reason in one line, for the retry note: the client's own text, sanitized. */
+function sandboxReason(err: unknown): string {
+  return sanitizeRemote(execFailureText(err, { audience: 'cli' }) ?? String(err));
+}
+
 /** The command's own output, byte for byte: never decoded, never given a newline. */
 function passThrough(io: Io, stdout: Buffer, stderr: Buffer): void {
   if (stdout.length) {
@@ -36,11 +55,94 @@ function passThrough(io: Io, stdout: Buffer, stderr: Buffer): void {
   }
 }
 
+/** How many times `sbx run` sends a command the sandbox refused before starting it. */
+export const DEFAULT_BUSY_RETRIES = 4;
+/** The waits between those tries: 1, 2, 4, 8 s (under 30 s in all with the jitter), then 8 s each. */
+const BUSY_BACKOFF_MS = [1000, 2000, 4000, 8000];
+
+/**
+ * MOCACTL_SBX_BUSY_RETRIES: a whole number of retries, 0 for none; anything else is the default.
+ */
+export function busyRetries(env: NodeJS.ProcessEnv): number {
+  const raw = env.MOCACTL_SBX_BUSY_RETRIES?.trim();
+  if (raw === undefined || raw === '' || !/^\d+$/.test(raw)) return DEFAULT_BUSY_RETRIES;
+  return Math.min(Number(raw), 20);
+}
+
+export interface RunRetry {
+  /** Retries after a refusal before start (`refusedBeforeStart`); 0 for none. */
+  retries: number;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** 0 to 1, for the jitter; tests fix it. */
+  random?: () => number;
+}
+
+/**
+ * One Exec, sent again after a refusal before start (`refusedBeforeStart`) up to `retry.retries`
+ * times, with a note per retry: the command runs at most once. Returns the result, or the exit to
+ * stop with: `EXIT_BUSY` when every try was refused, 130 when interrupted while waiting. Any other
+ * failure is thrown, for the caller's `execFailed`.
+ */
+async function execRetrying(
+  c: SbxCtx,
+  x: { exec: Exec },
+  command: string,
+  opts: Parameters<Exec>[1],
+  retry: RunRetry,
+  capS?: number,
+): Promise<ExecResult | number> {
+  // The backoff sleeps spend the sandbox token's lifetime: each retry's timeout is re-capped to
+  // what the token has left (capS, its lifetime minus the margin, less the time waited so far).
+  let waitedMs = 0;
+  for (let attempt = 0; ; attempt++) {
+    let attemptOpts = opts;
+    if (capS !== undefined && waitedMs > 0) {
+      const leftS = capS - Math.ceil(waitedMs / 1000);
+      if (leftS <= 0) {
+        c.io.err(
+          `sbx: the sandbox token has too little time left to send the command again; nothing ran (exit ${EXIT_BUSY})`,
+        );
+        return EXIT_BUSY;
+      }
+      if (opts?.timeoutS === undefined || opts.timeoutS > leftS)
+        attemptOpts = { ...opts, timeoutS: leftS };
+    }
+    try {
+      return await x.exec(command, attemptOpts);
+    } catch (err) {
+      if (!refusedBeforeStart(err) || c.signal?.aborted) throw err;
+      if (attempt >= retry.retries) {
+        execFailed(c, err);
+        c.io.err(
+          `sbx: the sandbox refused the command ${attempt + 1} time${attempt ? 's' : ''} before starting it; nothing ran (exit ${EXIT_BUSY})`,
+        );
+        return EXIT_BUSY;
+      }
+      const base = BUSY_BACKOFF_MS[Math.min(attempt, BUSY_BACKOFF_MS.length - 1)]!;
+      const waitMs = Math.round(base * (0.75 + 0.5 * (retry.random ?? Math.random)()));
+      c.io.err(
+        `sbx: ${sandboxReason(err)}; nothing ran; retrying in ${(waitMs / 1000).toFixed(1)}s (${attempt + 1}/${retry.retries})`,
+      );
+      await retry.sleep(waitMs, c.signal);
+      waitedMs += waitMs;
+      if (c.signal?.aborted) return 130;
+    }
+  }
+}
+
 /**
  * `mocactl sbx run` (SBX0 §6.1): one Exec, never retried once started. Exits with the command's
  * code; 124 when it timed out (`ExecError{"timeout:<n>"}`) or was killed; 125 when the sandbox
  * failed (`execFailed`). The timeout defaults to, and is capped at, the sandbox token's lifetime
  * minus 60 s (§6.5); a larger `--timeout` is clamped with a note.
+ *
+ * A command the sandbox refused BEFORE starting it, for want of capacity (the relay's in-flight
+ * cap, or the template worker's `memory-budget:`, `max-runs:`, `busy: queue full`),
+ * is sent again after a backoff with jitter, up to `retry.retries` times (MOCACTL_SBX_BUSY_RETRIES,
+ * default 4), with a note each time. Nothing ran, so the command still runs at most once. Refused
+ * every time: exit 75 (`EXIT_BUSY`). Interrupted while waiting: 130. The waits count against the
+ * sandbox token's lifetime: each retry's timeout is re-capped to what the token has left, and with
+ * nothing left the command is not sent again (exit 75).
  */
 export async function cmdRun(
   c: SbxCtx,
@@ -48,6 +150,7 @@ export async function cmdRun(
   command: string,
   timeout: number | undefined,
   factory?: ExecFactory,
+  retry: RunRetry = { retries: 0, sleep: async () => {} },
 ): Promise<number> {
   let x;
   try {
@@ -67,10 +170,15 @@ export async function cmdRun(
       );
       timeoutS = cap;
     }
-    const r = await x.exec(command, {
-      ...(timeoutS !== undefined ? { timeoutS } : {}),
-      signal: c.signal,
-    });
+    const r = await execRetrying(
+      c,
+      x,
+      command,
+      { ...(timeoutS !== undefined ? { timeoutS } : {}), signal: c.signal },
+      retry,
+      cap,
+    );
+    if (typeof r === 'number') return r;
     passThrough(c.io, r.stdout, r.stderr);
     // mocactl's own notes start on a line of their own, after the command's stderr.
     const notes = r.truncated || r.capped || r.timedOutS !== undefined || r.exitCode < 0;
@@ -106,7 +214,11 @@ export function workspacePath(path: string): string | undefined {
   return p.startsWith(`${WORKSPACE}/`) ? p : undefined;
 }
 
-/** `mocactl sbx put PATH` (SBX0 §6.1): stdin, byte for byte, written atomically (`writeFileCommand`). */
+/**
+ * `mocactl sbx put PATH` (SBX0 §6.1): stdin, byte for byte, written atomically (`writeFileCommand`).
+ * A refusal before start is retried as `run`'s (the write is atomic and did not start), and exits 75
+ * when every try was refused.
+ */
 export async function cmdPut(
   c: SbxCtx,
   id: string,
@@ -114,6 +226,7 @@ export async function cmdPut(
   target: string,
   content: Buffer,
   factory?: ExecFactory,
+  retry: RunRetry = { retries: 0, sleep: async () => {} },
 ): Promise<number> {
   let x;
   try {
@@ -122,11 +235,15 @@ export async function cmdPut(
     return execFailed(c, err);
   }
   try {
-    const r = await x.exec(writeFileCommand(target), {
-      stdin: content,
-      timeoutS: PUT_TIMEOUT_S,
-      signal: c.signal,
-    });
+    const r = await execRetrying(
+      c,
+      x,
+      writeFileCommand(target),
+      { stdin: content, timeoutS: PUT_TIMEOUT_S, signal: c.signal },
+      retry,
+      x.lifetimeS - TOKEN_MARGIN_S > 0 ? x.lifetimeS - TOKEN_MARGIN_S : undefined,
+    );
+    if (typeof r === 'number') return r;
     if (r.exitCode !== 0) {
       c.io.err(
         `sbx: put failed: ${sanitizeRemote(r.stderr.toString().trim()) || `exit ${r.exitCode}`}`,

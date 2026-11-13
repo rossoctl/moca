@@ -25,3 +25,8 @@ func killPidIgnoringAbsent(pid int) error {
 // killPidIgnoringAbsent, which refuses outright on this platform — nothing can be
 // signalled for the check to have failed to protect.
 func pidSharesCallersProcessGroup(pid int) bool { return false }
+
+// pidStillRunning has no Windows implementation for the same reason killPidIgnoringAbsent
+// does not. Returning false is safe: the sweep that asks it has already failed on this
+// platform at killPidIgnoringAbsent before it reaches the wait.
+func pidStillRunning(pid int) bool { return false }

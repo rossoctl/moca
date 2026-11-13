@@ -105,6 +105,26 @@ type Spec struct {
 	// Dir is the directory the child starts in; empty means the worker's own. Never on the
 	// wire: WorkspaceRunner derives it from a validated WorkspaceKey (#408).
 	Dir string
+	// The lease fields, from Exec.mode, mode_epoch, idle_timeout_s and keepalive. The relay
+	// sets the first three from the caller's verified token. Mode is "" for per-exec (proto
+	// UNSPECIFIED or PER_EXEC), else "lease" or "lease+processes" (vmpool's Mode.String());
+	// a proto value the session does not know arrives as "unknown(<n>)", so a runner refuses
+	// it rather than reading it as per-exec. BashRunner ignores all four; vmpool.Runner
+	// forwards them to the pool.
+	Mode         string
+	ModeEpoch    uint64
+	IdleTimeoutS uint32
+	Keepalive    bool
+}
+
+// LeaseSink is the optional extension of Sink a lease-mode runner uses to report a lease
+// state change on the Exec's response. The session's per-Exec sink implements it, stamping
+// the Exec's req_id on the event; a runner type-asserts for it. Lease returns nil only once
+// the event is queued on the connection, so a runner acknowledges an event (vmpool's
+// AckLeaseEvent) only when it returned nil. Called from inside Run, never after it returns,
+// and never concurrently with Chunk.
+type LeaseSink interface {
+	Lease(ev *pb.LeaseEvent) error
 }
 
 // Sink receives output as it is produced. data is owned by the callee. Chunk is

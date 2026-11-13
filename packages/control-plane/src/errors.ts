@@ -40,6 +40,7 @@ export const CP_ERROR_CODES = [
   'template_retired',
   'build_in_use',
   'quota_changed',
+  'mode_not_allowed',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -117,6 +118,9 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: a quota write's `expect` is not the target's quota now (§5.2): another admin changed it
   // since the client read it, and nothing was written. Read again, then write.
   quota_changed: 409,
+  // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
+  // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
+  mode_not_allowed: 403,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.
