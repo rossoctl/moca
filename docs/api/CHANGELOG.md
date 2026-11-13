@@ -19,11 +19,13 @@ Every change is additive; the new routes mount on both route profiles and need `
   is moved, never removed (`400 invalid_request`); a tag name outside the tag grammar is `400 invalid_request`
   too. A `tag` record with `buildId: null`.
 - New PATCH /v1/templates/{id} `{description?, visibility?}` (the owner, or an admin): a `visibility` record
-  (`{field, value, before}`) per field that changes.
+  (`{field, value, before}`) per field that changes. A description holding a lone surrogate is `400 invalid_request`.
 - New PUT /v1/templates/{id}/owner `{owner}` (an admin): the new owner, `github:<numeric id>` or `oidc:<provider sub>`
   (never `test:<n>`), must be enrolled. A template the deployment declared (`owner: null`) can be handed to a subject
   the same way (`before: null`), who can then build, tag and edit it; a restart does not undo it. An `owner` record
   (`{owner, before}`).
+- Every template change (a tag moved or removed, an edit, an owner transfer, a cancelled build) is stored only once its
+  records are on the chain: a record that fails to append refuses the change.
 
 ## 1.5.0
 

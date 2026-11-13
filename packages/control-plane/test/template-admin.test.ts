@@ -311,6 +311,63 @@ describe('edit description and visibility (§5.1)', () => {
   });
 });
 
+describe('every change is a record (§7.1)', () => {
+  it('refuses a description holding a lone surrogate, before anything is written', async () => {
+    const d = stored();
+    await registered(d);
+    const before = (await d.templates!.get(ID))!;
+    // JSON.parse('"\\ud800"') holds one: a body can carry it, a provenance record cannot.
+    const lone = JSON.parse('"half \\ud800 a pair"') as string;
+    expect(await codeOf(() => patch(d, { description: lone }))).toBe('invalid_request');
+    expect(await codeOf(() => patch(d, { visibility: 'private', description: lone }))).toBe(
+      'invalid_request',
+    );
+    expect(await d.templates!.get(ID)).toEqual(before);
+    expect((await chain(d)).some((x) => x.kind === 'visibility')).toBe(false);
+    // A whole pair (an emoji) is a string as any other.
+    expect((await patch(d, { description: 'ok \u{1f600}' })).status).toBe(200);
+  });
+
+  it('writes no change whose record fails to append', async () => {
+    const d = stored();
+    await registered(d, 2);
+    await HANDLERS.createTemplateBuild!(
+      ctx({
+        principal: alice,
+        params: { id: ID },
+        body: createBody({ spec: { ...spec, description: 'queued' } }),
+      }),
+      d,
+    );
+    const queued = (await d.templates!.get(ID))!.builds[0]!.handle!;
+    await move(d, { tags: ['stable'], build: hash('1') });
+    const doc = await d.templates!.get(ID);
+    const n = (await chain(d)).length;
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    prov.append = () => Promise.reject(new Error('the chain is not writable'));
+    const changes: [string, () => Promise<unknown>][] = [
+      ['move', () => move(d, { tags: ['default', 'v2'], build: hash('2') })],
+      ['untag', () => untag(d, 'stable')],
+      ['edit', () => patch(d, { visibility: 'private', description: 'new' })],
+      ['transfer', () => transfer(d, ID, bob.sub)],
+      [
+        'cancel',
+        () =>
+          HANDLERS.cancelTemplateBuild!(
+            ctx({ principal: alice, params: { id: ID, build: queued } }),
+            d,
+          ),
+      ],
+    ];
+    for (const [what, run] of changes)
+      await expect(run(), what).rejects.toThrow('the chain is not writable');
+    prov.append = append;
+    expect(await d.templates!.get(ID)).toEqual(doc);
+    expect((await chain(d)).length).toBe(n);
+  });
+});
+
 describe('owner transfer (§5.2)', () => {
   it('an admin moves a template to another enrolled subject, who then owns its actions', async () => {
     const d = stored();

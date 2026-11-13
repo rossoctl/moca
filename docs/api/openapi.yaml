@@ -1828,7 +1828,10 @@ paths:
               minProperties: 1
               properties:
                 visibility: { type: string, enum: [private, deployment] }
-                description: { type: string, maxLength: 1024 }
+                description:
+                  type: string
+                  maxLength: 1024
+                  description: no lone surrogate (a provenance record cannot hold one)
       responses:
         '200':
           description: changed (or already so)
@@ -1853,7 +1856,7 @@ paths:
                         before: { type: string }
                         record: { type: string, description: the visibility record written }
         '400':
-          description: '`invalid_request`: no field, a bad value, or this deployment stores no templates'
+          description: '`invalid_request`: no field, a bad value (a description holding a lone surrogate is one), or this deployment stores no templates'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

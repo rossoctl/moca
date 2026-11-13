@@ -7,7 +7,13 @@ import {
   seconds,
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
+import {
+  canonicalJson,
+  LONE_SURROGATE_RE,
+  sha256Hex,
+  type AppendInput,
+  type ProvenanceStore,
+} from './provenance.js';
 import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 import { isEnrolled, type SandboxConfig } from './sandbox-config.js';
 import {
@@ -688,6 +694,20 @@ function buildSpec(spec: Record<string, unknown>): TemplateBuild['spec'] {
   };
 }
 
+/**
+ * A change's records (§7.1), appended inside the catalog's write, as create does: the write
+ * happens only after they are on the chain, so a change is never stored without its record. Every
+ * body is checked as canonical JSON before the first append, so a body the chain refuses refuses
+ * the change and writes nothing. A failed write after the appends leaves records of a change not
+ * stored, which a reader sees against the catalog; never the reverse. Returns their digests.
+ */
+async function appendRecords(prov: ProvenanceStore, inputs: AppendInput[]): Promise<string[]> {
+  for (const x of inputs) canonicalJson(x.body);
+  const digests: string[] = [];
+  for (const x of inputs) digests.push((await prov.append(x)).digest);
+  return digests;
+}
+
 /** The statuses an owner may cancel (§5.1): not yet built. */
 const CANCELLABLE = new Set<TemplateBuild['status']>(['queued', 'building', 'probing']);
 
@@ -717,13 +737,15 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
       status: 'failed',
       reason: { message: `cancelled by ${p.sub}`, step: 'cancelled' },
     };
+    await appendRecords(prov, [
+      {
+        stream: `template/${d0.id}`,
+        kind: 'build',
+        subject: p.sub,
+        body: { handle: cancelled.handle ?? cancelled.buildId, outcome: 'cancelled' },
+      },
+    ]);
     return { ...cur!, builds: cur!.builds.map((y) => (y === x ? cancelled! : y)) };
-  });
-  await prov.append({
-    stream: `template/${d0.id}`,
-    kind: 'build',
-    subject: p.sub,
-    body: { handle: cancelled!.handle ?? cancelled!.buildId, outcome: 'cancelled' },
   });
   await auditBestEffort(deps, 'template_build_cancelled', d0.id, {
     subject: p.sub,
@@ -771,9 +793,11 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
   const ref = typeof b.build === 'string' ? b.build : '';
   const nowS = seconds(deps);
   let buildId = '';
-  const moved: { tag: string; from: string | null }[] = [];
+  let moved: { tag: string; from: string | null }[] = [];
+  const records: Record<string, string> = {};
   // The build is checked under the template's write lock, so it is still registered when tagged.
   await cat.update(d0.id, async (cur) => {
+    moved = [];
     const target = cur!.builds.find((x) => x.buildId === ref || x.handle === ref);
     if (!target) throw new CpError('template_not_found', 'no such build of this template');
     if (target.status !== 'registered')
@@ -792,18 +816,18 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
       next[t] = buildId;
       meta[t] = { at: nowS, by: p.sub };
     }
+    const digests = await appendRecords(
+      prov,
+      moved.map((m) => ({
+        stream: `template/${d0.id}`,
+        kind: 'tag' as const,
+        subject: p.sub,
+        body: { tag: m.tag, buildId, before: m.from },
+      })),
+    );
+    moved.forEach((m, i) => (records[m.tag] = digests[i]!));
     return { ...cur!, tags: next, tagsMeta: meta };
   });
-  const records: Record<string, string> = {};
-  for (const m of moved) {
-    const rec = await prov.append({
-      stream: `template/${d0.id}`,
-      kind: 'tag',
-      subject: p.sub,
-      body: { tag: m.tag, buildId, before: m.from },
-    });
-    records[m.tag] = rec.digest;
-  }
   if (moved.length > 0)
     await auditBestEffort(deps, 'template_tags_moved', d0.id, {
       subject: p.sub,
@@ -839,6 +863,7 @@ async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
       'the default tag is moved (POST …/tags), never removed: the bare id must resolve',
     );
   let before = '';
+  let record = '';
   await cat.update(d0.id, async (cur) => {
     const b = Object.hasOwn(cur!.tags, tag) ? cur!.tags[tag] : undefined;
     if (b === undefined)
@@ -848,13 +873,15 @@ async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
     const meta = { ...(cur!.tagsMeta ?? {}) };
     delete next[tag];
     delete meta[tag];
+    [record] = await appendRecords(prov, [
+      {
+        stream: `template/${d0.id}`,
+        kind: 'tag',
+        subject: p.sub,
+        body: { tag, buildId: null, before },
+      },
+    ]);
     return { ...cur!, tags: next, tagsMeta: meta };
-  });
-  const rec = await prov.append({
-    stream: `template/${d0.id}`,
-    kind: 'tag',
-    subject: p.sub,
-    body: { tag, buildId: null, before },
   });
   await auditBestEffort(deps, 'template_tag_removed', d0.id, {
     subject: p.sub,
@@ -862,7 +889,7 @@ async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
   });
   return {
     status: 200,
-    body: { templateId: d0.id, subject: p.sub, tag, buildId: null, before, record: rec.digest },
+    body: { templateId: d0.id, subject: p.sub, tag, buildId: null, before, record },
   };
 }
 
@@ -886,31 +913,35 @@ async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
     (typeof b.description !== 'string' || b.description.length > 1024)
   )
     throw new CpError('invalid_request', 'description must be a string of at most 1024 characters');
+  // A JSON body can carry a lone surrogate (`"\ud800"`), which a provenance record cannot hold.
+  if (typeof b.description === 'string' && LONE_SURROGATE_RE.test(b.description))
+    throw new CpError('invalid_request', 'description must not hold a lone surrogate');
   const visibility = b.visibility as 'private' | 'deployment' | undefined;
   const description = b.description as string | undefined;
   let changes: TemplateEdit[] = [];
+  const records: Record<string, string> = {};
   const after = await cat.update(d0.id, async (cur) => {
     changes = [];
     if (visibility !== undefined && visibility !== cur!.visibility)
       changes.push({ field: 'visibility', value: visibility, before: cur!.visibility });
     if (description !== undefined && description !== cur!.description)
       changes.push({ field: 'description', value: description, before: cur!.description });
+    const digests = await appendRecords(
+      prov,
+      changes.map((c) => ({
+        stream: `template/${d0.id}`,
+        kind: 'visibility' as const,
+        subject: p.sub,
+        body: { field: c.field, value: c.value, before: c.before },
+      })),
+    );
+    changes.forEach((c, i) => (records[c.field] = digests[i]!));
     return {
       ...cur!,
       ...(visibility !== undefined ? { visibility } : {}),
       ...(description !== undefined ? { description } : {}),
     };
   });
-  const records: Record<string, string> = {};
-  for (const c of changes) {
-    const rec = await prov.append({
-      stream: `template/${d0.id}`,
-      kind: 'visibility',
-      subject: p.sub,
-      body: { field: c.field, value: c.value, before: c.before },
-    });
-    records[c.field] = rec.digest;
-  }
   if (changes.length > 0)
     await auditBestEffort(deps, 'template_updated', d0.id, {
       subject: p.sub,
@@ -955,20 +986,16 @@ async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
       `${owner} is not enrolled: add them to SH_ALLOWED_SUBJECTS first`,
     );
   let before = null as string | null;
+  let record: string | null = null;
   await cat.update(d0.id, async (cur) => {
     before = cur!.owner;
-    return before === owner ? cur! : { ...cur!, owner };
+    if (before === owner) return cur!;
+    [record] = await appendRecords(prov, [
+      { stream: `template/${d0.id}`, kind: 'owner', subject: p.sub, body: { owner, before } },
+    ]);
+    return { ...cur!, owner };
   });
-  let record: string | null = null;
   if (owner !== before) {
-    record = (
-      await prov.append({
-        stream: `template/${d0.id}`,
-        kind: 'owner',
-        subject: p.sub,
-        body: { owner, before },
-      })
-    ).digest;
     await auditBestEffort(deps, 'template_owner_transferred', d0.id, {
       subject: p.sub,
       decision: 'template_owner_transferred',
