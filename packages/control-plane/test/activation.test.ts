@@ -64,15 +64,15 @@ async function registered(
   h: string,
   worker: string,
   principal = alice,
-  another?: { vcpus: number },
+  opts: { another?: boolean; vcpus?: number; sourceDigest?: string; status?: string } = {},
 ): Promise<void> {
-  if (another)
+  if (opts.another)
     // Another build of an existing template, from the same image with another spec.
     await HANDLERS.createTemplateBuild!(
       ctx({
         principal,
         params: { id },
-        body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: another.vcpus }, profile: 'base' },
+        body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: opts.vcpus ?? 2 }, profile: 'base' },
       }),
       d,
     );
@@ -103,15 +103,15 @@ async function registered(
             hash_version: 2,
             hash: h,
             guest_ram_mb: 4096,
-            vcpus: another?.vcpus ?? 2,
-            source_image_digest: DIGEST,
+            vcpus: opts.vcpus ?? 2,
+            source_image_digest: opts.sourceDigest ?? DIGEST,
           }),
         },
       ),
       d,
     )
   ).body as Body;
-  expect(r.status).toBe('registered');
+  expect(r.status).toBe(opts.status ?? 'registered');
 }
 const inventory = (d: TestDeps, host: string, holds: Record<string, string>, activeLimit: number) =>
   HANDLERS.hostInventory!(
@@ -854,7 +854,7 @@ describe('retire (§5.1)', () => {
     attachedNow = ['sbx_t1'];
     // Two builds of t1 from one image, other specs: template-build.sh names both workers alike.
     await registered(d, 't1', hash('1'), 'sbx_t1');
-    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { vcpus: 4 });
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
     await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
     await activate(d, 't1', alice, { build: hash('2') });
     const sb = (await sandbox(d, `t1@${hash('2')}`)).body as Body;
@@ -868,7 +868,7 @@ describe('retire (§5.1)', () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
     await registered(d, 't1', hash('1'), 'sbx_t1');
-    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { vcpus: 4 });
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { another: true, vcpus: 4 });
     // A record from before builds were traced: no buildId, so its worker's every build is in use.
     const nowS = Math.floor(now / 1000);
     await d.sandboxes!.create(
@@ -918,6 +918,34 @@ describe('retire (§5.1)', () => {
     // The registered build is untouched, and still serves.
     const doc = (await d.templates!.get('t1'))!;
     expect(doc.builds.find((x) => x.buildId === hash('1'))!.status).toBe('registered');
+  });
+
+  it('cites the build record of a build built and then rejected', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // Built, then rejected at registration: its rootfs is not from the create's image.
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, {
+      another: true,
+      vcpus: 4,
+      sourceDigest: hash('f'),
+      status: 'rejected',
+    });
+    const x = (await d.templates!.get('t1'))!.builds.find((b) => b.status === 'rejected')!;
+    // A rejected build keeps its handle as its id; its build record names that handle.
+    expect(x.buildId).toBe(x.handle);
+    const chain = await d.provenance!.chain('template/t1');
+    const built = chain.find(
+      (r) =>
+        r.kind === 'build' &&
+        (r.body as Body).outcome === 'built' &&
+        (r.body as Body).handle === x.handle,
+    )!;
+    await retireBuild(d, 't1', x.handle!);
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'retire',
+      body: { build: x.handle, buildRecord: recordDigestOf(built), from: 'rejected' },
+    });
   });
 
   it("refuses another subject and a bad reason; an admin may retire anyone's", async () => {

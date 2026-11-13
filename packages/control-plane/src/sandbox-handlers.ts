@@ -1122,7 +1122,7 @@ async function retireBuilds(
       body: {
         build: x.handle ?? x.buildId,
         ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
-        buildRecord: await buildRecordOf(prov, d0.id, x.buildId),
+        buildRecord: await buildRecordOf(prov, d0.id, x),
         from: x.status,
         ...(typeof reason === 'string' ? { reason } : {}),
       },
