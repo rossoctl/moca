@@ -800,10 +800,20 @@ func WaitForHeldJails(lc Launcher, timeout time.Duration) []string {
 	if !ok {
 		return nil
 	}
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
+	var first []string
 	for {
 		held := jh.heldJails()
+		if first == nil && len(held) > 0 {
+			first = held
+		}
 		if len(held) == 0 || !time.Now().Before(deadline) {
+			// Only a wait that actually waited is logged, so a future occurrence shows in the journal.
+			if first != nil {
+				log.Printf("vmpool: waited %s for VM id(s) %v to release their API sockets; still held: %v",
+					time.Since(start).Round(time.Millisecond), first, held)
+			}
 			return held
 		}
 		time.Sleep(heldJailPoll)
