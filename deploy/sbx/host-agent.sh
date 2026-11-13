@@ -426,7 +426,7 @@ activation() {
     fi
     systemctl is-active --quiet "$unit" && continue
     # A build whose memory file does not match its guest size (memory_report) is never started here,
-    # whatever the control plane asks (one older than openapi 1.9.0 does not read memfileMismatch).
+    # whatever the control plane asks (one older than openapi 1.10.0 does not read memfileMismatch).
     if [[ -s "$WORK/memfile-mismatch" ]] && grep -qxF -- "$b" "$WORK/memfile-mismatch"; then
       worker_report "$b" refused 'memfile mismatch: its memory file is not guest_ram_mb x 1 MiB on this host'
       say "{\"agent\":\"refused\",\"worker\":\"$w\",\"why\":\"memfile mismatch\"}"

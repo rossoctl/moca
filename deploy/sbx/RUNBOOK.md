@@ -880,7 +880,7 @@ pending)`, `used` being its running workers' cost, their VMs' committed memory a
   set the floor at or above lease mode's reclaim target.
 - **Version skew, both ways:** an agent older than memory-aware placement sends no `memory`, and
   the control plane places that host by `SBX_ACTIVE_LIMIT` alone, as before. A control plane older
-  than it (openapi 1.9.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
+  than it (openapi 1.10.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
   refuses to start a build whose memory file does not match. Upgrade either first; list both in the
   rollout.
 
