@@ -496,6 +496,11 @@ export const HOST_REFUSAL_MESSAGE =
  * An error's text as a client may read it in a frame (an SSE error frame after the first one, a
  * detached turn's logged terminal, which any later attach replays): the error's own text, but never a
  * host refusal's figures (the same rule as the 503 body's `message`, below).
+ *
+ * This covers the TERMINAL frames and the 503 body only. A refused command is also a tool call that
+ * failed: Pi's bash tool hands the transport's error text to the model as `isError` tool content
+ * (see k8s-sandbox's capacity-latch.ts), and the turn stream's `tool_result` frame carries a clipped
+ * preview of that content, as it does for any tool result.
  */
 export function clientErrorText(err: unknown): string {
   if (err instanceof Error && err.name === 'SandboxCapacityRefusedError')

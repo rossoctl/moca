@@ -485,12 +485,18 @@ components:
       required: [image, spec]
       properties:
         id: { type: string, description: 'the template id (lowercased); ignored on /{id}/builds' }
-        image: { type: string, description: 'repository@sha256:<64 hex>, from an allowed registry' }
+        image:
+          type: string
+          description: >-
+            [host[:port]/]path@sha256:<64 hex>, in the distribution reference grammar (lowercase
+            path components, no tag beside the digest), from an allowed registry (hosts compare
+            case-insensitively)
         spec:
           type: object
           description: |
             a template spec (`moca-sbx-template-spec/1`; samples in
-            deploy/sbx/template-onboarding/examples/): guest_mb (or guest_ram_mb), vcpus,
+            deploy/sbx/template-onboarding/examples/): guest_ram_mb (or its alias guest_mb, never
+            both: M7.guest; stored as guest_ram_mb), vcpus,
             workspace_mb?, egress, seed, probe, tools, description, and optionally guest_home,
             skip_git_identity_check, guest_home_gitconfig, probe_status, source_record_digest. An
             `id` or `image` in it must equal the create's own (M7.spec_id, M7.spec_image)
@@ -542,7 +548,10 @@ components:
             type: object
             required: [requires, envelope]
             properties:
-              requires: { type: array, items: { type: string }, description: gating rule ids }
+              requires:
+                type: array
+                items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
+                description: gating rule ids beyond the base rules; an unknown id is refused
               envelope:
                 type: object
                 required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
@@ -552,9 +561,10 @@ components:
                   maxWorkspaceMb: { type: integer }
                   exact:
                     type: object
+                    required: [guestMb, vcpus]
                     properties:
-                      guestMb: { type: integer }
-                      vcpus: { type: integer }
+                      guestMb: { type: integer, minimum: 1 }
+                      vcpus: { type: integer, minimum: 1 }
         defaultProfile: { type: string }
         allowedRegistries:
           type: array
@@ -571,8 +581,18 @@ components:
       type: object
       required: [templates, buildsQueued, active]
       properties:
-        templates: { type: integer, minimum: 0 }
-        buildsQueued: { type: integer, minimum: 0 }
+        templates:
+          type: integer
+          minimum: 0
+          description: >-
+            templates a subject owns with a build registered or on its way there (a template whose
+            builds all failed, were cancelled or retired is not counted)
+        buildsQueued:
+          type: integer
+          minimum: 0
+          description: >-
+            builds of a subject's templates not yet built (queued, building or probing), charged to
+            the template's owner
         active: { type: integer, minimum: 0 }
     PolicyView:
       type: object
@@ -1785,8 +1805,11 @@ paths:
                     type: array
                     description: |
                       per KVM host, its limits and use, as its host agent last reported them
-                      (template lifecycle spec §6.2). Empty means no host has reported, never that
-                      there is no limit
+                      (template lifecycle spec §6.2); `active.used` counts the workers that stay
+                      running on it (leased builds placed or running there, unleased ones draining a
+                      live sandbox). Empty means no host has reported, never that
+                      there is no limit. A host whose last inventory is over 6 minutes old is left
+                      out, here and in placement, until it reports again
                     items:
                       type: object
                       required: [id, active, idleLimitSeconds, disk]
@@ -1811,7 +1834,9 @@ paths:
         is checked against the deployment's policy (GET /v1/policy) before anything is queued: a
         refusal is `422 policy_refused` with `rule`, the gating rule's id
         (deploy/sbx/template-onboarding/governance/GATING-RULES.md), and a `check` record on the
-        template's stream. Ids are unique per deployment: another subject's id is
+        template's stream when the template exists and is the caller's (an admin's, adding a
+        build); a refusal on a new id writes an audit-log line instead, and one on another subject's
+        id is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
         `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for
@@ -2077,14 +2102,16 @@ paths:
       description: |
         Template lifecycle spec §6.3. Body `{tag?, build?, leaseSeconds?}`: the build by tag
         (default `default`) or build id; the lease 60-86400 s (default the largest
-        `idleLimitSeconds` its hosts report, else 3600), renewed by calling again, without limit.
+        `idleLimitSeconds` of the hosts that hold it, clamped to 60-86400, else 3600), renewed by calling again, without limit.
         A build is wanted running only while a lease stands, and a leased build is never evicted.
         An `activate` record on the template's stream; a sandbox created under the lease cites its
         digest as `lease`. One activation at a time: the quota and placement check, the record and
         the lease write run under one lock across all templates. Refusals keep no lease:
         `409 template_unavailable` (no registered build under that reference, or no host that
         reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
-        with leased builds, or a lease in the same second as a placed build), `429 quota_exceeded`
+        with leased builds, or a lease in the same second as a placed build; Retry-After is the
+        seconds until a build placed on one of this build's holders loses its last live lease, else
+        60), `429 quota_exceeded`
         with `quota: active`. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
@@ -2115,7 +2142,10 @@ paths:
                     type: [string, 'null']
                     description: the host it is placed on; null while no host agent has reported
         '400':
-          description: '`invalid_request` (a lease outside 60-86400 s; also: this deployment stores no templates)'
+          description: |
+            `invalid_request` (a lease outside 60-86400 s; a template imported from
+            SH_SANDBOX_TEMPLATES, which the deployment runs and which takes no lease; also: this
+            deployment stores no templates)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2236,10 +2266,11 @@ paths:
       operationId: getQuota
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
-        The policy's quotas and the caller's use: templates owned, builds queued or building, and
-        builds the caller holds a live activation lease on (§6.3). On the sandbox profile,
-        `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
-        the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
+        The policy's quotas and the caller's use: templates owned (with a build registered or on its
+        way there), builds queued, building or probing, and builds the caller holds a live activation
+        lease on (§6.3). On the sandbox profile, `sandboxes` is SBX0's per-subject cap on live
+        sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's live ones; absent elsewhere. Needs
+        SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       responses:
         '200':
@@ -2269,9 +2300,10 @@ paths:
       description: |
         Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
         the host in the path must be the one whose token is presented. Body
-        `{holds: [{template, manifestHash}], limits: {activeLimit, idleLimitSeconds,
+        `{holds: [{template, manifestHash, running?}], limits: {activeLimit, idleLimitSeconds,
         buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
-        inventory in its own process; the agent re-sends it on every poll.
+        inventory in its own process; the agent re-sends it on every poll. A host whose last inventory is
+        over 6 minutes old is left out of placement until it reports again.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2289,6 +2321,12 @@ paths:
                     properties:
                       template: { type: string }
                       manifestHash: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                      running:
+                        type: boolean
+                        default: false
+                        description: |
+                          whether the build's worker unit runs on the host (placement counts it
+                          against activeLimit and keeps the build there)
                 limits:
                   type: object
                   properties:
@@ -2459,9 +2497,11 @@ paths:
       description: |
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
         holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
-        placement an activation is judged by). `stop`: the ones it holds with no live lease and no
-        live sandbox on their worker; a worker with a live sandbox is in neither list (it drains
-        first). The agent starts only workers already installed on the host.
+        placement an activation is judged by; a build already running on a holder stays there).
+        `stop`: the ones it holds with no live lease, and a leased one it runs while placement keeps
+        it on another host, each with no live sandbox on its worker; a worker with a live sandbox is
+        in neither list (it drains first, and counts against the host's `activeLimit` meanwhile).
+        The agent starts only workers already installed on the host.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2490,8 +2530,10 @@ paths:
         Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
         worker unit started) and `refused` (not started, with why: not installed, or the start
         failed) write an `activate` record, `detached` (stopped) a `deactivate` record, each with
-        the subject `host:<host>`. Readiness never comes from a report: `active` is the relay's
-        attached record.
+        the subject `host:<host>`. A `refused` that repeats this host's last one for the build (the
+        same reason) while the build stays in the host's `run` is not recorded again (`recorded:
+        null`): the agent retries every 15 s, and the stream is append-only. Readiness never comes
+        from a report: `active` is the relay's attached record.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2511,7 +2553,12 @@ paths:
           description: recorded
           content:
             application/json:
-              schema: { type: object, properties: { recorded: { type: string } } }
+              schema:
+                type: object
+                properties:
+                  recorded:
+                    type: [string, 'null']
+                    description: the event recorded; null for a repeated refusal, not recorded
         '400':
           description: '`invalid_request`'
           content:
@@ -2538,11 +2585,13 @@ paths:
         (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
         create takes the caller's activation lease (as POST /v1/templates/{id}/activate, with its
         refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
-        `activate` record says `reason: first_use`) and answers `409 template_not_active` with
+        `activate` record says `reason: first_use`; not taken again while the caller holds a live lease on
+        the build, so a retry writes nothing) and answers `409 template_not_active` with
         `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
-        is refused. Without template hosts the create succeeds as before. The `sandbox` record's
+        is refused. Without template hosts the create succeeds as before, and so it does on a template
+        imported from SH_SANDBOX_TEMPLATES (no host holds it: the deployment runs its worker). The `sandbox` record's
         `lease` is the digest of the `activate` record of the caller's live lease on the build.
       security: [{ sessionToken: [] }]
       requestBody:
@@ -3036,13 +3085,18 @@ paths:
                   sandboxTier:
                     type: string
                     description: |
-                      the tier this turn runs in, from the SESSION (the turn record does not copy
-                      it); absent whenever the deployment declares no tiers
+                      the tier this turn runs in: the tier the TURN RECORD pinned at submission,
+                      which is the session's stored tier and so already resolved against the
+                      deployment's default as it stood when the session was created. A record that
+                      pinned none is resolved against the session instead. Absent whenever the
+                      deployment declares no tiers.
                   model:
                     type: object
                     description: |
-                      the session's model and the limits recorded when it was chosen; absent when the
-                      session names none, and the worker then uses its deployment default
+                      the model the TURN RECORD pinned at submission, with the limits recorded when
+                      it was chosen; absent when the submission named none, and the worker then uses
+                      its deployment default. Pinned, so switching the session's model while this
+                      turn is still queued does not move it onto the new one.
                     required: [id]
                     properties:
                       id: { type: string }

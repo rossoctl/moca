@@ -361,6 +361,10 @@ export class OwnershipIndex {
     egressHost?: string;
     configRef?: string;
     bytes?: number;
+    /** The template a decision is about (template lifecycle spec §4). */
+    templateId?: string;
+    /** The gating rule ids a policy refusal failed, comma-separated (spec §8.1). */
+    rules?: string;
     decision: string;
     /** The error code of a refusal. */
     reason?: string;
@@ -384,6 +388,8 @@ export class OwnershipIndex {
           ...(entry.egressHost ? { egressHost: entry.egressHost } : {}),
           ...(entry.configRef ? { configRef: entry.configRef } : {}),
           ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
+          ...(entry.templateId ? { templateId: entry.templateId } : {}),
+          ...(entry.rules ? { rules: entry.rules } : {}),
           ...(entry.reason ? { reason: entry.reason } : {}),
           ...(entry.model ? { model: entry.model } : {}),
           ...(entry.fromModel ? { fromModel: entry.fromModel } : {}),
