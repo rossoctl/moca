@@ -451,8 +451,20 @@ export function verifyKeysFromEnv(
  *
  * The signer's label is its own variable name, so a bad key is a boot error naming
  * `MOCA_GRANT_SIGNING_KEY` rather than sending an operator to edit the session key that is fine.
+ *
+ * `sessionVerifyKeys` is taken so SEPARATENESS is enforced here rather than left to operator
+ * discipline: a kid in both rings means one key signs both tokens, and the §6.1 property this whole
+ * slice leans on is gone with only `typ` left between a session token and a grant. A kid is a sha256
+ * of the SPKI (`keyIdFor`), so equal kid is equal key -- no false positive is possible. The session
+ * map already holds the session signer's own key, so this one check covers both ways an operator
+ * gets there: reusing `SH_SESSION_TOKEN_PRIVATE_KEY` as the grant key, and listing a session public
+ * key in `MOCA_GRANT_PUBLIC_KEYS`. Refusing to boot is right for the reason `makeSigner` refuses a
+ * public key: a deployment cannot discover this at runtime -- every token verifies.
  */
-export function grantRingFromEnv(env: NodeJS.ProcessEnv):
+export function grantRingFromEnv(
+  env: NodeJS.ProcessEnv,
+  sessionVerifyKeys: Map<string, KeyObject>,
+):
   | {
       grantSigner: ReturnType<typeof makeSigner>;
       grantVerifyKeys: Map<string, KeyObject>;
@@ -464,6 +476,15 @@ export function grantRingFromEnv(env: NodeJS.ProcessEnv):
   const grantVerifyKeys = parseKeyset(env.MOCA_GRANT_PUBLIC_KEYS, 'MOCA_GRANT_PUBLIC_KEYS');
   const own = publicKeyFromBase64(grantSigner.publicKeyBase64);
   grantVerifyKeys.set(keyIdFor(own), own);
+  const shared = [...grantVerifyKeys.keys()].filter((kid) => sessionVerifyKeys.has(kid));
+  if (shared.length > 0) {
+    throw new Error(
+      `the grant key ring shares key ${shared.join(', ')} with the session token ring, which ` +
+        'would let a session token be signed by a grant key (MI1 §6.1 requires separate rings): ' +
+        'generate a new keypair for MOCA_GRANT_SIGNING_KEY, and keep MOCA_GRANT_PUBLIC_KEYS and ' +
+        'SH_SESSION_TOKEN_PUBLIC_KEYS disjoint',
+    );
+  }
   return { grantSigner, grantVerifyKeys };
 }
 
@@ -559,6 +580,8 @@ export function templateCatalogFromEnv(
 export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
+  // Named rather than inlined below: the grant ring is checked against it for a shared key.
+  const verifyKeys = verifyKeysFromEnv(env, signer.publicKeyBase64);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
   if (
@@ -631,10 +654,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     // test-login route 404, so an ordinary deployment gains no new code path at all.
     ...testUserProvider(env, config),
     signer,
-    verifyKeys: verifyKeysFromEnv(env, signer.publicKeyBase64),
+    verifyKeys,
     // MI1 §6.1's grant ring, or nothing when no key is configured -- and nothing is what unmounts
-    // both grant routes, so this costs an existing deployment no new code path.
-    ...grantRingFromEnv(env),
+    // both grant routes, so this costs an existing deployment no new code path. Takes the session
+    // ring to refuse a boot where the two share a key, which would collapse §6.1's separation.
+    ...grantRingFromEnv(env, verifyKeys),
     config,
     now: () => Date.now(),
     // A UUID, so a control-plane-minted id is always identical to its leafSessionId sanitisation

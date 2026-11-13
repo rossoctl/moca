@@ -13,6 +13,7 @@ import {
   configFromEnv,
   depsFromEnv,
   credentialStoreFromEnv,
+  grantRingFromEnv,
   portFromEnv,
   verifyKeysFromEnv,
   CONTROL_PLANE_SECRETS,
@@ -423,6 +424,48 @@ describe('hostFromEnv (SH_CONTROL_PLANE_HOST)', () => {
     expect(hostFromEnv({})).toBeUndefined();
     expect(hostFromEnv({ SH_CONTROL_PLANE_HOST: '' })).toBeUndefined();
     expect(hostFromEnv({ SH_CONTROL_PLANE_HOST: '127.0.0.1' })).toBe('127.0.0.1');
+  });
+});
+
+describe('grantRingFromEnv (MI1 §6.1`s separate key ring)', () => {
+  const sessionKeys = verifyKeysFromEnv({}, publicKeyToBase64(publicKey));
+  const grantPem = generateKeyPairSync('ed25519')
+    .privateKey.export({ format: 'pem', type: 'pkcs8' })
+    .toString();
+
+  it('is undefined with no key, which is what unmounts both grant routes', () => {
+    expect(grantRingFromEnv({}, sessionKeys)).toBeUndefined();
+    expect(grantRingFromEnv({ MOCA_GRANT_SIGNING_KEY: '' }, sessionKeys)).toBeUndefined();
+  });
+
+  it('builds a ring whose own key verifies, from a key of its own', () => {
+    const ring = grantRingFromEnv({ MOCA_GRANT_SIGNING_KEY: grantPem }, sessionKeys)!;
+    expect(ring.grantVerifyKeys.has(ring.grantSigner.kid)).toBe(true);
+    // The §6.1 property: no key in common with the session ring.
+    expect([...ring.grantVerifyKeys.keys()].filter((k) => sessionKeys.has(k))).toEqual([]);
+  });
+
+  it('refuses to BOOT when the grant key is the session key', () => {
+    // Nothing detects this at runtime -- every token verifies, and `typ` alone is left between a
+    // session token and a grant. So it has to be a boot error, naming the variable to change.
+    expect(() =>
+      grantRingFromEnv({ MOCA_GRANT_SIGNING_KEY: PRIVATE_PEM }, sessionKeys),
+    ).toThrowError(/shares key .* with the session token ring/);
+  });
+
+  it('refuses to BOOT when MOCA_GRANT_PUBLIC_KEYS lists a session ring key', () => {
+    // The other half of the same hole: a separate signing key, but a published session key that
+    // would verify a session token as a grant on the rotation path.
+    const sessionPub = publicKeyToBase64(publicKey);
+    expect(() =>
+      grantRingFromEnv(
+        {
+          MOCA_GRANT_SIGNING_KEY: grantPem,
+          MOCA_GRANT_PUBLIC_KEYS: `${keyIdFor(publicKey)}:${sessionPub}`,
+        },
+        sessionKeys,
+      ),
+    ).toThrowError(/shares key .* with the session token ring/);
   });
 });
 

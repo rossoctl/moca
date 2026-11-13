@@ -193,7 +193,10 @@ components:
           description: |
             epoch SECONDS; the absolute cap on this turn (turn start + `MOCA_TURN_MAX_S`, default
             1800). Carried forward unchanged by every refresh, so refreshing cannot extend a turn.
-            A refresh past it is refused with `401 grant_invalid`.
+            A refresh past it is refused with `401 grant_invalid`. A fresh call to
+            `/internal/turn-grants` does start a new window — `turnExp` is anchored to the call, and
+            no turn is yet identified to anchor to — so it caps a turn's refresh chain, not a
+            session.
         exp:
           type: integer
           description: |

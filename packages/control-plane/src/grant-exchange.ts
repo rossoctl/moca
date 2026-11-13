@@ -122,6 +122,13 @@ async function mintFor(
  * plane, from the control plane's own clock -- never from a value the worker sends. The caps-aware
  * form (§5.4's `dequeue + min(caps.wallClock ?? MAX, MAX)`) belongs to the dequeue path's grants;
  * `turnExp` already takes the parameter, so that slice adds a call site rather than a function.
+ *
+ * shortcut: a re-ISSUE starts a fresh `turn_exp` window. `turn_exp` is anchored to now and nothing
+ * here identifies a turn -- the interactive path has no turn record to anchor to -- so a holder of
+ * `SH_EXCHANGE_TOKEN` and a live session token can call this again for another `MOCA_TURN_MAX_S`.
+ * Refresh cannot extend a turn; re-issue can, which makes the real bound the session token's own
+ * lifetime. Anchor to the turn record's start (the dequeue path's grants already need that record
+ * for §5.4's caps) when the redeemer lands and `turn_exp` first enforces anything.
  */
 export async function issueTurnGrants(
   presentedToken: string,

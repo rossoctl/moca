@@ -18,12 +18,16 @@ Session grants: the key ring, the token format and the two lifecycle endpoints o
   a capability spent at an enforcement point, not a secret.
 - New POST /internal/grants/refresh: a worker presents either half mid-turn and gets a fresh pair.
   `turn_exp` is carried forward unchanged, so no number of refreshes extends a turn, and a refresh
-  past it is refused outright rather than clamped. The session is re-read rather than echoed, so a
+  past it is refused outright rather than clamped. A fresh **issue** does start a new window:
+  `turn_exp` is anchored to the call, and nothing yet identifies a turn to anchor to, so the bound
+  on a caller holding a live session token is that token's lifetime. Anchoring issuance to the turn
+  record is the redeemer's slice, where `turn_exp` first enforces anything. The session is re-read rather than echoed, so a
   credential or bundle changed mid-turn takes effect at the next refresh and a session tombstoned
   mid-turn stops refreshing (404 `session_not_found`, the same answer another user's session gives).
 - New `TurnGrants` schema and the error code `grant_invalid` (401): one code for every way a grant can
   fail — bad signature, wrong `typ`, unknown `kid`, wrong audience, wrong issuer, expired, or past
-  `turn_exp` — so a caller cannot tell which, and its only move is to get a new grant.
+  `turn_exp` — because a caller's only move on any of them is to get a new grant. The `message` does
+  name the failed check, for whoever is debugging a verifier; the route is behind the shared bearer.
 - Both routes are **unmounted unless `MOCA_GRANT_SIGNING_KEY` is set**, and 404 before the body is
   read (ADR-0045's shape). A deployment that has not generated the grant ring behaves exactly as
   before. New configuration: `MOCA_GRANT_SIGNING_KEY`, `MOCA_GRANT_PUBLIC_KEYS`, `MOCA_GRANT_TTL_S`
