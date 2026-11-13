@@ -23,6 +23,7 @@ import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
   normalizeSpec,
+  ownedLimit,
   policyDigest,
   policyProblems,
   quotaFor,
@@ -482,20 +483,23 @@ const buildHandle = (raw: string): string => `b-${sandboxId(raw).slice('sbx-'.le
  * The quota counters for one subject (§6.2). `templates`: the templates it owns with a build
  * registered or on its way there (a template whose builds all failed, were cancelled or were
  * retired holds no slot, so a failure never locks a subject out). `buildsQueued`: its builds not
- * yet built (queued, building or probing), the host work it has in flight.
+ * yet built (queued, building or probing), the host work it has in flight. `owned`: the template
+ * ids it owns in any status, the catalog documents and provenance streams it holds.
  */
 async function usage(
   cat: TemplateCatalog,
   subject: string,
-): Promise<{ templates: number; buildsQueued: number }> {
+): Promise<{ templates: number; buildsQueued: number; owned: number }> {
   let templates = 0;
   let buildsQueued = 0;
+  let owned = 0;
   for (const d of await cat.list()) {
     if (d.owner !== subject) continue;
+    owned++;
     if (d.builds.some((b) => REUSABLE.has(b.status))) templates++;
     buildsQueued += d.builds.filter((b) => CANCELLABLE.has(b.status)).length;
   }
-  return { templates, buildsQueued };
+  return { templates, buildsQueued, owned };
 }
 
 /**
@@ -608,12 +612,27 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
       if (reused) return cur!;
       const u = await usage(cat, charged);
-      if (!cur && u.templates >= quota.templates) {
+      // A template takes a slot when it holds none yet: a new id, or one whose builds all failed,
+      // were cancelled or were retired (usage does not count it). Checking only new ids would let
+      // a subject bring such templates back past the quota.
+      const holdsSlot = cur?.builds.some((x) => REUSABLE.has(x.status)) ?? false;
+      if (!holdsSlot && u.templates >= quota.templates) {
         throw new CpError(
           'quota_exceeded',
           `at most ${quota.templates} templates per subject`,
           undefined,
           { quota: 'templates' },
+        );
+      }
+      // A new id is one more document and stream for good: a create-then-cancel loop frees its
+      // templates and buildsQueued slots, never this one. An override holds the three counters
+      // alone, so owned is the deployment default's.
+      if (!cur && u.owned >= ownedLimit(pol.quota)) {
+        throw new CpError(
+          'quota_exceeded',
+          `at most ${ownedLimit(pol.quota)} template ids owned per subject, in any status`,
+          undefined,
+          { quota: 'owned' },
         );
       }
       if (u.buildsQueued >= quota.buildsQueued) {
@@ -1535,6 +1554,14 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       } catch {
         throw new CpError('invalid_request', 'expect must be a quota, or null, as JSON');
       }
+      // The quota a client read can carry the default's owned, which this write does not set
+      // (an override holds the three counters alone): the compare is on the three, so it is
+      // dropped here.
+      if (typeof v === 'object' && v !== null && !Array.isArray(v) && 'owned' in v) {
+        const rest = { ...(v as Record<string, unknown>) };
+        delete rest.owned;
+        v = rest;
+      }
       expected = v === null ? null : quotaBody(v);
       if (
         expected !== null &&
@@ -1552,7 +1579,11 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       next = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
       if (isDefault) {
         before = cur.quota;
-        next.quota = body as Policy['quota'];
+        // The three counters are set; the default's owned, which this does not set, is kept.
+        next.quota =
+          cur.quota.owned === undefined
+            ? (body as Policy['quota'])
+            : { ...(body as Policy['quota']), owned: cur.quota.owned };
       } else {
         before = cur.quotaBySubject?.[subject] ?? null;
         if (body === null) delete next.quotaBySubject![subject];
@@ -1605,6 +1636,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
         templates: { limit: quota.templates, used: u.templates },
         buildsQueued: { limit: quota.buildsQueued, used: u.buildsQueued },
         active: { limit: quota.active, used: active },
+        // An override holds the three counters alone: owned is the deployment default's.
+        owned: { limit: ownedLimit(pol.quota), used: u.owned },
         // Whether this subject has an admin-set quota (§5.2) or the deployment default.
         quotaSource: pol.quotaBySubject?.[p.sub] ? 'subject' : 'default',
         ...(sandboxes ? { sandboxes } : {}),

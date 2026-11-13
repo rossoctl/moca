@@ -169,10 +169,10 @@ components:
             X11, X12, X14, X15; deploy/sbx/template-onboarding/governance/GATING-RULES.md)
         quota:
           type: string
-          enum: [templates, buildsQueued, active]
+          enum: [templates, buildsQueued, owned, active]
           description: |
-            quota_exceeded on a template create (`templates`, `buildsQueued`) or an activation
-            (`active`): which quota
+            quota_exceeded on a template create (`templates`, `buildsQueued`, `owned`) or an
+            activation (`active`): which quota
         readiness:
           type: string
           description: |
@@ -609,7 +609,8 @@ components:
           minimum: 0
           description: >-
             templates a subject owns with a build registered or on its way there (a template whose
-            builds all failed, were cancelled or retired is not counted)
+            builds all failed, were cancelled or retired is not counted, and a new build of it is
+            checked against this quota like a new id)
         buildsQueued:
           type: integer
           minimum: 0
@@ -617,6 +618,12 @@ components:
             builds of a subject's templates not yet built (queued, building or probing), charged to
             the template's owner
         active: { type: integer, minimum: 0 }
+        owned:
+          type: integer
+          minimum: 0
+          description: >-
+            template ids a subject owns in any status (a failed or cancelled-only template too),
+            checked for a new id only; 200 when the policy does not set it
     PolicyView:
       type: object
       required: [policy, digest, record]
@@ -1813,7 +1820,7 @@ paths:
         build); a refusal on a new id writes an audit-log line instead, and one on another subject's
         id is only answered. Ids are unique per deployment: another subject's id is
         `409 template_exists` (`404 template_not_found` when it is private). Over a quota:
-        `429 quota_exceeded` with `quota` (`templates` or `buildsQueued`). An admitted create
+        `429 quota_exceeded` with `quota` (`templates`, `buildsQueued` or `owned`). An admitted create
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for
         a build host; follow it at `build`. A create whose inputs match a build of the caller's
         template that is registered or on its way (§3.2) queues nothing and answers that build with
@@ -2428,10 +2435,10 @@ paths:
       description: |
         The quotas that apply to the caller (its admin-set override, else the deployment default;
         `quotaSource` says which) and its use: templates owned (with a build registered or on its
-        way there), builds queued, building or probing, and builds the caller holds a live
-        activation lease on (§6.3). On the sandbox profile, `sandboxes` is SBX0's per-subject cap on
-        live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's live ones; absent elsewhere.
-        Needs SH_PROVENANCE_DIR.
+        way there), builds queued, building or probing, builds the caller holds a live activation
+        lease on (§6.3), and template ids owned in any status (`owned`). On the sandbox profile,
+        `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
+        the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       responses:
         '200':
@@ -2440,12 +2447,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [subject, templates, buildsQueued, active]
+                required: [subject, templates, buildsQueued, active, owned]
                 properties:
                   subject: { type: string }
                   templates: { $ref: '#/components/schemas/LimitUse' }
                   buildsQueued: { $ref: '#/components/schemas/LimitUse' }
                   active: { $ref: '#/components/schemas/LimitUse' }
+                  owned: { $ref: '#/components/schemas/LimitUse' }
                   sandboxes: { $ref: '#/components/schemas/LimitUse' }
                   quotaSource:
                     type: string
@@ -2467,7 +2475,8 @@ paths:
         (`github:<numeric id>` or `oidc:<provider sub>`, an override); a body of `null` removes a
         subject's override, returning it to the default (the default itself is never removed). A
         quota holds `templates`, `buildsQueued` and `active` only: another key is refused, so nothing
-        else is kept in the policy. Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
+        else is kept in the policy. The default's `owned`, when the policy sets one, is kept as it
+        is, and an override's `owned` is the default's. Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
         in it) naming the admin, whose digest is answered, so the chain shows who set which quota
         when. Enforced at once, on the next create, queued build and activation. Needs
         SH_PROVENANCE_DIR.
@@ -2481,7 +2490,8 @@ paths:
             A compare-and-set: the target's quota the client read, as JSON (a Quota, or `null` for
             a subject with no override), percent-encoded as a query value, e.g.
             `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D` or
-            `?expect=null`. Key order and spacing do not matter; the three counters are compared.
+            `?expect=null`. Key order and spacing do not matter; the three counters are compared
+            (an `owned` in it, as the default read from the policy carries, is not).
             The write is made only if the quota is that value now; else `409 quota_changed`, with
             nothing written.
           schema: { type: string }

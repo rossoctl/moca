@@ -65,7 +65,20 @@ export interface Quota {
   buildsQueued: number;
   /** Templates a subject holds active at once. */
   active: number;
+  /**
+   * Template ids a subject owns, in any status (a failed or cancelled-only template too): bounds
+   * the catalog documents and provenance streams one subject opens, which `templates` alone does
+   * not, since a failed or cancelled-only template holds no `templates` slot. Checked for a new id
+   * only. Optional: a policy without it gets DEFAULT_OWNED.
+   */
+  owned?: number;
 }
+
+/** The `owned` quota of a policy that does not set one. */
+export const DEFAULT_OWNED = 200;
+
+/** The `owned` quota in force: the policy's, else DEFAULT_OWNED. */
+export const ownedLimit = (q: Quota): number => q.owned ?? DEFAULT_OWNED;
 
 export const DEFAULT_POLICY: Policy = {
   schema: POLICY_SCHEMA,
@@ -84,7 +97,7 @@ export const DEFAULT_POLICY: Policy = {
   defaultProfile: 'base',
   allowedRegistries: ['<default>'],
   trustedGateRecords: [],
-  quota: { templates: 100, buildsQueued: 10, active: 8 },
+  quota: { templates: 100, buildsQueued: 10, active: 8, owned: DEFAULT_OWNED },
 };
 
 /** The template id rule (M7); refused past 31 characters, never truncated. */
@@ -487,6 +500,8 @@ export function policyProblems(p: unknown): string[] {
     );
   };
   if (!quotaOk(q)) out.push('quota must hold whole numbers templates, buildsQueued, active');
+  else if (q?.owned !== undefined && !(int(q.owned) && q.owned >= 0))
+    out.push('quota.owned, when set, must be a whole number');
   const by = (o as { quotaBySubject?: unknown }).quotaBySubject;
   if (by !== undefined) {
     if (typeof by !== 'object' || by === null || Array.isArray(by))
