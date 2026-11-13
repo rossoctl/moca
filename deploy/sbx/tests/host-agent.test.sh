@@ -104,7 +104,10 @@ job "$(printf 'b%.0s' {1..64})"
 run || fail 'poll with a bad gate record'
 grep -q '^build ' "$MOCK_LOG" && fail 'built with a gate record that does not match its digest'
 grep -q 'does not match its digest' "$TMP/out" || fail 'the mismatch was not reported'
-pass 'a gate record is checked against its digest before any build'
+jq -e '.event == "failed" and .step == "gate" and .message == "agent_error: the gate record does not match its digest"' "$R" >/dev/null ||
+  fail 'the claimed build was not reported failed on a gate digest mismatch'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"errors":0' "$TMP/out" || fail 'summary of a gate mismatch'
+pass 'a gate record is checked against its digest before any build, and the claimed build reported failed'
 
 # 5. Below the disk floor, nothing is claimed.
 job ''
@@ -230,5 +233,42 @@ jq -e '.event == "failed" and .step == "build" and (.message | startswith("build
   fail 'a build with an empty log is not reported failed'
 grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"errors":0' "$TMP/out" || fail 'no summary after an empty build log'
 pass 'a build that dies with no output is reported failed, and the poll ends with its summary'
+
+# 12. Every way out short of `built` after a claim reports the build failed (agent_error), so it
+#     does not stay `building`: a gate record that cannot be fetched, a build that wrote no template
+#     record, and one whose record is not JSON.
+job "$GATE_SHA"
+sed 's#"GET /v1/hosts/host-1/blobs/"\*)#"GET /v1/hosts/host-1/blobs/none")#' "$TMP/bin/curl" >"$TMP/bin/curl.noblob"
+cp "$TMP/bin/curl" "$TMP/curl.keep"
+mv "$TMP/bin/curl.noblob" "$TMP/bin/curl" && chmod +x "$TMP/bin/curl"
+run || fail 'a poll whose gate fetch failed'
+cp "$TMP/curl.keep" "$TMP/bin/curl"
+grep -q '^build ' "$MOCK_LOG" && fail 'built without its gate record'
+jq -e '.event == "failed" and .step == "gate" and .message == "agent_error: the gate record fetch failed"' "$R" >/dev/null ||
+  fail 'a failed gate fetch was not reported failed'
+job ''
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+rm -f "$SBX_SRV"/templates/*.json
+exit 0
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a poll whose build wrote no record'
+jq -e '.event == "failed" and .step == "report" and .message == "agent_error: template-build.sh wrote no template record"' "$R" >/dev/null ||
+  fail 'a build with no template record was not reported failed'
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+id="$(jq -r .id "$1")" d="$(jq -r .image "$1")"; d="${d##*@sha256:}"
+printf 'not json' >"$SBX_SRV/templates/$id-${d:0:12}.json"
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a poll whose record is not JSON ended early'
+jq -e '.event == "failed" and .message == "agent_error: the template record names no snapshot"' "$R" >/dev/null ||
+  fail 'a build with a record that is not JSON was not reported failed'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"errors":0' "$TMP/out" || fail 'no summary after a record that is not JSON'
+rm -f "$TMP/srv/templates/"*.json
+pass 'a claimed build is reported failed (agent_error) on a failed gate fetch, a missing record, or a record that is not JSON'
 
 echo 'all host-agent.sh tests passed'

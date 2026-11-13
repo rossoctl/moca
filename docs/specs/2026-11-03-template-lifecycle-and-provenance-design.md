@@ -320,7 +320,10 @@ reason and log (`SBX_REGISTRY`, URLs, registry hosts, IP addresses, 12-digit acc
 keeps the full log on the host (a 0700 directory). T and S go byte for byte, so they cannot be
 redacted: one that names `SBX_REGISTRY` is not sent, and the build fails `leak_refused`. A
 failure's reason leads with a code a client can branch on: `pull_failed`, `probe_failed`,
-`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`.
+`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`; or `agent_error`, when the agent
+cannot carry on with a build it claimed (a gate record it cannot fetch or whose bytes do not match
+its sha256, a report not accepted, no template record or manifest after the build). An agent that
+is still running reports every build it claimed: `built`, or `failed` on any other way out.
 
 **The build host handles untrusted images** in a self-serve model. The image is pulled only from a
 registry the policy allows (§8.1), its export runs as today (`build-rootfs.sh`, as root, owners
