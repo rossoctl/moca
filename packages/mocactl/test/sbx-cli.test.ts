@@ -322,7 +322,9 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(await sbxMain(['templates', 'untag', 'node22', 'a', '--build', b2], env, io, opts)).toBe(
       2,
     );
-    expect(io.errs.join('\n')).toMatch(/--build only applies to templates show and tag/);
+    expect(io.errs.join('\n')).toMatch(
+      /--build only applies to templates show, follow, cancel, tag/,
+    );
     expect(cp.calls.length).toBe(n);
   });
 
