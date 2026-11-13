@@ -103,24 +103,28 @@ cat >"$TMP/bin/flock" <<'MOCK'
 [[ ! -e "$MOCK_STATE/locked" && ! -e "$MOCK_STATE/locked-${!#}" ]]
 MOCK
 # journalctl: logs its argv; answers -o json entries from $MOCK_STATE/journal (one JSON entry a line,
-# each with __CURSOR), after --after-cursor when given; a cursor no entry has is journalctl's
-# "Failed to seek to cursor" and exit 1, as a rotated-away cursor is. Without --all, a MESSAGE over
-# 4096 bytes is printed null, as journalctl does. Exits 1 if anything else is asked.
+# each with __CURSOR), from --cursor or after --after-cursor when given. As journalctl (257) does: a
+# cursor it cannot parse (here: one with no digit) is "Failed to seek to cursor" and exit 1; a
+# well-formed one no entry has (vacuumed, or another machine's) falls back and prints every entry,
+# exit 0. Without --all, a MESSAGE over 4096 bytes is printed null. Exits 1 if anything else is asked.
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'journalctl %s\n' "$*" >>"$MOCK_LOG"
-after=''
+at='' after=''
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   [[ "${args[$i]}" == --after-cursor ]] && after="${args[$((i + 1))]}"
+  [[ "${args[$i]}" == --cursor ]] && at="${args[$((i + 1))]}"
 done
 [[ " $* " == *" -u moca-egress.service -o json "* ]] || exit 1
 full() { if [[ " $* " == *" --all "* ]]; then cat; else
   jq -c 'if (.MESSAGE | type) == "string" and (.MESSAGE | utf8bytelength) > 4096 then .MESSAGE = null else . end'; fi; }
+c="${at:-$after}"
+[[ -z "$c" || "$c" == *[0-9]* ]] || { echo 'Failed to seek to cursor: Invalid argument' >&2; exit 1; }
 [[ -f "$MOCK_STATE/journal" ]] || exit 0
-if [[ -z "$after" ]]; then cat "$MOCK_STATE/journal" | full "$@"; else
-  grep -qF "\"__CURSOR\":\"$after\"" "$MOCK_STATE/journal" || { echo 'Failed to seek to cursor: Invalid argument' >&2; exit 1; }
-  awk -v c="$after" 'seen { print } index($0, "\"__CURSOR\":\"" c "\"") { seen = 1 }' "$MOCK_STATE/journal" | full "$@"
+if [[ -z "$c" ]] || ! grep -qF "\"__CURSOR\":\"$c\"" "$MOCK_STATE/journal"; then cat "$MOCK_STATE/journal" | full "$@"
+elif [[ -n "$at" ]]; then awk -v c="$c" 'index($0, "\"__CURSOR\":\"" c "\"") { seen = 1 } seen { print }' "$MOCK_STATE/journal" | full "$@"
+else awk -v c="$c" 'seen { print } index($0, "\"__CURSOR\":\"" c "\"") { seen = 1 }' "$MOCK_STATE/journal" | full "$@"
 fi
 MOCK
 chmod +x "$TMP/bin/curl" "$TMP/bin/template-build" "$TMP/bin/systemctl" "$TMP/bin/flock" "$TMP/bin/journalctl"
@@ -523,9 +527,10 @@ egress_run || fail 'the run after a rejection failed'
 jq -e '.cursor == "c3"' "$TMP/state/egress-posts" >/dev/null || fail 'shipping did not go on after a rejection'
 pass 'a 400 batch is kept in egress.rejected/ (0600) and passed; a 404 or 503 keeps it and retries'
 
-# 15. A rotated-away cursor: an error, the old cursor kept as egress.cursor.stale, a restart from this
-#     boot, and shipping goes on; entries already sent (at or before egress.mark) are not sent again.
-#     Without a mark, the restart re-sends, and says so.
+# 15. A stale cursor: one whose entry was rotated away (journalctl exits 0 for it and falls back, so the
+#     agent checks with --cursor first) or one journalctl cannot parse (exit 1). An error, the old cursor
+#     kept as egress.cursor.stale, a restart from this boot, and shipping goes on; entries already sent
+#     (at or before egress.mark) are not sent again. Without a mark, the restart re-sends, and says so.
 rm -f "$TMP/srv/egress.pending.json" "$TMP/srv/egress.cursor.stale" "$TMP/srv/egress.catchup" "$TMP/srv/egress.mark"
 { entry c10 "$EV"; entry c11 "$EV2"; } >"$TMP/state/journal"
 egress_run || fail 'the first run of 15 failed'
@@ -534,6 +539,8 @@ egress_run || fail 'the first run of 15 failed'
 { entry r10 "$EV" 10; entry r11 "$EV2" 11; entry r12 "$EV" 12; } >"$TMP/state/journal"
 egress_run || fail 'the rotated run failed'
 grep -q 'egress: the journal cursor is no longer valid; restarting from this boot' "$TMP/out" || fail 'no error for a rotated cursor'
+grep -q 'journalctl -u moca-egress.service -o json --all --no-pager --cursor c11' "$MOCK_LOG" || fail 'the cursor was not checked with --cursor'
+grep -q -- '--after-cursor c11' "$MOCK_LOG" && fail 'read after a stale cursor (journalctl falls back and re-reads)'
 [[ "$(<"$TMP/srv/egress.cursor.stale")" == c11 ]] || fail 'the old cursor was not kept'
 grep -q 'journalctl -u moca-egress.service -o json --all --no-pager -b' "$MOCK_LOG" || fail 'no restart from this boot'
 jq -s -e --argjson a "$EV" '(map(.events) | add) == [$a] and .[-1].cursor == "r12"' "$TMP/state/egress-posts" >/dev/null ||

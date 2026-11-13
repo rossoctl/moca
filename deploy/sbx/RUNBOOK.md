@@ -418,7 +418,12 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   the error names the file (`egressRejected` in the summary). Its events are not in any sandbox's log:
   look at the file, and fix the agent or the control plane.
 - **A cursor the journal no longer has** (rotated away, or from another machine) is an error
-  (`the journal cursor is no longer valid; restarting from this boot`). The old cursor is kept as
+  (`the journal cursor is no longer valid; restarting from this boot`). journalctl itself does not
+  fail on one: it resumes at the nearest kept entry, or for another machine's cursor by time across
+  boots, with exit 0. So before its first read the agent checks that the cursor still names an
+  entry (`journalctl --cursor` starts at that entry); journalctl fails only on a cursor it cannot
+  parse, which is the same error. Entries rotated away before they were sent are lost with the
+  journal. The old cursor is kept as
   `/srv/sbx/egress.cursor.stale`, and shipping restarts from this boot's first entry. Entries already
   sent are skipped (`egressSkipped`), by `/srv/sbx/egress.mark` (the last sent entry's boot id and
   monotonic time): the control plane's replay check is by cursor, so it could not tell them apart.

@@ -58,9 +58,14 @@
 #   - A batch the control plane refuses as malformed (400 invalid_request or invalid_json) would fail
 #     every retry, so it is moved to $SBX_SRV/egress.rejected/<UTC time>-<pid>.json (0600), the cursor
 #     moves past it, and the error names the file: nothing is lost silently, and shipping goes on.
-#   - A cursor journalctl can no longer seek to (rotated away, or another machine's) is an error; it is
-#     kept as $SBX_SRV/egress.cursor.stale and the step restarts from this boot. Entries it already
-#     sent are not sent again: beside the cursor, $SBX_SRV/egress.mark (0600) keeps the last sent
+#   - A stale cursor is an error. journalctl itself fails only on a cursor it cannot parse: one whose
+#     entry was vacuumed resumes at the nearest kept entry, and another machine's falls back to time
+#     and reads across boots, both with exit 0 (the second could re-send entries the control plane
+#     cannot tell from new ones). So before its first read the step checks that the cursor still
+#     names an entry (journalctl --cursor prints that entry first); if not, or if journalctl fails
+#     on it, the cursor is kept as $SBX_SRV/egress.cursor.stale and the step restarts from this boot.
+#     Entries rotated away before they were sent are lost with the journal; the error says so.
+#     Entries it already sent are not sent again: beside the cursor, $SBX_SRV/egress.mark (0600) keeps the last sent
 #     entry's _BOOT_ID and __MONOTONIC_TIMESTAMP. From the restart ($SBX_SRV/egress.catchup) until the
 #     first entry past the mark, an entry of that boot at or before it is skipped (egressSkipped).
 #     Without a mark, a restart re-sends this boot's entries, which the control plane would store twice
@@ -444,6 +449,29 @@ egress_sids_refresh() {
     mv -f "$WORK/egress.sids.tmp" "$WORK/egress.sids"
 }
 
+# True when egress.cursor names an entry of moca-egress's journal: journalctl --cursor starts AT it,
+# so the first entry it prints carries that very cursor. A cursor it cannot parse fails; one whose
+# entry is gone (vacuumed, or another machine's) starts elsewhere, at the nearest entry or by time.
+egress_cursor_ok() {
+  local c first
+  c="$(<"$SBX_SRV/egress.cursor")"
+  first="$({ journalctl -u moca-egress.service -o json --all --no-pager --cursor "$c" 2>/dev/null || true; } |
+    head -n 1 | jq -r '.__CURSOR // empty' 2>/dev/null)" || first=''
+  [[ "$first" == "$c" ]]
+}
+
+# A stale cursor (see the header): kept aside, the step restarts from this boot, skipping what the
+# position mark says was sent; without a mark, the re-send is an error line of its own.
+egress_stale() {
+  mv -f "$SBX_SRV/egress.cursor" "$SBX_SRV/egress.cursor.stale"
+  error 'egress: the journal cursor is no longer valid; restarting from this boot (the old one is in egress.cursor.stale; entries rotated away before they were sent are lost)'
+  if [[ -s "$SBX_SRV/egress.mark" ]]; then
+    (umask 077 && : >"$SBX_SRV/egress.catchup")
+  else
+    error 'egress: no position mark: entries of this boot already sent are sent again, and the control plane stores them twice'
+  fi
+}
+
 # The egress step (see the header). Reads the journal only; never acts on moca-egress.
 egress() {
   systemctl is-active --quiet moca-egress.service 2>/dev/null || return 0
@@ -467,6 +495,8 @@ egress() {
     egress_post || { error "egress post failed: the cursor stays, the next run retries (HTTP $EG_CODE)"; exec 8>&-; return; }
   fi
   local rc mb mm skipped n_bad
+  # A cursor whose entry is gone is not an error to journalctl (see the header): checked here first.
+  [[ ! -s "$SBX_SRV/egress.cursor" ]] || egress_cursor_ok || egress_stale
   for ((i = 0; i < EGRESS_BATCHES; i++)); do
     if ((SECONDS - started >= EGRESS_BUDGET_S)); then
       say "{\"agent\":\"skipped\",\"why\":\"egress: the ${EGRESS_BUDGET_S} s budget is spent; the next run goes on\"}"
@@ -485,13 +515,7 @@ egress() {
     n="$(wc -l <"$entries" | tr -d ' ')"
     if ((n == 0)) && [[ "$rc" != 0 && "$rc" != 141 ]]; then
       if [[ "${pos[0]}" == --after-cursor ]]; then
-        mv -f "$SBX_SRV/egress.cursor" "$SBX_SRV/egress.cursor.stale"
-        error 'egress: the journal cursor is no longer valid; restarting from this boot (the old one is in egress.cursor.stale)'
-        if [[ -s "$SBX_SRV/egress.mark" ]]; then
-          (umask 077 && : >"$SBX_SRV/egress.catchup")
-        else
-          error 'egress: no position mark: entries of this boot already sent are sent again, and the control plane stores them twice'
-        fi
+        egress_stale
         continue
       fi
       error "egress: journalctl exited $rc"
