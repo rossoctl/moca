@@ -2499,8 +2499,8 @@ paths:
             a subject with no override), percent-encoded as a query value, e.g.
             `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D` or
             `?expect=null`. Key order and spacing do not matter; the four counters are compared (an
-            unset `owned` matches only an unset one).
-            The write is made only if the quota is that value now; else `409 quota_changed`, with
+            unset `owned` matches only an unset one), and another key is refused (`400
+            invalid_request`), so a client sends the counters alone. The write is made only if the quota is that value now; else `409 quota_changed`, with
             nothing written.
           schema: { type: string }
       requestBody:

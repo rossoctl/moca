@@ -392,7 +392,7 @@ registered build that later turns out wrong.
 [--owned N]`, or `--clear` for a subject's override (admins); without `--owned` the target keeps
   its `owned`, and the new value printed is the one stored. Like every admin write it names the control
   plane it writes to and refuses a login issued for another deployment, then reads the value
-  (`GET /v1/policy`) and writes it as a compare-and-set (`?expect=` the value read): it prints old
+  (`GET /v1/policy`) and writes it as a compare-and-set (`?expect=` the counters read): it prints old
   -> new with the policy's digest and record, and when another admin changed the value after its
   read, the control plane writes nothing (`409 quota_changed`) and the command exits 1, naming the
   value now.

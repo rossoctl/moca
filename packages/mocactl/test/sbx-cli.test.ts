@@ -935,6 +935,24 @@ describe('mocactl sbx templates quota (template lifecycle §5.2; admins)', () =>
     expect(io.outs.join('')).toContain('github:9: the default -> templates 5');
   });
 
+  it('expects only the counters read, when the stored quota carries another key', async () => {
+    const { home, env, io } = setup();
+    // A deployment-wide quota stored through PUT /v1/policy may hold a key the control plane's
+    // expect refuses; the command sends the counters alone.
+    const STORED = { ...OLD, owned: 7, note: 'set by hand' };
+    const cp = fakeCp({
+      'GET /v1/policy': () => ({ status: 200, body: policyView({ quota: STORED }) }),
+      'PUT /v1/quota/default': (req) => answer('default', req.body, STORED),
+    });
+    expect(
+      await sbxMain(['templates', 'quota', 'default', ...ARGS.slice(3)], env, io, {
+        home,
+        fetchImpl: cp.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(cp.calls.at(-1)!.path).toBe(`/v1/quota/default${ifRead({ ...OLD, owned: 7 })}`);
+  });
+
   it("refuses a login another deployment's control plane issued, before any read or write", async () => {
     const { home, env, io, paths } = setup();
     const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
