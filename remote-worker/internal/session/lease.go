@@ -12,12 +12,20 @@ import (
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
-// leaseControlCap bounds the LeaseControl calls running at once, across the whole Session
-// rather than per connection: SetMode and EndLease can block for up to the pool's
-// LeaseGraceLimit (30 min), and a call still blocked after its connection died keeps its
-// place, so a reconnect cannot start a second batch beside it. The relay caps each sandbox
-// at 4 in flight; this is the worker's own bound over every sandbox it serves.
-const leaseControlCap = 16
+// leaseControlCap bounds the mutating LeaseControl calls (reset, set_mode) running at once,
+// across the whole Session rather than per connection: SetMode and EndLease can block for up
+// to the pool's LeaseGraceLimit (30 min), and a call still blocked after its connection died
+// keeps its place, so a reconnect cannot start a second batch beside it. The relay caps each
+// sandbox at 4 in flight, but frees its place when the client cancels while the worker's call
+// runs on; this is the worker's own bound over every sandbox it serves.
+//
+// leaseKeyCap bounds them per workspace key, under leaseControlCap, so one sandbox cannot
+// fill the worker's slots and deny every other sandbox's reset and set_mode. A status takes
+// neither: it only reads the pool under its lock, so it is never refused busy.
+const (
+	leaseControlCap = 16
+	leaseKeyCap     = 2
+)
 
 // The LeaseControlResult.error strings this file answers with on its own (spec §8.2).
 const (
@@ -34,7 +42,7 @@ const (
 // block (a set_mode downgrade waits for the lease to end). ctx is the connection's context:
 // it ends when the connection does, after which the result has nowhere to go. A controller
 // may ignore it, and vmpool's does (the Pool's lease calls take no context): the op then runs
-// to completion, holding its leaseControlCap slot, and its result is dropped if the
+// to completion, holding its slots (a status holds none), and its result is dropped if the
 // connection has ended by the time it returns.
 //
 // LeaseKeepalive is called ON the receive loop and must not block: an Abort queued behind it
@@ -87,15 +95,16 @@ func leaseResultFrame(ctlID uint64, status *pb.LeaseStatus, errMsg string) *pb.W
 }
 
 // leaseControl answers one LeaseControl frame without blocking the receive loop. A refusal
-// (no lease mode, or the cap reached) is answered at once through trySend, like accept's
+// (no lease mode, or a cap reached) is answered at once through trySend, like accept's
 // refusals; an admitted call runs on its own goroutine and answers through c.sendLate when
-// the controller returns, however long that takes. Like accept, its only error is
-// ErrEgressWedged.
+// the controller returns, however long that takes. A status runs on its own goroutine too,
+// so the receive loop never waits on the pool's lock, but takes no slot. Like accept, its
+// only error is ErrEgressWedged.
 //
 // The goroutine is not one of Serve's producers: Serve does not wait for it, because a
 // set_mode can block far longer than a re-dial should. If the connection has ended by the
-// time it answers, the answer is dropped — the relay has already failed the call — while its
-// cap slot is held until the controller returns.
+// time it answers, the answer is dropped -- the relay has already failed the call -- while its
+// slots are held until the controller returns.
 func (s *Session) leaseControl(ctx context.Context, c *conn, f *pb.LeaseControlFrame) error {
 	ctlID := f.GetCtlId()
 	lc, ok := s.runner.(LeaseController)
@@ -105,17 +114,20 @@ func (s *Session) leaseControl(ctx context.Context, c *conn, f *pb.LeaseControlF
 		}
 		return nil
 	}
-	select {
-	case s.leaseSlots <- struct{}{}:
-	default:
-		if !c.trySend(leaseResultFrame(ctlID, nil, leaseBusyMsg)) {
-			return ErrEgressWedged
+	key := f.GetWorkspaceKey()
+	release := func() {}
+	if f.GetOp() != pb.LeaseOp_LEASE_OP_STATUS {
+		var admitted bool
+		if release, admitted = s.takeLeaseSlot(key); !admitted {
+			if !c.trySend(leaseResultFrame(ctlID, nil, leaseBusyMsg)) {
+				return ErrEgressWedged
+			}
+			return nil
 		}
-		return nil
 	}
 	go func() {
-		defer func() { <-s.leaseSlots }()
-		status, err := lc.LeaseControl(ctx, f.GetWorkspaceKey(), f.GetOp(), f.GetMode(), f.GetModeEpoch())
+		defer release()
+		status, err := lc.LeaseControl(ctx, key, f.GetOp(), f.GetMode(), f.GetModeEpoch())
 		errMsg := ""
 		if err != nil {
 			errMsg = err.Error()
@@ -126,6 +138,31 @@ func (s *Session) leaseControl(ctx context.Context, c *conn, f *pb.LeaseControlF
 		}
 	}()
 	return nil
+}
+
+// takeLeaseSlot admits one mutating call on key, without blocking: a place under
+// leaseKeyCap for key and one under leaseControlCap, or neither. release gives both back;
+// key's place first, so a drained leaseSlots means every key's count is back to zero.
+func (s *Session) takeLeaseSlot(key string) (release func(), admitted bool) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if s.leaseByKey[key] >= leaseKeyCap {
+		return nil, false
+	}
+	select {
+	case s.leaseSlots <- struct{}{}:
+	default:
+		return nil, false
+	}
+	s.leaseByKey[key]++
+	return func() {
+		s.leaseMu.Lock()
+		if s.leaseByKey[key]--; s.leaseByKey[key] == 0 {
+			delete(s.leaseByKey, key)
+		}
+		s.leaseMu.Unlock()
+		<-s.leaseSlots
+	}, true
 }
 
 // leaseKeepalive forwards a Keepalive frame inline; it has no reply. Without a

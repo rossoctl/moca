@@ -104,9 +104,12 @@ type Session struct {
 	// handed to Send. An Exec's terminal frame is queued before inflight drops, so Idle reads
 	// inflight first and then this: a terminal frame still behind chunks keeps the session busy.
 	unsent atomic.Int64
-	// leaseSlots holds one token per LeaseControl call running, across every connection: see
-	// leaseControlCap.
+	// leaseSlots holds one token per mutating LeaseControl call running, across every
+	// connection, and leaseByKey counts them per workspace key (under leaseMu): see
+	// leaseControlCap and takeLeaseSlot.
 	leaseSlots chan struct{}
+	leaseMu    sync.Mutex
+	leaseByKey map[string]int
 }
 
 // Idle reports that no admitted Exec is queued or running, and that every frame queued for the
@@ -126,7 +129,7 @@ func New(cfg Config, r wexec.Runner) *Session {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
 	}
-	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize), leaseSlots: make(chan struct{}, leaseControlCap)}
+	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize), leaseSlots: make(chan struct{}, leaseControlCap), leaseByKey: map[string]int{}}
 }
 
 // slot tracks one accepted exec so an Abort can reach it whether it is running

@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -20,8 +21,9 @@ type leaseCall struct {
 }
 
 // leaseRunner is a scriptedRunner that is also a session.LeaseController. With release
-// non-nil, every LeaseControl blocks until it is closed: a set_mode downgrade waiting out a
-// lease's grace, which can take minutes.
+// non-nil, every mutating LeaseControl (reset, set_mode) blocks until it is closed: a
+// set_mode downgrade waiting out a lease's grace, which can take minutes. A status never
+// blocks, as vmpool's only takes the pool lock.
 type leaseRunner struct {
 	scriptedRunner
 	release chan struct{}
@@ -41,7 +43,7 @@ func (r *leaseRunner) LeaseControl(
 	r.lmu.Lock()
 	r.calls = append(r.calls, leaseCall{key: key, op: op, mode: mode, epoch: epoch})
 	r.lmu.Unlock()
-	if r.release != nil {
+	if r.release != nil && op != pb.LeaseOp_LEASE_OP_STATUS {
 		<-r.release
 	}
 	return r.status, r.err
@@ -194,8 +196,18 @@ func waitLeaseDrained(t *testing.T, s *session.Session) {
 	waitFor(t, "every lease call to finish", func() bool { return session.LeaseCallsInFlight(s) == 0 })
 }
 
-// At leaseControlCap (16) calls in flight, the next is refused at once, and a finished call
-// frees its place.
+// fillLeaseSlots sends n mutating calls (reset), two per workspace key -- the per-key cap --
+// so that all n fit under the worker-wide cap.
+func fillLeaseSlots(st *fakeStream, firstID uint64, n int) {
+	for i := 0; i < n; i++ {
+		st.leaseControl(&pb.LeaseControlFrame{
+			CtlId: firstID + uint64(i), WorkspaceKey: fmt.Sprintf("leaf-%d", i/2), Op: pb.LeaseOp_LEASE_OP_RESET,
+		})
+	}
+}
+
+// At leaseControlCap (16) mutating calls in flight, the next is refused at once, and a
+// finished call frees its place.
 func TestLeaseControlCap(t *testing.T) {
 	const leaseCap = 16
 	st := newFakeStream()
@@ -205,12 +217,11 @@ func TestLeaseControlCap(t *testing.T) {
 	serve(t, s, st)
 	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
 
-	for id := uint64(1); id <= leaseCap; id++ {
-		st.leaseControl(&pb.LeaseControlFrame{CtlId: id, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_STATUS})
-	}
+	fillLeaseSlots(st, 1, leaseCap)
 	waitFor(t, "16 calls in flight", func() bool { return r.callCount() == leaseCap })
 
-	st.leaseControl(&pb.LeaseControlFrame{CtlId: leaseCap + 1, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_STATUS})
+	// A fresh key, so the refusal is the worker-wide cap's, not the per-key one's.
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: leaseCap + 1, WorkspaceKey: "leaf-fresh", Op: pb.LeaseOp_LEASE_OP_RESET})
 	waitFor(t, "the 17th call's refusal", func() bool { return leaseResultFor(st.sent(), leaseCap+1) != nil })
 	if got := leaseResultFor(st.sent(), leaseCap+1).GetError(); got != "busy: too many lease calls in flight" {
 		t.Errorf("17th result error = %q, want the busy refusal", got)
@@ -229,10 +240,83 @@ func TestLeaseControlCap(t *testing.T) {
 	// A slot is freed just AFTER its reply is queued, so seeing all 16 replies does not yet
 	// prove the slots are free; this does.
 	waitLeaseDrained(t, s)
-	st.leaseControl(&pb.LeaseControlFrame{CtlId: 100, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_STATUS})
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 100, WorkspaceKey: "leaf-0", Op: pb.LeaseOp_LEASE_OP_RESET})
 	waitFor(t, "a call after the cap drained", func() bool { return leaseResultFor(st.sent(), 100) != nil })
 	if got := leaseResultFor(st.sent(), 100); got.GetError() != "" || got.GetStatus().GetState() != "active" {
 		t.Errorf("post-drain result = %+v, want the controller's status", got)
+	}
+}
+
+// I1 (a): a status takes no slot, so a worker whose 16 slots are all held by blocked
+// mutating calls still answers every sandbox's status.
+func TestLeaseStatusAnsweredWhileSlotsFull(t *testing.T) {
+	const leaseCap = 16
+	st := newFakeStream()
+	r := &leaseRunner{release: make(chan struct{}), status: &pb.LeaseStatus{State: "active"}}
+	releaseOnCleanup(t, r)
+	s := session.New(testConfig(), r)
+	serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+	fillLeaseSlots(st, 1, leaseCap)
+	waitFor(t, "16 calls in flight", func() bool { return r.callCount() == leaseCap })
+
+	for id := uint64(50); id < 53; id++ {
+		st.leaseControl(&pb.LeaseControlFrame{CtlId: id, WorkspaceKey: "leaf-other", Op: pb.LeaseOp_LEASE_OP_STATUS})
+	}
+	for id := uint64(50); id < 53; id++ {
+		waitFor(t, "a status while every slot is held", func() bool { return leaseResultFor(st.sent(), id) != nil })
+		if got := leaseResultFor(st.sent(), id); got.GetError() != "" || got.GetStatus().GetState() != "active" {
+			t.Errorf("status ctl %d = %+v, want the controller's status and no error", id, got)
+		}
+	}
+	if n := session.LeaseCallsInFlight(s); n != leaseCap {
+		t.Errorf("lease calls in flight = %d, want %d: a status must not take a slot", n, leaseCap)
+	}
+	close(r.release)
+	waitLeaseDrained(t, s)
+}
+
+// I1 (b): at most 2 mutating calls per workspace key; a 3rd on the same key is refused at
+// once without reaching the controller, while another key still gets a slot.
+func TestLeaseControlPerKeyCap(t *testing.T) {
+	st := newFakeStream()
+	r := &leaseRunner{release: make(chan struct{}), status: &pb.LeaseStatus{State: "none"}}
+	releaseOnCleanup(t, r)
+	s := session.New(testConfig(), r)
+	serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 1, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_RESET})
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 2, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_SET_MODE, ModeEpoch: 3})
+	waitFor(t, "two calls on leaf-a in flight", func() bool { return r.callCount() == 2 })
+
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 3, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_SET_MODE, ModeEpoch: 4})
+	waitFor(t, "the 3rd leaf-a call's refusal", func() bool { return leaseResultFor(st.sent(), 3) != nil })
+	if got := leaseResultFor(st.sent(), 3).GetError(); got != "busy: too many lease calls in flight" {
+		t.Errorf("3rd leaf-a result error = %q, want the busy refusal", got)
+	}
+
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 4, WorkspaceKey: "leaf-b", Op: pb.LeaseOp_LEASE_OP_RESET})
+	waitFor(t, "the leaf-b call to reach the controller", func() bool { return r.callCount() == 3 })
+	if n := session.LeaseCallsInFlight(s); n != 3 {
+		t.Errorf("lease calls in flight = %d, want 3 (2 on leaf-a, 1 on leaf-b)", n)
+	}
+	r.lmu.Lock()
+	for _, c := range r.calls {
+		if c.key == "leaf-a" && c.epoch == 4 {
+			t.Errorf("the refused leaf-a call reached the controller: %+v", c)
+		}
+	}
+	r.lmu.Unlock()
+
+	// Once leaf-a's calls finish, its places are free again.
+	close(r.release)
+	waitLeaseDrained(t, s)
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 5, WorkspaceKey: "leaf-a", Op: pb.LeaseOp_LEASE_OP_RESET})
+	waitFor(t, "a leaf-a call after its calls drained", func() bool { return leaseResultFor(st.sent(), 5) != nil })
+	if got := leaseResultFor(st.sent(), 5).GetError(); got != "" {
+		t.Errorf("post-drain leaf-a result error = %q, want none", got)
 	}
 }
 
@@ -245,16 +329,14 @@ func TestLeaseControlCapSurvivesReconnect(t *testing.T) {
 
 	first := newFakeStream()
 	sv := serve(t, s, first)
-	for id := uint64(1); id <= 16; id++ {
-		first.leaseControl(&pb.LeaseControlFrame{CtlId: id, Op: pb.LeaseOp_LEASE_OP_STATUS})
-	}
+	fillLeaseSlots(first, 1, 16)
 	waitFor(t, "16 calls in flight", func() bool { return r.callCount() == 16 })
 	first.close()
 	_ = sv.wait(t, "after the first stream closed with lease calls still blocked")
 
 	second := newFakeStream()
 	serve(t, s, second)
-	second.leaseControl(&pb.LeaseControlFrame{CtlId: 17, Op: pb.LeaseOp_LEASE_OP_STATUS})
+	second.leaseControl(&pb.LeaseControlFrame{CtlId: 17, WorkspaceKey: "leaf-fresh", Op: pb.LeaseOp_LEASE_OP_RESET})
 	waitFor(t, "the refusal on the new connection", func() bool { return leaseResultFor(second.sent(), 17) != nil })
 	if got := leaseResultFor(second.sent(), 17).GetError(); got != "busy: too many lease calls in flight" {
 		t.Errorf("result on reconnect = %q, want the busy refusal", got)

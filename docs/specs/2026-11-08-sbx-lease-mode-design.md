@@ -586,8 +586,10 @@ under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no 
 - **`LeaseKeepalive` is fire-and-forget.** The relay answers OK once the caller checks pass, even
   with no worker attached; on the worker it is a no-op without a live lease. It is not audited, since
   a client may send one every few seconds.
-- **The worker** runs lease calls off its receive loop and its Exec slots, at most 16 at once across
-  every sandbox it serves (then `busy: too many lease calls in flight`). The container tier has no
+- **The worker** runs lease calls off its receive loop and its Exec slots. It runs at most 16
+  `reset` and `set_mode` calls at once across every sandbox it serves, and at most 2 per workspace;
+  past either cap it answers `busy: too many lease calls in flight`. A `status` counts against
+  neither cap, so one sandbox's blocked calls cannot deny another's `status`. The container tier has no
   lease mode and answers every `LeaseControl` with `lease_unsupported: this worker has no lease mode`.
 - **One audit line per `LeaseControl`,** marker `sandbox_lease_control`, refusals included (a call
   with no bearer token is a `refused` line with the reason `no bearer token`): `wrk`, `op`, `ms`,
