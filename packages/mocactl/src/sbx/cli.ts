@@ -10,13 +10,17 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
 import { SandboxApiClient } from './api.js';
 import {
   cmdCreate,
+  cmdEditTemplate,
   cmdEnv,
   cmdLogin,
   cmdLogout,
   cmdLs,
   cmdRm,
+  cmdTagTemplate,
   cmdTemplates,
   cmdToken,
+  cmdTransferTemplate,
+  cmdUntagTemplate,
   failRefresh,
   SBX_EXIT,
   type SbxCtx,
@@ -94,6 +98,15 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  3600), 130 on Ctrl-C (the build goes on)
   mocactl sbx templates cancel ID --build BUILD [--json]
                                                  withdraw a queued, building or probing build
+  mocactl sbx templates tag ID TAG... --build BUILD [--json]
+                                                 move tags onto a registered build of a template you
+                                                 own; sandboxes made earlier keep their build
+  mocactl sbx templates untag ID TAG [--json]    remove a tag; its build stays (never default)
+  mocactl sbx templates edit ID [--visibility private|deployment] [--description TEXT] [--json]
+                                                 change who sees it, or its description
+  mocactl sbx templates transfer ID SUBJECT [--json]
+                                                 make SUBJECT (github:<id> or oidc:<sub>) its owner
+                                                 (admins only)
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -346,10 +359,14 @@ const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
  * credentials, whose secrets are the request.
  */
 const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
-/** The `templates` subcommands; all but `create` take one template ID. */
-const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel'];
+/** The `templates` owner's and admin's subcommands (lifecycle spec §5.1-§5.2). */
+const TEMPLATE_ADMIN_SUBS = ['tag', 'untag', 'edit', 'transfer'];
+/** The `templates` subcommands; their arguments are checked one by one in sbxMain. */
+const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel', ...TEMPLATE_ADMIN_SUBS];
+/** The `templates` subcommands that take one template ID. */
+const TEMPLATE_ONE_ID = ['build', 'show', 'follow', 'cancel', 'edit'];
 /** The `templates` subcommands that take --build, and those that take --timeout (a wait). */
-const TAKES_BUILD = ['show', 'follow', 'cancel'];
+const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag'];
 const TAKES_TIMEOUT = ['follow', 'create', 'build'];
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
@@ -456,6 +473,8 @@ async function sbxMainWith(
         'control-plane-url': { type: 'string' },
         template: { type: 'string' },
         build: { type: 'string' },
+        description: { type: 'string' },
+        visibility: { type: 'string' },
         seed: { type: 'boolean' },
         name: { type: 'string' },
         label: { type: 'string', multiple: true },
@@ -481,7 +500,6 @@ async function sbxMainWith(
         id: { type: 'string' },
         image: { type: 'string' },
         profile: { type: 'string' },
-        visibility: { type: 'string' },
         'gate-record': { type: 'string' },
         'dry-run': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
@@ -560,8 +578,8 @@ async function sbxMainWith(
     io.err(`sbx: --id only applies to templates create\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.visibility !== undefined && sub !== 'create') {
-    io.err(`sbx: --visibility only applies to templates create\n${SBX_USAGE}`);
+  if (values.visibility !== undefined && !(sub === 'create' || sub === 'edit')) {
+    io.err(`sbx: --visibility only applies to templates create and edit\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if ((sub === 'create' || sub === 'build') && !values.spec?.length) {
@@ -607,17 +625,36 @@ async function sbxMainWith(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates SUB ...` (template lifecycle spec §4); bare `templates` lists them.
+  // `templates SUB ...` (template lifecycle spec §4), and the owner's and admin's actions
+  // (§5.1-§5.2); bare `templates` lists them.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub !== undefined && TEMPLATE_ADMIN_SUBS.includes(sub) && extra.some((x) => !x.trim())) {
+    io.err(`sbx: templates ${sub} takes no empty argument\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (sub === 'create' && extra.length > 0) {
     io.err(`sbx: templates create takes no ID (the spec names it, or --id)\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (sub !== undefined && sub !== 'create' && (extra.length !== 1 || !extra[0]!.trim())) {
+  if (
+    sub !== undefined &&
+    TEMPLATE_ONE_ID.includes(sub) &&
+    (extra.length !== 1 || !extra[0]!.trim())
+  ) {
     io.err(`sbx: templates ${sub} takes one template ID\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if ((sub === 'untag' || sub === 'transfer') && extra.length !== 2) {
+    io.err(
+      `sbx: templates ${sub} takes a template ID and ${sub === 'untag' ? 'a TAG' : 'a SUBJECT'}\n${SBX_USAGE}`,
+    );
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && extra.length < 2) {
+    io.err(`sbx: templates tag takes a template ID and at least one TAG\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.build !== undefined && !(sub !== undefined && TAKES_BUILD.includes(sub))) {
@@ -626,6 +663,27 @@ async function sbxMainWith(
   }
   if (sub === 'cancel' && values.build === undefined) {
     io.err(`sbx: templates cancel needs --build BUILD\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'tag' && values.build === undefined) {
+    io.err(`sbx: templates tag needs --build BUILD\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.description !== undefined && sub !== 'edit') {
+    io.err(`sbx: --description only applies to templates edit\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'edit' && values.visibility === undefined && values.description === undefined) {
+    io.err(`sbx: templates edit needs --visibility or --description\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (
+    sub === 'edit' &&
+    values.visibility !== undefined &&
+    values.visibility !== 'private' &&
+    values.visibility !== 'deployment'
+  ) {
+    io.err(`sbx: --visibility must be private or deployment\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.build !== undefined && !values.build.trim()) {
@@ -889,6 +947,14 @@ async function sbxMainWith(
         });
       if (arg === 'cancel') return cmdCancelBuild(ctx, extra[0]!, values.build!);
       if (arg === 'show') return cmdShowTemplate(ctx, extra[0]!, values.build);
+      if (arg === 'tag') return cmdTagTemplate(ctx, extra[0]!, extra.slice(1), values.build!);
+      if (arg === 'untag') return cmdUntagTemplate(ctx, extra[0]!, extra[1]!);
+      if (arg === 'edit')
+        return cmdEditTemplate(ctx, extra[0]!, {
+          ...(values.visibility !== undefined ? { visibility: values.visibility } : {}),
+          ...(values.description !== undefined ? { description: values.description } : {}),
+        });
+      if (arg === 'transfer') return cmdTransferTemplate(ctx, extra[0]!, extra[1]!);
       return cmdTemplates(ctx);
     case 'create':
       return cmdCreate(

@@ -55,6 +55,12 @@
 # the drop-in, token and api CA and KEEPS the CA (snapshots are built with it). Once the drop-in
 # exists, a worker install refuses a snapshot whose manifest.json egress_ca_sha256 is not the CA's.
 #
+# SBX_WORKER_AT_BOOT (0 or 1, default 1) says whether the worker's unit is enabled for boot. With 1 a
+# host boot starts every installed worker, as before. With 0 the unit is installed and started now but
+# disabled, so a boot starts none of them: set it under a host agent, which starts and stops workers
+# from the control plane's wanted state (#796). Every re-install applies the value it is given, so a
+# unit an earlier install enabled is disabled by a re-install with 0. An empty value is refused.
+#
 # --janitor takes deploy/sbx/.generated/janitor (janitor.env, janitor.token [+ api-ca.crt]) and
 # installs the host janitor (spec §8.3): $SBX_LIBEXEC_DIR/sbx-janitor.sh, $SBX_ENV_DIR/janitor.env
 # and janitor.token (0600), sbx-janitor.service and .timer (enabled). Its files are their own
@@ -65,12 +71,12 @@
 # $SBX_SRV to SBX_READ_AHEAD_KB (default 512; 0 leaves the device alone), so a cold start reads its
 # snapshot's memory file in larger requests. A sysfs write does not survive a reboot, so it installs
 # $SBX_LIBEXEC_DIR/sbx-read-ahead.sh (which finds the device by path at every run) and the oneshot
-# sbx-read-ahead.service (enabled; the workers are ordered after it), then runs the script once. The
-# device's value before the first install is kept in $SBX_ENV_DIR/read-ahead.orig; the last worker's
-# uninstall (or a re-run with SBX_READ_AHEAD_KB=0) writes it back and removes the three files, the
-# manifest kind `readahead <path>`. A $SBX_SRV on no block device (tmpfs, overlay), or a value the
-# device does not take, is a warning, never a failed install. The setting is device-wide: everything
-# else on that device reads ahead as much.
+# sbx-read-ahead.service (enabled, whatever SBX_WORKER_AT_BOOT says; the workers are ordered after
+# it), then runs the script once. The device's value before the first install is kept in
+# $SBX_ENV_DIR/read-ahead.orig; the last worker's uninstall (or a re-run with SBX_READ_AHEAD_KB=0)
+# writes it back and removes the three files, the manifest kind `readahead <path>`. A $SBX_SRV on no
+# block device (tmpfs, overlay), or a value the device does not take, is a warning, never a failed
+# install. The setting is device-wide: everything else on that device reads ahead as much.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,6 +87,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 : "${SBX_BIN_DIR:=/usr/local/bin}"
+# Only an unset value defaults (no colon): an explicit empty one is refused in main, not read as 1.
+: "${SBX_WORKER_AT_BOOT=1}"
 # The worker binary the template unit runs: SBX0's own build, never deploy/microvm's /usr/local/bin
 # one (see the header).
 : "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
@@ -637,9 +645,14 @@ install_worker() {
   fi
   record "worker sbx-worker@$id $SBX_ENV_DIR/workers/$id.env $SBX_UNIT_DIR/sbx-$id.slice"
   systemctl daemon-reload
-  # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
-  # env file once (enable --now followed by restart would start a fresh unit twice).
-  systemctl enable "sbx-worker@$id.service"
+  # enable (or disable, with SBX_WORKER_AT_BOOT=0), then exactly one restart: a first install starts
+  # the unit, a re-install picks up the new env file once (enable --now followed by restart would start
+  # a fresh unit twice). disable is what makes a re-install with 0 undo an earlier install's enable.
+  if [[ "$SBX_WORKER_AT_BOOT" == 1 ]]; then
+    systemctl enable "sbx-worker@$id.service"
+  else
+    systemctl disable "sbx-worker@$id.service"
+  fi
   # A worker that crash-looped into `failed` (StartLimitBurst, e.g. a missing snapshot) refuses a
   # restart with "start request repeated too quickly" until reset; a re-run after the fix is how an
   # operator brings it back (as deploy/microvm/setup-microvm.sh does).
@@ -901,6 +914,8 @@ main() {
   if [[ -n "$EGRESS_BUNDLE" ]]; then install_egress_credentials; return; fi
   valid_read_ahead "$SBX_READ_AHEAD_KB" ||
     die "SBX_READ_AHEAD_KB='$SBX_READ_AHEAD_KB' must be a whole number of KiB from 0 (leave the device alone) to 16384"
+  [[ "$SBX_WORKER_AT_BOOT" =~ ^[01]$ ]] ||
+    die "SBX_WORKER_AT_BOOT='$SBX_WORKER_AT_BOOT' must be 1 (start the worker at boot, the default) or 0 (do not; under a host agent)"
   [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
   validate_worker
   [[ -n "$NO_EGRESS" ]] || install_egress

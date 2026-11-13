@@ -55,6 +55,9 @@ gitignored).
    session, (guest RAM + 32) × 3 + 1024 MiB at the unit's standby depth of 2: 13408 MiB for a
    4096 MiB guest. A smaller budget is refused, naming the minimum. The worker runs
    `SBX_WORKER_BIN` (default `/usr/local/libexec/sbx/microvm-worker`, [README](README.md#2-kvm-host-side)).
+   On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
+   the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
+   agent's wanted state instead of starting all of them.
 
 6. **The janitor,** once per KVM host:
 
@@ -527,7 +530,9 @@ read stayed 128 KiB, at about 5,900-6,900 reads/s at 512 and above (about 5,950 
 
 So `install-host.sh` sets the read-ahead of the device holding `/srv/sbx` to `SBX_READ_AHEAD_KB`
 (default 512 KiB, at most 16384) and installs `sbx-read-ahead.service`, a oneshot enabled at boot
-(a sysfs write does not survive a reboot) that the workers start after. It finds the device by path
+(a sysfs write does not survive a reboot) that the workers start after. It is enabled whatever
+`SBX_WORKER_AT_BOOT` says: on a host whose workers a host agent starts, the boot still sets the
+read-ahead before the agent starts any. It finds the device by path
 at every run: a partition's read-ahead is its disk's, an LVM or dm device has its own. The value the
 device had before the first install is kept in `/etc/sbx/read-ahead.orig`, and the last worker's
 uninstall writes it back. A `/srv/sbx` on no block device (tmpfs, overlay), or a value the device
