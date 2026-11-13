@@ -267,7 +267,7 @@ describe('frozen context on a prompt leaf', () => {
     // No seed, no patch capture, and the turn is told of no template either.
     const ran = transport.exec.mock.calls.map((c) => String(c[0]));
     expect(ran.some((c) => c.includes('.moca-seeded'))).toBe(false);
-    expect(ran.some((c) => c.includes('git diff --cached'))).toBe(false);
+    expect(ran.some((c) => c.includes('diff --cached'))).toBe(false);
     expect(r).not.toHaveProperty('workspace');
     const cfg = executeTurn.mock.calls[0]![0].config ?? {};
     for (const k of ['sandboxTemplate', 'sandboxSeed', 'sandboxSeedSource', 'sandboxBuildId'])

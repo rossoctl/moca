@@ -705,7 +705,9 @@ components:
         A templated session's workspace after the turn (session-templates spec §5.1), taken in
         the turn's sandbox before its lease is returned: `git diff --cached --binary` from the
         seed's baseline commit to everything in the workspace now, staged in a throwaway index
-        (`.moca-*` and `.sh-config` left out). Present on every templated turn that leased its
+        (Moca's own files left out: `.moca-*`, `.sh-config*` and `leaves/*/.sh-config`), with
+        `a/` and `b/` prefixes, no color and no renames whatever the workspace's git config says,
+        so it applies with `git apply`. Present on every templated turn that leased its
         sandbox; a failed capture is `error` alone and never fails the turn.
       properties:
         baseline:
@@ -729,7 +731,9 @@ components:
             8 MiB output cap): `patch` is left out, never cut.
         error:
           type: string
-          description: Why no patch was taken (no baseline commit, a failed exec).
+          description: |
+            Why no patch was taken (no baseline commit, a baseline that is not a full commit id,
+            a failed exec).
     LeafUsage:
       type: object
       description: Cumulative token usage, for run cost pricing.

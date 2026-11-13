@@ -170,12 +170,21 @@ A client of a Moca Pi session has no exec on its workspace (the relay's exec rou
 tokens only), so the harness hands the end state back: **after every turn of a templated session
 that leased its sandbox**, before the lease is returned, one exec in the session's workspace:
 
-    BASE=$(cat .moca-baseline || git rev-parse HEAD); GIT_INDEX_FILE=<tmp>/index
-    git read-tree $BASE && git add -A -- . ':(exclude).moca-*' ':(exclude).sh-config'
-    git diff --cached --binary $BASE
+    BASE=$(cat .moca-baseline || git rev-parse HEAD)   # a full commit id (40 or 64 hex), else an error
+    GIT_INDEX_FILE=<tmp>/index
+    git read-tree $BASE && git add -A -- . ':(exclude).moca-*' ':(exclude).sh-config*' \
+      ':(exclude,glob)leaves/*/.sh-config'
+    git -c color.ui=never -c diff.noprefix=false ... diff --cached --binary --no-color \
+      --no-ext-diff --no-textconv --no-renames --src-prefix=a/ --dst-prefix=b/ $BASE
 
 the same diff a stock agent's runner takes (a throwaway index, so the workspace's own index is
-untouched; the agent's own commits do not hide its work, since the base is the seed's commit). It is
+untouched; the agent's own commits do not hide its work, since the base is the seed's commit). Left
+out are Moca's own files: the seed's, and a promoted config's, which a turn with a `configRef` still
+holds when the capture runs (the cache `.sh-config/`, its lock `.sh-config.lock`, the session's link
+`leaves/<sid>/.sh-config`). The diff's options override the workspace's and the image's git config
+(color, prefixes, an external diff), which the template or the agent controls, so the patch always
+applies with `git apply`. The baseline file is the agent's to write, so a value that is not a full
+commit id is refused (`{ error }`), never read as an option or a rev of the agent's choosing. It is
 `TurnResult.workspace` (also on the terminal `done` and `error` frames, so `mocactl run --json`
 prints it):
 

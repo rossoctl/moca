@@ -14,6 +14,7 @@ import {
   SEED_MARKER,
   seedWorkspace,
 } from '../src/run-turn.js';
+import { buildLeafBindScript, configCacheDir } from '../src/config-overlay.js';
 
 /**
  * The template seed (session-templates spec §5), run through a fake transport that executes the
@@ -451,11 +452,88 @@ describe('the seed baseline and the patch capture (session-templates spec §5.1)
     expect(patchMaxBytes({ SH_TURN_PATCH_MAX_BYTES: String(64 << 20) })).toBeLessThan(8 << 20);
   });
 
+  it("leaves a promoted config's files out: its cache, its lock and the session's link", async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    // The layout a turn with a configRef holds while the capture runs (config-overlay.ts): the
+    // shared cache with its lock and refs, and the session's link, all in the seed's checkout.
+    const digest = `sha256:${'c'.repeat(64)}`;
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          `mkdir -p "${configCacheDir(digest)}" /workspace/.sh-config/.refs/x`,
+          `echo cfg > "${configCacheDir(digest)}/AGENTS.md"`,
+          `: > /workspace/.sh-config/.refs/x/sess-1`,
+          `: > /workspace/.sh-config.lock`,
+          buildLeafBindScript(digest, 'sess-1'),
+        ]
+          .join('\n')
+          .replaceAll('/workspace', ws),
+      ],
+      { stdio: 'pipe' },
+    );
+    execFileSync('bash', ['-c', 'echo new > n.txt; mkdir -p leaves/keep; echo k > leaves/keep/k'], {
+      cwd: ws,
+    });
+    const w = await captureTurnPatch(bashOut, ws, 1 << 20);
+    expect(w.error).toBeUndefined();
+    expect(w.patch).toContain('b/n.txt');
+    // The agent's own file under leaves/ is kept; only the session's link is Moca's.
+    expect(w.patch).toContain('b/leaves/keep/k');
+    expect(w.patch).not.toContain('.sh-config');
+  });
+
+  it('the patch ignores the workspace git config: it applies under color, noprefix, mnemonic', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    for (const [k, v] of [
+      ['color.ui', 'always'],
+      ['color.diff', 'always'],
+      ['diff.noprefix', 'true'],
+      ['diff.mnemonicPrefix', 'true'],
+      ['diff.external', 'false'],
+    ])
+      git(ws, 'config', k, v);
+    execFileSync('bash', ['-c', 'printf "a\\nB\\n" > f.txt; git mv keep.txt kept.txt'], {
+      cwd: ws,
+    });
+    const w = await captureTurnPatch(bashOut, ws, 1 << 20);
+    expect(w.error).toBeUndefined();
+    expect(w.patch).toMatch(/^diff --git a\/f\.txt b\/f\.txt$/m);
+    expect(w.patch).not.toContain('\u001b[');
+    // No rename detection: a moved file is a deletion and an addition.
+    expect(w.patch).not.toContain('rename from');
+    const check = scratch();
+    execFileSync('bash', ['-c', `cp -a ${src}/. .`], { cwd: check });
+    execFileSync('git', ['apply', '--check', '-'], { cwd: check, input: w.patch });
+  });
+
+  it('refuses a baseline that is not a full commit id: no option, no rev name', async () => {
+    const src = repo();
+    const ws = scratch();
+    await seedWorkspace(realBash, 'example-repo', `cp -a ${src}/. .`, ws);
+    const head = readFileSync(join(ws, SEED_BASELINE), 'utf8').trim();
+    for (const bad of ['--output=x.out', 'HEAD~1', head.slice(0, 12), `${head}\n${head}`, 'ABC']) {
+      execFileSync('bash', ['-c', `printf '%s' "$1" > ${SEED_BASELINE}`, '_', bad], { cwd: ws });
+      expect((await captureTurnPatch(bashOut, ws, 1 << 20)).error).toBe(
+        'the baseline is not a commit id',
+      );
+    }
+    expect(existsSync(join(ws, 'x.out'))).toBe(false);
+  });
+
   it("the capture script names the baseline file and excludes Moca's own files", () => {
     const c = buildPatchCaptureScript('/workspace');
     expect(c).toContain(SEED_BASELINE);
     expect(c).toContain("':(exclude).moca-*'");
-    expect(c).toContain('git diff --cached --binary "$BASE"');
+    expect(c).toContain("':(exclude).sh-config*'");
+    expect(c).toContain("':(exclude,glob)leaves/*/.sh-config'");
+    expect(c).toContain('diff --cached --binary');
+    expect(c).toContain('--src-prefix=a/ --dst-prefix=b/ "$BASE"');
     expect(c).toContain('GIT_INDEX_FILE');
   });
 });

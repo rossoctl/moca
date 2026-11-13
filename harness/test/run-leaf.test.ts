@@ -1038,7 +1038,7 @@ describe("runPromptLeaf on a templated session's hands (session-templates spec Â
     // The seed ran before the turn, in the leased workspace; the capture after it.
     expect(commands[0]).toContain('.moca-seeded');
     expect(commands[0]).toContain("'/workspace'");
-    expect(commands.at(-1)).toContain('git diff --cached --binary');
+    expect(commands.at(-1)).toContain('diff --cached --binary');
     expect(r).toMatchObject({
       status: 'responded',
       text: 'fixed',

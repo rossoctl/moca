@@ -417,18 +417,44 @@ export function patchMaxBytes(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * Moca's own files in a workspace, left out of its patch: the seed's (`.moca-*`), and a promoted
+ * config's while a turn holds it (config-overlay.ts), which the capture runs before releasing: the
+ * shared cache `.sh-config/` with its lock `.sh-config.lock`, and a session's link to it
+ * `leaves/<sid>/.sh-config` (on a microVM the workspace is the seed's checkout, so they are in it).
+ */
+export const PATCH_EXCLUDES = [
+  ':(exclude).moca-*',
+  ':(exclude).sh-config*',
+  ':(exclude,glob)leaves/*/.sh-config',
+];
+
+/**
+ * The diff's output fixed against the workspace's and the image's git config, which the template
+ * or the agent controls: no color, no external diff or textconv, `a/` and `b/` prefixes, no renames
+ * (one patch for one end state), so the patch applies like a stock agent's `git diff` output.
+ */
+const PATCH_DIFF =
+  'git -c color.ui=never -c color.diff=never -c diff.noprefix=false -c diff.mnemonicPrefix=false ' +
+  '-c diff.relative=false diff --cached --binary --no-color --no-ext-diff --no-textconv ' +
+  '--no-renames --src-prefix=a/ --dst-prefix=b/';
+
+/**
  * The capture (spec §5.1), run in the session's workspace: the baseline on the first line, then
- * `git diff --cached --binary` from it to the whole workspace now, staged in a throwaway index so
- * the workspace's own index is untouched. Moca's own files (`.moca-*`, `.sh-config`) are left out;
- * the workspace's .gitignore applies, as in a stock agent's `git add -A`.
+ * the diff (PATCH_DIFF) from it to the whole workspace now, staged in a throwaway index so the
+ * workspace's own index is untouched. Moca's own files (PATCH_EXCLUDES) are left out; the
+ * workspace's .gitignore applies, as in a stock agent's `git add -A`. The baseline is read from a
+ * file the agent can write, so it must be a full commit id (40 or 64 hex), never an option or a rev
+ * name of the agent's choosing: anything else exits 93, reported as an error.
  */
 export function buildPatchCaptureScript(workspace: string): string {
   return [
     `cd ${shq(workspace)} || exit 90`,
     `BASE=$(cat ${SEED_BASELINE} 2>/dev/null || git rev-parse --verify -q HEAD) && [ -n "$BASE" ] || exit 91`,
+    `case "$BASE" in *[!0-9a-f]*) exit 93 ;; esac`,
+    `[ "\${#BASE}" -eq 40 ] || [ "\${#BASE}" -eq 64 ] || exit 93`,
     `D=$(mktemp -d) || exit 92`,
     `export GIT_INDEX_FILE="$D/index"`,
-    `git read-tree "$BASE" && git add -A -- . ':(exclude).moca-*' ':(exclude).sh-config' && printf '%s\\n' "$BASE" && git diff --cached --binary "$BASE"`,
+    `git read-tree "$BASE" && git add -A -- . ${PATCH_EXCLUDES.map(shq).join(' ')} && printf '%s\\n' "$BASE" && ${PATCH_DIFF} "$BASE"`,
     `rc=$?; rm -rf "$D"; exit $rc`,
   ].join('\n');
 }
@@ -452,7 +478,9 @@ export async function captureTurnPatch(
       const why =
         exitCode === 91
           ? 'no baseline commit in the workspace'
-          : `capture exited ${exitCode ?? 'none: signal'}`;
+          : exitCode === 93
+            ? 'the baseline is not a commit id'
+            : `capture exited ${exitCode ?? 'none: signal'}`;
       return { error: why };
     }
     const nl = stdout.indexOf(0x0a);
