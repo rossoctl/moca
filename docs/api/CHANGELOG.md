@@ -25,7 +25,8 @@ Every change is additive; the new routes mount on both route profiles and need `
   the same way (`before: null`), who can then build, tag and edit it; a restart does not undo it. An `owner` record
   (`{owner, before}`).
 - Every template change (a tag moved or removed, an edit, an owner transfer, a cancelled build) is stored only once its
-  records are on the chain: a record that fails to append refuses the change.
+  records are on the chain: a record that fails to append refuses the change. The owner's check is made again under the
+  template's lock, so a change by an owner the template was transferred away from meanwhile is refused (`403`).
 
 ## 1.5.0
 

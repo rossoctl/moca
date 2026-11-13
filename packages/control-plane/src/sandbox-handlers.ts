@@ -445,6 +445,9 @@ function quotaLock(cat: TemplateCatalog): SubjectQueue {
   return q;
 }
 
+/** Thrown inside a create's write when the template changed owner since it was read. */
+const OWNER_MOVED = new Error('the template changed owner');
+
 /**
  * The shared body of both create routes. `existing`: true for POST /v1/templates/{id}/builds (the
  * template must exist and be the caller's), false for POST /v1/templates (a new id, or the
@@ -523,98 +526,113 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   let reused: TemplateBuild | undefined;
   // The quota is the template's owner's: an admin adding a build to another's template uses the
   // owner's buildsQueued, not its own. The owner's lock is held around the check and the write
-  // (quotaLock). A template's owner never changes, so reading it before the lock is safe; a new id
-  // another subject takes meanwhile is refused inside, before any quota is read.
-  const charged = (await cat.get(id))?.owner ?? p.sub;
-  const doc = await quotaLock(cat).run(charged, () =>
-    cat.update(id, async (cur) => {
-      if (existing && !cur) throw new CpError('template_not_found', 'no such template');
-      if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
-        // 404 for a private template, 409 for a visible one: never an existence oracle for private.
-        throw cur.visibility === 'private' && !isAdmin(p)
-          ? new CpError('template_not_found', 'no such template')
-          : new CpError('template_exists', `template '${id}' belongs to another subject`);
-      }
-      // §3.2: the same inputs are the same build. One registered, or still on its way there, is
-      // answered instead of a second build (two creates would otherwise queue two builds that
-      // register under one manifest hash).
-      reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
-      if (reused) return cur!;
-      const u = await usage(cat, charged);
-      if (!cur && u.templates >= quota.templates) {
-        throw new CpError(
-          'quota_exceeded',
-          `at most ${quota.templates} templates per subject`,
-          undefined,
-          { quota: 'templates' },
-        );
-      }
-      if (u.buildsQueued >= quota.buildsQueued) {
-        throw new CpError(
-          'quota_exceeded',
-          `at most ${quota.buildsQueued} builds queued per subject`,
-          undefined,
-          { quota: 'buildsQueued' },
-        );
-      }
-      if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
-      const created = await prov.append({
-        stream,
-        kind: 'create',
-        subject: p.sub,
-        body: {
-          image: b.image as string,
-          // A round trip through JSON: what the client sent, as the wire carries it (no undefined),
-          // with the guest size under the key the build reads (normalizeSpec).
-          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
-          profile: result.profile,
-          handle,
-          ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
-        },
-      });
-      if (result.gateRecordSha256) {
-        await prov.append({
-          stream,
-          kind: 'gate',
-          subject: p.sub,
-          body: {
-            record_sha256: result.gateRecordSha256,
-            // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
-            // X1). The policy record in force names what the trust was at create, after any change.
-            source: result.gateTrusted ? 'trusted' : 'client',
-            policy: policyRecord,
-          },
-        });
-      }
-      await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
-      const build: TemplateBuild = {
-        buildId: handle,
-        handle,
-        status: 'queued',
-        profile: result.profile,
-        worker: '',
-        spec: buildSpec(built),
-        createdAt: now,
-        provenance: created.digest,
-        request: {
-          image: b.image as string,
-          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
-          ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
-        },
-      };
-      const base: TemplateDoc = cur ?? {
-        schema: TEMPLATE_DOC_SCHEMA,
-        id,
-        owner: p.sub,
-        visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
-        description: String(built.description ?? ''),
-        tags: {},
-        builds: [],
-        createdAt: now,
-      };
-      return { ...base, builds: [build, ...base.builds] };
-    }),
-  );
+  // (quotaLock); a new id another subject takes meanwhile is refused inside, before any quota is
+  // read. The owner is read before the lock, and an admin's transfer (PUT …/owner) can move it in
+  // between: the write sees another owner, writes nothing, and the step runs again under the new
+  // owner's lock.
+  let doc: TemplateDoc | undefined;
+  for (let attempt = 1; !doc; attempt++) {
+    const charged = (await cat.get(id))?.owner ?? p.sub;
+    try {
+      doc = await quotaLock(cat).run(charged, () =>
+        cat.update(id, async (cur) => {
+          if (existing && !cur) throw new CpError('template_not_found', 'no such template');
+          if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
+            // 404 for a private template, 409 for a visible one: never an existence oracle for
+            // private.
+            throw cur.visibility === 'private' && !isAdmin(p)
+              ? new CpError('template_not_found', 'no such template')
+              : new CpError('template_exists', `template '${id}' belongs to another subject`);
+          }
+          // The owner charged is the one read before the lock; a transfer meanwhile runs it again.
+          if ((cur?.owner ?? p.sub) !== charged) throw OWNER_MOVED;
+          // §3.2: the same inputs are the same build. One registered, or still on its way there,
+          // is answered instead of a second build (two creates would otherwise queue two builds
+          // that register under one manifest hash).
+          reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
+          if (reused) return cur!;
+          const u = await usage(cat, charged);
+          if (!cur && u.templates >= quota.templates) {
+            throw new CpError(
+              'quota_exceeded',
+              `at most ${quota.templates} templates per subject`,
+              undefined,
+              { quota: 'templates' },
+            );
+          }
+          if (u.buildsQueued >= quota.buildsQueued) {
+            throw new CpError(
+              'quota_exceeded',
+              `at most ${quota.buildsQueued} builds queued per subject`,
+              undefined,
+              { quota: 'buildsQueued' },
+            );
+          }
+          if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
+          const created = await prov.append({
+            stream,
+            kind: 'create',
+            subject: p.sub,
+            body: {
+              image: b.image as string,
+              // A round trip through JSON: what the client sent, as the wire carries it (no
+              // undefined), with the guest size under the key the build reads (normalizeSpec).
+              spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+              profile: result.profile,
+              handle,
+              ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
+            },
+          });
+          if (result.gateRecordSha256) {
+            await prov.append({
+              stream,
+              kind: 'gate',
+              subject: p.sub,
+              body: {
+                record_sha256: result.gateRecordSha256,
+                // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not
+                // require X1). The policy record in force names what the trust was at create, after
+                // any change.
+                source: result.gateTrusted ? 'trusted' : 'client',
+                policy: policyRecord,
+              },
+            });
+          }
+          await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+          const build: TemplateBuild = {
+            buildId: handle,
+            handle,
+            status: 'queued',
+            profile: result.profile,
+            worker: '',
+            spec: buildSpec(built),
+            createdAt: now,
+            provenance: created.digest,
+            request: {
+              image: b.image as string,
+              spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+              ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
+            },
+          };
+          const base: TemplateDoc = cur ?? {
+            schema: TEMPLATE_DOC_SCHEMA,
+            id,
+            owner: p.sub,
+            visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
+            description: String(built.description ?? ''),
+            tags: {},
+            builds: [],
+            createdAt: now,
+          };
+          return { ...base, builds: [build, ...base.builds] };
+        }),
+      );
+    } catch (err) {
+      if (err !== OWNER_MOVED) throw err;
+      if (attempt >= 3)
+        throw new CpError('internal_error', "the template's owner kept changing; retry the create");
+    }
+  }
   if (reused) {
     await auditBestEffort(deps, 'template_build_reused', id, {
       subject: p.sub,
@@ -717,15 +735,12 @@ const CANCELLABLE = new Set<TemplateBuild['status']>(['queued', 'building', 'pro
  * further report from a build host, so it never registers.
  */
 async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
-  const p = requireEnrolled(ctx, deps);
-  const { cat, prov } = writable(deps);
-  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
-  if (d0.owner !== p.sub && !isAdmin(p))
-    throw new CpError('forbidden', "only the template's owner cancels its builds");
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'cancels its builds');
   const ref = ctx.params.build ?? '';
   let cancelled: TemplateBuild | undefined;
-  await cat.update(d0.id, async (cur) => {
-    const x = cur!.builds.find((y) => y.handle === ref || y.buildId === ref);
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    const x = cur.builds.find((y) => y.handle === ref || y.buildId === ref);
     if (!x) throw new CpError('template_not_found', 'no such build of this template');
     if (!CANCELLABLE.has(x.status))
       throw new CpError(
@@ -745,7 +760,7 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
         body: { handle: cancelled.handle ?? cancelled.buildId, outcome: 'cancelled' },
       },
     ]);
-    return { ...cur!, builds: cur!.builds.map((y) => (y === x ? cancelled! : y)) };
+    return { ...cur, builds: cur.builds.map((y) => (y === x ? cancelled! : y)) };
   });
   await auditBestEffort(deps, 'template_build_cancelled', d0.id, {
     subject: p.sub,
@@ -764,10 +779,23 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 async function ownTemplate(ctx: RequestCtx, deps: CpDeps, verb: string) {
   const p = requireEnrolled(ctx, deps);
   const w = writable(deps);
-  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
-  if (d0.owner !== p.sub && !isAdmin(p))
+  const own = (d: TemplateDoc | null): TemplateDoc => ownerCheck(d, p, verb);
+  const d0 = own(await catalog(deps).get(ctx.params.id ?? ''));
+  return { p, ...w, d0, own };
+}
+
+/**
+ * The owner's check on a document: 404 for one the caller cannot see (or none), 403 for one that
+ * is neither theirs nor an admin's to act on. `ownTemplate` makes it on the document as read, for
+ * an early answer; each write makes it again on the document under the template's lock, so an
+ * owner transfer (or a change to private) between the two is seen and the old owner's change
+ * refused.
+ */
+function ownerCheck(d: TemplateDoc | null, p: TokenClaims, verb: string): TemplateDoc {
+  if (!d || !canSee(d, p)) throw new CpError('template_not_found', 'no such template');
+  if (d.owner !== p.sub && !isAdmin(p))
     throw new CpError('forbidden', `only the template's owner, or an admin, ${verb}`);
-  return { p, ...w, d0 };
+  return d;
 }
 
 /**
@@ -777,7 +805,7 @@ async function ownTemplate(ctx: RequestCtx, deps: CpDeps, verb: string) {
  * the new build and the one before (§7.1); a tag already on the build writes nothing.
  */
 async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
-  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'moves its tags');
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'moves its tags');
   const b = asRecord(ctx.body);
   const tags = b.tags;
   if (!Array.isArray(tags) || tags.length === 0 || tags.length > 16)
@@ -796,9 +824,10 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
   let moved: { tag: string; from: string | null }[] = [];
   const records: Record<string, string> = {};
   // The build is checked under the template's write lock, so it is still registered when tagged.
-  await cat.update(d0.id, async (cur) => {
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
     moved = [];
-    const target = cur!.builds.find((x) => x.buildId === ref || x.handle === ref);
+    const target = cur.builds.find((x) => x.buildId === ref || x.handle === ref);
     if (!target) throw new CpError('template_not_found', 'no such build of this template');
     if (target.status !== 'registered')
       throw new CpError(
@@ -806,8 +835,8 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
         `the build is ${target.status}; only a registered build is tagged`,
       );
     buildId = target.buildId;
-    const next = { ...cur!.tags };
-    const meta = { ...(cur!.tagsMeta ?? {}) };
+    const next = { ...cur.tags };
+    const meta = { ...(cur.tagsMeta ?? {}) };
     for (const t of tags as string[]) {
       // An own property only: a tag such as `constructor` is not Object.prototype's.
       const from = Object.hasOwn(next, t) ? next[t]! : null;
@@ -826,7 +855,7 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
       })),
     );
     moved.forEach((m, i) => (records[m.tag] = digests[i]!));
-    return { ...cur!, tags: next, tagsMeta: meta };
+    return { ...cur, tags: next, tagsMeta: meta };
   });
   if (moved.length > 0)
     await auditBestEffort(deps, 'template_tags_moved', d0.id, {
@@ -853,7 +882,7 @@ async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
  * is moved, never removed: the bare id must resolve. A `tag` record with `buildId: null`.
  */
 async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
-  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'removes its tags');
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'removes its tags');
   const tag = ctx.params.tag ?? '';
   if (!TEMPLATE_ID_RE.test(tag))
     throw new CpError('invalid_request', `tag '${tag}' must match ${TEMPLATE_ID_RE.source}`);
@@ -864,13 +893,14 @@ async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
     );
   let before = '';
   let record = '';
-  await cat.update(d0.id, async (cur) => {
-    const b = Object.hasOwn(cur!.tags, tag) ? cur!.tags[tag] : undefined;
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    const b = Object.hasOwn(cur.tags, tag) ? cur.tags[tag] : undefined;
     if (b === undefined)
       throw new CpError('template_not_found', `no tag '${tag}' on this template`);
     before = b;
-    const next = { ...cur!.tags };
-    const meta = { ...(cur!.tagsMeta ?? {}) };
+    const next = { ...cur.tags };
+    const meta = { ...(cur.tagsMeta ?? {}) };
     delete next[tag];
     delete meta[tag];
     [record] = await appendRecords(prov, [
@@ -881,7 +911,7 @@ async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
         body: { tag, buildId: null, before },
       },
     ]);
-    return { ...cur!, tags: next, tagsMeta: meta };
+    return { ...cur, tags: next, tagsMeta: meta };
   });
   await auditBestEffort(deps, 'template_tag_removed', d0.id, {
     subject: p.sub,
@@ -902,7 +932,7 @@ type TemplateEdit = { field: 'visibility' | 'description'; value: string; before
  * `visibility` record (the field, the new value and the one before), so every edit is on the chain.
  */
 async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
-  const { p, cat, prov, d0 } = await ownTemplate(ctx, deps, 'edits it');
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'edits it');
   const b = asRecord(ctx.body);
   if (b.visibility === undefined && b.description === undefined)
     throw new CpError('invalid_request', 'nothing to change: send visibility or description');
@@ -920,12 +950,13 @@ async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
   const description = b.description as string | undefined;
   let changes: TemplateEdit[] = [];
   const records: Record<string, string> = {};
-  const after = await cat.update(d0.id, async (cur) => {
+  const after = await cat.update(d0.id, async (c) => {
+    const cur = own(c);
     changes = [];
-    if (visibility !== undefined && visibility !== cur!.visibility)
-      changes.push({ field: 'visibility', value: visibility, before: cur!.visibility });
-    if (description !== undefined && description !== cur!.description)
-      changes.push({ field: 'description', value: description, before: cur!.description });
+    if (visibility !== undefined && visibility !== cur.visibility)
+      changes.push({ field: 'visibility', value: visibility, before: cur.visibility });
+    if (description !== undefined && description !== cur.description)
+      changes.push({ field: 'description', value: description, before: cur.description });
     const digests = await appendRecords(
       prov,
       changes.map((c) => ({
@@ -937,7 +968,7 @@ async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
     );
     changes.forEach((c, i) => (records[c.field] = digests[i]!));
     return {
-      ...cur!,
+      ...cur,
       ...(visibility !== undefined ? { visibility } : {}),
       ...(description !== undefined ? { description } : {}),
     };
@@ -988,12 +1019,13 @@ async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
   let before = null as string | null;
   let record: string | null = null;
   await cat.update(d0.id, async (cur) => {
-    before = cur!.owner;
-    if (before === owner) return cur!;
+    if (!cur) throw new CpError('template_not_found', 'no such template');
+    before = cur.owner;
+    if (before === owner) return cur;
     [record] = await appendRecords(prov, [
       { stream: `template/${d0.id}`, kind: 'owner', subject: p.sub, body: { owner, before } },
     ]);
-    return { ...cur!, owner };
+    return { ...cur, owner };
   });
   if (owner !== before) {
     await auditBestEffort(deps, 'template_owner_transferred', d0.id, {
