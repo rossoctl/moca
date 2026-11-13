@@ -3,7 +3,7 @@ import { asRecord, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
-import { liveLeases, place, type HostView } from './activation.js';
+import { hostManaged, liveLeases, place, type HostView } from './activation.js';
 import { isLive } from './sandbox-store.js';
 
 /**
@@ -59,6 +59,17 @@ export interface HostState {
   at: number;
   /** manifest hash -> template id, what the host holds. */
   holds: Record<string, string>;
+  /**
+   * The held builds whose worker unit runs: as the last inventory said, then kept current by the
+   * host's attached and detached reports, so placement counts what the host really runs.
+   */
+  running: string[];
+  /**
+   * buildId -> the last `refused` report (its reason) this host made for a build it is still asked
+   * to run: a repeat is not recorded again (hostWorkerReport). Cleared once the build leaves the
+   * host's `run`, or on any other report for it.
+   */
+  refused?: Record<string, string>;
   limits: {
     activeLimit: number;
     idleLimitSeconds: number;
@@ -82,13 +93,38 @@ export class HostRegistry {
   }
 }
 
-/** The hosts as their agents last reported (§6.1), as placement reads them. */
+/**
+ * A host whose last inventory is older than this is left out of placement, of the hosts block and of
+ * the default lease until it reports again: three of the build poll's two-minute intervals (the
+ * --wanted-only timer re-sends it every 15 s). A host whose agent died or was removed then takes no
+ * new placement and no activeLimit slot, and a deployment whose every host is silent reads
+ * readiness from the workers' presence alone, as before any host reported.
+ */
+export const HOST_STALE_S = 360;
+
+/** The hosts as their agents last reported (§6.1), as placement reads them: fresh ones only. */
 export function hostViewsOf(deps: CpDeps): HostView[] {
-  return (deps.hosts?.all() ?? []).map(([id, h]) => ({
+  return freshHosts(deps).map(([id, h]) => ({
     id,
     holds: h.holds,
     activeLimit: h.limits.activeLimit,
+    running: h.running,
   }));
+}
+
+/** The workers with a live sandbox: never stopped under one, so they drain and keep their slot. */
+export async function busyWorkers(deps: CpDeps, nowS: number): Promise<Set<string>> {
+  const busy = new Set<string>();
+  if (deps.sandboxes) {
+    for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  }
+  return busy;
+}
+
+/** The hosts whose last inventory is at most HOST_STALE_S old, by id. */
+export function freshHosts(deps: CpDeps): [string, HostState][] {
+  const nowS = seconds(deps);
+  return (deps.hosts?.all() ?? []).filter(([, h]) => nowS - h.at <= HOST_STALE_S);
 }
 
 function catalogOf(deps: CpDeps) {
@@ -197,39 +233,56 @@ function registrationResults(
   return out;
 }
 
+/** The statuses a host may still report on: claimed, and not yet registered, rejected or failed. */
+const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
+
+/** Refuses a report on a build that is not this host's, or that takes no more reports. */
+function reportable(y: TemplateBuild, host: string): void {
+  if (y.claim?.host !== host) throw new CpError('not_found', 'no such build claimed by this host');
+  if (!REPORTABLE.has(y.status))
+    throw new CpError('invalid_request', `the build is ${y.status}; it takes no more reports`);
+}
+
 export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
    * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
-   * live lease, and the retired ones it holds (§5.1: no longer wanted, never run again). A worker
-   * is never stopped under a live sandbox: it drains first, so a build with one is in neither list.
-   * Removing a retired build's worker and snapshot from the host is not asked here.
+   * live lease, or that it runs while placement keeps them on another host, and the retired ones it
+   * holds (§5.1: no longer wanted, never run again). A worker is never stopped under a live
+   * sandbox: it drains first, so a build with one is in neither list. Removing a retired build's
+   * worker and snapshot from the host is not asked here. A build imported from SH_SANDBOX_TEMPLATES
+   * (not hostManaged) is in neither list, retired or not: the deployment runs its worker.
    */
   hostWanted: async (ctx, deps) => {
     const host = hostOf(ctx);
     const { cat } = catalogOf(deps);
     const nowS = seconds(deps);
     const docs = await cat.list();
-    const p = place(docs, hostViewsOf(deps), nowS);
+    const busy = await busyWorkers(deps, nowS);
+    const p = place(docs, hostViewsOf(deps), nowS, busy);
     const mine = deps.hosts?.get(host);
-    const busy = new Set<string>();
-    if (deps.sandboxes) {
-      for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
-    }
     const run: Record<string, unknown>[] = [];
     const stop: Record<string, unknown>[] = [];
     for (const d of docs) {
       for (const b of d.builds) {
-        if (!mine || mine.holds[b.buildId] === undefined) continue;
+        if (!mine || mine.holds[b.buildId] === undefined || !hostManaged(b)) continue;
         const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
         // A retired build has no lease and is never placed: its worker stops once it is idle.
         if (b.status === 'retired') {
+          if (mine.refused) delete mine.refused[b.buildId];
           if (b.worker && !busy.has(b.worker)) stop.push(entry);
           continue;
         }
         if (b.status !== 'registered') continue;
-        if (p.placed.get(b.buildId) === host) run.push(entry);
-        else if (liveLeases(b, nowS).length === 0 && !busy.has(b.worker)) stop.push(entry);
+        if (p.placed.get(b.buildId) === host) {
+          run.push(entry);
+          continue;
+        }
+        if (mine.refused) delete mine.refused[b.buildId];
+        // Stopped when no lease is left, or when it runs here while placement keeps it on another
+        // host (one worker id on two hosts): this host's copy stops. Never under a live sandbox.
+        const unleased = liveLeases(b, nowS).length === 0;
+        if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
       }
     }
     return { status: 200, body: { run, stop } };
@@ -239,7 +292,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
    * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
-   * `deactivate` record by the host. Readiness still comes from the relay.
+   * `deactivate` record by the host, except a refusal repeating the host's last one for a build
+   * still in its `run` (answered `recorded: null`). Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -265,6 +319,23 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
+    // What the host runs, as placement counts it, without waiting for its next inventory: started
+    // (attached) runs; stopped (detached) and not started (refused) do not.
+    const st = deps.hosts!.get(host)!;
+    const others = st.running.filter((x) => x !== buildId);
+    st.running = event === 'attached' ? [...others, buildId] : others;
+    // A refusal the same as this host's last one for a build it is still asked to run (the agent
+    // retries every 15 s: a worker not installed, a unit whose start keeps failing) is not appended
+    // again: the template's stream is append-only provenance, and would grow by one record a poll.
+    st.refused ??= {};
+    if (event === 'refused') {
+      if (st.refused[buildId] === (reason ?? '')) {
+        return { status: 200, body: { recorded: null } };
+      }
+      st.refused[buildId] = reason ?? '';
+    } else {
+      delete st.refused[buildId];
+    }
     await prov.append({
       stream: `template/${doc.id}`,
       kind: event === 'detached' ? 'deactivate' : 'activate',
@@ -278,6 +349,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const host = hostOf(ctx);
     const b = asRecord(ctx.body);
     const holds: Record<string, string> = {};
+    const running: string[] = [];
     const inv = Array.isArray(b.holds) ? b.holds : [];
     for (const h of inv) {
       const r = asRecord(h);
@@ -287,6 +359,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         typeof r.template === 'string'
       ) {
         holds[r.manifestHash] = r.template;
+        if (r.running === true) running.push(r.manifestHash);
       }
     }
     const l = asRecord(b.limits);
@@ -297,7 +370,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFreeGb: nonNeg(l.diskFreeGb) ?? 0,
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
-    deps.hosts?.set(host, { at: seconds(deps), holds, limits });
+    // A host's unrepeated refusals outlive its inventories (each poll replaces the rest).
+    const refused = deps.hosts?.get(host)?.refused ?? {};
+    deps.hosts?.set(host, { at: seconds(deps), holds, running, refused, limits });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 
@@ -403,32 +478,38 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const b = asRecord(ctx.body);
     const event = b.event;
     const stream = `template/${doc.id}`;
-    const terminal = new Set(['built', 'registered', 'rejected', 'failed', 'retired']);
-    if (terminal.has(build.status) && build.status !== 'built') {
-      throw new CpError(
-        'invalid_request',
-        `the build is ${build.status}; it takes no more reports`,
-      );
-    }
-    const setBuild = (patch: Partial<TemplateBuild>) =>
-      cat.update(doc.id, async (cur) => ({
-        ...cur!,
-        builds: cur!.builds.map((y) => (y.handle === build.handle ? { ...y, ...patch } : y)),
-      }));
+    // A quick refusal on what this request read; the same check runs again inside every write
+    // below, in the template's update queue, because the build can change in between (an owner's
+    // cancel), and a report never overwrites a build the host may no longer report on.
+    reportable(build, host);
+    const withBuild = (mutate: (y: TemplateBuild, c: TemplateDoc) => Promise<TemplateDoc>) =>
+      cat.update(doc.id, async (cur) => {
+        const y = cur?.builds.find((x) => x.handle === build.handle);
+        if (!cur || !y) throw new CpError('not_found', 'no such build claimed by this host');
+        reportable(y, host);
+        return mutate(y, cur);
+      });
+    const patched = (c: TemplateDoc, y: TemplateBuild, patch: Partial<TemplateBuild>) => ({
+      ...c,
+      builds: c.builds.map((x) => (x === y ? { ...x, ...patch } : x)),
+    });
     if (event === 'building' || event === 'probing') {
-      await setBuild({ status: event });
+      await withBuild(async (y, c) => patched(c, y, { status: event }));
       return { status: 200, body: { status: event } };
     }
     if (event === 'failed') {
       const step = typeof b.step === 'string' ? b.step.slice(0, 64) : 'unknown';
       const message = typeof b.message === 'string' ? b.message.slice(0, 4096) : 'the build failed';
-      await prov.append({
-        stream,
-        kind: 'build',
-        subject: `host:${host}`,
-        body: { handle: build.handle!, outcome: 'failed', step, message },
+      // The record is written inside the update, so a refused report leaves none.
+      await withBuild(async (y, c) => {
+        await prov.append({
+          stream,
+          kind: 'build',
+          subject: `host:${host}`,
+          body: { handle: build.handle!, outcome: 'failed', step, message },
+        });
+        return patched(c, y, { status: 'failed', reason: { message, step } });
       });
-      await setBuild({ status: 'failed', reason: { message, step } });
       return { status: 200, body: { status: 'failed' } };
     }
     if (event !== 'built')
@@ -451,62 +532,75 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     }
     const tSha = await prov.putBlob(Buffer.from(b.templateRecord, 'utf8'));
     const sSha = await prov.putBlob(Buffer.from(b.manifest, 'utf8'));
-    const buildRec = await prov.append({
-      stream,
-      kind: 'build',
-      subject: `host:${host}`,
-      body: {
-        handle: build.handle!,
-        outcome: 'built',
-        manifest_hash: String(t.manifest_hash ?? ''),
-        template_record_sha256: tSha,
-        manifest_sha256: sSha,
-        worker: String(t.worker ?? ''),
-        snapshot: String(t.snapshot ?? ''),
-      },
-    });
-    // Registration (§8.2): automatic, by policy, never a person.
-    const results = registrationResults(build, t, sm);
-    const failed = results.find((r) => !r.passed);
     const { record: policyRecord } = await policy.current();
-    const outcome = failed ? 'rejected' : 'registered';
-    await prov.append({
-      stream,
-      kind: 'check',
-      subject: 'policy',
-      body: {
-        policy: policyRecord,
-        profile: build.profile,
-        at: 'registration',
-        build: recordDigest(buildRec.record),
-        outcome,
-        results: results as unknown as Record<string, unknown>[],
-      },
-    });
     const manifestHash = String(t.manifest_hash);
-    await cat.update(doc.id, async (cur) => {
-      const c = cur!;
-      const builds = c.builds.map((y) =>
-        y.handle !== build.handle
-          ? y
-          : failed
-            ? {
-                ...y,
-                status: 'rejected' as const,
-                reason: { message: failed.message ?? failed.rule, rule: failed.rule },
-              }
-            : {
-                ...y,
-                status: 'registered' as const,
-                buildId: manifestHash,
-                worker: String(t.worker ?? ''),
-              },
+    // Set inside the update (a closure TypeScript's narrowing does not follow).
+    const verdict: { failed?: { rule: string; message?: string } } = {};
+    // The status re-check, the registration check and both records happen inside the update, so
+    // a cancel either lands first (this report is refused, and no record says it registered) or
+    // after (it finds the build registered or rejected, and refuses).
+    await withBuild(async (y, c) => {
+      const buildRec = await prov.append({
+        stream,
+        kind: 'build',
+        subject: `host:${host}`,
+        body: {
+          handle: build.handle!,
+          outcome: 'built',
+          manifest_hash: String(t.manifest_hash ?? ''),
+          template_record_sha256: tSha,
+          manifest_sha256: sSha,
+          worker: String(t.worker ?? ''),
+          snapshot: String(t.snapshot ?? ''),
+        },
+      });
+      // Registration (§8.2): automatic, by policy, never a person.
+      const results = registrationResults(y, t, sm);
+      // A build id names one build of a template: a second build of the same snapshot (the same
+      // image and spec, created again with another gate record or profile) is not registered
+      // beside the first.
+      const twin = c.builds.find((x) => x !== y && x.buildId === manifestHash);
+      results.push(
+        twin
+          ? {
+              rule: 'T.unique',
+              passed: false,
+              message: `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+            }
+          : { rule: 'T.unique', passed: true },
       );
+      const failed = results.find((r) => !r.passed);
+      verdict.failed = failed;
+      await prov.append({
+        stream,
+        kind: 'check',
+        subject: 'policy',
+        body: {
+          policy: policyRecord,
+          profile: y.profile,
+          at: 'registration',
+          build: recordDigest(buildRec.record),
+          outcome: failed ? 'rejected' : 'registered',
+          results: results as unknown as Record<string, unknown>[],
+        },
+      });
+      const next = failed
+        ? patched(c, y, {
+            status: 'rejected',
+            reason: { message: failed.message ?? failed.rule, rule: failed.rule },
+          })
+        : patched(c, y, {
+            status: 'registered',
+            buildId: manifestHash,
+            worker: String(t.worker ?? ''),
+          });
       // A first registered build of a template takes `default` (§3.2); later ones are tagged by the owner.
-      const tags =
-        !failed && c.tags.default === undefined ? { ...c.tags, default: manifestHash } : c.tags;
-      return { ...c, builds, tags };
+      return !failed && c.tags.default === undefined
+        ? { ...next, tags: { ...c.tags, default: manifestHash } }
+        : next;
     });
+    const { failed } = verdict;
+    const outcome = failed ? 'rejected' : 'registered';
     return {
       status: 200,
       body: { status: outcome, ...(failed ? { rule: failed.rule } : { buildId: manifestHash }) },

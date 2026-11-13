@@ -378,9 +378,14 @@ A claimed build's job is the spec as the policy checked it: the template's id an
 image always win over keys of the same name in the spec, and the guest size is always named
 `guest_ram_mb` (the API also takes `guest_mb`; `template-build.sh` reads only `guest_ram_mb`). A
 report is accepted only for a build handed to that host, and a failed or cancelled build takes no
-more reports. On `built` the control plane stores T and S byte for byte, writes a `build` record
+more reports; the check is made again inside the template's update, with the report's records, so
+an owner's cancel that lands while a report is being written stands and no record says it
+registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
-template's first registered build takes the `default` tag.
+template's first registered build takes the `default` tag. A build id names one build of a
+template: a build whose manifest hash another build of the template already has (the same image
+and spec created again under another profile or gate record, which the build finds already built)
+is rejected, rule `T.unique`, naming that build.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
@@ -388,7 +393,10 @@ reason and log (`SBX_REGISTRY`, URLs, registry hosts, IP addresses, 12-digit acc
 keeps the full log on the host (a 0700 directory). T and S go byte for byte, so they cannot be
 redacted: one that names `SBX_REGISTRY` is not sent, and the build fails `leak_refused`. A
 failure's reason leads with a code a client can branch on: `pull_failed`, `probe_failed`,
-`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`.
+`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`; or `agent_error`, when the agent
+cannot carry on with a build it claimed (a gate record it cannot fetch or whose bytes do not match
+its sha256, a report not accepted, no template record or manifest after the build). An agent that
+is still running reports every build it claimed: `built`, or `failed` on any other way out.
 
 **The build host handles untrusted images** in a self-serve model. The image is pulled only from a
 registry the policy allows (§8.1), its export runs as today (`build-rootfs.sh`, as root, owners
@@ -405,22 +413,31 @@ Known limits: a claimed build is not re-queued if the agent dies mid-build; one 
 run at once), its `idleLimitSeconds` (the default lease length, §6.3), its `buildConcurrency` and its
 disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its operator sizes them
 from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
-`active {limit, used}`, where `used` is the leased builds placed on it now.
+`active {limit, used}`, where `used` counts the workers that stay running on it: the leased builds
+placed or running there, and the unleased ones still draining a live sandbox. The inventory says,
+per held build, whether its worker's unit is `running`; the host's `attached` and `detached` reports
+keep that current between inventories.
 
 **Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
 Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
 use.
 
 **Placement:** a wanted build (one with a live lease, §6.3) is placed on a host whose last inventory
-holds its snapshot (by manifest hash) and that is under its `activeLimit`: the one with the fewest
-builds placed, then by id, in the order the leases began (first leased, first placed). A build no
+holds its snapshot (by manifest hash). Placement is sticky: a build already running on a holder stays
+there, so a lease ending elsewhere never moves a running worker to another host. Any other goes to
+a holder under its `activeLimit`, the one with the fewest workers counted (above), then by id, in
+the order the leases began (first leased, first placed). A build no
 reporting host holds is not placed (`unavailable`); one whose every holder is full waits
-(`unavailable`), and is never placed by evicting a leased build.
+(`unavailable`), and is never placed by evicting a leased build. A host whose last inventory is
+more than 6 minutes old (three build polls) is left out of placement, of the hosts block and of
+the default lease until it reports again, so a host whose agent died takes no new placement and no
+slot; with every host silent, readiness is the workers' presence alone, as before any reported.
 
 ### 6.3 Leases, aging and the wanted state
 
 - **Leases:** an activation is a **lease** held by its subject, `leaseSeconds` long (60 s to a day a
-  grant; default the largest `idleLimitSeconds` its hosts report, else 3600), renewed by
+  grant; default the largest `idleLimitSeconds` of the hosts that hold it, clamped to 60-86400,
+  else 3600), renewed by
   `POST /v1/templates/{id}/activate` again, without a cap, while the subject still needs the build
   (for the life of a batch, say). `POST /v1/templates/{id}/deactivate` drops the subject's leases.
   Each grant is an `activate` record, and the lease stores its digest (§7.1). This activation lease
@@ -432,8 +449,9 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
   refused.
 - **Refusals:** an activation that cannot be placed is refused with no lease kept:
   `409 template_unavailable` (no registered build under the reference, or no reporting host holds
-  it) or `409 no_active_slot` with `Retry-After` (the seconds until the earliest lease ends: every
-  holder is at its `activeLimit` with leased builds).
+  it) or `409 no_active_slot` with `Retry-After` (every holder is at its `activeLimit`; the seconds
+  until the soonest a build placed on one of this build's holders loses its last live lease, or
+  60 when no lease tells, as with draining workers).
 - **One activation at a time:** an activation's quota and placement check, its `activate` record
   and its lease write run one at a time across the deployment (owner activation and first use
   alike), so concurrent activations of different templates cannot together pass a subject's quota
@@ -441,14 +459,19 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
   (`409 no_active_slot`) rather than displacing it. The lock is in the control plane's process, so
   one process per template store is what makes it enough.
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
-  host) and `stop` (the builds it holds with no lease and no live sandbox, retired ones (§5.1)
-  included). The agent starts each
-  `run` worker that is installed and not running (`sbx-worker@<id>`), stops each `stop` worker that
-  runs, and reports each start (`attached`), refusal (`refused`, with why) and stop (`detached`) at
+  host) and `stop` (the builds it holds with no lease and no live sandbox, a leased build it runs
+  while placement keeps it on another host, so one worker id never runs on two hosts, and the
+  retired builds it holds (§5.1) with no live sandbox; a build imported from SH_SANDBOX_TEMPLATES is
+  in neither list, retired or not). The agent stops each `stop` worker that runs, then starts each
+  `run` worker that is installed and not running (`sbx-worker@<id>`), and reports each start
+  (`attached`), refusal (`refused`, with why) and stop (`detached`) at
   `POST /v1/hosts/{host}/workers/report`, as `activate` and `deactivate` records by `host:<id>`
   (`detached` is taken for a retired build too).
   Readiness never comes from a report: `active` is the relay's attached record. A worker that is
-  not installed is reported `refused`, never installed by the agent.
+  not installed is reported `refused`, never installed by the agent. The agent retries a refused
+  start every 15 s; a `refused` that repeats the host's last one for the build (same reason) while
+  the build stays in the host's `run` is not recorded again, so the append-only stream does not
+  grow by a record a poll.
 - **Live sandboxes:** a worker is never stopped under a live sandbox: an attached build with no
   lease is `deactivating` and drains (no new lease needed for the sandboxes it runs); it is stopped
   once none is left.
@@ -463,11 +486,17 @@ So a client can name a template and go: on a deployment with template hosts
 (`SH_TEMPLATE_HOSTS`), `POST /v1/sandboxes` on a registered build that is not `active` takes the
 caller's lease (as `activate`, recorded with `reason: first_use`; its refusals `no_active_slot`,
 `template_unavailable` and `quota_exceeded` answer as they would) and answers
-`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries.
+`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries. A caller that
+already holds a live lease on the build (its own retry) is only answered the wait: no renewal and
+no new record per retry.
 `activate: false` starts nothing. No sandbox record is kept while waiting, so a wait never uses the
 live-sandbox cap. The gate applies whenever template hosts are configured, also before any of them
 has reported: until a host's first inventory, an attached worker serves and an absent one is
-refused, not left to wait at the relay. Without template hosts nothing changes. `mocactl sbx create`
+refused, not left to wait at the relay. Without template hosts nothing changes. A template imported
+from `SH_SANDBOX_TEMPLATES` (build `imported:<12 hex>`) is never gated, with hosts or without: it
+names no snapshot, so no host holds it and the deployment runs its worker; its readiness is that
+worker's presence alone, and `activate` refuses it with `400 invalid_request` (it takes no lease).
+`mocactl sbx create`
 and `sbx up` wait out a `template_not_active` after its `Retry-After` for up to 10 minutes, saying
 why; `mocactl sbx templates activate ID --wait` before a batch avoids the first wait.
 

@@ -108,7 +108,7 @@ pass 'a claimed build is built and reported built with its template record and m
 job ''
 printf '{"builds":[]}' >"$TMP/state/claim-answer"
 run || fail 'second poll'
-jq -e '.holds == [{template: "django-django-11133", manifestHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]' "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null ||
+jq -e '.holds == [{template: "django-django-11133", manifestHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", running: false}]' "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null ||
   fail 'the inventory does not name the held snapshot'
 pass 'the inventory names the snapshots held, by manifest hash'
 
@@ -125,7 +125,10 @@ job "$(printf 'b%.0s' {1..64})"
 run || fail 'poll with a bad gate record'
 grep -q '^build ' "$MOCK_LOG" && fail 'built with a gate record that does not match its digest'
 grep -q 'does not match its digest' "$TMP/out" || fail 'the mismatch was not reported'
-pass 'a gate record is checked against its digest before any build'
+jq -e '.event == "failed" and .step == "gate" and .message == "agent_error: the gate record does not match its digest"' "$R" >/dev/null ||
+  fail 'the claimed build was not reported failed on a gate digest mismatch'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"started":0,"stopped":0,"errors":0' "$TMP/out" || fail 'summary of a gate mismatch'
+pass 'a gate record is checked against its digest before any build, and the claimed build reported failed'
 
 # 5. Below the disk floor, nothing is claimed.
 job ''
@@ -236,7 +239,60 @@ jq -e '.event == "failed" and .step == "probe" and (.message | startswith("probe
   fail 'a probe failure is not reported with step probe'
 pass 'reports a probe failure with step probe, beside its code'
 
-# 11. Activation: start a wanted, installed worker and report attached; refuse one not installed;
+# 11. A build that dies with no output (killed, out of memory) is still reported failed, and the
+#     poll goes on to its summary (an empty log once ended the whole run under errexit).
+job ''
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+printf '\n\n'
+exit 137
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a build with an empty log failed the poll'
+jq -e '.event == "failed" and .step == "build" and (.message | startswith("build_failed: template-build.sh exit 137"))' "$R" >/dev/null ||
+  fail 'a build with an empty log is not reported failed'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"started":0,"stopped":0,"errors":0' "$TMP/out" || fail 'no summary after an empty build log'
+pass 'a build that dies with no output is reported failed, and the poll ends with its summary'
+
+# 12. Every way out short of `built` after a claim reports the build failed (agent_error), so it
+#     does not stay `building`: a gate record that cannot be fetched, a build that wrote no template
+#     record, and one whose record is not JSON.
+job "$GATE_SHA"
+sed 's#"GET /v1/hosts/host-1/blobs/"\*)#"GET /v1/hosts/host-1/blobs/none")#' "$TMP/bin/curl" >"$TMP/bin/curl.noblob"
+cp "$TMP/bin/curl" "$TMP/curl.keep"
+mv "$TMP/bin/curl.noblob" "$TMP/bin/curl" && chmod +x "$TMP/bin/curl"
+run || fail 'a poll whose gate fetch failed'
+cp "$TMP/curl.keep" "$TMP/bin/curl"
+grep -q '^build ' "$MOCK_LOG" && fail 'built without its gate record'
+jq -e '.event == "failed" and .step == "gate" and .message == "agent_error: the gate record fetch failed"' "$R" >/dev/null ||
+  fail 'a failed gate fetch was not reported failed'
+job ''
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+rm -f "$SBX_SRV"/templates/*.json
+exit 0
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a poll whose build wrote no record'
+jq -e '.event == "failed" and .step == "report" and .message == "agent_error: template-build.sh wrote no template record"' "$R" >/dev/null ||
+  fail 'a build with no template record was not reported failed'
+cat >"$TMP/bin/template-build" <<'MOCK'
+#!/usr/bin/env bash
+printf 'build %s\n' "$*" >>"$MOCK_LOG"
+id="$(jq -r .id "$1")" d="$(jq -r .image "$1")"; d="${d##*@sha256:}"
+printf 'not json' >"$SBX_SRV/templates/$id-${d:0:12}.json"
+MOCK
+chmod +x "$TMP/bin/template-build"
+run || fail 'a poll whose record is not JSON ended early'
+jq -e '.event == "failed" and .message == "agent_error: the template record names no snapshot"' "$R" >/dev/null ||
+  fail 'a build with a record that is not JSON was not reported failed'
+grep -q '"agent":"summary","claimed":1,"built":0,"failed":1,"started":0,"stopped":0,"errors":0' "$TMP/out" || fail 'no summary after a record that is not JSON'
+rm -f "$TMP/srv/templates/"*.json
+pass 'a claimed build is reported failed (agent_error) on a failed gate fetch, a missing record, or a record that is not JSON'
+
+# 13. Activation: start a wanted, installed worker and report attached; refuse one not installed;
 #     stop one no longer wanted and report detached; never start a malformed worker id.
 job ''
 printf '{"builds":[]}' >"$TMP/state/claim-answer"
@@ -258,6 +314,20 @@ run || fail 'stop poll'
 grep -q 'systemctl stop sbx-worker@sbx_t1.service' "$MOCK_LOG" || fail 'did not stop the unwanted worker'
 jq -e '.event == "detached" and .buildId == "sha256:1"' "$W" >/dev/null || fail 'detach not reported'
 grep -q '"stopped":1' "$TMP/out" || fail 'the stop is not in the summary'
+# The inventory says which held builds' worker units run: a record whose worker's unit is active.
+jq -n '{schema: "moca-sbx-template/1", id: "t1", worker: "sbx_t1", snapshot: "t1-x", manifest_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"}' \
+  >"$SBX_SRV/templates/t1-x.json"
+printf '{"run":[{"worker":"sbx_t1","buildId":"sha256:1"}],"stop":[]}' >"$TMP/state/wanted-answer"
+run || fail 'restart poll'
+run || fail 'running-inventory poll'
+jq -e '.holds | map(select(.template == "t1")) == [{template: "t1", manifestHash: "sha256:1111111111111111111111111111111111111111111111111111111111111111", running: true}]' \
+  "$TMP/state/POST_v1_hosts_host-1_inventory" >/dev/null || fail 'the inventory does not say the running worker runs'
+# Stops come before starts, so a freed slot is free before a start takes it.
+printf '{"run":[{"worker":"sbx_t2","buildId":"sha256:2"}],"stop":[{"worker":"sbx_t1","buildId":"sha256:1"}]}' >"$TMP/state/wanted-answer"
+: >"$TMP/workers/sbx_t2.env"; : >"$MOCK_LOG"
+run || fail 'stop-and-start poll'
+[[ "$(grep -E 'systemctl (start|stop) ' "$MOCK_LOG" | cut -d' ' -f2 | tr '\n' ' ')" == 'stop start ' ]] || fail 'did not stop before starting'
+rm -f "$TMP/workers/sbx_t2.env" "$SBX_SRV/templates/t1-x.json" "$TMP/state/active-sbx-worker@sbx_t2.service"
 printf '{"run":[{"worker":"../x","buildId":"sha256:1"}],"stop":[]}' >"$TMP/state/wanted-answer"
 run || fail 'malformed wanted poll'
 grep -q 'systemctl start' "$MOCK_LOG" && fail 'started a malformed worker id'
@@ -268,7 +338,7 @@ grep -q 'wanted state malformed' "$TMP/out" || fail 'a malformed wanted state wa
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 pass 'starts wanted installed workers (attached), refuses uninstalled ones, stops unwanted ones (detached), refuses a malformed id'
 
-# 12. --wanted-only: the inventory and the wanted state, never a claim or a build; the lock keeps it
+# 14. --wanted-only: the inventory and the wanted state, never a claim or a build; the lock keeps it
 #     and a build poll from applying the wanted state at once; usage refused otherwise.
 job ''
 : >"$TMP/workers/sbx_t2.env"

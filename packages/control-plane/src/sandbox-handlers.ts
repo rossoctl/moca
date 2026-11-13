@@ -9,8 +9,15 @@ import {
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import type { SandboxConfig } from './sandbox-config.js';
 import { buildRecordOf, canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
-import { liveLeases, place, readinessOf, type HostView, type Placement } from './activation.js';
-import { hostViewsOf } from './host-handlers.js';
+import {
+  hostManaged,
+  liveLeases,
+  place,
+  readinessOf,
+  type HostView,
+  type Placement,
+} from './activation.js';
+import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
@@ -282,7 +289,9 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
   const placement =
-    hosts.length > 0 ? place(docs ?? (await catalog(deps).list()), hosts, nowS) : null;
+    hosts.length > 0
+      ? place(docs ?? (await catalog(deps).list()), hosts, nowS, await busyWorkers(deps, nowS))
+      : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -797,13 +806,14 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /**
- * Per host: its limits, its use (builds placed on it now) and its disk (§4, §6.2), as its agent
- * last reported them. Empty when no host has reported, never meaning "no limit".
+ * Per host: its limits, its use (the workers placement counts on it: placed, running, draining) and
+ * its disk (§4, §6.2), as its agent
+ * last reported them. Empty when no host has reported, never meaning "no limit"; a host silent for
+ * over HOST_STALE_S is left out, as placement leaves it out.
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
-  const used = new Map<string, number>();
-  for (const h of f.placement?.placed.values() ?? []) used.set(h, (used.get(h) ?? 0) + 1);
-  return (deps.hosts?.all() ?? []).map(([id, h]) => ({
+  const used = f.placement?.used ?? new Map<string, number>();
+  return freshHosts(deps).map(([id, h]) => ({
     id,
     active: { limit: h.limits.activeLimit, used: used.get(id) ?? 0 },
     idleLimitSeconds: h.limits.idleLimitSeconds,
@@ -819,8 +829,8 @@ const leasedBy = (docs: TemplateDoc[], subject: string, nowS: number): TemplateB
 
 /**
  * Activate (§6.3): take or renew this subject's lease on a registered build, by `tag` (default
- * `default`) or `build`, `leaseSeconds` long (default the largest idle limit its hosts report, else
- * 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
+ * `default`) or `build`, `leaseSeconds` long (default the largest idle limit of the hosts that hold it, clamped
+ * to 60-86400, else 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
  * registered build or no host holds it, no_active_slot (Retry-After) when every holder is full,
  * quota_exceeded over the subject's active quota; on a refusal no lease is kept.
  */
@@ -844,12 +854,24 @@ async function activate(ctx: RequestCtx, deps: CpDeps) {
       { readiness: 'unavailable' },
     );
   }
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const r = await takeLease(deps, p, d0, target, b.leaseSeconds, 'owner');
   return {
     status: 200,
     body: { templateId: d0.id, buildId: target.buildId, leaseUntil: r.until, host: r.host },
   };
 }
+
+/**
+ * The refusal of a lease on a build no host can hold (activation.ts hostManaged): one imported from
+ * SH_SANDBOX_TEMPLATES, whose worker the deployment runs. It needs no activation: a sandbox is
+ * created on it whenever its worker is attached, as on a deployment without host agents.
+ */
+const deploymentRun = (id: string) =>
+  new CpError(
+    'invalid_request',
+    `template '${id}' is run by the deployment (SH_SANDBOX_TEMPLATES); it takes no activation lease`,
+  );
 
 /**
  * The deployment-wide activation lock. takeLease checks the subject's active quota and the hosts'
@@ -891,6 +913,7 @@ async function takeLease(
   leaseSeconds: unknown,
   reason: 'owner' | 'first_use',
 ): Promise<{ until: number; host: string | null }> {
+  if (!hostManaged(target)) throw deploymentRun(d0.id);
   const { cat } = writable(deps);
   return activationLock(cat).run('activation', () =>
     takeLeaseLocked(deps, p, d0, target, leaseSeconds, reason),
@@ -910,14 +933,26 @@ async function takeLeaseLocked(
   const nowS = seconds(deps);
   const DAY = 86_400;
   const hosts = hostViewsOf(deps);
-  const defaultLease =
-    Math.max(...hosts.map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds), 0) || 3600;
-  const want =
-    typeof leaseSeconds === 'number' && Number.isSafeInteger(leaseSeconds)
-      ? leaseSeconds
-      : defaultLease;
-  if (want < 60 || want > DAY)
-    throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+  // An explicit leaseSeconds is the client's, range-checked. The default is the largest idle limit
+  // of the hosts that hold this build (3600 when none reports one), clamped into the range: a
+  // host's SBX_IDLE_LIMIT_S outside it never refuses a request that named no lease.
+  let want: number;
+  if (leaseSeconds !== undefined && leaseSeconds !== null) {
+    if (
+      typeof leaseSeconds !== 'number' ||
+      !Number.isSafeInteger(leaseSeconds) ||
+      leaseSeconds < 60 ||
+      leaseSeconds > DAY
+    ) {
+      throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+    }
+    want = leaseSeconds;
+  } else {
+    const idle = hosts
+      .filter((h) => h.holds[target.buildId] !== undefined)
+      .map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds);
+    want = Math.min(DAY, Math.max(60, Math.max(0, ...idle) || 3600));
+  }
   const { policy: pol } = await policy.current();
   const docs = await cat.list();
   // `target` was resolved before the lock; a retire takes the lock too, so this read is current. A
@@ -962,11 +997,12 @@ async function takeLeaseLocked(
       ? d
       : { ...d, builds: d.builds.map((x) => (x.buildId === target.buildId ? withLease(x) : x)) },
   );
-  const pl = place(trial, hosts, nowS);
+  const busy = await busyWorkers(deps, nowS);
+  const pl = place(trial, hosts, nowS, busy);
   // A held build is never evicted to make room (§6.3): placement breaks a tie of equal `since` (whole
   // seconds) by buildId, so a lease taken in the same second as a placed one could otherwise sort
   // ahead of it and push it off its host. Such a lease waits, as one that does not fit.
-  const before = place(docs, hosts, nowS);
+  const before = place(docs, hosts, nowS, busy);
   const displaces = [...before.placed.keys()].some(
     (x) => x !== target.buildId && !pl.placed.has(x),
   );
@@ -976,10 +1012,18 @@ async function takeLeaseLocked(
     });
   }
   if (pl.unplaced.get(target.buildId) === 'no_slot' || displaces) {
+    // Retry-After: the soonest a slot on one of this build's holders can free, that is the soonest
+    // another build placed on one of them loses its last live lease. Other hosts' builds, and other
+    // subjects' leases on a build that stays leased, free nothing here. 60 s when no leased build
+    // holds those slots (draining workers, whose end no lease tells).
+    const holders = new Set(
+      hosts.filter((h) => h.holds[target.buildId] !== undefined).map((h) => h.id),
+    );
     const free = Math.min(
       ...trial
         .flatMap((d) => d.builds)
-        .flatMap((x) => liveLeases(x, nowS).map((l) => l.until - nowS)),
+        .filter((x) => x.buildId !== target.buildId && holders.has(pl.placed.get(x.buildId) ?? ''))
+        .map((x) => Math.max(...liveLeases(x, nowS).map((l) => l.until)) - nowS),
     );
     throw new CpError(
       'no_active_slot',
@@ -1194,9 +1238,10 @@ export const FIRST_USE_RETRY_S = 30;
  * agent starts its worker; the retry succeeds once it is attached. No sandbox record is kept while
  * waiting, so a wait never uses the caller's live-sandbox cap. Without host agents (workers run
  * by the deployment, SH_TEMPLATE_HOSTS unset) nothing changes: the create succeeds as before.
- * With hosts configured but none reported yet (a fresh deploy, a restart, a host down), readiness
- * is the worker's presence alone: an attached worker serves, and an absent one is refused rather
- * than left to wait at the relay.
+ * With hosts configured but none reported within HOST_STALE_S (a fresh deploy, a restart, every
+ * host down), readiness is the worker's presence alone: an attached worker serves, and an absent one is refused rather
+ * than left to wait at the relay. A build imported from SH_SANDBOX_TEMPLATES (no snapshot, so no
+ * host ever holds it) is never gated: the deployment runs its worker.
  */
 async function requireActive(
   deps: CpDeps,
@@ -1205,13 +1250,20 @@ async function requireActive(
   activate: boolean,
 ): Promise<void> {
   if (hostViewsOf(deps).length === 0 && !deps.config.templateHosts?.length) return;
+  // A build imported from SH_SANDBOX_TEMPLATES is the deployment's to run, never a host's: no gate,
+  // as on a deployment without host agents.
+  if (!hostManaged(t.build)) return;
   const facts = await readinessFacts(deps);
   const readiness = readinessOf(t.build, facts.nowS, facts.placement, facts.attached);
   if (readiness === 'active') return;
   let now = readiness;
   let started = false;
+  // A caller that already holds a live lease on the build (a retry of its own first use, say) is
+  // only told to wait: no renewal and no new `activate` record on every retry.
+  const leased = liveLeases(t.build, facts.nowS).some((l) => l.subject === p.sub);
   if (
     activate &&
+    !leased &&
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {
     // Its refusals (no_active_slot, quota_exceeded, template_unavailable) answer as activate's.
