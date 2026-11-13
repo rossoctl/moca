@@ -298,7 +298,9 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   `400 unknown_template`: it existed, and its records stay). Readiness reads `retired`, and each
   build lists `heldBy`, the hosts whose last inventory still holds its snapshot.
 - **Never cuts off running work.** A retire is refused `409 build_in_use` while a live sandbox runs
-  on a build it names: delete the sandbox (or let it end), then retire. A worker is never stopped
+  on a build it names (the build the sandbox resolved to at creation, not its worker, which two
+  builds from one image can share; a sandbox record without a build id counts for every build on
+  its worker): delete the sandbox (or let it end), then retire. A worker is never stopped
   under a live sandbox either (§6.3).
 - **Recorded.** Each build retired writes a `retire` record naming the caller, `from` (the status
   before), `buildRecord` (the digest of its `build` record; null for a build never built) and the

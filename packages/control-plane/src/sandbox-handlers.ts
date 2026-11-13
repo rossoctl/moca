@@ -1033,9 +1033,12 @@ async function deactivate(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /**
- * Why each build is in use now (§5.1): a live sandbox runs on its worker. A retire is refused
- * while any build it names is in use, so it never cuts off running work. Sessions pinned to a
- * build, once sessions are, are live use too, and are to be checked here.
+ * Why each build is in use now (§5.1): a live sandbox runs on it. A retire is refused while any
+ * build it names is in use, so it never cuts off running work. A sandbox names the build it
+ * resolved to (`buildId`), so it counts for that build only: two builds of one template from one
+ * image can share a worker id, and a sandbox on one must not block retiring the other. A record
+ * from before builds were traced (no `buildId`) counts for every build on its worker. Sessions
+ * pinned to a build, once sessions are, are live use too, and are to be checked here.
  */
 async function buildsInUse(
   deps: CpDeps,
@@ -1044,10 +1047,16 @@ async function buildsInUse(
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!deps.sandboxes) return out;
-  const busy = new Set<string>();
-  for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  const busyBuilds = new Set<string>();
+  const busyWorkers = new Set<string>();
+  for (const r of await deps.sandboxes.listAll(nowS)) {
+    if (!isLive(r, nowS)) continue;
+    if (r.buildId) busyBuilds.add(r.buildId);
+    else busyWorkers.add(r.worker);
+  }
   for (const x of builds) {
-    if (x.worker && busy.has(x.worker)) out.set(x.buildId, 'still serves a live sandbox');
+    if (busyBuilds.has(x.buildId) || (x.worker !== '' && busyWorkers.has(x.worker)))
+      out.set(x.buildId, 'still serves a live sandbox');
   }
   return out;
 }

@@ -64,11 +64,23 @@ async function registered(
   h: string,
   worker: string,
   principal = alice,
+  another?: { vcpus: number },
 ): Promise<void> {
-  await HANDLERS.createTemplate!(
-    ctx({ principal, body: { id, image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
-    d,
-  );
+  if (another)
+    // Another build of an existing template, from the same image with another spec.
+    await HANDLERS.createTemplateBuild!(
+      ctx({
+        principal,
+        params: { id },
+        body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: another.vcpus }, profile: 'base' },
+      }),
+      d,
+    );
+  else
+    await HANDLERS.createTemplate!(
+      ctx({ principal, body: { id, image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+      d,
+    );
   const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
   const build = c.builds[0].build;
   const r = (
@@ -91,7 +103,7 @@ async function registered(
             hash_version: 2,
             hash: h,
             guest_ram_mb: 4096,
-            vcpus: 2,
+            vcpus: another?.vcpus ?? 2,
             source_image_digest: DIGEST,
           }),
         },
@@ -835,6 +847,48 @@ describe('retire (§5.1)', () => {
     });
     expect(r.record).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(await refusal(() => retireBuild(d, 't1', hash('9')))).toBe('template_not_found');
+  });
+
+  it('judges build_in_use by build: a sandbox on another build of one worker does not block', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    // Two builds of t1 from one image, other specs: template-build.sh names both workers alike.
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { vcpus: 4 });
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't1' }, 2);
+    await activate(d, 't1', alice, { build: hash('2') });
+    const sb = (await sandbox(d, `t1@${hash('2')}`)).body as Body;
+    expect(sb.id).toEqual(expect.any(String));
+    // The sandbox runs on build 2: build 1 retires, build 2 is refused.
+    expect((await retireBuild(d, 't1', hash('1'))).status).toBe(200);
+    expect(await refusal(() => retireBuild(d, 't1', hash('2')))).toBe('build_in_use');
+  });
+
+  it('judges build_in_use by worker for a sandbox record without a build id', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1', alice, { vcpus: 4 });
+    // A record from before builds were traced: no buildId, so its worker's every build is in use.
+    const nowS = Math.floor(now / 1000);
+    await d.sandboxes!.create(
+      {
+        id: 'sb-untraced',
+        owner: alice.sub,
+        tenant: '',
+        name: '',
+        template: 't1',
+        worker: 'sbx_t1',
+        wsk: '',
+        labels: {},
+        createdAt: nowS,
+        expiresAt: nowS + 3600,
+      },
+      { total: 10, perSubject: 10, retentionS: 60 },
+      nowS,
+    );
+    expect(await refusal(() => retireBuild(d, 't1', hash('1')))).toBe('build_in_use');
+    expect(await refusal(() => retireBuild(d, 't1', hash('2')))).toBe('build_in_use');
   });
 
   it('retires a build not yet built by its handle: no build id, no build record', async () => {
