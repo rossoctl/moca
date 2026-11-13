@@ -83,7 +83,18 @@ async function registered(
       d,
     );
   const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
-  const build = c.builds[0].build;
+  await reportBuilt(d, c.builds[0].build, id, h, worker, opts);
+}
+
+/** host-1's `built` report for its claimed build `build` of template `id` (manifest hash `h`). */
+async function reportBuilt(
+  d: TestDeps,
+  build: string,
+  id: string,
+  h: string,
+  worker: string,
+  opts: { vcpus?: number; sourceDigest?: string; status?: string } = {},
+): Promise<void> {
   const r = (
     await HANDLERS.hostBuildReport!(
       asHost(
@@ -1406,6 +1417,52 @@ describe('reject after the fact (§5.2)', () => {
       active: { used: 0 },
     });
   });
+
+  for (const how of ['reject', 'retire'] as const) {
+    it(`a ${how} judges live use on the template as it is under its locks, not as first read`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await HANDLERS.createTemplate!(
+        ctx({
+          principal: alice,
+          body: { id: 't1', image: IMAGE, spec: BASE_SPEC, profile: 'base' },
+        }),
+        d,
+      );
+      const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
+      const cat = d.templates!;
+      const handle = (await cat.get('t1'))!.builds[0].handle!;
+      // The call's first read sees the build still building. Before it takes its locks, the build
+      // registers (taking its buildId) and a sandbox is created on it.
+      const get = cat.get.bind(cat);
+      let armed = true;
+      cat.get = async (id) => {
+        const doc = await get(id);
+        if (armed) {
+          armed = false;
+          expect(doc!.builds[0].status).not.toBe('registered');
+          await reportBuilt(d, c.builds[0].build, 't1', hash('1'), 'sbx_t1');
+          await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+          await activate(d, 't1');
+          expect((await sandbox(d, 't1')).status).toBe(201);
+        }
+        return doc;
+      };
+      const end = () =>
+        how === 'reject'
+          ? reject(d, 't1', handle, { reason: 'broken' })
+          : HANDLERS.retireTemplateBuild!(
+              ctx({ principal: alice, params: { id: 't1', build: handle } }),
+              d,
+            );
+      expect(await refusal(end)).toBe('build_in_use');
+      expect((await get('t1'))!.builds[0]).toMatchObject({
+        status: 'registered',
+        buildId: hash('1'),
+      });
+      expect(await d.sandboxes!.listAll(NOW_MS / 1000)).toHaveLength(1);
+    });
+  }
 
   for (const [how, code] of [
     ['reject', 'unknown_template'],

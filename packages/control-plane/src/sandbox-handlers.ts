@@ -1220,8 +1220,13 @@ async function retireBuilds(
   // (createUnlessEnded).
   await activationLock(cat).run('activation', () =>
     templateUseLock(cat).run(d0.id, async () => {
-      // Read before the catalog update, so no store lookup runs inside it.
-      const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
+      // Read before the catalog update, so no store lookup runs inside it, and from the template
+      // as it is now, under the use lock: d0 was read before the locks, and a build it saw still
+      // building may have registered (taking its buildId, then a sandbox) while this waited. A
+      // build that registers after this read has no sandbox, and gets none while the lock is held.
+      const now = await cat.get(d0.id);
+      if (!now) throw new CpError('template_not_found', 'no such template');
+      const inUse = await buildsInUse(deps, now.builds.filter(which), seconds(deps));
       await cat.update(d0.id, async (cur) => {
         done.length = 0;
         const targets = cur!.builds.filter(which);
