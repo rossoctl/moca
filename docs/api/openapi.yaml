@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.8.0
+  version: 1.9.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -122,6 +122,7 @@ components:
             - no_active_slot
             - template_unavailable
             - template_not_active
+            - mode_not_allowed
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -371,6 +372,9 @@ components:
           expiresAt,
           terminatedAt,
           labels,
+          mode,
+          idleTimeoutS,
+          modeEpoch,
         ]
       additionalProperties: false
       properties:
@@ -416,6 +420,23 @@ components:
           propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
           additionalProperties: { type: string }
           description: free-form string pairs (at most 16; each value at most 256 UTF-8 bytes)
+        mode:
+          type: string
+          enum: [per-exec, lease, lease+processes]
+          description: |
+            How the worker runs the sandbox's Execs (lease-mode spec §8.1); `per-exec` unless the
+            owner picked a lease mode. Sandbox tokens carry it as the `mode` claim.
+        idleTimeoutS:
+          type: integer
+          minimum: 0
+          description: the owner's lease idle timeout in seconds; 0 means the worker's default
+        modeEpoch:
+          type: integer
+          minimum: 0
+          description: |
+            raised by 1 on every PUT /v1/sandboxes/{id}/mode, so a worker can refuse an Exec whose
+            token carries an older mode (`stale_mode`). A sandbox created `per-exec` starts at 0, one
+            created in a lease mode at 1
     Template:
       type: object
       description: A template (template lifecycle spec §3.2, §4)
@@ -2528,7 +2549,7 @@ paths:
                       every sandbox on a worker of a build it holds, live or ended less than 600 s
                       ago, the set `POST /v1/hosts/{host}/egress` accepts. The agent sends only these
                       sandboxes' events (and `audit_dropped` reports), so the proxy's other clients'
-                      events never leave the host. Absent from a control plane before 1.8.0: the agent
+                      events never leave the host. Absent from a control plane before 1.9.0: the agent
                       then sends nothing.
         '400':
           description: '`invalid_request`: this deployment stores no templates'
@@ -2711,9 +2732,25 @@ paths:
                   propertyNames: { pattern: '^[a-z0-9][a-z0-9._-]{0,62}$' }
                   additionalProperties: { type: string }
                   description: at most 16 pairs; each value at most 256 UTF-8 bytes
+                mode:
+                  type: string
+                  enum: [per-exec, lease, lease+processes]
+                  description: |
+                    default `per-exec`. A lease mode must be listed in SH_SANDBOX_MODES_ALLOWED
+                    (default `per-exec`: no lease mode), else 403 `mode_not_allowed`; `per-exec`
+                    always is.
+                idleTimeoutS:
+                  type: integer
+                  minimum: 30
+                  description: |
+                    the lease idle timeout in seconds, at most SH_SANDBOX_IDLE_CEILING_S (default
+                    1800). Omit it for the worker's default (stored as 0); an explicit 0 is refused
+                    (400).
       responses:
         '201':
-          description: the new sandbox, ready
+          description: |
+            the new sandbox, ready: mode epoch 0 for `per-exec`, 1 for a lease mode, which the worker
+            serves per-Exec until the first LeaseControl set_mode (POST .../mode-token mints one)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Sandbox' }
@@ -2725,7 +2762,11 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '403':
+          description: '`not_enrolled`, or `mode_not_allowed`: the deployment does not allow that mode'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: |
             `name_conflict`: the caller already has a live sandbox with that name;
@@ -2842,7 +2883,10 @@ paths:
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
         404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
-        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). No request body.
+        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). A sandbox whose lease
+        mode SH_SANDBOX_MODES_ALLOWED no longer lists is first set to `per-exec` at the next epoch,
+        and the `idle_timeout_s` claim is clamped to SH_SANDBOX_IDLE_CEILING_S (lease-mode spec
+        §8.1). No request body.
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       responses:
@@ -2940,6 +2984,114 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}/mode:
+    put:
+      operationId: setSandboxMode
+      summary: Change a sandbox's mode
+      description: |
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken: a sandbox token is
+        refused (401). Every accepted call raises `modeEpoch` by 1, the same mode included, and is
+        audited as `sandbox_mode_changed` (who, the old mode, the new mode, the epoch). Sandbox
+        tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
+        that mode and epoch for the client's `LeaseControl set_mode`, through which a downgrade takes
+        effect at once (lease-mode spec §8.2).
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [per-exec, lease, lease+processes]
+                  description: |
+                    a lease mode must be listed in SH_SANDBOX_MODES_ALLOWED, else 403
+                    `mode_not_allowed`; `per-exec` is always allowed
+                idleTimeoutS:
+                  type: integer
+                  minimum: 30
+                  description: |
+                    at most SH_SANDBOX_IDLE_CEILING_S. Omit it for the worker's default (stored as
+                    0, not the previous value); an explicit 0 is refused (400).
+      responses:
+        '200':
+          description: the sandbox as changed, and a set-mode token for its new epoch
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandbox, setModeToken]
+                properties:
+                  sandbox: { $ref: '#/components/schemas/Sandbox' }
+                  setModeToken:
+                    type: string
+                    description: 'JWT, typ moca-sandbox-mode+jwt, valid 300 s'
+        '400':
+          description: '`invalid_json` or `invalid_request` (an unknown mode, an idle timeout out of range)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `mode_not_allowed`: the deployment does not allow that mode'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}/mode-token:
+    post:
+      operationId: mintSandboxModeToken
+      summary: Mint a set-mode token for the current mode and epoch
+      description: |
+        Owner only, admins included: an admin calling it on another user's sandbox gets the same
+        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken. Raises nothing:
+        it signs the mode and epoch the record holds now, for a client to re-send `LeaseControl
+        set_mode` when the worker reports the epoch unknown (lease-mode spec §8.2). The exception
+        is a lease mode SH_SANDBOX_MODES_ALLOWED no longer lists: the sandbox is first set to
+        `per-exec` at the next epoch, as the sandbox token mint does (§8.1). The `idle_timeout_s`
+        claim is clamped to SH_SANDBOX_IDLE_CEILING_S. No request body.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      responses:
+        '200':
+          description: a set-mode token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setModeToken]
+                properties:
+                  setModeToken:
+                    type: string
+                    description: 'JWT, typ moca-sandbox-mode+jwt, valid 300 s'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`sandbox_terminated`, with `reason` (deleted | expired)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: redis_unavailable
           content:

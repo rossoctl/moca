@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { ProvenanceStore, recordDigest, verifyExport } from '../src/provenance.js';
 import { publicKeyFromBase64 } from '../src/token.js';
-import { verifySandboxToken } from '../src/sandbox-token.js';
+import { verifySandboxToken, verifySetModeToken } from '../src/sandbox-token.js';
 import { admin, alice, bob, codeOf, ctx, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
 
 const NOW = Math.floor(NOW_MS / 1000);
@@ -56,12 +56,17 @@ describe('sandbox handlers (SBX0 §5)', () => {
       expiresAt: NOW + 7 * 86_400,
       terminatedAt: null,
       labels: { project: 'p1' },
+      mode: 'per-exec',
+      idleTimeoutS: 0,
+      modeEpoch: 0,
     });
     expect(b.id).toMatch(/^sbx-[0-9a-f]{26}$/);
     const rec = await d.sandboxes!.get(b.id as string, NOW);
     expect(rec).toMatchObject({ worker: 'sbx_node22', wsk: b.id, tenant: 'github:1234' });
     expect(b.buildId).toMatch(/^imported:[0-9a-f]{12}$/);
     expect(rec?.buildId).toBe(b.buildId);
+    // No mode asked for: per-exec, the worker's idle default, epoch 0 (lease-mode spec §8.1).
+    expect(rec).toMatchObject({ mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 0 });
   });
 
   it('shows an unnamed sandbox as name null', async () => {
@@ -142,7 +147,13 @@ describe('sandbox handlers (SBX0 §5)', () => {
       const c = ctx({ principal: outsider, body: { template: 'default' } });
       expect(await codeOf(() => HANDLERS[op]!(c, d)), op).toBe('not_enrolled');
     }
-    for (const op of ['getSandbox', 'deleteSandbox', 'mintSandboxToken'] as const) {
+    for (const op of [
+      'getSandbox',
+      'deleteSandbox',
+      'mintSandboxToken',
+      'setSandboxMode',
+      'mintSandboxModeToken',
+    ] as const) {
       expect(await codeOf(() => HANDLERS[op]!(on(outsider, id), d)), op).toBe('not_enrolled');
     }
   });
@@ -157,14 +168,22 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(JSON.stringify(ts)).not.toContain('sbx_default');
   });
 
-  it("hides another user's sandbox behind 404, on get, delete and token", async () => {
+  it("hides another user's sandbox behind 404, on get, delete, token, mode and mode-token", async () => {
     const d = sbxDeps();
     const { id } = await create(d);
-    for (const op of ['getSandbox', 'deleteSandbox', 'mintSandboxToken'] as const) {
-      expect(await codeOf(() => HANDLERS[op]!(on(bob, id), d)), op).toBe('sandbox_not_found');
+    const ops = [
+      'getSandbox',
+      'deleteSandbox',
+      'mintSandboxToken',
+      'setSandboxMode',
+      'mintSandboxModeToken',
+    ] as const;
+    for (const op of ops) {
+      const c = ctx({ principal: bob, params: { id: id as string }, body: { mode: 'lease' } });
+      expect(await codeOf(() => HANDLERS[op]!(c, d)), op).toBe('sandbox_not_found');
     }
     // ...and an unknown id answers the same.
-    for (const op of ['getSandbox', 'deleteSandbox', 'mintSandboxToken'] as const) {
+    for (const op of ops) {
       expect(await codeOf(() => HANDLERS[op]!(on(alice, 'sbx-nope'), d)), op).toBe(
         'sandbox_not_found',
       );
@@ -401,6 +420,353 @@ describe('sandbox handlers (SBX0 §5)', () => {
       console.error = orig;
     }
     expect(errors).toHaveLength(1);
+  });
+
+  describe('mode (lease-mode spec §8.1)', () => {
+    const keysOf = (d: TestDeps) =>
+      new Map([[d.signer.kid, publicKeyFromBase64(d.publicKeyBase64)]]);
+    const put = (d: TestDeps, id: unknown, body: unknown, principal = alice) =>
+      HANDLERS.setSandboxMode!(ctx({ principal, params: { id: id as string }, body }), d);
+    const modeToken = (d: TestDeps, id: unknown, principal = alice) =>
+      HANDLERS.mintSandboxModeToken!(on(principal, id), d);
+    const withSandbox = (over: object): Parameters<typeof makeDeps>[0] => ({
+      config: { sandbox: { ...makeDeps().config.sandbox!, ...over } },
+    });
+
+    it('creates a lease mode at epoch 1, and per-exec at epoch 0 (ruling R8)', async () => {
+      // The worker serves every epoch-0 Exec as unversioned per-Exec, so a lease at epoch 0 could
+      // never be served; per-exec stays 0, which is what every pre-change sandbox is.
+      const d = sbxDeps();
+      for (const mode of ['lease', 'lease+processes'] as const) {
+        const dd = mode === 'lease' ? d : sbxDeps(withSandbox({ modesAllowed: new Set([mode]) }));
+        const b = await create(dd, alice, { template: 'default', mode, idleTimeoutS: 600 });
+        expect(b, mode).toMatchObject({ mode, idleTimeoutS: 600, modeEpoch: 1 });
+        expect(await dd.sandboxes!.get(b.id as string, NOW), mode).toMatchObject({
+          mode,
+          idleTimeoutS: 600,
+          modeEpoch: 1,
+        });
+      }
+      const p = await create(d, alice, { template: 'default', mode: 'per-exec' });
+      expect(p).toMatchObject({ mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 0 });
+      // A PUT on the lease sandbox raises from 1 to 2, and its set-mode token carries 2.
+      const l = await create(d, alice, { template: 'default', mode: 'lease' });
+      const r = (await put(d, l.id, { mode: 'lease' })).body as { sandbox: object };
+      expect(r.sandbox).toMatchObject({ modeEpoch: 2 });
+    });
+
+    it('refuses a mode the policy does not allow (403), and an unknown mode (400), on create', async () => {
+      const d = sbxDeps();
+      const bad = (body: object) =>
+        codeOf(() => create(d, alice, { template: 'default', ...body }));
+      expect(await bad({ mode: 'lease+processes' })).toBe('mode_not_allowed');
+      expect(await bad({ mode: 'resident' })).toBe('invalid_request');
+      expect(await bad({ mode: 7 })).toBe('invalid_request');
+      expect(await d.sandboxes!.listByOwner(alice.sub, NOW)).toEqual([]);
+    });
+
+    it('bounds the idle timeout to 30..SH_SANDBOX_IDLE_CEILING_S, on create and on PUT', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      const c = (body: object) => create(d, alice, { template: 'default', ...body });
+      for (const idleTimeoutS of [29, 1801, 0, -1, 30.5, '60', null]) {
+        expect(await codeOf(() => c({ idleTimeoutS })), `create ${idleTimeoutS}`).toBe(
+          'invalid_request',
+        );
+        expect(
+          await codeOf(() => put(d, id, { mode: 'lease', idleTimeoutS })),
+          `put ${idleTimeoutS}`,
+        ).toBe('invalid_request');
+      }
+      // The bounds themselves are in range.
+      expect((await c({ idleTimeoutS: 30 })).idleTimeoutS).toBe(30);
+      expect((await put(d, id, { mode: 'lease', idleTimeoutS: 1800 })).status).toBe(200);
+      // Nothing refused raised the epoch: only the one accepted PUT did.
+      expect((await d.sandboxes!.get(id as string, NOW))!.modeEpoch).toBe(1);
+    });
+
+    it('raises the epoch on an owner PUT and returns the sandbox and a set-mode token', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d, alice, { template: 'node22' });
+      const r = await put(d, id, { mode: 'lease', idleTimeoutS: 900 });
+      expect(r.status).toBe(200);
+      const b = r.body as { sandbox: Record<string, unknown>; setModeToken: string };
+      expect(b.sandbox).toMatchObject({
+        id,
+        state: 'ready',
+        mode: 'lease',
+        idleTimeoutS: 900,
+        modeEpoch: 1,
+      });
+      expect(Object.keys(b).sort()).toEqual(['sandbox', 'setModeToken']);
+      const c = verifySetModeToken(b.setModeToken, keysOf(d), {
+        issuer: 'sbx-control-plane',
+        now: NOW,
+      });
+      expect(c).toMatchObject({
+        sub: 'github:1234',
+        sbx: id,
+        wrk: 'sbx_node22',
+        wsk: id,
+        mode: 'lease',
+        mode_epoch: 1,
+        idle_timeout_s: 900,
+        exp: NOW + 300,
+      });
+      // A second PUT, the same mode, raises it again; an omitted idle timeout is the worker's default.
+      const again = (await put(d, id, { mode: 'lease' })).body as { sandbox: object };
+      expect(again.sandbox).toMatchObject({ modeEpoch: 2, idleTimeoutS: 0 });
+      // Sandbox tokens minted from now on carry the record's mode.
+      const t = (await HANDLERS.mintSandboxToken!(on(alice, id), d)).body as { token: string };
+      expect(
+        verifySandboxToken(t.token, keysOf(d), { issuer: 'sbx-control-plane', now: NOW }),
+      ).toMatchObject({ mode: 'lease', mode_epoch: 2, idle_timeout_s: 0 });
+    });
+
+    it('audits a mode change with who, the old mode, the new mode and the epoch', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      await put(d, id, { mode: 'lease', idleTimeoutS: 60 });
+      await put(d, id, { mode: 'per-exec' });
+      const rows = [...d.streams.values()].flat().filter((r) => r.decision !== 'sandbox_created');
+      expect(
+        rows.map((r) => [r.decision, r.sandboxId, r.subject, r.fromMode, r.toMode, r.modeEpoch]),
+      ).toEqual([
+        ['sandbox_mode_changed', id, 'github:1234', 'per-exec', 'lease', '1'],
+        ['sandbox_mode_changed', id, 'github:1234', 'lease', 'per-exec', '2'],
+      ]);
+      expect(d.logLines.filter((l) => l.decision === 'sandbox_mode_changed')).toEqual([
+        {
+          event: 'audit',
+          decision: 'sandbox_mode_changed',
+          subject: 'github:1234',
+          sandboxId: id,
+          fromMode: 'per-exec',
+          toMode: 'lease',
+          modeEpoch: 1,
+        },
+        {
+          event: 'audit',
+          decision: 'sandbox_mode_changed',
+          subject: 'github:1234',
+          sandboxId: id,
+          fromMode: 'lease',
+          toMode: 'per-exec',
+          modeEpoch: 2,
+        },
+      ]);
+    });
+
+    it("audits fromMode as the atomic update saw it, not as the handler's earlier read did (R9)", async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      // Another PUT lands between this handler's read and its setMode.
+      const store = d.sandboxes!;
+      const setMode = store.setMode.bind(store);
+      let raced = false;
+      store.setMode = async (...a) => {
+        if (!raced) {
+          raced = true;
+          await setMode(id as string, 'lease', 0, NOW);
+        }
+        return setMode(...a);
+      };
+      await put(d, id, { mode: 'per-exec' });
+      const rows = [...d.streams.values()]
+        .flat()
+        .filter((r) => r.decision === 'sandbox_mode_changed');
+      expect(rows.map((r) => [r.fromMode, r.toMode, r.modeEpoch])).toEqual([
+        ['lease', 'per-exec', '2'],
+      ]);
+    });
+
+    it('refuses a mode the policy does not allow with 403, and never refuses per-exec', async () => {
+      // An operator list without per-exec still lets an owner go back to it (ruling R7).
+      const d = sbxDeps(withSandbox({ modesAllowed: new Set(['lease']) }));
+      const { id } = await create(d, alice, { template: 'default', mode: 'lease' });
+      expect(await codeOf(() => put(d, id, { mode: 'lease+processes' }))).toBe('mode_not_allowed');
+      expect((await d.sandboxes!.get(id as string, NOW))!.modeEpoch).toBe(1);
+      expect((await put(d, id, { mode: 'per-exec' })).status).toBe(200);
+      expect((await create(d, alice, { template: 'default', mode: 'per-exec' })).mode).toBe(
+        'per-exec',
+      );
+      expect((await create(d, alice, { template: 'default' })).mode).toBe('per-exec');
+    });
+
+    it('refuses a PUT body without a valid mode', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      for (const body of [undefined, {}, { mode: 'resident' }, { mode: 2 }, ['lease']]) {
+        expect(await codeOf(() => put(d, id, body)), JSON.stringify(body)).toBe('invalid_request');
+      }
+    });
+
+    it('lets only the owner change the mode or mint a set-mode token, admins included', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      expect(await codeOf(() => put(d, id, { mode: 'lease' }, admin))).toBe('sandbox_not_found');
+      expect(await codeOf(() => modeToken(d, id, admin))).toBe('sandbox_not_found');
+      expect((await d.sandboxes!.get(id as string, NOW))!.modeEpoch).toBe(0);
+    });
+
+    it('refuses a terminated sandbox as the token mint does: 409 with the reason, epoch untouched', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      await HANDLERS.deleteSandbox!(on(alice, id), d);
+      for (const call of [() => put(d, id, { mode: 'lease' }), () => modeToken(d, id)]) {
+        expect(await call().catch((e) => e)).toMatchObject({
+          code: 'sandbox_terminated',
+          extra: { reason: 'deleted' },
+        });
+      }
+      const s = await create(d);
+      const expired = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+      for (const call of [
+        () => put(expired, s.id, { mode: 'lease' }),
+        () => modeToken(expired, s.id),
+      ]) {
+        expect(await call().catch((e) => e)).toMatchObject({
+          code: 'sandbox_terminated',
+          extra: { reason: 'expired' },
+        });
+      }
+      expect((await d.sandboxes!.get(s.id as string, NOW))!.modeEpoch).toBe(0);
+      // Past retention it is gone, as get and the token mint read it.
+      const purged = { ...d, now: () => NOW_MS + 30 * DAY_MS };
+      expect(await codeOf(() => put(purged, s.id, { mode: 'lease' }))).toBe('sandbox_not_found');
+      expect(await codeOf(() => modeToken(purged, s.id))).toBe('sandbox_not_found');
+    });
+
+    describe('a narrowed policy, at the next mint (review #4559538363)', () => {
+      const opts = { issuer: 'sbx-control-plane', now: NOW };
+      const narrowed = (d: TestDeps, over: object): TestDeps => ({
+        ...d,
+        config: { ...d.config, sandbox: { ...d.config.sandbox!, ...over } },
+      });
+      const sandboxToken = async (d: TestDeps, id: unknown) =>
+        verifySandboxToken(
+          ((await HANDLERS.mintSandboxToken!(on(alice, id), d)).body as { token: string }).token,
+          keysOf(d),
+          opts,
+        );
+      const setModeToken = async (d: TestDeps, id: unknown) =>
+        verifySetModeToken(
+          ((await modeToken(d, id)).body as { setModeToken: string }).setModeToken,
+          keysOf(d),
+          opts,
+        );
+      const modeChanges = (d: TestDeps) =>
+        d.logLines.filter((l) => l.decision === 'sandbox_mode_changed');
+
+      for (const first of ['sandbox token', 'set-mode token'] as const) {
+        it(`downgrades a lease sandbox to per-exec at epoch+1 once its mode is not allowed (${first} first)`, async () => {
+          const d = sbxDeps();
+          const { id } = await create(d, alice, {
+            template: 'default',
+            mode: 'lease',
+            idleTimeoutS: 600,
+          });
+          const n = narrowed(d, { modesAllowed: new Set(['per-exec']) });
+          // A mint before the policy changed is untouched: lease at the create's epoch 1.
+          expect(await sandboxToken(d, id)).toMatchObject({ mode: 'lease', mode_epoch: 1 });
+
+          const a =
+            first === 'sandbox token' ? await sandboxToken(n, id) : await setModeToken(n, id);
+          const b =
+            first === 'sandbox token' ? await setModeToken(n, id) : await sandboxToken(n, id);
+          // A raised epoch, not a same-epoch re-issue, which the worker would treat as a retry.
+          for (const c of [a, b]) expect(c).toMatchObject({ mode: 'per-exec', mode_epoch: 2 });
+          expect(await d.sandboxes!.get(id as string, NOW)).toMatchObject({
+            mode: 'per-exec',
+            modeEpoch: 2,
+          });
+          // Audited once, as the policy's change rather than the owner's.
+          expect(modeChanges(d)).toEqual([
+            {
+              event: 'audit',
+              decision: 'sandbox_mode_changed',
+              subject: 'github:1234',
+              sandboxId: id,
+              reason: 'mode_not_allowed',
+              fromMode: 'lease',
+              toMode: 'per-exec',
+              modeEpoch: 2,
+            },
+          ]);
+          const rows = [...d.streams.values()]
+            .flat()
+            .filter((r) => r.decision === 'sandbox_mode_changed');
+          expect(rows.map((r) => [r.reason, r.fromMode, r.toMode, r.modeEpoch])).toEqual([
+            ['mode_not_allowed', 'lease', 'per-exec', '2'],
+          ]);
+        });
+      }
+
+      it('leaves an allowed mode, and per-exec, as they are', async () => {
+        const d = sbxDeps(withSandbox({ modesAllowed: new Set(['lease', 'lease+processes']) }));
+        const l = await create(d, alice, { template: 'default', mode: 'lease' });
+        const p = await create(d, alice, { template: 'default' });
+        const n = narrowed(d, { modesAllowed: new Set(['lease']) });
+        expect(await sandboxToken(n, l.id)).toMatchObject({ mode: 'lease', mode_epoch: 1 });
+        expect(await setModeToken(n, p.id)).toMatchObject({ mode: 'per-exec', mode_epoch: 0 });
+        const none = narrowed(d, { modesAllowed: new Set() });
+        expect(await sandboxToken(none, p.id)).toMatchObject({ mode: 'per-exec', mode_epoch: 0 });
+        expect(modeChanges(d)).toEqual([]);
+      });
+
+      it('clamps the idle timeout claim to a lowered ceiling, changing neither the record nor the epoch', async () => {
+        const d = sbxDeps();
+        const { id } = await create(d, alice, {
+          template: 'default',
+          mode: 'lease',
+          idleTimeoutS: 1800,
+        });
+        const dflt = await create(d, alice, { template: 'default', mode: 'lease' });
+        const n = narrowed(d, { idleCeilingS: 600 });
+        expect(await sandboxToken(n, id)).toMatchObject({
+          mode: 'lease',
+          mode_epoch: 1,
+          idle_timeout_s: 600,
+        });
+        expect(await setModeToken(n, id)).toMatchObject({
+          mode: 'lease',
+          mode_epoch: 1,
+          idle_timeout_s: 600,
+        });
+        // 0 is the worker's default, not a value above the ceiling.
+        expect(await sandboxToken(n, dflt.id)).toMatchObject({ idle_timeout_s: 0 });
+        expect(await d.sandboxes!.get(id as string, NOW)).toMatchObject({
+          idleTimeoutS: 1800,
+          modeEpoch: 1,
+        });
+        expect(modeChanges(d)).toEqual([]);
+      });
+    });
+
+    it('mints a set-mode token for the current mode and epoch, raising nothing', async () => {
+      const d = sbxDeps();
+      const { id } = await create(d);
+      const first = (await modeToken(d, id)).body as { setModeToken: string };
+      expect(Object.keys(first)).toEqual(['setModeToken']);
+      const opts = { issuer: 'sbx-control-plane', now: NOW };
+      expect(verifySetModeToken(first.setModeToken, keysOf(d), opts)).toMatchObject({
+        sbx: id,
+        mode: 'per-exec',
+        mode_epoch: 0,
+        idle_timeout_s: 0,
+      });
+      await put(d, id, { mode: 'lease', idleTimeoutS: 45 });
+      await put(d, id, { mode: 'lease', idleTimeoutS: 45 });
+      const r = await modeToken(d, id);
+      expect(r.status).toBe(200);
+      const t = (r.body as { setModeToken: string }).setModeToken;
+      expect(verifySetModeToken(t, keysOf(d), opts)).toMatchObject({
+        mode: 'lease',
+        mode_epoch: 2,
+        idle_timeout_s: 45,
+      });
+      expect((await d.sandboxes!.get(id as string, NOW))!.modeEpoch).toBe(2);
+    });
   });
 });
 
