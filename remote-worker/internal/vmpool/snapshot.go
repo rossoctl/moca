@@ -61,6 +61,12 @@ type Manifest struct {
 // (deploy/microvm/build-snapshot.sh). A worker refuses lease mode without it.
 const FeatureLeaseV1 = "lease-v1"
 
+// FeatureBalloonFPRV1 marks a snapshot whose VM carries a virtio-balloon in free-page
+// reporting mode only (amount 0, never inflated): the guest returns the pages it frees, so
+// an idle lease's measured charge follows its working set rather than its peak (spec §6).
+// Firecracker builds only; a restored VM keeps reporting. Lease mode works without it.
+const FeatureBalloonFPRV1 = "balloon-fpr-v1"
+
 // HasFeature reports whether the snapshot advertises f.
 func (m Manifest) HasFeature(f string) bool {
 	return slices.Contains(m.Features, f)

@@ -32,11 +32,12 @@ import {
   cmdWorkloadGet,
   cmdWorkloadList,
 } from './workloads.js';
-import { VERSION } from './version.js';
+import { versionLine } from './version.js';
 
 export const USAGE = `usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI
-  mocactl --version                              print this build's version (a release tag, edge-<sha> or dev)
+  mocactl --version                              print this build's version (a release tag, edge-<sha>,
+                                                 or dev-<sha> from a source checkout)
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
                                                  terminal: copies the code, opens the browser)
   mocactl login --test-user N                    log in as test user N (needs the control plane's
@@ -206,7 +207,7 @@ async function mainWith(
   }
   const { values, positionals } = parsed;
   if (values.version) {
-    io.out(VERSION + '\n');
+    io.out(versionLine() + '\n');
     return 0;
   }
   if (values.help) {

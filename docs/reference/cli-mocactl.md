@@ -13,7 +13,8 @@ mocactl <command> [flags]    a headless command
 ```
 
 Run `mocactl --help` for the usage text. `--help` is not per command: `mocactl run --help` prints the
-same global usage. `mocactl --version` prints a release tag, `edge-<sha>` or `dev`.
+same global usage. `mocactl --version` prints a release tag or `edge-<sha>`; run from a source checkout it prints
+`dev-<sha>` (the checkout's commit, `-dirty` if tracked files differ from it), or `dev` where git can't say.
 
 All flags are accepted by one parser. An unknown flag, or a missing flag value, prints the usage and
 exits 2. Some flags are always rejected (exit 2) outside their command: `--consumer`, `--host` and

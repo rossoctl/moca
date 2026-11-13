@@ -1,0 +1,13 @@
+# The template store for the SBX0 control plane (template lifecycle spec §3.1, §7.2): the template
+# catalog and the provenance records on a volume (SH_PROVENANCE_DIR). A Component, not part of the
+# overlay: deploy/sbx/setup.sh lists it only behind SBX_TEMPLATE_STORE=1, so a stack without the
+# switch renders exactly as before (no PVC, no store, no Recreate).
+#   pvc.yaml                    the store's volume, 1 GiB RWO
+#   patch-control-plane.yaml    Recreate (an RWO volume cannot attach to a surge pod), the store env
+#                               and the PVC mount
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - pvc.yaml
+patches:
+  - path: patch-control-plane.yaml
