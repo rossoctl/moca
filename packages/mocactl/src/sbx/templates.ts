@@ -79,6 +79,7 @@ export async function cmdQuota(c: SbxCtx): Promise<number> {
           limitLine('templates', q.templates) +
           limitLine('buildsQueued', q.buildsQueued) +
           limitLine('active', q.active) +
+          limitLine('owned', q.owned) +
           limitLine('sandboxes', q.sandboxes),
       );
     return SBX_EXIT.ok;
@@ -109,7 +110,9 @@ export async function cmdPolicy(c: SbxCtx): Promise<number> {
     c.io.out(`registries ${p.allowedRegistries.map(sanitizeRemote).join(', ') || 'none'}\n`);
     c.io.out(
       `trusted gate records ${p.trustedGateRecords.length}; quota templates ${p.quota.templates}, ` +
-        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}\n`,
+        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}` +
+        (p.quota.owned !== undefined ? `, owned ${p.quota.owned}` : '') +
+        '\n',
     );
     c.io.out(`policy ${sanitizeRemote(v.digest)} (record ${sanitizeRemote(v.record)})\n`);
     return SBX_EXIT.ok;

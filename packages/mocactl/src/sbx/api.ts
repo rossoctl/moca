@@ -142,6 +142,9 @@ export interface SbxQuotaView {
   templates: SbxLimitUse;
   buildsQueued: SbxLimitUse;
   active: SbxLimitUse;
+  /** Template ids owned in any status (a lifetime cap); absent from an older control plane. */
+  owned?: SbxLimitUse;
+  ownedSource?: 'subject' | 'default';
   sandboxes?: SbxLimitUse;
 }
 

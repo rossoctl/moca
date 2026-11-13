@@ -679,6 +679,8 @@ describe('sbx quota, policy', () => {
       templates: { limit: 100, used: 3 },
       buildsQueued: { limit: 10, used: 1 },
       active: { limit: 8, used: 0 },
+      owned: { limit: 200, used: 4 },
+      ownedSource: 'default',
       sandboxes: { limit: 3, used: 1 },
     };
     const w = world({ 'GET /v1/quota': () => ({ status: 200, body: q }) });
@@ -688,6 +690,7 @@ describe('sbx quota, policy', () => {
         'templates      3 of 100\n' +
         'buildsQueued   1 of 10\n' +
         'active         0 of 8\n' +
+        'owned          4 of 200\n' +
         'sandboxes      1 of 3\n',
     );
     expect(await w.run(['quota', '--json'])).toBe(0);
