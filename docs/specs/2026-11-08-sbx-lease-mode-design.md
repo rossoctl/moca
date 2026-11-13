@@ -576,7 +576,8 @@ under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no 
 
 - **Who may call them:** a sandbox-token caller only, on its own worker (`sandbox_id` equal to the
   token's `wrk`) and its own workspace (the token's `wsk`, which the relay fills in). The harness
-  exec token is refused: the harness never uses leases.
+  exec token is refused: the harness never uses leases. A workload sandbox refuses both, as it
+  refuses an Exec that names no workload (SBX0 §3.3).
 - **At most 4 `LeaseControl` calls in flight per sandbox** at the relay. A fifth is refused at once.
   A client that cancels its call frees its place at once; the worker's late answer is then dropped.
 - **Per-op timeouts at the relay:** 15 s for `status`, and 31 minutes for `reset` and `set_mode`
@@ -584,13 +585,14 @@ under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no 
   code older than lease mode ignores the frame, so its silence ends at this timeout, never in a hung
   call.
 - **`LeaseKeepalive` is fire-and-forget.** The relay answers OK once the caller checks pass, even
-  with no worker attached; on the worker it is a no-op without a live lease. It is not audited, since
-  a client may send one every few seconds.
+  with no worker attached or when the frame cannot be written to it; on the worker it is a no-op
+  without a live lease. It is not audited, since a client may send one every few seconds.
 - **The worker** runs lease calls off its receive loop and its Exec slots. It runs at most 16
   `reset` and `set_mode` calls at once across every sandbox it serves, and at most 2 per workspace;
   past either cap it answers `busy: too many lease calls in flight`. A `status` counts against
-  neither cap, so one sandbox's blocked calls cannot deny another's `status`. The container tier has no
-  lease mode and answers every `LeaseControl` with `lease_unsupported: this worker has no lease mode`.
+  neither cap, so one sandbox's blocked calls cannot deny another's `status`. The container tier
+  has no lease mode and answers every `LeaseControl` with
+  `lease_unsupported: this worker has no lease mode`.
 - **One audit line per `LeaseControl`,** marker `sandbox_lease_control`, refusals included (a call
   with no bearer token is a `refused` line with the reason `no bearer token`): `wrk`, `op`, `ms`,
   `outcome`, a `reason` when there is one, `sub` and `sbx` once the sandbox token verified, and for
@@ -598,17 +600,17 @@ under that `ctl_id`. `LeaseKeepalive` becomes a `ServerFrame.keepalive` with no 
   no command text. A relay with no sandbox keyset, which can verify no sandbox token, answers
   `UNAUTHENTICATED` without a line, as it does for `Exec` and `Abort`.
 
-| `LeaseControl` ends with | When                                                                                | Audit `outcome` |
-| ------------------------ | ----------------------------------------------------------------------------------- | --------------- |
-| OK                       | the worker answered without an error                                                | `ok`            |
-| `FAILED_PRECONDITION`    | the worker answered with an error; the message is its wire string                   | `failed`        |
-| `UNAUTHENTICATED`        | no sandbox token, or one that did not verify                                        | `refused`       |
-| `PERMISSION_DENIED`      | `sandbox_id` is not the token's worker; the harness token; a set-mode token refused | `refused`       |
-| `INVALID_ARGUMENT`       | no `op`, or one this relay does not know                                            | `refused`       |
-| `RESOURCE_EXHAUSTED`     | `sandbox busy: <n> lease controls already in flight`                                | `busy`          |
-| `DEADLINE_EXCEEDED`      | only the per-op timeout: the worker did not answer in time                          | `timeout`       |
-| `UNAVAILABLE`            | no live worker, the frame could not be written, or the worker disconnected first    | `error`         |
-| `CANCELLED`              | the client cancelled the call before the worker answered                            | `cancelled`     |
+| `LeaseControl` ends with | When                                                                                                    | Audit `outcome` |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- | --------------- |
+| OK                       | the worker answered without an error                                                                    | `ok`            |
+| `FAILED_PRECONDITION`    | the worker answered with an error; the message is its wire string                                       | `failed`        |
+| `UNAUTHENTICATED`        | no sandbox token, or one that did not verify                                                            | `refused`       |
+| `PERMISSION_DENIED`      | `sandbox_id` is not the token's worker; the harness token; a set-mode token refused; a workload sandbox | `refused`       |
+| `INVALID_ARGUMENT`       | no `op`, or one this relay does not know                                                                | `refused`       |
+| `RESOURCE_EXHAUSTED`     | `sandbox busy: <n> lease controls already in flight`, checked before the set-mode token                 | `busy`          |
+| `DEADLINE_EXCEEDED`      | only the per-op timeout: the worker did not answer in time                                              | `timeout`       |
+| `UNAVAILABLE`            | no live worker, the frame could not be written, or the worker disconnected first                        | `error`         |
+| `CANCELLED`              | the client cancelled the call before the worker answered                                                | `cancelled`     |
 
 The worker's wire strings, on an Exec's `ExecError.message` or in `LeaseControlResult.error`:
 `lease_ended(<reason>)` for an Exec cut by a lease end (§4, §4.1), `stale_mode: <detail>` for an

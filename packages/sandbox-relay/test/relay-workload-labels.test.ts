@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { status } from '@grpc/grpc-js';
 import { makeSigner, mintAttachToken } from '@moca/control-plane';
 import type { RecordStore, SandboxRecord } from '@moca/harness';
-import { Exec } from '@moca/k8s-sandbox';
+import { Exec, LeaseOp, SandboxMode } from '@moca/k8s-sandbox';
 import { createRelay, type RelayDeps } from '../src/relay.js';
 import { makeAttachVerifier, makeDefaultValidateToken } from '../src/main.js';
 
@@ -340,6 +340,41 @@ describe('relay trusted workload labels: attach keys configured', () => {
       code: status.PERMISSION_DENIED,
     });
     expect(await drive(r, stream, 'moca-sandbox-0', '')).toEqual({ ok: true });
+  });
+});
+
+describe('relay lease routes: the workload check (SBX0 §3.3 parity with Exec)', () => {
+  const STATUS = {
+    workspaceKey: 'wsk',
+    op: LeaseOp.LEASE_OP_STATUS,
+    mode: SandboxMode.SANDBOX_MODE_UNSPECIFIED,
+    modeEpoch: 0,
+  };
+
+  it('a workload sandbox refuses LeaseControl and LeaseKeepalive, and its worker sees nothing', async () => {
+    const { signer, keysEnv } = attachSigner();
+    const r = relayWith(keysEnv);
+    const { stream } = await attach(r, `${WL}-0`, mint(signer));
+    await expect(r.relay.routeLeaseControl(`${WL}-0`, STATUS, 200)).rejects.toMatchObject({
+      code: status.PERMISSION_DENIED,
+    });
+    expect(() => r.relay.routeKeepalive(`${WL}-0`, 'wsk')).toThrow(
+      expect.objectContaining({ code: status.PERMISSION_DENIED }),
+    );
+    expect(stream.written.filter((f) => f.leaseControl || f.keepalive)).toHaveLength(0);
+  });
+
+  it('a shared-pool sandbox on the same relay still gets both', async () => {
+    const { keysEnv } = attachSigner();
+    const r = relayWith(keysEnv);
+    const { stream } = await attach(r, 'moca-sandbox-0', SHARED);
+    const call = r.relay.routeLeaseControl('moca-sandbox-0', STATUS, 60_000);
+    const sent = stream.written.find((f) => f.leaseControl);
+    expect(sent).toBeDefined();
+    stream.emitData({ leaseResult: { ctlId: sent.leaseControl.ctlId, error: '' } });
+    await expect(call).resolves.toMatchObject({ error: '' });
+    r.relay.routeKeepalive('moca-sandbox-0', 'wsk');
+    expect(stream.written.filter((f) => f.keepalive)).toHaveLength(1);
   });
 });
 

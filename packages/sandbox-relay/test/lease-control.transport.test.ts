@@ -359,6 +359,32 @@ describe('LeaseControl (lease-mode §8.2)', () => {
     expect((await again).code).toBe(status.OK);
   });
 
+  it('saturated, a set_mode is busy whether or not its set-mode token verifies', async () => {
+    const r = await relay();
+    const w = await worker(r.attach, 'sbx_default');
+    const pending = Array.from({ length: LEASE_CONTROL_MAX_INFLIGHT }, () =>
+      leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS),
+    );
+    await sleep(150);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT);
+    // The cap is checked before the set-mode token, so saturation tells a prober nothing about it.
+    const bogus = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_SET_MODE, {
+      setModeToken: 'not-a-token',
+    });
+    const valid = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_SET_MODE, {
+      setModeToken: setModeToken(),
+    });
+    expect(bogus).toEqual(valid);
+    expect(bogus.code).toBe(status.RESOURCE_EXHAUSTED);
+    expect(leaseLines(r.lines).slice(-2)).toEqual([
+      expect.objectContaining({ op: 'set_mode', outcome: 'busy' }),
+      expect.objectContaining({ op: 'set_mode', outcome: 'busy' }),
+    ]);
+    expect(w.controls).toHaveLength(LEASE_CONTROL_MAX_INFLIGHT);
+    for (const c of w.controls) w.answerControl(c.ctlId, { status: ACTIVE });
+    for (const p of pending) expect((await p).code).toBe(status.OK);
+  });
+
   it('a cancelled call frees its slot at once', async () => {
     const r = await relay();
     const w = await worker(r.attach, 'sbx_default');
@@ -415,6 +441,38 @@ describe('LeaseControl per-op timeouts', () => {
     for (const op of [LeaseOp.LEASE_OP_STATUS, LeaseOp.LEASE_OP_RESET, LeaseOp.LEASE_OP_SET_MODE])
       await caller.leaseControl(claims, req(op), Date.now());
     expect(timeouts).toEqual([15_000, 31 * 60_000, 31 * 60_000]);
+  });
+});
+
+describe('LeaseControl refused by the relay route', () => {
+  it("the workload check's PERMISSION_DENIED is a refused line, not an error", async () => {
+    const fake = {
+      routeLeaseControl: async () => {
+        throw Object.assign(new Error('lease control not permitted'), {
+          code: status.PERMISSION_DENIED,
+        });
+      },
+    } as unknown as Relay;
+    const env = { SH_SANDBOX_TOKEN_PUBLIC_KEYS: K.keyset, SH_SANDBOX_TOKEN_ISSUER: ISS };
+    const lines: string[] = [];
+    const caller = makeSandboxCaller(fake, {
+      maxInflight: 2,
+      leewayS: 30,
+      drainGraceS: 60,
+      reqIdKey: REQ_ID_KEY,
+      audit: makeAudit((l) => lines.push(l), false),
+    });
+    const claims = makeSandboxTokenVerifier(env)!(token()).claims!;
+    await expect(
+      caller.leaseControl(
+        claims,
+        { sandboxId: 'sbx_default', op: LeaseOp.LEASE_OP_STATUS, setModeToken: '' },
+        Date.now(),
+      ),
+    ).rejects.toMatchObject({ code: status.PERMISSION_DENIED });
+    expect(lines.map((l) => JSON.parse(l))).toEqual([
+      expect.objectContaining({ op: 'status', outcome: 'refused' }),
+    ]);
   });
 });
 

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { status } from '@grpc/grpc-js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { LeaseOp, SandboxMode } from '@moca/k8s-sandbox';
 import type { RecordStore } from '@moca/harness';
 import { createRelay } from '../src/relay.js';
@@ -115,5 +115,25 @@ describe('relay routeLeaseControl bookkeeping', () => {
     s.emit('data', { leaseResult: { ctlId: b, error: '' } });
     await expect(second).resolves.toMatchObject({ ctlId: b, error: '' });
     expect(live.size).toBe(0);
+  });
+});
+
+describe('relay routeKeepalive', () => {
+  it('a write that throws is caught: fire-and-forget, the caller still answers OK', () => {
+    const { relay, s } = parked((f) => {
+      if (f.keepalive) throw new Error('write after end');
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => relay.routeKeepalive('sbx-1', 'wsk')).not.toThrow();
+      expect(err).toHaveBeenCalledTimes(1);
+    } finally {
+      err.mockRestore();
+    }
+    // The stream is left as it was: the next frame still goes out.
+    const p = relay.routeLeaseControl('sbx-1', STATUS, 60_000);
+    const ctlId = s.written.at(-1).leaseControl.ctlId;
+    s.emit('data', { leaseResult: { ctlId, error: '' } });
+    return expect(p).resolves.toMatchObject({ ctlId });
   });
 });

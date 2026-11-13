@@ -564,6 +564,17 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       );
     }
     if (op === 'unspecified') throw refusal(status.INVALID_ARGUMENT, 'lease control needs an op');
+    // The cap first, before the set-mode token: saturated, every call is answered busy alike, so
+    // it is no oracle for a token's validity, and no verify work is spent on it. Nothing below
+    // awaits before the slot is taken, so `n` is still current then.
+    const n = leaseInflight.get(claims.sbx) ?? 0;
+    if (n >= LEASE_CONTROL_MAX_INFLIGHT) {
+      line('busy');
+      throw grpcError(
+        status.RESOURCE_EXHAUSTED,
+        `sandbox busy: ${n} lease controls already in flight`,
+      );
+    }
     let mode = SandboxMode.SANDBOX_MODE_UNSPECIFIED;
     let modeEpoch = 0;
     if (op === 'set_mode') {
@@ -582,14 +593,6 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       ({ mode, modeEpoch } = claimsToExecMode(setMode));
     }
 
-    const n = leaseInflight.get(claims.sbx) ?? 0;
-    if (n >= LEASE_CONTROL_MAX_INFLIGHT) {
-      line('busy');
-      throw grpcError(
-        status.RESOURCE_EXHAUSTED,
-        `sandbox busy: ${n} lease controls already in flight`,
-      );
-    }
     leaseInflight.set(claims.sbx, n + 1);
     let result;
     try {
@@ -606,7 +609,9 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
           ? 'timeout'
           : code === status.CANCELLED
             ? 'cancelled'
-            : 'error';
+            : code === status.PERMISSION_DENIED
+              ? 'refused' // the relay's workload check
+              : 'error';
       line(outcome, (err as Error).message);
       throw err;
     } finally {

@@ -186,9 +186,10 @@ export interface Relay {
    * resolve with the worker's LeaseControlResult for that id. Every call ends: it rejects
    * DEADLINE_EXCEEDED at `timeoutMs` (a worker on code older than lease mode ignores the frame),
    * UNAVAILABLE when there is no live worker, the frame cannot be written or the worker disconnects
-   * first, and CANCELLED when `signal` aborts (the caller went away). However it settles, its
-   * waiter is gone at once, so a later answer for its ctl_id is dropped. A result's own `error` is
-   * the caller's to read; this resolves with it.
+   * first, PERMISSION_DENIED for a workload sandbox (the workload check, as routeExec's: a lease
+   * call names no workload), and CANCELLED when `signal` aborts (the caller went away). However it
+   * settles, its waiter is gone at once, so a later answer for its ctl_id is dropped. A result's
+   * own `error` is the caller's to read; this resolves with it.
    */
   routeLeaseControl(
     sandboxId: string,
@@ -196,7 +197,11 @@ export interface Relay {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<LeaseControlResult>;
-  /** Activity on a live lease, without an Exec. Fire-and-forget; a no-op without a live worker. */
+  /**
+   * Activity on a live lease, without an Exec. Fire-and-forget: a no-op without a live worker, and
+   * a write that fails is logged, not thrown. Throws PERMISSION_DENIED only for a workload sandbox
+   * (the workload check, as routeLeaseControl's).
+   */
   routeKeepalive(sandboxId: string, workspaceKey: string): void;
   /**
    * Graceful stop (#453): refuse every later Hello, run each parked session's teardown and await
@@ -525,6 +530,8 @@ export function createRelay(deps: RelayDeps): Relay {
         statusError(status.UNAVAILABLE, `no live worker for sandbox '${sandboxId}'`),
       );
     }
+    const refused = leaseOnWorkload(sandboxId, parked, 'lease control');
+    if (refused) return Promise.reject(refused);
     if (signal?.aborted) {
       return Promise.reject(statusError(status.CANCELLED, 'lease control cancelled'));
     }
@@ -577,9 +584,35 @@ export function createRelay(deps: RelayDeps): Relay {
   }
 
   function routeKeepalive(sandboxId: string, workspaceKey: string): void {
-    sessions.get(sandboxId)?.stream.write({
-      keepalive: LeaseKeepaliveFrame.fromPartial({ workspaceKey }),
-    } as ServerFrame);
+    const parked = sessions.get(sandboxId);
+    if (!parked) return;
+    const refused = leaseOnWorkload(sandboxId, parked, 'lease keepalive');
+    if (refused) throw refused;
+    try {
+      parked.stream.write({
+        keepalive: LeaseKeepaliveFrame.fromPartial({ workspaceKey }),
+      } as ServerFrame);
+    } catch (err) {
+      // Fire-and-forget: the caller is answered OK either way, and a stream this broken is torn
+      // down by its own end or error event.
+      console.error(
+        `lease keepalive not sent to sandbox '${sandboxId}': ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * The lease routes' half of routeExec's workload check (SBX0 §3.3): their only callers are
+   * sandbox-token callers, which name no workload, so a workload sandbox refuses them, as it
+   * refuses an Exec that names none. Checked only with attach keys, as routeExec's is.
+   */
+  function leaseOnWorkload(
+    sandboxId: string,
+    parked: Parked,
+    what: string,
+  ): (Error & { code: number; details: string }) | undefined {
+    if (!deps.verifyAttach || !parked.workload) return undefined;
+    return workloadMismatch(`${what} not permitted: sandbox '${sandboxId}' belongs to a workload`);
   }
 
   async function drain(): Promise<void> {
