@@ -50,6 +50,9 @@ gitignored).
    ```
 
    It waits up to 120 s for the worker's attach to hold (`SBX_ATTACH_TIMEOUT`).
+   On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
+   the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
+   agent's wanted state instead of starting all of them.
 
 6. **The janitor,** once per KVM host:
 
