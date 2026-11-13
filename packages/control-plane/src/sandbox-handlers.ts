@@ -929,7 +929,9 @@ const deploymentRun = (id: string) =>
  * does not take it: a drop can only free quota or a slot, so an activation that read the leases
  * before a drop judged against more leases than remain, never fewer. A retire takes it (§5.1): it
  * ends a build's use, and takeLease re-reads the build's status under it, so a lease is never
- * written onto a build retired after the activation resolved it.
+ * written onto a build retired after the activation resolved it. A sandbox create writes its record
+ * under it too, after the same re-read (notRetired), so no sandbox lands on a build as it is
+ * retired; it holds the lock for one catalog read and one record write.
  *
  * It is process-local, which suffices because one control plane process owns the store: the
  * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
@@ -1279,6 +1281,28 @@ async function retireTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
   };
 }
 
+/**
+ * A sandbox record's write (§5.1), run under the activation lock after re-reading its build's
+ * status. A retire judges use and retires under the same lock, so a create racing it either writes
+ * first, and the retire sees its sandbox and is refused `409 build_in_use`, or finds the build
+ * retired, and is refused `410 template_retired` with no record written. Without a template store
+ * nothing can be retired, so no lock is taken.
+ */
+async function notRetired<T>(
+  deps: CpDeps,
+  t: { id: string; buildId: string },
+  write: () => Promise<T>,
+): Promise<T> {
+  const cat = deps.templates;
+  if (!cat?.update || !deps.provenance) return write();
+  return activationLock(cat).run('activation', async () => {
+    const cur = (await cat.get(t.id))?.builds.find((x) => x.buildId === t.buildId);
+    if (cur?.status === 'retired')
+      throw new CpError('template_retired', `template '${t.id}' build ${t.buildId} is retired`);
+    return write();
+  });
+}
+
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
 export const FIRST_USE_RETRY_S = 30;
 
@@ -1472,10 +1496,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       createdAt: now,
       expiresAt: now + cfg.lifetimeS,
     };
-    const outcome = await store.create(
-      rec,
-      { perSubject: cfg.maxPerSubject, total: cfg.maxTotal, retentionS: cfg.retentionS },
-      now,
+    const outcome = await notRetired(deps, template, () =>
+      store.create(
+        rec,
+        { perSubject: cfg.maxPerSubject, total: cfg.maxTotal, retentionS: cfg.retentionS },
+        now,
+      ),
     );
     if (outcome === 'quota_subject') {
       throw new CpError('quota_exceeded', `at most ${cfg.maxPerSubject} live sandboxes per user`);

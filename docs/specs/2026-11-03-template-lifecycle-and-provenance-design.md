@@ -302,14 +302,17 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
   `400 unknown_template`: it existed, and its records stay). A retire and an activation's lease
   write run one at a time, and an activation re-reads its build's status before writing, so one
   that resolved the build just before a retire is refused `410 template_retired` too: no lease is
-  left on a retired build to count against its subject's `active` quota. Readiness reads
+  left on a retired build to count against its subject's `active` quota. A sandbox create writes
+  its record one at a time with a retire too, after re-reading its build's status: a create racing
+  a retire either lands first (the retire sees its sandbox, and is refused `409 build_in_use`) or
+  is refused `410 template_retired`, so no sandbox lands on a build as it is retired. Readiness reads
   `retired`, and each build lists `heldBy`, the hosts whose last inventory still holds its
   snapshot (a host silent past the staleness limit too: it leaves placement, not `heldBy`, so a
   `--wait` keeps waiting for the stop it gets once it reports again).
 - **Never cuts off running work.** A retire is refused `409 build_in_use` while a live sandbox runs
   on a build it names (the build the sandbox resolved to at creation, not its worker, which two
   builds from one image can share; a sandbox record without a build id counts for every build on
-  its worker; judged on the template as read under the lock, not the request's earlier read):
+  its worker; judged on the template as read in the retire's turn, not the request's earlier read):
   delete the sandbox (or let it end), then retire. A worker is never stopped
   under a live sandbox either (§6.3).
 - **Recorded.** Each build retired writes a `retire` record naming the caller, `from` (the status
@@ -343,10 +346,6 @@ Known limits:
 
 - A tag that points at a retired build still resolves to it, and is refused; so does `default`
   when the default build is retired, even with another registered build.
-- `build_in_use` is judged from a read of the live sandboxes taken before the catalog update, so a
-  sandbox create racing the retire can land on the build in between. It is harmless: that sandbox
-  runs, and its worker is stopped only once nothing on it is live, since the wanted state never
-  lists a worker with a live sandbox in `stop`.
 - Removing a retired build's worker and snapshot from its host comes with the host agent's removal
   step (#743); until then a retired build stays in `heldBy`.
 - A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
@@ -468,7 +467,9 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   and its lease write run one at a time across the deployment (owner activation and first use
   alike), so concurrent activations of different templates cannot together pass a subject's quota
   or a host's `activeLimit`. A lease taken in the same second as a placed build waits
-  (`409 no_active_slot`) rather than displacing it. The lock is in the control plane's process, so
+  (`409 no_active_slot`) rather than displacing it. A retire (§5.1) and a sandbox create's status
+  re-read and record write take the same lock, held for one catalog read and one record write per
+  create. The lock is in the control plane's process, so
   one process per template store is what makes it enough.
 - **The wanted state:** `GET /v1/hosts/{host}/wanted` answers `run` (the leased builds placed on that
   host) and `stop` (the builds it holds with no lease and no live sandbox, a leased build it runs

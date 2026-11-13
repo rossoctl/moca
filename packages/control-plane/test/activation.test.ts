@@ -1200,6 +1200,53 @@ describe('retire (§5.1)', () => {
     expect((await get('t1'))!.builds.map((x) => x.status)).toEqual(['registered', 'registered']);
   });
 
+  it('a sandbox create that resolved the build before a retire is refused 410', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The create reads the template (build registered), then the retire runs to its end before
+    // the create writes its sandbox record.
+    const cat = d.templates!;
+    const get = cat.get.bind(cat);
+    let race = true;
+    cat.get = async (id: string) => {
+      const doc = await get(id);
+      if (race) {
+        race = false;
+        await retire(d, 't1');
+      }
+      return doc;
+    };
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('template_retired');
+    expect(await d.sandboxes!.listAll(Math.floor(now / 1000))).toEqual([]);
+  });
+
+  it('a sandbox create waits for a retire judging use, then is refused 410', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    // The create arrives once the retire has read the live sandboxes (none), before it retires.
+    // Under the lock the create waits for the retire, then finds the build retired; without it,
+    // the sandbox would be written in between and run on a retired build.
+    const store = d.sandboxes!;
+    const listAll = store.listAll.bind(store);
+    let creating: Promise<unknown> | null = null;
+    let arm = false;
+    store.listAll = async (nowS: number) => {
+      const out = await listAll(nowS);
+      if (arm) {
+        arm = false;
+        creating = refusal(() => sandbox(d, 't1'));
+        await Promise.race([creating, new Promise((r) => setTimeout(r, 200))]);
+      }
+      return out;
+    };
+    arm = true;
+    expect((await retire(d, 't1')).status).toBe(200);
+    expect(await creating).toBe('template_retired');
+    expect(await listAll(Math.floor(now / 1000))).toEqual([]);
+  });
+
   it('retires nothing when its retire record cannot be written; a retry retires it', async () => {
     const d = await setup();
     attachedNow = [];
