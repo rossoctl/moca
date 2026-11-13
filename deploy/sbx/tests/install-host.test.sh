@@ -675,6 +675,19 @@ pass '--uninstall-egress removes the drop-in, token and api CA, keeps the CA, re
 
 # The last worker's uninstall removes the credential files the same way.
 bash "$INSTALL" --egress "$(ebundle api)" >"$TMP/out" 2>&1 || fail '--egress before the last uninstall'
+# --keep-shared (the host agent's removal): the last worker's own files go, nothing shared does; a
+# plain --uninstall of the same id then removes the rest.
+! bash "$INSTALL" --keep-shared >"$TMP/out" 2>&1 || fail '--keep-shared accepted without --uninstall'
+grep -q -- '--keep-shared goes with --uninstall' "$TMP/out" || fail '--keep-shared alone does not say why it is refused'
+bash "$INSTALL" --uninstall sbx_cr --keep-shared >"$TMP/out" 2>&1 || fail 'last uninstall with --keep-shared'
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_cr.env" ]] || fail '--keep-shared kept the worker env'
+! grep -q '^worker sbx-worker@sbx_cr ' "$M" || fail '--keep-shared kept the worker in the manifest'
+[[ -e "$DROPIN" && -e "$CD/token" && -e "$U" && -f "$SBX_UNIT_DIR/sbx-worker@.service" && -f "$SBX_UNIT_DIR/sbx.slice" ]] ||
+  fail '--keep-shared removed the shared units, moca-egress or its credential injection'
+grep -qF 'kept the shared units, moca-egress and its credential injection (--keep-shared)' "$TMP/out" ||
+  fail '--keep-shared does not say what it kept'
+! grep -q 'credential injection removed' "$TMP/out" || fail '--keep-shared says it removed credential injection'
+pass '--uninstall --keep-shared removes the last worker alone and keeps the shared units and egress setup'
 bash "$INSTALL" --uninstall sbx_cr >"$TMP/out" 2>&1 || fail 'last uninstall with credentials'
 [[ ! -e "$DROPIN" && ! -e "$CD/token" && ! -e "$CD/api-ca.crt" && ! -e "$U" ]] || fail 'the last uninstall left credential files or the unit'
 [[ -f "$CD/ca.crt" ]] || fail 'the last uninstall removed the CA'

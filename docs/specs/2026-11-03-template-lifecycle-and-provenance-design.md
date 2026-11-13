@@ -388,9 +388,11 @@ template: the same snapshot registered again, or a worker id kept) is in neither
 needs, and drop its host from that build's `heldBy`. For each, the agent finds the snapshot from its own template record whose manifest hash
 is the build id and whose worker is the one named, never from a path the control plane sends: a
 name no record matches deletes nothing and is reported as an error. It skips a worker whose unit
-still runs (removed once it is stopped), runs `install-host.sh --uninstall <worker>` if the worker is
-installed (`SBX_INSTALL_HOST`, set in both agent units), deletes the snapshot directory and its
-record, and reports `removed`. The control plane writes a `retire` record by `host:<id>` with
+still runs (removed once it is stopped), runs `install-host.sh --uninstall <worker> --keep-shared`
+if the worker is installed (`SBX_INSTALL_HOST`, set in both agent units; the worker's own files
+only, so a retire never removes the host's shared units, `moca-egress` or its credential
+injection, even with its last worker), deletes the snapshot directory and its record, and reports
+`removed`. The control plane writes a `retire` record by `host:<id>` with
 `event: removed` and the build's `buildRecord` digest, and the build's `heldBy` drops the host at
 once (the next inventory says the same). The worker's workspace data stays for the host janitor.
 

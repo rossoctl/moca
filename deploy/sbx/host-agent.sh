@@ -331,8 +331,10 @@ activation() {
 # whose worker is the one named, never from a path the control plane sends; nothing else is deleted,
 # and a name no record matches deletes nothing. A running worker is not removed (the control plane
 # leaves out one with a live sandbox, and this checks again): it is skipped until it is stopped. The
-# worker is uninstalled first (install-host.sh --uninstall, which keeps its workspace data for the
-# janitor), then the snapshot directory and its record go. Each removal is reported `removed`.
+# worker is uninstalled first (install-host.sh --uninstall --keep-shared: its own files only, so
+# the last worker's removal leaves the shared units, moca-egress and its credential injection for
+# the next one; its workspace data stays for the janitor), then the snapshot directory and its
+# record go. Each removal is reported `removed`.
 removal() {
   local w b f rec snap
   while IFS=$'\t' read -r w b; do
@@ -353,7 +355,7 @@ removal() {
       continue
     fi
     if [[ -f "$SBX_ENV_DIR/workers/$w.env" ]]; then
-      "$SBX_INSTALL_HOST" --uninstall "$w" >"$WORK/uninstall-$w.log" 2>&1 || { error "install-host.sh --uninstall $w failed"; continue; }
+      "$SBX_INSTALL_HOST" --uninstall "$w" --keep-shared >"$WORK/uninstall-$w.log" 2>&1 || { error "install-host.sh --uninstall $w failed"; continue; }
     fi
     rm -rf -- "${SBX_SRV:?}/snapshots/$snap"
     rm -f -- "$rec"

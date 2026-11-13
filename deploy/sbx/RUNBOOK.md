@@ -687,12 +687,16 @@ template store (the Deployment's one replica, the store's ReadWriteOnce volume).
 /v1/templates/{id}/retire`, `DELETE /v1/templates/{id}/builds/{build}`, or `mocactl sbx templates
 retire`), each host holding it gets it in its wanted state's `stop` and `remove` as soon as no live
 sandbox runs on its worker. In the same run the agent stops the worker, runs `install-host.sh
---uninstall <worker>` (`SBX_INSTALL_HOST`), deletes the snapshot directory and its template record
+--uninstall <worker> --keep-shared` (`SBX_INSTALL_HOST`), deletes the snapshot directory and its template record
 under `/srv/sbx`, and reports `removed`: the template's provenance gains a `retire` record by
 `host:<id>`, and the build's `heldBy` (`GET /v1/templates/{id}/builds/{build}`) no longer lists the
 host. It deletes only what its own template record names for that build id and worker, never a
 running worker's; a name no record matches is an `error` line and deletes nothing. The worker's
-workspace data stays for the janitor, as with any uninstall. Also re-run `setup.sh` without the
+workspace data stays for the janitor, as with any uninstall. `--keep-shared` removes the worker's own
+files only: even the host's last worker leaves the shared units (`sbx-worker@.service`, `sbx.slice`),
+`moca-egress` and its credential injection in place for the next worker, so a client's retire never
+undoes an operator's `--egress`. To remove them from a host with no worker left, run `install-host.sh
+--uninstall <that worker>` again without it (§12). Also re-run `setup.sh` without the
 worker's id in `SBX_WORKERS` (§5) to revoke its relay token. `mocactl sbx templates retire ID
 --wait` returns once the worker has stopped and every holding host has removed it; a host that is
 down removes it at its next poll.

@@ -12,7 +12,7 @@ Every change is additive.
 
 - GET /v1/hosts/{host}/wanted gains `remove`: the retired builds the host holds with no live sandbox
   on their worker, each also in `stop`. The agent stops a running worker, then uninstalls it
-  (`install-host.sh --uninstall`), deletes the snapshot and its template record, and reports it. A
+  (`install-host.sh --uninstall --keep-shared`: its own files only), deletes the snapshot and its template record, and reports it. A
   worker with a live sandbox is in no list, nor is a retired build whose build id or worker a build
   that is not retired shares (in any template): its snapshot or worker is still needed.
 - POST /v1/hosts/{host}/workers/report takes `removed` for a retired build the host holds: a `retire`
