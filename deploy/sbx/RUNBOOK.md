@@ -115,7 +115,9 @@ aborts (`Can't handle RDB format version 12`) and `redis-0` crash-loops, taking 
 down with it. Until a migration exists, keep such a namespace on Redis 7: set `SBX_REDIS_IMAGE` to
 the digest it ran, e.g.
 `docker.io/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`
-(the pin before #670). Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
+(the pin before #670). With `SBX_REDIS_IMAGE` unset, `setup.sh` now refuses, before it applies
+anything, when the namespace's `redis` StatefulSet runs an image other than Valkey, and names that
+image. Before any Redis image change, take a copy of `/data` (`BGSAVE`, then
 `dump.rdb` and `appendonlydir`). The StatefulSet is OrderedReady: a `redis-0` that crash-loops on
 the old revision is never replaced, so `setup.sh`'s rollout wait times out. Then delete the pod
 (`kubectl -n <namespace> delete pod redis-0`; its PVC stays) and re-run `setup.sh`.
