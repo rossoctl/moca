@@ -27,6 +27,9 @@ export const ADMIN = 'admin';
  */
 export const MAX_GRANT_SECONDS = 366 * 86_400;
 
+/** The settings-only fallback warns at most this often per process, with the count since the last. */
+const FALLBACK_WARN_EVERY_S = 60;
+
 export interface RoleGrant {
   role: typeof ADMIN;
   /** Epoch seconds; absent: no expiry. */
@@ -84,6 +87,9 @@ export class MembersStore {
   private readonly provenance: ProvenanceStore;
   private pending: Promise<unknown> = Promise.resolve();
   private cache: MembersDoc = { members: {} };
+  /** Answers from the settings alone since the last warning, and when that warning was logged. */
+  private fallbacks = 0;
+  private fallbackWarnedAtS = Number.NEGATIVE_INFINITY;
   /** The cached version's inode, size and mtime: any one moving means another file. */
   private cacheKey = '';
   readonly bootstrap: Bootstrap;
@@ -193,9 +199,10 @@ export class MembersStore {
    * The subject's roles and the store's own enrollment now, for the per-request evaluation, from ONE
    * read of the store. An admin named in the settings is answered from the settings without reading
    * the file at all. A subject on the allow list is answered from the settings (no API role, no
-   * store enrollment; the allow list still enrolls it) when the file can't be read, with a warning,
-   * so a damaged members.json never locks out the settings' subjects. Anyone else fails closed: the
-   * read's error propagates.
+   * store enrollment; the allow list still enrolls it) when the file can't be read, with a warning
+   * at most once a minute (`nowS` is the clock) carrying the count of such answers since the last,
+   * so a damaged members.json never locks out the settings' subjects and never floods the log.
+   * Anyone else fails closed: the read's error propagates.
    */
   async membershipNow(
     subject: string,
@@ -207,10 +214,16 @@ export class MembersStore {
       doc = await this.doc();
     } catch (err) {
       if (!this.bootstrap.allowed.includes(subject)) throw err;
-      const why = (err as NodeJS.ErrnoException).code ?? (err as Error).name;
-      console.warn(
-        `[control-plane] members.json can't be read (${why}): ${subject} answered from the settings alone`,
-      );
+      this.fallbacks += 1;
+      if (nowS - this.fallbackWarnedAtS >= FALLBACK_WARN_EVERY_S) {
+        const why = (err as NodeJS.ErrnoException).code ?? (err as Error).name;
+        console.warn(
+          `[control-plane] members.json can't be read (${why}): ${subject} answered from the settings alone ` +
+            `(${this.fallbacks} such answer(s) since the last warning)`,
+        );
+        this.fallbackWarnedAtS = nowS;
+        this.fallbacks = 0;
+      }
       return { roles: [], enrolled: false };
     }
     const m = doc.members[subject];
@@ -233,13 +246,6 @@ export class MembersStore {
   /** Whether the store (not the allow list) enrolls the subject. */
   async storeEnrolled(subject: string): Promise<boolean> {
     return (await this.doc()).members[subject]?.enrolled === true;
-  }
-
-  /** Whether the subject is enrolled: the allow list, the store, or an admin by either route. */
-  async enrolledNow(subject: string, nowS: number): Promise<boolean> {
-    if (this.bootstrap.allowed.includes(subject)) return true;
-    if ((await this.doc()).members[subject]?.enrolled) return true;
-    return (await this.rolesNow(subject, nowS)).includes(ADMIN);
   }
 
   private recordExpiry(subject: string, nowS: number): Promise<string | null> {

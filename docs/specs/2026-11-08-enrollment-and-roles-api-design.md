@@ -132,7 +132,7 @@ two cluster writes for one API call.
 - **Per request:** the router (`server.ts`) replaces a verified token's `roles` with the subject's
   roles now and sets `enrolled` from the store, both from one read (`MembersStore.membershipNow`); a
   token never carries `enrolled`. If `members.json` can't be read (damaged by hand, a bad restore, an
-  I/O error), the settings' subjects are still answered from the settings (a warning is logged, and
+  I/O error), the settings' subjects are still answered from the settings (a warning is logged at most once a minute, with the count since the last, and
   an API grant or store enrollment doesn't count until it is fixed); everyone else fails closed. The
   device login, the test-user login, the refresh and the egress owner check use the same evaluation
   (`membershipNow`, `handler-util.ts`). Without a store (no `SH_PROVENANCE_DIR`), the token's claims

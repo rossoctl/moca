@@ -421,6 +421,18 @@ describe('per-request evaluation from one read (spec §8)', () => {
       });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('answered from the settings'));
       await call(d, 'listTemplates', who(ALLOWED));
+      // Rate-limited: many requests within the minute log one line, and the next line, a minute
+      // later, carries the count of answers since the first.
+      warn.mockClear();
+      for (let i = 0; i < 5; i++) await d.members.membershipNow(ALLOWED, nowS());
+      expect(warn).not.toHaveBeenCalled();
+      now += 60_000;
+      await d.members.membershipNow(ALLOWED, nowS());
+      expect(warn).toHaveBeenCalledTimes(1);
+      // 1 by listTemplates, 5 in the loop, and this one.
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('(7 such answer(s) since the last warning)'),
+      );
       await expect(d.members.membershipNow(CAROL, nowS())).rejects.toThrow();
     } finally {
       warn.mockRestore();
