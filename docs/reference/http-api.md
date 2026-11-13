@@ -191,6 +191,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Internal       | `POST /internal/credentials` (session token → credential) and `POST /internal/turn-credentials` (queued turn id → credential, at dequeue): data plane only, both authenticated with `SH_EXCHANGE_TOKEN` |
 | Templates      | `GET /v1/templates`, `GET /v1/templates/{id}`, `GET /v1/templates/{id}/builds[/{build}]`, `GET /v1/templates/{id}/tags`: both route profiles (API 1.4.0)                                                |
 | Self-serve     | `POST /v1/templates`, `POST /v1/templates/{id}/builds`, `POST /v1/templates/{id}/builds/{build}/cancel`, `GET` and `PUT /v1/policy`, `GET /v1/quota`: both route profiles (API 1.5.0)                   |
+| Template admin | `POST /v1/templates/{id}/tags`, `DELETE /v1/templates/{id}/tags/{tag}`, `PATCH /v1/templates/{id}` (the owner, or an admin), `PUT /v1/templates/{id}/owner` (an admin): both route profiles (API 1.8.0) |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -217,6 +218,13 @@ is queued, and a refusal is 422 `policy_refused` naming the gating rule
 ([GATING-RULES.md](../../deploy/sbx/template-onboarding/governance/GATING-RULES.md)). Ids are unique per deployment
 (409 `template_exists`); quotas are per subject (429 `quota_exceeded` naming which; `GET /v1/quota` shows them). A create
 with the same inputs as a build of the caller's own template answers that build, `reused: true`.
+
+The template admin routes came with API 1.8.0 and need `SH_PROVENANCE_DIR`. A template's owner, or an admin, moves tags
+onto a registered build (`id:tag`, and the bare `id` for `default`, then name it for new sandboxes and sessions; those
+already created keep their build), removes a tag (never `default`; the build stays), and changes the description or the
+visibility (`private` hides it from other subjects, as a 404). An admin transfers a template to another enrolled subject
+(`github:<id>` or `oidc:<sub>`), including one the deployment declared, which has no owner until then. Each change is a
+provenance record (`tag`, `visibility` or `owner`) naming the new value and the one before.
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,

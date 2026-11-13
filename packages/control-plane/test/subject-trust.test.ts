@@ -480,6 +480,30 @@ describe('promotion and removal of trust (self-attestation)', () => {
     expect((await view(d, 't-self', bob)).visibility).toBe('deployment');
   });
 
+  it('refuses a visibility edit to deployment while a build is self-attested, and allows it once trusted', async () => {
+    const d = await setup();
+    await create(d);
+    const edit = (visibility: string, principal = alice) =>
+      HANDLERS.updateTemplate!(
+        ctx({ principal, params: { id: 't-self' }, body: { visibility } }),
+        d,
+      );
+    // Queued, then registered: refused either way, for the owner and for an admin alike.
+    expect(await codeOf(() => edit('deployment'))).toBe('self_attested');
+    await register(d, 't-self', HASH);
+    expect(await codeOf(() => edit('deployment'))).toBe('self_attested');
+    expect(await codeOf(() => edit('deployment', admin))).toBe('self_attested');
+    expect((await d.templates!.get('t-self'))!.visibility).toBe('private');
+    expect(
+      (await d.provenance!.chain('template/t-self')).some((x) => x.kind === 'visibility'),
+    ).toBe(false);
+    // An admin trusts the record: the edit goes through.
+    await putPolicy(d, { ...(await d.policy!.current()).policy, trustedGateRecords: [SHA] });
+    const r = (await edit('deployment')).body as Body;
+    expect(r.visibility).toBe('deployment');
+    expect((await view(d, 't-self', bob)).visibility).toBe('deployment');
+  });
+
   it('narrows a visible template to private on removal, names it in the policy record, and refuses others', async () => {
     const d = await setup();
     await create(d);

@@ -103,9 +103,8 @@ shows `gateFloorCheckedOffline`, and, from a `network_needed` gate, `gateFloorMe
 
 - A self-attested template is **private**. A create asking for `deployment` visibility and a
   self-attested build added to a deployment-visible template are each refused `409 self_attested`,
-  until an admin trusts the record. A visibility edit to `deployment` (`PATCH /v1/templates/{id}`) is
-  refused the same way once the template edit route is in; until then a stored visibility changes
-  only at create.
+  until an admin trusts the record. A visibility edit to `deployment` (`PATCH /v1/templates/{id}`) on
+  a template with a self-attested build, registered or on its way there, is refused the same way.
 - A template's **visibility in effect** is `private` while any of its registered builds is
   self-attested now, whatever is stored, so every list, read and use follows the current policy.
 - **Decision (i):** when an admin removes a record's sha256 from `trustedGateRecords`, a
@@ -139,6 +138,7 @@ buildId}]`) in its answer and in its `policy` record.
   - `attestationOf` and `effectiveVisibility`;
   - `canSee` on the effective visibility, so every list, read and use (`resolveForUse`) follows it;
   - the create's (subject, sha256) lookup, its gate record body, and its visibility refusals;
+  - the template edit's refusal of `deployment` visibility for a self-attested template;
   - `putPolicy`'s `narrowed`.
 - `PolicyStore.set` takes an `extra` body for the `policy` record, which is never put into the policy.
 - `SH_GATE_RECORD_SCHEMA` (`sandbox-config.ts`): the general-gate schema X1.offline reads, default
