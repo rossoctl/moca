@@ -1226,14 +1226,16 @@ func (*AbortResponse) Descriptor() ([]byte, []int) {
 // for Execs whose mode is not per-exec, so a client that never asked for a lease never
 // sees one.
 type LeaseEvent struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	ReqId     uint64                 `protobuf:"varint,1,opt,name=req_id,json=reqId,proto3" json:"req_id,omitempty"`
-	State     string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`                          // "start" | "end" | "expiring"
-	Reason    string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`                        // why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end"
-	AtUnixMs  int64                  `protobuf:"varint,4,opt,name=at_unix_ms,json=atUnixMs,proto3" json:"at_unix_ms,omitempty"` // when it happened; also the key the event is acknowledged by
-	Mode      SandboxMode            `protobuf:"varint,5,opt,name=mode,proto3,enum=sandbox.v1.SandboxMode" json:"mode,omitempty"`
-	AgeMs     uint64                 `protobuf:"varint,6,opt,name=age_ms,json=ageMs,proto3" json:"age_ms,omitempty"` // the lease's age at the event
-	Processes []string               `protobuf:"bytes,7,rep,name=processes,proto3" json:"processes,omitempty"`       // processes that were running; filled from plan 5 on
+	state protoimpl.MessageState `protogen:"open.v1"`
+	ReqId uint64                 `protobuf:"varint,1,opt,name=req_id,json=reqId,proto3" json:"req_id,omitempty"`
+	State string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"` // "start" | "end" | "expiring"
+	// On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
+	// (spec §5). Empty on "start".
+	Reason    string      `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	AtUnixMs  int64       `protobuf:"varint,4,opt,name=at_unix_ms,json=atUnixMs,proto3" json:"at_unix_ms,omitempty"` // when it happened; also the key the event is acknowledged by
+	Mode      SandboxMode `protobuf:"varint,5,opt,name=mode,proto3,enum=sandbox.v1.SandboxMode" json:"mode,omitempty"`
+	AgeMs     uint64      `protobuf:"varint,6,opt,name=age_ms,json=ageMs,proto3" json:"age_ms,omitempty"` // the lease's age at the event
+	Processes []string    `protobuf:"bytes,7,rep,name=processes,proto3" json:"processes,omitempty"`       // processes that were running; filled from plan 5 on
 	// On "expiring" only: the hard end, i.e. when the lease became expiring plus grace_limit
 	// (unix ms). Zero on every other state.
 	EndsByUnixMs  int64 `protobuf:"varint,8,opt,name=ends_by_unix_ms,json=endsByUnixMs,proto3" json:"ends_by_unix_ms,omitempty"`

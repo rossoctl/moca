@@ -305,7 +305,9 @@ export const LEASE_STATUS_TIMEOUT_MS = 15_000;
 /**
  * How long a mutate op (reset, set_mode, sandbox_deleted) waits: the worker's LeaseGraceLimit
  * (30 min, remote-worker/internal/vmpool/config.go), for which EndLease and SetMode can block, plus
- * 60 s.
+ * 60 s. Linked to `maxLeaseGraceS` in remote-worker/cmd/microvm-worker/main.go, the largest grace a
+ * worker boots with: raise one only with the other (a contract test on each side reads the other's
+ * literal).
  */
 export const LEASE_MUTATE_TIMEOUT_MS = 31 * 60_000;
 

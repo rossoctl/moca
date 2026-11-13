@@ -365,7 +365,10 @@ export interface LeaseEvent {
   reqId: number;
   /** "start" | "end" | "expiring" */
   state: string;
-  /** why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end" */
+  /**
+   * On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
+   * (spec §5). Empty on "start".
+   */
   reason: string;
   /** when it happened; also the key the event is acknowledged by */
   atUnixMs: number;

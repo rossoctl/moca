@@ -350,8 +350,8 @@ processes are gone; stopped: devserver (pid 412)`.
 
 On the wire, `sandbox/v1` gets an additive
 `LeaseEvent {req_id, state, reason, at_unix_ms, mode, age_ms, processes[]}`. `state` is `start`,
-`end` or `expiring`; `reason` is an end reason (§4.1), set only on an `end`; `processes` stays empty
-until level 2 (§7).
+`end` or `expiring`; `reason` is an end reason (§4.1), set on an `end`, and on an `expiring` as
+`max_duration` (plan 4); `processes` stays empty until level 2 (§7).
 
 - **It rides on a lease Exec's response, before its `End`.** The worker sends it under the Exec's
   `req_id` after the command's output and before the terminal frame. It does the same before an
@@ -392,8 +392,12 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
   the same value (ruling P4-R2); its `reason` is `max_duration`. A worker that predates the field
   sends 0, and the line reads `[sandbox] guest restarts soon (max_duration)` (P4-R8).
 - **The MCP server** puts the lines first in each tool result, a failed Exec's events included
-  (P4-R5), deduped on `at_unix_ms` for the server's life. The events of a call that was cancelled,
-  whose result nobody reads, are held for the next result. `sandbox_info` adds `mode`, `lease`
+  (P4-R5), deduped on `state` and `at_unix_ms` for the server's life (so an end and the next
+  lease's start in the same millisecond are both shown). The events of a call that was cancelled,
+  whose result nobody reads, are held for the next result: an aborted Exec's rejection carries the
+  events it had received, as a failed one's does. The `reset` tool takes its text from the reset's
+  own answer, and marks the reset's pending end seen without a notice line, as `mocactl sbx reset`
+  does (P4-R17). `sandbox_info` adds `mode`, `lease`
   (`none`, `active` or `expiring`), `age`, `idle timeout`, `last end` and `tracked processes: none`
   (until plan 5). A `per-exec` sandbox makes no lease call and shows `lease: none (per-exec)`
   (P4-R9); a failed status shows `lease: unknown (<code>)`.
@@ -401,7 +405,10 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
   the user has not seen. What was seen is kept per sandbox in `<state dir>/sbx/notices.json`, as the
   newest `at_unix_ms` shown (P4-R14); `rm` forgets the sandbox. An `expiring` line is shown every
   time and marks nothing seen.
-- **The static `sbx` client** prints the same lines on stderr, each `at_unix_ms` once per run.
+- **The static `sbx` client** prints the same lines on stderr, each event (`state` and
+  `at_unix_ms`) once per run, an `expiring` one included: its `at_unix_ms` is constant per lease
+  (P4-R2), so a retried attempt's repeat prints nothing. The MCP server, unlike it, shows `expiring`
+  on every result.
 - **`set_mode` does not acknowledge the `mode_change` end.** The event stays pending at the worker
   until a lease Exec carries it, and the clients dedupe it. `mocactl sbx mode` reports it on stdout,
   as `lease ended (mode_change)`, and `mocactl sbx reset` reports its own end as

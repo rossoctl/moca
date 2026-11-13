@@ -250,6 +250,10 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 // 60 s, and a reset or a set_mode downgrade blocks for up to the grace limit plus the cut
 // Exec's unwind. A longer grace would let the relay fail a call the worker is still
 // running, and the client would then report an op that later lands.
+//
+// Linked to LEASE_MUTATE_TIMEOUT_MS in packages/sandbox-relay/src/sandbox-caller.ts: raise one
+// only with the other (TestMaxLeaseGraceFitsTheRelayMutateTimeout and the relay's twin read
+// the other side's literal).
 const maxLeaseGraceS = 1800
 
 // leaseConfig reads the SH_LEASE_* knobs (spec §4, §6). Unset leaves a field zero for
