@@ -806,6 +806,75 @@ func fcJailOccupied(path string) bool {
 	return true
 }
 
+// heldJailPoll is how often WaitForHeldJails asks the held jails again. A dial that finds no
+// listener fails at once, so this only paces the wait on a VMM that is still exiting.
+const heldJailPoll = 50 * time.Millisecond
+
+// jailHolder is implemented by launchers whose VM ids own a host path a VMM left by an earlier
+// worker can still be holding. Only the Firecracker arm: its jail's API socket is what
+// Restore's collision guard (fcJailOccupied) refuses.
+type jailHolder interface {
+	heldJails() []string
+}
+
+// heldJails lists the VM ids under this launcher's jail tree, <chroot-base>/<exec-file
+// basename>/<id>, whose API socket some live VMM still answers on — fcJailOccupied asked of
+// every jail rather than of one, so the two cannot disagree about what "held" means. Only
+// pool-shaped ids (isPoolVMID) are asked: nothing else in that tree is a jail this pool made.
+//
+// Every jail is asked, not only the ones a sweep emptied, because the sweep cannot name them:
+// a Firecracker VM's cgroup is a pooled pool-<n>, not its id. At startup, before Probe, that
+// is the same set — this worker has started no VM yet, so any VMM still answering in its tree
+// was left by an earlier one.
+func (l *firecrackerLauncher) heldJails() []string {
+	tree := filepath.Join(l.opts.ChrootBase, filepath.Base(l.opts.FirecrackerBin))
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		return nil // no jail tree yet: nothing can be held
+	}
+	var held []string
+	for _, e := range entries {
+		if !e.IsDir() || !isPoolVMID(e.Name()) {
+			continue
+		}
+		if fcJailOccupied(filepath.Join(tree, e.Name(), "root", apiSockRelPath)) {
+			held = append(held, e.Name())
+		}
+	}
+	return held
+}
+
+// WaitForHeldJails waits up to timeout for every jail of lc's to have no live VMM answering on
+// its API socket, and returns the VM ids still held when it gives up (none: every jail is
+// free). microvm-worker calls it after the orphan sweep and before Probe (#797): a SIGKILLed
+// VMM can still be answering while the kernel tears it down, and Probe's first Restore would
+// otherwise meet it in Restore's collision guard and fail the start. A launcher with no jails
+// (Cloud Hypervisor) returns at once with nothing held.
+func WaitForHeldJails(lc Launcher, timeout time.Duration) []string {
+	jh, ok := lc.(jailHolder)
+	if !ok {
+		return nil
+	}
+	start := time.Now()
+	deadline := start.Add(timeout)
+	var first []string
+	for {
+		held := jh.heldJails()
+		if first == nil && len(held) > 0 {
+			first = held
+		}
+		if len(held) == 0 || !time.Now().Before(deadline) {
+			// Only a wait that actually waited is logged, so a future occurrence shows in the journal.
+			if first != nil {
+				log.Printf("vmpool: waited %s for VM id(s) %v to release their API sockets; still held: %v",
+					time.Since(start).Round(time.Millisecond), first, held)
+			}
+			return held
+		}
+		time.Sleep(heldJailPoll)
+	}
+}
+
 // Retry pacing for waitForUnixSocket (#304), and the RESOLUTION at which it can measure.
 //
 // It replaced a fixed 20 ms sleep, which was a measurement FLOOR: no restore could observe its

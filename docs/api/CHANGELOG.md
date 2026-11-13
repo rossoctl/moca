@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.6.0
+## 1.8.0
 
 Template tags, edits and owner transfer through the API
 ([#747](https://github.com/rossoctl/moca/issues/747)), per the
@@ -27,6 +27,80 @@ Every change is additive; the new routes mount on both route profiles and need `
 - Every template change (a tag moved or removed, an edit, an owner transfer, a cancelled build) is stored only once its
   records are on the chain: a record that fails to append refuses the change. The owner's check is made again under the
   template's lock, so a change by an owner the template was transferred away from meanwhile is refused (`403`).
+
+## 1.7.0
+
+Session grants: the key ring, the token format and the two lifecycle endpoints of
+[MI1](../specs/2026-09-28-moca-multi-user-isolation-design.md) §6.1-§6.2, which discharge
+[#388](https://github.com/rossoctl/moca/issues/388) items 1-2 and the `turn_exp` half of
+[#387](https://github.com/rossoctl/moca/issues/387)'s M2.
+
+- New POST /internal/turn-grants, behind the existing `exchangeToken` scheme: a worker presents the
+  session token it was handed with the turn and gets the turn's two grants. The response is two
+  signed grants, the turn's absolute `turnExp`, the `exp` to refresh at, and the session's bundle
+  digest. **No credential and no secret is in it** — the inference grant names the session's
+  credential and the sandbox grant names its `sandbox-egress` credentials, by name (§7.2). A grant is
+  a capability spent at an enforcement point, not a secret.
+- New POST /internal/grants/refresh: a worker presents either half mid-turn and gets a fresh pair.
+  `turn_exp` is carried forward unchanged, so no number of refreshes extends a turn, and a refresh
+  past it is refused outright rather than clamped. A fresh **issue** does start a new window:
+  `turn_exp` is anchored to the call, and nothing yet identifies a turn to anchor to, so the bound
+  on a caller holding a live session token is that token's lifetime. Anchoring issuance to the turn
+  record is the redeemer's slice, where `turn_exp` first enforces anything. The session is re-read rather than echoed, so a
+  credential or bundle changed mid-turn takes effect at the next refresh and a session tombstoned
+  mid-turn stops refreshing (404 `session_not_found`, the same answer another user's session gives).
+- New `TurnGrants` schema and the error code `grant_invalid` (401): one code for every way a grant can
+  fail — bad signature, wrong `typ`, unknown `kid`, wrong audience, wrong issuer, expired, or past
+  `turn_exp` — because a caller's only move on any of them is to get a new grant. The `message` does
+  name the failed check, for whoever is debugging a verifier; the route is behind the shared bearer.
+- Both routes are **unmounted unless `MOCA_GRANT_SIGNING_KEY` is set**, and 404 before the body is
+  read (ADR-0045's shape). A deployment that has not generated the grant ring behaves exactly as
+  before. New configuration: `MOCA_GRANT_SIGNING_KEY`, `MOCA_GRANT_PUBLIC_KEYS`, `MOCA_GRANT_TTL_S`
+  (300) and `MOCA_TURN_MAX_S` (1800), in
+  [configuration.md](../reference/configuration.md#control-plane).
+- The grants are signed by a **separate key ring** from session tokens, with header
+  `typ: moca-grant+jwt`, so a session token can never pass as a grant even where an `aud` check is
+  forgotten (§6.1). Note for any out-of-tree verifier: `aud: moca-sandbox` now names two different
+  tokens — the sandbox grant and SBX0's sandbox access token — and only `typ` separates them. The
+  cross-language vectors are at
+  `packages/control-plane/test/fixtures/grant-vectors.json` (§12.2); they pin the verifier side and
+  carry the public key only.
+
+Interim, and named as such: **nothing redeems a grant yet.** The `moca-egress` inference listener and
+§6.3's `/internal/token` are a later slice, so /internal/credentials and /internal/turn-credentials
+both stay (§6.2's "replaces /internal/credentials" lands with the redeemer), workers never verify a
+grant, and `MOCA_TENANCY=multi` still refuses async turns. There is no revocation list by design:
+`MOCA_GRANT_TTL_S` is the revocation latency.
+
+## 1.6.0
+
+Sandbox modes ([lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §8.1–§8.2), served
+only on the `sandbox` route profile.
+
+- `Sandbox` gains `mode` (`per-exec`, `lease` or `lease+processes`), `idleTimeoutS` (0 = the worker's
+  default) and `modeEpoch`. A sandbox created `per-exec` starts at epoch 0, one created in a lease
+  mode at 1.
+- POST /v1/sandboxes accepts `mode` (default `per-exec`) and `idleTimeoutS` (30 to
+  `SH_SANDBOX_IDLE_CEILING_S`, whose default is 1800; omitted, the worker's default of 300 s; an
+  explicit 0 is 400 `invalid_request`).
+- New PUT /v1/sandboxes/{id}/mode: changes the mode and the idle timeout, raises `modeEpoch` by 1 on
+  every accepted call, audits `sandbox_mode_changed`, and returns the sandbox with a `setModeToken`
+  for the client's `LeaseControl set_mode`.
+- New POST /v1/sandboxes/{id}/mode-token: a `setModeToken` for the mode and epoch the record holds
+  now, raising nothing.
+- Both mode routes are owner only (an admin gets 404 on another user's sandbox) and take only the
+  owner's user API token; a sandbox token is a 401. A set-mode token is a JWT with
+  `typ: moca-sandbox-mode+jwt`, valid 300 s.
+- New error code `mode_not_allowed` (403): a lease mode the deployment's `SH_SANDBOX_MODES_ALLOWED`
+  (default `per-exec`, so no lease mode until an operator lists one) does not list. `per-exec` is
+  always allowed.
+- Sandbox tokens gain the claims `mode`, `mode_epoch` and `idle_timeout_s`. A token without them
+  reads as `per-exec`, epoch 0.
+- Narrowing the policy downgrades existing sandboxes at their next token mint. A sandbox token or
+  `mode-token` minted for a sandbox whose lease mode `SH_SANDBOX_MODES_ALLOWED` no longer lists first
+  sets it to `per-exec` at the next epoch, audited as `sandbox_mode_changed` with the reason
+  `mode_not_allowed`. A lowered `SH_SANDBOX_IDLE_CEILING_S` clamps the `idle_timeout_s` claim; the
+  stored `idleTimeoutS` and the epoch are unchanged.
 
 ## 1.5.0
 
