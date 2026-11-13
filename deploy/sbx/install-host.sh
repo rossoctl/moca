@@ -40,10 +40,11 @@
 #   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK, the drop-in or an egress unit,
 #     so it never starts any moca-egress.service the host has; --egress warns only about egress workers.
 #
-# Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
+# Touches ONLY its own files: the template unit, its ExecStopPost= helper
+# $SBX_LIBEXEC_DIR/sbx-reap-vms.sh, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
 # worker's directories under $SBX_SRV. Never another install on the same host. Every file it writes
 # is listed in $SBX_ENV_DIR/manifest, and --uninstall is the undo (spec §8.2): it removes the
-# worker's files and, once no worker is left in the manifest, the shared template unit and
+# worker's files and, once no worker is left in the manifest, the shared template unit, its helper,
 # sbx.slice and the moca-egress unit it installed (and its env file, unless the operator edited it). It leaves workspace data in place (the janitor, or the operator, removes that).
 #
 # --egress takes deploy/sbx/.generated/egress (egress.env, egress.token [+ api-ca.crt]) and turns on
@@ -56,6 +57,12 @@
 # <path>`. --egress-ca-out prints the CA path (generating it if absent). --uninstall-egress removes
 # the drop-in, token and api CA and KEEPS the CA (snapshots are built with it). Once the drop-in
 # exists, a worker install refuses a snapshot whose manifest.json egress_ca_sha256 is not the CA's.
+#
+# SBX_WORKER_AT_BOOT (0 or 1, default 1) says whether the worker's unit is enabled for boot. With 1 a
+# host boot starts every installed worker, as before. With 0 the unit is installed and started now but
+# disabled, so a boot starts none of them: set it under a host agent, which starts and stops workers
+# from the control plane's wanted state (#796). Every re-install applies the value it is given, so a
+# unit an earlier install enabled is disabled by a re-install with 0. An empty value is refused.
 #
 # --janitor takes deploy/sbx/.generated/janitor (janitor.env, janitor.token [+ api-ca.crt]) and
 # installs the host janitor (spec §8.3): $SBX_LIBEXEC_DIR/sbx-janitor.sh, $SBX_ENV_DIR/janitor.env
@@ -72,6 +79,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 : "${SBX_BIN_DIR:=/usr/local/bin}"
+# Only an unset value defaults (no colon): an explicit empty one is refused in main, not read as 1.
+: "${SBX_WORKER_AT_BOOT=1}"
 # The worker binary the template unit runs: SBX0's own build, never deploy/microvm's /usr/local/bin
 # one (see the header).
 : "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
@@ -462,15 +471,21 @@ uninstall_egress_credentials() {
   fi
 }
 
+# The template unit, sbx.slice and the unit's ExecStopPost= helper ($SBX_LIBEXEC_DIR/sbx-reap-vms.sh,
+# #795: it ends the VMs a stopped worker left in its slice). All three are shared by every worker, so
+# all three are `unit` lines: remove_shared_units removes them with the last worker.
 install_units() {
-  install -d -m 0755 "$SBX_UNIT_DIR"
+  install -d -m 0755 "$SBX_UNIT_DIR" "$SBX_LIBEXEC_DIR"
   install -m 0644 "$SCRIPT_DIR/sbx.slice" "$SBX_UNIT_DIR/sbx.slice"
+  install -m 0755 "$SCRIPT_DIR/reap-vms.sh" "$SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
   sed -e "s#^EnvironmentFile=/etc/sbx/#EnvironmentFile=$SBX_ENV_DIR/#" \
+    -e "s#^ExecStopPost=-/usr/local/libexec/#ExecStopPost=-$SBX_LIBEXEC_DIR/#" \
     -e "s#^ExecStart=/usr/local/bin/microvm-worker\$#ExecStart=$SBX_WORKER_BIN#" "$SCRIPT_DIR/sbx-worker@.service" \
     >"$SBX_UNIT_DIR/sbx-worker@.service"
   chmod 0644 "$SBX_UNIT_DIR/sbx-worker@.service"
   record "unit $SBX_UNIT_DIR/sbx.slice"
   record "unit $SBX_UNIT_DIR/sbx-worker@.service"
+  record "unit $SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
@@ -500,6 +515,9 @@ validate_worker() {
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
   [[ "$BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((BUDGET_MB > 1024)) || die '--budget-mb must be a whole number of MiB above 1024 (the unit reserve)'
+  # It goes into a sed replacement and the unit's ExecStopPost= line (install_units).
+  [[ "$SBX_LIBEXEC_DIR" =~ $PLAIN_PATH_RE ]] || die "SBX_LIBEXEC_DIR='$SBX_LIBEXEC_DIR' must be a plain absolute path"
+  [[ -f "$SCRIPT_DIR/reap-vms.sh" ]] || die "no $SCRIPT_DIR/reap-vms.sh beside this script (the unit's ExecStopPost= helper): copy deploy/sbx whole"
   check_snapshot_ca
   check_snapshot_ram
   check_jail_path "$id"
@@ -569,9 +587,14 @@ install_worker() {
   fi
   record "worker sbx-worker@$id $SBX_ENV_DIR/workers/$id.env $SBX_UNIT_DIR/sbx-$id.slice"
   systemctl daemon-reload
-  # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
-  # env file once (enable --now followed by restart would start a fresh unit twice).
-  systemctl enable "sbx-worker@$id.service"
+  # enable (or disable, with SBX_WORKER_AT_BOOT=0), then exactly one restart: a first install starts
+  # the unit, a re-install picks up the new env file once (enable --now followed by restart would start
+  # a fresh unit twice). disable is what makes a re-install with 0 undo an earlier install's enable.
+  if [[ "$SBX_WORKER_AT_BOOT" == 1 ]]; then
+    systemctl enable "sbx-worker@$id.service"
+  else
+    systemctl disable "sbx-worker@$id.service"
+  fi
   # A worker that crash-looped into `failed` (StartLimitBurst, e.g. a missing snapshot) refuses a
   # restart with "start request repeated too quickly" until reset; a re-run after the fix is how an
   # operator brings it back (as deploy/microvm/setup-microvm.sh does).
@@ -830,6 +853,8 @@ main() {
   [[ "$MOCA_EGRESS_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     die "MOCA_EGRESS_READY_TIMEOUT='$MOCA_EGRESS_READY_TIMEOUT' must be a whole number of seconds, at least 1"
   if [[ -n "$EGRESS_BUNDLE" ]]; then install_egress_credentials; return; fi
+  [[ "$SBX_WORKER_AT_BOOT" =~ ^[01]$ ]] ||
+    die "SBX_WORKER_AT_BOOT='$SBX_WORKER_AT_BOOT' must be 1 (start the worker at boot, the default) or 0 (do not; under a host agent)"
   [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
   validate_worker
   [[ -n "$NO_EGRESS" ]] || install_egress

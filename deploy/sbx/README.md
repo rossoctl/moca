@@ -176,11 +176,20 @@ refused.
 The script waits up to `SBX_ATTACH_TIMEOUT` (120 s) for the worker's attach to hold. A newly added
 worker's token reaches the relay only when the kubelet syncs the Secret, about a minute, so the first
 attaches may be refused. Re-running it restarts the worker once, with the new env file.
+By default it enables the worker's unit, so every host boot starts every installed worker. Under a
+host agent, which starts and stops workers from the control plane's wanted state, run it with
+`SBX_WORKER_AT_BOOT=0`: the unit is installed and started once as usual but not enabled for boot,
+so a boot starts no worker and the agent starts the ones it should. Only `0` and `1` (the default)
+are accepted; any other value, an empty one included, is refused before the host is touched. A
+re-install applies the value it is given: with `0` it disables a unit an earlier install enabled.
 It also installs `moca-egress.service` (one per host, the guests' allowlisted egress proxy; allowlist
 in `/etc/sbx/moca-egress.env`) before the first worker: [the runbook](RUNBOOK.md#guest-egress).
+It installs `/usr/local/libexec/sbx-reap-vms.sh` too, the unit's `ExecStopPost=`: a worker's VMs run
+in `pool-N` cgroups beside the unit's own, which a stop does not reach, so after every exit it kills
+those of that worker's slice and waits for them to empty ([the runbook](RUNBOOK.md#10-a-kvm-host-outage)).
 `install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
 `/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
-a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace data under
+a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`. Workspace data under
 `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` is kept; remove it by hand when no sandbox needs
 it.
 

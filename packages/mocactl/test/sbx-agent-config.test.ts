@@ -251,6 +251,8 @@ describe('agent configuration (SBX0 §6.3)', () => {
       // The newer name for patch in current OpenCode (review round 2).
       'apply_patch',
       'multiedit',
+      // Reads the laptop's SKILL.md files into the session (found by running OpenCode 1.18.35).
+      'skill',
     ]);
     for (const s of [
       'remote sandbox at `/workspace`',
@@ -619,9 +621,9 @@ describe('agent configuration (SBX0 §6.3)', () => {
   it.each([
     '{"model": "x" /* a\n  b */}',
     '{\n  "model": "x" /* c */ }\n',
-    '{"tools":{"skill":true /* a\n b */ }}',
-    '{ "skill": true /* a\n */ }',
-    '{\n  "tools": {\n    "skill": true /* a\n    b */ }\n}\n',
+    '{"tools":{"todowrite":true /* a\n b */ }}',
+    '{ "todowrite": true /* a\n */ }',
+    '{\n  "tools": {\n    "todowrite": true /* a\n    b */ }\n}\n',
   ])('keeps a comment before a closing bracket, through up and rm (review round 3): %j', (oc) => {
     const d = dir();
     writeFileSync(join(d, 'opencode.json'), oc);
@@ -646,7 +648,10 @@ describe('agent configuration (SBX0 §6.3)', () => {
     [{ tools: { apply_patch: true } }, 'tools.apply_patch'],
     [{ agent: { build: { tools: { apply_patch: true } } } }, 'agent.build.tools.apply_patch'],
     [{ permission: { apply_patch: 'allow' } }, 'permission.apply_patch'],
-  ])('refuses apply_patch switched on: %j names %s', (body, key) => {
+    // skill reads the laptop's SKILL.md files into the session: off like the local tools.
+    [{ tools: { skill: true } }, 'tools.skill'],
+    [{ permission: { skill: 'allow' } }, 'permission.skill'],
+  ])('refuses a local tool switched on: %j names %s', (body, key) => {
     const d = dir();
     writeFileSync(join(d, 'opencode.json'), JSON.stringify(body));
     expect(conflictOf(() => writeAgentConfig(d, { dryRun: true })).key).toBe(key);
@@ -657,13 +662,18 @@ describe('agent configuration (SBX0 §6.3)', () => {
     Object.assign(o, body);
     if ('tools' in body) o.tools = { ...o.tools, ...body.tools };
     writeFileSync(join(e, 'opencode.json'), JSON.stringify(o));
-    expect(checkAgentConfig(e).join('\n')).toMatch(/OpenCode.*apply_patch/);
+    expect(checkAgentConfig(e).join('\n')).toMatch(new RegExp(`OpenCode.*${key.split('.').pop()}`));
   });
 
   it('accepts OpenCode overrides that keep the local tools off', () => {
     const d = dir();
     const body = {
-      permission: { bash: 'deny', edit: { '*': 'deny' }, skill: 'allow', sandbox_bash: 'allow' },
+      permission: {
+        bash: 'deny',
+        edit: { '*': 'deny' },
+        todowrite: 'allow',
+        sandbox_bash: 'allow',
+      },
       agent: {
         build: { tools: { bash: false, mymcp_x: true }, permission: { question: 'allow' } },
       },
