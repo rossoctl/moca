@@ -238,7 +238,21 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
     expect(w.out()).toBe(`${SBX}\n`);
     expect(w.err()).toContain(`sbx: ${SBX}: created, but its mode was not sent`);
     expect(w.err()).toContain('set_mode failed (failed): stale_mode: epoch 2 > 1');
+    expect(w.err()).not.toContain('seed');
     expect(w.conns()).toEqual({ opened: 1, closed: 1 });
+  });
+
+  it('a hard set_mode failure on create --seed says the seed was not run', async () => {
+    const w = world({
+      setMode: () => new LeaseControlError('failed', 'stale_mode: epoch 2 > 1', 'stale_mode: ...'),
+    });
+    expect(await w.run(['create', '--mode', 'lease', '--seed'])).toBe(1);
+    expect(w.out()).toBe(`${SBX}\n`);
+    expect(w.io.errs).toContain(
+      `sbx: ${SBX}: created, but its mode was not sent; the seed was not run`,
+    );
+    // No seed Exec went out: the factory's exec throws if one does.
+    expect(w.err()).not.toContain('no command runs');
   });
 
   it('a control plane that ignores the mode is said so, and no set_mode is sent', async () => {

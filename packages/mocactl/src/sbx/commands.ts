@@ -352,7 +352,9 @@ export async function cmdCreate(
         const text = r.err instanceof ApiError ? describeError(r.err) : setModeFailureText(r.err);
         if (c.json) c.io.out(JSON.stringify({ ...s, setMode: { error: text } }) + '\n');
         else c.io.out(`${id}\n`);
-        c.io.err(`sbx: ${id}: created, but its mode was not sent`);
+        c.io.err(
+          `sbx: ${id}: created, but its mode was not sent${o.seed ? '; the seed was not run' : ''}`,
+        );
         if (r.err instanceof ApiError) return failed(c, r.err);
         c.io.err(`sbx: ${text}`);
         return SBX_EXIT.failed;
