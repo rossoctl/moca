@@ -244,7 +244,8 @@ is refused 409 `build_in_use` while a live sandbox runs on the build, and is ide
 build of the template is the way back. Each build lists `heldBy`, the hosts still holding its snapshot, and a retired
 build reports `capacity` while its worker still runs (null once its host has stopped it). `mocactl sbx templates retire
 --wait` waits for that stop, and returns at once for a build no host holds (`heldBy` null or empty: no host agent
-stops its worker); waiting for the snapshot's removal from every host (`heldBy` empty) comes with
+stops its worker) and for a `shared` one (its snapshot or worker serves a build that is not retired, so its worker is
+kept running for that build); waiting for the snapshot's removal from every host (`heldBy` empty) comes with
 [#743](https://github.com/rossoctl/moca/issues/743).
 
 The admin routes came with API 1.9.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one

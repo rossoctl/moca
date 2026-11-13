@@ -18,7 +18,7 @@ import {
   type HostView,
   type Placement,
 } from './activation.js';
-import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
+import { busyWorkers, freshHosts, hostViewsOf, liveSnapshots } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
@@ -281,8 +281,14 @@ interface ReadinessFacts {
   lastUsed: Map<string, number> | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
-  /** The hosts as last reported, for each build's `heldBy`; null without host agents. */
+  /**
+   * Every host as last reported, stale ones too, for each build's `heldBy`: it is the snapshot
+   * inventory, not placement, and a silent host still holds what it last reported (it is told to
+   * stop a retired build once it reports again). Null without host agents.
+   */
   hosts: HostView[] | null;
+  /** Whether a build's snapshot or worker a build that is not retired shares (liveSnapshots). */
+  shared: (b: TemplateBuild) => boolean;
   nowS: number;
 }
 
@@ -293,10 +299,21 @@ const viewsOrNull = (deps: CpDeps, hosts: HostView[]): HostView[] | null =>
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
+  // Every template, not only those the caller sees: sharing is judged across the catalog.
+  const all = docs ?? (await catalog(deps).list());
+  const shared = liveSnapshots(all);
   const placement =
-    hosts.length > 0
-      ? place(docs ?? (await catalog(deps).list()), hosts, nowS, await busyWorkers(deps, nowS))
-      : null;
+    hosts.length > 0 ? place(all, hosts, nowS, await busyWorkers(deps, nowS)) : null;
+  // Fresh hosts only for placement (HOST_STALE_S); every reported host for `heldBy`.
+  const holders = viewsOrNull(
+    deps,
+    (deps.hosts?.all() ?? []).map(([id, h]) => ({
+      id,
+      holds: h.holds,
+      activeLimit: h.limits.activeLimit,
+      running: h.running,
+    })),
+  );
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -312,7 +329,8 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       inUse: null,
       lastUsed: null,
       placement,
-      hosts: viewsOrNull(deps, hosts),
+      hosts: holders,
+      shared,
       nowS,
     };
   }
@@ -323,7 +341,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, hosts: viewsOrNull(deps, hosts), nowS };
+  return { attached, inUse, lastUsed, placement, hosts: holders, shared, nowS };
 }
 
 /**
@@ -333,6 +351,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
  * a retired build (§5.1); null for any other build that is not registered.
  */
 function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
+  const shared = (b.status === 'retired' || rejectedByAdmin(b)) && f.shared(b);
   const readiness =
     b.status === 'retired'
       ? 'retired'
@@ -348,20 +367,27 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // runs until its host stops it), so a client sees the stop. For a retired build whose
     // presence cannot be read, `running: null`: not known to be stopped, so null capacity means
     // only "read, and not attached". A build retired before it registered has no worker
-    // (`worker` empty), so nothing to stop: null capacity, presence read or not.
+    // (`worker` empty), so nothing to stop: null capacity, presence read or not. Nor does one
+    // whose snapshot or worker a build that is not retired shares (`shared`): its worker is left
+    // running for that build, never stopped for the retire.
     capacity:
       readiness === 'active' ||
       (b.status === 'retired' &&
         b.worker !== '' &&
+        !shared &&
         (f.attached === null || f.attached.has(b.worker)))
         ? {
             running: f.attached === null ? null : (f.attached.get(b.worker) ?? 0),
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
           }
         : null,
+    // A retired build whose snapshot or worker a build that is not retired shares: its worker is
+    // kept for that build. False for every other build.
+    shared,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
-    // The hosts whose last inventory holds this build's snapshot (§6.1): ids only, no paths, so a
-    // client sees which hosts still hold a retired build. Null without host agents.
+    // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past
+    // HOST_STALE_S too: ids only, no paths, so a client sees which hosts still hold a retired
+    // build. Null without host agents.
     heldBy:
       f.hosts === null
         ? null
@@ -1212,6 +1238,7 @@ async function retireBuilds(
   const ended = (x: TemplateBuild): boolean =>
     mode === 'reject' ? rejectedByAdmin(x) : x.status === 'retired';
   const done: TemplateBuild[] = [];
+  const records = new Map<string, string>();
   // Under the activation lock, so an activation never writes a lease onto a build retired or
   // rejected after it resolved the build: it re-reads the build's status under the same lock
   // (takeLeaseLocked).
@@ -1229,6 +1256,7 @@ async function retireBuilds(
       const inUse = await buildsInUse(deps, now.builds.filter(which), seconds(deps));
       await cat.update(d0.id, async (cur) => {
         done.length = 0;
+        records.clear();
         const targets = cur!.builds.filter(which);
         if (targets.length === 0)
           throw new CpError('template_not_found', 'no such build of this template');
@@ -1244,6 +1272,24 @@ async function retireBuilds(
             `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then ${mode}`,
           );
         done.push(...targets.filter((x) => !ended(x)));
+        // Each record is written inside the update, as a host's build report writes its own: a
+        // record that cannot be written leaves the build as it was, so a retry ends it with its
+        // record, and no build is retired or rejected without one.
+        for (const x of done) {
+          const rec = await prov.append({
+            stream: `template/${d0.id}`,
+            kind: mode,
+            subject: p.sub,
+            body: {
+              build: x.handle ?? x.buildId,
+              ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
+              buildRecord: await buildRecordOf(prov, d0.id, x),
+              from: x.status,
+              ...(typeof reason === 'string' ? { reason } : {}),
+            },
+          });
+          records.set(x.handle ?? x.buildId, rec.digest);
+        }
         return {
           ...cur!,
           builds: cur!.builds.map((x) =>
@@ -1262,22 +1308,6 @@ async function retireBuilds(
       });
     }),
   );
-  const records = new Map<string, string>();
-  for (const x of done) {
-    const rec = await prov.append({
-      stream: `template/${d0.id}`,
-      kind: mode,
-      subject: p.sub,
-      body: {
-        build: x.handle ?? x.buildId,
-        ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
-        buildRecord: await buildRecordOf(prov, d0.id, x),
-        from: x.status,
-        ...(typeof reason === 'string' ? { reason } : {}),
-      },
-    });
-    records.set(x.handle ?? x.buildId, rec.digest);
-  }
   const decision = mode === 'reject' ? 'template_build_rejected' : 'template_retired';
   if (done.length > 0) await auditBestEffort(deps, decision, d0.id, { subject: p.sub, decision });
   // Each build, its id, its readiness and the record written now (null for one already retired),

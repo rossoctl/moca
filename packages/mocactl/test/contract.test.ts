@@ -124,6 +124,7 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
       'readiness',
       'capacity',
       'heldBy',
+      'shared',
       'reason',
       'tags',
       'spec',

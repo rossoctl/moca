@@ -59,6 +59,11 @@ export interface SbxBuild {
    * host agents; absent from an older control plane.
    */
   heldBy?: string[] | null;
+  /**
+   * A retired build whose snapshot or worker a build that is not retired shares: its worker is kept
+   * for that build, never stopped for the retire. Absent from an older control plane.
+   */
+  shared?: boolean;
   tags: string[];
   createdAt: number;
   provenance: string | null;
