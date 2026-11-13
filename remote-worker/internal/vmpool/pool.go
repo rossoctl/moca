@@ -115,8 +115,8 @@ type Pool interface {
 	// lease it is a no-op. Spec §4.
 	Keepalive(key string) error
 	// LeaseStatus reports key's stored mode, whether its epoch is known, the live lease
-	// (none, active or expiring, its age and idle timeout) and the unacknowledged lease
-	// event. Spec §5, §8.3's LeaseControl status.
+	// (none, active or expiring, its age and idle timeout, and an expiring lease's
+	// deadline) and the unacknowledged lease event. Spec §5, §8.3's LeaseControl status.
 	LeaseStatus(key string) LeaseInfo
 	// AckLeaseEvent clears key's pending lease event whose At equals at; a newer one
 	// stays. Spec §5: the worker keeps the last end event until a client has seen it.
