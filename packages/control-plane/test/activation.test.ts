@@ -786,6 +786,32 @@ describe('retire (§5.1)', () => {
     expect(await read()).toMatchObject({ readiness: 'retired', capacity: null });
   });
 
+  it('reports null capacity for a build retired before it registered, presence unreadable too', async () => {
+    const d = await setup();
+    attachedNow = null;
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const q = (
+      await HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id: 't1' },
+          body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: 4 }, profile: 'base' },
+        }),
+        d,
+      )
+    ).body as Body;
+    const handle = String(q.build).split('/').at(-1)!;
+    await retireBuild(d, 't1', handle);
+    // It never had a worker: nothing can stop, so no `running: null` to wait out.
+    const b = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: handle } }),
+        d,
+      )
+    ).body as Body;
+    expect(b).toMatchObject({ status: 'retired', readiness: 'retired', capacity: null });
+  });
+
   it('never retires a build under a live sandbox (409 build_in_use); retires one build alone', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];

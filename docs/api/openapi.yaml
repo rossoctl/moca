@@ -420,7 +420,8 @@ components:
           description: |
             for an active build; and for a retired one whose worker still holds a presence record
             (its host has not stopped it yet), or whose presence cannot be read (`running` null);
-            null otherwise, so for a retired build null means its worker is known to be stopped
+            null otherwise, so for a retired build null means its worker is known to be stopped,
+            or that it never had one (retired before it registered)
           required: [running, inUse]
           properties:
             running:
