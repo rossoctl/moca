@@ -353,6 +353,28 @@ function loginBody(
   };
 }
 
+/**
+ * A `session` record on its build's chain (lifecycle spec §7.1), written BEST EFFORT: it records a
+ * create or delete that has already happened, so a failed append is logged and the write stands, as
+ * the audit mirroring does (auditBestEffort). Throwing would answer 500 for a session that exists,
+ * or is gone, and a client retrying that create would make a second session.
+ */
+async function appendSessionRecord(
+  deps: CpDeps,
+  stream: string,
+  subject: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await deps.provenance!.append({ stream, kind: 'session', subject, body });
+  } catch (err) {
+    console.error(
+      `[control-plane] session record write failed for ${String(body.sessionId)} (${String(body.state)}): ` +
+        `${(err as Error)?.message ?? String(err)} -- the write itself SUCCEEDED`,
+    );
+  }
+}
+
 async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
   const runtime = await deps.index.getRuntime(sessionId);
   const started = Number(runtime.turnStartedAt ?? 0);
@@ -1041,17 +1063,14 @@ export const HANDLERS: Record<string, Handler> = {
     // no lease, e.g. no host agents).
     if (resolved && deps.provenance) {
       const live = (resolved.build.leases ?? []).find((l) => l.subject === p.sub && l.until > iat);
-      await deps.provenance.append({
-        stream: `template/${resolved.id}`,
-        kind: 'session',
-        subject: p.sub,
-        body: {
-          sessionId,
-          buildId: resolved.buildId,
-          templateManifestHash: resolved.build.status === 'registered' ? resolved.buildId : null,
-          lease: live?.record ?? null,
-          state: 'created',
-        },
+      await appendSessionRecord(deps, `template/${resolved.id}`, p.sub, {
+        sessionId,
+        buildId: resolved.buildId,
+        // Null for a build imported from SH_SANDBOX_TEMPLATES, which names no snapshot, as on a
+        // sandbox's record: resolveForUse returns only registered builds, imported ones included.
+        templateManifestHash: resolved.buildId.startsWith('sha256:') ? resolved.buildId : null,
+        lease: live?.record ?? null,
+        state: 'created',
       });
     }
     return {
@@ -1190,26 +1209,22 @@ export const HANDLERS: Record<string, Handler> = {
     };
     resolveAuditLog(deps)({ event: 'audit', ...deletedEntry });
     await deps.index.audit(deletedEntry);
-    // Its end on the build's chain (§7.1): with a store and provenance, a session's build was
-    // resolved through the store at creation, so a `created` record precedes this one.
-    if (
-      deps.provenance &&
-      deps.templates &&
-      rec.sandboxTemplate &&
-      rec.sandboxBuildId?.startsWith('sha256:')
-    ) {
-      await deps.provenance.append({
-        stream: `template/${rec.sandboxTemplate}`,
-        kind: 'session',
-        subject: ctx.principal?.sub ?? rec.owner,
-        body: {
+    // Its end on the build's chain (§7.1): a session has a build id only when its template resolved
+    // through the store at creation, which wrote its `created` record, so the same gate on both
+    // sides gives every `created` its end, an `imported:` build's included.
+    if (deps.provenance && rec.sandboxTemplate && rec.sandboxBuildId) {
+      await appendSessionRecord(
+        deps,
+        `template/${rec.sandboxTemplate}`,
+        ctx.principal?.sub ?? rec.owner,
+        {
           sessionId: rec.sessionId,
           buildId: rec.sandboxBuildId,
           state: 'terminated',
           reason: 'deleted',
           endedAt: seconds(deps),
         },
-      });
+      );
     }
     // 202 rather than pretending a synchronous delete happened; a sweeper reaps what the in-flight
     // turn writes on its way out (spec §7.3).

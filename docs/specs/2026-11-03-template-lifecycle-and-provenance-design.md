@@ -481,7 +481,10 @@ the janitor's read the `expired` end. `buildId` is the build the sandbox's refer
 lease on the build (§6.3), by its `activate` record's digest, and null with none. The second is the
 session: with a store configured, `POST /v1/sessions` for a session whose template resolved through
 it writes the `created` record, and `DELETE /v1/sessions/{id}` the `deleted` end; a session never
-deleted has no end record. A store written before a kind existed links those events by time, not by
+deleted has no end record. Its `buildId` and `templateManifestHash` read as a sandbox's: an
+`imported:` build's hash is null, and its session gets its end record all the same. Both records are
+written after the change they record, best effort: one that cannot be written is logged, and the
+create or delete stands. A store written before a kind existed links those events by time, not by
 digest; a verifier older than a kind refuses a store holding one.
 
 ### 7.2 Hosting, persistence and offline verification

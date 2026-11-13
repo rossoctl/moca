@@ -732,6 +732,61 @@ describe('activation on first use (§6.4)', () => {
     expect(await d.provenance!.chain('template/t1')).toHaveLength(before);
   });
 
+  it("an imported build's session: a null manifest hash at create, and its end record", async () => {
+    const d = await setup(8, [{ id: 'py', worker: 'sbx_py', description: 'py', tools: [] }]);
+    attachedNow = ['sbx_py'];
+    await seedCredential(d);
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: 'py' } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    const sid = (r.body as Body).sessionId as string;
+    const created = (await d.provenance!.chain('template/py')).at(-1)!;
+    expect(created).toMatchObject({
+      kind: 'session',
+      body: { sessionId: sid, templateManifestHash: null, lease: null, state: 'created' },
+    });
+    expect((created.body as Body).buildId).toMatch(/^imported:[0-9a-f]{12}$/);
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+    const records = (await d.provenance!.chain('template/py')).filter((x) => x.kind === 'session');
+    expect(records.map((x) => (x.body as Body).state)).toEqual(['created', 'terminated']);
+    expect(records[1].body).toMatchObject({
+      sessionId: sid,
+      buildId: (created.body as Body).buildId,
+      reason: 'deleted',
+    });
+  });
+
+  it('a session record that cannot be written is logged; the create and the delete stand', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await seedCredential(d);
+    const append = d.provenance!.append.bind(d.provenance!);
+    d.provenance!.append = (async (rec: Parameters<typeof append>[0]) => {
+      if (rec.kind === 'session') throw new Error('EIO');
+      return append(rec);
+    }) as typeof append;
+    const logged: string[] = [];
+    const err = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map(String).join(' '));
+    try {
+      const r = await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { template: 't1' } } }),
+        d,
+      );
+      expect(r.status).toBe(201);
+      const sid = (r.body as Body).sessionId as string;
+      const del = await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+      expect(del.status).toBe(204);
+      expect(await d.index.get(sid)).toBeNull();
+      expect(logged.filter((l) => l.includes('session record write failed'))).toHaveLength(2);
+    } finally {
+      console.error = err;
+    }
+  });
+
   it('a build without a seed sends none, even where the env list declares one', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
