@@ -52,7 +52,9 @@
 #                            number, at least 1 (0 is refused). Not SBX_ACTIVE_LIMIT, which caps running ones
 #   SBX_START_WINDOW_S       default 300: with a control plane that sends no `starting` (older than
 #                            openapi 1.9.0), a worker this agent started less than this many seconds ago,
-#                            whose unit is active and which is still wanted, counts as starting
+#                            whose unit is active and which is still wanted, counts as starting. With
+#                            `starting`, the most a listed worker counts as starting: past it, it is
+#                            stuck (an error line each run) and holds no start slot
 #   SBX_IDLE_GRACE_S         default 0 (off): how long the control plane keeps a released build's running
 #                            worker before it is stopped (the idle grace); a whole number
 #                            of seconds, at most 86400 (a day), without a leading zero. Reported in the
@@ -104,8 +106,12 @@
 #     builds placed here whose worker is not attached to the relay; a listed build whose unit is active
 #     is starting. A control plane without `starting` cannot say what is attached, so the agent counts
 #     its own: the workers it started less than SBX_START_WINDOW_S ago that are still active and wanted.
-#     The limit thus holds with an older control plane too (it is the agent's).
-#   - $SBX_SRV/start-times (0600) keeps each start: worker, build id, epoch. A start is done when the
+#     The limit thus holds with an older control plane too (it is the agent's). Either way a start
+#     counts for SBX_START_WINDOW_S at most: a listed worker still not attached after it (one that
+#     crash-loops, hangs, or cannot reach the relay) is stuck, said in an error line each run, and
+#     holds no slot, so a few such workers cannot stop every other start on the host.
+#   - $SBX_SRV/start-times (0600) keeps each start: worker, build id, epoch (and `seen` for a listed
+#     worker this agent did not start, timed from when it was first seen; it gives no start time). A start is done when the
 #     wanted answer still lists its build in `run` but no longer in `starting`; its time (to within the
 #     15 s poll) goes into $SBX_SRV/start-seconds (0600, the last 10), and the inventory's limits report
 #     their mean as startSeconds (absent until a start is done, so always with an older control plane),
@@ -444,13 +450,13 @@ start_seconds() {
 # The start book (see the header), before this run's starts. Of $SBX_SRV/start-times it keeps the
 # starts still in flight, records the time of each one done, and drops the rest (stopped, no longer
 # wanted, or, with no `starting` from the control plane, SBX_START_WINDOW_S old). Then sets INFLIGHT,
-# the workers starting now. Reads $WORK/run.tsv (worker, build a line), $WORK/starting.ids and
+# the workers starting now, none counted past SBX_START_WINDOW_S (stuck). Reads $WORK/run.tsv (worker, build a line), $WORK/starting.ids and
 # $WORK/graced.ids (a graced build is kept running, not wanted: its start, if any, is dropped).
 start_book() { # start_book NOW HAS_STARTING
-  local now="$1" has="$2" w b t book="$SBX_SRV/start-times" keep="$WORK/start-times.keep" fin="$WORK/start-seconds.new"
+  local now="$1" has="$2" w b t a book="$SBX_SRV/start-times" keep="$WORK/start-times.keep" fin="$WORK/start-seconds.new"
   : >"$keep"; : >"$fin"
   if [[ -f "$book" ]]; then
-    while IFS=$'\t' read -r w b t; do
+    while IFS=$'\t' read -r w b t a; do
       [[ "$w" =~ $WORKER_RE && "$b" =~ $BUILD_ID_RE && "$t" =~ ^[0-9]{1,12}$ ]] || continue
       grep -qxF -- "$w"$'\t'"$b" "$WORK/run.tsv" || continue
       # Released before it was seen attached, and kept by the idle grace: no start time to take.
@@ -458,7 +464,11 @@ start_book() { # start_book NOW HAS_STARTING
       systemctl is-active --quiet "sbx-worker@$w.service" || continue
       if ((has == 1)); then
         if grep -qxF -- "$b" "$WORK/starting.ids"; then
-          printf '%s\t%s\t%s\n' "$w" "$b" "$t" >>"$keep"
+          if [[ "$a" == seen ]]; then printf '%s\t%s\t%s\tseen\n' "$w" "$b" "$t"; else printf '%s\t%s\t%s\n' "$w" "$b" "$t"; fi >>"$keep"
+        elif [[ "$a" == seen ]] || ((now - t >= SBX_START_WINDOW_S)); then
+          # Not started by this agent (timed from when first seen), or done only after it was stuck:
+          # neither is a cold start's time.
+          say "{\"agent\":\"attached\",\"worker\":\"$w\"}"
         elif ((now >= t)); then
           printf '%s\n' "$((now - t))" >>"$fin"
           say "{\"agent\":\"attached\",\"worker\":\"$w\",\"startSeconds\":$((now - t))}"
@@ -476,10 +486,25 @@ start_book() { # start_book NOW HAS_STARTING
   fi
   INFLIGHT=0
   if ((has == 1)); then
-    # The control plane's list, whoever started the unit: a listed build whose unit is active.
+    # The control plane's list, whoever started the unit: a listed build whose unit is active, for
+    # SBX_START_WINDOW_S from its start. One the book does not hold (started by hand, or before this
+    # agent kept a book) is entered as first seen now. Past the window it is stuck (it crash-loops,
+    # hangs, or cannot reach the relay): no longer counted, so it holds no start slot, and said.
     while IFS=$'\t' read -r w b; do
       if ! [[ "$w" =~ $WORKER_RE ]] || ! grep -qxF -- "$b" "$WORK/starting.ids"; then continue; fi
-      if systemctl is-active --quiet "sbx-worker@$w.service"; then INFLIGHT=$((INFLIGHT + 1)); fi
+      systemctl is-active --quiet "sbx-worker@$w.service" || continue
+      t="$(awk -F'\t' -v w="$w" -v b="$b" '$1 == w && $2 == b { print $3; exit }' "$book")"
+      if [[ -z "$t" ]]; then
+        t="$now"
+        if [[ "$b" =~ $BUILD_ID_RE ]]; then
+          (umask 077 && printf '%s\t%s\t%s\tseen\n' "$w" "$b" "$now" >>"$book")
+        fi
+      fi
+      if ((now - t >= SBX_START_WINDOW_S)); then
+        error "worker $w started $((now - t)) s ago and is not attached: it no longer holds a start slot"
+        continue
+      fi
+      INFLIGHT=$((INFLIGHT + 1))
     done <"$WORK/run.tsv"
   else
     INFLIGHT="$(wc -l <"$book" | tr -d ' ')"

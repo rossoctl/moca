@@ -2671,8 +2671,9 @@ paths:
                     description: |
                       1.9.0 (§6.5): the build ids of `run` whose worker is not attached to the
                       relay (its presence, which readiness reads), in `run`'s order. The agent
-                      counts those whose unit is active as starting, and starts at most
-                      SBX_START_CONCURRENCY less those. Absent from a control plane before 1.9.0,
+                      counts those whose unit is active as starting, for SBX_START_WINDOW_S at
+                      most from its start (past it a worker is stuck and holds no start slot), and
+                      starts at most SBX_START_CONCURRENCY less those. Absent from a control plane before 1.9.0,
                       or when the presence cannot be read: the agent then counts its own recent
                       starts (SBX_START_WINDOW_S).
                   graced:

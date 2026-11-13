@@ -520,7 +520,11 @@ each start's wait and makes the line visible; it does not shorten the total.
   waits for a start to finish. The wanted answer gains `starting: [buildId]`, the builds of `run`
   whose worker the relay does not show attached; with an older control plane that sends none, the
   agent counts as starting its own starts younger than `SBX_START_WINDOW_S` (default 300) whose
-  unit runs and which are still wanted, so the limit holds without a control-plane change.
+  unit runs and which are still wanted, so the limit holds without a control-plane change. Either
+  way a start counts for `SBX_START_WINDOW_S` at most: a listed worker still not attached after it
+  (one that crash-loops, hangs, or cannot reach the relay) is stuck, said in an error line each run,
+  and holds no slot, so a few stuck workers cannot stop every other start on a host. A listed
+  worker the agent did not start is timed from when it first sees it, and gives no start time.
 - **The measured start time:** the agent keeps its starts (`start-times`, 0600) and takes a start
   as done when its build is still in `run` but no longer in `starting`; it reports
   `startConcurrency` and `startSeconds`, the mean of its last ten starts (start to attach, to within

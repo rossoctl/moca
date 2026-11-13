@@ -15,7 +15,9 @@ an older control plane too. Every change is additive.
 - `GET /v1/hosts/{host}/wanted` gains `starting: [buildId]`: the builds of `run` whose worker is not
   attached to the relay (its presence, as readiness reads it), in `run`'s order. `run` is now in the
   wanted order, first leased first. Without `starting` (an older control plane, or the presence
-  unreadable) the agent counts its own starts of the last `SBX_START_WINDOW_S` (default 300).
+  unreadable) the agent counts its own starts of the last `SBX_START_WINDOW_S` (default 300). With
+  `starting`, a listed worker counts for `SBX_START_WINDOW_S` at most: one not attached after it is
+  stuck (an error line each run) and holds no start slot.
 - `POST /v1/hosts/{host}/inventory`'s `limits` take optional `startConcurrency`, `startSeconds` (the
   mean of the agent's last cold starts, start to attach) and `idleGraceSeconds` (0-86400). Without
   them (an older agent) nothing changes; an older control plane ignores them.

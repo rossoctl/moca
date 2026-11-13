@@ -572,6 +572,27 @@ n=0; for f in "$TMP/state/active-sbx-worker@sbx_s"*; do [[ -e "$f" ]] && n=$((n 
 ((n == 4)) || fail 'more than four started while none attached'
 pass 'activation never waits on a start: workers that never attach hold their slots and each run returns at once'
 
+# 19b. ... but a start counts for SBX_START_WINDOW_S at most: a listed worker still not attached after
+#     it is stuck (an error line names it) and frees its slot. A listed active unit the book does not
+#     hold is entered as first seen (`seen`), and its attach gives no start time.
+OLD=$(($(date +%s) - 400))
+awk -v t="$OLD" 'BEGIN { FS = OFS = "\t" } $1 != "sbx_s4" { $3 = t } { print }' "$TMP/srv/start-times" >"$TMP/st" && cat "$TMP/st" >"$TMP/srv/start-times"
+st_run || fail 'the stuck-start run failed'
+[[ "$(started)" == 's5 s6 ' ]] || fail "three stuck, one starting, started: $(started)"
+for w in sbx_s1 sbx_s2 sbx_s3; do
+  grep -q "\"agent\":\"error\".*worker $w started 4[0-9][0-9] s ago and is not attached" "$TMP/out" || fail "$w is not said stuck"
+done
+! grep -q 'worker sbx_s4 started' "$TMP/out" || fail 'a start within the window is said stuck'
+! grep -q '"startQueued"' "$TMP/out" || fail 'starts queued behind stuck workers'
+rm -f "$TMP/srv/start-times" "$TMP/srv/start-seconds"
+st_run || fail 'the first-seen run failed'
+[[ "$(grep -c $'\tseen$' "$TMP/srv/start-times")" == 6 ]] || fail "listed units not entered as seen: $(cat "$TMP/srv/start-times")"
+wanted '[]'
+st_run || fail 'the seen-attached run failed'
+grep -q '"agent":"attached","worker":"sbx_s1"}' "$TMP/out" || fail 'a seen worker attaching is not said'
+[[ ! -e "$TMP/srv/start-seconds" ]] || fail "a seen worker gave a start time: $(cat "$TMP/srv/start-seconds")"
+pass 'a listed start counts for SBX_START_WINDOW_S at most: past it, stuck, said, and its slot freed; an unknown one is timed from first seen'
+
 # 20. Its start settings, refused (exit 2) before any call.
 for bad in 'SBX_START_CONCURRENCY=0' 'SBX_START_CONCURRENCY=04' 'SBX_START_CONCURRENCY=-1' 'SBX_START_CONCURRENCY=four' \
   'SBX_START_CONCURRENCY=1.5' 'SBX_START_WINDOW_S=0' 'SBX_START_WINDOW_S=5m'; do

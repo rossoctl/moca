@@ -761,6 +761,12 @@ workers that start together share the host's disk. So the agent starts at most
   the agent then counts as starting the workers it started less than `SBX_START_WINDOW_S` ago
   (default 300) that are still running and wanted. Its starts are kept in `/srv/sbx/start-times`
   (0600).
+- **A stuck start:** either way, a start counts for `SBX_START_WINDOW_S` at most. A worker still
+  not attached after it (a crash loop, a hang, a relay it cannot reach) is stuck: each run says so
+  in an error line (`worker <id> started <n> s ago and is not attached`) and it no longer holds a
+  start slot, so the line moves. Look at that worker's unit (`journalctl -u sbx-worker@<id>`).
+  Keep `SBX_START_WINDOW_S` above the host's slowest start in a full wave, or a slow start is taken
+  for a stuck one and one more start shares the disk.
 - **What it bounds:** each start's wait, not the total. The disk sets the total, at any width.
   Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
   125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): cold starts one at a
