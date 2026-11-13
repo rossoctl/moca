@@ -894,8 +894,8 @@ const deploymentRun = (id: string) =>
  * before a drop judged against more leases than remain, never fewer. A retire takes it (§5.1),
  * and so does an admin's reject after the fact (§5.2): each ends a build's use, and takeLease
  * re-reads the build's status under it, so a lease is never written onto a build retired or
- * rejected after the activation resolved it. A sandbox create takes it around its last status
- * read and its store write (createUnlessEnded), so no sandbox lands on a build ended meanwhile.
+ * rejected after the activation resolved it. A sandbox create does not take it: it takes only
+ * its template's use lock (templateUseLock), which a retire or reject takes inside this one.
  *
  * It is process-local, which suffices because one control plane process owns the store: the
  * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
@@ -907,6 +907,21 @@ const ACTIVATION_LOCKS = new WeakMap<TemplateCatalog, SubjectQueue>();
 function activationLock(cat: TemplateCatalog): SubjectQueue {
   let q = ACTIVATION_LOCKS.get(cat);
   if (!q) ACTIVATION_LOCKS.set(cat, (q = new SubjectQueue()));
+  return q;
+}
+
+/**
+ * The per-template use lock, keyed by template id: a sandbox create's last status read and its
+ * store write (createUnlessEnded) against a retire's or a reject's in-use check and catalog write
+ * (retireBuilds), on that template only, so creates on different templates never wait on each
+ * other. A retire or reject takes it inside the activation lock, always in that order (activation,
+ * then template); a create takes only this one, and holds no other lock while it does, so no cycle.
+ * Process-local, as the activation lock is.
+ */
+const TEMPLATE_USE_LOCKS = new WeakMap<TemplateCatalog, SubjectQueue>();
+function templateUseLock(cat: TemplateCatalog): SubjectQueue {
+  let q = TEMPLATE_USE_LOCKS.get(cat);
+  if (!q) TEMPLATE_USE_LOCKS.set(cat, (q = new SubjectQueue()));
   return q;
 }
 
@@ -1180,40 +1195,48 @@ async function retireBuilds(
   // Under the activation lock, so an activation never writes a lease onto a build retired or
   // rejected after it resolved the build: it re-reads the build's status under the same lock
   // (takeLeaseLocked).
-  await activationLock(cat).run('activation', async () => {
-    // Read before the catalog update, so no store lookup runs inside it.
-    const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
-    await cat.update(d0.id, async (cur) => {
-      done.length = 0;
-      const targets = cur!.builds.filter(which);
-      if (targets.length === 0)
-        throw new CpError('template_not_found', 'no such build of this template');
-      if (mode === 'reject' && targets.some((x) => x.status !== 'registered' && !ended(x)))
-        throw new CpError('invalid_request', 'only a registered build is rejected after the fact');
-      const busy = targets.find((x) => !ended(x) && inUse.has(x.buildId));
-      if (busy)
-        throw new CpError(
-          'build_in_use',
-          `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then ${mode}`,
-        );
-      done.push(...targets.filter((x) => !ended(x)));
-      return {
-        ...cur!,
-        builds: cur!.builds.map((x) =>
-          done.includes(x)
-            ? mode === 'reject'
-              ? {
-                  ...x,
-                  status: 'rejected' as const,
-                  leases: [],
-                  reason: { message: String(reason), rule: 'admin', step: 'rejected' },
-                }
-              : { ...x, status: 'retired' as const, leases: [] }
-            : x,
-        ),
-      };
-    });
-  });
+  // And under this template's use lock, inside it (activation, then template), so a sandbox create
+  // on this template either is stored before the in-use check or sees the build ended
+  // (createUnlessEnded).
+  await activationLock(cat).run('activation', () =>
+    templateUseLock(cat).run(d0.id, async () => {
+      // Read before the catalog update, so no store lookup runs inside it.
+      const inUse = await buildsInUse(deps, d0.builds.filter(which), seconds(deps));
+      await cat.update(d0.id, async (cur) => {
+        done.length = 0;
+        const targets = cur!.builds.filter(which);
+        if (targets.length === 0)
+          throw new CpError('template_not_found', 'no such build of this template');
+        if (mode === 'reject' && targets.some((x) => x.status !== 'registered' && !ended(x)))
+          throw new CpError(
+            'invalid_request',
+            'only a registered build is rejected after the fact',
+          );
+        const busy = targets.find((x) => !ended(x) && inUse.has(x.buildId));
+        if (busy)
+          throw new CpError(
+            'build_in_use',
+            `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then ${mode}`,
+          );
+        done.push(...targets.filter((x) => !ended(x)));
+        return {
+          ...cur!,
+          builds: cur!.builds.map((x) =>
+            done.includes(x)
+              ? mode === 'reject'
+                ? {
+                    ...x,
+                    status: 'rejected' as const,
+                    leases: [],
+                    reason: { message: String(reason), rule: 'admin', step: 'rejected' },
+                  }
+                : { ...x, status: 'retired' as const, leases: [] }
+              : x,
+          ),
+        };
+      });
+    }),
+  );
   const records = new Map<string, string>();
   for (const x of done) {
     const rec = await prov.append({
@@ -1376,7 +1399,8 @@ async function requireActive(
 /**
  * Stores a new sandbox (`create`) unless its build was retired (§5.1) or rejected after the fact
  * (§5.2) since resolveForUse read it: the build's status is re-read and the sandbox stored under
- * the activation lock, which a retire and a reject hold around their in-use check and their write.
+ * the template's use lock (templateUseLock), which a retire and a reject hold around their in-use
+ * check and their write. Keyed by template id, so creates on other templates run meanwhile.
  * So either the sandbox is stored first, and the retire or reject sees it live (`409
  * build_in_use`), or the build has ended first, and the create is refused with nothing stored
  * (`410 template_retired`, or `400 unknown_template` for a rejected build, as resolveForUse
@@ -1389,7 +1413,7 @@ async function createUnlessEnded<T>(
 ): Promise<T> {
   const cat = deps.templates;
   if (!cat?.update) return create();
-  return activationLock(cat).run('activation', async () => {
+  return templateUseLock(cat).run(t.id, async () => {
     const b = (await cat.get(t.id))?.builds.find((x) => x.buildId === t.buildId);
     if (b?.status === 'retired')
       throw new CpError('template_retired', `template '${t.id}' build ${t.buildId} is retired`);

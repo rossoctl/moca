@@ -1440,6 +1440,47 @@ describe('reject after the fact (§5.2)', () => {
     });
   }
 
+  it('creates on two templates do not wait on each other (the use lock is per template)', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1', 'sbx_t2'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4);
+    await activate(d, 't1');
+    await activate(d, 't2');
+    // t1's create is held inside its store write, under t1's use lock; t2's runs meanwhile.
+    const store = d.sandboxes!;
+    const create = store.create.bind(store);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => (entered = r));
+    store.create = async (rec, ...rest) => {
+      if (rec.template === 't1') {
+        entered();
+        await held;
+      }
+      return create(rec, ...rest);
+    };
+    const first = sandbox(d, 't1');
+    await inside;
+    const second = await Promise.race([
+      sandbox(d, 't2').then((r) => r.status),
+      new Promise((r) => setTimeout(() => r('waited'), 1000)),
+    ]);
+    expect(second).toBe(201);
+    // A retire of t1 waits for t1's create, then sees its sandbox live.
+    const retiring = refusal(() =>
+      HANDLERS.retireTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+        d,
+      ),
+    );
+    release();
+    expect((await first).status).toBe(201);
+    expect(await retiring).toBe('build_in_use');
+  });
+
   it('refuses a non-admin (the owner too), no reason, an unknown build and one not registered', async () => {
     const d = await setup();
     attachedNow = [];
