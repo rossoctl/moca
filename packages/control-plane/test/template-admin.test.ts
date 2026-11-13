@@ -19,7 +19,7 @@ const SPEC = JSON.parse(readFileSync(join(EX, 'django__django-11133.json'), 'utf
 const GATE = readFileSync(join(EX, 'django__django-11133.gate-record.json'), 'utf8');
 const GATE_SHA = `sha256:${sha256Hex(Buffer.from(GATE, 'utf8'))}`;
 const { id: ID, image: IMAGE, schema: _s, notes: _n, ...REST } = SPEC;
-const spec = { ...REST, guest_mb: REST.guest_ram_mb };
+const spec = REST;
 const policy: Policy = { ...DEFAULT_POLICY, trustedGateRecords: [GATE_SHA] };
 type Body = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 const hash = (c: string) => `sha256:${c.repeat(64)}`;
