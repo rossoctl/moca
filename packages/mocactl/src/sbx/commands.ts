@@ -449,7 +449,8 @@ const quotaText = (q: SbxQuota | null | undefined) =>
  * `sbx templates quota TARGET (--templates N --builds-queued N --active N | --clear)` (template
  * lifecycle spec §5.2; admins). Names the control plane it writes to and refuses a login issued for
  * another deployment; reads the current value first (`GET /v1/policy`), then writes it as a
- * compare-and-set (`?expect=` the value read): if another admin changed the quota in between, the
+ * compare-and-set (`?expect=`, the value read as percent-encoded JSON, `null` for no override): if
+ * another admin changed the quota in between, the
  * control plane writes nothing (`409 quota_changed`), and this reports the value now (exit 1).
  * Prints old -> new and the new policy's digest and record.
  */

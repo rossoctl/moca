@@ -2479,8 +2479,11 @@ paths:
           required: false
           description: >-
             A compare-and-set: the target's quota the client read, as JSON (a Quota, or `null` for
-            a subject with no override). The write is made only if the quota is that value now;
-            else `409 quota_changed`, with nothing written.
+            a subject with no override), percent-encoded as a query value, e.g.
+            `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D` or
+            `?expect=null`. Key order and spacing do not matter; the three counters are compared.
+            The write is made only if the quota is that value now; else `409 quota_changed`, with
+            nothing written.
           schema: { type: string }
       requestBody:
         required: true

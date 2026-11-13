@@ -1626,6 +1626,20 @@ describe('admin quotas (§5.2)', () => {
     const def = JSON.stringify((await d.policy!.current()).policy.quota);
     expect((await putIf('default', q, def)).status).toBe(200);
     expect(await refusal(() => putIf('default', q, def))).toBe('quota_changed');
+    // As a raw query string: the JSON percent-encoded, as a client sends it.
+    const raw = (body: unknown, query: string) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject: alice.sub },
+          body,
+          query: new URLSearchParams(query),
+        }),
+        d,
+      );
+    expect((await raw(q, 'expect=null')).status).toBe(200);
+    const enc = 'expect=%7B%22templates%22%3A5%2C%22buildsQueued%22%3A2%2C%22active%22%3A1%7D';
+    expect((await raw(null, enc)).body).toMatchObject({ quota: null, before: q });
     // An expect that is no quota is refused before any read.
     expect(await refusal(() => putIf(alice.sub, q, '{'))).toBe('invalid_request');
     expect(await refusal(() => putIf(alice.sub, q, '{"templates":1}'))).toBe('invalid_request');

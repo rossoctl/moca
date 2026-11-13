@@ -174,7 +174,8 @@ export class SandboxApiClient extends ControlPlaneClient {
   /**
    * Set a subject's quota, or the default; null removes a subject's override (§5.2; admins).
    * `expect`, when given, is the value read before: the control plane writes only if the target's
-   * quota is that now, else `409 quota_changed` with nothing written.
+   * quota is that now, else `409 quota_changed` with nothing written. It goes as `?expect=` its
+   * JSON (`null` for no override), percent-encoded by the URL's searchParams.
    */
   putQuota(
     target: string,
