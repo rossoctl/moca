@@ -9,8 +9,8 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP="$(mktemp -d /tmp/ih.XXXX)"
 # The reaper's tests below leave live `sleep`s in fake cgroup.procs files on a failure: end them too.
 trap 'cat "$TMP"/cgroup/*/*/*/cgroup.procs 2>/dev/null | while read -r p; do kill -KILL "$p" 2>/dev/null || true; done; rm -rf "$TMP"' EXIT
-export MOCK_LOG="$TMP/mock.log"
-mkdir -p "$TMP/bin"
+export MOCK_LOG="$TMP/mock.log" MOCK_ENABLED_DIR="$TMP/enabled"
+mkdir -p "$TMP/bin" "$MOCK_ENABLED_DIR"
 fail() { echo "FAIL: $*" >&2; [[ -f "$TMP/out" ]] && sed 's/^/  | /' "$TMP/out" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
@@ -18,6 +18,12 @@ cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
+# enable and disable keep each unit's boot state as a file in MOCK_ENABLED_DIR (the unit is the last
+# argument: `disable --now UNIT` too), so a test can check what a re-install leaves enabled.
+case "$1" in
+enable) touch "$MOCK_ENABLED_DIR/${!#}" ;;
+disable) rm -f "$MOCK_ENABLED_DIR/${!#}" ;;
+esac
 # MOCK_ACTIVE_RC is every unit's is-active answer; MOCK_EGRESS_ACTIVE_RC overrides moca-egress's.
 [[ "$1" == is-active ]] && { [[ "$3" == moca-egress.service ]] && exit "${MOCK_EGRESS_ACTIVE_RC:-${MOCK_ACTIVE_RC:-0}}"; exit "${MOCK_ACTIVE_RC:-0}"; }
 exit 0
@@ -182,6 +188,47 @@ pass 'installs the template unit, the slices, enables and restarts the worker on
 grep -A1 -x 'systemctl reset-failed sbx-worker@sbx_py312.service' "$MOCK_LOG" | grep -qx 'systemctl restart sbx-worker@sbx_py312.service' ||
   fail 'reset-failed does not run right before the restart (a failed unit would refuse it)'
 pass 'clears a failed state (reset-failed) right before restarting the worker'
+
+# SBX_WORKER_AT_BOOT (#796): 1, the default, enables the unit for boot; 0 installs and starts it but
+# leaves it disabled; a re-install applies the value it is given. A bad value is refused before any
+# systemctl call or file.
+! grep -qx 'systemctl disable sbx-worker@sbx_py312.service' "$MOCK_LOG" || fail 'the default install disabled the worker'
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_py312.service" ]] || fail 'the default install left the worker disabled'
+for v in 2 yes '' ' 1' 01; do
+  : >"$MOCK_LOG"
+  ! SBX_WORKER_AT_BOOT="$v" bash "$INSTALL" "$(bundle sbx_noboot)" --snapshot default >"$TMP/out" 2>&1 ||
+    fail "accepted SBX_WORKER_AT_BOOT='$v'"
+  grep -q "SBX_WORKER_AT_BOOT='$v' must be 1" "$TMP/out" || fail "the SBX_WORKER_AT_BOOT='$v' refusal does not say why"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing SBX_WORKER_AT_BOOT='$v'"
+  [[ ! -e "$SBX_ENV_DIR/workers/sbx_noboot.env" ]] || fail "wrote the env file before refusing SBX_WORKER_AT_BOOT='$v'"
+done
+pass 'refuses SBX_WORKER_AT_BOOT other than 0 or 1 (2, yes, an explicit empty value, " 1", 01) before touching anything'
+
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=0 bash "$INSTALL" "$(bundle sbx_noboot)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with SBX_WORKER_AT_BOOT=0'
+[[ -f "$SBX_ENV_DIR/workers/sbx_noboot.env" ]] || fail 'SBX_WORKER_AT_BOOT=0 did not install the worker'
+! grep -q 'systemctl enable sbx-worker@sbx_noboot' "$MOCK_LOG" || fail 'SBX_WORKER_AT_BOOT=0 enabled the worker'
+[[ ! -e "$MOCK_ENABLED_DIR/sbx-worker@sbx_noboot.service" ]] || fail 'SBX_WORKER_AT_BOOT=0 left the worker enabled'
+[[ "$(grep -cx 'systemctl restart sbx-worker@sbx_noboot.service' "$MOCK_LOG")" == 1 ]] || fail 'SBX_WORKER_AT_BOOT=0 did not start the worker exactly once'
+grep -A1 -x 'systemctl reset-failed sbx-worker@sbx_noboot.service' "$MOCK_LOG" | grep -qx 'systemctl restart sbx-worker@sbx_noboot.service' ||
+  fail 'SBX_WORKER_AT_BOOT=0: reset-failed does not run right before the restart'
+grep -q 'sbx-worker@sbx_noboot attached to the relay' "$TMP/out" || fail 'SBX_WORKER_AT_BOOT=0 did not wait for the attach'
+bash "$INSTALL" --uninstall sbx_noboot >"$TMP/out" 2>&1 || fail 'uninstall sbx_noboot'
+pass 'SBX_WORKER_AT_BOOT=0 installs the worker and starts it once (and waits for the attach) without enabling it for boot'
+
+# sbx_default was enabled by its install above: a re-install with 0 disables it, one with 1 enables it again.
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'sbx_default is not enabled before the re-install'
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=0 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install sbx_default with SBX_WORKER_AT_BOOT=0'
+grep -qx 'systemctl disable sbx-worker@sbx_default.service' "$MOCK_LOG" || fail 'a re-install with 0 did not disable the worker'
+[[ ! -e "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'a re-install with 0 left the worker enabled'
+[[ "$(grep -cx 'systemctl restart sbx-worker@sbx_default.service' "$MOCK_LOG")" == 1 ]] || fail 'a re-install with 0 did not restart the worker once'
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=1 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 're-install sbx_default with SBX_WORKER_AT_BOOT=1'
+grep -qx 'systemctl enable sbx-worker@sbx_default.service' "$MOCK_LOG" || fail 'a re-install with 1 did not enable the worker'
+! grep -q 'systemctl disable sbx-worker@sbx_default' "$MOCK_LOG" || fail 'a re-install with 1 disabled the worker'
+[[ -f "$MOCK_ENABLED_DIR/sbx-worker@sbx_default.service" ]] || fail 'a re-install with 1 left the worker disabled'
+pass 'a re-install keeps the chosen boot behavior: 0 disables a unit an earlier install enabled, 1 enables it again'
 
 # #795: the worker's VMs live in pool-N cgroups beside the unit's own, which KillMode=control-group
 # does not reach; the unit's ExecStopPost= helper ends them after every exit.
