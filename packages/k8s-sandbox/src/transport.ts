@@ -266,7 +266,7 @@ export const CAPACITY_REFUSAL = /^(?:memory-budget:|max-runs:|busy: queue full)/
  * Thrown by a transport when the worker REFUSED an exec for capacity rather than
  * failing it (#452). Carries no extra data — its whole payload is its identity.
  *
- * THE NAME IS THE CONTRACT, not a label. `knative-server`'s `turnErrorStatus` maps
+ * THE NAME IS THE CONTRACT, not a label. `@moca/server`'s `turnErrorStatus` maps
  * errors to HTTP status by `err.name`, deliberately: `instanceof` is only sound within
  * one package instance, which is false whenever a test mocks a harness module wholesale
  * (server.test.ts does). A test there also pins that a saturation-shaped MESSAGE still

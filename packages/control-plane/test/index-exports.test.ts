@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as cp from '../src/index.js';
 
 /**
- * The package boundary, pinned. @moca/knative-server's drain loop (#389) reaches the turn record and
+ * The package boundary, pinned. @moca/server's drain loop (#389) reaches the turn record and
  * the queue names through these; a rename that drops one is a worker that fails to compile at best,
  * and at worst a worker that drains a stream nobody submits to.
  */

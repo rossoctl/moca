@@ -134,7 +134,7 @@ describe('readTenancy', () => {
         ':(top,exclude)packages/control-plane/src/tenancy.ts',
         // Boot test fixture: deliberately names a misspelled variable to assert it is refused.
         ':(top,exclude)packages/control-plane/test/main.test.ts',
-        ':(top,exclude)packages/knative-server/test/server-process.test.ts',
+        ':(top,exclude)packages/server/test/server-process.test.ts',
         // Names near-misses on purpose, to document the rule.
         ':(top,exclude)docs/specs/2026-09-28-moca-multi-user-isolation-design.md',
       ],

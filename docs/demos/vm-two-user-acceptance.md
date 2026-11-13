@@ -37,7 +37,7 @@ Record the commit you ran against (Act 3).
 
 **Automated sibling.** The same properties, without GitHub, with two minted subjects:
 `packages/control-plane/test/two-subject.test.ts` and
-`packages/knative-server/test/two-subject-turn.test.ts` (#371). Prefer them for a pass/fail; this
+`packages/server/test/two-subject-turn.test.ts` (#371). Prefer them for a pass/fail; this
 run proves the real login.
 
 ## Act 0 — Preconditions

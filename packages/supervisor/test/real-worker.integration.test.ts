@@ -26,7 +26,7 @@ import { startSupervisor, DEFAULT_WORKER_ENTRY, type Supervisor } from '../src/m
  * `handler`'s import graph resolving from a foreign package root.
  *
  * It is also what makes the recorded justification for duplicating `WorkerToSupervisor` across
- * `supervisor/src/pool.ts` and `knative-server/src/worker.ts` true rather than aspirational:
+ * `supervisor/src/pool.ts` and `server/src/worker.ts` true rather than aspirational:
  * the two copies must agree on the wire or these tests fail.
  *
  * It also depends on vitest's default per-file process isolation (`pool: 'forks'`,
@@ -124,7 +124,7 @@ describe('the real worker, forked from DEFAULT_WORKER_ENTRY', () => {
   it('is the default entry, and forking it brings a worker up over IPC', async () => {
     // `DEFAULT_WORKER_ENTRY` had ZERO test references, so the highest-risk integration in the
     // slice ran only on a real VM.
-    expect(DEFAULT_WORKER_ENTRY).toMatch(/knative-server[/\\]src[/\\]worker\.ts$/);
+    expect(DEFAULT_WORKER_ENTRY).toMatch(/server[/\\]src[/\\]worker\.ts$/);
 
     ({ sup, restore } = await withRealWorker({ SH_TURNS_PER_WORKER: '8' }));
     await waitReady(sup!);
@@ -151,7 +151,7 @@ describe('the real worker, forked from DEFAULT_WORKER_ENTRY', () => {
 
   it('agrees with the supervisor on all four IPC rows', async () => {
     // `WorkerToSupervisor` is duplicated verbatim in `supervisor/src/pool.ts` and
-    // `knative-server/src/worker.ts`, deliberately (spec §9). The recorded justification says
+    // `server/src/worker.ts`, deliberately (spec §9). The recorded justification says
     // drift "fails a test rather than rotting" -- which only became true once something forked
     // a real worker. This is that test: every row crosses the boundary here.
     ({ sup, restore } = await withRealWorker(

@@ -255,7 +255,7 @@ describe('runtime hash', () => {
   });
 
   it("keeps the data plane's P6.3 placement fields (spec §6), which the resources view reads", async () => {
-    // The knative-server reporter writes through this same putRuntime: a field missing from the
+    // The `@moca/server` reporter writes through this same putRuntime: a field missing from the
     // allow-list is silently dropped on write, and the resources view's placement stays null forever.
     const f = fakeRedis();
     const index = new OwnershipIndex(f.redis);

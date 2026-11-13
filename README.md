@@ -97,7 +97,7 @@ flowchart LR
 | **Control plane**         | Multi-user identity and credentials (MU1); issues per-session tokens ([ADR-0033](docs/adrs/0033-multi-user-control-plane.md))                                                                                                                                |
 
 > **Note:** The supervisor and its workers are the **same container image**: the supervisor forks
-> `packages/knative-server/src/worker.ts` (the package name is historical — the code is
+> `packages/server/src/worker.ts` — the code is
 > P6-load-bearing). The "brain" (model inference + session logic) runs in a worker; the "hands"
 > (command/tool execution) always run in the sandbox.
 
@@ -219,7 +219,7 @@ moca/
 ├── harness/               # Pi SessionStorageBackend adapter (write-behind) + promote CLI
 ├── packages/
 │   ├── supervisor/        # P6 process manager: L4 listener, socket hand-off, worker pool
-│   ├── knative-server/    # HTTP server + P6 worker entry points (name is historical)
+│   ├── server/            # HTTP server + P6 worker entry points
 │   ├── k8s-sandbox/       # Sandbox transports over the gRPC relay (name is historical)
 │   ├── session-backend/   # Generic append-only LogStore + Redis Streams impl
 │   ├── sandbox-relay/     # gRPC relay between control plane and remote-worker sandboxes
