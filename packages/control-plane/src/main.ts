@@ -185,7 +185,7 @@ export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
  */
 // prettier-ignore
-export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET'] as const;
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET', 'MOCA_GRANT_SIGNING_KEY'] as const;
 
 /** The API, session and refresh token lifetimes, shared by both route profiles. */
 function tokenTtlsFromEnv(
@@ -209,6 +209,22 @@ function tokenTtlsFromEnv(
   };
 }
 
+/**
+ * MI1 §15's two grant lifetimes. Read on BOTH profiles -- the grant routes are harness-only, but
+ * `CpConfig` is one type and a profile-specific default here would be a second place to keep the
+ * numbers. Spread like `tokenTtlsFromEnv`, for the same reason.
+ */
+function grantTtlsFromEnv(env: NodeJS.ProcessEnv): Pick<CpConfig, 'grantTtlS' | 'turnMaxS'> {
+  return {
+    // 5 minutes. With no revocation list (§6.2 builds none deliberately), this IS the revocation
+    // latency and the replay window of a stolen grant; the worker refreshes at half-life.
+    grantTtlS: intEnv(env, 'MOCA_GRANT_TTL_S', 300),
+    // 30 minutes, the deployment-wide ceiling on one turn. A turn's caps may ask for less; a caller
+    // asking for more is clamped at mint rather than refused (async spec §5.4).
+    turnMaxS: intEnv(env, 'MOCA_TURN_MAX_S', 1800),
+  };
+}
+
 export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
   // The github client id belongs to the github provider only; an oidc deployment has
@@ -220,6 +236,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   keksFromBase64(required(env, 'SH_CREDENTIAL_KEK'));
   const config: CpConfig = {
     ...tokenTtlsFromEnv(env),
+    ...grantTtlsFromEnv(env),
     exchangeToken: required(env, 'SH_EXCHANGE_TOKEN'),
     defaultInferenceEndpoint: env.SH_DEFAULT_INFERENCE_ENDPOINT || undefined,
     modelCatalogHosts: catalogHostsEnv(env),
@@ -296,6 +313,7 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     routeProfile: 'sandbox',
     sandbox: sandboxConfigFromEnv(env),
     ...tokenTtlsFromEnv(env),
+    ...grantTtlsFromEnv(env),
     allowOperatorFallback: false,
     injectorConfigured: false,
     sandboxNamespace: 'default',
@@ -422,6 +440,55 @@ export function verifyKeysFromEnv(
   return keys;
 }
 
+/**
+ * The GRANT ring (MI1 §6.1), built only when `MOCA_GRANT_SIGNING_KEY` is set. A SEPARATE key from
+ * the session signer, which is the §6.1 property that a session token can never pass as a grant even
+ * where an `aud` check is forgotten -- sharing one key would leave `typ` as the only thing between
+ * them.
+ *
+ * Undefined when no key is configured, and that absence is load-bearing: it is what unmounts both
+ * grant routes (`server.ts`'s `grants` gate), so an existing deployment boots and behaves exactly as
+ * before. Nothing redeems a grant yet, so there is nothing for it to turn on.
+ *
+ * The signer's label is its own variable name, so a bad key is a boot error naming
+ * `MOCA_GRANT_SIGNING_KEY` rather than sending an operator to edit the session key that is fine.
+ *
+ * `sessionVerifyKeys` is taken so SEPARATENESS is enforced here rather than left to operator
+ * discipline: a kid in both rings means one key signs both tokens, and the §6.1 property this whole
+ * slice leans on is gone with only `typ` left between a session token and a grant. A kid is a sha256
+ * of the SPKI (`keyIdFor`), so equal kid is equal key -- no false positive is possible. The session
+ * map already holds the session signer's own key, so this one check covers both ways an operator
+ * gets there: reusing `SH_SESSION_TOKEN_PRIVATE_KEY` as the grant key, and listing a session public
+ * key in `MOCA_GRANT_PUBLIC_KEYS`. Refusing to boot is right for the reason `makeSigner` refuses a
+ * public key: a deployment cannot discover this at runtime -- every token verifies.
+ */
+export function grantRingFromEnv(
+  env: NodeJS.ProcessEnv,
+  sessionVerifyKeys: Map<string, KeyObject>,
+):
+  | {
+      grantSigner: ReturnType<typeof makeSigner>;
+      grantVerifyKeys: Map<string, KeyObject>;
+    }
+  | undefined {
+  const raw = env.MOCA_GRANT_SIGNING_KEY;
+  if (!raw) return undefined;
+  const grantSigner = makeSigner(raw, 'MOCA_GRANT_SIGNING_KEY');
+  const grantVerifyKeys = parseKeyset(env.MOCA_GRANT_PUBLIC_KEYS, 'MOCA_GRANT_PUBLIC_KEYS');
+  const own = publicKeyFromBase64(grantSigner.publicKeyBase64);
+  grantVerifyKeys.set(keyIdFor(own), own);
+  const shared = [...grantVerifyKeys.keys()].filter((kid) => sessionVerifyKeys.has(kid));
+  if (shared.length > 0) {
+    throw new Error(
+      `the grant key ring shares key ${shared.join(', ')} with the session token ring, which ` +
+        'would let a session token be signed by a grant key (MI1 §6.1 requires separate rings): ' +
+        'generate a new keypair for MOCA_GRANT_SIGNING_KEY, and keep MOCA_GRANT_PUBLIC_KEYS and ' +
+        'SH_SESSION_TOKEN_PUBLIC_KEYS disjoint',
+    );
+  }
+  return { grantSigner, grantVerifyKeys };
+}
+
 export const CREDENTIAL_STORES = ['kubernetes', 'file', 'vault'] as const;
 export type CredentialStoreKind = (typeof CREDENTIAL_STORES)[number];
 
@@ -530,6 +597,8 @@ export function templateCatalogFromEnv(
 export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const config = configFromEnv(env);
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
+  // Named rather than inlined below: the grant ring is checked against it for a shared key.
+  const verifyKeys = verifyKeysFromEnv(env, signer.publicKeyBase64);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
   if (
@@ -602,7 +671,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     // test-login route 404, so an ordinary deployment gains no new code path at all.
     ...testUserProvider(env, config),
     signer,
-    verifyKeys: verifyKeysFromEnv(env, signer.publicKeyBase64),
+    verifyKeys,
+    // MI1 §6.1's grant ring, or nothing when no key is configured -- and nothing is what unmounts
+    // both grant routes, so this costs an existing deployment no new code path. Takes the session
+    // ring to refuse a boot where the two share a key, which would collapse §6.1's separation.
+    ...grantRingFromEnv(env, verifyKeys),
     config,
     now: () => Date.now(),
     // A UUID, so a control-plane-minted id is always identical to its leafSessionId sanitisation
