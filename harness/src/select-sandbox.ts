@@ -738,7 +738,8 @@ async function select(
   // The build filter: only with a template and a pinned build; a worker reporting no
   // build label never serves a pinned session.
   const build = template && opts.build ? opts.build : '';
-  if (build) grpcRecs = grpcRecs.filter((r) => r.labels?.[BUILD_LABEL] === build);
+  const ofBuild = (r: SandboxRecord): boolean => !build || r.labels?.[BUILD_LABEL] === build;
+  if (build) grpcRecs = grpcRecs.filter(ofBuild);
   // The workload filter (spec §3.3): a workload run sees only its own workload's sandboxes, of its own
   // owner, and a run
   // without one never sees any workload's. A deployment with no workload sandboxes has no record
@@ -870,11 +871,12 @@ async function select(
       allRecs.some(
         (r) =>
           r.sandboxId === prior.sandboxId &&
-          (inOtherDeclaredTier(r) || !inScope(r) || !ofTemplate(r)),
+          (inOtherDeclaredTier(r) || !inScope(r) || !ofTemplate(r) || !ofBuild(r)),
       )
     ) {
       // Present, but advertising another DECLARED tier (or serving another template, or none: an
-      // operator re-templated it, session-templates spec §4): an operator re-tiered the worker. It will not
+      // operator re-templated it, session-templates spec §4; or, for a session pinned to a build,
+      // another build of its template, or no build label): an operator re-tiered the worker. It will not
       // come back to this tier by waiting, so the grace would only delay the same outcome (Review
       // Focus 3). An UNLABELLED record, or one labelled with an undeclared tier, is not "another tier"
       // (spec §4 step 4): it is a worker whose SANDBOX_TIER is missing or mistyped, most likely by
