@@ -112,7 +112,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  default (TARGET default); --clear removes a
                                                  subject's override (admins only). --owned: the
                                                  template ids it may own in any status (without
-                                                 it, the target keeps its own). Reads, then
+                                                 it, the target keeps its current owned: to
+                                                 return one subject's owned to the default,
+                                                 --clear, then set the quota again). Reads, then
                                                  writes only if unchanged since the read: prints
                                                  old -> new; exit 1, nothing written, if another
                                                  admin changed it in between

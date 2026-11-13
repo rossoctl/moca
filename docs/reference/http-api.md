@@ -260,7 +260,9 @@ rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{buil
 `rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire, and a
 sandbox create naming it is 400 `unknown_template`. A `reject` record names the admin, the reason and the build's `build`
 record; a reject is refused 409 `build_in_use` under a live sandbox, is idempotent, and cannot be undone.
-`mocactl sbx templates quota TARGET` sets a quota from the terminal (`--owned N` for `owned`).
+`mocactl sbx templates quota TARGET` sets a quota from the terminal (`--owned N` for `owned`). A quota write without
+`owned` keeps the target's current `owned`, so to return one subject's `owned` to the default, remove its override
+(`--clear`, or a body of `null`) and then set its quota again.
 
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
