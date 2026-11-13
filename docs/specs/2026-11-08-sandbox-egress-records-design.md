@@ -113,7 +113,8 @@ provenance.
   that existed within 60 s before it: a sandbox may be marked incomplete when it lost nothing, never
   complete when it did. `complete` means `dropped == 0`.
 - **Export:** `GET /v1/sandboxes/{id}/egress?format=ndjson` returns the whole log
-  (`application/x-ndjson`). Its sha256 equals the end record's, so a grader checks a copy offline:
+  (`application/x-ndjson`), streamed a store page at a time, so the control plane never holds a
+  whole log for it; a store failure mid-stream cuts the body short. Its sha256 equals the end record's, so a grader checks a copy offline:
   `verify-provenance.py EXPORT --egress <sandbox id>=<file>`.
 
 ## 4. The API

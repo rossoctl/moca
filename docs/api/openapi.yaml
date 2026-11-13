@@ -2884,7 +2884,8 @@ paths:
         name only, but a secret a guest puts in a URL path segment is logged as sent.
 
         `format=ndjson` returns the whole log, one canonical JSON event per line, each ended by
-        `\n`. Its sha256 is `summary.sha256`, and the sandbox's end record's `egress.sha256` (or a
+        `\n`, streamed (chunked); a store failure after the first chunk cuts it short, so check
+        its sha256. Its sha256 is `summary.sha256`, and the sandbox's end record's `egress.sha256` (or a
         later `sandbox` record with `state: egress`, when events arrived after the end).
       security: [{ sessionToken: [] }]
       parameters:

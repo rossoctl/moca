@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HANDLERS } from '../src/handlers.js';
+import { apiIssuer, HANDLERS } from '../src/handlers.js';
 import { HostRegistry } from '../src/host-handlers.js';
+import { buildHandler } from '../src/server.js';
+import { CpError } from '../src/errors.js';
 import { canonicalJson, ProvenanceStore } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
@@ -143,6 +147,15 @@ const post = async (d: TestDeps, host: string, events: unknown[], cursor = `c${+
 
 const read = async (d: TestDeps, id: string, q: Record<string, string> = {}, principal = alice) =>
   HANDLERS.getSandboxEgress!(ctx({ principal, params: { id }, query: new URLSearchParams(q) }), d);
+
+/** A streamed NDJSON body (server.ts writes it chunk by chunk), read whole. */
+async function text(body: unknown): Promise<string> {
+  let out = '';
+  for await (const c of body as AsyncIterable<string>) out += c;
+  return out;
+}
+const ndjsonOf = async (d: TestDeps, id: string) =>
+  text((await read(d, id, { format: 'ndjson' })).body);
 
 const sha = (s: string) => `sha256:${createHash('sha256').update(s).digest('hex')}`;
 
@@ -365,7 +378,8 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     expect(nd.contentType).toBe('application/x-ndjson');
     // The digest's definition: sha256 over each event's canonical JSON, each followed by "\n".
     const want = events.map((e) => `${canonicalJson(e)}\n`).join('');
-    expect(nd.body).toBe(want);
+    expect(typeof nd.body).not.toBe('string'); // streamed, never built whole
+    expect(await text(nd.body)).toBe(want);
     expect(p1.summary.sha256).toBe(sha(want));
     // The empty log's digest is the sha256 of no bytes.
     const empty = await create(d, 't1');
@@ -373,6 +387,63 @@ describe('GET /v1/sandboxes/{id}/egress', () => {
     expect(await codeOf(() => read(d, a.id, { limit: '0' }))).toBe('invalid_request');
     expect(await codeOf(() => read(d, a.id, { after: 'x' }))).toBe('invalid_request');
     expect(await codeOf(() => read(d, a.id, { format: 'csv' }))).toBe('invalid_request');
+  });
+
+  it('streams the NDJSON export over HTTP, a store page at a time, byte for byte the digest', async () => {
+    const d = await setup();
+    const a = await create(d, 't1');
+    const events = Array.from({ length: 2500 }, (_, i) => ev(a.id, { bytes_up: i }));
+    for (let i = 0; i < events.length; i += 1000)
+      await post(d, 'host-1', events.slice(i, i + 1000));
+    const server = createServer(buildHandler(d));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const token = d.signer.mint({
+        sub: alice.sub,
+        tenant: alice.tenant,
+        roles: [],
+        scope: ['api'],
+        ttlSeconds: 3600,
+        now: nowS(),
+        iss: apiIssuer(d.config),
+      });
+      const res = await fetch(`${base}/v1/sandboxes/${a.id}/egress?format=ndjson`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('application/x-ndjson');
+      expect(res.headers.get('transfer-encoding')).toBe('chunked');
+      const body = await res.text();
+      expect(body).toBe(events.map((e) => `${canonicalJson(e)}\n`).join(''));
+      const first = (await read(d, a.id)).body as Body;
+      expect(first.summary.sha256).toBe(sha(body));
+      // A store that fails before the first chunk still answers its error; one that fails after it
+      // cuts the body short, never a complete-looking log.
+      const store = d.egress!;
+      const page = store.page.bind(store);
+      let calls = 0;
+      const failAt = (n: number) =>
+        (store.page = async (...args) => {
+          if (++calls === n) throw new CpError('redis_unavailable', 'redis is not answering');
+          return page(...args);
+        });
+      const get = () =>
+        fetch(`${base}/v1/sandboxes/${a.id}/egress?format=ndjson`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+      failAt(1);
+      expect((await get()).status).toBe(503);
+      calls = 0;
+      failAt(2);
+      const cut = await get();
+      expect(cut.status).toBe(200);
+      const partial = await cut.text().catch(() => null);
+      expect(partial === null || partial.length < body.length).toBe(true);
+      store.page = page;
+    } finally {
+      server.close();
+    }
   });
 });
 
@@ -388,7 +459,7 @@ describe("the sandbox's end record names its egress log", () => {
     const a = await create(d, 't1');
     await post(d, 'host-1', [ev(a.id), ev(a.id, { host: 'cdn.example.com' })]);
     await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: a.id } }), d);
-    const nd1 = (await read(d, a.id, { format: 'ndjson' })).body as string;
+    const nd1 = await ndjsonOf(d, a.id);
     const [end] = await ends(d, a.id);
     expect(end!.body).toMatchObject({
       state: 'terminated',
@@ -417,7 +488,7 @@ describe("the sandbox's end record names its egress log", () => {
     await janitor();
     const after = await ends(d, a.id);
     expect(after).toHaveLength(2);
-    const nd2 = (await read(d, a.id, { format: 'ndjson' })).body as string;
+    const nd2 = await ndjsonOf(d, a.id);
     expect(after[1]).toMatchObject({
       subject: 'janitor',
       body: { state: 'egress', egress: { events: 3, sha256: sha(nd2), complete: true } },

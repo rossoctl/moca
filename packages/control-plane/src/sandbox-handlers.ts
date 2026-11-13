@@ -232,6 +232,21 @@ async function egressDigest(store: EgressStore, id: string) {
   };
 }
 
+/** The egress log's NDJSON export, a store page at a time: each line and its `\n`. */
+async function* ndjson(store: EgressStore, id: string): AsyncGenerator<string> {
+  let chunk = '';
+  let n = 0;
+  for await (const line of allLines(store, id)) {
+    chunk += `${line}\n`;
+    if (++n % EGRESS_STREAM_LINES === 0) {
+      yield chunk;
+      chunk = '';
+    }
+  }
+  if (chunk) yield chunk;
+}
+const EGRESS_STREAM_LINES = 1000;
+
 /**
  * Seals each ended sandbox's egress log once its grace has passed (egress-log.ts EGRESS_GRACE_S),
  * in the janitor's sweep after recordExpiries. A log that changed after its end record named it
@@ -1361,9 +1376,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     if (format !== null && format !== 'json' && format !== 'ndjson')
       throw new CpError('invalid_request', "format must be 'json' or 'ndjson'");
     if (format === 'ndjson') {
-      let out = '';
-      for await (const line of allLines(deps.egress, rec.id)) out += `${line}\n`;
-      return { status: 200, body: out, contentType: 'application/x-ndjson' };
+      // Streamed a store page at a time (server.ts writeStream), never built whole in memory.
+      return {
+        status: 200,
+        body: ndjson(deps.egress, rec.id),
+        contentType: 'application/x-ndjson',
+      };
     }
     const after = ctx.query.get('after');
     if (after !== null && !ENTRY_ID_RE.test(after))
