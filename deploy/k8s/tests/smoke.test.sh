@@ -47,8 +47,13 @@ MOCK
 # kubectl mock's $MOCK_STATE/redis-restarted), the next N session POSTs fail, as a stack still
 # reconnecting to Redis does. Claim M1: a session POST's "model" and a PATCH /v1/sessions/<id> set the
 # model the next turn reports (a K8S-SMOKE-MODEL turn prints model=<it>, as the mock gateway does);
-# MOCK_PATCH_IGNORED=1 answers the PATCH 200 but keeps the old model. Everything else is a refused
-# connection.
+# MOCK_PATCH_IGNORED=1 answers the PATCH 200 but keeps the old model. /metrics answers MOCK_METRICS
+# verbatim (claim 13's arming check). Claims 13 and 14: a POST /v1/sessions/<id>/turns hands out
+# t1, t2, ... and remembers the prompt; a GET of one answers `queued` (or `running`, for claim 14's
+# K8S-SMOKE-ASYNC-SLOW leaf) on its FIRST read and the final state after that, so a poll that waits
+# for a state change gets one. MOCK_ASYNC_STATE / MOCK_ASYNC_TEXT (claim 13) and MOCK_ASYNC_SLOW_STATE
+# / MOCK_ASYNC_ATTEMPTS (claim 14) set that final state, its result text and the delivery it finished
+# on. Everything else is a refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 url='' data='' prev='' ofile='' wfmt=''
@@ -76,6 +81,26 @@ case "$url" in
   n=$(($(cat "$MOCK_STATE/sessions" 2>/dev/null || echo 0) + 1))
   echo "$n" >"$MOCK_STATE/sessions"
   echo "{\"sessionId\":\"s$n\",\"token\":\"t$n\"}" ;;
+*/v1/sessions/*/turns)
+  [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
+  n=$(($(cat "$MOCK_STATE/turns" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$MOCK_STATE/turns"
+  # The prompt decides this turn's script below, so keep it: the slow leaf is claim 14's.
+  jq -r '.prompt // empty' <<<"$data" >"$MOCK_STATE/turn-t$n"
+  body="$(jq -nc --arg t "t$n" '{turnId: $t, state: "queued"}')"
+  if [[ -n "$ofile" ]]; then printf '%s' "$body" >"$ofile"; else printf '%s' "$body"; fi ;;
+*/v1/sessions/*/turns/*)
+  [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
+  tid="${url##*/}"
+  r=$(($(cat "$MOCK_STATE/reads-$tid" 2>/dev/null || echo 0) + 1))
+  echo "$r" >"$MOCK_STATE/reads-$tid"
+  case "$(cat "$MOCK_STATE/turn-$tid" 2>/dev/null)" in
+  *K8S-SMOKE-ASYNC-SLOW*) first=running st="${MOCK_ASYNC_SLOW_STATE-responded}" att="${MOCK_ASYNC_ATTEMPTS-2}" text=async-slow-ok ;;
+  *) first=queued st="${MOCK_ASYNC_STATE-responded}" att=1 text="${MOCK_ASYNC_TEXT-async-leaf-ok}" ;;
+  esac
+  [[ "$r" -gt 1 ]] || st="$first"
+  jq -nc --arg s "$st" --argjson a "$att" --arg t "$text" \
+    '{state: $s, attempts: $a} + (if $s == "queued" or $s == "running" then {} else {result: {text: $t}} end)' ;;
 */v1/sessions/*)
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
   printf '%s\n' "$data" >>"$MOCK_STATE/patches.log"
@@ -103,6 +128,7 @@ case "$url" in
     '{type: "tool_result", preview: (if $env == "1" then {content: [{type: "text", text: ($t + "\n")}]} | tojson else $t end)}' |
     sed 's/^/data: /'
   jq -nc --arg s "$sid" '{type: "done", sessionId: $s}' | sed 's/^/data: /' ;;
+*/metrics) printf '%s' "${MOCK_METRICS-}" ;;
 *) exit 7 ;;
 esac
 MOCK
@@ -118,9 +144,14 @@ case " $* " in
 *" exec redis-0 "*) printf '%s' "${MOCK_REDIS_OUT-}" ;;
 *" exec deploy/sandbox-relay "*) exit 0 ;;
 *" get statefulset "*) echo 1 ;;
+# The replica guard asks for two fields at once, so MOCK_SUP_REPLICAS holds both: "<spec> <ready>".
+*" get deployment moca-supervisor "*) printf '%s' "${MOCK_SUP_REPLICAS-1 1}" ;;
 *"SH_SANDBOX_TIERS"*)
   [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_TIERS-}" ;;
+*"SH_ASYNC_DRAIN"*)
+  [[ -z "${MOCK_SETTINGS_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-settings" is forbidden' >&2; exit 1; }
+  printf '%s' "${MOCK_ASYNC_DRAIN-}" ;;
 *" get configmap moca-setup "*)
   [[ -z "${MOCK_SETUP_CM_FAIL-}" ]] || { echo 'Error from server (Forbidden): configmaps "moca-setup" is forbidden' >&2; exit 1; }
   printf '%s' "${MOCK_P4_IDS-moca_microvm_0}" ;;
@@ -324,13 +355,13 @@ pass 'claim 12: each first turn holds its lease (sleep 2; echo ...), each second
 
 # The live run's model is deploy/microvm/mock-anthropic.mjs: its steps must be the commands smoke.sh asks for.
 MOCK_MJS="$(cd "$(dirname "$SMOKE")/../microvm" && pwd)/mock-anthropic.mjs"
-for m in WHERE-1 WHERE-2; do
+for m in WHERE-1 WHERE-2 ASYNC ASYNC-SLOW; do
   asked="$(sed -n "s/.*ask K8S-SMOKE-$m '\([^']*\)'.*/\1/p" "$SMOKE")"
   scripted="$(sed -n "s/.*'K8S-SMOKE-$m': { steps: \['\([^']*\)'\].*/\1/p" "$MOCK_MJS")"
   [[ -n "$asked" && "$asked" == "$scripted" ]] ||
     fail "K8S-SMOKE-$m: smoke.sh asks for '$asked', mock-anthropic.mjs runs '$scripted'"
 done
-pass "claim 12: mock-anthropic.mjs scripts exactly the commands smoke.sh asks for"
+pass "claims 12-14: mock-anthropic.mjs scripts exactly the commands smoke.sh asks for"
 
 # Claim 10 restarts Redis; claim 12 must not start until the stack takes a session again.
 (export MOCK_SESSIONS=1 MOCK_ENVELOPE=1 MOCK_WHERE="$SPREAD" MOCK_SESSIONS_DOWN=3
@@ -419,8 +450,102 @@ pass 'tiered p4: a P4 record without moca.dev/tier fails P2, naming the id and w
   grep -qF '  FAIL could not tell whether this stack is tiered' "$TMP/out" ||
     fail "P2 judged a stack whose tiers it could not read: $(grep -A1 'Claim P2' "$TMP/out" | tail -1)"
   ! grep -qE '^  ok attached' "$TMP/out" || fail 'P2 passed without knowing whether the stack is tiered'
-  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] || fail 'an unreadable moca-settings did not fall back to {} sessions')
+  [[ "$(sort -u "$MOCK_STATE/sessions.log")" == '{}' ]] || fail 'an unreadable moca-settings did not fall back to {} sessions'
+  ! grep -q 'Claim 13' "$TMP/out" || fail 'the p4 tier run reached the container-tier async claims')
 pass 'an unreadable moca-settings is a FAIL (quoted), P2 does not judge it, sessions post {}'
+
+# The drain knob follows the same rule as the tiers above, but claim 13 only exists on the container
+# path (--tier p4 ends at the summary): an unreadable ConfigMap cannot say "SH_ASYNC_DRAIN is unset",
+# so claim 13 must FAIL rather than skip itself as though the consumer were off on purpose.
+(export MOCK_SETTINGS_CM_FAIL=1
+  run_smoke
+  grep -qE '^  FAIL could not read configmap moca-settings \(SH_ASYNC_DRAIN\)' "$TMP/out" ||
+    fail "an unreadable moca-settings let claim 13 skip as though the drain were off: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  grep -qF '  note no drain on this stack (claim 13 says why): skipped' "$TMP/out" ||
+    fail "claim 14 did not defer to claim 13's verdict: $(grep -A1 'Claim 14' "$TMP/out" | tail -1)")
+pass 'an unreadable moca-settings FAILs claim 13 rather than skipping it, and claim 14 defers to it'
+
+# Opt-in: no SH_ASYNC_DRAIN key means the stack runs no drain, which is a SKIP, not a FAIL.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD"
+  run_smoke
+  grep -qF '  note SH_ASYNC_DRAIN is unset on this stack' "$TMP/out" ||
+    fail "an absent SH_ASYNC_DRAIN did not skip claim 13: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  ! grep -qE '^  (FAIL|ok).*async' "$TMP/out" || fail 'claim 13 judged a stack that runs no drain')
+pass 'a stack without SH_ASYNC_DRAIN skips claims 13 and 14 instead of failing them'
+
+# Claim 13's arming check wants a NUMBER, not "anything but NaN": a supervisor whose /metrics has no
+# such key reads as `null` through jq, and an unreachable admin port as empty. Neither says a worker
+# armed, so neither may pass -- and the FAIL must not blame the ConfigMap for an unreachable port.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1
+  export MOCK_METRICS='{"counters":{}}'
+  run_smoke
+  grep -qF "FAIL the admin port answered async_queue_depth='null', not a number" "$TMP/out" ||
+    fail "a /metrics without the gauge passed claim 13's arming check: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  export MOCK_METRICS=''
+  run_smoke
+  grep -qF "FAIL the admin port answered async_queue_depth='<nothing>', not a number" "$TMP/out" ||
+    fail "an unreadable /metrics was not reported as unreadable: $(grep -A1 'Claim 13' "$TMP/out" | tail -1)"
+  grep -qF 'or http://127.0.0.1:18081/metrics is unreachable' "$TMP/out" ||
+    fail 'the FAIL blamed SH_ASYNC_DRAIN alone for a reading it cannot explain')
+pass "claim 13 requires a numeric async_queue_depth, and names both causes when it is not"
+
+# Claims 9 and 14 both pick a supervisor pod before the work they interrupt starts, so above one
+# replica the delete can miss the pod that holds it. A healthy multi-pod stack must be a SKIP, never
+# a FAIL that blames the drain -- and claim 13, which deletes nothing, must still run. `replicas: 1`
+# with three pods READY is the case the guard must not miss: those three drain loops are all running,
+# whatever the spec now says, so the larger of the two numbers decides.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1 \
+  MOCK_METRICS='{"async_queue_depth":0}' MOCK_SUP_REPLICAS='1 3'
+  run_smoke
+  grep -qF '  note the supervisor runs 3 pods, and this claim cannot tell which one serves its turn: skipped' "$TMP/out" ||
+    fail "claim 9 judged a multi-pod stack: $(grep -A1 'Claim 9' "$TMP/out" | tail -1)"
+  grep -qF "  note the supervisor runs 3 pods, so another pod's drain could hold the leaf: skipped" "$TMP/out" ||
+    fail "claim 14 judged a multi-pod stack: $(grep -A1 'Claim 14' "$TMP/out" | tail -1)"
+  ! grep -q 'never redelivered' "$TMP/out" || fail 'a multi-pod stack was failed for never redelivering'
+  ! grep -qE '^  (FAIL|ok) pod ' "$TMP/out" || fail 'a pod was deleted on a stack with more than one'
+  grep -q 'Claim 13' "$TMP/out" || fail 'the replica guard also skipped claim 13, which deletes nothing')
+pass 'claims 9 and 14 skip a stack with more than one supervisor pod instead of failing it'
+
+# The verdicts themselves, which only the live Kind job used to exercise: five leaves that all reach
+# `responded` with the tool's output in the result, and a slow leaf that finishes on its second
+# delivery after its pod is deleted.
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1 \
+  MOCK_METRICS='{"async_queue_depth":0}'
+  run_smoke
+  grep -qF '  ok 5 leaves, all responded (async_queue_depth read 0' "$TMP/out" ||
+    fail "claim 13 did not pass on a stack where every leaf responded: $(grep -A3 'Claim 13' "$TMP/out" | tail -2)"
+  grep -qF '  note 5 of 5 still queued when the last 202 landed' "$TMP/out" ||
+    fail 'claim 13 lost its queue-depth note'
+  grep -qF '  ok pod moca-supervisor-x deleted mid-leaf; turn t6 finished on delivery 2' "$TMP/out" ||
+    fail "claim 14 did not pass on a redelivered leaf: $(grep -A3 'Claim 14' "$TMP/out" | tail -2)")
+pass 'claims 13 and 14 pass when every leaf responds and the slow one is redelivered'
+
+# The three ways those verdicts must go the other way. `paused` is the one that needs the control
+# plane's rule rather than a list: it is terminal there, so a paused leaf is a FAIL now, not a leaf
+# the claim polls until its 240 s deadline (the read count is what tells those two apart).
+(export MOCK_TIERS=container MOCK_SESSIONS=1 MOCK_WHERE="$SPREAD" MOCK_ASYNC_DRAIN=1 \
+  MOCK_METRICS='{"async_queue_depth":0}'
+  export MOCK_ASYNC_STATE=paused
+  run_smoke
+  grep -qF 'FAIL not every async leaf reached a result: t1=paused 1' "$TMP/out" ||
+    fail "a paused leaf was not reported as one: $(grep -A3 'Claim 13' "$TMP/out" | tail -2)"
+  [[ "$(cat "$MOCK_STATE/reads-t1")" -le 4 ]] ||
+    fail "claim 13 polled a paused leaf $(cat "$MOCK_STATE/reads-t1") times: the control plane calls it terminal"
+  export MOCK_ASYNC_STATE=failed
+  run_smoke
+  grep -qF 'FAIL not every async leaf reached a result: t1=failed 1' "$TMP/out" ||
+    fail "a failed leaf was not reported as one: $(grep -A3 'Claim 13' "$TMP/out" | tail -2)"
+  unset MOCK_ASYNC_STATE
+  export MOCK_ASYNC_TEXT=nothing-ran
+  run_smoke
+  grep -qF "returned no tool output: 'nothing-ran'" "$TMP/out" ||
+    fail "a leaf that responded without running its tool passed claim 13: $(grep -A3 'Claim 13' "$TMP/out" | tail -2)"
+  unset MOCK_ASYNC_TEXT
+  export MOCK_ASYNC_ATTEMPTS=1
+  run_smoke
+  grep -qF 'FAIL the leaf finished on attempt 1: it was never redelivered' "$TMP/out" ||
+    fail "claim 14 passed a leaf the delete never interrupted: $(grep -A3 'Claim 14' "$TMP/out" | tail -2)")
+pass 'claim 13 fails a leaf that pauses, fails or runs no tool; claim 14 fails one that was never redelivered'
 
 echo "== P7 keeps the sticky sandbox count (#425)"
 # P7 runs the setup.sh beside smoke.sh, so the copy here runs a stand-in that records its env.

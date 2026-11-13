@@ -99,6 +99,76 @@ describe('metricsBody', () => {
     expect(body.env).not.toHaveProperty('ANTHROPIC_API_KEY');
     expect(body.env).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
   });
+
+  it('surfaces the four async counts, summed across workers', () => {
+    const h = ready();
+    h.forked[0]!.stats({
+      asyncClaims: 7,
+      asyncReclaims: 1,
+      asyncDeadLetters: 0,
+      asyncClaimDeniedFull: 3,
+    });
+    h.forked[1]!.stats({
+      asyncClaims: 5,
+      asyncReclaims: 2,
+      asyncDeadLetters: 1,
+      asyncClaimDeniedFull: 0,
+    });
+    expect(metricsBody(h.pool, {}).counters).toMatchObject({
+      async_claims: 12,
+      async_reclaims: 3,
+      async_dead_letters: 1,
+      async_claim_denied_full: 3,
+    });
+  });
+
+  it('sums the finite contribution when one slot has not reported (a restart reseeds to NaN)', () => {
+    const h = ready();
+    h.forked[0]!.stats({ asyncClaims: 412, asyncReclaims: 2, asyncDeadLetters: 1 });
+    // Slot 1 sends no stats at all -- it stays NaN, exactly as it would right after a restart.
+    const counters = metricsBody(h.pool, {}).counters;
+    // Pinned as a real number, not the string 'NaN': a NaN reaching a `number`-typed field would
+    // JSON.stringify to null and read as "no claims" rather than "412 claims, one slot restarting".
+    expect(counters.async_claims).toBe(412);
+    expect(typeof counters.async_claims).toBe('number');
+    expect(Number.isFinite(counters.async_claims)).toBe(true);
+  });
+
+  it('reads 0 for a deployment where no worker drains the queue', () => {
+    expect(metricsBody(ready().pool, {}).counters).toMatchObject({
+      async_claims: 0,
+      async_dead_letters: 0,
+    });
+  });
+
+  it('takes the two queue gauges from slot 0 only', () => {
+    const h = ready();
+    h.forked[0]!.stats({ asyncQueueDepth: 12, asyncOldestAgeMs: 4_000 });
+    h.forked[1]!.stats({ asyncQueueDepth: 99, asyncOldestAgeMs: 99_000 });
+    const body = metricsBody(h.pool, {});
+    expect(body.async_queue_depth).toBe(12);
+    expect(body.async_oldest_age_ms).toBe(4_000);
+  });
+
+  it('reports the gauges as NaN while slot 0 has not reported', () => {
+    const h = ready();
+    h.forked[1]!.stats({ asyncQueueDepth: 99 });
+    const body = metricsBody(h.pool, {});
+    expect(body.async_queue_depth).toBe('NaN');
+    expect(body.async_oldest_age_ms).toBe('NaN');
+  });
+
+  it('keeps async telemetry out of routing: views() carries none of it', () => {
+    const h = ready();
+    h.forked[0]!.stats({ asyncClaims: 7, asyncQueueDepth: 12 });
+    expect(Object.keys(h.pool.views()[0]!)).toEqual(['id', 'inFlight', 'healthy']);
+  });
+
+  // Four zeroes mean two different things -- nobody submitted, or this deployment does not drain.
+  it('quotes the drain knob, so all-zero counts are readable', () => {
+    const body = metricsBody(ready(1).pool, { SH_ASYNC_DRAIN: '1' });
+    expect(body.env).toMatchObject({ SH_ASYNC_DRAIN: '1' });
+  });
 });
 
 describe('readiness', () => {

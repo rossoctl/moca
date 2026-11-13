@@ -84,6 +84,24 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'readyz',
   },
+  // §7's `async_quota_refusals`: the one async metric a worker cannot report, because §4.3 refuses
+  // the submission here and nothing is ever enqueued. HARNESS only -- the sandbox profile runs no
+  // turns, so the number is structurally zero there. Unversioned like the probes above: an operator
+  // surface, not client API, and the same path the supervisor's admin port serves.
+  //
+  // `auth: 'api'` with an admin check inside the handler, NOT `auth: 'none'` like the probes: this
+  // answers how often tenants hit their quota, on the public port. A small activity side channel,
+  // but free to close. The check is in the handler because RouteSpec has no whole-route admin field
+  // and one route does not justify adding one (`listSessions` gates its privileged branch the same
+  // way); a second admin-only route is the moment to lift it into the router.
+  {
+    method: 'GET',
+    path: '/metrics',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'getMetrics',
+  },
   // Public by design: a client asks it BEFORE logging in, to learn where the harness is.
   {
     method: 'GET',
@@ -369,15 +387,102 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: HARNESS,
     operationId: 'exchangeTurnCredential',
   },
-  // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
+  // Template lifecycle spec §4: the templates, one template, its builds, one build, its tags. On
+  // BOTH profiles (§4.1), so a session's brain and a sandbox client read the same templates.
   {
     method: 'GET',
     path: '/v1/templates',
     auth: 'api',
     sessionScoped: false,
-    profiles: SANDBOX,
+    profiles: BOTH,
     operationId: 'listTemplates',
   },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getTemplate',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/builds',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'listTemplateBuilds',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/builds/{build}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getTemplateBuild',
+  },
+  {
+    method: 'GET',
+    path: '/v1/templates/{id}/tags',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'listTemplateTags',
+  },
+  // Template lifecycle spec §4, §5.1, §8.1: self-serve create, a new build, cancel, the policy and
+  // the caller's quota. On BOTH profiles (§4.1), as the reads.
+  {
+    method: 'POST',
+    path: '/v1/templates',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    maxBodyBytes: 1024 * 1024,
+    operationId: 'createTemplate',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    maxBodyBytes: 1024 * 1024,
+    operationId: 'createTemplateBuild',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds/{build}/cancel',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'cancelTemplateBuild',
+  },
+  {
+    method: 'GET',
+    path: '/v1/policy',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getPolicy',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/policy',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'putPolicy',
+  },
+  {
+    method: 'GET',
+    path: '/v1/quota',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'getQuota',
+  },
+  // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {
     method: 'POST',
     path: '/v1/sandboxes',

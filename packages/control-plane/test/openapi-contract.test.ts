@@ -101,6 +101,8 @@ describe('§9.3 test 3 — contract drift', () => {
       'owner',
       'name',
       'template',
+      'buildId',
+      'templateManifestHash',
       'state',
       'reason',
       'createdAt',
@@ -170,6 +172,14 @@ describe('§9.3 test 3 — contract drift', () => {
     expect(post.responses['400'].description).toContain('ack');
   });
 
+  it('documents the envelope as a required field of the turn exchange response', () => {
+    const schema =
+      doc().paths['/internal/turn-credentials'].post.responses['200'].content['application/json']
+        .schema;
+    expect(schema.required).toContain('envelope');
+    expect(schema.properties.envelope.required).toEqual(['sessionId']);
+  });
+
   it('never describes a RESPONSE that returns a credential value', () => {
     // GET /v1/credentials is metadata only and there is no read-back path anywhere in /v1 (spec §4.2).
     // Scoped to responses on purpose: `PUT /v1/credentials/{name}` legitimately documents `secret` in
@@ -191,9 +201,15 @@ describe('§9.3 test 3 — contract drift', () => {
       (r) =>
         r.operationId === 'completeDeviceAuth' ||
         r.operationId === 'refreshAuth' ||
-        (r.profiles.includes('sandbox') && r.profiles.length === 1 && r.auth === 'api'),
+        (r.profiles.includes('sandbox') && r.profiles.length === 1 && r.auth === 'api') ||
+        // The template, policy and quota routes are on both profiles; on the sandbox one they
+        // check enrollment.
+        ((r.path.startsWith('/v1/templates') ||
+          r.path === '/v1/policy' ||
+          r.path === '/v1/quota') &&
+          r.auth === 'api'),
     ).map((r) => `${r.method} ${r.path}`);
-    expect(enrollable.length).toBe(8);
+    expect(enrollable.length).toBe(18);
     const missing = operations()
       .filter(({ path, method }) => enrollable.includes(`${method} ${path}`))
       .filter(({ op }) => !(op as { responses?: Record<string, unknown> }).responses?.['403'])

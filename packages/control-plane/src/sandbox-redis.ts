@@ -21,8 +21,10 @@ import { subjectHash } from './subject-document.js';
  *
  * Subjects appear in key names only as subjectHash, as ownerKey does, so the keyspace names no logins.
  *
- * Narrow on purpose, as RefreshRedisLike is: CpRedisLike's fake cannot run Lua, so this takes only
- * what it calls, and test/sandbox-redis.test.ts runs it against a real Redis.
+ * Narrow on purpose, as RefreshRedisLike is: this takes only what it calls, and
+ * test/sandbox-redis.test.ts runs it against a real Redis -- which is where its Lua is exercised.
+ * (`CpRedisLike` now carries `eval` too, but its fake only recognises the one script `TurnStore`
+ * sends; it interprets no Lua, so these quotas could not be run through it.)
  */
 export interface SandboxRedisLike {
   eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<unknown>;
@@ -213,6 +215,7 @@ function toHash(r: SandboxRecord): Record<string, string> {
     name: r.name,
     template: r.template,
     worker: r.worker,
+    ...(r.buildId ? { buildId: r.buildId } : {}),
     wsk: r.wsk,
     labels: JSON.stringify(r.labels),
     createdAt: String(r.createdAt),
@@ -235,6 +238,7 @@ function fromHash(h: Record<string, string>): SandboxRecord | null {
     name: h.name ?? '',
     template: h.template ?? '',
     worker: h.worker ?? '',
+    ...(h.buildId ? { buildId: h.buildId } : {}),
     wsk: h.wsk ?? '',
     labels,
     createdAt: Number(h.createdAt),

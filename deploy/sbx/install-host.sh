@@ -24,8 +24,9 @@
 #   - The binary is the operator's, like microvm-worker: a missing /usr/local/bin/moca-egress is
 #     refused before anything is written or systemd is touched.
 #   - $SBX_ENV_DIR/moca-egress.env (the allowlist; no secret, 0644) is written ONLY when absent,
-#     seeded from MOCA_EGRESS_ALLOW in the environment or else the GitHub hosts, so an operator's
-#     edit survives a re-run. Restart moca-egress by hand after editing it or rebuilding the binary.
+#     seeded from MOCA_EGRESS_ALLOW in the environment or else deploy/sbx/egress-allow.env beside
+#     this script, so an operator's edit survives a re-run. Restart moca-egress by hand after
+#     editing it or rebuilding the binary.
 #   - --no-egress installs the worker without MOCA_EGRESS_CONTROL_SOCK and installs no egress unit.
 #
 # Touches ONLY its own files: the template unit, sbx.slice, sbx-<id>.slice, $SBX_ENV_DIR, and the
@@ -64,7 +65,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
 : "${MOCA_EGRESS_READY_TIMEOUT:=30}"
-: "${DEFAULT_EGRESS_ALLOW:=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com}"
+# LEGACY_EGRESS_ALLOW is the GitHub-only default from before egress-allow.env existed: the
+# fallback for a copy of this script without the file (default_egress_allow warns when it is
+# used), and, in remove_egress, a seed an older script wrote still counts as unedited.
+LEGACY_EGRESS_ALLOW='api.github.com,github.com,codeload.github.com,objects.githubusercontent.com'
+# The default guest-egress allowlist: the MOCA_EGRESS_ALLOW= line of egress-allow.env beside this
+# script (a systemd EnvironmentFile, so comments are allowed), resolved lazily from egress_seed.
+default_egress_allow() {
+  local v
+  v="$(sed -n 's/^MOCA_EGRESS_ALLOW=//p' "$SCRIPT_DIR/egress-allow.env" 2>/dev/null | tail -1)" || v=''
+  if [[ -n "$v" ]]; then
+    printf '%s\n' "$v"
+  else
+    printf 'deploy/sbx/install-host.sh: no MOCA_EGRESS_ALLOW line in %s; falling back to the GitHub hosts\n' \
+      "$SCRIPT_DIR/egress-allow.env" >&2
+    printf '%s\n' "$LEGACY_EGRESS_ALLOW"
+  fi
+}
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
 # spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
 # the image size defaults to microvm-worker's own.
@@ -98,6 +115,42 @@ parse_args() {
 valid_id() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$1" != DIR ]]; }
 
 record() { mkdir -p "$SBX_ENV_DIR"; touch "$SBX_ENV_DIR/manifest"; grep -qxF "$1" "$SBX_ENV_DIR/manifest" || echo "$1" >>"$SBX_ENV_DIR/manifest"; }
+
+# jail_dir ID -> the worker's jailer --chroot-base-dir. Keyed by a 12-hex digest of the id, not
+# the id: a Unix socket path holds at most 107 bytes, the VM's API socket is
+# <base>/firecracker/vm-<up to 20 digits>/root/run/firecracker.socket (64 bytes after the base), and a
+# worker id can be 52 (sbx_ + a 31-character template + _ + 12 hex). With the id, a long template's
+# worker failed every restore from vm-10 on. The digest keeps two workers apart.
+jail_dir() {
+  local h
+  h="$(printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
+  printf '%s/jail/j%s' "$SBX_SRV" "$h"
+}
+
+# remove_legacy_jail ID: before jail_dir, a worker's jail was $SBX_SRV/jail/<id>. A reinstall or an
+# uninstall removes that worker's own old jail, only that exact path, once the worker that used it is
+# stopped: it holds the jailer's per-VM chroots, whose snapshot and workspace files are hard links
+# (the files themselves stay). An id shaped like a new jail's name (j + 12 hex) could name another
+# worker's jail, so that one is left, and so is a symlink.
+remove_legacy_jail() {
+  local old="$SBX_SRV/jail/$1"
+  [[ -d "$old" && ! -L "$old" ]] || return 0
+  if [[ "$1" =~ ^j[0-9a-f]{12}$ ]]; then
+    log "left in place: $old (named like a current jail; remove it by hand if it is $1's old one)"
+    return 0
+  fi
+  rm -rf -- "$old"
+  log "removed $old (this worker's jail from before the jail path was keyed by a digest of the id)"
+}
+
+# check_jail_path ID: the worst-case API socket path under the worker's jail fits a Unix socket
+# (microvm-worker refuses at start otherwise; here it is refused before anything is written).
+check_jail_path() {
+  local longest
+  longest="$(jail_dir "$1")/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+  ((${#longest} < 108)) ||
+    die "the worker's jail path is too long for a Unix socket (${#longest} bytes: $longest); set a shorter SBX_SRV"
+}
 
 sha256_of() { # sha256_of FILE -> its hex digest
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -135,7 +188,12 @@ egress_forget() {
   mv "$SBX_ENV_DIR/manifest.new" "$SBX_ENV_DIR/manifest"
 }
 
-egress_seed() { printf 'MOCA_EGRESS_ALLOW=%s\n' "${MOCA_EGRESS_ALLOW:-$DEFAULT_EGRESS_ALLOW}"; }
+# egress_seed: what a fresh moca-egress.env is seeded with. MOCA_EGRESS_ALLOW from the
+# environment wins, then DEFAULT_EGRESS_ALLOW, then default_egress_allow (the file, or the
+# legacy GitHub hosts with a warning). Resolved here, lazily, so that warning prints only
+# when the default is actually consumed: a --no-egress run, or one with MOCA_EGRESS_ALLOW
+# exported, never seeds and so never warns.
+egress_seed() { printf 'MOCA_EGRESS_ALLOW=%s\n' "${MOCA_EGRESS_ALLOW:-${DEFAULT_EGRESS_ALLOW:-$(default_egress_allow)}}"; }
 
 # wait_egress_ready: the worker's startup probe Registers over moca-egress's control socket, so a
 # moca-egress that exits at boot (a bad moca-egress.env) would otherwise surface much later, as the
@@ -397,6 +455,7 @@ validate_worker() {
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
   [[ "$BUDGET_MB" =~ ^[1-9][0-9]*$ ]] && ((BUDGET_MB > 1024)) || die '--budget-mb must be a whole number of MiB above 1024 (the unit reserve)'
   check_snapshot_ca
+  check_jail_path "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
 }
 
@@ -409,14 +468,14 @@ install_worker() {
     ca="$SBX_ENV_DIR/workers/$id-relay-ca.crt"
     record "file $ca"
   fi
-  install -d -m 0700 "$SBX_SRV/workspaces/$id" "$SBX_SRV/jail/$id"
+  install -d -m 0700 "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
   (
     umask 077
     {
       printf 'RELAY_ADDR=%s\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\n' "$addr" "$id" "$tok"
       [[ -z "$ca" ]] || printf 'RELAY_CA_FILE=%s\n' "$ca"
       printf 'SH_SNAPSHOT_DIR=%s\nSH_SNAPSHOT_IMAGE=%s\n' "$SBX_SRV/snapshots" "$SNAPSHOT"
-      printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$SBX_SRV/jail/$id"
+      printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
@@ -435,6 +494,7 @@ install_worker() {
   # operator brings it back (as deploy/microvm/setup-microvm.sh does).
   systemctl reset-failed "sbx-worker@$id.service" || true
   systemctl restart "sbx-worker@$id.service"
+  remove_legacy_jail "$id"
   wait_attached "$id"
 }
 
@@ -513,8 +573,10 @@ remove_shared_units() {
 # only while the unit still has the content this script wrote (another install, such as the P6
 # setup-microvm.sh, may have replaced it and its worker depends on it). The env file is the operator's
 # allowlist: it goes only if it still hashes to what was seeded (a manifest without a digest falls back
-# to comparing with the seed). A moca-egress.service the manifest does not list was never ours.
-# An `egress <kind>` this script does not know (a later version's) is left alone, line and file.
+# to comparing with the seed -- or with the legacy GitHub-only seed, which an older script's fresh
+# install wrote and which is not an operator's edit). A moca-egress.service the manifest does not list
+# was never ours. An `egress <kind>` this script does not know (a later version's) is left alone, line
+# and file.
 remove_egress() {
   local kind path sha
   [[ -f "$SBX_ENV_DIR/manifest" ]] || return 0
@@ -534,7 +596,8 @@ remove_egress() {
       if [[ ! -f "$path" ]]; then
         :
       elif [[ -n "$sha" && "$(sha256_of "$path")" != "$sha" ]] ||
-        [[ -z "$sha" && "$(cat "$path")" != "$(egress_seed)" ]]; then
+        [[ -z "$sha" && "$(cat "$path")" != "$(egress_seed)" &&
+          "$(cat "$path")" != "MOCA_EGRESS_ALLOW=$LEGACY_EGRESS_ALLOW" ]]; then
         log "kept $path (edited)"
       else
         rm -f "$path"
@@ -648,9 +711,10 @@ uninstall_worker() {
   # substrings of `@ba ` and `/ba-relay-ca.crt`.
   [[ ! -f "$SBX_ENV_DIR/manifest" ]] || drop_manifest_lines -e "worker sbx-worker@$id " -e "/$id-relay-ca.crt"
   log "removed sbx-worker@$id"
+  remove_legacy_jail "$id"
   remove_shared_units
   systemctl daemon-reload
-  log "left in place: $SBX_SRV/workspaces/$id and $SBX_SRV/jail/$id (workspace data; remove by hand when no sandbox needs it)"
+  log "left in place: $SBX_SRV/workspaces/$id and $(jail_dir "$id") (workspace data; remove by hand when no sandbox needs it)"
 }
 
 main() {

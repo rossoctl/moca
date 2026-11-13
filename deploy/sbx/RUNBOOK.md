@@ -104,6 +104,11 @@ says so, and `install-host.sh --janitor` with the new janitor bundle after a cha
 `SBX_API_HOST` or `SBX_API_CA_FILE`. `status.sh --host` warns when a host's installed janitor wait
 no longer exceeds the token lifetime plus 30 s.
 
+**A worker installed before the jail path was keyed by a digest of the id** has its jail at
+`/srv/sbx/jail/<id>`; a reinstall moves it to `/srv/sbx/jail/j<12 hex of the id>`. Re-running
+`install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
+path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
+
 ## 3. Changing the sandbox lifetime
 
 `SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,
@@ -334,10 +339,13 @@ only the hosts on the allowlist; everything else is refused with a named error (
 never a timeout. No credential is involved.
 
 - **The allowlist** is `MOCA_EGRESS_ALLOW` in `/etc/sbx/moca-egress.env`, a comma-separated list of
-  hosts. It is seeded on the first install with `api.github.com,github.com,codeload.github.com,objects.githubusercontent.com`
+  hosts. It is seeded on the first install from `deploy/sbx/egress-allow.env` beside the installer
   (or from `MOCA_EGRESS_ALLOW` in the installer's environment, on the first write only) and is never
-  overwritten by a re-run. To change it, edit the file and run `sudo systemctl restart moca-egress`;
-  open tunnels end, new ones work at once. The same restart is needed after rebuilding the binary.
+  overwritten by a re-run. To change it on one host, edit `/etc/sbx/moca-egress.env` and run
+  `sudo systemctl restart moca-egress`; to change the default for new hosts, edit
+  `deploy/sbx/egress-allow.env` in the repo (see its header for the format and the entry groups).
+  Open tunnels end on the restart, new ones work at once. The same restart is needed after
+  rebuilding the binary.
 - **Another install's `moca-egress.service`.** A host that also runs `deploy/microvm`'s P6 worker
   already has one. If `/etc/systemd/system/moca-egress.service` exists and `/etc/sbx/manifest` has no
   `egress unit` line for it, `install-host.sh` logs
@@ -440,7 +448,7 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
 also removes the shared `sbx-worker@.service` and `sbx.slice`, and the `moca-egress.service` it
-installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is left; remove it by hand.
+installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
 

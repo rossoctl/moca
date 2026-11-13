@@ -56,6 +56,15 @@ export interface CpRedisLike {
   expire(key: string, seconds: number): Promise<unknown>;
   /** A sorted set's cardinality: the per-owner open-turn count the fan-out quota reads (§4.3). */
   zCard(key: string): Promise<number>;
+  /**
+   * One Lua script, server-side. The turn record's state transitions need the read and the write to
+   * be indivisible (`turn-store.ts`'s CAS_STATE_LUA): a `cancel` landing between a claim's read and
+   * its write would otherwise be overwritten, and the worker would run a turn the caller cancelled.
+   *
+   * `script` is always one of this package's own exported constants -- never a caller's string --
+   * which is also what lets the in-memory fake dispatch on identity rather than interpret Lua.
+   */
+  eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<unknown>;
 }
 
 export interface SessionRecord {
@@ -106,7 +115,11 @@ export const ownerKey = (subject: string): string => `sh:cp:owner:${subjectHash(
 const dataKeys = (sid: string): string[] => [
   `session:${sid}`, // pi log stream       (packages/session-backend/src/redis-backend.ts:6)
   `session:${sid}:seq`, // its position counter (:7)
-  `leaf:result:${sid}`, // leaf result + gate state (harness/src/leaf-result-store.ts:23)
+  // The SYNC `/runs` path's leaf result + gate state (harness/src/leaf-result-store.ts:32), which
+  // is per session because a session has one interactive leaf at a time. An ASYNC turn's result
+  // key carries a turn id too, so it can only be reached by enumerating the session's turns --
+  // TurnStore.deleteSessionTurns, which deleteSession calls right after this cascade.
+  `leaf:result:${sid}`,
 ];
 
 /** Fields the runtime hash may carry. Anything else is dropped on write -- see putRuntime. */
@@ -332,6 +345,10 @@ export class OwnershipIndex {
     egressHost?: string;
     configRef?: string;
     bytes?: number;
+    /** The template a decision is about (template lifecycle spec §4). */
+    templateId?: string;
+    /** The gating rule ids a policy refusal failed, comma-separated (spec §8.1). */
+    rules?: string;
     decision: string;
     /** The error code of a refusal. */
     reason?: string;
@@ -355,6 +372,8 @@ export class OwnershipIndex {
           ...(entry.egressHost ? { egressHost: entry.egressHost } : {}),
           ...(entry.configRef ? { configRef: entry.configRef } : {}),
           ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
+          ...(entry.templateId ? { templateId: entry.templateId } : {}),
+          ...(entry.rules ? { rules: entry.rules } : {}),
           ...(entry.reason ? { reason: entry.reason } : {}),
           ...(entry.model ? { model: entry.model } : {}),
           ...(entry.fromModel ? { fromModel: entry.fromModel } : {}),

@@ -30,6 +30,7 @@ import {
   seconds,
 } from './handler-util.js';
 import { subjectHash } from './subject-document.js';
+import { asyncCounters } from './counters.js';
 import {
   resolveInferenceName,
   parseCredentialBody,
@@ -65,6 +66,9 @@ import { projectResources, resolveSandbox } from './resources.js';
 import type { SandboxTiers } from './sandbox-tiers.js';
 import type { RouteProfile } from './routes.js';
 import { isEnrolled, notEnrolled, type SandboxConfig } from './sandbox-config.js';
+import type { ProvenanceStore } from './provenance.js';
+import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
+import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS } from './sandbox-handlers.js';
 import { EGRESS_HANDLERS } from './egress-handlers.js';
@@ -206,13 +210,32 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /**
+   * The template provenance store (template lifecycle spec §7). Absent, nothing is recorded and no
+   * handler's behavior changes; when present, a sandbox's create and end are recorded on its
+   * template's chain.
+   */
+  provenance?: ProvenanceStore;
+  /**
+   * The template catalog (template lifecycle spec §3.1), opened with `provenance` when
+   * SH_PROVENANCE_DIR is set. Absent: built from the sandbox profile's SH_SANDBOX_TEMPLATES, as
+   * before the catalog existed.
+   */
+  templates?: TemplateCatalog;
+  /** The relay's presence records, which template readiness is derived from (§3.3). */
+  presence?: PresenceReader;
+  /**
+   * The deployment's template policy (§8), stored with the catalog and recorded in `provenance`;
+   * absent without SH_PROVENANCE_DIR, where templates cannot be created through the API.
+   */
+  policy?: PolicyStore;
   /** Stdout mirror of audit decisions; defaults to `defaultAuditLog` in depsFromEnv. */
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */
   turns?: TurnStore;
   /** The leaf queue, holding turn ids and nothing else (§5.1). */
   turnQueue?: TurnQueue;
-  /** Reads `leaf:result:<sid>` for the status route (§4.4); absent means a turn reports no result. */
+  /** Reads `leaf:result:<sid>:<turnId>` for the status route (§4.4); absent means no result. */
   leafResults?: ResultRedisLike;
 }
 
@@ -604,6 +627,18 @@ async function oidcCallbackImpl(
 
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
+
+  /**
+   * §7's `async_quota_refusals`. Process-local and reset by a restart, like every count in the
+   * supervisor's own /metrics: with more than one replica a scraper sees one replica's share per
+   * request. That is the right trade for a rate signal -- a shared counter would put a Redis write
+   * on the refusal path, which is the one path already shedding load.
+   */
+  getMetrics: async (ctx) => {
+    const p = requirePrincipal(ctx);
+    if (!isAdmin(p)) throw new CpError('forbidden', '/metrics requires the admin role');
+    return { status: 200, body: { counters: asyncCounters() } };
+  },
   // `null`, not a 404, when unset: the client can tell "this deployment advertises no harness" from
   // "this control plane predates discovery" and name the right fix for each.
   // SBX0 §4.1 (v1.1): the sandbox profile answers only where clients send Exec, and the CA to trust

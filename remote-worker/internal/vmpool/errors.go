@@ -35,6 +35,26 @@ var ErrShortResponse = errors.New("vmpool: guest closed before End")
 // undiagnosable at 200 VMs a second.
 var ErrGuest = errors.New("vmpool: guest error")
 
+// ErrCommandTooLarge means the command, once wrapped and encoded, is larger than the
+// guest's one request frame (guestagent.MaxFrame). Refused before anything is sent;
+// large content goes in stdin, which is split across frames.
+var ErrCommandTooLarge = errors.New("vmpool: command too large")
+
+// ErrLeaseEnded means the Exec's lease ended under it: the lease sweep cut it at the
+// grace limit (spec §4: "An Exec in flight then fails with a lease_ended(grace_limit)
+// error, not a generic failure"). The error returned is a *LeaseEndedError carrying the
+// reason; errors.Is matches it against this sentinel.
+var ErrLeaseEnded = errors.New("vmpool: lease ended")
+
+// LeaseEndedError is ErrLeaseEnded with the reason the lease ended.
+type LeaseEndedError struct {
+	Reason LeaseEndReason
+}
+
+func (e *LeaseEndedError) Error() string { return fmt.Sprintf("vmpool: lease_ended(%s)", e.Reason) }
+
+func (e *LeaseEndedError) Unwrap() error { return ErrLeaseEnded }
+
 // RefusalReason names why the pool declined. Spec §6 requires a memory-driven
 // refusal to be recorded DISTINCTLY from a MaxRuns refusal — "or the two ceilings
 // get conflated and neither is diagnosable" — and §7.3 reports ExecErrors by cause.
@@ -54,6 +74,13 @@ const (
 	RefuseMaxRuns       RefusalReason = "max-runs"
 	RefuseSpawn         RefusalReason = "spawn-failure"
 	RefuseShortResponse RefusalReason = "vsock-short-response"
+	// RefuseStaleMode is spec §8.2's stale_mode: an Exec (or SetMode) whose mode_epoch
+	// is below the one stored for the key, so a token minted before a downgrade cannot
+	// keep its higher mode.
+	RefuseStaleMode RefusalReason = "stale-mode"
+	// RefuseLeaseUnsupported is a lease-mode request on a worker that cannot serve
+	// one: not the Firecracker arm, or a snapshot without lease-v1.
+	RefuseLeaseUnsupported RefusalReason = "lease-unsupported"
 )
 
 // RefusalError carries a reason to microvm-worker, which counts it and returns an

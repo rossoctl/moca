@@ -186,6 +186,26 @@ export {
   type ResolvedInference,
 } from './exchange.js';
 export { exchangeTurnCredential, type TurnExchangeResponse } from './turn-exchange.js';
+export { TurnStore, type TurnStoreOptions } from './turn-store.js';
+export {
+  isTerminalState,
+  TURN_STATES,
+  isMintedTurnId,
+  turnKey,
+  resultTtlSeconds,
+  TURN_RECORD_TTL_MARGIN_SECONDS,
+  type TurnCaps,
+  type TurnRecord,
+  type TurnState,
+} from './turn-record.js';
+export {
+  LEAF_QUEUE_GROUP,
+  LEAF_QUEUE_STREAM,
+  MemoryTurnQueue,
+  RedisTurnQueue,
+  type TurnQueue,
+} from './turn-queue.js';
+export { asyncCounters, countAsync, resetAsyncCounters, type AsyncCounter } from './counters.js';
 export { buildHandler, startControlPlane } from './server.js';
 export {
   CREDENTIAL_STORES,
@@ -194,6 +214,57 @@ export {
   depsFromEnv,
   portFromEnv,
   redisClientOptions,
+  templateCatalogFromEnv,
   verifyKeysFromEnv,
   type CredentialStoreKind,
 } from './main.js';
+export {
+  EXPORT_SCHEMA,
+  RECORD_KINDS,
+  RECORD_SCHEMA,
+  ProvenanceStore,
+  canonicalJson,
+  recordDigest,
+  verifyExport,
+  type AppendInput,
+  type ProvenanceExport,
+  type ProvenanceRecord,
+  type RecordKind,
+  type StreamHead,
+  type VerifyResult,
+} from './provenance.js';
+export {
+  FileTemplateCatalog,
+  MemoryTemplateCatalog,
+  PRESENCE_KEY,
+  TEMPLATE_DOC_SCHEMA,
+  importedBuildId,
+  redisPresenceReader,
+  resolveBuild,
+  type OnboardingStatus,
+  type PresenceReader,
+  type PresenceRecord,
+  type TemplateBuild,
+  type TemplateCatalog,
+  type TemplateDoc,
+} from './template-catalog.js';
+export {
+  DEFAULT_OWNED,
+  DEFAULT_POLICY,
+  POLICY_SCHEMA,
+  PROFILE_RULES,
+  TEMPLATE_ID_RE,
+  checkCreate,
+  ownedLimit,
+  policyDigest,
+  policyProblems,
+  registryOf,
+  type CheckResult,
+  type CreateInput,
+  type Policy,
+  type PolicyStore,
+  type Profile,
+  type Quota,
+  type RuleResult,
+} from './template-policy.js';
+export { FilePolicyStore } from './template-policy-store.js';

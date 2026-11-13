@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -532,5 +533,206 @@ func TestAWorkspaceIdleBelowStandbyIdleIsRefusedAtNormalize(t *testing.T) {
 	}
 	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "WorkspaceIdle") {
 		t.Fatalf("Normalize err = %v, want the StandbyIdle < WorkspaceIdle refusal", err)
+	}
+}
+
+// TestPoolConfigLeaseEnv: every SH_LEASE_* knob is read into its Config field, unset leaves
+// the field zero for Normalize to default, and a malformed value refuses to start rather
+// than running at the default -- the WORKER_MAX_CONCURRENT posture.
+func TestPoolConfigLeaseEnv(t *testing.T) {
+	cfg, err := poolConfig(baseEnv(map[string]string{
+		"SH_LEASE_IDLE_DEFAULT_S":    "600",
+		"SH_LEASE_IDLE_CEILING_S":    "3600",
+		"SH_LEASE_MAX_DURATION_S":    "7200",
+		"SH_LEASE_MAX_DURATION_L2_S": "3600",
+		"SH_LEASE_GRACE_S":           "900",
+		"SH_LEASE_KEEPALIVE_LOSS_S":  "90",
+		"SH_LEASE_START_MB":          "128",
+		"SH_LEASE_HEADROOM":          "1.5",
+		"SH_LEASE_PAGECACHE_MB":      "512",
+		"SH_LEASE_RECLAIM_FREE_MB":   "4096",
+	}))
+	if err != nil {
+		t.Fatalf("poolConfig: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"LeaseIdleDefault", cfg.LeaseIdleDefault, 600 * time.Second},
+		{"LeaseIdleCeiling", cfg.LeaseIdleCeiling, 3600 * time.Second},
+		{"LeaseMaxDuration", cfg.LeaseMaxDuration, 2 * time.Hour},
+		{"LeaseMaxDurationProcesses", cfg.LeaseMaxDurationProcesses, time.Hour},
+		{"LeaseGraceLimit", cfg.LeaseGraceLimit, 15 * time.Minute},
+		{"LeaseKeepaliveLoss", cfg.LeaseKeepaliveLoss, 90 * time.Second},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+	if cfg.LeaseStartBytes != 128<<20 || cfg.LeasePageCacheBytes != 512<<20 || cfg.LeaseReclaimFreeBytes != 4096<<20 {
+		t.Errorf("byte knobs = start %d, pagecache %d, reclaim %d", cfg.LeaseStartBytes, cfg.LeasePageCacheBytes, cfg.LeaseReclaimFreeBytes)
+	}
+	if cfg.LeaseHeadroom != 1.5 {
+		t.Errorf("LeaseHeadroom = %v, want 1.5", cfg.LeaseHeadroom)
+	}
+
+	unset, err := poolConfig(baseEnv(nil))
+	if err != nil {
+		t.Fatalf("poolConfig: %v", err)
+	}
+	if unset.LeaseIdleDefault != 0 || unset.LeaseHeadroom != 0 || unset.LeaseReclaimFreeBytes != 0 {
+		t.Errorf("unset SH_LEASE_* must leave the fields to Normalize: %+v", unset)
+	}
+
+	for k, bad := range map[string]string{
+		"SH_LEASE_IDLE_DEFAULT_S":    "5m",
+		"SH_LEASE_IDLE_CEILING_S":    "0",
+		"SH_LEASE_MAX_DURATION_S":    "-1",
+		"SH_LEASE_MAX_DURATION_L2_S": "abc",
+		"SH_LEASE_GRACE_S":           "1.5",
+		"SH_LEASE_KEEPALIVE_LOSS_S":  " ",
+		"SH_LEASE_START_MB":          "0",
+		"SH_LEASE_HEADROOM":          "0.9",
+		"SH_LEASE_PAGECACHE_MB":      "lots",
+		"SH_LEASE_RECLAIM_FREE_MB":   "-5",
+	} {
+		_, err := poolConfig(baseEnv(map[string]string{k: bad}))
+		if err == nil {
+			t.Errorf("%s=%q was accepted; it must refuse", k, bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), k) {
+			t.Errorf("%s=%q: error %q does not name the variable", k, bad, err)
+		}
+	}
+	if _, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_HEADROOM": "NaN"})); err == nil {
+		t.Error("SH_LEASE_HEADROOM=NaN was accepted")
+	}
+}
+
+// PR #763 review (F5): a value that would overflow its conversion is refused, never
+// wrapped: SH_LEASE_GRACE_S=10000000000 once wrapped to a negative Duration that
+// Normalize then silently replaced with the default. The largest values that convert
+// exactly are accepted.
+func TestPoolConfigLeaseEnvRefusesOverflow(t *testing.T) {
+	maxS := math.MaxInt64 / int64(time.Second)
+	maxMB := int64(math.MaxInt64 >> 20)
+	seconds := []string{"SH_LEASE_IDLE_DEFAULT_S", "SH_LEASE_IDLE_CEILING_S", "SH_LEASE_MAX_DURATION_S",
+		"SH_LEASE_MAX_DURATION_L2_S", "SH_LEASE_GRACE_S", "SH_LEASE_KEEPALIVE_LOSS_S"}
+	mib := []string{"SH_LEASE_START_MB", "SH_LEASE_PAGECACHE_MB", "SH_LEASE_RECLAIM_FREE_MB"}
+	for _, tc := range []struct {
+		keys []string
+		over string
+	}{
+		{seconds, strconv.FormatInt(maxS+1, 10)},
+		{seconds, "10000000000"},
+		{mib, strconv.FormatInt(maxMB+1, 10)},
+	} {
+		for _, k := range tc.keys {
+			_, err := poolConfig(baseEnv(map[string]string{k: tc.over}))
+			if err == nil || !strings.Contains(err.Error(), k) {
+				t.Errorf("%s=%s: err = %v, want a refusal naming the variable", k, tc.over, err)
+			}
+		}
+	}
+	env := map[string]string{}
+	for _, k := range seconds {
+		env[k] = strconv.FormatInt(maxS, 10)
+	}
+	for _, k := range mib {
+		env[k] = strconv.FormatInt(maxMB, 10)
+	}
+	var cfg vmpool.Config
+	if err := leaseConfig(baseEnv(env), &cfg); err != nil {
+		t.Fatalf("the largest exact values: leaseConfig = %v, want accepted", err)
+	}
+	if want := time.Duration(maxS) * time.Second; cfg.LeaseGraceLimit != want || cfg.LeaseKeepaliveLoss != want {
+		t.Errorf("LeaseGraceLimit %v, LeaseKeepaliveLoss %v, want %v", cfg.LeaseGraceLimit, cfg.LeaseKeepaliveLoss, want)
+	}
+	if want := maxMB << 20; cfg.LeaseStartBytes != want || cfg.LeaseReclaimFreeBytes != want {
+		t.Errorf("LeaseStartBytes %d, LeaseReclaimFreeBytes %d, want %d", cfg.LeaseStartBytes, cfg.LeaseReclaimFreeBytes, want)
+	}
+}
+
+func TestLeaseBannerReportsResolvedValues(t *testing.T) {
+	cfg, err := poolConfig(baseEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := leaseBanner(cfg)
+	if !strings.Contains(off, "lease=off") {
+		t.Errorf("banner without lease-v1 = %q, want lease=off", off)
+	}
+	cfg.ManifestFeatures = []string{vmpool.FeatureLeaseV1}
+	on := leaseBanner(cfg)
+	for _, want := range []string{"lease=on", "lease_idle=5m0s/30m0s", "lease_max=8h0m0s/4h0m0s", "lease_start=192MiB", "lease_reclaim_free=2624MiB"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("banner %q lacks %q", on, want)
+		}
+	}
+}
+
+// A lease-v1 snapshot without the reporting balloon still serves leases, but the guest
+// never returns freed pages, so measured charge follows peaks (spec §6): warn, never refuse.
+func TestBalloonWarningOnlyForALeaseImageWithoutTheBalloon(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []string
+		warn     bool
+	}{
+		{"no features", nil, false},
+		{"lease-v1 and balloon-fpr-v1", []string{vmpool.FeatureLeaseV1, vmpool.FeatureBalloonFPRV1}, false},
+		{"balloon-fpr-v1 alone", []string{vmpool.FeatureBalloonFPRV1}, false},
+		{"lease-v1 alone", []string{vmpool.FeatureLeaseV1}, true},
+	} {
+		w := balloonWarning(tc.features)
+		if (w != "") != tc.warn {
+			t.Errorf("%s: balloonWarning = %q, want warning=%v", tc.name, w, tc.warn)
+			continue
+		}
+		if tc.warn {
+			for _, want := range []string{"WARNING", "lease-v1", "balloon-fpr-v1", "peak"} {
+				if !strings.Contains(w, want) {
+					t.Errorf("%s: warning %q lacks %q", tc.name, w, want)
+				}
+			}
+		}
+	}
+}
+
+// The lease fields are omitempty: a worker that never served a lease (every per-Exec
+// worker) serves /stats with exactly the keys it served before lease mode existed, and a
+// lease worker reports its lease VMs, their commitment and its ends by reason.
+func TestDiagStatsLeaseFieldsOnlyWhenLeasesExist(t *testing.T) {
+	leaseKeys := []string{"leaseVMs", "leaseExecuting", "leaseCommittedBytes", "leaseEnds"}
+	b, err := json.Marshal(toDiagStats(vmpool.Stats{LeaseEnds: map[vmpool.LeaseEndReason]uint64{}}, 4))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, k := range leaseKeys {
+		if strings.Contains(string(b), `"`+k+`"`) {
+			t.Errorf("per-Exec /stats carries %q: %s", k, b)
+		}
+	}
+
+	b, err = json.Marshal(toDiagStats(vmpool.Stats{
+		LeaseVMs: 2, LeaseExecuting: 1, LeaseCommittedBytes: 384 << 20,
+		LeaseEnds: map[vmpool.LeaseEndReason]uint64{vmpool.LeaseEndIdle: 3},
+	}, 4))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		LeaseVMs            int               `json:"leaseVMs"`
+		LeaseExecuting      int               `json:"leaseExecuting"`
+		LeaseCommittedBytes int64             `json:"leaseCommittedBytes"`
+		LeaseEnds           map[string]uint64 `json:"leaseEnds"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.LeaseVMs != 2 || got.LeaseExecuting != 1 || got.LeaseCommittedBytes != 384<<20 || got.LeaseEnds["idle"] != 3 {
+		t.Fatalf("lease /stats = %+v, want 2, 1, %d, idle 3", got, 384<<20)
 	}
 }

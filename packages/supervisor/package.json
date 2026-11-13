@@ -12,7 +12,10 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "@moca/control-plane": "workspace:*",
+    "@moca/harness": "workspace:*",
     "@moca/session-backend": "workspace:*",
+    "@moca/work-queue": "workspace:*",
     "@types/node": "^22.0.0",
     "redis": "^6.3.1",
     "tsx": "^4.23.15",

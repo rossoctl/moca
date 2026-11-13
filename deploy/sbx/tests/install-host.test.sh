@@ -4,7 +4,9 @@
 # workspace data alone, and that moca-egress is installed and wired beside the worker (#623).
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-TMP="$(mktemp -d)"
+# Short: the worker's jail path must fit a Unix socket (install-host.sh checks it), and macOS's
+# default temp directory is too long for that.
+TMP="$(mktemp -d /tmp/ih.XXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log"
 mkdir -p "$TMP/bin"
@@ -100,6 +102,56 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
 pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle and image size"
+
+# The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
+# (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
+LONG=sbx_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_0123456789ab
+bash "$INSTALL" "$(bundle $LONG)" --snapshot default >"$TMP/out" 2>&1 || fail "install the longest worker id: $(cat "$TMP/out")"
+jb="$(grep '^SH_CHROOT_BASE=' "$SBX_ENV_DIR/workers/$LONG.env" | cut -d= -f2-)"
+[[ "$jb" =~ ^$SBX_SRV/jail/j[0-9a-f]{12}$ && -d "$jb" ]] || fail "the jail is not $SBX_SRV/jail/j<12 hex>: $jb"
+p="$jb/firecracker/vm-99999999999999999999/root/run/firecracker.socket"
+((${#p} < 108)) || fail "the worst-case API socket path is ${#p} bytes"
+[[ "$(grep -h '^SH_CHROOT_BASE=' "$SBX_ENV_DIR"/workers/*.env | sort | uniq -d)" == '' ]] || fail 'two workers share a jail'
+bash "$INSTALL" --uninstall $LONG >"$TMP/out" 2>&1 || fail 'uninstall the longest worker id'
+grep -qF "left in place: $SBX_SRV/workspaces/$LONG and $jb" "$TMP/out" || fail "uninstall does not name the jail: $(cat "$TMP/out")"
+DEEP="$TMP/$(printf 'x%.0s' {1..40})"
+mkdir -p "$DEEP/snapshots/default"
+rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"$TMP/out" 2>&1 || rc=$?
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
+[[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
+pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
+
+# A worker installed before the digest-keyed jail had $SBX_SRV/jail/<id>. A reinstall and an uninstall
+# remove that worker's own old jail (its hard-linked files stay) and say so; another worker's is kept.
+legacy_jail() { # legacy_jail ID: an old jail with a VM chroot holding a hard link to a workspace file
+  mkdir -p "$SBX_SRV/jail/$1/firecracker/vm-1/root" "$SBX_SRV/workspaces/$1"
+  printf 'DATA\n' >"$SBX_SRV/workspaces/$1/ws.img"
+  ln "$SBX_SRV/workspaces/$1/ws.img" "$SBX_SRV/jail/$1/firecracker/vm-1/root/ws.img"
+}
+legacy_jail sbx_default
+legacy_jail sbx_py312
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail "reinstall over a legacy jail: $(cat "$TMP/out")"
+[[ ! -e "$SBX_SRV/jail/sbx_default" ]] || fail 'the reinstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_default " "$TMP/out" || fail "the reinstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_default/ws.img")" == DATA ]] || fail 'the legacy jail removal took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the reinstall removed another worker's legacy jail"
+[[ -d "$(grep '^SH_CHROOT_BASE=' "$A" | cut -d= -f2-)" ]] || fail 'the reinstall has no current jail'
+bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'reinstall with no legacy jail'
+! grep -q "removed $SBX_SRV/jail/" "$TMP/out" || fail 'a reinstall with no legacy jail says it removed one'
+bash "$INSTALL" "$(bundle sbx_unin)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_unin'
+legacy_jail sbx_unin
+bash "$INSTALL" --uninstall sbx_unin >"$TMP/out" 2>&1 || fail 'uninstall over a legacy jail'
+[[ ! -e "$SBX_SRV/jail/sbx_unin" ]] || fail 'the uninstall left the legacy jail'
+grep -qF "removed $SBX_SRV/jail/sbx_unin " "$TMP/out" || fail "the uninstall does not say it removed the legacy jail: $(cat "$TMP/out")"
+[[ "$(cat "$SBX_SRV/workspaces/sbx_unin/ws.img")" == DATA ]] || fail 'the uninstall took the workspace file'
+[[ -d "$SBX_SRV/jail/sbx_py312" ]] || fail "the uninstall removed another worker's legacy jail"
+# An id shaped like a current jail's name could be another worker's jail: left, and said so.
+mkdir -p "$SBX_SRV/jail/j0123456789ab/firecracker"
+bash "$INSTALL" --uninstall j0123456789ab >"$TMP/out" 2>&1 || fail 'uninstall j0123456789ab'
+[[ -d "$SBX_SRV/jail/j0123456789ab" ]] || fail 'removed a jail named like a current one'
+grep -qF "left in place: $SBX_SRV/jail/j0123456789ab " "$TMP/out" || fail "the jail-shaped id's message is missing: $(cat "$TMP/out")"
+rm -rf "$SBX_SRV/jail/j0123456789ab" "$SBX_SRV/jail/sbx_py312"
+pass "a reinstall and an uninstall remove the worker's own legacy jail <SBX_SRV>/jail/<id>, keep its files' data, and say so"
 
 # A bundle without SH_WORKSPACE_IMAGE_MB gets microvm-worker's default, 2048 MiB.
 bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'
@@ -312,6 +364,9 @@ pass 'the last worker uninstall leaves the janitor; --uninstall-janitor removes 
 # state is clean here (no worker, no janitor, an empty manifest), so the first install installs the unit.
 EM="$SBX_ENV_DIR/manifest"
 sha_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" | cut -d' ' -f1; }
+# The default seed is deploy/sbx/egress-allow.env beside the installer.
+EXPECTED_ALLOW="$(sed -n 's/^MOCA_EGRESS_ALLOW=//p' "$SRC/deploy/sbx/egress-allow.env" | tail -1)"
+[[ -n "$EXPECTED_ALLOW" ]] || fail 'deploy/sbx/egress-allow.env has no MOCA_EGRESS_ALLOW line'
 U="$SBX_UNIT_DIR/moca-egress.service" E="$SBX_ENV_DIR/moca-egress.env"
 [[ ! -e "$U" && ! -s "$EM" ]] || fail 'the egress block does not start from a clean host'
 : >"$MOCK_LOG"
@@ -320,7 +375,7 @@ grep -qx "EnvironmentFile=$E" "$U" || fail 'egress unit does not read this host 
 ! grep -q '^#' "$U" || fail 'egress unit kept source comments'
 grep -qx 'ExecStart=/usr/local/bin/moca-egress' "$U" || fail 'egress unit lost its ExecStart'
 [[ "$(mode "$E")" == 644 ]] || fail "the egress env file is not 0644 ($(mode "$E"))"
-grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" || fail 'allowlist not seeded'
+grep -qxF "MOCA_EGRESS_ALLOW=$EXPECTED_ALLOW" "$E" || fail 'allowlist not seeded from deploy/sbx/egress-allow.env'
 grep -qx 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock' "$SBX_ENV_DIR/workers/sbx_eg.env" || fail 'worker not wired to the egress socket'
 grep '^After=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker not ordered after moca-egress'
 grep '^Wants=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'moca-egress.service' || fail 'worker does not want moca-egress'
@@ -364,6 +419,29 @@ bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail '
 bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall sbx_eg again'
 [[ ! -e "$U" && ! -e "$E" ]] || fail 'the last uninstall kept an unedited egress env file'
 pass 'the last uninstall removes the egress unit, and the env file unless it was edited'
+
+# Without egress-allow.env beside it, the script falls back to the GitHub hosts and says so -- but
+# only when the default is actually consumed: a run with MOCA_EGRESS_ALLOW exported, or --no-egress,
+# never seeds from it and so never warns.
+COPY="$TMP/scriptcopy/deploy/sbx"
+mkdir -p "$COPY/../microvm"
+cp "$SRC/deploy/sbx/install-host.sh" "$SRC/deploy/sbx/sbx.slice" "$SRC/deploy/sbx/sbx-worker@.service" "$COPY/"
+cp "$SRC/deploy/microvm/moca-egress.service" "$COPY/../microvm/"
+bash "$COPY/install-host.sh" "$(bundle sbx_fb)" --snapshot default >"$TMP/out" 2>&1 || fail 'install from a script copy without egress-allow.env'
+grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'no fallback warning beside a missing egress-allow.env'
+grep -qx 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com' "$E" ||
+  fail 'the fallback did not seed the GitHub hosts'
+bash "$INSTALL" --uninstall sbx_fb >"$TMP/out" 2>&1 || fail 'uninstall sbx_fb'
+MOCA_EGRESS_ALLOW=pypi.org bash "$COPY/install-host.sh" "$(bundle sbx_fb2)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'install from a script copy with MOCA_EGRESS_ALLOW set'
+! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although MOCA_EGRESS_ALLOW was set'
+grep -qx 'MOCA_EGRESS_ALLOW=pypi.org' "$E" || fail 'the exported allowlist was not seeded'
+bash "$COPY/install-host.sh" "$(bundle sbx_fb3)" --snapshot default --no-egress >"$TMP/out" 2>&1 ||
+  fail 'install from a script copy with --no-egress'
+! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although --no-egress was given'
+for id in sbx_fb2 sbx_fb3; do bash "$INSTALL" --uninstall "$id" >"$TMP/out" 2>&1 || fail "uninstall $id"; done
+rm -rf "$TMP/scriptcopy"
+pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script, and stays quiet when the default is not used'
 
 # A unit this script did not install is reused, not overwritten.
 echo '# P6-owned' >"$U"
@@ -457,6 +535,15 @@ grep -qx "egress foo $TMP/foo.file" "$EM" && [[ -f "$TMP/foo.file" ]] || fail 'a
 sed -i.bak '/^egress foo /d' "$EM"; rm -f "$EM.bak"
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end: $(cat "$EM")"
 pass 'a two-field manifest uninstalls cleanly; an unknown egress kind is left alone'
+
+# An env file holding the legacy GitHub-only seed was written by an older script's fresh install,
+# not by an operator: with no digest recorded, the last uninstall removes it too.
+bash "$INSTALL" "$(bundle sbx_eg)" --snapshot default >"$TMP/out" 2>&1 || fail 'install for the legacy-seed case'
+printf 'MOCA_EGRESS_ALLOW=api.github.com,github.com,codeload.github.com,objects.githubusercontent.com\n' >"$E"
+sed -i.bak 's/^\(egress [a-z]* [^ ]*\) [0-9a-f]\{64\}$/\1/' "$EM"; rm -f "$EM.bak"
+bash "$INSTALL" --uninstall sbx_eg >"$TMP/out" 2>&1 || fail 'uninstall with the legacy seed'
+[[ ! -e "$E" && ! -e "$U" ]] || fail 'an untouched legacy seed was kept as an edit'
+pass 'an env file holding the legacy GitHub-only seed is removed by the last uninstall'
 
 # Egress credentials (SBX0.2b, spec §6.2): --egress installs the host CA, the token and a unit drop-in;
 # a worker install checks the snapshot's egress_ca_sha256 once the drop-in exists.

@@ -45,6 +45,17 @@ export interface TurnExchangeResponse extends ExchangeResponse {
   turnId: string;
   /** The caps recorded at submission (§4.3). Enforcing them is the worker's job (#389). */
   caps: TurnCaps;
+  /**
+   * The LeafEnvelope the worker runs, from the record (§5.1), with the record's `sessionId`
+   * attached -- `parseTurnSubmission` deliberately stores none, and `LeafEnvelope.sessionId` is
+   * required. Returned HERE rather than from a second internal route (§9.2): the handler that
+   * answers this call has already loaded the record, so fetching the envelope separately would be
+   * two round trips for one read, on a route whose contract is "the id alone is sufficient".
+   *
+   * It contains no credential and no bearer: the record stores a credential NAME, and the name is
+   * not in the envelope either.
+   */
+  envelope: Record<string, unknown>;
 }
 
 export async function exchangeTurnCredential(
@@ -157,16 +168,27 @@ export async function exchangeTurnCredential(
     );
   }
 
-  // `sandboxTier` and `model` come from the LIVE session, while `credentialName` and `cfg` above come
-  // from the record. The split is deliberate, and it is where a turn record stops being authoritative:
-  // §5.1 copies onto the record only what a turn must spend unchanged, so the two it does not copy can
-  // only be read from the session as it is now. The consequence is real and worth knowing -- a
-  // `PATCH /v1/sessions/{id}` between submission and dequeue moves an already-queued turn onto the new
-  // model, which updateSession's own "a turn in flight keeps its model" does not cover because an async
-  // turn's exchange can be an hour after its submission. Pinning them means adding both to the record
-  // (M2/#388 -- the record is this issue's, so #389 cannot pin what it does not carry), not reading
-  // them from a different place here.
-  const tier = sessionTier(rec, deps.config.sandboxTiers);
+  // Everything below comes from the RECORD, which is now authoritative for all four of
+  // `credentialName`, `cfg`, `model` and `sandboxTier` (§5.1). `sandboxTier` and `model` used to be
+  // read from the live session, and that was a defect rather than a split: a
+  // `PATCH /v1/sessions/{id}` between submission and dequeue moved an already-queued turn onto the
+  // new model, which `updateSession`'s own "a turn already running keeps its model" cannot cover
+  // because the turn has not started -- an async turn's exchange can be an hour after its
+  // submission. The session is still read above, for the owner compare and the tombstone; nothing
+  // the turn SPENDS is taken from it.
+  //
+  // The tier is the one the record STORED, which is the session's stored tier and not a raw choice:
+  // `createSession` already resolved it (`requestedTier ?? tiers?.default ?? ''`). So a turn keeps
+  // the default that was current when its SESSION was created, and an operator who changes
+  // `sandboxTiers.default` afterwards does not move an already-queued turn.
+  //
+  // It reads '' in exactly two cases, and the fallback to the session covers both. A session created
+  // while the deployment declared no tiers stores '' as well, so resolving against it is the same
+  // answer as resolving the record. A record written before #388 carries no tier at all, and there
+  // the fallback is load-bearing: handing the worker the deployment default instead of the session's
+  // own tier retiers the session's sandbox, and a retier starts its workspace empty
+  // (`select-sandbox.ts`, `reason: 'retiered'`).
+  const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
   return {
     turnId: turn.turnId,
     mode,
@@ -175,11 +197,13 @@ export async function exchangeTurnCredential(
     sessionId: turn.sessionId,
     subject: turn.owner,
     caps: turn.caps,
+    // sessionId LAST, so a stored envelope cannot override the record's own.
+    envelope: { ...turn.envelope, sessionId: turn.sessionId },
     // Direct mode only: in placeholder mode the worker sends `Bearer <placeholder>` and the injector
     // decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(turn.cfg ? { configRef: turn.cfg } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
-    ...(rec.model ? { model: { id: rec.model, ...rec.modelLimits } } : {}),
+    ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
   };
 }

@@ -1,5 +1,6 @@
 import { CpError } from './errors.js';
 import { asRecord } from './handler-util.js';
+import type { ModelLimits } from './models.js';
 import { subjectHash } from './subject-document.js';
 
 /**
@@ -32,6 +33,41 @@ export function isTerminalState(s: TurnState): boolean {
   return s !== 'queued' && s !== 'running';
 }
 
+/**
+ * How much longer the turn record lives than its result (§5.1). The record must OUTLIVE the
+ * result: a caller polling a finished turn whose record expired first would read `404 not
+ * submitted` for a turn that in fact succeeded. One hour, longer than any plausible gap between a
+ * result being read and the poll that follows it.
+ *
+ * Here rather than in `main.ts` because the WORKER finalizes turns too (#389), and a record
+ * finalized by a worker must get the same expiry as one finalized by the control plane. This module
+ * is pure, so a worker can import the number instead of re-typing it.
+ */
+export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
+
+/**
+ * `LEAF_RESULT_TTL_SECONDS`, the lifetime of a leaf result, read the SAME way in every process that
+ * writes one. Beside the margin above and for the same reason: the control plane and the async
+ * worker both write results, under the same keys, from the same variable, so a second parse of it
+ * is a second meaning. A malformed value refuses to boot rather than becoming `NaN` -- `writeResult`
+ * passes this straight to Redis as `EX`, and `EX NaN` is `ERR value is not an integer`, so a typo'd
+ * TTL would turn every result write into a runtime error instead of a startup one. Zero is refused
+ * too: Redis rejects `EX 0`, so "no retention" is not something this knob can express.
+ */
+export function resultTtlSeconds(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): number {
+  // TRIMMED first. The value reaches a worker from a systemd EnvironmentFile or a ConfigMap, where
+  // `LEAF_RESULT_TTL_SECONDS=86400 ` and a CRLF line ending are both ordinary operator slips -- and
+  // this parse runs at module load, so refusing one takes down a tier that was serving sync traffic
+  // happily before the knob was ever set. Whitespace-only is therefore the same as unset.
+  const v = env.LEAF_RESULT_TTL_SECONDS?.trim();
+  if (v === undefined || v === '') return 86_400;
+  if (!/^[1-9][0-9]*$/.test(v))
+    throw new Error(`LEAF_RESULT_TTL_SECONDS must be a positive integer (seconds), got "${v}"`);
+  return Number(v);
+}
+
 /** Per-turn caps, resolved at submission and stored (§4.3). Enforcement is the worker's (#389). */
 export interface TurnCaps {
   tokens?: number;
@@ -50,6 +86,35 @@ export interface TurnRecord {
   cfg: string;
   /** A NAME, resolved against the owner's credentials at dequeue -- never the credential (§5.1). */
   credentialName: string;
+  /**
+   * The session's model, copied at submission; '' when it names none, and the worker then uses its
+   * deployment default.
+   *
+   * COPIED rather than read from the live session at dequeue, which is what #388 changed. §5.1 copies
+   * onto the record what a turn must spend unchanged, and the model is one of those: a queued turn can
+   * wait an hour, so `PATCH /v1/sessions/{id}`'s own "a turn already running keeps its model" cannot
+   * cover it -- the turn has not started. Reading the session at dequeue therefore moved an
+   * already-queued turn onto a model its submitter never chose.
+   */
+  model: string;
+  /**
+   * The catalog's limits for `model`, snapshotted with it. Pinned TOGETHER with the id or they
+   * disagree: the limits describe that model, so a record keeping the old id against the session's
+   * new limits would send the wrong `max_tokens` upstream.
+   */
+  modelLimits?: ModelLimits;
+  /**
+   * The session's STORED tier, copied at submission.
+   *
+   * Not the submitter's raw choice: `createSession` already resolves it
+   * (`requestedTier ?? tiers?.default ?? ''`), so on a deployment that declared tiers when the
+   * session was created this is the default that was current THEN. Changing
+   * `sandboxTiers.default` afterwards therefore does not move an already-queued turn.
+   *
+   * '' in two cases only -- a session created while the deployment declared no tiers, and a record
+   * written before #388 -- and the dequeue resolves both against the session (`turn-exchange.ts`).
+   */
+  sandboxTier: string;
   caps: TurnCaps;
   /** Defaults to `sessionId` (§4.3). */
   idempotencyKey: string;
@@ -129,8 +194,8 @@ const str = (v: unknown): boolean => typeof v === 'string' && v.length > 0;
  * Validate a submission body (§4.1) into the envelope to store. The three kinds mirror the data
  * plane's `isLeafEnvelope` / `isPromptEnvelope` / `isSolveEnvelope` (knative-server server.ts) so one
  * body is accepted by both paths. `sessionId` is NOT read from the body: the handler supplies the
- * path's session id, which is what keeps the leaf's result under the key `cascadeDelete` already
- * cleans up (`leaf:result:<sid>`, ownership.ts dataKeys).
+ * path's session id, which is what keeps the leaf's result under a key this session's delete can
+ * reach (`leaf:result:<sid>:<turnId>`, TurnStore.deleteSessionTurns).
  */
 export function parseTurnSubmission(body: unknown): ParsedSubmission {
   const b = asRecord(body);
