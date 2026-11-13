@@ -21,6 +21,7 @@ printf 'podman %s\n' "$*" >>"$MOCK_LOG"
 case "$1 $2" in
 'image exists') exit 1 ;;
 'image inspect') echo "${MOCK_DIGEST:?}" ;;
+'pull '*) [[ -z "${MOCK_PULL_FAIL:-}" ]] || { echo 'mock: unauthorized' >&2; exit 125; } ;;
 esac
 exit 0
 MOCK
@@ -212,6 +213,13 @@ spec ".etc_hosts_sha256 = \"$HOSTS_SHA0\""; run || fail 'the same etc_hosts_sha2
 grep -q 'already built' "$TMP/out" || fail 'the same etc_hosts_sha256 was rebuilt'
 grep -q 'needed after a guest agent change' "$TMP/out" || fail 'already built does not say --force is needed after an agent change'
 pass 'already built only with the same --vmm, --kernel, guest_home, skip_git_identity_check and etc_hosts_sha256; says --force is needed after an agent change'
+
+# 4c. A failed pull stops the build there, naming the image, not later at the digest check.
+spec
+rc=0; MOCK_PULL_FAIL=1 run --force || rc=$?
+[[ "$rc" == 1 ]] && grep -q "could not pull registry.example.invalid/moca-microvm@$DIGEST" "$TMP/out" || fail "a failed pull was not named: rc $rc, $(cat "$TMP/out")"
+! grep -q 'podman image inspect' "$MOCK_LOG" && ! grep -q build-rootfs "$MOCK_LOG" || fail 'a failed pull went on to inspect or build'
+pass 'a failed pull fails the build at once, naming the image'
 
 # 5. Refusals that must leave nothing behind: low disk, a digest mismatch, a failed probe.
 spec

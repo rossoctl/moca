@@ -330,7 +330,10 @@ trap cleanup EXIT
 # makes a registry or a local tag that says otherwise fail here, not in a sandbox.
 log "pulling $IMAGE"
 PULLED=''
-podman image exists "$PULL" || { podman pull "$PULL" >/dev/null && PULLED=1; }
+if ! podman image exists "$PULL"; then
+  podman pull "$PULL" >/dev/null || die "could not pull $PULL"
+  PULLED=1
+fi
 got="$(podman image inspect --format '{{.Digest}}' "$PULL")"
 [[ "$got" == "$DIGEST" ]] || die "pulled $IMAGE but its digest is $got"
 
