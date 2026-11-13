@@ -2,6 +2,7 @@ package main
 
 // The lease notices sbx run prints to stderr. This is a Go port of leaseNotice, noticeLines and NoticeDedupe in
 // packages/sandbox-client/src/lease.ts, which is the source of truth for the copy (spec §5): keep the two in step.
+// The one deliberate difference is the dedupe of expiring events (see noticeDedupe).
 
 import (
 	"fmt"
@@ -82,22 +83,21 @@ func noticeLines(fresh []*pb.LeaseEvent, now time.Time) []string {
 	return lines
 }
 
-// noticeDedupe holds the at_unix_ms of each event already printed in this run: lease events are best-effort and may
-// repeat (spec §5). An expiring event is never deduped, since every result carries it while the lease is expiring.
-type noticeDedupe map[int64]bool
+// noticeDedupe holds each event already printed in this run, by its state and at_unix_ms, as TS NoticeDedupe keys
+// it: lease events are best-effort and may repeat (spec §5). Unlike TS NoticeDedupe, which shows an expiring event
+// on every MCP result, an expiring event is deduped too: the spec prints each event once per run, and an expiring
+// event's at_unix_ms is constant per lease (P4-R2), so a retried attempt's repeat is the same event.
+type noticeDedupe map[string]bool
 
 // take returns the events not printed before, marking them printed.
 func (d noticeDedupe) take(evs []*pb.LeaseEvent) []*pb.LeaseEvent {
 	var out []*pb.LeaseEvent
 	for _, ev := range evs {
-		if ev.GetState() == "expiring" {
-			out = append(out, ev)
+		key := fmt.Sprintf("%s:%d", ev.GetState(), ev.GetAtUnixMs())
+		if d[key] {
 			continue
 		}
-		if d[ev.GetAtUnixMs()] {
-			continue
-		}
-		d[ev.GetAtUnixMs()] = true
+		d[key] = true
 		out = append(out, ev)
 	}
 	return out

@@ -767,3 +767,52 @@ func TestNoticeLines(t *testing.T) {
 		})
 	}
 }
+
+// The dedupe keys on state and at_unix_ms, as TS NoticeDedupe: an end and the next lease's start in the same
+// millisecond are both printed (review #4569829041).
+func TestNoticeDedupeKeysOnStateAndAt(t *testing.T) {
+	at := noticeAt.UnixMilli()
+	end := &pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: at}
+	start := &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: at}
+	d := noticeDedupe{}
+	if got := d.take([]*pb.LeaseEvent{end, start}); len(got) != 2 {
+		t.Fatalf("first take = %v, want the end and the start", got)
+	}
+	if got := d.take([]*pb.LeaseEvent{end, start}); len(got) != 0 {
+		t.Fatalf("second take = %v, want nothing", got)
+	}
+}
+
+// Unlike TS NoticeDedupe, which shows expiring on every MCP result, the static client prints each expiring event
+// once per run: its at_unix_ms is constant per lease (P4-R2), so a retried attempt's repeat is the same event
+// (review #4569829081).
+func TestNoticeDedupeTakesExpiringOncePerRun(t *testing.T) {
+	at := noticeAt.UnixMilli()
+	exp := &pb.LeaseEvent{State: "expiring", Reason: "max_duration", AtUnixMs: at, EndsByUnixMs: at + 300_000}
+	d := noticeDedupe{}
+	if got := d.take([]*pb.LeaseEvent{exp, exp}); len(got) != 1 {
+		t.Fatalf("first take = %v, want one expiring", got)
+	}
+	if got := d.take([]*pb.LeaseEvent{exp}); len(got) != 0 {
+		t.Fatalf("second take = %v, want nothing", got)
+	}
+	// An expiring event and an end at the same ms are different events.
+	if got := d.take([]*pb.LeaseEvent{{State: "end", Reason: "max_duration", AtUnixMs: at}}); len(got) != 1 {
+		t.Fatalf("end take = %v, want the end", got)
+	}
+}
+
+func TestExpiringNoticeIsPrintedOncePerRun(t *testing.T) {
+	pinUTC(t)
+	at := noticeAt.UnixMilli()
+	exp := leaseEv(&pb.LeaseEvent{State: "expiring", Reason: "max_duration", AtUnixMs: at, EndsByUnixMs: at + 4*60_000 + 30_000})
+	// The first attempt is refused as busy after the expiring notice; the retry carries the same event.
+	c := &scriptedClient{scripts: []*fakeClient{
+		{stream: &fakeStream{events: []*pb.ExecEvent{exp, execErr(budgetRefusal)}}},
+		{stream: &fakeStream{events: []*pb.ExecEvent{exp, chunk(pb.Stream_STREAM_STDOUT, "ok"), end0()}}},
+	}}
+	code, errw, _ := retryRun(t, c, busyCfg(t), nil)
+	if code != 0 || len(c.ids) != 2 || strings.Count(errw, "guest restarts within") != 1 {
+		t.Fatalf("code=%d attempts=%d err=%q, want one expiring line", code, len(c.ids), errw)
+	}
+}
