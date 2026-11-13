@@ -146,7 +146,7 @@ in `/etc/sbx/moca-egress.env`) before the first worker: [the runbook](RUNBOOK.md
 `install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
 `/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
 a host also removes the shared `sbx-worker@.service` and `sbx.slice`. Workspace data under
-`/srv/sbx/workspaces/<id>` and `/srv/sbx/jail/<id>` is kept; remove it by hand when no sandbox needs
+`/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` is kept; remove it by hand when no sandbox needs
 it.
 
 **A template's snapshot and worker from a container image** are what

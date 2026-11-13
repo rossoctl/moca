@@ -679,18 +679,48 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
   business hours. If it is lost, every sandbox on it ends and its files are gone. Your laptop
   keeps the original tree, so pull often.
 
-## 8. Using your own templates
+## 8. Your own templates
 
-On a deployment with the template store, you can make templates of your own from an image pinned by
-digest and a spec, and use them like the ones your operator provides. Creating one and following its
-build (`mocactl sbx templates create`, `follow`, `show`, `cancel`, `build`) comes with the template
-authoring client; the template onboarding guide (`deploy/sbx/template-onboarding/GUIDE.md`, §4b)
-walks through it from an OCI image. Once a build is registered, every command below takes `--json`
-(the API's answer, never a token).
+A template is the image a sandbox's VM boots: its tools, and its seed (what fills `/workspace`).
+Beyond the ones your operator provides, you can make your own from an image pinned by digest
+(`repository@sha256:<64 hex>`) and a spec (`moca-sbx-template-spec/1`; samples in
+[the onboarding examples](../../deploy/sbx/template-onboarding/examples/)). A policy, not a person,
+admits or refuses each create; the rules it names are in
+[the gating rules](../../deploy/sbx/template-onboarding/governance/GATING-RULES.md). Every command
+below takes `--json` (the API's answer, never a token).
 
-**What you may do.** `mocactl sbx quota` shows your template quotas and use; `mocactl sbx policy`
-the profiles a create can name, each with its size envelope and egress, and the registries an image
-may come from; `mocactl sbx hosts` each KVM host's active slots, start line and memory.
+**What you may do.** `mocactl sbx quota` shows your template quotas and use, and your live-sandbox
+cap; `mocactl sbx policy` the profiles a create can name, each with its size envelope, egress and
+rules, the registries an image may come from, and the policy's digest; `mocactl sbx hosts` each
+KVM host's active slots, start line and memory.
+
+**Create, and follow the build:**
+
+```bash
+mocactl sbx templates create --spec my-python.json --dry-run   # the checks needing only the inputs
+mocactl sbx templates create --spec my-python.json             # prints: my-python b-<handle> queued
+mocactl sbx templates follow my-python                         # exit 0 once registered
+```
+
+- `--spec` is a spec file or a gate record (whose `template` block is the spec); the id and image
+  are the spec's own (`--id`, `--image` must equal them). `--profile P` names a policy profile,
+  `--gate-record F` sends its gate record byte for byte (the `benchmark` profile needs one; at most
+  1 MiB, with one `--spec`),
+  `--visibility private` keeps a new template to yourself.
+- `--dry-run` creates nothing: it reads the policy (`mocactl sbx policy`, so it needs your login
+  and the control plane, exit 3 or 4 without them) and names the policy rule a create would fail
+  (`M7.id`, `M1`, `X10`, …). Whether the policy trusts a gate record, whether the image's registry
+  is allowed, and your quotas, only the server decides: its answer is still the decision.
+- Several `--spec` make one create each. When your `buildsQueued` quota is full, the next waits for
+  a slot ("N waiting for a queue slot") rather than failing, up to `--timeout` (default 3600 s).
+  Ctrl-C stops it with exit 130: the specs not yet posted are not posted.
+- A create on an id already yours is a new build of it. The same create again (same image, spec,
+  profile and gate record) answers the build it already made (`reused`), not a second one; a
+  changed spec, image or profile queues a new build. An id someone else owns is refused with its
+  owner's name.
+- `follow` polls until the build is `registered` (exit 0), `failed` or `rejected` (exit 1, with
+  its reason). `templates show ID` prints it once; `templates cancel ID --build B` withdraws one not
+  yet built. `templates build ID --spec F` is a new build of your template.
 
 **Use it:**
 
@@ -790,6 +820,14 @@ Other messages:
 - **"at most 3 live sandboxes per user"** or **"the sandbox service is at capacity"**: `mocactl sbx ls`
   shows yours; pull and `mocactl sbx rm` one you no longer need.
 - **"template busy; retry later"**: too many users on that template at once. Retry in a while.
+- **"refused by policy rule …"** (a template create): the rule the create failed and why;
+  `mocactl sbx templates create … --dry-run` checks most of them before you send it, and
+  `mocactl sbx policy` lists the profiles' envelopes. **"over your … quota"**: `mocactl sbx quota`.
+- **Exit 5**: a `templates follow`, or a create waiting for a queue slot, ran out of time, with what
+  it was waiting for; nothing was undone. Run it again, or with a longer `--timeout`.
+- **Exit 130**: Ctrl-C stopped a `templates follow`, or a create waiting for a queue slot. A build
+  already queued goes on (`templates cancel ID --build B` withdraws it); a spec not yet posted was
+  not.
 - **"sandbox busy: …"**: another call on your sandbox is still running (another terminal, or a
   parallel agent). Wait for it, or retry.
 - **"the sandbox expires in N s; pull your work now"**: the sandbox is in its last minute, too

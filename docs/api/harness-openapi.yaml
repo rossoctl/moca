@@ -200,7 +200,8 @@ paths:
           description: |
             Retryable, from one of three causes: no sandbox capacity right now (every candidate
             is at its cap, none is present yet, or the session's own sandbox is briefly absent —
-            sandbox_unavailable), the control-plane credential exchange failed
+            sandbox_unavailable, whose message names the cause: a pool, tier, template or
+            sandbox id, never a secret), the control-plane credential exchange failed
             (credential_unavailable — the control plane is unreachable or its answer was
             unusable), or a detachable turn could not take its lease because Redis did not
             answer, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000) —

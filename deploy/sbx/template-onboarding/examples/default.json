@@ -1,0 +1,17 @@
+{
+  "schema": "moca-sbx-template-spec/1",
+  "id": "default",
+  "image": "ghcr.io/rossoctl/moca-remote-worker@sha256:eed901b838bf11e16054fccfb38af600a6e61d74dd52907af0750bba13ecbed3",
+  "guest_ram_mb": 256,
+  "vcpus": 1,
+  "egress": true,
+  "seed": "",
+  "probe": {
+    "cmd": "git --version && python3 -c 'print(6*7)' && rg --version | head -1",
+    "timeout_s": 120,
+    "expect_rc": 0,
+    "expect": ["^git version ", "^42$", "^ripgrep "]
+  },
+  "description": "Moca's sandbox image: bash, git, Python 3, ripgrep",
+  "tools": ["bash", "git", "python3", "rg"]
+}
