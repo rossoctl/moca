@@ -772,8 +772,8 @@ const leasedBy = (docs: TemplateDoc[], subject: string, nowS: number): TemplateB
 
 /**
  * Activate (§6.3): take or renew this subject's lease on a registered build, by `tag` (default
- * `default`) or `build`, `leaseSeconds` long (default the largest idle limit its hosts report, else
- * 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
+ * `default`) or `build`, `leaseSeconds` long (default the largest idle limit of the hosts that hold it, clamped
+ * to 60-86400, else 3600; at most a day per grant, renewals unlimited). Refused with template_unavailable when no
  * registered build or no host holds it, no_active_slot (Retry-After) when every holder is full,
  * quota_exceeded over the subject's active quota; on a refusal no lease is kept.
  */
@@ -859,14 +859,26 @@ async function takeLeaseLocked(
   const nowS = seconds(deps);
   const DAY = 86_400;
   const hosts = hostViewsOf(deps);
-  const defaultLease =
-    Math.max(...hosts.map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds), 0) || 3600;
-  const want =
-    typeof leaseSeconds === 'number' && Number.isSafeInteger(leaseSeconds)
-      ? leaseSeconds
-      : defaultLease;
-  if (want < 60 || want > DAY)
-    throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+  // An explicit leaseSeconds is the client's, range-checked. The default is the largest idle limit
+  // of the hosts that hold this build (3600 when none reports one), clamped into the range: a
+  // host's SBX_IDLE_LIMIT_S outside it never refuses a request that named no lease.
+  let want: number;
+  if (leaseSeconds !== undefined && leaseSeconds !== null) {
+    if (
+      typeof leaseSeconds !== 'number' ||
+      !Number.isSafeInteger(leaseSeconds) ||
+      leaseSeconds < 60 ||
+      leaseSeconds > DAY
+    ) {
+      throw new CpError('invalid_request', 'leaseSeconds must be 60-86400 (renew to hold longer)');
+    }
+    want = leaseSeconds;
+  } else {
+    const idle = hosts
+      .filter((h) => h.holds[target.buildId] !== undefined)
+      .map((h) => deps.hosts!.get(h.id)!.limits.idleLimitSeconds);
+    want = Math.min(DAY, Math.max(60, Math.max(0, ...idle) || 3600));
+  }
   const { policy: pol } = await policy.current();
   const docs = await cat.list();
   // A renewal does not count against itself.

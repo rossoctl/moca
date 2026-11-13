@@ -384,7 +384,7 @@ header is authoritative.
   `SBX_HOST_TOKEN_FILE`, `SBX_KERNEL`, `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB` (default 60),
   `SBX_BUILD_CONCURRENCY` (default 1, at most 4), `SBX_ACTIVE_LIMIT` (the workers the control plane
   places on the host at once; default 0, none), `SBX_IDLE_LIMIT_S` (the default activation lease,
-  in seconds; default 0, then 3600), `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host
+  in seconds, clamped to 60-86400; default 0, then 3600), `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host
   agent). `deploy/sbx/setup.sh`'s
   `SBX_TEMPLATE_HOSTS` lists the hosts and writes each one's bundle.
 

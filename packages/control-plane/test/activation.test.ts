@@ -174,6 +174,43 @@ describe('activation (§6.2-§6.3)', () => {
     });
   });
 
+  it("clamps the default lease from the holders' idle limits, and range-checks only an explicit one", async () => {
+    const d = await setup();
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const idle = (host: string, holds: Record<string, string>, idleLimitSeconds: number) =>
+      HANDLERS.hostInventory!(
+        asHost(
+          host,
+          {},
+          {
+            holds: Object.entries(holds).map(([manifestHash, template]) => ({
+              manifestHash,
+              template,
+            })),
+            limits: { activeLimit: 2, idleLimitSeconds },
+          },
+        ),
+        d,
+      );
+    const nowS = () => Math.floor(now / 1000);
+    // Over a day: the default is a day, never a refusal of a request that named no lease.
+    await idle('host-1', { [hash('1')]: 't1' }, 172_800);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 86_400);
+    // Under a minute: the default is a minute.
+    await idle('host-1', { [hash('1')]: 't1' }, 5);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 60);
+    // Only the hosts that hold the build: another host's longer idle limit is not this build's.
+    await idle('host-1', { [hash('1')]: 't1' }, 0);
+    await idle('host-2', {}, 7200);
+    expect(((await activate(d, 't1')).body as Body).leaseUntil).toBe(nowS() + 3600);
+    // An explicit lease is the client's, and checked.
+    for (const leaseSeconds of [59, 86_401, 'x', 1.5]) {
+      await expect(activate(d, 't1', alice, { leaseSeconds })).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
+    }
+  });
+
   it('never evicts a leased build: over the limit is 409 no_active_slot with Retry-After', async () => {
     const d = await setup();
     attachedNow = [];

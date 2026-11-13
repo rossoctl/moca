@@ -11,8 +11,8 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 `SH_PROVENANCE_DIR` (else `400 invalid_request`).
 
 - New POST /v1/templates/{id}/activate `{tag?, build?, leaseSeconds?}`: takes or renews the caller's
-  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` its
-  hosts report, else 3600; renewed by calling again, without limit) and answers
+  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` of
+  the hosts that hold it, clamped to 60-86400, else 3600; renewed by calling again, without limit) and answers
   `{templateId, buildId, leaseUntil, host}`. A build is wanted running only while a lease stands; a
   leased build is never evicted. Each grant is an `activate` record; the lease stores its digest. Refusals keep
   no lease: `409 template_unavailable` (no registered build under that reference, or no reporting

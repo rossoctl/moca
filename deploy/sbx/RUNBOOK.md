@@ -661,7 +661,7 @@ once; the one without it skips, saying so. Size the limits:
   memory whole from its start, with its standby VMs, so size it from the host's memory and the
   templates' guest sizes, leaving the host's own reserve. 0 (unset) places nothing on the host.
 - `SBX_IDLE_LIMIT_S` is the default lease length a client gets when it names none (the largest of
-  the hosts' that hold the build; else 3600 s). A lease is renewed by activating again.
+  the hosts' that hold the build, clamped to 60-86400 s; else 3600 s). A lease is renewed by activating again.
 - The policy's `quota.active` caps the builds one subject holds a lease on at once
   (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the use.
 

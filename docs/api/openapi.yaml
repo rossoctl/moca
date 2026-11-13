@@ -2034,7 +2034,7 @@ paths:
       description: |
         Template lifecycle spec §6.3. Body `{tag?, build?, leaseSeconds?}`: the build by tag
         (default `default`) or build id; the lease 60-86400 s (default the largest
-        `idleLimitSeconds` its hosts report, else 3600), renewed by calling again, without limit.
+        `idleLimitSeconds` of the hosts that hold it, clamped to 60-86400, else 3600), renewed by calling again, without limit.
         A build is wanted running only while a lease stands, and a leased build is never evicted.
         An `activate` record on the template's stream; a sandbox created under the lease cites its
         digest as `lease`. One activation at a time: the quota and placement check, the record and

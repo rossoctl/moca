@@ -354,7 +354,8 @@ reporting host holds is not placed (`unavailable`); one whose every holder is fu
 ### 6.3 Leases, aging and the wanted state
 
 - **Leases:** an activation is a **lease** held by its subject, `leaseSeconds` long (60 s to a day a
-  grant; default the largest `idleLimitSeconds` its hosts report, else 3600), renewed by
+  grant; default the largest `idleLimitSeconds` of the hosts that hold it, clamped to 60-86400,
+  else 3600), renewed by
   `POST /v1/templates/{id}/activate` again, without a cap, while the subject still needs the build
   (for the life of a batch, say). `POST /v1/templates/{id}/deactivate` drops the subject's leases.
   Each grant is an `activate` record, and the lease stores its digest (§7.1). This activation lease
