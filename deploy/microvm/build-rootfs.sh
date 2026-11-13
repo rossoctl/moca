@@ -125,11 +125,54 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# NEVER WRITE THROUGH THE IMAGE'S SYMLINKS. $OUT is an untrusted image's filesystem and this runs
+# as root, so a directory in it can be a symlink out of it (an absolute one resolves on THIS host),
+# and an rm, mkdir or redirect through it would change the build host's files. build-snapshot.sh's
+# tree_write_target guards its own writes the same way.
+#
+# refuse_tree: the tree is not one this script may finish, so it is removed (rm -rf removes a
+# symlink, never its target) and the build fails.
+refuse_tree() {
+  echo "build-rootfs.sh: $1" >&2
+  rm -rf "$OUT"
+  exit 1
+}
+# tree_dir_inside DIR [make]: exits unless the tree's DIR resolves inside the tree. It checks the
+# deepest part of DIR that exists first, then (with `make`) creates the rest and checks DIR itself,
+# because mkdir -p follows symlinks. Without `make`, a DIR that does not exist passes: nothing in it
+# can be removed.
+tree_dir_inside() {
+  local dir="$1" make="${2:-}" tree probe real d
+  tree="$(cd -P "$OUT" && pwd)"
+  probe="$dir"
+  while [ "$probe" != . ] && [ ! -e "$OUT/$probe" ] && [ ! -L "$OUT/$probe" ]; do
+    probe="$(dirname "$probe")"
+  done
+  for d in "$probe" "$dir"; do
+    if [ "$d" = "$dir" ]; then
+      if [ -n "$make" ]; then mkdir -p "$OUT/$dir"; elif [ ! -e "$OUT/$dir" ] && [ ! -L "$OUT/$dir" ]; then return 0; fi
+    fi
+    real="$(cd -P "$OUT/$d" 2>/dev/null && pwd)" || real="unresolvable"
+    case "$real/" in
+      "$tree"/*) ;;
+      *) refuse_tree "the image's /$d resolves outside the tree ($real); refusing to change files through it" ;;
+    esac
+  done
+}
+
 # The container tier's own worker binary is inert in a guest (the guest agent is the executor,
-# installed by build-snapshot.sh), so it has no business in the image the VM trusts.
+# installed by build-snapshot.sh), so it has no business in the image the VM trusts. rm -f removes
+# a symlink itself, so only its directory needs the check.
+tree_dir_inside usr/local/bin
 rm -f "$OUT/usr/local/bin/remote-worker"
 # Mount points init and the kernel need; an exported container tree may lack them.
-mkdir -p "$OUT/dev" "$OUT/proc" "$OUT/sys"
+for d in dev proc sys; do tree_dir_inside "$d" make; done
+# The provenance file: its directory must resolve inside the tree, and the file must not be a
+# symlink (its target is unknown, and the redirect would truncate the build host's file).
+tree_dir_inside etc make
+if [ -L "$OUT/etc/moca-rootfs-source" ]; then
+  refuse_tree "the image's /etc/moca-rootfs-source is a symlink ($(readlink "$OUT/etc/moca-rootfs-source")); refusing to write through it"
+fi
 printf 'image=%s\ndigest=%s\n' "${SOURCE_NAME:-$IMAGE}" "$digest" >"$OUT/etc/moca-rootfs-source"
 
 echo "build-rootfs.sh: $OUT is ready (from ${SOURCE_NAME:-$IMAGE} @ $digest)"

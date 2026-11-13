@@ -243,9 +243,13 @@ export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
  * until it is `retired`, its worker no longer runs (`capacity` null: the host stopped it, after
  * the wanted state's `stop`) and no host holds it any more (`heldBy` empty: each holding host has
  * removed its worker and snapshot, §6.1 step 7), saying so, once per change, while it waits;
- * `running` null, presence unreadable, is waited out too, never taken as stopped. `heldBy` null, or
- * absent from an older control plane, means no host agents: nothing to wait for. A wait past
- * --timeout (default RETIRE_TIMEOUT_S) exits 5.
+ * `running` null, presence unreadable, is waited out too, never taken as stopped. Only a host agent
+ * that holds the build stops and removes its worker (the wanted state lists the builds a host
+ * holds), so a build no host holds has nothing to wait for: `heldBy` null (no host agents; or
+ * absent, from an older control plane), or empty from the first read (no host holds it, such as an
+ * imported template whose worker an operator runs). Then a worker that still runs is said to be not
+ * host-managed, to be stopped where it runs. A wait past --timeout (default RETIRE_TIMEOUT_S) exits
+ * 5.
  */
 export async function cmdRetire(
   c: SbxCtx,
@@ -270,6 +274,7 @@ export async function cmdRetire(
     const end = c.rt.now() + timeoutS * 1000;
     for (const { build } of builds) {
       let said = '';
+      let wasHeld = false;
       for (;;) {
         let b: SbxBuild | undefined;
         try {
@@ -277,16 +282,24 @@ export async function cmdRetire(
         } catch (err) {
           if (!transient(err)) throw err;
         }
-        const noAgents = b !== undefined && (b.heldBy === null || b.heldBy === undefined);
         const held = b?.heldBy ?? [];
-        if (
-          b &&
-          b.status === 'retired' &&
-          (noAgents || (b.capacity === null && held.length === 0))
-        ) {
+        if (held.length > 0) wasHeld = true;
+        // No host holds it (heldBy null or absent: no host agents; empty from the first read: none
+        // holds this build): no host agent will stop or remove its worker, so it is done at once.
+        if (b && b.status === 'retired' && (b.heldBy == null || (held.length === 0 && !wasHeld))) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired` +
+              (b.capacity === null
+                ? ', its worker stopped'
+                : '; no host agent holds it, so its worker is not host-managed: stop it where it runs'),
+          );
+          break;
+        }
+        // Held by a host when the wait began: done once its worker stopped and every host removed it.
+        if (b && b.status === 'retired' && b.capacity === null && held.length === 0) {
           c.io.err(
             `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, ` +
-              (noAgents ? 'its worker stopped' : 'its worker stopped and removed from every host'),
+              'its worker stopped and removed from every host',
           );
           break;
         }

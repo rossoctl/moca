@@ -538,8 +538,61 @@ describe('sbx templates retire (§5.1)', () => {
     });
     expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
     expect(w.slept).toEqual([]);
-    expect(w.io.errs.join('')).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
+    expect(w.io.errs.join('')).toContain(
+      `my-python ${HANDLE}: retired; no host agent holds it, so its worker is not host-managed`,
+    );
     expect(w.io.errs.join('')).not.toContain('removed from every host');
+  });
+
+  it('--wait: done at once when no host holds the build (heldBy empty, worker attached)', async () => {
+    // Host agents exist, but none holds this build (an imported template's operator-run worker):
+    // none will stop its worker, so waiting could only time out.
+    for (const capacity of [RUNNING, { running: null, inUse: null }]) {
+      const w = waiting({
+        'POST /v1/templates/my-python/retire': retireRoute,
+        [BUILD_PATH]: () => ({ status: 200, body: retiredRead(capacity, []) }),
+      });
+      expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+      expect(w.slept).toEqual([]);
+      const errs = w.io.errs.join('');
+      expect(errs).toContain('no host agent holds it, so its worker is not host-managed');
+      expect(errs).not.toContain('its worker still runs');
+    }
+  });
+
+  it('--wait: done at once when heldBy is empty from the start and its worker stopped', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(null, []) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
+    expect(errs).not.toContain('removed from every host');
+  });
+
+  it('--wait: a build its host held waits for its stop too once heldBy empties', async () => {
+    // Held at first, then no host holds it while its worker still runs: not done until it stops,
+    // and never taken for a build no host agent manages.
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => {
+        ++reads;
+        return {
+          status: 200,
+          body: retiredRead(reads < 3 ? RUNNING : null, reads < 2 ? ['host-1'] : []),
+        };
+      },
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs).not.toContain('not host-managed');
+    expect(errs).toContain(
+      `my-python ${HANDLE}: retired, its worker stopped and removed from every host`,
+    );
   });
 
   it('--wait: exits 5 when its worker still runs at --timeout', async () => {

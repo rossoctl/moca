@@ -55,33 +55,44 @@ per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-pro
 `SH_PROVENANCE_DIR` (else `400 invalid_request`).
 
 - New POST /v1/templates/{id}/activate `{tag?, build?, leaseSeconds?}`: takes or renews the caller's
-  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` its
-  hosts report, else 3600; renewed by calling again, without limit) and answers
+  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` of
+  the hosts that hold it, clamped to 60-86400, else 3600; renewed by calling again, without limit) and answers
   `{templateId, buildId, leaseUntil, host}`. A build is wanted running only while a lease stands; a
   leased build is never evicted. Each grant is an `activate` record; the lease stores its digest. Refusals keep
   no lease: `409 template_unavailable` (no registered build under that reference, or no reporting
   host holds it), `409 no_active_slot` with `Retry-After` (every holder at its `activeLimit` with
-  leased builds), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
+  leased builds; the wait is until a build placed on one of its holders loses its last lease), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
   record and the lease write run one activation at a time across all templates.
 - New POST /v1/templates/{id}/deactivate `{all?}`: drops the caller's leases on the template (an
   admin with `all: true`, everyone's), answering `{templateId, released}`, with a `deactivate`
   record when any is dropped.
 - New GET /v1/hosts/{host}/wanted (host bearer): `run`, the leased builds placed on this host within
-  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox; new
-  `WantedWorker` schema.
+  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox (and a leased
+  build it runs while placement keeps it on another host); new `WantedWorker` schema. Placement is
+  sticky (a running build stays on its host) and counts every worker that stays running on a host:
+  leased builds placed or running there, and unleased ones draining a live sandbox.
+- POST /v1/hosts/{host}/inventory: each `holds` entry gains `running` (boolean, default false):
+  whether the build's worker unit runs on the host.
 - New POST /v1/hosts/{host}/workers/report `{buildId, event, reason?}` (host bearer): `attached`,
-  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>`;
+  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>` (a
+  `refused` repeating the host's last one for a build still in its `run` is not recorded again:
+  `recorded: null`);
   readiness still comes from the relay.
 - POST /v1/sandboxes: activation on first use. With `SH_TEMPLATE_HOSTS` set, a create on a
   registered build that is not `active` takes the caller's lease (`reason: first_use` on its record;
   refused as activate would be) and answers `409 template_not_active` with `readiness` and
-  `Retry-After: 30`. New body field `activate` (default true; false starts nothing). No sandbox
-  record is kept while waiting. Without template hosts, nothing changes. The `sandbox` record's
+  `Retry-After: 30`; a caller already holding a live lease on the build is only answered the
+  wait (no renewal, no record per retry). New body field `activate` (default true; false starts nothing). No sandbox
+  record is kept while waiting. Without template hosts, nothing changes. A template imported from
+  `SH_SANDBOX_TEMPLATES` is never gated, and activate refuses it with `400 invalid_request`: the
+  deployment runs its worker, and its readiness is that worker's presence alone. The `sandbox` record's
   `lease` is now the digest of the caller's `activate` record (null without a lease).
 - Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
   any host reports it is the presence alone, as before.
-- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}`, `idleLimitSeconds`
-  and `disk {freeGb, floorGb}`.
+- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}` (`used`: the
+  workers placement counts on it), `idleLimitSeconds`
+  and `disk {freeGb, floorGb}`. A host whose last inventory is over 6 minutes old is left out of
+  it and of placement until it reports again.
 - GET /v1/quota: `active.used` counts the builds the caller holds a live lease on.
 - New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
   Error schema gains `readiness`, and `quota` the value `active`.
@@ -138,8 +149,9 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
   record naming who), with the `Policy` (`moca-template-policy/1`: profiles with their rules and
   size envelope, allowed registries, trusted gate records by sha256, quotas) and `PolicyView`
   schemas. The default policy has a `base` and a `benchmark` profile.
-- New GET /v1/quota: the caller's limits and use (`templates`, `buildsQueued`, `active`), and on the
-  sandbox profile the live-sandbox cap (`sandboxes`).
+- New GET /v1/quota: the caller's limits and use (`templates`, owned with a build registered or on
+  its way there; `buildsQueued`, queued, building or probing; `active`), and on the sandbox profile
+  the live-sandbox cap (`sandboxes`).
 - New error codes `policy_refused` (422, with `rule`, the gating rule's id from
   `deploy/sbx/template-onboarding/governance/GATING-RULES.md`) and `template_exists` (409: ids are
   unique per deployment, the first creator owns one). `quota_exceeded` on a create names the quota
@@ -147,6 +159,23 @@ queued}`, `build` being the build's path under a `b-<26 hex>` handle, and writes
 - `TemplateBuild` adds `handle` (the create's handle; equal to `buildId` for an imported build) and
   `reason` (why a build failed or was rejected), and GET /v1/templates/{id}/builds/{build} also
   finds a build by its handle.
+- A refused create is recorded as a `check` provenance record only on an existing template's stream
+  the caller may write; a refusal on an id no template holds writes one audit line instead
+  (`template_create_refused`, with the subject, `templateId` and the failed `rules`).
+
+Upgrade note (the policy fails closed):
+
+- X12 applies under every profile, `base` included: a `skip_git_identity_check: true` that no gate
+  record backs is refused (`422 policy_refused`, rule `X12`). A `base` client sends a gate record
+  showing commits refused (X5: `agent_can_commit: "no"`, `git_identity: "none"`), or drops the skip:
+  the build host's git identity check then needs git with an identity in the image, or no git at all
+  once the build-snapshot change in [#757](https://github.com/rossoctl/moca/pull/757) is in.
+- A stored policy (`<SH_PROVENANCE_DIR>/policy.json`) that names a rule id outside the ones the
+  check acts on (X1, X10, X11, X12, X14, X15), or an `envelope.exact` that is not two positive whole
+  numbers, is refused when it is read: every create and every read of the policy or the quota fails
+  until an admin PUTs a valid policy, instead of the policy silently enforcing nothing. So read
+  `GET /v1/policy` and fix it **before** upgrading: afterwards only `PUT /v1/policy` succeeds (the
+  file itself stays readable on the volume).
 
 ## 1.4.0
 
