@@ -2650,7 +2650,8 @@ paths:
         them in, at most its start limit at once). On a host with an idle grace the graced builds
         follow the wanted ones in `run`, soonest grace end first, and are listed in `graced`. A
         graced worker displaced for a wanted build is re-checked for a lease when the answer is
-        made: a build leased since stays in `run`.
+        made: a build leased since is left out of `stop` (its worker keeps running; it is in `run`
+        from the next answer).
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }

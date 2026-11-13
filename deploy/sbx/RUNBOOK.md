@@ -791,11 +791,13 @@ workers that start together share the host's disk. So the agent starts at most
 - **Placement keeps a build on the host already running its worker** (no start at all; sticky),
   whether or not that host reports its memory; a graced build leased again stays there too.
 - **The one change on upgrade:** a host whose agent is upgraded, with no new settings and whatever
-  its control plane, now starts at most 4 workers per run instead of every wanted one at once; a
-  wide activation takes several 15 s runs to start everything, and a client's first Retry-After is
-  the old 30 s until the host has measured a start. A control plane older than 1.9.0 ignores the
-  new inventory fields; an older agent sends none, and the control plane then shows no queue and
-  answers Retry-After as before.
+  its control plane, now starts at most 4 workers at once instead of every wanted one; a wide
+  activation starts in waves of `SBX_START_CONCURRENCY`, each about one start time long (a slot
+  frees when a worker attaches, or, with a control plane older than 1.9.0, after
+  `SBX_START_WINDOW_S`), so 28 builds at the default take about seven waves, many minutes, and a
+  client's first Retry-After is the old 30 s until the host has measured a start. A control plane
+  older than 1.9.0 ignores the new inventory fields; an older agent sends none, and the control
+  plane then shows no queue and answers Retry-After as before.
 
 **The idle grace** (part of cold-start pacing, openapi 1.9.0): a released worker can stay up for a
 while, so a template used again soon is warm (no memory-file read at all).
