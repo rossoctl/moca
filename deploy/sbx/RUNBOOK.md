@@ -55,6 +55,10 @@ gitignored).
    session, (guest RAM + 32) × 3 + 1024 MiB at the unit's standby depth of 2: 13408 MiB for a
    4096 MiB guest. A smaller budget is refused, naming the minimum. The worker runs
    `SBX_WORKER_BIN` (default `/usr/local/libexec/sbx/microvm-worker`, [README](README.md#2-kvm-host-side)).
+   When `<image>` was built by `deploy/sbx/template-onboarding/template-build.sh`, its template record
+   (`/srv/sbx/templates/<image>.json`) is wired into the worker env (`SH_TEMPLATE_RECORD`,
+   `SANDBOX_TEMPLATE`), so the worker checks the record against its snapshot at every start; a record
+   for another worker is refused before anything is written.
    On a host run by a host agent, run it as `sudo SBX_WORKER_AT_BOOT=0 <checkout>/deploy/sbx/install-host.sh ...`:
    the worker is started once but not enabled for boot, so a reboot leaves starting workers to the
    agent's wanted state instead of starting all of them.
