@@ -594,10 +594,10 @@ func TestLeaseEventAfterAbortIsQueued(t *testing.T) {
 	}
 }
 
-// Review #4559538351: the lease fields are part of what an Exec means, so a req_id reused
-// across modes, epochs, idle timeouts or the keepalive opt-in runs fresh instead of being
-// answered from the other Exec's cached terminal frame (which would skip its stale_mode check
-// and its lease-event delivery).
+// Review #4559538351: mode, epoch and workspace are part of what an Exec means, so a req_id
+// reused across modes, epochs or workspaces runs fresh instead of being answered from the other
+// Exec's cached terminal frame (which would skip its stale_mode check and its lease-event
+// delivery, or hand one sandbox another's result).
 func TestReqIDReusedAcrossLeaseFieldsRunsFresh(t *testing.T) {
 	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
 	for _, tc := range []struct {
@@ -607,8 +607,7 @@ func TestReqIDReusedAcrossLeaseFieldsRunsFresh(t *testing.T) {
 	}{
 		{"mode", &pb.Exec{Mode: pb.SandboxMode_SANDBOX_MODE_PER_EXEC}, &pb.Exec{Mode: lease}},
 		{"mode_epoch", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 2}},
-		{"idle_timeout_s", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 1, IdleTimeoutS: 600}},
-		{"keepalive", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 1, Keepalive: true}},
+		{"workspace_key", &pb.Exec{Mode: lease, ModeEpoch: 1}, &pb.Exec{Mode: lease, ModeEpoch: 1, WorkspaceKey: "leaf-b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newFakeStream()
@@ -638,6 +637,52 @@ func TestReqIDReusedAcrossLeaseFieldsRunsFresh(t *testing.T) {
 			})
 			if r.count() != 2 {
 				t.Errorf("runner calls = %d, want 2: an Exec differing only in %s was answered from the cache",
+					r.count(), tc.name)
+			}
+		})
+	}
+}
+
+// The other side of the fingerprint's scope: a retry that differs only in idle_timeout_s or
+// keepalive -- as one sent under a re-minted token can, after a lowered idle ceiling -- is the
+// same Exec, answered from the cache rather than run a second time.
+func TestRetryDifferingInIdleOrKeepaliveIsAnsweredFromCache(t *testing.T) {
+	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
+	for _, tc := range []struct {
+		name   string
+		second *pb.Exec
+	}{
+		{"idle_timeout_s", &pb.Exec{IdleTimeoutS: 600}},
+		{"keepalive", &pb.Exec{IdleTimeoutS: 1800, Keepalive: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStream()
+			r := &scriptedRunner{code: 0}
+			s := session.New(testConfig(), r)
+			serve(t, s, st)
+			waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+			exec := func(overlay *pb.Exec) *pb.Exec {
+				e := &pb.Exec{ReqId: 62, Command: "echo x >> log", TimeoutS: 10, WorkspaceKey: "leaf-a", Mode: lease, ModeEpoch: 1}
+				proto.Merge(e, overlay)
+				return e
+			}
+			st.exec(exec(&pb.Exec{IdleTimeoutS: 1800}))
+			waitFor(t, "first terminal", func() bool { return terminalFor(st.sent(), 62) != nil })
+			settle() // the retry must reach the cache, not the in-flight slot
+
+			st.exec(exec(tc.second))
+			waitFor(t, "the cached replay", func() bool {
+				n := 0
+				for _, f := range st.sent() {
+					if f.GetEnd() != nil && f.GetEnd().GetReqId() == 62 {
+						n++
+					}
+				}
+				return n >= 2
+			})
+			if r.count() != 1 {
+				t.Errorf("runner calls = %d, want 1: a retry differing only in %s re-ran the command",
 					r.count(), tc.name)
 			}
 		})

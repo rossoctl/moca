@@ -98,18 +98,15 @@ func TestFingerprintSeparatesStreaming(t *testing.T) {
 	}
 }
 
-// The lease fields are in scope too (review #4559538351): two Execs identical except for
-// mode, mode_epoch, idle_timeout_s or keepalive are different Execs. Each field is
-// fixed-width, so a value cannot slide into its neighbour: mode 1 at epoch 0 is not mode 0
-// at epoch 1.
-func TestFingerprintSeparatesLeaseFields(t *testing.T) {
+// mode and mode_epoch are in scope too (review #4559538351): two Execs identical except for
+// either are different Execs. Each is fixed-width, so a value cannot slide into its
+// neighbour: mode 1 at epoch 0 is not mode 0 at epoch 1.
+func TestFingerprintSeparatesModeAndEpoch(t *testing.T) {
 	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
 	ref := &pb.Exec{Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3}
 	for name, other := range map[string]*pb.Exec{
-		"mode":           {Command: "true", TimeoutS: 10, Mode: pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, ModeEpoch: 3},
-		"mode_epoch":     {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 4},
-		"idle_timeout_s": {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3, IdleTimeoutS: 600},
-		"keepalive":      {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 3, Keepalive: true},
+		"mode":       {Command: "true", TimeoutS: 10, Mode: pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, ModeEpoch: 3},
+		"mode_epoch": {Command: "true", TimeoutS: 10, Mode: lease, ModeEpoch: 4},
 	} {
 		if session.Fingerprint(ref) == session.Fingerprint(other) {
 			t.Errorf("fingerprint ignores %s", name)
@@ -125,6 +122,22 @@ func TestFingerprintSeparatesLeaseFields(t *testing.T) {
 	}
 }
 
+// idle_timeout_s and keepalive are NOT in scope: neither changes what an Exec does, and both
+// can differ between a genuine retry and its original when the token was re-minted in between
+// (a lowered idle ceiling clamps the claim). Hashing them would rerun a non-idempotent command.
+func TestFingerprintIgnoresIdleTimeoutAndKeepalive(t *testing.T) {
+	lease := pb.SandboxMode_SANDBOX_MODE_LEASE
+	ref := &pb.Exec{Command: "echo x >> log", TimeoutS: 10, Mode: lease, ModeEpoch: 3, IdleTimeoutS: 1800}
+	for name, retry := range map[string]*pb.Exec{
+		"idle_timeout_s": {Command: "echo x >> log", TimeoutS: 10, Mode: lease, ModeEpoch: 3, IdleTimeoutS: 600},
+		"keepalive":      {Command: "echo x >> log", TimeoutS: 10, Mode: lease, ModeEpoch: 3, IdleTimeoutS: 1800, Keepalive: true},
+	} {
+		if session.Fingerprint(ref) != session.Fingerprint(retry) {
+			t.Errorf("fingerprint depends on %s: a retry after a re-mint would rerun the command", name)
+		}
+	}
+}
+
 // workspace_key is in scope: one worker serves many sandboxes, so a req_id reused across two
 // workspaces with an otherwise identical Exec must not be answered from the other sandbox's
 // cache entry -- that would hand one sandbox another's result.
@@ -134,11 +147,15 @@ func TestFingerprintSeparatesWorkspaceKey(t *testing.T) {
 	if session.Fingerprint(a) == session.Fingerprint(b) {
 		t.Error("fingerprint ignores workspace_key")
 	}
-	// Length-prefixed: the key cannot borrow bytes from the command.
-	c := &pb.Exec{Command: "ab", WorkspaceKey: "c"}
-	d := &pb.Exec{Command: "a", WorkspaceKey: "bc"}
+	// Bytes moved between stdin and the key give a different fingerprint. This pins the
+	// prefixes of the fields BEFORE the key (stdin's), not the key's own: every field after the
+	// key is fixed-width, so the encoding would stay injective without it, and no input can
+	// tell. The key is length-prefixed anyway, so it stays injective when a variable-width
+	// field is added after it.
+	c := &pb.Exec{Command: "cat", Stdin: []byte("ab"), WorkspaceKey: "c"}
+	d := &pb.Exec{Command: "cat", Stdin: []byte("a"), WorkspaceKey: "bc"}
 	if session.Fingerprint(c) == session.Fingerprint(d) {
-		t.Error("fingerprint aliases command and workspace_key: the encoding is not injective")
+		t.Error("fingerprint aliases stdin and workspace_key: the encoding is not injective")
 	}
 }
 

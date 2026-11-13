@@ -138,9 +138,9 @@ type slot struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	// fp fingerprints the exec occupying this slot. accept needs it to tell a
-	// genuine redelivery of THIS exec (same command+stdin, terminal frame already
-	// owed) from a req_id collision between harness replicas carrying different
-	// work under the same id (spec §3.1) — the two demand opposite handling.
+	// genuine redelivery of THIS exec (the same Exec by Fingerprint, terminal frame
+	// already owed) from a req_id collision carrying different work under the same id
+	// (spec §3.1) — the two demand opposite handling.
 	fp [32]byte
 }
 
@@ -647,16 +647,18 @@ func (s *Session) accept(ctx context.Context, c *conn, e *pb.Exec) error {
 		return nil
 	case claimCollision:
 		cancel()
-		// NOT a redelivery: different command+stdin under an id already in flight,
-		// which a req_id salt collision across harness replicas still makes reachable
-		// (spec §3.1) — and the in-flight window is where it is widest, since
+		// NOT a redelivery: a different Exec (command, mode, epoch or workspace) under an
+		// id already in flight, which a req_id salt collision across harness replicas
+		// still makes reachable (spec §3.1) — and the in-flight window is where it is widest, since
 		// the cache cannot catch it while the original is incomplete. Coalescing
 		// here would swallow genuinely different work: it would never run and never
 		// get a frame at all. Refuse it instead. That cannot be a second terminal
 		// frame for the same logical exec, precisely because it is a different one.
-		log.Printf("session: req_id %d reused for a different command while the original is still "+
-			"in flight; refusing it (req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
-		if !c.trySend(errFrame(reqID, "req_id collision: a different command is already in flight for this id")) {
+		log.Printf("session: req_id %d reused for a different Exec (command, mode, epoch or workspace) "+
+			"while the original is still in flight; refusing it (req_id is only probabilistically "+
+			"unique across replicas — see spec §3.1)", reqID)
+		if !c.trySend(errFrame(reqID, "req_id collision: a different Exec (command, mode, epoch or "+
+			"workspace) is already in flight for this id")) {
 			return ErrEgressWedged
 		}
 		return nil
@@ -684,8 +686,8 @@ func (s *Session) enqueueAdmitted(
 	c *conn, e *pb.Exec, reqID uint64, cancel context.CancelFunc, collision bool,
 ) error {
 	if collision {
-		log.Printf("session: req_id %d reused for a different command; running it fresh "+
-			"(req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
+		log.Printf("session: req_id %d reused for a different Exec (command, mode, epoch or workspace); "+
+			"running it fresh (req_id is only probabilistically unique across replicas — see spec §3.1)", reqID)
 	}
 
 	// Counted before the send, so a pool goroutine that finishes it at once cannot go below zero.
