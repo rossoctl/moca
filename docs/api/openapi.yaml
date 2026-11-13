@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.10.0
+  version: 1.11.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -99,6 +99,7 @@ components:
             - token_required
             - token_invalid
             - token_expired
+            - grant_invalid
             - invalid_grant
             - subject_conflict
             - unauthorized
@@ -158,7 +159,7 @@ components:
           type: string
           description: |
             sandbox_terminated: deleted | expired. no_active_slot: `memory` when no holder under its
-            active limit has the memory for the worker (1.9.0; absent at the active limit, as
+            active limit has the memory for the worker (1.10.0; absent at the active limit, as
             before). template_unavailable: `memfile_mismatch` when every holder reports the
             snapshot's memory file is not the guest's size. template_not_active with readiness
             `unavailable`: the build's readinessReason
@@ -181,6 +182,54 @@ components:
           description: |
             template_unavailable, no_active_slot and template_not_active: the build's readiness
             (template lifecycle spec §3.3)
+    TurnGrants:
+      type: object
+      description: |
+        One turn's pair of session grants (MI1 §6.1). Returned by both `/internal/turn-grants` and
+        `/internal/grants/refresh`, which is what makes refresh a drop-in for the caller.
+
+        Each grant is a compact Ed25519 JWS with header `typ: moca-grant+jwt`, signed with the
+        control plane's GRANT ring — a different key from the session-token signer, so a session
+        token can never pass as a grant even where an `aud` check is forgotten. The inference half
+        carries `aud: moca-inference` and claims `iss sub tenant sid cred iat exp jti turn_exp`; the
+        sandbox half carries `aud: moca-sandbox` and `iss sub tenant sid cfg egress iat exp jti
+        turn_exp`. `cred` is a credential NAME (`''` when the session named none) and `egress` a
+        list of names — NO SECRET VALUE IS EVER IN A GRANT (§7.2). Each half gets its own `jti`:
+        they are separate capabilities presented to separate enforcement points.
+
+        `moca-sandbox` is also `sandbox-token.ts`'s audience, so `aud` alone does not distinguish a
+        sandbox token from a sandbox grant; `typ` does, and every verifier pins its own.
+      required: [inferenceGrant, sandboxGrant, turnExp, exp]
+      properties:
+        inferenceGrant: { type: string, description: 'compact JWS, aud moca-inference' }
+        sandboxGrant:
+          type: string
+          description: |
+            compact JWS, aud moca-sandbox. Its `egress` claim lists the session OWNER's
+            `sandbox-egress` credential names as of this mint — by name, never by value — so one
+            added mid-turn appears at the next refresh. The token endpoint narrows them to the
+            destination's own hosts, which makes the claim an upper bound rather than a grant of
+            access to every name in it.
+        turnExp:
+          type: integer
+          description: |
+            epoch SECONDS; the absolute cap on this turn (turn start + `MOCA_TURN_MAX_S`, default
+            1800). Carried forward unchanged by every refresh, so refreshing cannot extend a turn.
+            A refresh past it is refused with `401 grant_invalid`. A fresh call to
+            `/internal/turn-grants` does start a new window — `turnExp` is anchored to the call, and
+            no turn is yet identified to anchor to — so it caps a turn's refresh chain, not a
+            session.
+        exp:
+          type: integer
+          description: |
+            epoch SECONDS; when both grants expire, `min(iat + MOCA_GRANT_TTL_S, turnExp)` with
+            `MOCA_GRANT_TTL_S` defaulting to 300. Workers refresh at half-life. With no revocation
+            list built (§6.2 builds none deliberately), this lifetime IS the revocation latency.
+        cfg:
+          type: string
+          description: |
+            the config-bundle digest bound to the session, echoing the sandbox grant's `cfg` claim;
+            absent when the session binds no bundle
     Session:
       type: object
       required: [sessionId, owner, tenant, createdAt, state, turns]
@@ -419,7 +468,7 @@ components:
       type: string
       enum: [not_held, no_slot, memory, memfile_mismatch]
       description: |
-        present only with readiness `unavailable` (1.9.0): why placement left the build waiting.
+        present only with readiness `unavailable` (1.10.0): why placement left the build waiting.
         `not_held` no host holds its snapshot; `no_slot` every holder is at its active limit;
         `memory` a holder under its limit has no memory headroom for the worker now (template
         lifecycle spec §6.2: its floor, a pressure brake, or an inventory older than 60 s);
@@ -457,7 +506,7 @@ components:
         queued:
           type: boolean
           description: |
-            1.10.0 (template lifecycle spec §6.5), present only with readiness `activating` on a host
+            1.11.0 (template lifecycle spec §6.5), present only with readiness `activating` on a host
             whose agent reports its start limit: true while the build waits for a start slot (its
             place in the host's start line is beyond the host's startConcurrency), false once its
             worker is starting. A queued build stays `activating` longer than before: poll with a
@@ -466,20 +515,20 @@ components:
           type: integer
           minimum: 1
           description: |
-            1.10.0, with `queued`: the build's 1-based place among its host's placed, wanted builds
+            1.11.0, with `queued`: the build's 1-based place among its host's placed, wanted builds
             not attached yet, first leased first; the first startConcurrency are starting
         graced:
           type: boolean
           enum: [true]
           description: |
-            1.10.0 (§6.5), present only while the build is in its host's idle grace: no lease left,
+            1.11.0 (§6.5), present only while the build is in its host's idle grace: no lease left,
             and its worker kept running (readiness `deactivating`) until `gracedUntil`, unless a
             wanted build needs its slot or a release with `stopNow` ends it. A use within the grace
             finds it active, with no cold start
         gracedUntil:
           type: integer
           description: |
-            1.10.0, with `graced`: epoch seconds the grace ends (its last lease's end plus the host's
+            1.11.0, with `graced`: epoch seconds the grace ends (its last lease's end plus the host's
             idleGraceSeconds)
         capacity:
           type: [object, 'null']
@@ -1820,9 +1869,9 @@ paths:
                       live sandbox; graced builds are counted apart, in `graced`). Empty means no host
                       has reported, never that there is no limit. A host whose last inventory is over 6
                       minutes old is left out, here and in placement, until it reports again. `memory`
-                      (1.9.0) only from an agent that reports it: then placement also needs the memory
-                      for each new worker. `start` (1.10.0) only from an agent that reports its start
-                      limit; `idleGraceSeconds` and `graced` (1.10.0) only from an agent that sets an idle
+                      (1.10.0) only from an agent that reports it: then placement also needs the memory
+                      for each new worker. `start` (1.11.0) only from an agent that reports its start
+                      limit; `idleGraceSeconds` and `graced` (1.11.0) only from an agent that sets an idle
                       grace
                     items:
                       type: object
@@ -1891,7 +1940,7 @@ paths:
                         start:
                           type: object
                           description: |
-                            1.10.0 (template lifecycle spec §6.5), only from an agent that reports
+                            1.11.0 (template lifecycle spec §6.5), only from an agent that reports
                             its start limit: at most `concurrency` workers start at once there
                             (SBX_START_CONCURRENCY); `seconds` its measured mean cold start, start
                             to attach (null before one is done); `starting` and `queued` its start
@@ -1907,12 +1956,12 @@ paths:
                           type: integer
                           minimum: 1
                           description: |
-                            1.10.0 (§6.5), only from an agent that sets one (SBX_IDLE_GRACE_S above
+                            1.11.0 (§6.5), only from an agent that sets one (SBX_IDLE_GRACE_S above
                             0): how long a released build's worker is kept running there
                         graced:
                           type: integer
                           description: |
-                            1.10.0, beside idleGraceSeconds: the builds in the host's idle grace now
+                            1.11.0, beside idleGraceSeconds: the builds in the host's idle grace now
                             (no lease, worker kept running). Each still holds its whole pinned
                             memory file, counted in `memory.usedMib`, and a slot of `active.limit`
                             until a wanted build needs it
@@ -2270,7 +2319,7 @@ paths:
         any. A build stays wanted while another subject's lease stands; with none left its host
         agent stops the worker once no live sandbox runs on it. Needs SH_PROVENANCE_DIR.
 
-        On a host with an idle grace (SBX_IDLE_GRACE_S, 1.10.0, §6.5) the running worker of a build
+        On a host with an idle grace (SBX_IDLE_GRACE_S, 1.11.0, §6.5) the running worker of a build
         left with no lease is kept for that long after the release, so a use soon after is warm.
         `stopNow: true` skips the grace: once no lease is left (after this release), the worker is
         stopped at the host's next poll, as on a host with no grace; a build already in its grace
@@ -2290,7 +2339,7 @@ paths:
                 stopNow:
                   type: boolean
                   description: |
-                    1.10.0, skip the host's idle grace (force a cold start next time); not a boolean
+                    1.11.0, skip the host's idle grace (force a cold start next time); not a boolean
                     is `400 invalid_request`
       responses:
         '200':
@@ -2412,16 +2461,16 @@ paths:
         last inventory in its own process; the agent re-sends it on every poll. A host whose last
         inventory is over 6 minutes old is left out of placement until it reports again.
 
-        `memory` (1.9.0) is optional: an agent before it sends none, and its host is placed by
+        `memory` (1.10.0) is optional: an agent before it sends none, and its host is placed by
         `activeLimit` alone, as before; a control plane before it ignores it. Each field is
         optional and a malformed one is dropped. `memTotalMib`, `memAvailableMib` and
         `memFloorMib` are used only all three together.
 
-        `limits.startConcurrency` and `limits.startSeconds` (1.10.0, §6.5) are optional: the agent's
+        `limits.startConcurrency` and `limits.startSeconds` (1.11.0, §6.5) are optional: the agent's
         start limit (SBX_START_CONCURRENCY, a whole number from 1) and the mean of its last cold
         starts, start to attach, in seconds (absent before one is done; used only beside
         startConcurrency). Without startConcurrency (an older agent) its builds have no place in a
-        start line, and Retry-After is as before. `limits.idleGraceSeconds` (1.10.0, §6.5) is
+        start line, and Retry-After is as before. `limits.idleGraceSeconds` (1.11.0, §6.5) is
         optional: SBX_IDLE_GRACE_S, a whole number of seconds, 0 (off) to 86400. Absent (an older
         agent), malformed or 0: no grace, as before.
       security: [{ hostToken: [] }]
@@ -2460,18 +2509,18 @@ paths:
                       minimum: 1
                       description: |
                         SBX_START_CONCURRENCY (default 4), at most this many workers starting at
-                        once (1.10.0)
+                        once (1.11.0)
                     startSeconds:
                       type: number
                       description: |
-                        the mean of the last (up to 10) cold starts, start to attach, seconds (1.10.0)
+                        the mean of the last (up to 10) cold starts, start to attach, seconds (1.11.0)
                     idleGraceSeconds:
                       type: integer
                       minimum: 0
                       maximum: 86400
                       description: |
                         SBX_IDLE_GRACE_S (default 0, off), how long a released build's worker is
-                        kept running (1.10.0)
+                        kept running (1.11.0)
                 memory:
                   type: object
                   description: what the host agent reads of its memory (template lifecycle spec §6.2)
@@ -2675,7 +2724,7 @@ paths:
         sandbox is in neither list (it drains first, and counts against the host's `activeLimit`
         meanwhile). The agent starts only workers already installed on the host.
 
-        `run` is in the wanted order, first leased first (1.10.0, §6.5: the order the agent starts
+        `run` is in the wanted order, first leased first (1.11.0, §6.5: the order the agent starts
         them in, at most its start limit at once). On a host with an idle grace the graced builds
         follow the wanted ones in `run`, soonest grace end first, and are listed in `graced`. A
         graced worker displaced for a wanted build is re-checked for a lease when the answer is
@@ -2699,21 +2748,21 @@ paths:
                     type: array
                     items: { type: string }
                     description: |
-                      1.10.0 (§6.5): the build ids of `run` whose worker is not attached to the
+                      1.11.0 (§6.5): the build ids of `run` whose worker is not attached to the
                       relay (its presence, which readiness reads), in `run`'s order. The agent
                       counts those whose unit is active as starting, for SBX_START_WINDOW_S at
                       most from its start (past it a worker is stuck and holds no start slot), and
-                      starts at most SBX_START_CONCURRENCY less those. Absent from a control plane before 1.10.0,
+                      starts at most SBX_START_CONCURRENCY less those. Absent from a control plane before 1.11.0,
                       or when the presence cannot be read: the agent then counts its own recent
                       starts (SBX_START_WINDOW_S).
                   graced:
                     type: array
                     items: { type: string }
                     description: |
-                      1.10.0 (§6.5), only for a host whose agent reports an idle grace: the build
+                      1.11.0 (§6.5), only for a host whose agent reports an idle grace: the build
                       ids of `run` with no lease, kept running in the grace. The agent never starts
                       one (a grace keeps a running worker) and counts those it runs in its summary.
-                      Absent from a control plane before 1.10.0, or for a host with no grace.
+                      Absent from a control plane before 1.11.0, or for a host with no grace.
         '400':
           description: '`invalid_request`: this deployment stores no templates'
           content:
@@ -2785,10 +2834,10 @@ paths:
         refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
         `activate` record says `reason: first_use`; not taken again while the caller holds a live
         lease on the build, so a retry writes nothing) and answers `409 template_not_active` with
-        `readiness` and `Retry-After`; retry after the wait. Retry-After is 30 s, or (1.10.0, §6.5)
+        `readiness` and `Retry-After`; retry after the wait. Retry-After is 30 s, or (1.11.0, §6.5)
         the build's place in its host's start line, when the host's agent reports its start limit
         and a measured start time: `ceil(ceil(queuePosition / startConcurrency) × startSeconds)`. A
-        build in its host's idle grace (1.10.0) is served at once. With `activate: false` nothing is
+        build in its host's idle grace (1.11.0) is served at once. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
         is refused. Without template hosts the create succeeds as before, and so it does on a template
@@ -3470,6 +3519,143 @@ paths:
           description: |
             `redis_unavailable` when the record cannot be read, or `credential_unavailable` when the
             credential store cannot be reached. Retryable, unlike the 404.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /internal/turn-grants:
+    post:
+      operationId: issueTurnGrants
+      summary: Data-plane only — mint a turn's two session grants
+      description: |
+        Not part of the public surface. MI1 §6.2's turn-start call: the worker presents the session
+        token it was handed with the turn plus the shared `SH_EXCHANGE_TOKEN`, and receives the
+        turn's two grants.
+
+        A GRANT IS NOT A CREDENTIAL. It is a short-lived signed capability that must be spent at an
+        enforcement point — `cred` names the session's inference credential and `egress` lists its
+        `sandbox-egress` credential names (§7.2); no secret value is ever returned. That is the
+        difference from `/internal/credentials`, which §6.2 says this route eventually replaces.
+
+        **Mounted only when `MOCA_GRANT_SIGNING_KEY` is configured.** Without it the path is
+        genuinely unrouted and answers `404 not_found` before the body is parsed (ADR-0045).
+        Nothing redeems a grant yet — the `moca-egress` inference listener and the token endpoint
+        (§6.3, §8.6) are later slices — so `/internal/credentials` and `/internal/turn-credentials`
+        both stay exactly as they are, and the async tenancy gate stays shut.
+      security: [{ exchangeToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: |
+                    the SESSION token presented by the caller. An api token is refused with
+                    `token_invalid`: the grants are about one session, and a session token is the
+                    only kind that names one.
+      responses:
+        '200':
+          description: the turn's two grants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnGrants' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: |
+            `session_not_found` for an unknown session, a session the presented token's subject does
+            not own, and a tombstoned one — one answer for all three, so this route is no more of an
+            existence oracle than `/internal/credentials`. Also a bare `not_found` when the
+            deployment configured no grant signing key, in which case the path is not mounted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: |
+            `internal_error`: the audit write failed with an untyped error. The grant is refused
+            rather than issued off the books — that audit entry is the only record a capability
+            left the control plane.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`redis_unavailable`: the session record or the audit stream is unreachable.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /internal/grants/refresh:
+    post:
+      operationId: refreshTurnGrants
+      summary: Data-plane only — re-mint a turn's grants with a later expiry
+      description: |
+        Not part of the public surface. MI1 §6.2's mid-turn call: the worker presents a grant it
+        already holds — either audience — plus the shared `SH_EXCHANGE_TOKEN`, and receives both
+        halves again with a new `exp`. Workers refresh at half-life.
+
+        `turnExp` is carried forward UNCHANGED, because it is an absolute cap: refreshing cannot
+        extend a turn no matter how many times it happens. Past `turnExp` the refresh is refused
+        outright rather than clamped, and a tombstoned session stops refreshing (§6.2).
+
+        The claims are re-derived from the session record rather than copied from the presented
+        grant. §6.2 says "same claims, new exp", but an inference grant carries no `cfg`/`egress`
+        and a sandbox grant no `cred`, so echoing cannot reconstruct the other half — and
+        re-reading makes a mid-turn credential or bundle change take effect at the next refresh,
+        which is strictly tighter.
+
+        **Mounted only when `MOCA_GRANT_SIGNING_KEY` is configured**, as above.
+      security: [{ exchangeToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grant]
+              properties:
+                grant:
+                  type: string
+                  description: |
+                    either of the turn's current grants. A separate field from the issue route's
+                    `token` deliberately: the two carry different credentials to different
+                    verifiers, and a worker that confused them gets an `invalid_request` naming the
+                    field rather than a `grant_invalid` naming nothing.
+      responses:
+        '200':
+          description: the same two grants with a new `exp` and an unchanged `turnExp`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnGrants' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: |
+            `unauthorized` when the shared bearer is missing or wrong. `grant_invalid` for EVERY way
+            the presented grant can fail: bad signature, `alg: none` or any non-EdDSA alg, wrong
+            `typ` (a session token presented here), wrong `aud`, unknown `kid`, past `exp`, or past
+            `turnExp`. One code on purpose (§6.3): the caller's only move on any of them is to
+            re-exchange at `/internal/turn-grants`, so splitting the code the way the session
+            token's `token_invalid`/`token_expired` are split would buy a caller nothing. The
+            `message` does name the failed check, for the operator reading the log — the route is
+            behind the shared bearer, so no untrusted holder of a tampered grant reaches it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: |
+            `session_not_found` for an unknown, unowned or tombstoned session — the same answer the
+            issue route gives. Also a bare `not_found` when no grant signing key is configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: '`internal_error`: the audit write failed with an untyped error.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`redis_unavailable`: the session record or the audit stream is unreachable.'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

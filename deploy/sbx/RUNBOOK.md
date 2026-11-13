@@ -882,7 +882,7 @@ pending)`, `used` being its running workers' cost, their VMs' committed memory a
   set the floor at or above lease mode's reclaim target.
 - **Version skew, both ways:** an agent older than memory-aware placement sends no `memory`, and
   the control plane places that host by `SBX_ACTIVE_LIMIT` alone, as before. A control plane older
-  than it (openapi 1.9.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
+  than it (openapi 1.10.0) ignores the field and places by `SBX_ACTIVE_LIMIT` alone; the agent still
   refuses to start a build whose memory file does not match. Upgrade either first; list both in the
   rollout.
 
@@ -900,7 +900,7 @@ workers that start together share the host's disk. So the agent starts at most
   refused** (exit 2, before any call), as is a leading zero or anything that is not a number.
 - **Where "starting" comes from:** the control plane's wanted answer lists, in `starting`, the
   builds placed on this host whose worker the relay does not show attached. The limit is the
-  agent's, so it holds **with an older control plane too** (openapi before 1.10.0, no `starting`):
+  agent's, so it holds **with an older control plane too** (openapi before 1.11.0, no `starting`):
   the agent then counts as starting the workers it started less than `SBX_START_WINDOW_S` ago
   (default 300) that are still running and wanted. Its starts are kept in `/srv/sbx/start-times`
   (0600).
@@ -936,13 +936,13 @@ workers that start together share the host's disk. So the agent starts at most
 - **The one change on upgrade:** a host whose agent is upgraded, with no new settings and whatever
   its control plane, now starts at most 4 workers at once instead of every wanted one; a wide
   activation starts in waves of `SBX_START_CONCURRENCY`, each about one start time long (a slot
-  frees when a worker attaches, or, with a control plane older than 1.10.0, after
+  frees when a worker attaches, or, with a control plane older than 1.11.0, after
   `SBX_START_WINDOW_S`), so 28 builds at the default take about seven waves, many minutes, and a
   client's first Retry-After is the old 30 s until the host has measured a start. A control plane
-  older than 1.10.0 ignores the new inventory fields; an older agent sends none, and the control
+  older than 1.11.0 ignores the new inventory fields; an older agent sends none, and the control
   plane then shows no queue and answers Retry-After as before.
 
-**The idle grace** (part of cold-start pacing, openapi 1.10.0): a released worker can stay up for a
+**The idle grace** (part of cold-start pacing, openapi 1.11.0): a released worker can stay up for a
 while, so a template used again soon is warm (no memory-file read at all).
 
 - **The setting:** `SBX_IDLE_GRACE_S` in `host-agent.env` (0600), never in argv. **Default 0: off**,
@@ -983,7 +983,7 @@ while, so a template used again soon is warm (no memory-file read at all).
   until a wanted build needs one. A host over its memory with its graced workers lets the
   soonest-ending go first.
 - **Version skew:** an agent without the setting reports no `idleGraceSeconds`, which the control
-  plane takes as 0 (off). A control plane older than 1.10.0 ignores the field, sends no `graced`,
+  plane takes as 0 (off). A control plane older than 1.11.0 ignores the field, sends no `graced`,
   and stops released workers as before; the agent then just applies `stop`. **Roll out the control
   plane before setting `SBX_IDLE_GRACE_S` on a host**: the order is the control plane, then the
   agent, then the setting.

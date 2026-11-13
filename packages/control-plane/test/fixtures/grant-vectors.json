@@ -1,0 +1,257 @@
+{
+  "note": "MI1 §12.2 cross-language grant vectors. Verifier-side only: the private key was generated for this file and thrown away, so nothing here can mint. Each vector carries `segments`, the compact JWS joined with \".\" -- a whole token would be flagged by every secret scanner that walks this repo, and these are public by construction, so the join is the readers job (one line in any language). A verifier must accept exactly the `expect: accept` vectors under `kid`/`publicKeyBase64`, at each vectors own `now` (epoch seconds), with `typ: moca-grant+jwt` and `iss: moca-control-plane-grant`.",
+  "typ": "moca-grant+jwt",
+  "issuer": "moca-control-plane-grant",
+  "kid": "c7fc3b2ca8bbff5e",
+  "publicKeyBase64": "MCowBQYDK2VwAyEAIFPqlQdmIHycU4SqcUcJnixMowUiUm40PkqgRNfrBwg=",
+  "vectors": [
+    {
+      "name": "inference-grant",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "accept",
+      "claims": {
+        "iss": "moca-control-plane-grant",
+        "sub": "github:1234",
+        "tenant": "github:1234",
+        "sid": "sid-vectors",
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "turn_exp": 1800001800,
+        "aud": "moca-inference",
+        "cred": "my-anthropic",
+        "jti": "jti-inference-1"
+      },
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "sandbox-grant-with-cfg",
+      "aud": "moca-sandbox",
+      "now": 1800000001,
+      "expect": "accept",
+      "claims": {
+        "iss": "moca-control-plane-grant",
+        "sub": "github:1234",
+        "tenant": "github:1234",
+        "sid": "sid-vectors",
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "turn_exp": 1800001800,
+        "aud": "moca-sandbox",
+        "egress": ["corp-proxy", "npm-registry"],
+        "cfg": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "jti": "jti-sandbox-1"
+      },
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2Etc2FuZGJveCIsImVncmVzcyI6WyJjb3JwLXByb3h5IiwibnBtLXJlZ2lzdHJ5Il0sImNmZyI6InNoYTI1NjphYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwianRpIjoianRpLXNhbmRib3gtMSJ9",
+        "cRAfQdS6-1sG9GU422J1vl3wUz008C3HCoW9YpP13ZnUw2XtbJO6psa1YkdDLZ6tzYz6OH_ZA36efGo4-sh7BA"
+      ]
+    },
+    {
+      "name": "sandbox-grant-no-cfg-no-egress",
+      "aud": "moca-sandbox",
+      "now": 1800000001,
+      "expect": "accept",
+      "claims": {
+        "iss": "moca-control-plane-grant",
+        "sub": "github:1234",
+        "tenant": "github:1234",
+        "sid": "sid-vectors",
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "turn_exp": 1800001800,
+        "aud": "moca-sandbox",
+        "egress": [],
+        "jti": "jti-sandbox-2"
+      },
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2Etc2FuZGJveCIsImVncmVzcyI6W10sImp0aSI6Imp0aS1zYW5kYm94LTIifQ",
+        "lJEX1COpX2azrVwAc41_EVxAdxmZ1qDrBhi6maCTJlatwsRS04Ugi3rhOiDj7FZBXeTGMT6YhVB6X0beGjC4Bw"
+      ]
+    },
+    {
+      "name": "valid-through-exp",
+      "aud": "moca-inference",
+      "now": 1800000300,
+      "expect": "accept",
+      "claims": {
+        "iss": "moca-control-plane-grant",
+        "sub": "github:1234",
+        "tenant": "github:1234",
+        "sid": "sid-vectors",
+        "iat": 1800000000,
+        "exp": 1800000300,
+        "turn_exp": 1800001800,
+        "aud": "moca-inference",
+        "cred": "my-anthropic",
+        "jti": "jti-inference-1"
+      },
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "expired-one-second-past-exp",
+      "aud": "moca-inference",
+      "now": 1800000301,
+      "expect": "reject",
+      "reason": "expired, with no clock leeway",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "past-turn-exp-though-exp-is-future",
+      "aud": "moca-inference",
+      "now": 1800000061,
+      "expect": "reject",
+      "reason": "turn_exp is an absolute cap, checked separately from exp",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDYwMCwidHVybl9leHAiOjE4MDAwMDAwNjAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "IhWYPEJT9xzJI0UtADMNW3DxYc9njNwnlDkrGqoRoVTrWG-EJsf_XkMsMWhG8OpqrDAckyfxfE8zosFZNb13BA"
+      ]
+    },
+    {
+      "name": "wrong-audience",
+      "aud": "moca-sandbox",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "an inference grant presented at the sandbox enforcement point",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "wrong-issuer",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "iss is not the grant ring issuer",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "VcXsE_Vg2J76cZHsokqtc2M-TunPNGmqFM0s9ZlPLsy1ftYnu_eb-oGZnrSDZPbrhV0w39llPgtmDTY98v5eAA"
+      ]
+    },
+    {
+      "name": "wrong-typ-session-token",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "typ JWT: a session token must never pass as a grant (MI1 6.1)",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImM3ZmMzYjJjYThiYmZmNWUifQ",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "jcKmlWj_nZLUReXyXGvTQOpQfRnM63VQKcKOxzX3SrqcspbRxwnglmFF9ilb7AlAhJmL2KuwDkrdi-Gl3eNRAg"
+      ]
+    },
+    {
+      "name": "wrong-typ-sandbox-token",
+      "aud": "moca-sandbox",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "typ moca-sandbox+jwt shares aud with the sandbox grant; only typ separates them",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2Etc2FuZGJveCtqd3QiLCJraWQiOiJjN2ZjM2IyY2E4YmJmZjVlIn0",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2Etc2FuZGJveCIsImVncmVzcyI6WyJjb3JwLXByb3h5IiwibnBtLXJlZ2lzdHJ5Il0sImNmZyI6InNoYTI1NjphYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwianRpIjoianRpLXNhbmRib3gtMSJ9",
+        "G1qS4KzVDkgvVtoKtVmiVN64HH3XM8xfiKCXPCQ2IWzhrfwVTOuKRqH38aH3VG8O1IFl9Y77lf_EtYL_W6_1Bw"
+      ]
+    },
+    {
+      "name": "alg-none",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "the JWT downgrade; refused before the key is looked up",
+      "segments": [
+        "eyJhbGciOiJub25lIiwidHlwIjoibW9jYS1ncmFudCtqd3QiLCJraWQiOiJjN2ZjM2IyY2E4YmJmZjVlIn0",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "bm90LWEtc2lnbmF0dXJl"
+      ]
+    },
+    {
+      "name": "alg-hs256",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "a symmetric alg naming the public key as its secret",
+      "segments": [
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "bm90LWEtc2lnbmF0dXJl"
+      ]
+    },
+    {
+      "name": "unknown-kid",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "a kid outside the ring, so no key is found",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoibm90LWluLXRoZS1yaW5nIn0",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "tampered-cred",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "the credential name swapped under a valid signature",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6InNvbWVvbmUtZWxzZXMiLCJqdGkiOiJqdGktaW5mZXJlbmNlLTEifQ",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "tampered-turn-exp",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "the turn cap extended under a valid signature",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDA5OTk5OTksImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "tampered-sub",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "another subject's id under a valid signature",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6OTk5OSIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9",
+        "UU0TPY2i3XfbnP4PcR-tFudHOplxti_JxPgvfmCn13oQfqZZxoyrE_OCp_wMqDEQA-qhZB03UXL4SFqZBRdDAQ"
+      ]
+    },
+    {
+      "name": "malformed-two-segments",
+      "aud": "moca-inference",
+      "now": 1800000001,
+      "expect": "reject",
+      "reason": "not a compact JWS",
+      "segments": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6Im1vY2EtZ3JhbnQrand0Iiwia2lkIjoiYzdmYzNiMmNhOGJiZmY1ZSJ9",
+        "eyJpc3MiOiJtb2NhLWNvbnRyb2wtcGxhbmUtZ3JhbnQiLCJzdWIiOiJnaXRodWI6MTIzNCIsInRlbmFudCI6ImdpdGh1YjoxMjM0Iiwic2lkIjoic2lkLXZlY3RvcnMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMDMwMCwidHVybl9leHAiOjE4MDAwMDE4MDAsImF1ZCI6Im1vY2EtaW5mZXJlbmNlIiwiY3JlZCI6Im15LWFudGhyb3BpYyIsImp0aSI6Imp0aS1pbmZlcmVuY2UtMSJ9"
+      ]
+    }
+  ]
+}
