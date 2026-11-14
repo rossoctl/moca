@@ -58,11 +58,28 @@
 # the drop-in, token and api CA and KEEPS the CA (snapshots are built with it). Once the drop-in
 # exists, a worker install refuses a snapshot whose manifest.json egress_ca_sha256 is not the CA's.
 #
+# SBX_WORKER_AT_BOOT (0 or 1, default 1) says whether the worker's unit is enabled for boot. With 1 a
+# host boot starts every installed worker, as before. With 0 the unit is installed and started now but
+# disabled, so a boot starts none of them: set it under a host agent, which starts and stops workers
+# from the control plane's wanted state (#796). Every re-install applies the value it is given, so a
+# unit an earlier install enabled is disabled by a re-install with 0. An empty value is refused.
+#
 # --janitor takes deploy/sbx/.generated/janitor (janitor.env, janitor.token [+ api-ca.crt]) and
 # installs the host janitor (spec §8.3): $SBX_LIBEXEC_DIR/sbx-janitor.sh, $SBX_ENV_DIR/janitor.env
 # and janitor.token (0600), sbx-janitor.service and .timer (enabled). Its files are their own
 # manifest kind, `janitor <path>`, so uninstalling the last worker leaves the janitor running (it
 # still has workspaces to free); --uninstall-janitor removes exactly them.
+#
+# Snapshot read-ahead: a worker install also sets the kernel read-ahead of the block device holding
+# $SBX_SRV to SBX_READ_AHEAD_KB (default 512; 0 leaves the device alone), so a cold start reads its
+# snapshot's memory file in larger requests. A sysfs write does not survive a reboot, so it installs
+# $SBX_LIBEXEC_DIR/sbx-read-ahead.sh (which finds the device by path at every run) and the oneshot
+# sbx-read-ahead.service (enabled, whatever SBX_WORKER_AT_BOOT says; the workers are ordered after
+# it), then runs the script once. The device's value before the first install is kept in
+# $SBX_ENV_DIR/read-ahead.orig; the last worker's uninstall (or a re-run with SBX_READ_AHEAD_KB=0)
+# writes it back and removes the three files, the manifest kind `readahead <path>`. A $SBX_SRV on no
+# block device (tmpfs, overlay), or a value the device does not take, is a warning, never a failed
+# install. The setting is device-wide: everything else on that device reads ahead as much.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,9 +90,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_ATTACH_TIMEOUT:=120}"
 : "${SBX_ATTACH_SETTLE:=5}"
 : "${SBX_BIN_DIR:=/usr/local/bin}"
+# Only an unset value defaults (no colon): an explicit empty one is refused in main, not read as 1.
+: "${SBX_WORKER_AT_BOOT=1}"
 # The worker binary the template unit runs: SBX0's own build, never deploy/microvm's /usr/local/bin
 # one (see the header).
 : "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
+# KiB, 0..16384; 0 leaves the device unchanged (and removes the unit a previous install left).
+: "${SBX_READ_AHEAD_KB:=512}"
 # moca-egress's control socket: the path inside the unit is fixed (RuntimeDirectory=moca-egress); the
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
@@ -480,6 +501,78 @@ install_units() {
   record "unit $SBX_LIBEXEC_DIR/sbx-reap-vms.sh"
 }
 
+# ---- snapshot read-ahead (see the header) ----
+read_ahead_unit() { printf '%s/sbx-read-ahead.service' "$SBX_UNIT_DIR"; }
+read_ahead_orig() { printf '%s/read-ahead.orig' "$SBX_ENV_DIR"; }
+read_ahead_helper() { printf '%s/sbx-read-ahead.sh' "$SBX_LIBEXEC_DIR"; }
+valid_read_ahead() { [[ "$1" =~ ^(0|[1-9][0-9]{0,4})$ ]] && (($1 <= 16384)); }
+
+# install_read_ahead: after install_units, before the worker starts. Never fails the install.
+install_read_ahead() {
+  local kb="$SBX_READ_AHEAD_KB" src="$SCRIPT_DIR/sbx-read-ahead.sh" q cur v unit orig helper
+  unit="$(read_ahead_unit)" orig="$(read_ahead_orig)" helper="$(read_ahead_helper)"
+  if ((kb == 0)); then
+    remove_read_ahead
+    return 0
+  fi
+  [[ -f "$src" ]] || { echo "WARNING: no $src beside this script: read-ahead not set" >&2; return 0; }
+  for v in SBX_SRV SBX_LIBEXEC_DIR SBX_UNIT_DIR SBX_ENV_DIR; do
+    [[ "${!v}" =~ $PLAIN_PATH_RE ]] ||
+      { echo "WARNING: $v='${!v}' is not a plain absolute path (it goes into a unit file): read-ahead not set" >&2; return 0; }
+  done
+  q="$("$BASH" "$src" resolve "$SBX_SRV")" ||
+    { echo "WARNING: no block device found under $SBX_SRV: read-ahead not set (SBX_READ_AHEAD_KB=0 silences this)" >&2; return 0; }
+  cur="$(cat "$q" 2>/dev/null)" || cur=''
+  [[ "$cur" =~ ^[0-9]+$ ]] || { echo "WARNING: cannot read $q: read-ahead not set" >&2; return 0; }
+  install -d -m 0700 "$SBX_ENV_DIR"
+  install -d -m 0755 "$SBX_LIBEXEC_DIR" "$SBX_UNIT_DIR"
+  # The value before the FIRST install: a re-run (with this or another value) keeps it.
+  if [[ ! -s "$orig" ]]; then
+    (umask 077 && printf '%s\n' "$cur" >"$orig")
+  fi
+  install -m 0755 "$src" "$helper"
+  {
+    printf '# Installed by deploy/sbx/install-host.sh: the read-ahead of the device holding %s (SBX0 snapshots).\n' "$SBX_SRV"
+    printf '[Unit]\nDescription=SBX0 snapshot read-ahead (%s KiB on the device holding %s)\n' "$kb" "$SBX_SRV"
+    printf 'RequiresMountsFor=%s\nBefore=sbx.slice\n\n' "$SBX_SRV"
+    printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=%s set %s %s\n\n' "$helper" "$SBX_SRV" "$kb"
+    printf '[Install]\nWantedBy=multi-user.target\n'
+  } >"$unit"
+  chmod 0644 "$unit"
+  record "readahead $helper"
+  record "readahead $orig"
+  record "readahead $unit"
+  systemctl daemon-reload
+  systemctl enable sbx-read-ahead.service
+  "$BASH" "$helper" set "$SBX_SRV" "$kb" || true
+}
+
+# remove_read_ahead: write the recorded value back, then remove what the manifest lists as readahead.
+# Only that: a host whose manifest is gone keeps whatever is there.
+remove_read_ahead() {
+  local kind path old helper
+  [[ -f "$SBX_ENV_DIR/manifest" ]] && grep -q '^readahead ' "$SBX_ENV_DIR/manifest" || return 0
+  helper="$(read_ahead_helper)"
+  [[ -f "$helper" ]] || helper="$SCRIPT_DIR/sbx-read-ahead.sh"
+  old="$(cat "$(read_ahead_orig)" 2>/dev/null)" || old=''
+  if [[ "$old" =~ ^[0-9]{1,5}$ && -f "$helper" ]]; then
+    log "restoring the read-ahead of the device holding $SBX_SRV to $old KiB"
+    "$BASH" "$helper" set "$SBX_SRV" "$old" || true
+  else
+    echo "WARNING: no recorded read-ahead to restore; the device keeps its current value until a reboot" >&2
+  fi
+  # --now: the boot started the oneshot (RemainAfterExit), so a plain disable would leave it loaded
+  # and active until the next boot; it has no ExecStop, so stopping it changes no device setting.
+  systemctl disable --now sbx-read-ahead.service || true
+  while read -r kind path; do
+    [[ "$kind" == readahead && -n "$path" ]] || continue
+    rm -f "$path"
+    drop_manifest_lines -x -e "readahead $path"
+    log "removed $path"
+  done < <(grep '^readahead ' "$SBX_ENV_DIR/manifest" || true)
+  systemctl daemon-reload || true
+}
+
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
 # W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and W_TEMPLATE.
 # It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
@@ -556,6 +649,8 @@ install_worker() {
       [[ -z "$W_RECORD" ]] || printf 'SH_TEMPLATE_RECORD=%s\nSANDBOX_TEMPLATE=%s\n' "$W_RECORD" "$W_TEMPLATE"
       printf 'SH_WORKSPACE_ROOT=%s\nSH_CHROOT_BASE=%s\n' "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
       printf 'SH_PARENT_CGROUP=sbx.slice/sbx-%s.slice\n' "$id"
+      # The verify cache under SBX0's own tree, where template-build.sh's seed writes it.
+      printf 'SH_VERIFY_CACHE_DIR=%s\n' "$SBX_SRV/verify-cache"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
     } >"$SBX_ENV_DIR/workers/$id.env"
@@ -577,9 +672,14 @@ install_worker() {
   fi
   record "worker sbx-worker@$id $SBX_ENV_DIR/workers/$id.env $SBX_UNIT_DIR/sbx-$id.slice"
   systemctl daemon-reload
-  # enable, then exactly one restart: a first install starts the unit, a re-install picks up the new
-  # env file once (enable --now followed by restart would start a fresh unit twice).
-  systemctl enable "sbx-worker@$id.service"
+  # enable (or disable, with SBX_WORKER_AT_BOOT=0), then exactly one restart: a first install starts
+  # the unit, a re-install picks up the new env file once (enable --now followed by restart would start
+  # a fresh unit twice). disable is what makes a re-install with 0 undo an earlier install's enable.
+  if [[ "$SBX_WORKER_AT_BOOT" == 1 ]]; then
+    systemctl enable "sbx-worker@$id.service"
+  else
+    systemctl disable "sbx-worker@$id.service"
+  fi
   # A worker that crash-looped into `failed` (StartLimitBurst, e.g. a missing snapshot) refuses a
   # restart with "start request repeated too quickly" until reset; a re-run after the fix is how an
   # operator brings it back (as deploy/microvm/setup-microvm.sh does).
@@ -660,6 +760,7 @@ remove_shared_units() {
     drop_manifest_lines -x -e "unit $path"
     log "removed $path (no SBX0 worker left on this host)"
   done < <(grep '^unit ' "$SBX_ENV_DIR/manifest" || true)
+  remove_read_ahead
   remove_egress
 }
 
@@ -838,10 +939,15 @@ main() {
   [[ "$MOCA_EGRESS_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     die "MOCA_EGRESS_READY_TIMEOUT='$MOCA_EGRESS_READY_TIMEOUT' must be a whole number of seconds, at least 1"
   if [[ -n "$EGRESS_BUNDLE" ]]; then install_egress_credentials; return; fi
+  valid_read_ahead "$SBX_READ_AHEAD_KB" ||
+    die "SBX_READ_AHEAD_KB='$SBX_READ_AHEAD_KB' must be a whole number of KiB from 0 (leave the device alone) to 16384"
+  [[ "$SBX_WORKER_AT_BOOT" =~ ^[01]$ ]] ||
+    die "SBX_WORKER_AT_BOOT='$SBX_WORKER_AT_BOOT' must be 1 (start the worker at boot, the default) or 0 (do not; under a host agent)"
   [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
   validate_worker
   [[ -n "$NO_EGRESS" ]] || install_egress
   install_units
+  install_read_ahead
   install_worker
 }
 
