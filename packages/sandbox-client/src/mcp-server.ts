@@ -8,12 +8,29 @@ import {
   type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import { ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
-import { sandboxTools, ToolInputError, WORKSPACE, type ToolResult } from './tools.js';
+import { ExecAbortedError, ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
+import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
+import {
+  hhmm,
+  LeaseControlError,
+  noticeLines,
+  NoticeDedupe,
+  type SandboxModeName,
+} from './lease.js';
+import {
+  LEASE_RULE,
+  sandboxTools,
+  ToolInputError,
+  WORKSPACE,
+  type LeaseCall,
+  type ToolResult,
+} from './tools.js';
 
 /**
- * The sandbox MCP server (SBX0 spec §6.4): the eight tools over one sandbox's Exec. Transport-free:
- * `mocactl sbx mcp` connects it to stdio, the tests to an in-memory pair.
+ * The sandbox MCP server (SBX0 spec §6.4): the tools over one sandbox's Exec, and its lease (plan
+ * 4): each result is prefixed with the notices of the lease events its Execs carried, `reset` ends
+ * the lease and `sandbox_info` shows it. Transport-free: `mocactl sbx mcp` connects it to stdio,
+ * the tests to an in-memory pair.
  */
 
 /** One line per tool call for the flight recorder. Never command output. */
@@ -23,7 +40,7 @@ export interface CallRecord {
   tool: string;
   /** Arrival to answer, queueing included. */
   ms: number;
-  /** Execs this call made: 1 per tool, 2 for edit, 0 for sandbox_info and any refused call. */
+  /** Execs this call made: 1 per tool, 2 for edit, 0 for sandbox_info, reset and any refused call. */
   execs: number;
   /** False for a tool error of any kind, the command's own non-zero exit included. */
   ok: boolean;
@@ -31,10 +48,30 @@ export interface CallRecord {
   error?: string;
 }
 
+/** `sandbox_info`'s text, and the sandbox's mode as the record says it now. */
+export interface SandboxInfo {
+  text: string;
+  mode: SandboxModeName;
+}
+
 export interface SandboxMcpOptions {
   exec: Exec;
-  /** `sandbox_info`'s text. Costs no Exec, and is never queued. */
-  info: () => Promise<string>;
+  /**
+   * `sandbox_info`'s text, before the lease fields, and the record's current mode, which every
+   * lease field follows; a bare string means the mode at start. Costs no Exec, and is never queued.
+   */
+  info: () => Promise<string | SandboxInfo>;
+  /** The sandbox's lease calls: `reset`, and the status `sandbox_info` shows. */
+  lease: LeaseCall;
+  /** The sandbox's mode at start, for the tool and rule texts (default per-exec). */
+  mode?: SandboxModeName;
+  /**
+   * The mode claim of the latest sandbox token minted, undefined before the first mint. When set it
+   * decides, over the record, whether `reset` and `sandbox_info` ask the lease at all: the record
+   * read at start may be stale, a token is minted from the record as it is now. Before the first
+   * mint both re-read the record through `info`.
+   */
+  leaseMode?: () => SandboxModeName | undefined;
   /** Called once per call. A recorder that throws never fails the call. */
   record?: (r: CallRecord) => void;
   /** How long a call may wait behind this server's running one before it is refused as busy. */
@@ -57,17 +94,25 @@ export const DEFAULT_BUSY_WAIT_MS = 30_000;
  * every MCP client receives them on connecting, while Claude Code does not load a CLAUDE.md that
  * `sbx up`'s own `Read` deny covers (#568).
  */
-export const sandboxRules = (ws: string): string =>
-  [
+export const sandboxRules = (ws: string, mode: SandboxModeName = 'per-exec'): string => {
+  const noBackground =
+    'Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.';
+  const leased = mode !== 'per-exec';
+  return [
     `The code lives in a remote sandbox at \`${ws}\`: use the \`sandbox\` MCP tools for everything.`,
     '',
-    '- Every tool call runs in a fresh VM, and no process survives it. Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.',
-    `- Files under \`${ws}\` persist between calls; nothing else does.`,
+    leased
+      ? `- Lease mode: ${LEASE_RULE}. ${noBackground}`
+      : `- Every tool call runs in a fresh VM, and no process survives it. ${noBackground}`,
+    leased
+      ? `- Files under \`${ws}\` persist between calls; anything else lasts at most until the guest restarts.`
+      : `- Files under \`${ws}\` persist between calls; nothing else does.`,
     '- There is no network: packages cannot be installed from the internet.',
     '- Calls run one at a time, so batch the work: read several files in one `bash` call, and run the tests in one call after editing.',
   ].join('\n');
+};
 
-/** The server's instructions for the default workspace. */
+/** The server's instructions for the default workspace in per-exec mode. */
 export const MCP_INSTRUCTIONS = sandboxRules(WORKSPACE);
 
 /** The tool error texts that are not the command's own (plan 1c R4). */
@@ -140,6 +185,8 @@ export function execFailureText(
 /** The tool error for anything a tool threw: never shown as the command's output. */
 function describe(err: unknown, expiresAt?: number): string {
   if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
+  if (err instanceof LeaseControlError)
+    return `the lease call failed (${err.code}): ${err.message}`;
   const exec = execFailureText(err);
   if (exec !== undefined) return exec;
   const gone = terminated(err);
@@ -221,13 +268,99 @@ export function line(waitMs: number, now: () => number) {
 
 export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
   const ws = o.workspace ?? WORKSPACE;
-  const tools = sandboxTools({ info: o.info, workspace: ws });
-  const byName = new Map(tools.map((t) => [t.name, t]));
+  const mode = o.mode ?? 'per-exec';
   const now = o.now ?? Date.now;
+  // One deduper per server: an event repeated on a later result is shown once (spec §5).
+  const dedupe = new NoticeDedupe();
+  let lastEnd: LeaseEvent | undefined;
+  /** Keeps `lastEnd` the newest end among `evs` and what it was. */
+  const noteEnds = (evs: LeaseEvent[]) => {
+    for (const ev of evs) {
+      if (ev.state === 'end' && (!lastEnd || ev.atUnixMs >= lastEnd.atUnixMs)) lastEnd = ev;
+    }
+  };
+  /**
+   * The events of a cancelled call, whose result nobody receives: shown on the next result, so no
+   * lease end goes unsaid.
+   */
+  const held: LeaseEvent[] = [];
+  /**
+   * The end the running `reset` reported itself, claimed when its result is sent. Resets run one
+   * at a time (the queue), so one slot is enough.
+   */
+  let ownEnd: LeaseEvent | undefined;
+
+  /**
+   * The lease fields of `sandbox_info` for the current mode (the latest token's, else the
+   * record's). A per-exec sandbox has no lease to ask about (P4-R9: the default deployment's worker
+   * would refuse the status). A failed status is shown, never a failed tool.
+   */
+  const leaseInfo = async (current: SandboxModeName): Promise<string[]> => {
+    const lines = [`mode: ${current}`];
+    if (current === 'per-exec') {
+      lines.push('lease: none (per-exec)');
+    } else {
+      try {
+        const v = await o.lease('status');
+        const idle = `${v.idleTimeoutS}s${v.idleTimeoutS === 0 ? ' (the worker default)' : ''}`;
+        lines.push(
+          `lease: ${v.state}`,
+          `age: ${Math.floor(v.ageMs / 1000)}s`,
+          `idle timeout: ${idle}`,
+        );
+      } catch (err) {
+        const code = err instanceof LeaseControlError ? err.code : 'unavailable';
+        lines.push(`lease: unknown (${code})`);
+      }
+    }
+    const end = lastEnd ? `${lastEnd.reason}, ${hhmm(lastEnd.atUnixMs)}` : 'none';
+    // Plan 5 tracks processes; until then there are none to show.
+    lines.push(`last end: ${end}`, 'tracked processes: none');
+    return lines;
+  };
+  /** The record as `o.info` reads it now; a bare string means the mode at start. */
+  const current = async (): Promise<SandboxInfo> => {
+    const got = await o.info();
+    return typeof got === 'string' ? { text: got, mode } : got;
+  };
+  const info = async (): Promise<string> => {
+    const cur = await current();
+    // A held end is this result's notice: `last end` names it too.
+    noteEnds(held);
+    return [cur.text, ...(await leaseInfo(o.leaseMode?.() ?? cur.mode))].join('\n');
+  };
+  /**
+   * The notice lines for one result's lease events: a start only when no end is shown, and only
+   * the last expiring event (edit's two Execs may straddle a minute boundary).
+   */
+  const notices = (events: LeaseEvent[]): string[] => {
+    const fresh = dedupe.take(events);
+    noteEnds(fresh);
+    return noticeLines(fresh, now());
+  };
+
+  const tools = sandboxTools({
+    info,
+    workspace: ws,
+    mode,
+    lease: o.lease,
+    // Before the first mint the record read at start may be stale: read it again (one GET).
+    currentMode: async () => o.leaseMode?.() ?? (await current()).mode,
+    // The reset's own end, newer than anything seen: `reset`'s text says it, so the next
+    // result's notices do not repeat it (as mocactl's P4-R17), and `last end` names it. It is
+    // claimed only once the call's result is sent (`run`): a reply that lands as the call is
+    // cancelled is discarded, and its end must stay deliverable as a notice.
+    resetEnded: (p) => {
+      if (p?.state !== 'end' || p.reason !== 'reset' || !dedupe.claimable(p)) return false;
+      ownEnd = p;
+      return true;
+    },
+  });
+  const byName = new Map(tools.map((t) => [t.name, t]));
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
   const server = new Server(
     { name: o.name ?? 'moca-sandbox', version: o.version ?? '0.0.0' },
-    { capabilities: { tools: {} }, instructions: sandboxRules(ws) },
+    { capabilities: { tools: {} }, instructions: sandboxRules(ws, mode) },
   );
   const listed: Tool[] = tools.map((t) => ({
     name: t.name,
@@ -264,19 +397,64 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
 
     const tool = byName.get(name);
     if (!tool) return refuse(`unknown tool: ${name}`);
-    const counted: Exec = (command, opts) => {
+    // Every lease event this call's Execs carried, a failed Exec's included (P4-R5).
+    const events: LeaseEvent[] = [];
+    const counted: Exec = async (command, opts) => {
       execs++;
-      return o.exec(command, opts);
+      try {
+        const r = await o.exec(command, opts);
+        events.push(...(r.lease ?? []));
+        return r;
+      } catch (err) {
+        // A failed, refused or aborted Exec still carried its events: the worker acked them.
+        if (
+          err instanceof ExecMachineryError ||
+          err instanceof ExecRefusedError ||
+          err instanceof ExecAbortedError
+        ) {
+          events.push(...err.lease);
+        }
+        throw err;
+      }
+    };
+    /** The result with its notice lines first, before the output or the error text. */
+    const noticed = (r: CallToolResult): CallToolResult => {
+      const lines = notices([...held.splice(0), ...events]);
+      if (lines.length === 0) return r;
+      const [first, ...rest] = r.content;
+      if (first?.type === 'text') {
+        return {
+          ...r,
+          content: [{ ...first, text: `${lines.join('\n')}\n${first.text}` }, ...rest],
+        };
+      }
+      return { ...r, content: [{ type: 'text', text: lines.join('\n') }, ...r.content] };
     };
     const run = async (): Promise<CallToolResult> => {
+      // Only the reset sets or reads `ownEnd`: sandbox_info is never queued, and may run beside it.
+      const resets = tool.name === 'reset';
       try {
         const r: ToolResult = await tool.run(args, counted, extra.signal);
+        const own = resets ? ownEnd : undefined;
+        if (resets) ownEnd = undefined;
+        if (extra.signal.aborted) {
+          // Resolved as the cancel arrived: the SDK discards this result, so its notices wait for
+          // the next one instead of being marked seen here (review #4569829034), and a reset's
+          // own end is not claimed: nobody reads the text that says it.
+          held.push(...events);
+          return refuse(CANCELLED);
+        }
+        if (own && dedupe.claim(own)) noteEnds([own]);
         record(!r.isError);
-        return r as CallToolResult;
+        return noticed(r as CallToolResult);
       } catch (err) {
+        if (resets) ownEnd = undefined;
         // The SDK sends nothing for a cancelled request; the record says why it ended.
-        if (extra.signal.aborted) return refuse(CANCELLED);
-        return refuse(oneLine(describe(err, o.expiresAt)));
+        if (extra.signal.aborted) {
+          held.push(...events);
+          return refuse(CANCELLED);
+        }
+        return noticed(refuse(oneLine(describe(err, o.expiresAt))));
       }
     };
 

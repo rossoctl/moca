@@ -644,6 +644,17 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'hostWorkerReport',
   },
+  // The egress proxy's audit events from the host's journal, into sandboxes' logs.
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/egress',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    // 1000 events of at most 8 KiB each (the agent keeps longer ones back), with room for JSON.
+    maxBodyBytes: 9 * 1024 * 1024,
+    operationId: 'hostEgress',
+  },
   // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {
     method: 'POST',
@@ -689,6 +700,16 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     profiles: SANDBOX,
     operationId: 'mintSandboxToken',
+  },
+  // A sandbox's egress log, for its owner or an admin, as GET /v1/sandboxes/{id}.
+  {
+    method: 'GET',
+    path: '/v1/sandboxes/{id}/egress',
+    auth: 'api',
+    sessionScoped: false,
+    sandboxScoped: true,
+    profiles: SANDBOX,
+    operationId: 'getSandboxEgress',
   },
   // Lease-mode spec §8.1-§8.2: the owner's user API token only; a sandbox token is refused by typ.
   {

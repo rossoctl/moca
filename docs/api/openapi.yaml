@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.12.0
+  version: 1.15.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -160,7 +160,12 @@ components:
         sessionId: { type: string }
         reason:
           type: string
-          description: 'sandbox_terminated only: deleted | expired'
+          description: |
+            sandbox_terminated: deleted | expired. no_active_slot: `memory` when no holder under its
+            active limit has the memory for the worker (1.12.0; absent at the active limit, as
+            before). template_unavailable: `memfile_mismatch` when every holder reports the
+            snapshot's memory file is not the guest's size. template_not_active with readiness
+            `unavailable`: the build's readinessReason
         rule:
           type: string
           description: |
@@ -346,6 +351,67 @@ components:
               maxTokens: { type: integer }
               reasoning: { type: boolean }
               vision: { type: boolean }
+    EgressEvent:
+      description: |
+        One audit event of the KVM host's egress proxy (`moca-egress`, remote-worker
+        internal/egress/audit.go `Event`), exactly as it wrote it; no other field is accepted or
+        stored. `path` carries no query, fragment or userinfo; `credential` is a name, never a value.
+      type: object
+      additionalProperties: false
+      required: [time, via, decision]
+      properties:
+        time: { type: string, description: RFC 3339 }
+        via: { type: string, enum: [moca-egress] }
+        vm_id: { type: string }
+        sid: { type: string, description: "the sandbox's workspace key" }
+        sub: { type: string }
+        host: { type: string }
+        dial_addr: { type: string }
+        method: { type: string }
+        path: { type: string }
+        status: { type: integer }
+        bytes_up: { type: integer }
+        bytes_down: { type: integer }
+        credential: { type: string }
+        decision:
+          { type: string, description: 'tunnel, forward, destination_denied, audit_dropped, ...' }
+        dropped: { type: integer }
+        coalesced: { type: integer }
+    EgressSummary:
+      type: object
+      required: [byHost, total, dropped, droppedBy, complete, sealed, sha256]
+      properties:
+        byHost:
+          type: object
+          additionalProperties:
+            type: object
+            required: [count, decisions, bytesUp, bytesDown]
+            properties:
+              count: { type: integer }
+              decisions: { type: object, additionalProperties: { type: integer } }
+              bytesUp: { type: integer }
+              bytesDown: { type: integer }
+        total: { type: integer, description: events stored }
+        dropped: { type: integer, description: 'droppedBy summed: the events this log may lack' }
+        droppedBy:
+          type: object
+          required: [proxy, cap, budget, invalid]
+          properties:
+            proxy: { type: integer, description: "charged by the proxy's audit_dropped reports" }
+            cap: { type: integer, description: "over a log's cap: 10,000 events or 4 MiB of lines" }
+            budget:
+              type: integer
+              description: "over the deployment's 64 MiB budget of lines for all logs together"
+            invalid: { type: integer, description: named this sandbox but were not a proxy Event }
+        complete: { type: boolean, description: dropped is 0 }
+        sealed:
+          { type: boolean, description: 'past the 600 s grace after the end: takes no more events' }
+        sha256:
+          type: string
+          description: |
+            sha256: + the hex sha256 of the NDJSON export: each stored event's canonical JSON
+            (the provenance canonicalization: keys sorted, no whitespace), each followed by one \n,
+            in arrival order. The empty log's is the sha256 of no bytes.
     Sandbox:
       type: object
       description: A sandbox (SBX0 §5.1). Times are epoch seconds.
@@ -460,6 +526,8 @@ components:
           type: [string, 'null']
           description: the default build's readiness
           enum: [active, activating, deactivating, inactive, unavailable, unknown, retired, null]
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
         tags:
           type: object
           additionalProperties: { type: string }
@@ -467,6 +535,16 @@ components:
         builds:
           type: array
           items: { $ref: '#/components/schemas/TemplateBuild' }
+    ReadinessReason:
+      type: string
+      enum: [not_held, no_slot, memory, memfile_mismatch]
+      description: |
+        present only with readiness `unavailable` (1.12.0): why placement left the build waiting.
+        `not_held` no host holds its snapshot; `no_slot` every holder is at its active limit;
+        `memory` a holder under its limit has no memory headroom for the worker now (template
+        lifecycle spec §6.2: its floor, a pressure brake, or an inventory older than 60 s);
+        `memfile_mismatch` every holder reports the snapshot's memory file is not the guest's size
+        (a rebuild clears it, not a wait)
     TemplateBuild:
       type: object
       description: One build of a template, an immutable snapshot (template lifecycle spec §3.2, §3.3)
@@ -489,10 +567,41 @@ components:
             presence record for its worker; `activating` an activation lease stands and a host
             holding it is asked to run it, not attached yet; `deactivating` attached with no lease
             (draining: a worker is never stopped under a live sandbox); `inactive` no lease, not
-            attached; `unavailable` leased, but no host that reports holds it or every holder is at
-            its active limit; `unknown` the relay's presence could not be read; `retired` for a
-            retired build (§5.1); null for any other build that is not registered. Before any host
-            agent reports, readiness is the presence alone (`active` or `inactive`)
+            attached; `unavailable` leased, but no host that reports holds it, every holder is at
+            its active limit, none has the memory for its worker, or every holder reports its
+            memory file wrong (`readinessReason` says which); `unknown` the relay's presence could
+            not be read; `retired` for a retired build (§5.1); null for any other build that is not
+            registered. Before any host agent reports, readiness is the presence alone (`active` or
+            `inactive`)
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
+        queued:
+          type: boolean
+          description: |
+            1.13.0 (template lifecycle spec §6.5), present only with readiness `activating` on a host
+            whose agent reports its start limit: true while the build waits for a start slot (its
+            place in the host's start line is beyond the host's startConcurrency), false once its
+            worker is starting. A queued build stays `activating` longer than before: poll with a
+            timeout sized for the host's whole start line
+        queuePosition:
+          type: integer
+          minimum: 1
+          description: |
+            1.13.0, with `queued`: the build's 1-based place among its host's placed, wanted builds
+            not attached yet, first leased first; the first startConcurrency are starting
+        graced:
+          type: boolean
+          enum: [true]
+          description: |
+            1.13.0 (§6.5), present only while the build is in its host's idle grace: no lease left,
+            and its worker kept running (readiness `deactivating`) until `gracedUntil`, unless a
+            wanted build needs its slot or a release with `stopNow` ends it. A use within the grace
+            finds it active, with no cold start
+        gracedUntil:
+          type: integer
+          description: |
+            1.13.0, with `graced`: epoch seconds the grace ends (its last lease's end plus the host's
+            idleGraceSeconds)
         capacity:
           type: [object, 'null']
           description: |
@@ -1929,9 +2038,13 @@ paths:
                       per KVM host, its limits and use, as its host agent last reported them
                       (template lifecycle spec §6.2); `active.used` counts the workers that stay
                       running on it (leased builds placed or running there, unleased ones draining a
-                      live sandbox). Empty means no host has reported, never that
-                      there is no limit. A host whose last inventory is over 6 minutes old is left
-                      out, here and in placement, until it reports again
+                      live sandbox; graced builds are counted apart, in `graced`). Empty means no host
+                      has reported, never that there is no limit. A host whose last inventory is over 6
+                      minutes old is left out, here and in placement, until it reports again. `memory`
+                      (1.12.0) only from an agent that reports it: then placement also needs the memory
+                      for each new worker. `start` (1.13.0) only from an agent that reports its start
+                      limit; `idleGraceSeconds` and `graced` (1.13.0) only from an agent that sets an idle
+                      grace
                     items:
                       type: object
                       required: [id, active, idleLimitSeconds, disk]
@@ -1945,6 +2058,85 @@ paths:
                           properties:
                             freeGb: { type: integer }
                             floorGb: { type: integer }
+                        memory:
+                          type: object
+                          description: |
+                            template lifecycle spec §6.2, all in MiB. `usedMib` is what placement
+                            counts: each running worker's guest RAM + 128 (4096 + 128 for a build
+                            with no recorded guest size), its VMs' committed memory, and the builds
+                            placed here not started yet. `headroomMib` = min(total − floor − used,
+                            available − floor − the pending starts), 0 while `brake` is set; a new
+                            worker starts here only if its cost fits it
+                          required:
+                            [
+                              totalMib,
+                              availableMib,
+                              floorMib,
+                              usedMib,
+                              headroomMib,
+                              pressureFull10,
+                              pressureLimit,
+                              brake,
+                              runningWorkers,
+                              memfileMismatch,
+                              reportedAt,
+                            ]
+                          properties:
+                            totalMib: { type: integer }
+                            availableMib: { type: integer }
+                            floorMib:
+                              type: integer
+                              description: |
+                                the effective floor the agent applies: SBX_MEM_FLOOR_MIB, else 10%
+                                of MemTotal, at least 4096
+                            usedMib: { type: integer }
+                            headroomMib: { type: integer }
+                            pressureFull10:
+                              type: [number, 'null']
+                              description: memory PSI `full avg10` (a percentage); null with no /proc/pressure
+                            pressureLimit: { type: [number, 'null'] }
+                            brake:
+                              type: [string, 'null']
+                              enum: [pressure, stale, null]
+                              description: |
+                                why the host takes no new start now (what it runs is kept): PSI over
+                                its limit, or its last inventory over 60 s old; null otherwise
+                            runningWorkers:
+                              { type: integer, description: the template workers running there }
+                            memfileMismatch:
+                              type: array
+                              items: { type: string }
+                              description: build ids never placed there (their memory file is not the guest's size)
+                            reportedAt:
+                              { type: integer, description: epoch seconds of its last inventory }
+                        start:
+                          type: object
+                          description: |
+                            1.13.0 (template lifecycle spec §6.5), only from an agent that reports
+                            its start limit: at most `concurrency` workers start at once there
+                            (SBX_START_CONCURRENCY); `seconds` its measured mean cold start, start
+                            to attach (null before one is done); `starting` and `queued` its start
+                            line now (placed, wanted builds not attached: within the limit, and
+                            beyond it), null when the relay's presence cannot be read
+                          required: [concurrency, seconds, starting, queued]
+                          properties:
+                            concurrency: { type: integer, minimum: 1 }
+                            seconds: { type: [number, 'null'] }
+                            starting: { type: [integer, 'null'] }
+                            queued: { type: [integer, 'null'] }
+                        idleGraceSeconds:
+                          type: integer
+                          minimum: 1
+                          description: |
+                            1.13.0 (§6.5), only from an agent that sets one (SBX_IDLE_GRACE_S above
+                            0): how long a released build's worker is kept running there
+                        graced:
+                          type: integer
+                          description: |
+                            1.13.0, beside idleGraceSeconds: the builds in the host's idle grace now
+                            (no lease, worker kept running). Each still holds its whole pinned
+                            memory file, counted in `memory.usedMib`, and a slot of `active.limit`
+                            until a wanted build needs it
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
     post:
@@ -2593,11 +2785,13 @@ paths:
         digest as `lease`. One activation at a time: the quota and placement check, the record and
         the lease write run under one lock across all templates. Refusals keep no lease:
         `409 template_unavailable` (no registered build under that reference, or no host that
-        reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
-        with leased builds, or a lease in the same second as a placed build; Retry-After is the
-        seconds until a build placed on one of this build's holders loses its last live lease, else
-        60), `429 quota_exceeded` with `quota: active`, `410 template_retired` (the build is
-        retired, §5.1). Needs SH_PROVENANCE_DIR.
+        reports holds it; `reason: memfile_mismatch` when every holder reports its memory file
+        wrong), `409 no_active_slot` with `Retry-After` (every holder at its active limit with
+        leased builds, or a lease in the same second as a placed build; `reason: memory` when a
+        holder under its limit has no memory headroom for the worker; Retry-After is the seconds
+        until a build placed on one of this build's holders loses its last live lease, else 60),
+        `429 quota_exceeded` with `quota: active`, `410 template_retired` (the build is retired,
+        §5.1). Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2665,6 +2859,13 @@ paths:
         admin with `{all: true}`, every subject's) and writes a `deactivate` record when it drops
         any. A build stays wanted while another subject's lease stands; with none left its host
         agent stops the worker once no live sandbox runs on it. Needs SH_PROVENANCE_DIR.
+
+        On a host with an idle grace (SBX_IDLE_GRACE_S, 1.13.0, §6.5) the running worker of a build
+        left with no lease is kept for that long after the release, so a use soon after is warm.
+        `stopNow: true` skips the grace: once no lease is left (after this release), the worker is
+        stopped at the host's next poll, as on a host with no grace; a build already in its grace
+        has it ended (`released: 0`). The `deactivate` record carries `stopNow: true`. A stopNow
+        while others hold leases changes nothing for them.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2676,6 +2877,11 @@ paths:
               type: object
               properties:
                 all: { type: boolean, description: admins only; ignored otherwise }
+                stopNow:
+                  type: boolean
+                  description: |
+                    1.13.0, skip the host's idle grace (force a cold start next time); not a boolean
+                    is `400 invalid_request`
       responses:
         '200':
           description: released
@@ -2807,9 +3013,22 @@ paths:
         Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
         the host in the path must be the one whose token is presented. Body
         `{holds: [{template, manifestHash, running?}], limits: {activeLimit, idleLimitSeconds,
-        buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
-        inventory in its own process; the agent re-sends it on every poll. A host whose last inventory is
-        over 6 minutes old is left out of placement until it reports again.
+        buildConcurrency, diskFreeGb, diskFloorGb}, memory?}`. The control plane keeps each host's
+        last inventory in its own process; the agent re-sends it on every poll. A host whose last
+        inventory is over 6 minutes old is left out of placement until it reports again.
+
+        `memory` (1.12.0) is optional: an agent before it sends none, and its host is placed by
+        `activeLimit` alone, as before; a control plane before it ignores it. Each field is
+        optional and a malformed one is dropped. `memTotalMib`, `memAvailableMib` and
+        `memFloorMib` are used only all three together.
+
+        `limits.startConcurrency` and `limits.startSeconds` (1.13.0, §6.5) are optional: the agent's
+        start limit (SBX_START_CONCURRENCY, a whole number from 1) and the mean of its last cold
+        starts, start to attach, in seconds (absent before one is done; used only beside
+        startConcurrency). Without startConcurrency (an older agent) its builds have no place in a
+        start line, and Retry-After is as before. `limits.idleGraceSeconds` (1.13.0, §6.5) is
+        optional: SBX_IDLE_GRACE_S, a whole number of seconds, 0 (off) to 86400. Absent (an older
+        agent), malformed or 0: no grace, as before.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2841,6 +3060,57 @@ paths:
                     buildConcurrency: { type: integer }
                     diskFreeGb: { type: integer }
                     diskFloorGb: { type: integer }
+                    startConcurrency:
+                      type: integer
+                      minimum: 1
+                      description: |
+                        SBX_START_CONCURRENCY (default 4), at most this many workers starting at
+                        once (1.13.0)
+                    startSeconds:
+                      type: number
+                      description: |
+                        the mean of the last (up to 10) cold starts, start to attach, seconds (1.13.0)
+                    idleGraceSeconds:
+                      type: integer
+                      minimum: 0
+                      maximum: 86400
+                      description: |
+                        SBX_IDLE_GRACE_S (default 0, off), how long a released build's worker is
+                        kept running (1.13.0)
+                memory:
+                  type: object
+                  description: what the host agent reads of its memory (template lifecycle spec §6.2)
+                  properties:
+                    memTotalMib: { type: integer, description: /proc/meminfo MemTotal, MiB }
+                    memAvailableMib: { type: integer, description: /proc/meminfo MemAvailable, MiB }
+                    memFloorMib:
+                      type: integer
+                      description: the effective floor (SBX_MEM_FLOOR_MIB, else 10% of MemTotal, at least 4096)
+                    memPressureFull10:
+                      type: number
+                      description: |
+                        /proc/pressure/memory `full avg10`, a percentage; absent with no
+                        /proc/pressure (no brake)
+                    memPressureLimit:
+                      type: number
+                      description: SBX_MEM_PRESSURE_LIMIT (default 10); above it, no new start on this host
+                    runningWorkers:
+                      type: array
+                      items: { type: string }
+                      description: the workers of held builds whose sbx-worker unit is active
+                    vmCommittedMib:
+                      type: object
+                      additionalProperties: { type: integer }
+                      description: |
+                        worker id -> its VMs' unreclaimable memory, MiB: its slice's memory.stat
+                        anon + shmem + kernel, never page cache; a worker whose slice could not be
+                        read is absent
+                    memfileMismatch:
+                      type: array
+                      items: { type: string }
+                      description: |
+                        manifest hashes of held builds whose memory file is not guest_ram_mb x 1 MiB:
+                        never placed on this host
       responses:
         '200':
           description: recorded
@@ -3002,14 +3272,22 @@ paths:
       summary: The workers a host agent should run (leased and placed on it) and stop (no lease or retired, no live sandbox)
       description: |
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
-        holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
-        placement an activation is judged by; a build already running on a holder stays there).
-        `stop`: the ones it holds with no live lease, and a leased one it runs while placement keeps
-        it on another host, each with no live sandbox on its worker, and the retired ones it holds
-        (§5.1) with no live sandbox; a worker with a live sandbox is in neither list (it drains
-        first, and counts against the host's `activeLimit` meanwhile). A build imported from
+        holds whose lease stands and which placement puts on it, within its `activeLimit` and,
+        from an agent that reports its memory, its memory headroom (the same placement an
+        activation is judged by; a build already running on a holder stays there). `stop`: the
+        ones it holds with no live lease and no idle grace, and a leased one it runs while placement
+        keeps it on another host, each with no live sandbox on its worker, and the retired ones it
+        holds (§5.1) with no live sandbox; a worker with a live sandbox is in neither list (it
+        drains first, and counts against the host's `activeLimit` meanwhile). A build imported from
         SH_SANDBOX_TEMPLATES is in neither list, retired or not: the deployment runs its worker.
         The agent starts only workers already installed on the host.
+
+        `run` is in the wanted order, first leased first (1.13.0, §6.5: the order the agent starts
+        them in, at most its start limit at once). On a host with an idle grace the graced builds
+        follow the wanted ones in `run`, soonest grace end first, and are listed in `graced`. A
+        graced worker displaced for a wanted build is re-checked for a lease when the answer is
+        made: a build leased since is left out of `stop` (its worker keeps running; it is in `run`
+        from the next answer).
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -3024,6 +3302,35 @@ paths:
                 properties:
                   run: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
                   stop: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
+                  starting:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      1.13.0 (§6.5): the build ids of `run` whose worker is not attached to the
+                      relay (its presence, which readiness reads), in `run`'s order. The agent
+                      counts those whose unit is active as starting, for SBX_START_WINDOW_S at
+                      most from its start (past it a worker is stuck and holds no start slot), and
+                      starts at most SBX_START_CONCURRENCY less those. Absent from a control plane before 1.13.0,
+                      or when the presence cannot be read: the agent then counts its own recent
+                      starts (SBX_START_WINDOW_S).
+                  graced:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      1.13.0 (§6.5), only for a host whose agent reports an idle grace: the build
+                      ids of `run` with no lease, kept running in the grace. The agent never starts
+                      one (a grace keeps a running worker) and counts those it runs in its summary.
+                      Absent from a control plane before 1.13.0, or for a host with no grace.
+                  egressSids:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      The workspace keys of the sandboxes whose egress events this host ships:
+                      every sandbox on a worker of a build it holds, live or ended less than 600 s
+                      ago, the set `POST /v1/hosts/{host}/egress` accepts. The agent sends only these
+                      sandboxes' events (and `audit_dropped` reports), so the proxy's other clients'
+                      events never leave the host. Absent from a control plane before 1.14.0: the agent
+                      then sends nothing.
         '400':
           description: '`invalid_request`: this deployment stores no templates'
           content:
@@ -3079,6 +3386,82 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/egress:
+    post:
+      operationId: hostEgress
+      summary: A host agent posts the egress proxy's audit events from its journal
+      description: |
+        Up to 1000 events, each exactly as `moca-egress` wrote it, and the journal cursor after the
+        last. An event is stored in a sandbox's log when its `sid` is the workspace key of a
+        sandbox on a worker of a build this host holds, and the sandbox ended at most 600 s ago;
+        every other event is refused and counted. One naming such a sandbox that is not exactly a
+        proxy Event (an unknown field, a wrong type) is not stored, and counted as dropped there.
+        An `audit_dropped` event (no VM) is charged to every sandbox on this host's workers live
+        within 60 s before it, its count taken up to 1,000,000. A log holds at most 10,000 events and 4 MiB of lines, and all logs
+        together at most 64 MiB of lines; the rest count as dropped (`cap`, `budget`).
+        Idempotent by (host, cursor): a post repeating the host's last cursor appends nothing and
+        answers as the first.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events, cursor]
+              properties:
+                events:
+                  {
+                    type: array,
+                    maxItems: 1000,
+                    items: { $ref: '#/components/schemas/EgressEvent' },
+                  }
+                oversized:
+                  type: array
+                  items: { type: string }
+                  description: |
+                    the sid of each event the agent kept back for its size (over 8 KiB); each is
+                    counted as dropped in its sandbox's log. events and oversized: 1000 in all
+                cursor:
+                  {
+                    type: string,
+                    maxLength: 512,
+                    description: 'the journal cursor after the last event',
+                  }
+      responses:
+        '200':
+          description: appended (or a replay's first answer)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, refused, capped, overBudget, invalid, dropped, cursor]
+                properties:
+                  accepted: { type: integer }
+                  refused:
+                    { type: integer, description: "no sandbox of this host's, or its log sealed" }
+                  capped:
+                    { type: integer, description: "over a log's cap (10,000 events or 4 MiB)" }
+                  overBudget: { type: integer, description: 'over the 64 MiB of all logs together' }
+                  invalid:
+                    type: integer
+                    description: "named a sandbox of this host's but not a proxy Event, or oversized"
+                  dropped:
+                    { type: integer, description: "the audit_dropped reports' counts, summed" }
+                  cursor: { type: string }
+        '400':
+          description: '`invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes:
     description: |
       Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers
@@ -3094,9 +3477,12 @@ paths:
         (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
         create takes the caller's activation lease (as POST /v1/templates/{id}/activate, with its
         refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
-        `activate` record says `reason: first_use`; not taken again while the caller holds a live lease on
-        the build, so a retry writes nothing) and answers `409 template_not_active` with
-        `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
+        `activate` record says `reason: first_use`; not taken again while the caller holds a live
+        lease on the build, so a retry writes nothing) and answers `409 template_not_active` with
+        `readiness` and `Retry-After`; retry after the wait. Retry-After is 30 s, or (1.13.0, §6.5)
+        the build's place in its host's start line, when the host's agent reports its start limit
+        and a measured start time: `ceil(ceil(queuePosition / startConcurrency) × startSeconds)`. A
+        build in its host's idle grace (1.13.0) is served at once. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
         is refused. Without template hosts the create succeeds as before, and so it does on a template
@@ -3169,7 +3555,8 @@ paths:
           description: |
             `name_conflict`: the caller already has a live sandbox with that name;
             `template_not_active` (Retry-After), with `readiness`: the build is not active yet, its
-            activation started unless `activate: false`; `no_active_slot` (Retry-After) and
+            activation started unless `activate: false` (with readiness `unavailable`, `reason` is
+            its readinessReason); `no_active_slot` (Retry-After) and
             `template_unavailable`: as activate
           content:
             application/json:
@@ -3321,6 +3708,74 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sandboxes/{id}/egress:
+    get:
+      operationId: getSandboxEgress
+      summary: A sandbox's egress log
+      description: |
+        The egress proxy's audit events for this sandbox, as the KVM host's proxy wrote them
+        (`moca-egress`'s Event: time, via, vm_id, sid, sub, host, dial_addr, method, path without
+        query, fragment or userinfo, status, bytes_up, bytes_down, credential NAME, decision,
+        dropped, coalesced), in arrival order. The caller's own sandbox; admins may read any, as
+        `GET /v1/sandboxes/{id}`. Kept as long as the sandbox record (SH_SANDBOX_RETENTION_SECONDS).
+
+        Paths are logged without query, fragment or userinfo, and an injected credential appears by
+        name only, but a secret a guest puts in a URL path segment is logged as sent.
+
+        `format=ndjson` returns the whole log, one canonical JSON event per line, each ended by
+        `\n`, streamed (chunked); a store failure after the first chunk cuts it short, so check
+        its sha256. Its sha256 is `summary.sha256`, and the sandbox's end record's `egress.sha256` (or a
+        later `sandbox` record with `state: egress`, when events arrived after the end).
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/sandboxId' }
+        - name: after
+          in: query
+          description: the previous page's `next`
+          schema: { type: string, pattern: '^[0-9]{1,20}-[0-9]{1,20}$' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, ndjson], default: json }
+      responses:
+        '200':
+          description: a page of the log and its summary, or (format=ndjson) the whole log
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, next, summary]
+                properties:
+                  events: { type: array, items: { $ref: '#/components/schemas/EgressEvent' } }
+                  next:
+                    {
+                      type: [string, 'null'],
+                      description: "the next page's `after`; null at the end",
+                    }
+                  summary:
+                    description: |
+                      the whole log's summary, on the first page (no `after`); null on the pages
+                      after it, so paging a log through reads it once
+                    oneOf:
+                      - { $ref: '#/components/schemas/EgressSummary' }
+                      - { type: 'null' }
+            application/x-ndjson:
+              schema: { type: string }
+        '400':
+          description: '`invalid_request`: a bad after, limit or format'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '503':
           description: redis_unavailable
           content:

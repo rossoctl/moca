@@ -198,6 +198,18 @@ refusals=(
   'export SBX_RETENTION_DAYS=91 => SBX_RETENTION_DAYS must be'
   'export SBX_MAX_INFLIGHT=0 => SBX_MAX_INFLIGHT must be 1-8'
   'export SBX_MAX_INFLIGHT=9 => SBX_MAX_INFLIGHT must be 1-8'
+  'export SBX_MODES_ALLOWED=per-exec,bogus => SBX_MODES_ALLOWED must be a comma list of per-exec, lease and lease\+processes'
+  'export SBX_MODES_ALLOWED="per-exec, lease" => SBX_MODES_ALLOWED must be a comma list'
+  'export SBX_MODES_ALLOWED=per-exec, => SBX_MODES_ALLOWED must be a comma list'
+  'export SBX_MODES_ALLOWED=LEASE => SBX_MODES_ALLOWED must be a comma list'
+  'export SBX_IDLE_CEILING_S=20 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_IDLE_CEILING_S=299 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_IDLE_CEILING_S=30m => SBX_IDLE_CEILING_S must be'
+  'export SBX_IDLE_CEILING_S=1000000 => SBX_IDLE_CEILING_S must be'
+  'export SBX_IDLE_CEILING_S=86401 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_MODES_ALLOWED=per-exec,lease SBX_IDLE_CEILING_S=3600 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed the token lifetime plus the 30 s leeway plus SBX_IDLE_CEILING_S \(4530 s\) when a lease mode is allowed'
+  'export SBX_MODES_ALLOWED=lease+processes SBX_IDLE_CEILING_S=2700 SBX_JANITOR_WAIT_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed .* \(3630 s\)'
+  'export SBX_MODES_ALLOWED=per-exec,lease SBX_TOKEN_TTL_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3900 s\) must exceed .* \(5430 s\)'
   'export SBX_WORKSPACE_IMAGE_MB=-1 => SBX_WORKSPACE_IMAGE_MB must be a positive whole number'
   'export SBX_MAX_TOTAL=999999999 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_MAX_TOTAL must be'
   'export SBX_MAX_TOTAL=1 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_WORKSPACE_IMAGE_MB must be'
@@ -326,6 +338,8 @@ fi
 [[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'lifetime'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_PER_SUBJECT)" == 3 && "$(cm sbx-settings SH_SANDBOX_MAX_TOTAL)" == 40 ]] || fail 'quotas'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 2 ]] || fail 'in-flight cap'
+[[ "$(cm sbx-settings SH_SANDBOX_MODES_ALLOWED)" == per-exec ]] || fail 'lease is not off by default (SH_SANDBOX_MODES_ALLOWED)'
+[[ "$(cm sbx-settings SH_SANDBOX_IDLE_CEILING_S)" == 1800 ]] || fail 'idle ceiling default (1800 s)'
 [[ "$(cm sbx-settings SH_SANDBOX_TOKEN_TTL_SECONDS)" == 900 ]] || fail 'token TTL default (15 min)'
 [[ "$(cm sbx-settings SH_SANDBOX_RETENTION_SECONDS)" == 1209600 ]] || fail 'retention default (14 d)'
 [[ "$(cm sbx-settings SH_SANDBOX_TOKEN_ISSUER)" == sbx-control-plane ]] || fail 'issuer'
@@ -357,6 +371,7 @@ grep -qx 'RELAY_TLS=true' "$W/worker.env" || fail 'worker bundle RELAY_TLS'
 grep -qx "SANDBOX_TOKEN=$(secret_val moca-relay-sandbox-tokens sbx_py312)" "$W/worker.env" || fail 'worker bundle token'
 grep -qx 'SH_WORKSPACE_IDLE=216h' "$W/worker.env" || fail 'worker bundle idle is not lifetime + 2 days'
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$W/worker.env" || fail 'worker bundle image size'
+grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$W/worker.env" || fail 'worker bundle idle ceiling is not the default 1800'
 [[ -f "$W/relay-ca.crt" ]] || fail 'self-signed attach certificate not shipped in the worker bundle'
 [[ "$(stat -c %a "$W/worker.env" 2>/dev/null || stat -f %Lp "$W/worker.env")" == 600 ]] || fail 'worker.env is not 0600'
 pass 'writes 0600 worker bundles in the P6.2 format, with the idle derived from the lifetime and the image size'
@@ -487,6 +502,30 @@ render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
 pass 'SBX_TOKEN_TTL_MINUTES and SBX_RETENTION_DAYS reach sbx-settings in seconds, and move the hash'
 
+# 4c'. The lease policy (lease-mode spec §8.1): SBX_MODES_ALLOWED and SBX_IDLE_CEILING_S reach
+# sbx-settings and move the hash; the ceiling also reaches every worker bundle, so the control
+# plane's clamp and the worker's agree.
+run_setup export SBX_MODES_ALLOWED=per-exec,lease,lease+processes SBX_IDLE_CEILING_S=3600 SBX_JANITOR_WAIT_MINUTES=76 ||
+  fail 'a run with a lease policy failed'
+[[ "$(cm sbx-settings SH_SANDBOX_MODES_ALLOWED)" == per-exec,lease,lease+processes ]] || fail 'SBX_MODES_ALLOWED not written'
+[[ "$(cm sbx-settings SH_SANDBOX_IDLE_CEILING_S)" == 3600 ]] || fail 'SBX_IDLE_CEILING_S not written'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$GEN/workers/$w/worker.env" || fail "the $w bundle's idle ceiling is not 3600"
+  [[ "$(grep -c '^SH_LEASE_IDLE_CEILING_S=' "$GEN/workers/$w/worker.env")" == 1 ]] || fail "the $w bundle has the idle ceiling twice"
+done
+render
+[[ "$(pod_hash moca-control-plane)" != "$cp_hash" ]] || fail 'the lease policy is not in the settings hash'
+grep -A4 -- '- name: SH_SANDBOX_MODES_ALLOWED$' "$TMP/render.yaml" | grep -q 'name: sbx-settings' ||
+  fail 'the control plane does not read SH_SANDBOX_MODES_ALLOWED from sbx-settings'
+grep -A4 -- '- name: SH_SANDBOX_IDLE_CEILING_S$' "$TMP/render.yaml" | grep -q 'name: sbx-settings' ||
+  fail 'the control plane does not read SH_SANDBOX_IDLE_CEILING_S from sbx-settings'
+run_setup true || fail 'the run back to the defaults failed'
+[[ "$(cm sbx-settings SH_SANDBOX_MODES_ALLOWED)" == per-exec ]] || fail 'the run back to the defaults left lease on'
+grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$GEN/workers/sbx_default/worker.env" || fail 'the bundle ceiling did not return to 1800'
+render
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
+pass 'SBX_MODES_ALLOWED and SBX_IDLE_CEILING_S reach sbx-settings and move the hash; the ceiling reaches every worker bundle'
+
 # 4d. The janitor's wait (spec §8.1, §8.3): default max(60, TTL + 5) minutes, so the default at the
 # longest token lifetime (60 min) is 65 min, not the refused 60; an explicit one must exceed TTL + 30 s.
 run_setup export SBX_TOKEN_TTL_MINUTES=60 || fail 'the default janitor wait was refused at a 60 min token lifetime'
@@ -496,6 +535,17 @@ grep -qx 'SBX_JANITOR_AGE=3660' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_
 run_setup export SBX_JANITOR_WAIT_MINUTES=120 || fail 'a 120 min wait was refused'
 grep -qx 'SBX_JANITOR_AGE=7200' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=120 is not 7200 s'
 pass 'the janitor wait defaults to max(60, TTL + 5) min (65 at TTL 60), and an explicit one is written in seconds'
+
+# 4d'. The idle ceiling against the janitor (review #4569829097): with a lease mode allowed, a token
+# minted before a delete keeps a lease live for its lifetime plus 30 s plus the idle timeout, so the
+# wait must exceed all three; the defaults (15 min, 1800 s) pass. Per-exec only, the ceiling is unused.
+run_setup export SBX_MODES_ALLOWED=per-exec,lease || fail 'the default wait was refused with lease allowed at the default ceiling'
+run_setup export SBX_MODES_ALLOWED=per-exec,lease SBX_IDLE_CEILING_S=3600 SBX_JANITOR_WAIT_MINUTES=76 ||
+  fail 'a 76 min wait (4560 s > 4530 s) was refused'
+grep -qx 'SBX_JANITOR_AGE=4560' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=76 is not 4560 s'
+run_setup export SBX_IDLE_CEILING_S=86400 || fail 'the 86400 s ceiling was refused with per-exec only'
+run_setup true || fail 'the run back to the defaults failed'
+pass 'the idle ceiling is at most 86400 s, and with a lease mode the janitor wait must exceed TTL + 30 s + the ceiling'
 
 # 4e. An API CA (SBX_API_CA_FILE) for a Route certificate the host does not trust: bundled, then
 # dropped from the bundle when unset again.
@@ -665,7 +715,8 @@ HASH="$({
   printf '%s\n' 'SH_ALLOWED_SUBJECTS=github:1,github:2' "SH_SANDBOX_TEMPLATES=$(jq -c . "$TMP/templates.json")" \
     'SH_SANDBOX_EXEC_ENDPOINT=sbx-exec.apps.example.invalid:443' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' \
     'SH_SANDBOX_LIFETIME_SECONDS=604800' 'SH_SANDBOX_TOKEN_TTL_SECONDS=900' 'SH_SANDBOX_RETENTION_SECONDS=1209600' \
-    'SH_SANDBOX_MAX_PER_SUBJECT=3' 'SH_SANDBOX_MAX_TOTAL=40' 'SH_SANDBOX_MAX_INFLIGHT=2' "SH_SANDBOX_EXEC_CA=$(cat "$GEN/exec-ca.crt")"
+    'SH_SANDBOX_MAX_PER_SUBJECT=3' 'SH_SANDBOX_MAX_TOTAL=40' 'SH_SANDBOX_MAX_INFLIGHT=2' \
+    'SH_SANDBOX_MODES_ALLOWED=per-exec' 'SH_SANDBOX_IDLE_CEILING_S=1800' "SH_SANDBOX_EXEC_CA=$(cat "$GEN/exec-ca.crt")"
   raw_val sbx-token-keys PUBLIC_KEYS
   raw_val moca-relay-tls tls.crt
   raw_val sbx-exec-tls tls.crt
@@ -709,7 +760,7 @@ GOLD
 diff <(expected_off_kustomization) "$K" >"$TMP/golden.diff" || { cat "$TMP/golden.diff" >&2; fail 'the generated kustomization.yaml with egress off is not today'"'"'s'; }
 jq -e '.data | keys == ["SH_ADMIN_SUBJECTS","SH_API_TOKEN_TTL_SECONDS","SH_GITHUB_CLIENT_ID","SH_SESSION_TOKEN_TTL_SECONDS"]' \
   "$MOCK_STATE/configmap-moca-settings.json" >/dev/null || fail 'moca-settings keys changed with egress off'
-jq -e '.data | keys == ["SH_ALLOWED_SUBJECTS","SH_SANDBOX_EXEC_CA","SH_SANDBOX_EXEC_ENDPOINT","SH_SANDBOX_LIFETIME_SECONDS","SH_SANDBOX_MAX_INFLIGHT","SH_SANDBOX_MAX_PER_SUBJECT","SH_SANDBOX_MAX_TOTAL","SH_SANDBOX_RETENTION_SECONDS","SH_SANDBOX_TEMPLATES","SH_SANDBOX_TOKEN_ISSUER","SH_SANDBOX_TOKEN_TTL_SECONDS"]' \
+jq -e '.data | keys == ["SH_ALLOWED_SUBJECTS","SH_SANDBOX_EXEC_CA","SH_SANDBOX_EXEC_ENDPOINT","SH_SANDBOX_IDLE_CEILING_S","SH_SANDBOX_LIFETIME_SECONDS","SH_SANDBOX_MAX_INFLIGHT","SH_SANDBOX_MAX_PER_SUBJECT","SH_SANDBOX_MAX_TOTAL","SH_SANDBOX_MODES_ALLOWED","SH_SANDBOX_RETENTION_SECONDS","SH_SANDBOX_TEMPLATES","SH_SANDBOX_TOKEN_ISSUER","SH_SANDBOX_TOKEN_TTL_SECONDS"]' \
   "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null || fail 'sbx-settings keys changed with egress off'
 [[ "$(applied_names)" == 'configmap moca-settings;configmap sbx-settings;secret moca-mu1;secret moca-redis;secret moca-relay;secret moca-relay-sandbox-tokens;secret moca-relay-tls;secret sbx-exec-tls;secret sbx-token-keys;' ]] ||
   fail "the applied object set changed with egress off: $(applied_names)"

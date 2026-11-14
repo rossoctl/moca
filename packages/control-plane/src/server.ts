@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { CpError, writeError } from './errors.js';
 import type { EgressHost } from './egress-config.js';
@@ -107,6 +108,42 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
   });
 }
 
+/** A handler's streamed body: chunks written as they come, so a large answer is never held whole. */
+const isStream = (b: unknown): b is AsyncIterable<string> =>
+  typeof b === 'object' && b !== null && Symbol.asyncIterator in b;
+
+/**
+ * Writes a streamed body with backpressure (the egress log's NDJSON export). The first chunk is read
+ * before the status goes out, so a store that fails at once still answers its error (a 503); one that
+ * fails mid-stream can only cut the response short, which the client sees as a truncated body.
+ */
+async function writeStream(
+  res: ServerResponse,
+  status: number,
+  headers: Record<string, string>,
+  body: AsyncIterable<string>,
+): Promise<void> {
+  const it = body[Symbol.asyncIterator]();
+  let next = await it.next();
+  res.writeHead(status, headers);
+  try {
+    while (!next.done) {
+      // A client that goes away mid-stream closes the response: stop reading the store.
+      if (!res.write(next.value)) await Promise.race([once(res, 'drain'), once(res, 'close')]);
+      if (res.destroyed) {
+        await it.return?.();
+        return;
+      }
+      next = await it.next();
+    }
+    res.end();
+  } catch (err) {
+    console.error('[control-plane] streamed response cut short:', (err as Error)?.message);
+    await it.return?.();
+    res.destroy();
+  }
+}
+
 export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     const route = async () => {
@@ -176,6 +213,15 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
       const extra = headers ?? {};
       if (body === undefined) {
         res.writeHead(status, extra).end();
+        return;
+      }
+      if (isStream(body)) {
+        await writeStream(
+          res,
+          status,
+          { 'Content-Type': contentType ?? 'text/plain', ...extra },
+          body,
+        );
         return;
       }
       if (typeof body === 'string') {

@@ -10,7 +10,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Exec, ExecConnOptions } from '@moca/sandbox-client';
+import {
+  LeaseControlError,
+  type Exec,
+  type ExecConnOptions,
+  type LeaseOpName,
+  type LeaseStatusView,
+} from '@moca/sandbox-client';
 import { resolvePaths, saveAuth } from '../../src/config.js';
 import { sbxMain, sbxPaths } from '../../src/sbx/cli.js';
 import type { AgentopExec } from '../../src/sbx/agentop.js';
@@ -127,6 +133,9 @@ export type FakeSandbox = {
   expiresAt: number;
   terminatedAt: number | null;
   labels: Record<string, string>;
+  mode: string;
+  idleTimeoutS: number;
+  modeEpoch: number;
 };
 export const sandbox = (over: Record<string, unknown> = {}): FakeSandbox => ({
   id: SBX,
@@ -139,12 +148,42 @@ export const sandbox = (over: Record<string, unknown> = {}): FakeSandbox => ({
   expiresAt: 1_800_604_800,
   terminatedAt: null,
   labels: {},
+  mode: 'per-exec',
+  idleTimeoutS: 0,
+  modeEpoch: 0,
   ...over,
 });
 
+/**
+ * A fake connection's lease calls: every call recorded (`calls`), answered by `answer`. The default
+ * answers each one `unavailable`, as a relay without lease calls would (the shared `NO_LEASE`).
+ */
+export function fakeLease(
+  answer: (op: LeaseOpName, setModeToken?: string) => LeaseStatusView | Error = () =>
+    new LeaseControlError('unavailable', 'this fake has no lease calls'),
+) {
+  const calls: { op: LeaseOpName; token?: string }[] = [];
+  return {
+    calls,
+    leaseControl: async (op: LeaseOpName, setModeToken?: string): Promise<LeaseStatusView> => {
+      calls.push({ op, ...(setModeToken !== undefined ? { token: setModeToken } : {}) });
+      const a = answer(op, setModeToken);
+      if (a instanceof Error) throw a;
+      return a;
+    },
+    leaseKeepalive: async (): Promise<void> => {
+      throw new LeaseControlError('unavailable', 'this fake has no lease calls');
+    },
+  };
+}
+/** The lease calls of a fake connection that does not use them: each answers `unavailable`. */
+export const NO_LEASE = (({ leaseControl, leaseKeepalive }) => ({ leaseControl, leaseKeepalive }))(
+  fakeLease(),
+);
+
 const b64url = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
-/** An unsigned JWT with the claims mocactl reads (unverified): `iat` and `exp`. */
-export const jwt = (claims: { iat: number; exp: number }) =>
+/** An unsigned JWT with the claims mocactl reads (unverified): `iat`, `exp` and `mode`. */
+export const jwt = (claims: { iat: number; exp: number; mode?: string }) =>
   `${b64url({ alg: 'EdDSA', typ: 'JWT' })}.${b64url({ sbx: SBX, ...claims })}.sig`;
 
 /** The token's lifetime is 900 s (`exp − iat`): the default timeout is 840 s. */
@@ -222,6 +261,7 @@ export function localWorkspace(o: { capBytes?: number; without?: string[] } = {}
             stderr,
             exitCode: typeof code === 'number' ? code : -1,
             truncated: cut,
+            lease: [],
           });
         },
       );
@@ -346,7 +386,7 @@ export function workspaces(o: Parameters<typeof localWorkspace>[0] = {}) {
   let closed = 0;
   const factory = (c: ExecConnOptions) => {
     opened++;
-    return { exec: get(c.workspaceKey).exec, close: () => void closed++ };
+    return { exec: get(c.workspaceKey).exec, close: () => void closed++, ...NO_LEASE };
   };
   return { get, factory, counts: () => ({ opened, closed }) };
 }

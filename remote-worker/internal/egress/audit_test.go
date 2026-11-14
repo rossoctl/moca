@@ -1,9 +1,12 @@
 package egress
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,6 +285,73 @@ func TestJSONSinkConcurrentEmit(t *testing.T) {
 	for _, l := range lines {
 		if !json.Valid([]byte(l)) {
 			t.Fatalf("invalid line %q", l)
+		}
+	}
+}
+
+// RedactPath on what the proxy actually parses: request lines, through
+// http.ReadRequest, as handler.go and intercept.go see them. The query and
+// userinfo never survive; a path segment is kept as it was sent (RedactPath
+// does not judge segments), and so is a "#" in an origin-form target, which
+// ReadRequest leaves in the path. Both are the guest's own bytes, not a value
+// the proxy injected; this test pins that down so a change is deliberate.
+func TestRedactPathOnRequestLines(t *testing.T) {
+	for line, want := range map[string]string{
+		"GET http://u:p@up.example.test/p?token=s3cret HTTP/1.1":        "/p",
+		"GET http://up.example.com/p?x=1#frag HTTP/1.1":                 "/p",
+		"GET /simple/pkg/?api_key=s3cret HTTP/1.1":                      "/simple/pkg/",
+		"GET /dl/tok-0123456789abcdef0123456789abcdef HTTP/1.1":         "/dl/tok-0123456789abcdef0123456789abcdef",
+		"GET /p#frag HTTP/1.1":                                          "/p%23frag",
+		"POST https://user@up.example.test:8443/a%2Fb?sig=abc HTTP/1.1": "/a%2Fb",
+	} {
+		r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(line + "\r\nHost: up.example.com\r\n\r\n")))
+		if err != nil {
+			t.Fatalf("%s: %v", line, err)
+		}
+		got := RedactPath(r.URL)
+		if got != want {
+			t.Errorf("%s: got %q want %q", line, got, want)
+		}
+		for _, secret := range []string{"s3cret", "u:p", "user@", "sig=", "x=1"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s: %q kept %q", line, got, secret)
+			}
+		}
+	}
+}
+
+// The Event's JSON names are the wire format the control plane stores
+// (packages/control-plane/src/egress-log.ts EVENT_FIELDS), which
+// refuses any other field. A field added here must be added there, on purpose.
+func TestEventFieldsAreTheWireFormat(t *testing.T) {
+	var names []string
+	ty := reflect.TypeOf(Event{})
+	for i := 0; i < ty.NumField(); i++ {
+		names = append(names, strings.Split(ty.Field(i).Tag.Get("json"), ",")[0])
+	}
+	want := []string{"time", "via", "vm_id", "sid", "sub", "host", "dial_addr", "method", "path",
+		"status", "bytes_up", "bytes_down", "credential", "decision", "dropped", "coalesced"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("Event fields %v, want %v", names, want)
+	}
+}
+
+// A credential is named in Event.Credential; no field carries a value. Every
+// string field of a fully populated event, as JSON, holds only what was set.
+func TestJSONSinkWritesNoCredentialValue(t *testing.T) {
+	var b bytes.Buffer
+	NewJSONSink(&b).Emit(Event{VMID: "vm1", SID: "s1", Host: "api.example.com", Method: "GET",
+		Path: "/v1/x", Status: 200, Credential: "gh-main", Decision: DecisionCredentialInjected})
+	var m map[string]any
+	if err := json.Unmarshal(b.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["credential"] != "gh-main" {
+		t.Fatalf("credential=%v", m["credential"])
+	}
+	for k := range m {
+		if k == "authorization" || k == "headers" || k == "query" || k == "value" {
+			t.Fatalf("an event carries %q", k)
 		}
 	}
 }

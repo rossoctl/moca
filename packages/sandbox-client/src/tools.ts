@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import type { Exec, ExecResult } from './exec-conn.js';
+import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
+import { LeaseControlError, type LeaseStatusView, type SandboxModeName } from './lease.js';
 import { PI_SCHEMAS } from './schemas.js';
 
 /**
  * The seven tools SBX0 serves (spec §6.4), with Pi's names and input schemas, reimplemented over an
- * Exec with no Pi dependency (ADR-0042). Each costs ONE Exec -- edit two -- using the command shapes
- * the prototype measured (#504's fewer-execs.ts): on the microVM tier every Exec is a fresh VM, so a
- * probe before the real work costs as much as the work.
+ * Exec with no Pi dependency (ADR-0042), plus `sandbox_info` and the lease's `reset` (plan 4). Each
+ * Pi tool costs ONE Exec -- edit two -- using the command shapes the prototype measured (#504's
+ * fewer-execs.ts): on the microVM tier every per-exec Exec is a fresh VM, so a probe before the real
+ * work costs as much as the work.
  *
  * The tools only depend on the `Exec` function type, never on the connection class. A machinery
  * failure (`ExecMachineryError`) or a refusal (`ExecRefusedError`) is THROWN, never returned as
@@ -39,7 +42,26 @@ export const TOOL_NAMES = [
   'find',
   'ls',
   'sandbox_info',
+  'reset',
 ] as const;
+
+/**
+ * The lease calls a tool may make (spec §8.3): `LeaseControl` status and reset. An abort of `signal`
+ * cancels the call (a reset may wait up to grace_limit, 30 min).
+ */
+export type LeaseCall = (
+  op: 'status' | 'reset',
+  opts?: { signal?: AbortSignal },
+) => Promise<LeaseStatusView>;
+
+/**
+ * What a lease mode tells the model in place of "every call is a fresh VM" (plan 4): one guest
+ * may serve several calls, so /tmp may last, but still no process does.
+ */
+export const LEASE_RULE =
+  'consecutive calls may share one guest until it restarts; no process survives a call; /tmp lasts until the guest restarts';
+export const RESET_ENDED_TEXT = 'lease ended (reset): the next command starts a new guest';
+export const RESET_NONE_TEXT = 'no lease to reset';
 
 export interface ToolResult {
   content: { type: 'text'; text: string }[];
@@ -59,7 +81,7 @@ export interface SandboxTool {
   description: string;
   inputSchema: Record<string, unknown>;
   /**
-   * Exec cost: 1 for every tool, 2 for edit, 0 for sandbox_info. Throws `ToolInputError` on
+   * Exec cost: 1 for every tool, 2 for edit, 0 for sandbox_info and reset. Throws `ToolInputError` on
    * malformed input (nothing sent), and rethrows the Exec's own errors unchanged.
    */
   run(args: Record<string, unknown>, exec: Exec, signal?: AbortSignal): Promise<ToolResult>;
@@ -223,16 +245,30 @@ const capNote = (requested: number | undefined) =>
 export function sandboxTools(o: {
   info: () => Promise<string>;
   workspace?: string;
+  /** The sandbox's mode, for the texts: a lease mode says calls may share a guest. */
+  mode?: SandboxModeName;
+  /** `reset`'s lease calls. Without them, `reset` fails as unavailable. */
+  lease?: LeaseCall;
+  /** The mode `reset` acts on, asked at each call (default `mode`): it may change mid-session. */
+  currentMode?: () => Promise<SandboxModeName>;
+  /**
+   * Whether the pending event a reset answered with is the end this reset made (default: an end
+   * with reason `reset`). The MCP server also marks it seen, so the next result does not repeat it.
+   */
+  resetEnded?: (pending: LeaseEvent | undefined) => boolean;
 }): SandboxTool[] {
   const ws = o.workspace ?? WORKSPACE;
+  const leased = (o.mode ?? 'per-exec') !== 'per-exec'; // the texts' mode
   const at = (p: string): string => (posix.isAbsolute(p) ? posix.normalize(p) : posix.join(ws, p));
   const rel = (line: string): string =>
     line.startsWith(`${ws}/`) ? line.slice(ws.length + 1) : line;
   const fileOpts = (signal?: AbortSignal) => ({ timeoutS: FILE_TOOL_TIMEOUT_S, signal });
-  const rules =
-    `It runs in a remote sandbox whose working directory is ${ws}. Every call is a fresh VM: no ` +
-    `process survives it, there is no network, and files under ${ws} persist. Calls run one at a ` +
-    'time, so batch the work.';
+  const rules = leased
+    ? `It runs in a remote sandbox whose working directory is ${ws}: ${LEASE_RULE}. There is no ` +
+      `network, and files under ${ws} persist. Calls run one at a time, so batch the work.`
+    : `It runs in a remote sandbox whose working directory is ${ws}. Every call is a fresh VM: no ` +
+      `process survives it, there is no network, and files under ${ws} persist. Calls run one at a ` +
+      'time, so batch the work.';
   const size = `${MAX_LINES} lines or ${MAX_BYTES / 1024}KB`;
 
   const bash: SandboxTool = {
@@ -626,12 +662,39 @@ export function sandboxTools(o: {
 
   const sandboxInfo: SandboxTool = {
     name: 'sandbox_info',
-    description: "The sandbox's template, expiry and rules. Costs no VM.",
+    description: "The sandbox's template, expiry, rules and lease. Costs no VM.",
     inputSchema: { type: 'object', properties: {} },
     run: async () => ok(await o.info()),
   };
 
-  return [bash, read, write, edit, grep, find, ls, sandboxInfo];
+  const lease: LeaseCall =
+    o.lease ??
+    (async () => {
+      throw new LeaseControlError('unavailable', 'this client has no lease calls');
+    });
+  const resetEnded =
+    o.resetEnded ?? ((p: LeaseEvent | undefined) => p?.state === 'end' && p.reason === 'reset');
+  const reset: SandboxTool = {
+    name: 'reset',
+    description:
+      "End the sandbox's current guest, so the next command starts a new guest: /tmp, installs " +
+      `outside ${ws} and background processes are gone; files under ${ws} stay. Use it when the ` +
+      'guest is in a bad state. Costs no VM.',
+    inputSchema: { type: 'object', properties: {} },
+    async run(_a, _exec, signal) {
+      // A per-exec sandbox has no lease (and its worker may have no lease calls): nothing to ask.
+      const m = o.currentMode ? await o.currentMode() : (o.mode ?? 'per-exec');
+      if (m === 'per-exec') return ok(RESET_NONE_TEXT);
+      // The worker holds a reset behind another client's running Exec: a cancelled call stops
+      // waiting, so it does not hold the MCP server's call queue past its cancel. A reset of no
+      // lease is a no-op there, so no status is asked first: the text comes from the reset's own
+      // answer, the end it left pending, with no check-then-act between two calls.
+      const after = await lease('reset', { signal });
+      return ok(resetEnded(after.pending) ? RESET_ENDED_TEXT : RESET_NONE_TEXT);
+    },
+  };
+
+  return [bash, read, write, edit, grep, find, ls, sandboxInfo, reset];
 }
 
 /** The first lines that fit in MAX_BYTES, joined. */

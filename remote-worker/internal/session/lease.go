@@ -20,11 +20,19 @@ import (
 // runs on; this is the worker's own bound over every sandbox it serves.
 //
 // leaseKeyCap bounds them per workspace key, under leaseControlCap, so one sandbox cannot
-// fill the worker's slots and deny every other sandbox's reset and set_mode. A status takes
-// neither: it only reads the pool under its lock, so it is never refused busy.
+// fill the worker's slots and deny every other sandbox's reset, set_mode and
+// sandbox_deleted.
+//
+// leaseStatusCap bounds the status calls running at once, across the Session, apart from
+// the two above: a status takes none of the mutating calls' slots, so a worker whose
+// mutating slots are all held by blocked calls still answers status. A status only reads
+// the pool under its lock, but each runs on a goroutine of its own: without a bound, a
+// flood of them behind a contended pool lock would pile up goroutines without limit. Past
+// it a status is refused busy at once, never queued.
 const (
 	leaseControlCap = 16
 	leaseKeyCap     = 2
+	leaseStatusCap  = 32
 )
 
 // The LeaseControlResult.error strings this file answers with on its own (spec §8.2).
@@ -119,8 +127,8 @@ func leaseResultFrame(ctlID uint64, status *pb.LeaseStatus, errMsg string) *pb.W
 // (no lease mode, or a cap reached) is answered at once through trySend, like accept's
 // refusals; an admitted call runs on its own goroutine and answers through c.sendLate when
 // the controller returns, however long that takes. A status runs on its own goroutine too,
-// so the receive loop never waits on the pool's lock, but takes no slot. Like accept, its
-// only error is ErrEgressWedged.
+// so the receive loop never waits on the pool's lock, and takes a leaseStatusCap slot
+// rather than a mutating one. Like accept, its only error is ErrEgressWedged.
 //
 // The goroutine is not one of Serve's producers: Serve does not wait for it, because a
 // set_mode can block far longer than a re-dial should. If the connection has ended by the
@@ -136,15 +144,20 @@ func (s *Session) leaseControl(ctx context.Context, c *conn, f *pb.LeaseControlF
 		return nil
 	}
 	key := f.GetWorkspaceKey()
-	release := func() {}
-	if f.GetOp() != pb.LeaseOp_LEASE_OP_STATUS {
-		var admitted bool
-		if release, admitted = s.takeLeaseSlot(key); !admitted {
-			if !c.trySend(leaseResultFrame(ctlID, nil, leaseBusyMsg)) {
-				return ErrEgressWedged
-			}
-			return nil
+	var (
+		release  func()
+		admitted bool
+	)
+	if f.GetOp() == pb.LeaseOp_LEASE_OP_STATUS {
+		release, admitted = s.takeLeaseStatusSlot()
+	} else {
+		release, admitted = s.takeLeaseSlot(key)
+	}
+	if !admitted {
+		if !c.trySend(leaseResultFrame(ctlID, nil, leaseBusyMsg)) {
+			return ErrEgressWedged
 		}
+		return nil
 	}
 	go func() {
 		defer release()
@@ -184,6 +197,17 @@ func (s *Session) takeLeaseSlot(key string) (release func(), admitted bool) {
 		s.leaseMu.Unlock()
 		<-s.leaseSlots
 	}, true
+}
+
+// takeLeaseStatusSlot admits one status call, without blocking: a place under
+// leaseStatusCap, or none. release gives it back.
+func (s *Session) takeLeaseStatusSlot() (release func(), admitted bool) {
+	select {
+	case s.leaseStatusSlots <- struct{}{}:
+		return func() { <-s.leaseStatusSlots }, true
+	default:
+		return nil, false
+	}
 }
 
 // leaseKeepalive forwards a Keepalive frame inline; it has no reply. Without a

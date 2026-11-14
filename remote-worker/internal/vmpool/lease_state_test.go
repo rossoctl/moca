@@ -288,3 +288,174 @@ func TestIdleTimeoutClamped(t *testing.T) {
 		}
 	}
 }
+
+// Plan 4 Task 3: the janitor removes a deleted sandbox's state file. Retiring a cached
+// state afterwards must not write it back, neither directly nor through the pool's
+// Reclaim on a run that still caches a known state.
+func TestRetireDoesNotRecreateARemovedStateFile(t *testing.T) {
+	root := t.TempDir()
+	s := leaseState{Mode: ModeLease, Epoch: 4, Known: true}
+	if err := saveLeaseState(root, "k", s); err != nil {
+		t.Fatal(err)
+	}
+	removeLeaseState(root, "k") // the janitor
+	retireLeaseState(root, "k", s)
+	if _, err := os.Stat(leaseStatePath(root, "k")); !os.IsNotExist(err) {
+		t.Fatalf("retireLeaseState recreated a removed state file: %v", err)
+	}
+
+	p, _, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModePerExec, 1)
+	mustExec(t, p, "k", Exec{Command: "one", TimeoutS: 30, Mode: ModePerExec, ModeEpoch: 1})
+	path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
+	if err := os.Remove(path); err != nil { // the janitor, while the run caches the known state
+		t.Fatal(err)
+	}
+	if err := p.Reclaim(t.Context(), "k"); err != nil {
+		t.Fatalf("Reclaim: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Reclaim recreated a state file the janitor removed: %v", err)
+	}
+}
+
+// Review #4569829097: a lease live past the janitor's reclaim (a large idle ceiling) ends
+// after the janitor removed the deleted sandbox's state file. The end must not write it back:
+// no sandbox owns it, and once the record is purged nothing would remove it again.
+func TestLeaseEndDoesNotRecreateARemovedStateFile(t *testing.T) {
+	for _, end := range []struct {
+		name string
+		do   func(t *testing.T, p *pool, clk *fakeClock)
+	}{
+		{"reset", func(t *testing.T, p *pool, _ *fakeClock) {
+			if err := p.EndLease("k", LeaseEndReset); err != nil {
+				t.Fatalf("EndLease: %v", err)
+			}
+		}},
+		{"idle", func(t *testing.T, p *pool, clk *fakeClock) {
+			clk.Advance(31 * time.Second)
+			waitFor(t, func() bool { return liveLease(p, "k") == nil })
+		}},
+	} {
+		t.Run(end.name, func(t *testing.T) {
+			p, _, clk := leasePool(t, nil)
+			mustSetMode(t, p, "k", ModeLease, 1)
+			mustExec(t, p, "k", leaseExecIdle(secretCommand, 30*time.Second))
+			leaseAlive(t, p, "before the janitor")
+			path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
+			if err := os.Remove(path); err != nil { // the janitor, under the live lease
+				t.Fatal(err)
+			}
+			end.do(t, p, clk)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("the lease end recreated a state file the janitor removed: %v", err)
+			}
+			// The cache follows the disk: nothing known, nothing pending.
+			if info := p.LeaseStatus("k"); info.EpochKnown || info.Pending != nil {
+				t.Fatalf("LeaseStatus = %+v, want no known epoch and nothing pending", info)
+			}
+		})
+	}
+}
+
+// bootLeasePool is New over root, with lease support on or off (the lease-v1 manifest
+// feature), closed before it returns: only what New did at boot is left to look at.
+func bootLeasePool(t *testing.T, root string, lease bool) {
+	t.Helper()
+	lc := newFakeLauncher()
+	cfg := Config{
+		VMM:               lc.Kind(),
+		SnapshotDir:       t.TempDir(),
+		WorkspaceRoot:     root,
+		MaxRuns:           16,
+		MaxCommittedBytes: 32 << 30,
+	}
+	if lease {
+		cfg.ManifestFeatures = []string{FeatureLeaseV1}
+	}
+	p, err := New(cfg, lc, newFakeClock())
+	if err != nil {
+		t.Fatalf("New (lease %v): %v", lease, err)
+	}
+	if got := p.(*pool).cfg.LeaseEnabled; got != lease {
+		t.Fatalf("LeaseEnabled = %v, want %v", got, lease)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func bootMarker(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, leaseStateDir, ".boot"))
+	if err != nil {
+		t.Fatalf("boot marker: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// A per-Exec Exec on a lease-off worker records no root_wrote, so a lease-on boot after
+// one cannot trust a known state's root_wrote = false: every known state gets it.
+func TestLeaseOffBootMarksRootWrote(t *testing.T) {
+	t.Run("off, then on", func(t *testing.T) {
+		root := t.TempDir()
+		bootLeasePool(t, root, true)
+		if m := bootMarker(t, root); m != "lease=on" {
+			t.Fatalf("marker after a lease-on boot = %q, want lease=on", m)
+		}
+		if err := saveLeaseState(root, "k", leaseState{Mode: ModeLease, Epoch: 3, Known: true}); err != nil {
+			t.Fatal(err)
+		}
+		bootLeasePool(t, root, false)
+		if m := bootMarker(t, root); m != "lease=off" {
+			t.Fatalf("marker after a lease-off boot = %q, want lease=off", m)
+		}
+		if s := loadLeaseState(root, "k"); s.RootWrote {
+			t.Fatalf("a lease-off boot changed the state: %+v", s)
+		}
+		bootLeasePool(t, root, true)
+		if s := loadLeaseState(root, "k"); !s.Known || !s.RootWrote || s.Mode != ModeLease || s.Epoch != 3 {
+			t.Fatalf("state after off, then on = %+v, want lease at epoch 3, known, root_wrote", s)
+		}
+		if m := bootMarker(t, root); m != "lease=on" {
+			t.Fatalf("marker = %q, want lease=on", m)
+		}
+	})
+	t.Run("no marker, state files", func(t *testing.T) {
+		root := t.TempDir()
+		at := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+		pending := &LeaseEvent{State: "end", Reason: LeaseEndIdle, At: at, Mode: ModeLease}
+		for key, s := range map[string]leaseState{
+			"known":   {Mode: ModeLease, Epoch: 3, Known: true},
+			"pending": {Pending: pending},
+		} {
+			if err := saveLeaseState(root, key, s); err != nil {
+				t.Fatal(err)
+			}
+		}
+		bootLeasePool(t, root, true)
+		if s := loadLeaseState(root, "known"); !s.Known || !s.RootWrote || s.Mode != ModeLease || s.Epoch != 3 {
+			t.Fatalf("known state after a boot with no marker = %+v, want root_wrote set, the rest kept", s)
+		}
+		// Not known: nothing to mark. Its first lease needs SetMode, which sets root_wrote (R7).
+		if s := loadLeaseState(root, "pending"); s.Known || s.RootWrote || s.Pending == nil {
+			t.Fatalf("pending-only state after a boot with no marker = %+v, want it unchanged", s)
+		}
+	})
+}
+
+func TestLeaseOnBootKeepsState(t *testing.T) {
+	root := t.TempDir()
+	bootLeasePool(t, root, true)
+	want := leaseState{Mode: ModeLeaseProcesses, Epoch: 9, Known: true}
+	if err := saveLeaseState(root, "k", want); err != nil {
+		t.Fatal(err)
+	}
+	bootLeasePool(t, root, true)
+	if s := loadLeaseState(root, "k"); !reflect.DeepEqual(s, want) {
+		t.Fatalf("state after on, then on = %+v, want %+v unchanged", s, want)
+	}
+	if m := bootMarker(t, root); m != "lease=on" {
+		t.Fatalf("marker = %q, want lease=on", m)
+	}
+}

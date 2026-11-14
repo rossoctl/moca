@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ExecMachineryError } from '@moca/sandbox-client';
+import { ExecMachineryError, sandboxRules, WORKSPACE } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
@@ -19,6 +19,7 @@ import { hasUnpulled, MAX_FILE, repoId } from '../src/sbx/push.js';
 import {
   LOGIN,
   NEW,
+  NO_LEASE,
   OTHER,
   SBX,
   URL_,
@@ -137,6 +138,24 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     expect(h.cp.posts()).toHaveLength(0);
     expect(binding(h.r).id).toBe(SBX);
   });
+
+  it('writes the lease rules into CLAUDE.md and AGENTS.md for a lease sandbox (P4-R11)', async () => {
+    const h = harness();
+    const rid = await repoId(h.r);
+    h.cp.boxes.set(
+      SBX,
+      sandbox({ id: SBX, labels: { project: rid }, mode: 'lease', modeEpoch: 1 }),
+    );
+    expect(await h.run(['up'])).toBe(0);
+    expect(binding(h.r).id).toBe(SBX);
+    for (const f of ['CLAUDE.md', 'AGENTS.md']) {
+      const md = readFileSync(join(h.r, f), 'utf8');
+      expect(md).toContain(sandboxRules(WORKSPACE, 'lease'));
+      expect(md).not.toContain('Every tool call runs in a fresh VM');
+    }
+    // doctor takes the block written for the sandbox's mode.
+    expect(checkAgentConfig(h.r)).toEqual([]);
+  }, 30_000);
 
   it('warns and pushes nothing when the reused sandbox holds changes not yet pulled', async () => {
     const h = harness();
@@ -583,6 +602,7 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
         );
       },
       close: () => {},
+      ...NO_LEASE,
     });
     const run = (argv: string[]) =>
       sbxMain(argv, h.env, h.io, {

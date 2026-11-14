@@ -147,6 +147,7 @@ describe('lease events reach the caller (lease-mode §4)', () => {
       mode: SandboxMode.SANDBOX_MODE_LEASE,
       ageMs: 0,
       processes: [],
+      endsByUnixMs: 0,
     });
     const kinds = res.events.map((ev) => Object.entries(ev).flatMap(([k, v]) => (v ? [k] : [])));
     expect(kinds).toEqual([['lease'], ['chunk'], ['end']]);

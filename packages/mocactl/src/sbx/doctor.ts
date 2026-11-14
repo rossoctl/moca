@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { q } from '@moca/sandbox-client';
+import { q, type SandboxModeName } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
@@ -93,8 +93,14 @@ async function loginCheck(c: SbxCtx): Promise<DoctorCheck> {
   };
 }
 
-/** Whether the next checks can reach the sandbox: false after a sandbox failure. */
-async function sandboxCheck(c: SbxCtx, id: string): Promise<{ check: DoctorCheck; live: boolean }> {
+/**
+ * Whether the next checks can reach the sandbox: false after a sandbox failure. `mode` is the
+ * record's, when it could be read, for the agent-config check's rules block.
+ */
+async function sandboxCheck(
+  c: SbxCtx,
+  id: string,
+): Promise<{ check: DoctorCheck; live: boolean; mode?: SandboxModeName }> {
   const name = 'sandbox';
   let s;
   try {
@@ -142,9 +148,10 @@ async function sandboxCheck(c: SbxCtx, id: string): Promise<{ check: DoctorCheck
           `mocactl sbx rm, then ${UP}`,
       },
       live: true,
+      mode: s.mode,
     };
   }
-  return { check: { name, ok: true, detail }, live: true };
+  return { check: { name, ok: true, detail }, live: true, mode: s.mode };
 }
 
 /**
@@ -225,8 +232,8 @@ export async function cortexCheck(agentop: AgentopExec = runAgentop): Promise<Do
   };
 }
 
-function configCheck(root: string): DoctorCheck {
-  const problems = checkAgentConfig(root);
+function configCheck(root: string, mode: SandboxModeName | undefined): DoctorCheck {
+  const problems = checkAgentConfig(root, mode);
   return problems.length
     ? {
         name: 'agent config',
@@ -372,6 +379,8 @@ export async function runDoctor(
   const login = await loginCheck(c);
   out.push(login);
   let live = false;
+  /** The sandbox's mode, from its record: the rules block must be that mode's. */
+  let mode: SandboxModeName | undefined;
   if (!id) {
     out.push({
       name: 'sandbox',
@@ -383,9 +392,10 @@ export async function runDoctor(
     const s = await sandboxCheck(c, id);
     out.push(s.check);
     live = s.live;
+    mode = s.mode;
   }
   if (root !== undefined) {
-    out.push(configCheck(root));
+    out.push(configCheck(root, mode));
     if (cortexMode(root)) out.push(await cortexCheck(agentop));
     const old = claudeVersionCheck(await claudeVersion());
     if (old) out.push(old);
