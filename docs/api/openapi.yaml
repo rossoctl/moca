@@ -2454,6 +2454,10 @@ paths:
         record's sha256 from trustedGateRecords, the builds that become self-attested on a
         deployment-visible template make that template private on read; they are named as
         `narrowed` in the answer and in the `policy` record, so the narrowing is never silent.
+        A change that widens it (adds to trustedGateRecords or allowedRegistries, or adds to or
+        drops a registry's allowedRepositories list) needs an admin named in SH_ADMIN_SUBJECTS
+        where a members store is kept: an admin by an API grant is refused `403 forbidden`, and may
+        still narrow it and change its quotas.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

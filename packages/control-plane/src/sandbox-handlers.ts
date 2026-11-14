@@ -1370,6 +1370,34 @@ async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
   return { status: 200, body: { templateId: d0.id, subject: p.sub, owner, before, record } };
 }
 
+/**
+ * The policy fields a change widens: a gate record trusted that was not, a registry allowed that
+ * was not, or a registry's repository list that gains an entry or is dropped (no list allows every
+ * repository). Registries and their keys compare case-insensitively, as the policy reads them.
+ */
+function policyWidens(cur: Policy, next: Policy): string[] {
+  const out: string[] = [];
+  const trusted = new Set(cur.trustedGateRecords);
+  if (next.trustedGateRecords.some((g) => !trusted.has(g))) out.push('trustedGateRecords');
+  const lower = (xs: string[]) => new Set(xs.map((x) => x.toLowerCase()));
+  const regs = lower(cur.allowedRegistries);
+  if (next.allowedRegistries.some((r) => !regs.has(r.toLowerCase()))) out.push('allowedRegistries');
+  const repos = (m: Record<string, string[]> | undefined) =>
+    new Map(Object.entries(m ?? {}).map(([k, v]) => [k.toLowerCase(), new Set(v)]));
+  const was = repos(cur.allowedRepositories);
+  const now = repos(next.allowedRepositories);
+  const nextRegs = lower(next.allowedRegistries);
+  for (const [reg, list] of was) {
+    if (!nextRegs.has(reg)) continue;
+    const n = now.get(reg);
+    if (!n || [...n].some((x) => !list.has(x))) {
+      out.push('allowedRepositories');
+      break;
+    }
+  }
+  return out;
+}
+
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
   // The template reads (template lifecycle spec §4), on both route profiles (§4.1): on `harness`
   // requireEnrolled admits any logged-in subject. The worker id is deployment plumbing; a client
@@ -1449,6 +1477,16 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const store = policyStore(deps);
     const bad = policyProblems(ctx.body);
     if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+    // Widening what the policy trusts is the same kind of act as widening access (enrollment and
+    // roles spec, decision 1): an admin by an API grant may narrow the policy and change its quotas,
+    // but adding a trusted gate record, a registry or a repository needs an admin named in the
+    // settings. Without a members store every admin is one.
+    const widened = policyWidens((await store.current()).policy, ctx.body as Policy);
+    if (widened.length && deps.members && !deps.members.bootstrap.admins.includes(p.sub))
+      throw new CpError(
+        'forbidden',
+        `widening ${widened.join(', ')} requires an admin named in the settings (SH_ADMIN_SUBJECTS)`,
+      );
     // Self-attestation: a record whose trust this removes narrows its deployment-visible templates
     // to private on read. Name each narrowed build in the policy record, so nothing is silent. The
     // policy itself is what the admin sent, every field kept as sent.

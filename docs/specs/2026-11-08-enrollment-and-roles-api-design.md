@@ -104,7 +104,10 @@ two cluster writes for one API call.
 1. **Who may change access:** only an admin named in the settings (`SH_ADMIN_SUBJECTS`) may enroll,
    unenroll, grant or revoke. An API-granted admin cannot widen or narrow access, so access never
    goes beyond what the settings' admins choose. They stay the recovery path: they cannot be revoked
-   through the API, and none can revoke itself.
+   through the API, and none can revoke itself. Widening what the template policy trusts is the same
+   kind of act: a `PUT /v1/policy` that adds a trusted gate record, a registry, or a repository to a
+   registry's list (or drops the list) also needs a settings admin. An API-granted admin may still
+   narrow the policy and change its quotas.
 2. **Per-template roles:** none for now. The owner and the admins cover every case seen so far. A
    `maintainer` role (tags, builds, retire; no ownership transfer) can be added later without changing
    this design.

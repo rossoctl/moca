@@ -16,6 +16,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { MembersStore } from '../src/members.js';
+import { DEFAULT_POLICY, type Policy } from '../src/template-policy.js';
+import { FilePolicyStore } from '../src/template-policy-store.js';
 import { ProvenanceStore, verifyExport } from '../src/provenance.js';
 import { buildHandler } from '../src/server.js';
 import { ctx, codeOf, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
@@ -249,6 +251,46 @@ describe('the admin role (spec §3, §6)', () => {
       expect(await codeOf(() => call(d, op, asCarol, args, body))).toBe('forbidden');
     }
     expect((await d.provenance.chain('members')).length).toBe(1);
+  });
+
+  it("refuses an API-granted admin's policy change that widens trust, registries or repositories", async () => {
+    const d = setup();
+    const policy = new FilePolicyStore({
+      dir: mkdtempSync(join(tmpdir(), 'cp-pol-')),
+      provenance: d.provenance,
+    });
+    const base: Policy = {
+      ...DEFAULT_POLICY,
+      allowedRegistries: ['<default>', 'docker.io'],
+      allowedRepositories: { 'docker.io': ['library/python'] },
+      trustedGateRecords: [`sha256:${'a'.repeat(64)}`],
+    };
+    await policy.set(base, ENV_ADMIN);
+    (d as { policy?: FilePolicyStore }).policy = policy;
+    await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, {});
+    const put = (p: TokenClaims, body: Policy) => call(d, 'putPolicy', p, {}, body);
+    // Each widening, by CAROL (an admin by an API grant): refused, the policy unchanged.
+    for (const wider of [
+      { ...base, trustedGateRecords: [...base.trustedGateRecords, `sha256:${'b'.repeat(64)}`] },
+      { ...base, allowedRegistries: [...base.allowedRegistries, 'quay.io'] },
+      { ...base, allowedRepositories: { 'docker.io': ['library/python', 'library/node'] } },
+      { ...base, allowedRepositories: {} },
+    ]) {
+      expect(await codeOf(() => put(who(CAROL), wider))).toBe('forbidden');
+      expect((await policy.current()).policy).toEqual(base);
+    }
+    // Narrowing and quotas are CAROL's to change.
+    const narrower = {
+      ...base,
+      trustedGateRecords: [],
+      allowedRegistries: ['<default>', 'DOCKER.IO'],
+      quota: { ...base.quota, templates: base.quota.templates + 1 },
+    };
+    await put(who(CAROL), narrower);
+    expect((await policy.current()).policy.trustedGateRecords).toEqual([]);
+    // A settings admin widens it again.
+    await put(who(ENV_ADMIN), base);
+    expect((await policy.current()).policy.trustedGateRecords).toEqual(base.trustedGateRecords);
   });
 
   it('revokes at the next request, and refuses a non-admin', async () => {
