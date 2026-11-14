@@ -9,7 +9,7 @@ import {
 } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
-import { writeAgentConfig } from '../src/sbx/agent-config.js';
+import { checkAgentConfig, writeAgentConfig } from '../src/sbx/agent-config.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import type { SbxCtx } from '../src/sbx/commands.js';
 import {
@@ -20,7 +20,17 @@ import {
 } from '../src/sbx/doctor.js';
 import type { ExecFactory } from '../src/sbx/exec.js';
 import { recordCall } from '../src/sbx/recorder.js';
-import { LOGIN, SBX, URL_, cleanupTmp, controlPlane, repo, sandbox, setup } from './helpers/sbx.js';
+import {
+  LOGIN,
+  NO_LEASE,
+  SBX,
+  URL_,
+  cleanupTmp,
+  controlPlane,
+  repo,
+  sandbox,
+  setup,
+} from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -30,6 +40,7 @@ const res = (o: Partial<ExecResult> = {}): ExecResult => ({
   stderr: Buffer.alloc(0),
   exitCode: 0,
   truncated: false,
+  lease: [],
   ...o,
 });
 
@@ -51,7 +62,7 @@ function fakeExec(o: { state?: string; fail?: Error; exitCode?: number } = {}) {
   };
   const factory: ExecFactory = (c) => {
     conns.push(c);
-    return { exec, close: () => void closed++ };
+    return { exec, close: () => void closed++, ...NO_LEASE };
   };
   return { factory, sent, opts, conns, closed: () => closed };
 }
@@ -216,6 +227,31 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(c.detail).toMatch(/agent\.build\.permission\.bash/);
   });
 
+  it("fails the agent-config check when the rules block is for another mode than the sandbox's (review #4569829055)", async () => {
+    // up on a lease sandbox writes the lease rules; doctor passes them.
+    const w = world({ box: { mode: 'lease', modeEpoch: 1 } });
+    writeAgentConfig(w.r, { mode: 'lease' });
+    const before = byName(
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      'agent config',
+    );
+    expect(before.ok, before.detail).toBe(true);
+    // `sbx mode per-exec` changes the record, not the block.
+    w.cp.boxes.set(SBX, { ...w.cp.boxes.get(SBX)!, mode: 'per-exec', modeEpoch: 2 });
+    const after = byName(
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      'agent config',
+    );
+    expect(after.ok).toBe(false);
+    expect(after.detail).toBe(
+      'CLAUDE.md: has the sandbox rules block for lease mode, but the sandbox is in per-exec mode; ' +
+        'AGENTS.md: has the sandbox rules block for lease mode, but the sandbox is in per-exec mode',
+    );
+    expect(after.fix).toContain('mocactl sbx up');
+    // Without the record (no login), any mode's block is taken as up to date.
+    expect(checkAgentConfig(w.r)).toEqual([]);
+  });
+
   it('fails the agent-config check in a repository sbx up never configured', async () => {
     const w = world();
     const cs = await runDoctor(w.ctx(), repo(), SBX, fakeExec().factory, CURRENT);
@@ -245,7 +281,13 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       return res({ exitCode: -1, timedOutS: o.timeoutS ?? 300 });
     };
     const t0 = Date.now();
-    const cs = await runDoctor(w.ctx(), w.r, SBX, () => ({ exec, close: () => {} }), CURRENT);
+    const cs = await runDoctor(
+      w.ctx(),
+      w.r,
+      SBX,
+      () => ({ exec, close: () => {}, ...NO_LEASE }),
+      CURRENT,
+    );
     expect(Date.now() - t0).toBeLessThan(5_000);
     expect(asked).toEqual([20]);
     const c = byName(cs, 'changes');

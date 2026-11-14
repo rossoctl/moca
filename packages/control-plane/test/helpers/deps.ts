@@ -4,6 +4,7 @@ import { InMemoryCredentialStore, parseCredentialBody } from '../../src/credenti
 import type { CpConfig, CpDeps, RequestCtx } from '../../src/handlers.js';
 import { OwnershipIndex } from '../../src/ownership.js';
 import { MemorySandboxStore } from '../../src/sandbox-store.js';
+import { MemoryEgressStore } from '../../src/egress-log.js';
 import { MemoryRefreshStore, type AuditFields } from '../../src/refresh-store.js';
 import { makeSigner, publicKeyFromBase64, type TokenClaims } from '../../src/token.js';
 import { MemoryTurnQueue } from '../../src/turn-queue.js';
@@ -103,6 +104,7 @@ export function makeDeps(
     credentials: new InMemoryCredentialStore(),
     bundles: fakeBundleRedis(),
     sandboxes: new MemorySandboxStore(),
+    egress: new MemoryEgressStore(),
     identity: new StubIdentity({ subject: 'github:1234', displayName: 'Alice', roles: [] }),
     signer,
     refresh,

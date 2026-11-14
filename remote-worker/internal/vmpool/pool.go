@@ -115,8 +115,8 @@ type Pool interface {
 	// lease it is a no-op. Spec §4.
 	Keepalive(key string) error
 	// LeaseStatus reports key's stored mode, whether its epoch is known, the live lease
-	// (none, active or expiring, its age and idle timeout) and the unacknowledged lease
-	// event. Spec §5, §8.3's LeaseControl status.
+	// (none, active or expiring, its age and idle timeout, and an expiring lease's
+	// deadline) and the unacknowledged lease event. Spec §5, §8.3's LeaseControl status.
 	LeaseStatus(key string) LeaseInfo
 	// AckLeaseEvent clears key's pending lease event whose At equals at; a newer one
 	// stays. Spec §5: the worker keeps the last end event until a client has seen it.
@@ -207,6 +207,10 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	// Computed, never configured: a Config claiming lease support the VMM or the
 	// snapshot cannot back would put lease Execs on a guest without plan 1's half.
 	cfg.LeaseEnabled = LeaseSupported(cfg)
+	// Before anything is served, and before endLeasesOpenAtStart reads the state files.
+	if err := markLeaseBoot(cfg.WorkspaceRoot, cfg.LeaseEnabled); err != nil {
+		return nil, err
+	}
 	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters()}
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.

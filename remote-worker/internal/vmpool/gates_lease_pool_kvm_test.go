@@ -1119,10 +1119,13 @@ while True: b.append(b"x" * (16 << 20))'`},
 	}
 	before := rootOOMs("before the tmpfs case")
 	// /tmp and /var are unsized tmpfs mounts, each limited to half the guest's memory by
-	// default, so the ~60% is split 45/15 between them.
+	// default, so the ~60% is split 45/15 between them. The /var share goes to /var/tmp:
+	// /var is an overlay over the image's root-owned /var (691c1a05), so the Exec user
+	// cannot create /var/fill there; /var/tmp is world-writable, and its writes land in the
+	// same tmpfs-backed /var.
 	fill := `kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 dd if=/dev/zero of=/tmp/fill bs=1M count=$((kb * 45 / 100 / 1024)) 2>/dev/null &&
-dd if=/dev/zero of=/var/fill bs=1M count=$((kb * 15 / 100 / 1024)) 2>/dev/null && echo filled`
+dd if=/dev/zero of=/var/tmp/fill bs=1M count=$((kb * 15 / 100 / 1024)) 2>/dev/null && echo filled`
 	if got := g.run(t, key, gateLease(fill, 1)); got != "filled\n" {
 		t.Fatalf("filling /tmp and /var: stdout %q, want filled", got)
 	}

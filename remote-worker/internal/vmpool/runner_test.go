@@ -561,3 +561,78 @@ func TestPerExecExecCarriesNoLeaseEvents(t *testing.T) {
 		t.Fatalf("pending = %+v, want the end/mode_change left for a lease client", got)
 	}
 }
+
+// The expiring notice names its reason and its deadline (plan 4): at_unix_ms is when the
+// lease passed its maximum duration, and ends_by_unix_ms is that plus LeaseGraceLimit, the
+// hard end a client counts its "restarts within <N> min" down to.
+func TestExpiringEventCarriesDeadline(t *testing.T) {
+	p, _, clk := leasePool(t, func(c *Config) {
+		c.LeaseMaxDuration = 10 * time.Second
+		c.LeaseGraceLimit = 60 * time.Second
+	})
+	r := Runner{Pool: p}
+	mustSetMode(t, p, "k", ModeLease, 1)
+	first := runLease(t, r, leaseSpec(1, 1))
+	if len(first) != 1 || first[0].GetState() != "start" {
+		t.Fatalf("first Exec's events = %v, want one lease start", first)
+	}
+	started := first[0].GetAtUnixMs()
+
+	clk.Advance(10 * time.Second)
+	evs := runLease(t, r, leaseSpec(2, 1))
+	if len(evs) != 1 {
+		t.Fatalf("events after 10 s = %v, want exactly the expiring notice", evs)
+	}
+	ev := evs[0]
+	if ev.GetState() != "expiring" || ev.GetReason() != "max_duration" {
+		t.Fatalf("event = %v, want expiring/max_duration", ev)
+	}
+	if ev.GetMode() != pb.SandboxMode_SANDBOX_MODE_LEASE {
+		t.Errorf("mode = %v, want lease", ev.GetMode())
+	}
+	if ev.GetAgeMs() < 10_000 {
+		t.Errorf("age_ms = %d, want the lease's age (>= 10 000)", ev.GetAgeMs())
+	}
+	if want := started + 10_000; ev.GetAtUnixMs() != want {
+		t.Errorf("at_unix_ms = %d, want %d: when the lease passed its maximum duration", ev.GetAtUnixMs(), want)
+	}
+	if d := ev.GetEndsByUnixMs() - ev.GetAtUnixMs(); d != 60_000 {
+		t.Errorf("ends_by - at = %d ms, want 60 000 (the grace limit)", d)
+	}
+
+	// Not acknowledged: the next lease Exec carries the same notice, at the same at_unix_ms,
+	// so a client deduping on it shows it once.
+	clk.Advance(time.Second)
+	again := runLease(t, r, leaseSpec(3, 1))
+	if len(again) != 1 || again[0].GetState() != "expiring" || again[0].GetAtUnixMs() != ev.GetAtUnixMs() ||
+		again[0].GetEndsByUnixMs() != ev.GetEndsByUnixMs() {
+		t.Fatalf("next Exec's events = %v, want the same expiring notice (%v)", again, ev)
+	}
+}
+
+// sandbox_deleted (plan 4) ends the lease with that reason and needs no epoch.
+func TestRunnerLeaseControlSandboxDeleted(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	r := Runner{Pool: p}
+	mustSetMode(t, p, "k", ModeLease, 1)
+	runLease(t, r, leaseSpec(1, 1))
+
+	st, err := r.LeaseControl(t.Context(), "k", pb.LeaseOp_LEASE_OP_SANDBOX_DELETED, 0, 0)
+	if err != nil {
+		t.Fatalf("sandbox_deleted: %v", err)
+	}
+	if st.GetState() != "none" || st.GetPending().GetState() != "end" || st.GetPending().GetReason() != "sandbox_deleted" {
+		t.Fatalf("status after sandbox_deleted = %v; want no lease, end/sandbox_deleted pending", st)
+	}
+	if got := p.LeaseStatus("k").Pending; got == nil || got.Reason != LeaseEndSandboxDeleted {
+		t.Fatalf("pending = %+v, want end/sandbox_deleted", got)
+	}
+	if n := lc.liveCount(); n != 0 {
+		t.Fatalf("%d VMs live after sandbox_deleted", n)
+	}
+
+	// Without a live lease it is a no-op that still answers the status.
+	if st, err := r.LeaseControl(t.Context(), "never", pb.LeaseOp_LEASE_OP_SANDBOX_DELETED, 0, 0); err != nil || st.GetState() != "none" {
+		t.Fatalf("sandbox_deleted without a lease = %v, %v; want status none, no error", st, err)
+	}
+}

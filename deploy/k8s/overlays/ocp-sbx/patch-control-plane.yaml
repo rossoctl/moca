@@ -46,6 +46,16 @@ spec:
                 { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_PER_SUBJECT } }
             - name: SH_SANDBOX_MAX_TOTAL
               valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_TOTAL } }
+            # The lease policy (lease-mode spec §8.1). Optional: absent, the control plane's
+            # defaults apply -- per-exec only (lease off) and 1800 s.
+            - name: SH_SANDBOX_MODES_ALLOWED
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_MODES_ALLOWED, optional: true }
+            - name: SH_SANDBOX_IDLE_CEILING_S
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_IDLE_CEILING_S, optional: true }
       volumes:
         - name: credentials
           # The base (ADR-0045) makes this a PROJECTED volume so the test-user secret can come from

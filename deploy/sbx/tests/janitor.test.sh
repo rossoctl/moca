@@ -407,3 +407,49 @@ for kind in rejects ignores; do
   [[ ! -s "$MOCK_LOG" && "$before" == "$(snapshot)" ]] || fail "asked the control plane or touched the disk with an mv that $kind -T/-h"
 done
 pass 'refuses, before anything else, an mv that rejects or ignores both -T and -h'
+
+# 20. The worker's lease state files (<root>/.lease-state/<wsk>.json) follow the workspace: a reclaimed
+# key's file goes (terminated or unknown-idle), and so does a terminated key's whose workspace the
+# worker had already reclaimed; a live, a recent and an unlisted key's stay, and so does the boot
+# marker. A symlinked .lease-state, or a symlinked state file, is refused and not followed.
+setup_dirs
+list
+LS="$D/.lease-state"
+mkdir -p "$LS" "$P/.lease-state"
+for key in "$TERM_OLD" "$UNK_OLD" "$LIVE" "$LIVE_TOO" "$TERM_RECENT" "$UNK_NEW" "$(k 7)" "$(k 9)"; do
+  printf '{"mode":"lease","epoch":1,"known":true}' >"$LS/$key.json"
+done
+printf '{"mode":"lease","epoch":1,"known":true}' >"$P/.lease-state/$PY_TERM.json"
+printf 'lease=on\n' >"$LS/.boot"
+bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ ! -e "$LS/$TERM_OLD.json" ]] || fail "a reclaimed terminated sandbox kept its lease state file"
+[[ ! -e "$P/.lease-state/$PY_TERM.json" ]] || fail "another installed worker's reclaimed sandbox kept its lease state file"
+[[ ! -e "$LS/$UNK_OLD.json" ]] || fail 'a reclaimed idle unknown directory kept its lease state file'
+[[ ! -e "$LS/$(k 7).json" ]] || fail 'a sandbox terminated more than the wait ago, its workspace already gone, kept its lease state file'
+for key in "$LIVE" "$LIVE_TOO" "$TERM_RECENT" "$UNK_NEW" "$(k 9)"; do
+  [[ -f "$LS/$key.json" ]] || fail "removed the lease state file of $key (live, recent, newer unknown or unlisted)"
+done
+[[ -f "$LS/.boot" ]] || fail 'removed the worker boot marker'
+grep -q "\"janitor\":\"lease_state_removed\",\"wrk\":\"sbx_default\",\"wsk\":\"$TERM_OLD\"" "$TMP/out" || fail 'no lease_state_removed line'
+[[ "$(field removed)" == 3 && "$(field errors)" == 4 ]] || fail "lease state files changed the counts: $(summary)"
+
+setup_dirs
+list
+mkdir -p "$TMP/outside/ls"
+printf '{}' >"$TMP/outside/ls/$TERM_OLD.json"
+ln -s "$TMP/outside/ls" "$D/.lease-state"
+bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ -f "$TMP/outside/ls/$TERM_OLD.json" && -L "$D/.lease-state" ]] || fail 'removed a state file through a symlinked .lease-state'
+grep -q '"janitor":"error","wrk":"sbx_default","wsk":"","why":".lease-state is a symlink or not a directory' "$TMP/out" ||
+  fail 'the symlinked .lease-state is not refused as such'
+[[ ! -e "$D/$TERM_OLD" ]] || fail 'a symlinked .lease-state stopped the workspace reclaim'
+
+setup_dirs
+list
+mkdir -p "$D/.lease-state"
+ln -s "$TMP/outside/precious" "$D/.lease-state/$TERM_OLD.json"
+bash "$J" >"$TMP/out" 2>&1 || fail 'janitor failed'
+[[ -f "$TMP/outside/precious" && -L "$D/.lease-state/$TERM_OLD.json" ]] || fail 'removed a symlinked state file or what it points at'
+grep -q "\"janitor\":\"error\",\"wrk\":\"sbx_default\",\"wsk\":\"$TERM_OLD\",\"why\":\"its lease state file is a symlink or not a file" "$TMP/out" ||
+  fail 'the symlinked state file is not refused as such'
+pass 'removes the lease state file of a freed workspace (or of a terminated one already gone); keeps the rest; never through a symlink'

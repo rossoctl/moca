@@ -25,6 +25,11 @@
 #   - .reclaiming-* trees older than one hour, left by a crashed worker or janitor. The age is the
 #     time in the name (the janitor's .reclaiming-<wsk>-<s>, the worker's .reclaiming-<key>-<ns>-<n>),
 #     never the mtime, which a rename keeps; a name without one falls back to the ctime.
+# With a workspace it frees, it removes the worker's lease state file for that key,
+# .lease-state/<wsk>.json in the same root; and the state file of a sandbox terminated more than
+# SBX_JANITOR_AGE ago whose workspace is already gone (the worker's own idle reclaim keeps the file:
+# the sandbox still existed). Only a regular file in a real .lease-state directory, with rm -f; the
+# worker never writes a removed one back (retireLeaseState in remote-worker/internal/vmpool).
 #
 # Every number read (the wait, terminatedAt, SH_WORKSPACE_IDLE, stat and date output) is matched
 # as decimal digits without a leading zero, or forced to base 10, before any arithmetic: bash reads
@@ -56,6 +61,7 @@ refuse() { echo "sbx-janitor: $*" >&2; exit 2; }
 declare -A ROOT=()      # worker id -> its validated workspace root (realpath); safe to remove tombstones in
 declare -A INSTALLED=() # worker id -> 1 when its env file is here and names that root
 declare -A IDLE_S=()    # worker id -> its SH_WORKSPACE_IDLE in seconds
+declare -A LEASE_DIR=() # worker id -> its root's .lease-state, when an installed root has a real one
 declare -A KNOWN=()     # wsk -> 1 for every live or terminated record
 declare -A LIVE=()      # wsk -> 1 for every live record
 declare -A RECLAIM=()   # "<wrk>/<wsk>" -> 1: terminated more than SBX_JANITOR_AGE ago
@@ -217,6 +223,12 @@ validate_root() {
   INSTALLED[$wrk]=1
   idle="$(env_value SH_WORKSPACE_IDLE "$env")"
   [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]] || IDLE_S[$wrk]=$((10#${idle%h} * 3600))
+  local state_dir="$root/.lease-state" # the worker's lease state files: only through a real directory
+  if [[ -L "$state_dir" || (-e "$state_dir" && ! -d "$state_dir") || (-d "$state_dir" && "$(realpath "$state_dir")" != "$state_dir") ]]; then
+    error "$wrk" '' '.lease-state is a symlink or not a directory; no lease state file removed there'
+  elif [[ -d "$state_dir" ]]; then
+    LEASE_DIR[$wrk]="$state_dir"
+  fi
 }
 
 # remove_tree WRK NAME: THE ONE DELETION. Only a .reclaiming-* real directory directly inside the
@@ -231,6 +243,18 @@ remove_tree() {
   [[ -d "$target" && ! -L "$target" && "$(realpath "$target")" == "$target" ]] ||
     { echo "sbx-janitor: remove_tree: $target is not a directory inside $root" >&2; return 1; }
   "${RM[@]}" -- "$target"
+}
+
+# remove_lease_state WRK WSK: the worker's lease state file for WSK, once WSK's workspace is gone.
+# Only a regular file directly in the validated .lease-state of an installed worker.
+remove_lease_state() {
+  local wrk="$1" wsk="$2" dir="${LEASE_DIR[$1]:-}" file
+  [[ -n "$dir" && "$wsk" =~ $KEY_RE ]] || return 0
+  file="$dir/$wsk.json"
+  [[ -e "$file" || -L "$file" ]] || return 0
+  if [[ -L "$file" || ! -f "$file" ]]; then error "$wrk" "$wsk" 'its lease state file is a symlink or not a file; left alone'; return 0; fi
+  rm -f -- "$file" || { error "$wrk" "$wsk" 'removal of its lease state file failed'; return 0; }
+  say "{\"janitor\":\"lease_state_removed\",\"wrk\":\"$wrk\",\"wsk\":\"$wsk\"}"
 }
 
 kb_of() { local out; out="$(du -skx -- "$1" 2>/dev/null)" || out=0; out="${out%%[[:space:]]*}"; [[ "$out" =~ ^[0-9]+$ ]] || out=0; printf '%s' "$out"; }
@@ -251,6 +275,7 @@ reclaim() {
   else
     error "$wrk" "$wsk" "removal of $tomb failed; retried as a stale tombstone"
   fi
+  remove_lease_state "$wrk" "$wsk" # the key's tree is out of its name space either way
 }
 
 newest_mtime() { # newest_mtime DIR: the newer of DIR's and DIR/workspace.img's, or nothing
@@ -318,6 +343,21 @@ sweep_root() { # sweep_root WRK: every workspace-key entry of a validated root
   done
 }
 
+# sweep_lease_states WRK: the state files of sandboxes terminated more than the wait ago, on this
+# worker, whose workspace is gone already (reclaim removed the rest). The glob skips the dot files:
+# the worker's boot marker and its temp files.
+sweep_lease_states() {
+  local wrk="$1" path wsk
+  [[ -n "${LEASE_DIR[$wrk]:-}" ]] || return 0
+  for path in "${LEASE_DIR[$wrk]}"/*.json; do
+    wsk="${path##*/}"
+    wsk="${wsk%.json}"
+    [[ "$wsk" =~ $KEY_RE && -n "${RECLAIM["$wrk/$wsk"]:-}" && -z "${LIVE[$wsk]:-}" ]] || continue
+    [[ ! -e "${ROOT[$wrk]}/$wsk" && ! -L "${ROOT[$wrk]}/$wsk" ]] || continue
+    remove_lease_state "$wrk" "$wsk"
+  done
+}
+
 sweep_tombstones() { # sweep_tombstones WRK: .reclaiming-* trees older than an hour
   local wrk="$1" path name m kb
   for path in "${ROOT[$wrk]}"/.reclaiming-*; do
@@ -355,6 +395,7 @@ main() {
         [[ "$wrk" =~ $WORKER_RE && -d "$path" ]] || continue
         validate_root "$wrk" || continue
         sweep_root "$wrk"
+        sweep_lease_states "$wrk"
         sweep_tombstones "$wrk"
       done
     fi

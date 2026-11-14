@@ -106,10 +106,31 @@ func TestSandboxModeValues(t *testing.T) {
 		1: LeaseOp_LEASE_OP_STATUS,
 		2: LeaseOp_LEASE_OP_RESET,
 		3: LeaseOp_LEASE_OP_SET_MODE,
+		4: LeaseOp_LEASE_OP_SANDBOX_DELETED,
 	} {
 		if int32(op) != want {
 			t.Fatalf("%v = %d, want %d", op, int32(op), want)
 		}
+	}
+}
+
+// ends_by_unix_ms is field 8 (int64) on LeaseEvent: the hard end of an expiring lease.
+// Pinned on the wire, so a renumbering cannot pass by renaming the Go field.
+func TestLeaseEventEndsByUnixMsIsField8(t *testing.T) {
+	// Only field 8 is set, so the encoding is exactly its tag (8<<3)|0 = 0x40 and the varint.
+	b, err := proto.Marshal(&LeaseEvent{EndsByUnixMs: 1_731_400_600_000})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if len(b) == 0 || b[0] != 0x40 {
+		t.Fatalf("ends_by_unix_ms not encoded as field 8 varint: % x", b)
+	}
+	var back LeaseEvent
+	if err := proto.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.GetEndsByUnixMs() != 1_731_400_600_000 {
+		t.Fatalf("round-trip mismatch: %+v", &back)
 	}
 }
 

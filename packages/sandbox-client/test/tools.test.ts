@@ -39,6 +39,7 @@ const res = (over: Partial<ExecResult> = {}): ExecResult => ({
   stderr: Buffer.alloc(0),
   exitCode: 0,
   truncated: false,
+  lease: [],
   ...over,
 });
 
@@ -92,6 +93,7 @@ function local() {
             stderr,
             exitCode: err ? ((err as { code?: number }).code ?? 1) : 0,
             truncated: false,
+            lease: [],
           }),
       );
       // A command may exit without reading its stdin (a refused write): the pipe then closes, and

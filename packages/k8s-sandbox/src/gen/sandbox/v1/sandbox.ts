@@ -126,6 +126,8 @@ export enum LeaseOp {
   LEASE_OP_STATUS = 1,
   LEASE_OP_RESET = 2,
   LEASE_OP_SET_MODE = 3,
+  /** LEASE_OP_SANDBOX_DELETED - Ends the lease with reason "sandbox_deleted". Takes no mode or mode_epoch. */
+  LEASE_OP_SANDBOX_DELETED = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -143,6 +145,9 @@ export function leaseOpFromJSON(object: any): LeaseOp {
     case 3:
     case "LEASE_OP_SET_MODE":
       return LeaseOp.LEASE_OP_SET_MODE;
+    case 4:
+    case "LEASE_OP_SANDBOX_DELETED":
+      return LeaseOp.LEASE_OP_SANDBOX_DELETED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -160,6 +165,8 @@ export function leaseOpToJSON(object: LeaseOp): string {
       return "LEASE_OP_RESET";
     case LeaseOp.LEASE_OP_SET_MODE:
       return "LEASE_OP_SET_MODE";
+    case LeaseOp.LEASE_OP_SANDBOX_DELETED:
+      return "LEASE_OP_SANDBOX_DELETED";
     case LeaseOp.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -358,7 +365,10 @@ export interface LeaseEvent {
   reqId: number;
   /** "start" | "end" | "expiring" */
   state: string;
-  /** why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end" */
+  /**
+   * On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
+   * (spec §5). Empty on "start".
+   */
   reason: string;
   /** when it happened; also the key the event is acknowledged by */
   atUnixMs: number;
@@ -367,6 +377,11 @@ export interface LeaseEvent {
   ageMs: number;
   /** processes that were running; filled from plan 5 on */
   processes: string[];
+  /**
+   * On "expiring" only: the hard end, i.e. when the lease became expiring plus grace_limit
+   * (unix ms). Zero on every other state.
+   */
+  endsByUnixMs: number;
 }
 
 /**
@@ -1867,7 +1882,7 @@ export const AbortResponse: MessageFns<AbortResponse> = {
 };
 
 function createBaseLeaseEvent(): LeaseEvent {
-  return { reqId: 0, state: "", reason: "", atUnixMs: 0, mode: 0, ageMs: 0, processes: [] };
+  return { reqId: 0, state: "", reason: "", atUnixMs: 0, mode: 0, ageMs: 0, processes: [], endsByUnixMs: 0 };
 }
 
 export const LeaseEvent: MessageFns<LeaseEvent> = {
@@ -1892,6 +1907,9 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     }
     for (const v of message.processes) {
       writer.uint32(58).string(v!);
+    }
+    if (message.endsByUnixMs !== 0) {
+      writer.uint32(64).int64(message.endsByUnixMs);
     }
     return writer;
   },
@@ -1959,6 +1977,14 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
           message.processes.push(reader.string());
           continue;
         }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.endsByUnixMs = longToNumber(reader.int64());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1979,6 +2005,7 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
       processes: globalThis.Array.isArray(object?.processes)
         ? object.processes.map((e: any) => globalThis.String(e))
         : [],
+      endsByUnixMs: isSet(object.endsByUnixMs) ? globalThis.Number(object.endsByUnixMs) : 0,
     };
   },
 
@@ -2005,6 +2032,9 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     if (message.processes?.length) {
       obj.processes = message.processes;
     }
+    if (message.endsByUnixMs !== 0) {
+      obj.endsByUnixMs = Math.round(message.endsByUnixMs);
+    }
     return obj;
   },
 
@@ -2020,6 +2050,7 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     message.mode = object.mode ?? 0;
     message.ageMs = object.ageMs ?? 0;
     message.processes = object.processes?.map((e) => e) || [];
+    message.endsByUnixMs = object.endsByUnixMs ?? 0;
     return message;
   },
 };

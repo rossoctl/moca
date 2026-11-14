@@ -817,6 +817,14 @@ describe('every link of a sandbox is a record digest (template lifecycle §7.1)'
       reason: 'deleted',
       expiresAt: sb.expiresAt,
       endedAt: NOW,
+      // The egress log's digest: empty here, so the sha256 of no bytes.
+      egress: {
+        events: 0,
+        sha256: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        dropped: 0,
+        droppedBy: { proxy: 0, cap: 0, budget: 0, invalid: 0 },
+        complete: true,
+      },
     });
     expect(chain[1].prev).toBe(recordDigest(chain[0]));
     // Another template's sandbox is on its own chain.

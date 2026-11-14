@@ -50,6 +50,7 @@ import {
   sessionTemplatesFromEnv,
 } from './sandbox-config.js';
 import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
+import { RedisEgressStore, type EgressRedisLike } from './egress-log.js';
 import { readTenancy } from './tenancy.js';
 import { TurnStore } from './turn-store.js';
 import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
@@ -679,7 +680,14 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
         ? new UnavailableCredentialStore()
         : credentialStoreFromEnv(env),
     ...(servesSandboxes
-      ? { sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike) }
+      ? {
+          sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike),
+          // A host's last post is kept for the replay check as long as a sandbox record is.
+          egress: new RedisEgressStore(
+            client as unknown as EgressRedisLike,
+            config.sandbox?.retentionS ?? 14 * 86_400,
+          ),
+        }
       : {}),
     // Readiness (template lifecycle spec §3.3) from the relay's presence records, which the relay
     // writes into this same Redis on either profile.

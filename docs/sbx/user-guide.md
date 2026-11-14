@@ -411,7 +411,7 @@ file and key.
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `.mcp.json`                           | `mcpServers.sandbox`: `mocactl sbx mcp`, the sandbox's tools over stdio                                                                                                                                                                                                                       |
 | `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`                                                      |
-| `opencode.json`                       | `mcp.sandbox`: `mocactl sbx mcp`; `tools.<name>: false` for OpenCode's local tools (`bash`, `read`, `edit`, `write`, `patch`, `apply_patch`, `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, `multiedit`)                                                                     |
+| `opencode.json`                       | `mcp.sandbox`: `mocactl sbx mcp`; `tools.<name>: false` for OpenCode's local tools (`bash`, `read`, `edit`, `write`, `patch`, `apply_patch`, `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, `multiedit`, `skill`)                                                            |
 | `.bob/settings.json`, `.bob/mcp.json` | `mcpServers.sandbox`: `mocactl sbx mcp`, the same entry `.mcp.json` gets, in both files — which one Bob reads depends on its version (2.0.9 reads `mcp.json`). Bob has no deny list, so its local tools are **not** denied, and it prefers them unless the prompt names the sandbox's (below) |
 | `CLAUDE.md`, `AGENTS.md`              | A block between `<!-- sbx:begin -->` and `<!-- sbx:end -->` telling the agent how the sandbox works (below)                                                                                                                                                                                   |
 | `.sbx/`                               | `sandbox.json`, the binding (your sandbox's id and the service URL), and `agent-config.json`, the record of what `up` added. `.sbx/` is listed in `.git/info/exclude`, never in your `.gitignore`                                                                                             |
@@ -782,7 +782,9 @@ eval "$(mocactl sbx env)"
 
 prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS`,
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
-self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token. See
+self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
+--renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
+long-lived client that reads its next token from a pipe. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
 ## 10. Troubleshooting

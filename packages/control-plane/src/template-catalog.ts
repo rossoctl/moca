@@ -65,6 +65,23 @@ export interface TemplateBuild {
   queuedAtMs?: number;
   /** The host that claimed it, and when (epoch seconds). */
   claim?: { host: string; at: number };
+  /**
+   * Created on a selfAttest profile with a gate record the policy did not trust (self-attestation):
+   * a fact of its create. Whether it is self-attested NOW is recomputed from the current policy
+   * (attestationOf): an admin's promotion or removal of the record needs no rewrite.
+   */
+  selfAttested?: boolean;
+  /**
+   * Created on a selfAttest profile with a gate record, trusted or not at create: a fact of its
+   * create. Such a build reads as self-attested whenever its record is not trusted NOW
+   * (attestationOf), so a trust removal narrows it whatever the order of events.
+   */
+  selfAttestProfile?: boolean;
+  /**
+   * Its gate record's offline facts: whether the floor was checked offline, and, from a
+   * `network_needed` contract, whether the offline run met it. Absent: no gate record.
+   */
+  gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
   /** On `failed` or `rejected`: why, and at which step or rule. */
   reason?: { message: string; step?: string; rule?: string };
   /**
@@ -74,6 +91,17 @@ export interface TemplateBuild {
    * the `activate` record that granted the lease, which a sandbox under it cites (§7.1).
    */
   leases?: { subject: string; until: number; since?: number; record?: string }[];
+  /**
+   * When its last lease ended, epoch seconds (§6.5, the idle grace): set when leases are dropped (a
+   * deactivate's time, or the end of an expired lease the write clears). An expired lease still
+   * stored counts too (lastLeaseEnd() in activation.ts takes the later).
+   */
+  lastLeaseEnd?: number;
+  /**
+   * The time of a deactivate with `stopNow: true` that left it with no lease (§6.5): a lease that
+   * ended at or before it gets no idle grace (forced cold).
+   */
+  stopNowAt?: number;
   /** The host agent's build log, newest last, at most LOG_MAX entries (§4 logs). */
   log?: { at: number; level: 'info' | 'warn' | 'error'; step: string; message: string }[];
 }
@@ -120,7 +148,9 @@ export function resolveBuild(
   ref: { tag?: string; build?: string },
 ): TemplateBuild | null {
   if (ref.build !== undefined) return doc.builds.find((b) => b.buildId === ref.build) ?? null;
-  const id = doc.tags[ref.tag ?? 'default'];
+  const tag = ref.tag ?? 'default';
+  // An own property only: `id:constructor` names no tag, not Object.prototype's constructor.
+  const id = Object.hasOwn(doc.tags, tag) ? doc.tags[tag] : undefined;
   return id === undefined ? null : (doc.builds.find((b) => b.buildId === id) ?? null);
 }
 

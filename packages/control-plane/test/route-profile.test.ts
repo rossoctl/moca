@@ -29,6 +29,10 @@ const SHARED = [
   'POST /v1/templates',
   'POST /v1/templates/{id}/builds',
   'POST /v1/templates/{id}/builds/{build}/cancel',
+  'POST /v1/templates/{id}/tags',
+  'DELETE /v1/templates/{id}/tags/{tag}',
+  'PATCH /v1/templates/{id}',
+  'PUT /v1/templates/{id}/owner',
   'POST /v1/templates/{id}/activate',
   'POST /v1/templates/{id}/deactivate',
   'GET /v1/policy',
@@ -41,6 +45,8 @@ const SHARED = [
   'POST /v1/hosts/{host}/builds/{build}/report',
   'GET /v1/hosts/{host}/wanted',
   'POST /v1/hosts/{host}/workers/report',
+  // The egress proxy's events into sandboxes' logs.
+  'POST /v1/hosts/{host}/egress',
 ];
 
 const servers: Server[] = [];
@@ -60,6 +66,7 @@ const SANDBOX_ONLY = [
   'createSandbox',
   'deleteSandbox',
   'getSandbox',
+  'getSandboxEgress',
   'janitorSandboxes',
   'listSandboxes',
   'lookupEgressCredential',

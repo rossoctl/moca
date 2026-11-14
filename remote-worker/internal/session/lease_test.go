@@ -24,13 +24,15 @@ type leaseCall struct {
 
 // leaseRunner is a scriptedRunner that is also a session.LeaseController. With release
 // non-nil, every mutating LeaseControl (reset, set_mode) blocks until it is closed: a
-// set_mode downgrade waiting out a lease's grace, which can take minutes. A status never
-// blocks, as vmpool's only takes the pool lock.
+// set_mode downgrade waiting out a lease's grace, which can take minutes. A status blocks
+// only with statusRelease non-nil, until it is closed: vmpool's only takes the pool lock,
+// but that lock can be contended.
 type leaseRunner struct {
 	scriptedRunner
-	release chan struct{}
-	status  *pb.LeaseStatus
-	err     error
+	release       chan struct{}
+	statusRelease chan struct{}
+	status        *pb.LeaseStatus
+	err           error
 
 	lmu        sync.Mutex
 	calls      []leaseCall
@@ -47,6 +49,9 @@ func (r *leaseRunner) LeaseControl(
 	r.lmu.Unlock()
 	if r.release != nil && op != pb.LeaseOp_LEASE_OP_STATUS {
 		<-r.release
+	}
+	if r.statusRelease != nil && op == pb.LeaseOp_LEASE_OP_STATUS {
+		<-r.statusRelease
 	}
 	return r.status, r.err
 }
@@ -195,7 +200,9 @@ func releaseOnCleanup(t *testing.T, r *leaseRunner) {
 // returned and its reply was queued or dropped.
 func waitLeaseDrained(t *testing.T, s *session.Session) {
 	t.Helper()
-	waitFor(t, "every lease call to finish", func() bool { return session.LeaseCallsInFlight(s) == 0 })
+	waitFor(t, "every lease call to finish", func() bool {
+		return session.LeaseCallsInFlight(s) == 0 && session.LeaseStatusCallsInFlight(s) == 0
+	})
 }
 
 // fillLeaseSlots sends n mutating calls (reset), two per workspace key -- the per-key cap --
@@ -274,6 +281,62 @@ func TestLeaseStatusAnsweredWhileSlotsFull(t *testing.T) {
 	}
 	if n := session.LeaseCallsInFlight(s); n != leaseCap {
 		t.Errorf("lease calls in flight = %d, want %d: a status must not take a slot", n, leaseCap)
+	}
+	close(r.release)
+	waitLeaseDrained(t, s)
+}
+
+// At leaseStatusCap (32) status calls in flight, the next status is refused busy at once,
+// without blocking; the mutating calls keep their own caps, and a finished status frees
+// its place.
+func TestLeaseStatusCap(t *testing.T) {
+	const statusCap = 32
+	st := newFakeStream()
+	r := &leaseRunner{release: make(chan struct{}), statusRelease: make(chan struct{}), status: &pb.LeaseStatus{State: "active"}}
+	releaseOnCleanup(t, r)
+	t.Cleanup(func() {
+		select {
+		case <-r.statusRelease:
+		default:
+			close(r.statusRelease)
+		}
+	})
+	s := session.New(testConfig(), r)
+	serve(t, s, st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+	for i := uint64(1); i <= statusCap; i++ {
+		st.leaseControl(&pb.LeaseControlFrame{CtlId: i, WorkspaceKey: fmt.Sprintf("leaf-%d", i), Op: pb.LeaseOp_LEASE_OP_STATUS})
+	}
+	waitFor(t, "32 status calls in flight", func() bool {
+		return session.LeaseStatusCallsInFlight(s) == statusCap && r.callCount() == statusCap
+	})
+
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: statusCap + 1, WorkspaceKey: "leaf-fresh", Op: pb.LeaseOp_LEASE_OP_STATUS})
+	waitFor(t, "the 33rd status's refusal", func() bool { return leaseResultFor(st.sent(), statusCap+1) != nil })
+	if got := leaseResultFor(st.sent(), statusCap+1).GetError(); got != "busy: too many lease calls in flight" {
+		t.Errorf("33rd status error = %q, want the busy refusal", got)
+	}
+	if r.callCount() != statusCap {
+		t.Errorf("controller saw %d calls, want %d: the refused status must not reach it", r.callCount(), statusCap)
+	}
+
+	// The mutating calls do not share the status cap: a reset is still admitted.
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 100, WorkspaceKey: "leaf-fresh", Op: pb.LeaseOp_LEASE_OP_RESET})
+	waitFor(t, "the reset to reach the controller", func() bool { return session.LeaseCallsInFlight(s) == 1 && r.callCount() == statusCap+1 })
+
+	close(r.statusRelease)
+	for id := uint64(1); id <= statusCap; id++ {
+		waitFor(t, "each held status's result", func() bool { return leaseResultFor(st.sent(), id) != nil })
+		if got := leaseResultFor(st.sent(), id); got.GetError() != "" || got.GetStatus().GetState() != "active" {
+			t.Errorf("status ctl %d = %+v, want the controller's status", id, got)
+		}
+	}
+	waitFor(t, "the status slots to drain", func() bool { return session.LeaseStatusCallsInFlight(s) == 0 })
+	st.leaseControl(&pb.LeaseControlFrame{CtlId: 200, WorkspaceKey: "leaf-1", Op: pb.LeaseOp_LEASE_OP_STATUS})
+	waitFor(t, "a status after the cap drained", func() bool { return leaseResultFor(st.sent(), 200) != nil })
+	if got := leaseResultFor(st.sent(), 200); got.GetError() != "" {
+		t.Errorf("post-drain status error = %q, want none", got.GetError())
 	}
 	close(r.release)
 	waitLeaseDrained(t, s)
