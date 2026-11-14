@@ -97,8 +97,8 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     method: 'post',
     path: '/v1/sandboxes',
     // `create --seed` reads the build it was served (template lifecycle spec §9).
-    reads: ['id', 'template', 'expiresAt', 'buildId'],
-    sends: ['template', 'name', 'labels'],
+    reads: ['id', 'template', 'expiresAt', 'buildId', 'mode', 'idleTimeoutS', 'modeEpoch'],
+    sends: ['template', 'name', 'labels', 'mode', 'idleTimeoutS'],
   },
   { method: 'get', path: '/v1/sandboxes', reads: ['sandboxes'] },
   { method: 'get', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason', 'expiresAt'] },
@@ -108,6 +108,14 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     path: '/v1/sandboxes/{id}/token',
     reads: ['token', 'expiresAt', 'execEndpoint', 'wrk', 'wsk', 'execCa'],
   },
+  // Lease mode (lease-mode spec §8.1, §8.2): `create --mode`, and the set-mode token it sends.
+  {
+    method: 'put',
+    path: '/v1/sandboxes/{id}/mode',
+    reads: ['sandbox', 'setModeToken'],
+    sends: ['mode', 'idleTimeoutS'],
+  },
+  { method: 'post', path: '/v1/sandboxes/{id}/mode-token', reads: ['setModeToken'] },
   // `sbx templates show` and `create --seed` (template lifecycle spec §4).
   {
     method: 'get',
@@ -389,8 +397,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
   });
 
   it('covers every call SandboxApiClient adds', async () => {
-    const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 23 }, () => reply));
+    const reply = () => json({ templates: [], sandboxes: [], sandbox: {} });
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 25 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -400,6 +408,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.getSandbox('ID');
     await c.deleteSandbox('ID');
     await c.mintSandboxToken('ID');
+    await c.setSandboxMode('ID', { mode: 'lease' });
+    await c.mintSandboxModeToken('ID');
     await c.getTemplate('TID');
     await c.getTemplateBuild('TID', 'BID');
     await c.moveTemplateTags('TID', ['default'], 'BID');
@@ -436,6 +446,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'getSandbox',
         'deleteSandbox',
         'mintSandboxToken',
+        'setSandboxMode',
+        'mintSandboxModeToken',
         'getTemplate',
         'getTemplateBuild',
         'moveTemplateTags',

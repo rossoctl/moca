@@ -1,7 +1,10 @@
 import { posix } from 'node:path';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
+  ExecAbortedError,
   execFailureText,
+  ExecMachineryError,
+  ExecRefusedError,
   TOKEN_MARGIN_S,
   type Exec,
   type ExecResult,
@@ -20,6 +23,7 @@ import {
   type ExecFactory,
 } from './exec.js';
 import { serveSbxMcp, stdioTransport } from './mcp.js';
+import { printNotices } from './notices.js';
 
 /** `put`'s timeout: a write of at most 14 MiB, well inside any token's life (no extra mint). */
 export const PUT_TIMEOUT_S = 120;
@@ -179,6 +183,8 @@ export async function cmdRun(
       cap,
     );
     if (typeof r === 'number') return r;
+    // A lease end happened before this command ran: said first, as an MCP result starts with it.
+    printNotices(c, id, r.lease);
     passThrough(c.io, r.stdout, r.stderr);
     // mocactl's own notes start on a line of their own, after the command's stderr.
     const notes = r.truncated || r.capped || r.timedOutS !== undefined || r.exitCode < 0;
@@ -199,6 +205,15 @@ export async function cmdRun(
     }
     return r.exitCode;
   } catch (err) {
+    // The worker sends lease events before an error too (spec §5): said before the failure, or
+    // the refusal, or the interrupt; the worker acked them, so nothing else will say them.
+    if (
+      err instanceof ExecMachineryError ||
+      err instanceof ExecRefusedError ||
+      err instanceof ExecAbortedError
+    ) {
+      printNotices(c, id, err.lease);
+    }
     return execFailed(c, err);
   } finally {
     x.close();

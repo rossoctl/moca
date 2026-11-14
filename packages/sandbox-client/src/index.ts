@@ -1,5 +1,6 @@
 export {
   CLIENT_CHANNEL_OPTIONS,
+  ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
   SandboxExecConn,
@@ -10,21 +11,39 @@ export {
   type ExecFailureKind,
   type ExecOptions,
   type ExecResult,
+  type LeaseOpName,
   type SandboxTokenGrant,
   type TokenFn,
   type TokenRequest,
 } from './exec-conn.js';
 export {
+  LeaseControlError,
+  NoticeDedupe,
+  leaseNotice,
+  leaseStatusView,
+  noticeLines,
+  modeName,
+  type LeaseControlErrorCode,
+  type LeaseState,
+  type LeaseStatusView,
+  type SandboxModeName,
+} from './lease.js';
+export type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
+export {
   FILE_TOOL_TIMEOUT_S,
+  LEASE_RULE,
   MAX_BYTES,
   MAX_LINES,
   MAX_STDIN_BYTES,
+  RESET_ENDED_TEXT,
+  RESET_NONE_TEXT,
   TOOL_NAMES,
   ToolInputError,
   WORKSPACE,
   q,
   sandboxTools,
   writeFileCommand,
+  type LeaseCall,
   type SandboxTool,
   type ToolResult,
 } from './tools.js';
@@ -39,5 +58,6 @@ export {
   execFailureText,
   sandboxRules,
   type CallRecord,
+  type SandboxInfo,
   type SandboxMcpOptions,
 } from './mcp-server.js';

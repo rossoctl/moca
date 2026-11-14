@@ -241,17 +241,20 @@ func TestGateReclamationCannotDeleteALiveWorkspace(t *testing.T) {
 			t.Fatalf("stat(%s) after the reclamation: err = %v, want IsNotExist", dir, err)
 		}
 		// And the detached tree is gone too, not merely renamed out of sight: a
-		// tombstone nobody removes is a disk leak wearing a fix's clothing.
+		// tombstone nobody removes is a disk leak wearing a fix's clothing. The lease
+		// state directory is no workspace: New writes its boot marker there.
 		entries, err := os.ReadDir(root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(entries) != 0 {
-			names := make([]string, 0, len(entries))
-			for _, e := range entries {
+		var names []string
+		for _, e := range entries {
+			if e.Name() != leaseStateDir {
 				names = append(names, e.Name())
 			}
-			t.Fatalf("WorkspaceRoot holds %v after the reclamation, want nothing", names)
+		}
+		if len(names) != 0 {
+			t.Fatalf("WorkspaceRoot holds %v after the reclamation, want nothing but %s", names, leaseStateDir)
 		}
 	})
 

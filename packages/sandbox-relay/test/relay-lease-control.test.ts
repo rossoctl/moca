@@ -43,9 +43,14 @@ function heldTimers() {
   };
 }
 
-function parked(write?: (f: any) => void) {
+function parked(write?: (f: any) => void, now?: () => number) {
   const t = heldTimers();
-  const relay = createRelay({ records, validateToken: () => true, timers: t.timers } as never);
+  const relay = createRelay({
+    records,
+    validateToken: () => true,
+    timers: t.timers,
+    ...(now ? { now } : {}),
+  } as never);
   const s = fakeAttach(write);
   relay.onAttach(s as never);
   s.emit('data', {
@@ -119,6 +124,38 @@ describe('relay routeLeaseControl bookkeeping', () => {
 });
 
 describe('relay routeKeepalive', () => {
+  it('a failed write opens no coalescing window: the next keepalive within 1 s is written (review #4569829045)', () => {
+    let t = 10_000;
+    let failNext = true;
+    const { relay, s } = parked(
+      (f) => {
+        if (f.keepalive && failNext) {
+          failNext = false;
+          throw new Error('write after end');
+        }
+      },
+      () => t,
+    );
+    const keepalives = () => s.written.filter((f) => f.keepalive).length;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      relay.routeKeepalive('sbx-1', 'wsk'); // tried, and failed
+      expect(keepalives()).toBe(1);
+      t += 300;
+      relay.routeKeepalive('sbx-1', 'wsk'); // within 1 s of the failure: written
+      expect(keepalives()).toBe(2);
+      expect(err).toHaveBeenCalledTimes(1);
+      t += 300;
+      relay.routeKeepalive('sbx-1', 'wsk'); // within 1 s of the written one: coalesced
+      expect(keepalives()).toBe(2);
+      t += 1_000;
+      relay.routeKeepalive('sbx-1', 'wsk'); // its window is over
+      expect(keepalives()).toBe(3);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it('a write that throws is caught: fire-and-forget, the caller still answers OK', () => {
     const { relay, s } = parked((f) => {
       if (f.keepalive) throw new Error('write after end');

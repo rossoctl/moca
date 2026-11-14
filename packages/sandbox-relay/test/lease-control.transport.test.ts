@@ -407,6 +407,37 @@ describe('LeaseControl (lease-mode §8.2)', () => {
     for (const c of calls.slice(1)) expect((await c.done).code).toBe(status.OK);
   });
 
+  it('sandbox_deleted reaches the worker as LEASE_OP_SANDBOX_DELETED and is audited', async () => {
+    const r = await relay();
+    const w = await worker(r.attach, 'sbx_default', 'auto', 0, undefined, undefined, () => ({
+      status: LeaseStatus.fromPartial({ state: 'none' }),
+    }));
+    // A set-mode token sent with it is ignored: the op takes no mode and no epoch.
+    const got = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_SANDBOX_DELETED, {
+      setModeToken: setModeToken({ mode: 'lease+processes', modeEpoch: 7 }),
+    });
+    expect(got.code).toBe(status.OK);
+    expect(got.res?.status?.state).toBe('none');
+    expect(w.controls).toEqual([
+      expect.objectContaining({
+        workspaceKey: 'sbx-aaaa',
+        op: LeaseOp.LEASE_OP_SANDBOX_DELETED,
+        mode: SandboxMode.SANDBOX_MODE_UNSPECIFIED,
+        modeEpoch: 0,
+      }),
+    ]);
+    const [line] = leaseLines(r.lines);
+    expect(line).toMatchObject({
+      audit: 'sandbox_lease_control',
+      sub: 'github:1',
+      sbx: 'sbx-aaaa',
+      wrk: 'sbx_default',
+      op: 'sandbox_deleted',
+      outcome: 'ok',
+    });
+    expect(line).not.toHaveProperty('mode');
+  });
+
   it('no live worker: UNAVAILABLE', async () => {
     const r = await relay();
     const got = await leaseControl(r.exec, token(), LeaseOp.LEASE_OP_STATUS);
@@ -466,7 +497,7 @@ describe("LeaseControl's cancel listener (review #4559538392)", () => {
 });
 
 describe('LeaseControl per-op timeouts', () => {
-  it('defaults to 15 s for status and LeaseGraceLimit + 60 s for reset and set_mode', async () => {
+  it('defaults to 15 s for status and LeaseGraceLimit + 60 s for the mutate ops', async () => {
     const timeouts: number[] = [];
     const fake = {
       routeLeaseControl: async (_s: string, _f: unknown, timeoutMs: number) => {
@@ -489,9 +520,14 @@ describe('LeaseControl per-op timeouts', () => {
       op,
       setModeToken: op === LeaseOp.LEASE_OP_SET_MODE ? setModeToken() : '',
     });
-    for (const op of [LeaseOp.LEASE_OP_STATUS, LeaseOp.LEASE_OP_RESET, LeaseOp.LEASE_OP_SET_MODE])
+    for (const op of [
+      LeaseOp.LEASE_OP_STATUS,
+      LeaseOp.LEASE_OP_RESET,
+      LeaseOp.LEASE_OP_SET_MODE,
+      LeaseOp.LEASE_OP_SANDBOX_DELETED,
+    ])
       await caller.leaseControl(claims, req(op), Date.now());
-    expect(timeouts).toEqual([15_000, 31 * 60_000, 31 * 60_000]);
+    expect(timeouts).toEqual([15_000, 31 * 60_000, 31 * 60_000, 31 * 60_000]);
   });
 });
 
@@ -545,6 +581,30 @@ describe('LeaseKeepalive (lease-mode §4)', () => {
     expect((await leaseKeepalive(r.exec, token())).code).toBe(status.OK);
     await sleep(100);
     expect(w.keepalives).toEqual([{ workspaceKey: 'sbx-aaaa' }]);
+  });
+
+  it('ten keepalives in 100 ms reach the worker once; one after 1 s reaches it again', async () => {
+    let clock = 1_000_000;
+    const r = await relay({}, { now: () => clock });
+    const w = await worker(r.attach, 'sbx_default');
+    for (let i = 0; i < 10; i++) {
+      // Every call is answered OK, the coalesced ones too.
+      expect((await leaseKeepalive(r.exec, token())).code).toBe(status.OK);
+      clock += 10;
+    }
+    // Per workspace: another workspace's keepalive inside the same window is its own.
+    expect((await leaseKeepalive(r.exec, tokenB())).code).toBe(status.OK);
+    await sleep(100);
+    expect(w.keepalives).toEqual([{ workspaceKey: 'sbx-aaaa' }, { workspaceKey: 'sbx-bbbb' }]);
+    clock = 1_000_000 + 1_000;
+    expect((await leaseKeepalive(r.exec, token())).code).toBe(status.OK);
+    await sleep(100);
+    expect(w.keepalives).toEqual([
+      { workspaceKey: 'sbx-aaaa' },
+      { workspaceKey: 'sbx-bbbb' },
+      { workspaceKey: 'sbx-aaaa' },
+    ]);
+    expect(r.lines).toEqual([]);
   });
 
   it('refuses a harness caller, an unauthenticated one, and another worker', async () => {

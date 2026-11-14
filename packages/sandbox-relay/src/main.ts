@@ -75,7 +75,7 @@ export interface RelayServerDeps extends RelayDeps {
   verifySetModeToken?: SetModeVerifier;
   /**
    * LeaseControl's per-op timeouts. Defaults to 15 s for status and 31 min (the worker's
-   * LeaseGraceLimit plus 60 s) for reset and set_mode; tests set short ones.
+   * LeaseGraceLimit plus 60 s) for the mutate ops; tests set short ones.
    */
   leaseTimeoutsMs?: LeaseTimeoutsMs;
   /** In-flight Execs admitted per `sbx` (SBX0 §3.6). Defaults to 2. */

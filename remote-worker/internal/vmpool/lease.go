@@ -730,7 +730,14 @@ func (p *pool) endLeaseLocked(rp *runPool, reason LeaseEndReason) *leaseVictim {
 	s := p.leaseStateLocked(rp)
 	s.Open = nil
 	s.Pending = &LeaseEvent{State: leaseEventEnd, Reason: reason, At: leaseEventAt(now), Mode: l.mode, Age: age}
-	if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
+	if s.Known && leaseStateFileGone(p.cfg.WorkspaceRoot, rp.key) {
+		// The janitor removed the file of a deleted sandbox while this lease was live (a
+		// janitor wait shorter than retireLeaseState's timing argument allows): as there,
+		// it is not written back, and the cache follows the disk, so no later save of
+		// this run recreates it either.
+		log.Printf("vmpool: lease end for %q: its state file is gone (removed by the host janitor); not written back", rp.key)
+		s = leaseState{}
+	} else if err := saveLeaseState(p.cfg.WorkspaceRoot, rp.key, s); err != nil {
 		log.Printf("vmpool: lease end for %q: %v", rp.key, err)
 	}
 	rp.state = s

@@ -95,7 +95,13 @@ func run(t *testing.T, c *fakeClient, cfg config) (int, string, string) {
 	t.Helper()
 	var out, errw bytes.Buffer
 	clock := []time.Time{time.Unix(100, 0), time.Unix(100, 250_000_000)}
-	now := func() time.Time { t := clock[0]; clock = clock[1:]; return t }
+	now := func() time.Time {
+		t := clock[0]
+		if len(clock) > 1 { // the last reading repeats: a lease notice reads the clock too
+			clock = clock[1:]
+		}
+		return t
+	}
 	code := callID(context.Background(), c, cfg, 7, "run", "true", nil, &out, &errw, now)
 	return code, out.String(), errw.String()
 }
@@ -608,5 +614,205 @@ func TestEachAttemptCapsItsTimeout(t *testing.T) {
 	}
 	if !strings.HasSuffix(errw, "sbx: timeout capped at 239 s, the sandbox token's lifetime minus 60 s\n") {
 		t.Fatalf("stderr %q", errw)
+	}
+}
+
+// leaseEv wraps a LeaseEvent as an Exec stream event.
+func leaseEv(ev *pb.LeaseEvent) *pb.ExecEvent {
+	return &pb.ExecEvent{Event: &pb.ExecEvent_Lease{Lease: ev}}
+}
+
+// pinUTC makes HH:MM in the notices local time in UTC for the test, as TZ=UTC does for the TS tests.
+func pinUTC(t *testing.T) {
+	t.Helper()
+	prev := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = prev })
+}
+
+// The lease copy's fixed instant: 2026-11-13 14:02:30 UTC, as the TS tests' AT.
+var noticeAt = time.Date(2026, 11, 13, 14, 2, 30, 0, time.UTC)
+
+func TestRunPrintsLeaseEndNotice(t *testing.T) {
+	pinUTC(t)
+	c := &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{
+		leaseEv(&pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: noticeAt.UnixMilli()}),
+		chunk(pb.Stream_STREAM_STDOUT, "ok"), end(0, false),
+	}}}
+	code, out, errw := run(t, c, testCfg)
+	want := "[sandbox] guest restarted (idle, 14:02): /tmp, installs outside /workspace and background processes are gone\n"
+	if code != 0 || out != "ok" || errw != want {
+		t.Fatalf("got code=%d out=%q err=%q, want err %q", code, out, errw, want)
+	}
+}
+
+func TestLeaseNoticeIsPrintedOncePerRun(t *testing.T) {
+	pinUTC(t)
+	end := leaseEv(&pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: noticeAt.UnixMilli()})
+	// The first attempt is refused after the end notice; the retry repeats the same event, as lease events may.
+	c := &scriptedClient{scripts: []*fakeClient{
+		{stream: &fakeStream{events: []*pb.ExecEvent{end, execErr(budgetRefusal)}}},
+		{stream: &fakeStream{events: []*pb.ExecEvent{end, chunk(pb.Stream_STREAM_STDOUT, "ok"), end0()}}},
+	}}
+	code, errw, _ := retryRun(t, c, busyCfg(t), nil)
+	want := "[sandbox] guest restarted (idle, 14:02): /tmp, installs outside /workspace and background processes are gone\n"
+	// the first attempt's notice comes before the retry's line, and the retry's repeat of it is not printed again
+	if code != 0 || len(c.ids) != 2 || errw != want+"sbx: memory_budget: nothing ran; retrying in 1.0s (attempt 2)\n" {
+		t.Fatalf("code=%d attempts=%d err=%q", code, len(c.ids), errw)
+	}
+}
+
+func end0() *pb.ExecEvent { return end(0, false) }
+
+func TestRunStaleModeExits125(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    *fakeClient
+		want string
+	}{
+		{"in-stream", &fakeClient{stream: &fakeStream{events: []*pb.ExecEvent{execErr("stale_mode: token mode is lease, sandbox is per-exec")}}},
+			"sbx: exec failed: stale_mode: token mode is lease, sandbox is per-exec\n"},
+		{"as a status", &fakeClient{execErr: status.Error(codes.FailedPrecondition, "lease_unsupported: this worker has no lease mode")},
+			"sbx: exec failed: FAILED_PRECONDITION: lease_unsupported: this worker has no lease mode\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &scriptedClient{scripts: []*fakeClient{tc.c}}
+			code, errw, slept := retryRun(t, c, busyCfg(t), nil)
+			// a lease refusal is before the command starts, but it is not a capacity refusal: never retried
+			if code != 125 || errw != tc.want || len(c.ids) != 1 || len(slept) != 0 {
+				t.Fatalf("code=%d attempts=%d slept=%v err=%q, want 125 and %q", code, len(c.ids), slept, errw, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoticeCopyMatchesTS(t *testing.T) {
+	pinUTC(t)
+	// the cases of packages/sandbox-client/test/lease.test.ts (leaseNotice), with its AT as noticeAt
+	at := noticeAt.UnixMilli()
+	expiring := func(endsBy int64) *pb.LeaseEvent {
+		return &pb.LeaseEvent{State: "expiring", Reason: "max_duration", AtUnixMs: at, EndsByUnixMs: endsBy}
+	}
+	for _, tc := range []struct {
+		name string
+		ev   *pb.LeaseEvent
+		now  int64
+		want string
+	}{
+		{"end at local HH:MM", &pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: at}, at,
+			"[sandbox] guest restarted (idle, 14:02): /tmp, installs outside /workspace and background processes are gone"},
+		{"end with one process", &pb.LeaseEvent{State: "end", Reason: "memory_reclaim", AtUnixMs: at, Processes: []string{"devserver (pid 412)"}}, at,
+			"[sandbox] guest restarted (memory_reclaim, 14:02): /tmp, installs outside /workspace and background processes are gone; stopped: devserver (pid 412)"},
+		{"end with two processes", &pb.LeaseEvent{State: "end", Reason: "reset", AtUnixMs: at, Processes: []string{"a (pid 1)", "b (pid 2)"}}, at,
+			"[sandbox] guest restarted (reset, 14:02): /tmp, installs outside /workspace and background processes are gone; stopped: a (pid 1); stopped: b (pid 2)"},
+		{"expiring 29.5 min rounds up to 30", expiring(at + 29*60_000 + 30_000), at,
+			"[sandbox] guest restarts within 30 min (max_duration)"},
+		{"expiring 10 s rounds up to 1", expiring(at + 10_000), at,
+			"[sandbox] guest restarts within 1 min (max_duration)"},
+		{"expiring already past is 1 min", expiring(at - 5_000), at,
+			"[sandbox] guest restarts within 1 min (max_duration)"},
+		{"expiring exactly 60 s is 1 min", expiring(at + 60_000), at,
+			"[sandbox] guest restarts within 1 min (max_duration)"},
+		{"expiring 2 min", &pb.LeaseEvent{State: "expiring", Reason: "grace_limit", AtUnixMs: at, EndsByUnixMs: at + 120_000}, at,
+			"[sandbox] guest restarts within 2 min (max_duration)"},
+		{"expiring with no deadline says soon", expiring(0), at,
+			"[sandbox] guest restarts soon (max_duration)"},
+		{"expiring with a negative deadline says soon", expiring(-1), at,
+			"[sandbox] guest restarts soon (max_duration)"},
+		{"start in lease mode", &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: at}, at,
+			"[sandbox] new guest (lease, 14:02)"},
+		{"start in lease+processes mode", &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, AtUnixMs: at}, at,
+			"[sandbox] new guest (lease+processes, 14:02)"},
+		{"start pads the hour and minute", &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: time.Date(2026, 11, 13, 9, 5, 0, 0, time.UTC).UnixMilli()}, at,
+			"[sandbox] new guest (lease, 09:05)"},
+		{"start at 23:59", &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: time.Date(2026, 11, 13, 23, 59, 0, 0, time.UTC).UnixMilli()}, at,
+			"[sandbox] new guest (lease, 23:59)"},
+		{"resumed is unknown", &pb.LeaseEvent{State: "resumed", AtUnixMs: at}, at, ""},
+		{"an empty state is unknown", &pb.LeaseEvent{AtUnixMs: at}, at, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := leaseNotice(tc.ev, time.UnixMilli(tc.now))
+			if !ok && tc.want != "" || ok && got != tc.want {
+				t.Fatalf("leaseNotice = %q (ok %v), want %q", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoticeLines(t *testing.T) {
+	pinUTC(t)
+	at := noticeAt.UnixMilli()
+	end := &pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: at}
+	start := &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: at + 1}
+	exp1 := &pb.LeaseEvent{State: "expiring", EndsByUnixMs: at + 120_000}
+	exp2 := &pb.LeaseEvent{State: "expiring", EndsByUnixMs: at + 60_000}
+	now := noticeAt
+	endLine := "[sandbox] guest restarted (idle, 14:02): /tmp, installs outside /workspace and background processes are gone"
+	startLine := "[sandbox] new guest (lease, 14:02)"
+	for _, tc := range []struct {
+		name  string
+		fresh []*pb.LeaseEvent
+		want  []string
+	}{
+		{"a start is hidden by an end in the same result", []*pb.LeaseEvent{start, end}, []string{endLine}},
+		{"a start alone is shown", []*pb.LeaseEvent{start}, []string{startLine}},
+		{"only the last expiring event is shown", []*pb.LeaseEvent{exp1, exp2}, []string{"[sandbox] guest restarts within 1 min (max_duration)"}},
+		{"nothing", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := noticeLines(tc.fresh, now)
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Fatalf("noticeLines = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The dedupe keys on state and at_unix_ms, as TS NoticeDedupe: an end and the next lease's start in the same
+// millisecond are both printed (review #4569829041).
+func TestNoticeDedupeKeysOnStateAndAt(t *testing.T) {
+	at := noticeAt.UnixMilli()
+	end := &pb.LeaseEvent{State: "end", Reason: "idle", AtUnixMs: at}
+	start := &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: at}
+	d := noticeDedupe{}
+	if got := d.take([]*pb.LeaseEvent{end, start}); len(got) != 2 {
+		t.Fatalf("first take = %v, want the end and the start", got)
+	}
+	if got := d.take([]*pb.LeaseEvent{end, start}); len(got) != 0 {
+		t.Fatalf("second take = %v, want nothing", got)
+	}
+}
+
+// Unlike TS NoticeDedupe, which shows expiring on every MCP result, the static client prints each expiring event
+// once per run: its at_unix_ms is constant per lease (P4-R2), so a retried attempt's repeat is the same event
+// (review #4569829081).
+func TestNoticeDedupeTakesExpiringOncePerRun(t *testing.T) {
+	at := noticeAt.UnixMilli()
+	exp := &pb.LeaseEvent{State: "expiring", Reason: "max_duration", AtUnixMs: at, EndsByUnixMs: at + 300_000}
+	d := noticeDedupe{}
+	if got := d.take([]*pb.LeaseEvent{exp, exp}); len(got) != 1 {
+		t.Fatalf("first take = %v, want one expiring", got)
+	}
+	if got := d.take([]*pb.LeaseEvent{exp}); len(got) != 0 {
+		t.Fatalf("second take = %v, want nothing", got)
+	}
+	// An expiring event and an end at the same ms are different events.
+	if got := d.take([]*pb.LeaseEvent{{State: "end", Reason: "max_duration", AtUnixMs: at}}); len(got) != 1 {
+		t.Fatalf("end take = %v, want the end", got)
+	}
+}
+
+func TestExpiringNoticeIsPrintedOncePerRun(t *testing.T) {
+	pinUTC(t)
+	at := noticeAt.UnixMilli()
+	exp := leaseEv(&pb.LeaseEvent{State: "expiring", Reason: "max_duration", AtUnixMs: at, EndsByUnixMs: at + 4*60_000 + 30_000})
+	// The first attempt is refused as busy after the expiring notice; the retry carries the same event.
+	c := &scriptedClient{scripts: []*fakeClient{
+		{stream: &fakeStream{events: []*pb.ExecEvent{exp, execErr(budgetRefusal)}}},
+		{stream: &fakeStream{events: []*pb.ExecEvent{exp, chunk(pb.Stream_STREAM_STDOUT, "ok"), end0()}}},
+	}}
+	code, errw, _ := retryRun(t, c, busyCfg(t), nil)
+	if code != 0 || len(c.ids) != 2 || strings.Count(errw, "guest restarts within") != 1 {
+		t.Fatalf("code=%d attempts=%d err=%q, want one expiring line", code, len(c.ids), errw)
 	}
 }

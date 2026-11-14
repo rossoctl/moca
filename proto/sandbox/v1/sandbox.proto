@@ -154,11 +154,16 @@ enum SandboxMode {
 message LeaseEvent {
   uint64      req_id     = 1;
   string      state      = 2;   // "start" | "end" | "expiring"
-  string      reason     = 3;   // why it ended (spec §4.1: "idle", "reset", ...); empty unless state is "end"
+  // On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
+  // (spec §5). Empty on "start".
+  string      reason     = 3;
   int64       at_unix_ms = 4;   // when it happened; also the key the event is acknowledged by
   SandboxMode mode       = 5;
   uint64      age_ms     = 6;   // the lease's age at the event
   repeated string processes = 7;   // processes that were running; filled from plan 5 on
+  // On "expiring" only: the hard end, i.e. when the lease became expiring plus grace_limit
+  // (unix ms). Zero on every other state.
+  int64       ends_by_unix_ms = 8;
 }
 
 enum LeaseOp {
@@ -166,6 +171,8 @@ enum LeaseOp {
   LEASE_OP_STATUS      = 1;
   LEASE_OP_RESET       = 2;
   LEASE_OP_SET_MODE    = 3;
+  // Ends the lease with reason "sandbox_deleted". Takes no mode or mode_epoch.
+  LEASE_OP_SANDBOX_DELETED = 4;
 }
 
 // relay → worker: one lease operation on the workspace. ctl_id correlates the

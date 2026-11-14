@@ -119,9 +119,12 @@ default_egress_allow() {
   fi
 }
 # A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
-# spec §5.4) and SH_WORKSPACE_IMAGE_MB. A bundle without the idle predates that rule and is refused;
-# the image size defaults to microvm-worker's own.
+# spec §5.4), SH_WORKSPACE_IMAGE_MB and SH_LEASE_IDLE_CEILING_S (the control plane's
+# SH_SANDBOX_IDLE_CEILING_S, lease-mode spec §8.1). A bundle without the idle predates that rule and
+# is refused; the image size and the idle ceiling default to microvm-worker's own, which are also
+# setup.sh's (a bundle from before the lease policy came from a control plane on the same 1800 s).
 DEFAULT_IMAGE_MB=2048
+DEFAULT_IDLE_CEILING_S=1800
 DEFAULT_BUDGET_MB=8192
 # The unit's own values (sbx-worker@.service: SH_STANDBY_DEPTH, SH_MEMORY_RESERVE_MB) and the VMM's
 # fixed per-VM cost outside guest RAM (vmpool.DefaultVMOverheadBytes), for check_snapshot_ram.
@@ -574,10 +577,10 @@ remove_read_ahead() {
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
-# W_IMAGE_MB and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and W_TEMPLATE.
-# It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
+# W_IMAGE_MB, W_IDLE_CEILING and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and
+# W_TEMPLATE. It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
 validate_worker() {
-  local env="$BUNDLE/worker.env" id addr tok idle image_mb
+  local env="$BUNDLE/worker.env" id addr tok idle image_mb ceiling
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
   id="$(env_value SANDBOX_ID "$env")"
   valid_id "$id" || die "SANDBOX_ID in $env is not a valid worker id"
@@ -596,6 +599,12 @@ validate_worker() {
   # Plain path characters only: it is written into ExecStart with sed, where # or & would break it.
   [[ "$SBX_WORKER_BIN" =~ ^/[A-Za-z0-9._/-]+$ && -x "$SBX_WORKER_BIN" ]] ||
     die "no worker binary $SBX_WORKER_BIN: build it with CGO_ENABLED=0 go build -o $SBX_WORKER_BIN ./remote-worker/cmd/microvm-worker (SBX_WORKER_BIN must be an absolute path of plain characters: letters, digits, . _ - /)"
+  ceiling="$(env_value SH_LEASE_IDLE_CEILING_S "$env")"
+  ceiling="${ceiling:-$DEFAULT_IDLE_CEILING_S}"
+  # At least 300 s: microvm-worker refuses to start with a ceiling below its default idle timeout.
+  # At most 86400 s, setup.sh's cap: the janitor's wait must outlast it when a lease mode is allowed.
+  [[ "$ceiling" =~ ^[1-9][0-9]{0,5}$ ]] && ((ceiling >= 300 && ceiling <= 86400)) ||
+    die "SH_LEASE_IDLE_CEILING_S in $env must be a whole number of seconds, 300-86400"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
@@ -606,8 +615,32 @@ validate_worker() {
   check_snapshot_ca
   check_snapshot_ram
   check_jail_path "$id"
+  check_lease_state "$id"
   check_template_record "$id"
-  W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb"
+  W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb" W_IDLE_CEILING="$ceiling"
+}
+
+# check_lease_state WORKER_ID: the worker's .lease-state, if there is one, is a real directory (as the
+# janitor requires before it removes a state file there), so clear_boot_marker never reaches through a
+# symlink. A refusal comes before anything is written.
+check_lease_state() {
+  local dir="$SBX_SRV/workspaces/$1/.lease-state"
+  [[ -e "$dir" || -L "$dir" ]] || return 0
+  [[ -d "$dir" && ! -L "$dir" ]] ||
+    die "$dir is a symlink or not a directory: move it aside (the worker keeps its lease state files there), then re-run"
+  [[ ! -d "$dir/.boot" || -L "$dir/.boot" ]] || die "$dir/.boot is a directory: remove it, then re-run"
+}
+
+# clear_boot_marker WORKER_ID: deletes the worker's lease boot marker, .lease-state/.boot, before the
+# worker (re)starts. A worker built before the marker never writes lease=off, so after a rollback past
+# it a marker could still say lease=on, and the next lease-on boot would trust root_wrote = false on
+# states a lease-off boot made untrue (ruling R7). With no marker, that boot marks root_wrote on every
+# known state, conservatively. A symlinked marker goes as the link (rm never follows it); the
+# directory itself was checked by check_lease_state.
+clear_boot_marker() {
+  local f="$SBX_SRV/workspaces/$1/.lease-state/.boot"
+  [[ -e "$f" || -L "$f" ]] || return 0
+  rm -f -- "$f"
 }
 
 # check_template_record WORKER_ID: when template-build.sh wrote a record for the snapshot
@@ -631,7 +664,7 @@ check_template_record() {
 }
 
 install_worker() {
-  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" guest_mb="$W_GUEST_MB" ca=''
+  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" guest_mb="$W_GUEST_MB" ceiling="$W_IDLE_CEILING" ca=''
   install -d -m 0700 "$SBX_ENV_DIR" "$SBX_ENV_DIR/workers"
   if [[ -f "$BUNDLE/relay-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$BUNDLE/relay-ca.crt" || die "$BUNDLE/relay-ca.crt holds no PEM certificate"
@@ -640,6 +673,7 @@ install_worker() {
     record "file $ca"
   fi
   install -d -m 0700 "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
+  clear_boot_marker "$id"
   (
     umask 077
     {
@@ -652,6 +686,7 @@ install_worker() {
       # The verify cache under SBX0's own tree, where template-build.sh's seed writes it.
       printf 'SH_VERIFY_CACHE_DIR=%s\n' "$SBX_SRV/verify-cache"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
+      printf 'SH_LEASE_IDLE_CEILING_S=%s\n' "$ceiling"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
     } >"$SBX_ENV_DIR/workers/$id.env"
   )
