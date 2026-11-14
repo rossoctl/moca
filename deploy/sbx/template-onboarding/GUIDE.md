@@ -817,6 +817,9 @@ A template the deployment declares (`SH_SANDBOX_TEMPLATES`) has no owner, so a s
 a self-serve template under the same id (`409 template_exists`). An admin hands it to a subject
 (`mocactl sbx templates transfer ID github:<id>`); that subject then builds, tags and
 retires it.
+A template with a self-attested build (§4b.5) is not transferred to another subject
+(`409 self_attested`) until an admin trusts its gate record: the record counts for its submitter's own
+templates only.
 
 ## 8. Templates in Moca agent sessions
 
