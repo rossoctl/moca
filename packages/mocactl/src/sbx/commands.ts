@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 // sandbox-client's POSIX single quotes: safe to `eval`, whatever the control plane sent.
@@ -516,6 +517,73 @@ export async function cmdRm(
 }
 
 /**
+ * `sbx egress`: a sandbox's egress, as its KVM host's proxy logged it. Text: the
+ * summary per host, then whether the log is complete, whether it is sealed (final: the control
+ * plane takes no more events, 600 s after the sandbox ended) and its digest. `--json`: every event and the
+ * summary, read page by page. `--ndjson`: the log exactly as served, whose sha256 the summary and the
+ * sandbox's end record name (verify-provenance.py --egress checks a saved copy).
+ */
+export async function cmdEgress(
+  c: SbxCtx,
+  id: string,
+  ndjson: boolean,
+  verify = false,
+): Promise<number> {
+  try {
+    if (verify) return await verifyEgress(c, id);
+    if (ndjson) {
+      const body = await c.api.sandboxEgressNdjson(id);
+      if (c.io.outBytes) c.io.outBytes(body);
+      else c.io.out(body.toString('utf8'));
+      return SBX_EXIT.ok;
+    }
+    let page = await c.api.sandboxEgress(id, { limit: 1000 });
+    // The summary comes on the first page only (the control plane computes it once, there).
+    const summary = page.summary;
+    if (!summary) {
+      c.io.err('sbx: the control plane sent no egress summary on the first page');
+      return SBX_EXIT.failed;
+    }
+    if (c.json) {
+      const events = [...page.events];
+      // A server that hands out a `next` it handed out before would loop forever: refused.
+      const seen = new Set<string>();
+      while (page.next !== null) {
+        if (seen.has(page.next)) {
+          c.io.err("sbx: the control plane repeated an egress page's next; the log was not read");
+          return SBX_EXIT.failed;
+        }
+        seen.add(page.next);
+        page = await c.api.sandboxEgress(id, { after: page.next, limit: 1000 });
+        events.push(...page.events);
+      }
+      c.io.out(JSON.stringify({ events, summary }) + '\n');
+      return SBX_EXIT.ok;
+    }
+    const hosts = Object.entries(summary.byHost).sort(([a], [b]) => (a < b ? -1 : 1));
+    for (const [host, h] of hosts) {
+      const decisions = Object.entries(h.decisions)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([d, n]) => `${sanitizeRemote(d)} ${num(n)}`)
+        .join(', ');
+      c.io.out(
+        `${sanitizeRemote(host || '-').padEnd(40)} ${num(h.count).padStart(6)}  ` +
+          `up ${num(h.bytesUp)} B, down ${num(h.bytesDown)} B  (${decisions})\n`,
+      );
+    }
+    c.io.out(
+      `${num(summary.total)} events; ` +
+        (summary.complete ? 'complete' : `INCOMPLETE: ${num(summary.dropped)} dropped`) +
+        sealedText(summary.sealed) +
+        `; ${sanitizeRemote(String(summary.sha256))}\n`,
+    );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
  * How long `rm` waits on `sandbox_deleted`: the worker may block the op up to its grace limit
  * (30 min), but it finishes the op once started, so `rm` stops waiting and deletes.
  */
@@ -548,6 +616,76 @@ async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined)
   } finally {
     settled.abort();
   }
+}
+
+/**
+ * `sbx egress ID --verify`: the log as served, its sha256 and line count checked against the
+ * control plane's summary of the same log. That catches damage in transit and a server whose log
+ * and summary disagree; it does not read the sandbox's end record (an owner cannot read provenance
+ * records: verify-provenance.py --egress checks a saved copy against an export). The log is read
+ * first and the summary after, so an open log (not yet sealed) that gained events in between shows
+ * as such, not as damage. Exit 0 only when both match.
+ */
+async function verifyEgress(c: SbxCtx, id: string): Promise<number> {
+  const body = await c.api.sandboxEgressNdjson(id);
+  const summary = (await c.api.sandboxEgress(id, { limit: 1 })).summary;
+  if (!summary) {
+    c.io.err('sbx: the control plane sent no egress summary on the first page');
+    return SBX_EXIT.failed;
+  }
+  const sha256 = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+  let lines = 0;
+  for (const b of body) if (b === 0x0a) lines += 1;
+  const whole = body.length === 0 || body[body.length - 1] === 0x0a;
+  const ok = whole && sha256 === summary.sha256 && lines === summary.total;
+  // An open log that grew between the two reads: more events in the summary than were read.
+  const grew =
+    !ok && summary.sealed !== true && typeof summary.total === 'number' && summary.total > lines;
+  if (c.json)
+    c.io.out(
+      JSON.stringify({
+        verified: ok,
+        sha256,
+        lines,
+        summary: {
+          sha256: summary.sha256,
+          total: summary.total,
+          complete: summary.complete,
+          sealed: summary.sealed,
+        },
+        ...(grew ? { open: true } : {}),
+      }) + '\n',
+    );
+  else if (ok)
+    c.io.out(
+      `verified: ${lines} events, ${sanitizeRemote(sha256)}` +
+        (summary.complete ? '' : `; INCOMPLETE: ${num(summary.dropped)} dropped`) +
+        sealedText(summary.sealed) +
+        '\n',
+    );
+  else if (grew)
+    c.io.out(
+      `NOT verified: the log is still open (not sealed) and gained events while it was read ` +
+        `(${lines} read, ${num(summary.total)} now); run --verify again, or once it is sealed ` +
+        `(10 minutes after the sandbox ends)\n`,
+    );
+  else
+    c.io.out(
+      `NOT verified: the log served is ${lines} events, ${sanitizeRemote(sha256)}; ` +
+        `the summary names ${num(summary.total)}, ${sanitizeRemote(String(summary.sha256))}\n`,
+    );
+  return ok ? SBX_EXIT.ok : SBX_EXIT.failed;
+}
+
+/** A number from the server, printed only when it is one: anything else is `?`, never its text. */
+function num(x: unknown): string {
+  return typeof x === 'number' && Number.isFinite(x) ? String(x) : '?';
+}
+
+/** `; sealed` or `; open (not sealed yet)`; nothing from a server that does not say. */
+function sealedText(sealed: boolean | undefined): string {
+  if (sealed === undefined) return '';
+  return sealed ? '; sealed' : '; open (not sealed yet)';
 }
 
 /**

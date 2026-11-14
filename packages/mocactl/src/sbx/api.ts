@@ -87,6 +87,28 @@ export interface SbxDiscovery {
 /** Why placement left a wanted build waiting (openapi ReadinessReason, template lifecycle spec §6.2). */
 export type SbxReadinessReason = 'not_held' | 'no_slot' | 'memory' | 'memfile_mismatch';
 
+/** A sandbox's egress log, a page at a time: the proxy's events as it wrote them. */
+export interface SbxEgressPage {
+  events: Record<string, unknown>[];
+  next: string | null;
+  /** On the first page only (it reads the whole log); null on the pages after `after`. */
+  summary: SbxEgressSummary | null;
+}
+
+/** The log's summary (openapi EgressSummary): per destination host, completeness and digest. */
+export interface SbxEgressSummary {
+  byHost: Record<
+    string,
+    { count: number; decisions: Record<string, number>; bytesUp: number; bytesDown: number }
+  >;
+  total: number;
+  dropped: number;
+  droppedBy?: { proxy: number; cap: number; budget?: number; invalid: number };
+  complete: boolean;
+  sealed?: boolean;
+  sha256: string;
+}
+
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
@@ -378,6 +400,24 @@ export class SandboxApiClient extends ControlPlaneClient {
 
   deleteSandbox(id: string): Promise<{ id: string; state: 'terminated'; reason: string }> {
     return this.json('DELETE', `/v1/sandboxes/${encodeURIComponent(id)}`);
+  }
+
+  /** One page of a sandbox's egress log (owner or admin), from `after` (a page's `next`). */
+  sandboxEgress(id: string, opts: { after?: string; limit?: number } = {}): Promise<SbxEgressPage> {
+    return this.json('GET', `/v1/sandboxes/${encodeURIComponent(id)}/egress`, {
+      query: { after: opts.after, limit: opts.limit },
+    });
+  }
+
+  /**
+   * The whole log as NDJSON, byte for byte as served: its sha256 is the summary's. The bytes, never
+   * a decoded string, so neither a UTF-8 decoder's replacements nor a BOM's removal can change them.
+   */
+  async sandboxEgressNdjson(id: string): Promise<Buffer> {
+    const res = await this.request('GET', `/v1/sandboxes/${encodeURIComponent(id)}/egress`, {
+      query: { format: 'ndjson' },
+    });
+    return Buffer.from(await res.arrayBuffer());
   }
 
   /** `signal` aborts the request (`rm`'s bounded lease step). */
