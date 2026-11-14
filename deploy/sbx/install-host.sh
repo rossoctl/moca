@@ -514,8 +514,9 @@ validate_worker() {
   ceiling="$(env_value SH_LEASE_IDLE_CEILING_S "$env")"
   ceiling="${ceiling:-$DEFAULT_IDLE_CEILING_S}"
   # At least 300 s: microvm-worker refuses to start with a ceiling below its default idle timeout.
-  [[ "$ceiling" =~ ^[1-9][0-9]{0,5}$ ]] && ((ceiling >= 300)) ||
-    die "SH_LEASE_IDLE_CEILING_S in $env must be a whole number of seconds, 300-999999"
+  # At most 86400 s, setup.sh's cap: the janitor's wait must outlast it when a lease mode is allowed.
+  [[ "$ceiling" =~ ^[1-9][0-9]{0,5}$ ]] && ((ceiling >= 300 && ceiling <= 86400)) ||
+    die "SH_LEASE_IDLE_CEILING_S in $env must be a whole number of seconds, 300-86400"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"

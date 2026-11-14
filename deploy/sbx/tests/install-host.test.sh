@@ -78,7 +78,7 @@ b="$(bundle sbx_bad)"; sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=short/' "$b
 ! bash "$INSTALL" "$b" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a malformed token'
 ! grep -q 'short' "$TMP/out" || fail 'the refusal printed the token value'
 for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' \
-  'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S= '; do
+  'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S=86401' 'SH_LEASE_IDLE_CEILING_S= '; do
   : >"$MOCK_LOG"
   # The bad line last: env_value takes the last one, so it overrides the valid idle before it.
   ! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IDLE=216h\n'"$extra"$'\n')" --snapshot default >"$TMP/out" 2>&1 || fail "accepted $extra"
@@ -91,6 +91,11 @@ done
 grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/out" ||
   fail 'the missing-idle refusal does not name SH_WORKSPACE_IDLE and setup.sh'
 ! grep -q systemctl "$MOCK_LOG" || fail 'touched systemd before refusing a bundle with no SH_WORKSPACE_IDLE'
+# setup.sh's cap (review #4569829097): the ceiling's refusal names the 300-86400 range.
+! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IDLE=216h\nSH_LEASE_IDLE_CEILING_S=86401\n')" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'accepted a ceiling above 86400 s'
+grep -q 'SH_LEASE_IDLE_CEILING_S in .* must be a whole number of seconds, 300-86400' "$TMP/out" ||
+  fail "the ceiling refusal does not name 300-86400: $(cat "$TMP/out")"
 pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size or idle ceiling'
 
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
