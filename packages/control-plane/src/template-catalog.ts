@@ -91,6 +91,17 @@ export interface TemplateBuild {
    * the `activate` record that granted the lease, which a sandbox under it cites (§7.1).
    */
   leases?: { subject: string; until: number; since?: number; record?: string }[];
+  /**
+   * When its last lease ended, epoch seconds (§6.5, the idle grace): set when leases are dropped (a
+   * deactivate's time, or the end of an expired lease the write clears). An expired lease still
+   * stored counts too (lastLeaseEnd() in activation.ts takes the later).
+   */
+  lastLeaseEnd?: number;
+  /**
+   * The time of a deactivate with `stopNow: true` that left it with no lease (§6.5): a lease that
+   * ended at or before it gets no idle grace (forced cold).
+   */
+  stopNowAt?: number;
   /** The host agent's build log, newest last, at most LOG_MAX entries (§4 logs). */
   log?: { at: number; level: 'info' | 'warn' | 'error'; step: string; message: string }[];
 }

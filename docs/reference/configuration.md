@@ -395,7 +395,12 @@ header is authoritative.
   in seconds, clamped to 60-86400; default 0, then 3600), `SBX_MEM_FLOOR_MIB` (the memory the
   control plane never places workers into, MiB; default 10% of MemTotal, at least 4096),
   `SBX_MEM_PRESSURE_LIMIT` (no new worker start while memory PSI `full avg10` is above it; default
-  10), `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host agent). `deploy/sbx/setup.sh`'s
+  10), `SBX_START_CONCURRENCY` (the workers starting at once, started and not attached yet; default
+  4, at least 1), `SBX_START_WINDOW_S` (how long a start counts as starting at
+  most, in seconds: with a control plane that sends no `starting`, the agent's own starts; with one,
+  a listed worker not attached after it is stuck and holds no slot; default 300), `SBX_IDLE_GRACE_S` (how long a
+  released build's running worker is kept, in seconds; default 0, off; at most 86400),
+  `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host agent). `deploy/sbx/setup.sh`'s
   `SBX_TEMPLATE_HOSTS` lists the hosts and writes each one's bundle.
 
 ## Known inconsistencies

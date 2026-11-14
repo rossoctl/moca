@@ -3,6 +3,49 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.13.0
+
+Pacing template workers' cold starts ([#745](https://github.com/rossoctl/moca/issues/745)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.5: a
+KVM host starts at most `SBX_START_CONCURRENCY` (default 4) workers at once, an activation waiting
+for a start slot says so, and an optional idle grace (`SBX_IDLE_GRACE_S`, default 0, off) keeps a
+released build's worker running for a while. The start limit is the host agent's, so it holds with
+an older control plane too. Every change is additive.
+
+- `GET /v1/hosts/{host}/wanted` gains `starting: [buildId]`: the builds of `run` whose worker is not
+  attached to the relay (its presence, as readiness reads it), in `run`'s order. `run` is now in the
+  wanted order, first leased first. Without `starting` (an older control plane, or the presence
+  unreadable) the agent counts its own starts of the last `SBX_START_WINDOW_S` (default 300). With
+  `starting`, a listed worker counts for `SBX_START_WINDOW_S` at most: one not attached after it is
+  stuck (an error line each run) and holds no start slot.
+- `POST /v1/hosts/{host}/inventory`'s `limits` take optional `startConcurrency`, `startSeconds` (the
+  mean of the agent's last cold starts, start to attach) and `idleGraceSeconds` (0-86400). Without
+  them (an older agent) nothing changes; an older control plane ignores them.
+- A build `activating` on such a host gains `queued` and `queuePosition` (1-based, among its host's
+  placed, wanted builds not attached yet, first leased first); `queued` is true beyond the host's
+  `startConcurrency`.
+- `409 template_not_active`'s Retry-After is `ceil(ceil(queuePosition / startConcurrency) ×
+startSeconds)` when the host reports both; else 30 s, as before. A queued activation stays
+  `activating` longer than before: a client polls with a timeout sized for the host's whole start
+  line.
+- A build whose worker already runs on a holder needs no start: it stays there (1.12.0's sticky
+  placement), whether or not the host reports memory figures; a graced build leased again too.
+- The idle grace runs from the build's last lease end (a release's time, or an expired lease's
+  `until`), for a worker the agent reports running with no live sandbox, while the host has room
+  under `activeLimit` beside the workers it counts (`active.used`: graced ones are counted apart)
+  and its memory headroom (a graced worker counts as running there). A wanted
+  build that needs the slot or the memory displaces the graced worker that ends soonest; the stop is
+  re-checked for a lease, under the activation lock, when the wanted answer is made. The wanted
+  answer gains `graced: [buildId]` for a host with a grace: the graced builds, kept in `run` after
+  the wanted ones (the agent starts none of them).
+- `POST /v1/templates/{id}/deactivate` takes an optional `stopNow: true`: with no lease left, the
+  build skips the grace (stopped at the next poll); the `deactivate` record carries `stopNow: true`.
+- Builds gain `graced: true` and `gracedUntil` (epoch seconds) while in a grace; a create on a
+  graced build takes the caller's lease and is served at once.
+- `GET /v1/templates`' hosts gain `start: {concurrency, seconds, starting, queued}`, only for a host
+  whose agent reports it, and `idleGraceSeconds` and `graced` (a count) for a host whose agent sets
+  a grace.
+
 ## 1.12.0
 
 Placement of template workers by host memory ([#744](https://github.com/rossoctl/moca/issues/744)),
