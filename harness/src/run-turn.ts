@@ -217,6 +217,7 @@ export async function acquireTurnSandbox(
   sessionId: string | undefined,
   deps: SelectDeps = {},
   tier?: string,
+  template?: { id: string; seed?: string; build?: string },
 ): Promise<AcquiredTurnSandbox> {
   const noop = async () => {};
   if (injected) return { sandbox: injected, leased: false, heartbeat: noop, release: noop };
@@ -238,10 +239,36 @@ export async function acquireTurnSandbox(
     // a one-off. Sharing a literal 'anon' workspace across unrelated turns would be the cross-turn
     // bleed spec §2.3 is about, and an EMPTY key is refused outright by microvm-worker (§3.4).
     sessionId ?? holderId,
-    { cap, ttlMs, holderId, remoteSandbox: env.SH_REMOTE_SANDBOX === '1', tier },
+    {
+      cap,
+      ttlMs,
+      holderId,
+      remoteSandbox: env.SH_REMOTE_SANDBOX === '1',
+      tier,
+      ...(template ? { template: template.id } : {}),
+      ...(template?.build ? { build: template.build } : {}),
+    },
     deps,
   );
   if (!selected) return { sandbox: null, leased: false, heartbeat: noop, release: noop };
+  // A templated workspace is seeded before the turn's first tool call (session-templates spec §5).
+  // The lease is held: a seed that throws must return it, as every other failure after the acquire.
+  if (template?.seed) {
+    // The seed may outlast the lease TTL (a clone, an install): renew while it runs, as executeTurn
+    // renews for the turn, or the slot is reaped and over-filled under a still-running seed.
+    const renew = setInterval(
+      () => void selected.heartbeat().catch(() => {}),
+      leaseTimings(env).heartbeatMs,
+    );
+    try {
+      await seedWorkspace(selected.transport, template.id, template.seed, selected.podCwd);
+    } catch (err) {
+      await selected.release().catch(() => {});
+      throw err;
+    } finally {
+      clearInterval(renew);
+    }
+  }
 
   // `leased` comes from the seam rather than from re-reading the environment here. It is
   // false for an injected sandbox (the caller owns that lease) and true only when this call
@@ -262,6 +289,71 @@ export async function acquireTurnSandbox(
       ...(selected.workspaceReset ? { workspaceReset: selected.workspaceReset } : {}),
     },
   };
+}
+
+/**
+ * The marker a seeded workspace carries (session-templates spec §5), relative to the workspace (the
+ * session's podCwd: `/workspace` on a microVM, `/workspace/<sid>` on a container worker), so it
+ * travels with that workspace and no other session's.
+ */
+export const SEED_MARKER = '.moca-seeded';
+/**
+ * The seed's own output, kept in the workspace for the operator: never in the turn's output, but in
+ * the agent's own workspace, where the agent can read it, so a seed must not print a secret.
+ */
+export const SEED_LOG = '.moca-seed.log';
+/** The lock that holds concurrent first turns of one session to one seed run. */
+export const SEED_LOCK = '.moca-seed.lock';
+
+/** A template's seed failed: the turn cannot start on a workspace that is not the template's. */
+export class SandboxSeedError extends Error {
+  constructor(template: string, why: number | null | string) {
+    super(
+      `seeding the workspace of sandbox template '${template}' failed (${typeof why === 'string' ? why : `exit ${why ?? 'none: signal'}`}; see ${SEED_LOG} in the workspace)`,
+    );
+    this.name = 'SandboxSeedError';
+  }
+}
+
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Runs a template's seed in the session's workspace (`workspace`, its podCwd) unless the marker
+ * says it has run (spec §5). An exclusive `flock` on the marker's lock file holds concurrent first
+ * turns of one session to one seed run: the second waits, then finds the marker. A failed seed
+ * leaves no marker, so the next turn runs it again on whatever it left: a seed must be safe to
+ * re-run (`cp -a` is; a bare `git clone` into the workspace is not). A workspace reset has no
+ * marker and is seeded again. The seed's output goes to SEED_LOG, never into the turn: only the
+ * exit code is read, so a chatty seed cannot trip the output cap. When the workspace is a git
+ * repository (a seeded checkout), the three seed files are added to its `info/exclude`, so a patch
+ * taken with `git add -A` or `git status --porcelain` never carries them.
+ */
+export async function seedWorkspace(
+  transport: {
+    exec: (command: string, opts?: { timeout?: number }) => Promise<{ exitCode: number | null }>;
+  },
+  template: string,
+  seed: string,
+  workspace = '/workspace',
+): Promise<void> {
+  const files = [SEED_MARKER, SEED_LOG, SEED_LOCK];
+  // Best-effort: no git, or not a repository, skips it; it never fails the seed.
+  const exclude =
+    `{ x="$(git rev-parse --git-path info/exclude 2>/dev/null)" && mkdir -p "$(dirname "$x")" && ` +
+    `for f in ${files.map((f) => `/${f}`).join(' ')}; do grep -qxF "$f" "$x" 2>/dev/null || echo "$f" >>"$x"; done; true; }`;
+  const body = `[ -e ${SEED_MARKER} ] || { bash -c ${shq(seed)} >${SEED_LOG} 2>&1 && ${exclude} && touch ${SEED_MARKER}; }`;
+  // flock(1) is util-linux, in every shipped sandbox image; without it the guard still runs, unlocked.
+  const command =
+    `cd ${shq(workspace)} && if command -v flock >/dev/null 2>&1; then ` +
+    `flock ${SEED_LOCK} bash -c ${shq(body)}; else ${body}; fi`;
+  let res: { exitCode: number | null };
+  try {
+    res = await transport.exec(command, { timeout: 600 });
+  } catch (err) {
+    // A transport failure or the worker's timeout (`timeout:600`): still the seed's failure.
+    throw new SandboxSeedError(template, (err as Error)?.message ?? String(err));
+  }
+  if (res.exitCode !== 0) throw new SandboxSeedError(template, res.exitCode);
 }
 
 /** The `workspace_reset` frame for a placement that moved the session, else null (P6.3 spec §6). */
@@ -358,6 +450,17 @@ export interface TurnConfig {
    * for every caller without a control plane; selectPoolSandbox then uses SH_SANDBOX_DEFAULT_TIER.
    */
   sandboxTier?: string;
+  /**
+   * The session's sandbox template and its seed, from the exchange (session-templates spec §3.4).
+   * Absent: the session runs only on untemplated workers, and nothing is seeded.
+   */
+  sandboxTemplate?: string;
+  sandboxSeed?: string;
+  /**
+   * The build the session's template resolved to (`sha256:…`, combined control plane spec §3.4).
+   * Set: only workers labelled `moca.dev/build=<it>` serve the turn.
+   */
+  sandboxBuildId?: string;
   /**
    * The session's model, from the exchange (per-session model spec §5.1). Read by executeTurn only:
    * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
@@ -918,6 +1021,13 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     opened.sessionManager.getSessionId(),
     {},
     input.config?.sandboxTier,
+    input.config?.sandboxTemplate
+      ? {
+          id: input.config.sandboxTemplate,
+          ...(input.config.sandboxSeed ? { seed: input.config.sandboxSeed } : {}),
+          ...(input.config.sandboxBuildId ? { build: input.config.sandboxBuildId } : {}),
+        }
+      : undefined,
   );
 
   // A null sandbox would leave Pi's built-in tools running LOCALLY, in this process (MI1 §5 R3). Both

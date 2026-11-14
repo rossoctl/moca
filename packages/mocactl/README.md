@@ -155,6 +155,10 @@ verdict. A session that has not finished yet exits `1` with a hint; a `failed` b
 with the status, reason, and detail on stderr.
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
+An empty `--session ""` is refused (exit `2`), not taken as `--new`. When the harness has no
+capacity (`503` with `Retry-After`), it waits and retries, printing the harness's reason (for
+example `no attached sandbox in sandbox tier 'container'`), for at most 15 minutes in all; then it
+exits `1` with that refusal. A tier or template with no worker never gains one by waiting.
 
 By default it prints the assistant's text only. `--show-tools` adds each tool call the turn makes,
 on its own line between the text, formatted as the TUI formats it (`$ ls /tmp`, `read src/a.ts`),

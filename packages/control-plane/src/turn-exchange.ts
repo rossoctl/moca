@@ -10,6 +10,7 @@ import {
   type ExchangeResponse,
 } from './exchange.js';
 import type { CpDeps } from './handlers.js';
+import { holdPinnedWorker } from './host-handlers.js';
 import { isTerminalState, type TurnCaps } from './turn-record.js';
 
 /**
@@ -189,6 +190,8 @@ export async function exchangeTurnCredential(
   // own tier retiers the session's sandbox, and a retier starts its workspace empty
   // (`select-sandbox.ts`, `reason: 'retiered'`).
   const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
+  // A queued turn of a session pinned to a build keeps that build's worker, as an interactive one.
+  if (rec.sandboxTemplate) await holdPinnedWorker(rec, deps);
   return {
     turnId: turn.turnId,
     mode,

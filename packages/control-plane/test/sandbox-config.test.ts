@@ -41,6 +41,50 @@ const messageOf = (fn: () => unknown): string => {
   throw new Error('expected a throw');
 };
 
+describe('the combined profile config (combined control plane spec §3.5)', () => {
+  const KEK = Buffer.alloc(32, 7).toString('base64'); // notsecret
+  const harness = { SH_CREDENTIAL_KEK: KEK, SH_EXCHANGE_TOKEN: 'x'.repeat(32) }; // notsecret
+  const cenv = (over: Record<string, string | undefined> = {}) =>
+    env({ SH_ROUTE_PROFILE: 'combined', ...harness, ...over });
+
+  it("boots with both profiles' settings: the sandbox block and the harness fields", () => {
+    const c = configFromEnv(cenv({ SH_PUBLIC_HARNESS_URL: 'https://h.example.invalid' }));
+    expect(c.routeProfile).toBe('combined');
+    expect(c.sandbox?.allowedSubjects).toEqual(['github:1', 'github:2']);
+    expect(c.sandbox?.execEndpoint).toBe('sbx-exec.apps.example.invalid:443');
+    expect(c.exchangeToken).toBe('x'.repeat(32));
+    expect(c.publicHarnessUrl).toBe('https://h.example.invalid');
+    // One template list for sessions and sandboxes.
+    expect(c.sessionTemplates?.map((t) => t.id)).toEqual(['default', 'node22']);
+    expect(c.sandbox?.templates.map((t) => t.id)).toEqual(['default', 'node22']);
+  });
+
+  it("refuses to boot without either profile's required settings, naming the missing one", () => {
+    for (const name of [
+      'SH_CREDENTIAL_KEK',
+      'SH_EXCHANGE_TOKEN',
+      'SH_ALLOWED_SUBJECTS',
+      'SH_SANDBOX_EXEC_ENDPOINT',
+      'SH_SANDBOX_TEMPLATES',
+    ]) {
+      expect(messageOf(() => configFromEnv(cenv({ [name]: undefined })))).toContain(name);
+    }
+  });
+
+  it('builds the sandbox store and keeps the harness credential store', () => {
+    const d = depsFromEnv(
+      cenv({
+        REDIS_URL: 'redis://127.0.0.1:1',
+        SH_CREDENTIAL_STORE: 'file',
+        SH_CREDENTIAL_DIR: mkdtempSync(join(tmpdir(), 'cp-comb-')),
+      }),
+    );
+    expect(d.sandboxes).toBeInstanceOf(RedisSandboxStore);
+    expect(d.credentials).not.toBeInstanceOf(UnavailableCredentialStore);
+    void d.close?.();
+  });
+});
+
 describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
   it('boots with no credential store, KEK, exchange token or inference settings', () => {
     const c = configFromEnv(env());
@@ -148,6 +192,10 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     expect(messageOf(() => configFromEnv(env({ SH_SANDBOX_MAX_TOTAL: '4x0' })))).not.toContain(
       '4x0',
     );
+  });
+
+  it('reads the combined profile (combined control plane spec §3.5)', () => {
+    expect(routeProfileFromEnv({ SH_ROUTE_PROFILE: 'combined' })).toBe('combined');
   });
 
   it('keeps the harness profile the default, and refuses an unknown one', () => {

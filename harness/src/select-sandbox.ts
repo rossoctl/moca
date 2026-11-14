@@ -15,6 +15,8 @@ import {
   RedisAffinityStore,
   OWNER_LABEL,
   TIER_LABEL,
+  TEMPLATE_LABEL,
+  BUILD_LABEL,
   WORKLOAD_LABEL,
   type AffinityStore,
 } from './sandbox-affinity.js';
@@ -327,11 +329,13 @@ export class SandboxAffinityPendingError extends SandboxPoolSaturatedError {
  * because an empty TIER on a healthy relay is the commonest misconfiguration (P6.3 spec §5).
  */
 export class SandboxPoolEmptyError extends Error {
-  constructor(selector: string, tier?: string) {
+  constructor(selector: string, tier?: string, template?: string) {
     super(
-      tier
-        ? `no attached sandbox in sandbox tier '${tier}' (SH_SANDBOX_TIERS is set; check that the workers of this tier set SANDBOX_TIER=${tier})`
-        : `no sandbox presence records (no sandbox has attached to the relay yet)`,
+      template
+        ? `no attached sandbox for sandbox template '${template}'${tier ? ` in tier '${tier}'` : ''} (check that a worker of this template sets SANDBOX_TEMPLATE=${template})`
+        : tier
+          ? `no attached sandbox in sandbox tier '${tier}' (SH_SANDBOX_TIERS is set; check that the workers of this tier set SANDBOX_TIER=${tier})`
+          : `no sandbox presence records (no sandbox has attached to the relay yet)`,
     );
     this.name = 'SandboxPoolEmptyError';
   }
@@ -607,6 +611,18 @@ export async function selectPoolSandbox(
      */
     tier?: string;
     /**
+     * The session's sandbox template (session-templates spec §4). Set: only records labelled
+     * `moca.dev/template=<it>` are candidates, and pods are not. Absent or '': only records WITHOUT
+     * the label, so an untemplated session never lands on a templated worker.
+     */
+    template?: string;
+    /**
+     * The build the session's template resolved to (combined control plane spec §3.4). Set: only
+     * records labelled `moca.dev/build=<it>` are candidates, so a session pinned to a build never
+     * runs on another. Absent: any build of the template, as before.
+     */
+    build?: string;
+    /**
      * The workload key (`w-<32 hex>`) the run names (workload sandboxes spec §3.3). Set: only
      * records labelled `moca.dev/workload=<key>` are candidates, and there is no fallback to the
      * shared pool. Absent or '': records carrying any workload label are never candidates.
@@ -713,6 +729,17 @@ async function select(
     return !!tiers && !!t && t !== tier && tiers.names.includes(t);
   };
   if (tiers) grpcRecs = grpcRecs.filter((r) => recordInTier(r, tier, tiers.names));
+  // The template filter (session-templates spec §4): a session with a template sees only workers
+  // serving it, and pods never (no pod carries the label); a session without one sees only
+  // untemplated workers. A deployment whose workers carry no template label keeps every record.
+  const template = opts.template || '';
+  const ofTemplate = (r: SandboxRecord): boolean => (r.labels?.[TEMPLATE_LABEL] || '') === template;
+  grpcRecs = grpcRecs.filter(ofTemplate);
+  // The build filter: only with a template and a pinned build; a worker reporting no
+  // build label never serves a pinned session.
+  const build = template && opts.build ? opts.build : '';
+  const ofBuild = (r: SandboxRecord): boolean => !build || r.labels?.[BUILD_LABEL] === build;
+  if (build) grpcRecs = grpcRecs.filter(ofBuild);
   // The workload filter (spec §3.3): a workload run sees only its own workload's sandboxes, of its own
   // owner, and a run
   // without one never sees any workload's. A deployment with no workload sandboxes has no record
@@ -729,7 +756,7 @@ async function select(
   const empty = () =>
     workload
       ? new WorkloadSandboxUnavailableError(workload)
-      : new SandboxPoolEmptyError(selector, tiers ? tier : undefined);
+      : new SandboxPoolEmptyError(selector, tiers ? tier : undefined, template || undefined);
 
   // Acquire `name`, then build what the caller gets; a throw after the acquire releases the lease
   // before the original error propagates (unchanged from before -- it is just shared by two paths now).
@@ -842,10 +869,14 @@ async function select(
     // shared pool) is the same case as retiered: waiting cannot bring it into scope.
     if (
       allRecs.some(
-        (r) => r.sandboxId === prior.sandboxId && (inOtherDeclaredTier(r) || !inScope(r)),
+        (r) =>
+          r.sandboxId === prior.sandboxId &&
+          (inOtherDeclaredTier(r) || !inScope(r) || !ofTemplate(r) || !ofBuild(r)),
       )
     ) {
-      // Present, but advertising another DECLARED tier: an operator re-tiered the worker. It will not
+      // Present, but advertising another DECLARED tier (or serving another template, or none: an
+      // operator re-templated it, session-templates spec §4; or, for a session pinned to a build,
+      // another build of its template, or no build label): an operator re-tiered the worker. It will not
       // come back to this tier by waiting, so the grace would only delay the same outcome (Review
       // Focus 3). An UNLABELLED record, or one labelled with an undeclared tier, is not "another tier"
       // (spec §4 step 4): it is a worker whose SANDBOX_TIER is missing or mistyped, most likely by

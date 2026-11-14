@@ -51,4 +51,22 @@ describe('GET /v1/discovery', () => {
       },
     });
   });
+
+  it('answers both sets of fields on the combined profile (combined control plane spec §3.1)', async () => {
+    const base = makeDeps().config.sandbox!;
+    const d = makeDeps({
+      config: {
+        routeProfile: 'combined',
+        publicHarnessUrl: 'https://harness.example.com',
+        sandbox: { ...base, execEndpoint: 'sbx-exec.example.invalid:443' },
+      },
+    });
+    expect((await HANDLERS.getDiscovery!(ctx({}), d)).body).toEqual({
+      harnessUrl: 'https://harness.example.com',
+      sandboxTiers: null,
+      version: null,
+      profile: 'combined',
+      execEndpoint: 'sbx-exec.example.invalid:443',
+    });
+  });
 });

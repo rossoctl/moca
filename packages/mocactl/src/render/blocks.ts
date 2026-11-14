@@ -225,7 +225,7 @@ export function workspaceResetText(f: {
   // No tier when the deployment declares none: name no tier rather than print "in tier ''".
   const where = f.tier ? ` in tier '${f.tier}'` : '';
   return f.reason === 'retiered'
-    ? `workspace reset: sandbox '${f.from}' moved to another tier; this turn runs on a fresh workspace${where}`
+    ? `workspace reset: sandbox '${f.from}' moved to another tier or template; this turn runs on a fresh workspace${where}`
     : `workspace reset: sandbox '${f.from}' is gone; this turn runs on a fresh workspace${where}`;
 }
 

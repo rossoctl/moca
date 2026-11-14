@@ -1,0 +1,20 @@
+# The combined control plane's API (combined design §3.6; as ocp-sbx's, SBX0 §2): edge TLS at the router, HTTP to the pod, as
+# overlays/ocp/routes.yaml's moca-control-plane Route. The host is a placeholder that
+# deploy/sbx/setup.sh's generated overlay replaces with SBX_API_HOST. API clients only, so plain
+# HTTP is refused (`None`), not redirected: a redirect comes after the bearer or refresh token has
+# already crossed in the clear. HSTS tells a client that has seen the host never to try HTTP.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: moca-api
+  namespace: moca
+  annotations:
+    haproxy.router.openshift.io/hsts_header: max-age=31536000
+spec:
+  host: moca-api.apps.example.invalid
+  to: { kind: Service, name: moca-control-plane }
+  port: { targetPort: http }
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: None
+# The router -> control plane NetworkPolicy comes from ../ocp-single/routes (identical rule).

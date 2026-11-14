@@ -60,6 +60,8 @@ export interface SessionSummary {
    * before P6.3.
    */
   sandboxTier?: string | null;
+  /** The session's sandbox template; null for none on a templated deployment, absent elsewhere. */
+  sandboxTemplate?: string | null;
   /** The session's model; null on the deployment default, absent before per-session models. */
   model?: string | null;
 }
@@ -73,7 +75,7 @@ export interface CreateSessionRequest {
   credentials?: { inference?: string };
   /** A promoted config bundle digest; fixed for the session's life (ADR-0038). */
   configRef?: string;
-  sandbox?: { tier?: string };
+  sandbox?: { tier?: string; template?: string; activate?: boolean };
   /** A model id the credential lists; fixed until switched with /model. */
   model?: string;
 }
@@ -176,6 +178,8 @@ export interface Discovery {
   harnessUrl: string | null;
   /** P6.3. Optional so a pre-P6.3 control plane, which omits it, still parses. */
   sandboxTiers?: { names: string[]; default: string } | null;
+  /** Session templates (session-templates spec §3.3). Absent when the deployment declares none. */
+  sandboxTemplates?: { id: string; description: string; tools: string[] }[] | null;
   /** The control plane's version; null/absent when it predates advertising one. */
   version?: string | null;
 }

@@ -60,7 +60,7 @@ type Config struct {
 	MaxConcurrent int
 	Heartbeat     time.Duration
 	// Labels go into Hello.labels verbatim; the relay mirrors them into the presence record.
-	// TierLabels builds the one the harness reads (moca.dev/tier).
+	// Labels builds the two the harness reads (moca.dev/tier, moca.dev/template).
 	Labels map[string]string
 }
 

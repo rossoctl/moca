@@ -179,6 +179,8 @@ describe('mocactl run --record F', () => {
     expect(l.map((x) => `${x.endpoint ?? ''} ${x.method ?? x.event} ${x.path ?? ''}`)).toEqual([
       'control-plane GET /v1/credentials',
       'control-plane GET /v1/models?credential=anthropic',
+      // The session options read the discovery twice: the sandbox tier, then the sandbox template.
+      'control-plane GET /v1/discovery',
       'control-plane GET /v1/discovery',
       'control-plane POST /v1/sessions',
       'control-plane GET /v1/discovery',
@@ -188,7 +190,7 @@ describe('mocactl run --record F', () => {
     expect(new Set(l.map((x) => x.command))).toEqual(new Set(['run']));
     expect(new Set(l.map((x) => x.invocation)).size).toBe(1);
     // The session's id, model and times stay; its token is a hash.
-    const created = l[3]!.answer as Record<string, unknown>;
+    const created = l[4]!.answer as Record<string, unknown>;
     expect(created).toMatchObject({ sessionId: 's-1', model: 'm1', expiresAt: 4_000_000_000 });
     expect(created.token).toBe(sha(SESSION_JWT));
     // The credential's name stays; its hosts and endpoint are lengths.
@@ -201,11 +203,11 @@ describe('mocactl run --record F', () => {
       length: JSON.stringify(['api.example.invalid']).length,
     });
     // The turn's request: its session id, the prompt as its length.
-    expect(l[5]!.request).toEqual({ sessionId: 's-1', prompt: { length: PROMPT.length } });
-    expect(l[5]).toMatchObject({ status: 200, seq: 6, try: 1 });
-    expect(l[5]!.answer).toBeUndefined();
-    const end = l[6]!;
-    expect(end).toMatchObject({ seq: 6, event: 'stream_end', frames: 2 });
+    expect(l[6]!.request).toEqual({ sessionId: 's-1', prompt: { length: PROMPT.length } });
+    expect(l[6]).toMatchObject({ status: 200, seq: 7, try: 1 });
+    expect(l[6]!.answer).toBeUndefined();
+    const end = l[7]!;
+    expect(end).toMatchObject({ seq: 7, event: 'stream_end', frames: 2 });
     expect(end.bytes).toBe(body.sent().length);
     expect(end.sha256).toBe(sha(body.sent()));
     expect(end.error).toBeUndefined();
@@ -280,7 +282,7 @@ describe('mocactl run --record F', () => {
     ac.abort();
     expect(await done).toBe(130);
     const end = lines(r.rec).find((x) => x.event === 'stream_end')!;
-    expect(end).toMatchObject({ seq: 6, frames: 1, error: 'AbortError' });
+    expect(end).toMatchObject({ seq: 7, frames: 1, error: 'AbortError' });
     expect(end.sha256).toBe(sha(body.sent()));
     clean(r.rec);
   });

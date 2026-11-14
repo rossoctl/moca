@@ -22,3 +22,51 @@ func TierLabels(lookup func(string) (string, bool), def string) map[string]strin
 	}
 	return map[string]string{TierLabelKey: v}
 }
+
+// TemplateLabelKey is the presence label naming the sandbox template this worker serves (the
+// session-templates spec §3.1): the harness keeps a session that asked for template T on workers
+// labelled T, and a session that asked for none on workers without the label.
+const TemplateLabelKey = "moca.dev/template"
+
+// TemplateLabels returns the Hello label for SANDBOX_TEMPLATE: set and non-blank, the trimmed
+// value; unset or blank, none. There is no default: a worker serves a template only when its
+// operator says so, because an untemplated session must never land on it.
+func TemplateLabels(lookup func(string) (string, bool)) map[string]string {
+	v, _ := lookup("SANDBOX_TEMPLATE")
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	return map[string]string{TemplateLabelKey: v}
+}
+
+// Labels is a worker's whole Hello label set: its tier (TierLabels, with def) and its template
+// (TemplateLabels). Nil when it has neither.
+// BuildLabelKey is the presence label naming the build this worker serves: its snapshot's manifest
+// hash, `sha256:<hex>` (combined control plane spec §3.4). A session pinned to a build
+// runs only on workers labelled with it. Only microvm-worker sets it, from the manifest it verified.
+const BuildLabelKey = "moca.dev/build"
+
+// WithBuild returns labels plus BuildLabelKey=hash, or labels unchanged for an empty hash.
+func WithBuild(labels map[string]string, hash string) map[string]string {
+	if strings.TrimSpace(hash) == "" {
+		return labels
+	}
+	out := map[string]string{}
+	for k, v := range labels {
+		out[k] = v
+	}
+	out[BuildLabelKey] = hash
+	return out
+}
+
+func Labels(lookup func(string) (string, bool), def string) map[string]string {
+	out := TierLabels(lookup, def)
+	for k, v := range TemplateLabels(lookup) {
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}

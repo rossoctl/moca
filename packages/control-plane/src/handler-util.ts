@@ -3,7 +3,7 @@ import type { AuditLog } from './audit-log.js';
 import { defaultAuditLog } from './audit-log.js';
 import type { OwnershipIndex } from './ownership.js';
 import { CpError } from './errors.js';
-import { isEnrolled, notEnrolled } from './sandbox-config.js';
+import { isEnrolledForSandbox, notEnrolled } from './sandbox-config.js';
 import type { CpConfig } from './handlers.js';
 import type { TokenClaims } from './token.js';
 
@@ -79,13 +79,27 @@ export async function auditBestEffort(
   }
 }
 
-/** Spec §4.2: the allow list (plus admins) gates the sandbox profile's routes; returns the principal. */
+/**
+ * Spec §4.2: the allow list (plus admins) gates the sandbox routes and the template writes, on the
+ * sandbox and the combined profile; returns the principal.
+ */
 export function requireEnrolledPrincipal(
   ctx: { principal?: TokenClaims },
   config: CpConfig,
 ): TokenClaims {
   const p = ctx.principal;
   if (!p) throw new CpError('token_required', 'this route requires a token');
-  if (!isEnrolled(p.sub, p.roles ?? [], config)) throw notEnrolled(p.sub);
+  if (!isEnrolledForSandbox(p.sub, p.roles ?? [], config)) throw notEnrolled(p.sub);
+  return p;
+}
+
+/**
+ * A route open to any logged-in subject on `harness` and `combined` (template, policy and quota
+ * reads, combined spec §3.2) but enrolled-only on `sandbox`, whose login is closed anyway.
+ */
+export function requireReader(ctx: { principal?: TokenClaims }, config: CpConfig): TokenClaims {
+  if (config.routeProfile === 'sandbox') return requireEnrolledPrincipal(ctx, config);
+  const p = ctx.principal;
+  if (!p) throw new CpError('token_required', 'this route requires a token');
   return p;
 }

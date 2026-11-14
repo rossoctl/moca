@@ -6,6 +6,7 @@ import {
   resolveSessionOptions,
   fieldRefusedByServer,
   sandboxTierField,
+  sandboxTemplateField,
   modelField,
 } from '../src/core/session-options.js';
 import { ApiError } from '../src/api/errors.js';
@@ -50,7 +51,8 @@ describe('resolveSessionOptions', () => {
   it('maps a refusal to the field by its refusal code, whatever the field order', () => {
     const refused = new ApiError('control-plane', 400, 'credential_required', 'no credential');
     const reversed = [...SESSION_OPTION_FIELDS].reverse();
-    expect(reversed[0].key).toBe('sandboxTier');
+    // A field with no refusal code first, so the match is by code, not position.
+    expect(reversed[0].key).toBe('sandboxTemplate');
     expect(fieldRefusedByServer(refused, reversed)?.key).toBe('inferenceCredential');
     // The tier field may also be left to the server, but no refusal is about it.
     expect(fieldRefusedByServer(refused, [sandboxTierField])).toBeUndefined();
@@ -446,5 +448,123 @@ describe('the model field', () => {
       },
     });
     await expect(resolveSessionOptions(api, [modelField], {}, {})).rejects.toThrow();
+  });
+});
+
+describe('sandboxTemplateField (session-templates spec §6)', () => {
+  const T = [
+    { id: 'django-django-11133', description: 'SWE-bench', tools: ['bash'] },
+    { id: 'py312', description: 'Python 3.12', tools: ['python3'] },
+  ];
+  const api = (sandboxTemplates?: unknown) =>
+    fakeControlPlane({
+      discovery: async () => ({ harnessUrl: null, sandboxTiers: null, sandboxTemplates }) as never,
+    });
+
+  it('offers none first, preselected, then the declared templates', async () => {
+    expect(await sandboxTemplateField.source(api(T), {})).toEqual([
+      { value: '', label: 'none', isDefault: true },
+      { value: 'django-django-11133', label: 'django-django-11133' },
+      { value: 'py312', label: 'py312' },
+    ]);
+  });
+
+  it('is skipped when the deployment declares none (absent, null or malformed)', async () => {
+    for (const t of [undefined, null, 'x', [{ nope: 1 }]]) {
+      expect(await resolveSessionOptions(api(t), [sandboxTemplateField], {}, {})).toEqual({
+        status: 'ready',
+        values: {},
+        request: {},
+      });
+    }
+  });
+
+  it('one declared template is still a question, not picked for every session', async () => {
+    const r = await resolveSessionOptions(api([T[1]]), [sandboxTemplateField], {}, {});
+    expect(r.status).toBe('needs-input');
+    expect(r.status === 'needs-input' && r.defaultValue).toBe('');
+  });
+
+  it('NON-interactive: an omitted template sends none', async () => {
+    const r = await resolveSessionOptions(
+      api(T),
+      [sandboxTemplateField],
+      {},
+      {},
+      {
+        interactive: false,
+      },
+    );
+    expect(r).toEqual({ status: 'ready', values: {}, request: {} });
+  });
+
+  it('a given template goes into the request as sandbox.template, beside a tier', async () => {
+    const both = fakeControlPlane({
+      discovery: async () =>
+        ({
+          harnessUrl: null,
+          sandboxTiers: { names: ['container', 'microvm'], default: 'container' },
+          sandboxTemplates: T,
+        }) as never,
+    });
+    const r = await resolveSessionOptions(
+      both,
+      [sandboxTierField, sandboxTemplateField],
+      { sandboxTier: 'microvm', sandboxTemplate: 'py312' },
+      {},
+    );
+    expect(r).toMatchObject({
+      status: 'ready',
+      request: { sandbox: { tier: 'microvm', template: 'py312' } },
+    });
+  });
+
+  it("choosing 'none' sends no template", async () => {
+    const r = await resolveSessionOptions(
+      api(T),
+      [sandboxTemplateField],
+      { sandboxTemplate: '' },
+      {},
+    );
+    expect(r).toEqual({ status: 'ready', values: { sandboxTemplate: '' }, request: {} });
+  });
+
+  it('sends an undeclared value as given, for the control plane to resolve (id@build, id:tag)', async () => {
+    for (const v of [
+      'django-django-11133@sha256:' + 'a'.repeat(64),
+      'py312:stable',
+      'self-serve-id',
+    ]) {
+      const r = await resolveSessionOptions(
+        api(T),
+        [sandboxTemplateField],
+        { sandboxTemplate: v },
+        {},
+        { interactive: false },
+      );
+      expect(r).toEqual({
+        status: 'ready',
+        values: { sandboxTemplate: v },
+        request: { sandbox: { template: v } },
+      });
+    }
+  });
+
+  it('sends an undeclared value even on a deployment that declares none (a store-only template)', async () => {
+    const r = await resolveSessionOptions(
+      api(undefined),
+      [sandboxTemplateField],
+      { sandboxTemplate: 'astropy-astropy-14995@sha256:' + 'b'.repeat(64) },
+      {},
+    );
+    expect(r).toMatchObject({
+      status: 'ready',
+      request: { sandbox: { template: expect.any(String) } },
+    });
+  });
+
+  it('is in SESSION_OPTION_FIELDS, after the tier', () => {
+    const keys = SESSION_OPTION_FIELDS.map((f) => f.key);
+    expect(keys.indexOf('sandboxTemplate')).toBe(keys.indexOf('sandboxTier') + 1);
   });
 });

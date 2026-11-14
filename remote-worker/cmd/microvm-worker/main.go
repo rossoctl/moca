@@ -944,7 +944,9 @@ func main() {
 	// from the golden snapshot's manifest loaded above instead, which the build script
 	// fills by probing INSIDE the guest before snapshotting; an empty manifest field
 	// advertises nothing rather than lying.
-	labels := session.TierLabels(os.LookupEnv, "microvm")
+	// moca.dev/build: the manifest hash verified above, so a session pinned to a build runs only here
+	// (combined control plane spec §3.4).
+	labels := session.WithBuild(session.Labels(os.LookupEnv, "microvm"), man.Hash)
 	sess := session.New(session.Config{
 		SandboxID:     env(get, "SANDBOX_ID", "sbx-microvm-1"),
 		Image:         env(get, "SANDBOX_IMAGE", ""),
