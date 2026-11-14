@@ -57,6 +57,7 @@ import {
   cmdDeactivate,
   cmdDryRun,
   cmdFollowTemplate,
+  cmdHosts,
   cmdPolicy,
   cmdQuota,
   cmdShowTemplate,
@@ -116,6 +117,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  why it waits (default 1800 s; exit 5 on a timeout)
   mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
                                                  its worker drains and stops
+  mocactl sbx hosts [--json]                     per KVM host: active slots, memory headroom and floor,
+                                                 disk
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed] [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
@@ -544,6 +547,7 @@ async function sbxMainWith(
     'login',
     'logout',
     'templates',
+    'hosts',
     'create',
     'ls',
     'rm',
@@ -1003,6 +1007,8 @@ async function sbxMainWith(
         });
       if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
       return cmdTemplates(ctx);
+    case 'hosts':
+      return cmdHosts(ctx);
     case 'create':
       return cmdCreate(
         ctx,

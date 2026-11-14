@@ -3,7 +3,7 @@ import { asRecord, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
-import { liveLeases, place, type HostView } from './activation.js';
+import { liveLeases, place, type HostMemory, type HostView } from './activation.js';
 import { isLive } from './sandbox-store.js';
 
 /**
@@ -11,7 +11,8 @@ import { isLive } from './sandbox-store.js';
  * polls these with its own bearer (`auth: 'host'`, SH_HOST_TOKEN_<ID>); the host named in the path
  * is the one whose token was presented, so a host reports only for itself.
  *
- *   POST /v1/hosts/{host}/inventory          what it holds (by manifest hash) and its limits
+ *   POST /v1/hosts/{host}/inventory          what it holds (by manifest hash), its limits and, from
+ *                                            an agent with memory-aware placement, its memory
  *   POST /v1/hosts/{host}/builds/claim       up to N queued builds, oldest first, subjects in turn
  *   GET  /v1/hosts/{host}/blobs/{digest}     a gate record a claimed build cites, byte for byte
  *   POST /v1/hosts/{host}/builds/{build}/log      log entries for a build it claimed
@@ -77,6 +78,11 @@ export interface HostState {
     diskFreeGb: number;
     diskFloorGb: number;
   };
+  /**
+   * The inventory's `memory` (memory-aware placement), as far as it is well-formed; absent from an
+   * older agent, and then its host is placed by activeLimit alone.
+   */
+  memory?: HostMemory;
 }
 
 /** In-memory host state; the inventory is re-sent on every poll, so a restart loses nothing durable. */
@@ -99,16 +105,22 @@ export class HostRegistry {
  * --wanted-only timer re-sends it every 15 s). A host whose agent died or was removed then takes no
  * new placement and no activeLimit slot, and a deployment whose every host is silent reads
  * readiness from the workers' presence alone, as before any host reported.
+ *
+ * Two steps with activation.ts's memoryStaleS (60 s): after about 60 s without an inventory, the
+ * memory brake (`stale`) already stops new starts on a host that reports its memory, while it keeps
+ * what it runs; at HOST_STALE_S the host leaves placement entirely.
  */
 export const HOST_STALE_S = 360;
 
-/** The hosts as their agents last reported (§6.1), as placement reads them: fresh ones only. */
+/** The hosts as their agents last reported (§6.1), as placement reads them: fresh ones only, with memory. */
 export function hostViewsOf(deps: CpDeps): HostView[] {
   return freshHosts(deps).map(([id, h]) => ({
     id,
     holds: h.holds,
     activeLimit: h.limits.activeLimit,
+    at: h.at,
     running: h.running,
+    ...(h.memory ? { memory: h.memory } : {}),
   }));
 }
 
@@ -145,6 +157,56 @@ const hostOf = (ctx: RequestCtx): string => {
 
 const nonNeg = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+
+const WORKER_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MEM_LIST_MAX = 1024;
+
+/** A non-negative finite number (PSI is a percentage with decimals). */
+const nonNegNum = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+
+/**
+ * The inventory's `memory` object, field by field: what is malformed is dropped, never guessed.
+ * MemTotal, MemAvailable and the floor are kept only all three together (the memory test needs
+ * each); the lists keep only well-formed worker ids and manifest hashes.
+ */
+export function parseHostMemory(raw: unknown): HostMemory | undefined {
+  if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw))
+    return undefined;
+  const m = raw as Record<string, unknown>;
+  const out: HostMemory = {};
+  const total = nonNeg(m.memTotalMib);
+  const avail = nonNeg(m.memAvailableMib);
+  const floor = nonNeg(m.memFloorMib);
+  if (total !== undefined && total > 0 && avail !== undefined && floor !== undefined) {
+    out.totalMib = total;
+    out.availableMib = avail;
+    out.floorMib = floor;
+  }
+  const psi = nonNegNum(m.memPressureFull10);
+  if (psi !== undefined) out.pressureFull10 = psi;
+  const limit = nonNegNum(m.memPressureLimit);
+  if (limit !== undefined && limit > 0) out.pressureLimit = limit;
+  if (Array.isArray(m.runningWorkers)) {
+    out.running = m.runningWorkers
+      .filter((w): w is string => typeof w === 'string' && WORKER_ID_RE.test(w))
+      .slice(0, MEM_LIST_MAX);
+  }
+  const vc = m.vmCommittedMib;
+  if (vc && typeof vc === 'object' && !Array.isArray(vc)) {
+    out.vmCommittedMib = {};
+    for (const [w, v] of Object.entries(vc as Record<string, unknown>).slice(0, MEM_LIST_MAX)) {
+      const n = nonNeg(v);
+      if (WORKER_ID_RE.test(w) && n !== undefined) out.vmCommittedMib[w] = n;
+    }
+  }
+  if (Array.isArray(m.memfileMismatch)) {
+    out.memfileMismatch = m.memfileMismatch
+      .filter((h): h is string => typeof h === 'string' && MANIFEST_HASH_RE.test(h))
+      .slice(0, MEM_LIST_MAX);
+  }
+  return out;
+}
 
 /** Finds the build a host refers to by handle or build id, in a template it claimed it for. */
 async function claimedBuild(
@@ -271,8 +333,13 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         if (mine.refused) delete mine.refused[b.buildId];
         // Stopped when no lease is left, or when it runs here while placement keeps it on another
         // host (one worker id on two hosts): this host's copy stops. Never under a live sandbox.
+        // "Runs here" is the union placement reads: a held build marked running, or its worker in
+        // the memory report's runningWorkers.
         const unleased = liveLeases(b, nowS).length === 0;
-        if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
+        const runsHere =
+          mine.running.includes(b.buildId) ||
+          (b.worker !== '' && (mine.memory?.running ?? []).includes(b.worker));
+        if (!busy.has(b.worker) && (unleased || runsHere)) stop.push(entry);
       }
     }
     return { status: 200, body: { run, stop } };
@@ -306,6 +373,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const st = deps.hosts!.get(host)!;
     const others = st.running.filter((x) => x !== buildId);
     st.running = event === 'attached' ? [...others, buildId] : others;
+    // The memory report's runningWorkers stay as the inventory said: they are what its MemAvailable
+    // reflects. A worker started since is pending on that side until the next inventory (place()).
     // A refusal the same as this host's last one for a build it is still asked to run (the agent
     // retries every 15 s: a worker not installed, a unit whose start keeps failing) is not appended
     // again: the template's stream is append-only provenance, and would grow by one record a poll.
@@ -352,9 +421,17 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFreeGb: nonNeg(l.diskFreeGb) ?? 0,
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
+    const memory = parseHostMemory(b.memory);
     // A host's unrepeated refusals outlive its inventories (each poll replaces the rest).
     const refused = deps.hosts?.get(host)?.refused ?? {};
-    deps.hosts?.set(host, { at: seconds(deps), holds, running, refused, limits });
+    deps.hosts?.set(host, {
+      at: seconds(deps),
+      holds,
+      running,
+      refused,
+      limits,
+      ...(memory ? { memory } : {}),
+    });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 

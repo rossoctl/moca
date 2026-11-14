@@ -3,10 +3,10 @@
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
 self-serve create (#737), §5.1-§5.2, the owner's and the admin's actions as built so far (#737,
-#747), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742), §7, provenance (#730),
-and §8, policy (#737); the rest of §5, and §9-§12 (tracing, validation, order of work, decisions)
-come with the issues that build them, and keep their numbers so a reference to a section stays
-valid.
+#747), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and placement by host
+memory (#744), §7, provenance (#730), and §8, policy (#737); the rest of §5, and §9-§12 (tracing,
+validation, order of work, decisions) come with the issues that build them, and keep their numbers
+so a reference to a section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -401,12 +401,14 @@ Known limits: a claimed build is not re-queued if the agent dies mid-build; one 
 
 **Per host:** each host's agent reports, with its inventory, its `activeLimit` (the workers it may
 run at once), its `idleLimitSeconds` (the default lease length, §6.3), its `buildConcurrency` and its
-disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its operator sizes them
-from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
-`active {limit, used}`, where `used` counts the workers that stay running on it: the leased builds
-placed or running there, and the unleased ones still draining a live sandbox. The inventory says,
-per held build, whether its worker's unit is `running`; the host's `attached` and `detached` reports
-keep that current between inventories.
+disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`), and its memory (below).
+`activeLimit` is the upper bound on the workers it runs; the memory rule keeps new starts within the
+host's memory, so the limit need not be worked out from the templates' guest sizes by hand.
+`GET /v1/templates` shows each host's `active {limit, used}`, where `used` counts the workers that
+stay running on it: the leased builds placed or running there, and the unleased ones still draining
+a live sandbox; and its `memory` when its agent reports it. The inventory says, per held build,
+whether its worker's unit is `running`; the host's `attached` and `detached` reports keep that
+current between inventories.
 
 **Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
 Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
@@ -423,6 +425,64 @@ more than 6 minutes old (three build polls) is left out of placement, of the hos
 the default lease until it reports again, so a host whose agent died takes no new placement and no
 slot; with every host silent, readiness is the workers' presence alone, as before any reported.
 
+**Memory (#744):** each attached worker maps and locks its snapshot's whole memory file at start
+(`PinMemoryFile`; snapshots are Full, so the file is the guest's whole RAM), so an idle worker holds
+its guest's RAM, and the cost of a host is mostly its attached workers times their guest size. A
+fixed `activeLimit` fits only templates of one size on a host doing nothing else, so placement also
+counts memory, on a host whose agent reports it:
+
+- **The inventory's `memory`** (`host-agent.sh`, sent with every inventory, the build poll's and
+  each 15 s wanted run's): `memTotalMib` and `memAvailableMib` (`/proc/meminfo`), `memPressureFull10`
+  (`/proc/pressure/memory`, `full avg10`; absent with no PSI, which is no brake), `memPressureLimit`,
+  `memFloorMib` (the effective floor), `runningWorkers` (the `sbx-worker@<id>` units active),
+  `vmCommittedMib` per running worker, and `memfileMismatch`. Without MemTotal and MemAvailable no
+  figures are sent, and the host is placed by `activeLimit` alone.
+- **A build's cost** is its guest RAM (`guest_mb` of the registered spec, checked against the
+  manifest's `guest_ram_mb`; 4096 for a build with none) plus 128 MiB for the worker and its VMM.
+  The agent checks that each held build's memory file is exactly `guest_ram_mb` MiB; a mismatch is
+  reported (`memfileMismatch`, an error line), never placed on that host, and never started there
+  (`refused`), whatever a control plane asks.
+- **`vmCommittedMib`** is what a worker's running VMs hold that the kernel cannot reclaim: its
+  slice's `memory.stat` (`sbx.slice/sbx-<id>.slice`) anon + shmem + kernel. Never `memory.current`,
+  which also counts the page cache the VMs' files fill (rootfs, workspace): several GiB a worker
+  that the kernel takes back at need and that MemAvailable already counts as available. The pinned
+  memory file is file-backed and locked, so it is in neither: the worker's cost counts it.
+- **The rule,** in `place()`, per host, in the wanted order:
+  `headroom = min(total − floor − used, available − floor − pending)`, where `pending` is the cost
+  of the builds placed there in this pass whose workers are not running yet, and
+  `used = Σ cost(running workers, any build's, wanted or draining) + Σ vmCommittedMib + pending`.
+  MemAvailable already reflects what runs, so only the pending starts come off it, and two builds
+  placed in one pass both count. A build fits if `cost ≤ headroom` and the host is under
+  `activeLimit`. A build already running on a holder stays there (sticky, above): its memory is
+  paid for and it is counted already, so nothing is evicted. "Running" is the union of the held
+  builds marked `running` (kept current by the host's `attached` and `detached` reports) and the
+  inventory's `runningWorkers`. A worker an `attached` report says started since the inventory is
+  not in that inventory's MemAvailable, so its cost is in `pending` too until the next one. A host
+  reporting the build's memory file wrong is never chosen for it, even where it runs (that copy
+  then goes to `stop`, under no live sandbox).
+- **Brakes:** while `memPressureFull10` is above `memPressureLimit` (default 10), or the host's last
+  inventory is older than 60 s (about four missed reports), the host takes no new start; it keeps
+  what it runs.
+- **Settings,** in the host's `host-agent.env` (0600), never argv: `SBX_MEM_FLOOR_MIB` (default 10%
+  of MemTotal, at least 4096) and `SBX_MEM_PRESSURE_LIMIT` (default 10).
+- **Visible:** a build wanted but not placed is `unavailable` with `readinessReason` (`not_held`,
+  `no_slot`, `memory`, `memfile_mismatch`); the activation's `409 no_active_slot` carries
+  `reason: memory` (at the active limit it answers as before, with no reason), and every holder
+  reporting a wrong memory file is `409 template_unavailable` with `reason: memfile_mismatch` (a
+  rebuild clears it, not a wait). The check runs under the activation lock (§6.3), so two
+  activations cannot see the same headroom.
+- **Compatible both ways:** an agent that sends no `memory` is placed by `activeLimit` alone; a
+  control plane that does not know the field ignores it, and the agent's own memory-file check still
+  holds.
+- **Limits:** keep the host's `/srv/sbx` off tmpfs (there a memory file is shmem and is charged
+  twice). The rule does not change a worker's own budget (`--budget-mb`), the guest size or the
+  pinning, and does not move running workers. Other workloads' memory is seen only through
+  MemAvailable. Pages a VM writes that are charged to another cgroup read low in `vmCommittedMib`;
+  the MemAvailable term still binds. The sandbox lease mode (SBX0.3), if built, keeps a lease VM's
+  guest memory as anon/shmem in its worker's slice, so `vmCommittedMib` counts it with no change; its
+  per-worker reclaim and this floor act on different things (VMs and whole workers), and on one host
+  the floor should be at or above lease mode's reclaim target.
+
 ### 6.3 Leases, aging and the wanted state
 
 - **Leases:** an activation is a **lease** held by its subject, `leaseSeconds` long (60 s to a day a
@@ -438,10 +498,11 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   replacement of the subject's own activations is not built: over the quota, the activation is
   refused.
 - **Refusals:** an activation that cannot be placed is refused with no lease kept:
-  `409 template_unavailable` (no registered build under the reference, or no reporting host holds
-  it) or `409 no_active_slot` with `Retry-After` (every holder is at its `activeLimit`; the seconds
-  until the soonest a build placed on one of this build's holders loses its last live lease, or
-  60 when no lease tells, as with draining workers).
+  `409 template_unavailable` (no registered build under the reference, no reporting host holds it,
+  or every holder reports its memory file wrong, §6.2) or `409 no_active_slot` with `Retry-After`
+  (every holder is at its `activeLimit` with leased builds, or has no memory headroom for it, §6.2;
+  the seconds until the soonest a build placed on one of this build's holders loses its last live
+  lease, or 60 when no lease tells, as with draining workers).
 - **One activation at a time:** an activation's quota and placement check, its `activate` record
   and its lease write run one at a time across the deployment (owner activation and first use
   alike), so concurrent activations of different templates cannot together pass a subject's quota

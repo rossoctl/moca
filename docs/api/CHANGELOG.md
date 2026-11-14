@@ -3,6 +3,32 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.12.0
+
+Placement of template workers by host memory ([#744](https://github.com/rossoctl/moca/issues/744)),
+per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§6.2: a new worker starts on a host only if the host has the memory for it, whatever its
+`activeLimit` says. Nothing running is evicted. Every change is additive.
+
+- `POST /v1/hosts/{host}/inventory` takes an optional `memory: {memTotalMib, memAvailableMib,
+memFloorMib, memPressureFull10, memPressureLimit, runningWorkers, vmCommittedMib, memfileMismatch}`.
+  Without it (an older agent) the host is placed by `activeLimit` alone, as before; an older control
+  plane ignores it.
+- A build costs its guest RAM (`spec.guest_mb`) plus 128 MiB, or 4096 + 128 with no recorded guest size.
+  A host's headroom is `min(total − floor − used, available − floor − pending starts)`, where `used`
+  counts its running workers, their VMs' committed memory and the builds placed there not started yet.
+  A host whose last inventory is older than 60 s, or whose PSI `full avg10` is above its limit, takes
+  no new start. A build in a host's `memfileMismatch` is never placed there.
+- `409 no_active_slot` gains `reason: memory` when a holder under its active limit lacks the memory
+  (Retry-After unchanged); at the active limit it answers as before, with no `reason`.
+  `409 template_unavailable` gains `reason: memfile_mismatch` when every holder reports the build's
+  memory file wrong. `409 template_not_active` with readiness `unavailable` carries the reason too.
+- Templates and builds gain `readinessReason` (`not_held | no_slot | memory | memfile_mismatch`),
+  present only with readiness `unavailable`; new `ReadinessReason` schema.
+- `GET /v1/templates`' hosts gain `memory: {totalMib, availableMib, floorMib, usedMib, headroomMib,
+pressureFull10, pressureLimit, brake, runningWorkers, memfileMismatch, reportedAt}`, only for a
+  host whose agent reports it; `floorMib` is the effective floor.
+
 ## 1.11.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
