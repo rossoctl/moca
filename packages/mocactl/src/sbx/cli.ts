@@ -53,8 +53,10 @@ import { checkBeforeRm, cmdPull, cmdPush, cmdUp, DEFAULT_TEMPLATE, unbind } from
 import { type AgentopExec } from './agentop.js';
 import { openCallRecord, type CallRecorder } from './call-record.js';
 import {
+  cmdActivate,
   cmdCancelBuild,
   cmdCreateTemplates,
+  cmdDeactivate,
   cmdDryRun,
   cmdFollowTemplate,
   cmdPolicy,
@@ -109,6 +111,13 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx templates transfer ID SUBJECT [--json]
                                                  make SUBJECT (github:<id> or oidc:<sub>) its owner
                                                  (admins only)
+  mocactl sbx templates activate ID [--build BUILD] [--lease S] [--wait [--timeout S]] [--json]
+                                                 take or renew your activation lease on a build (tag
+                                                 default, or BUILD; S seconds, 60-86400); a host agent
+                                                 starts its worker. --wait: until it is active, saying
+                                                 why it waits (default 1800 s; exit 5 on a timeout)
+  mocactl sbx templates deactivate ID [--json]   release your leases on a template; with none left,
+                                                 its worker drains and stops
   mocactl sbx admin subjects [--json]            every enrolled subject and its roles (admins only)
   mocactl sbx admin subjects enroll|unenroll SUBJECT [--json]
                                                  enroll SUBJECT (github:<id> or oidc:<sub>) or unenroll
@@ -376,12 +385,22 @@ const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
 /** The `templates` owner's and admin's subcommands (lifecycle spec §5.1-§5.2). */
 const TEMPLATE_ADMIN_SUBS = ['tag', 'untag', 'edit', 'transfer'];
 /** The `templates` subcommands; their arguments are checked one by one in sbxMain. */
-const TEMPLATE_SUBS = ['create', 'build', 'show', 'follow', 'cancel', ...TEMPLATE_ADMIN_SUBS];
+const TEMPLATE_SUBS = [
+  'create',
+  'build',
+  'show',
+  'follow',
+  'cancel',
+  ...TEMPLATE_ADMIN_SUBS,
+  'activate',
+  'deactivate',
+];
 /** The `templates` subcommands that take one template ID. */
-const TEMPLATE_ONE_ID = ['build', 'show', 'follow', 'cancel', 'edit'];
-/** The `templates` subcommands that take --build, and those that take --timeout (a wait). */
-const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag'];
-const TAKES_TIMEOUT = ['follow', 'create', 'build'];
+const TEMPLATE_ONE_ID = ['build', 'show', 'follow', 'cancel', 'edit', 'activate', 'deactivate'];
+/** The `templates` subcommands that take --build, and those that take --timeout (a wait; activate's
+ * only with --wait). */
+const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag', 'activate'];
+const TAKES_TIMEOUT = ['follow', 'create', 'build', 'activate'];
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -496,6 +515,8 @@ async function sbxMainWith(
         json: { type: 'boolean' },
         sandbox: { type: 'string' },
         timeout: { type: 'string' },
+        lease: { type: 'string' },
+        wait: { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
         'max-push': { type: 'string' },
@@ -573,6 +594,7 @@ async function sbxMainWith(
   }
   // `templates SUB`: the template subcommand, for the flags that apply to some of them only.
   const sub = command === 'templates' ? arg : undefined;
+  const activating = sub === 'activate';
   if (
     values.timeout !== undefined &&
     command !== 'run' &&
@@ -590,6 +612,10 @@ async function sbxMainWith(
     io.err(`sbx: --${createFlag} only applies to templates create and build\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
+  if (values.timeout !== undefined && activating && !values.wait) {
+    io.err(`sbx: --timeout with templates activate needs --wait\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
   if (values.id !== undefined && sub !== 'create') {
     io.err(`sbx: --id only applies to templates create\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -605,6 +631,19 @@ async function sbxMainWith(
   if (sub === 'build' && (values.spec?.length ?? 0) > 1) {
     io.err(`sbx: templates build takes one --spec\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
+  }
+  if ((values.lease !== undefined || values.wait !== undefined) && !activating) {
+    io.err(`sbx: --lease and --wait only apply to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  let leaseSeconds: number | undefined;
+  if (values.lease !== undefined) {
+    const raw = values.lease.trim();
+    leaseSeconds = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 60 || leaseSeconds > 86_400) {
+      io.err(`sbx: --lease must be a whole number of seconds, 60 to 86400 (got '${values.lease}')`);
+      return SBX_EXIT.usage;
+    }
   }
   const flagMisuse = SYNC_FLAGS.find(
     ([flag, cmds]) => values[flag] !== undefined && !cmds.includes(command),
@@ -641,8 +680,8 @@ async function sbxMainWith(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates SUB ...` (template lifecycle spec §4), and the owner's and admin's actions
-  // (§5.1-§5.2); bare `templates` lists them.
+  // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2),
+  // and activate and deactivate (§6.3); bare `templates` lists them.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -991,6 +1030,14 @@ async function sbxMainWith(
           ...(values.description !== undefined ? { description: values.description } : {}),
         });
       if (arg === 'transfer') return cmdTransferTemplate(ctx, extra[0]!, extra[1]!);
+      if (arg === 'activate')
+        return cmdActivate(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(leaseSeconds !== undefined ? { leaseSeconds } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
+      if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!);
       return cmdTemplates(ctx);
     case 'admin':
       if (extra.length === 0) return cmdSubjects(ctx);

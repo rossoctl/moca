@@ -143,6 +143,18 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     reads: ['templateId', 'owner', 'before', 'record'],
     sends: ['owner'],
   },
+  // `sbx templates activate` and `deactivate` (template lifecycle spec §6.3).
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/activate',
+    reads: ['templateId', 'buildId', 'leaseUntil', 'host'],
+    sends: ['build', 'leaseSeconds'],
+  },
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/deactivate',
+    reads: ['templateId', 'released'],
+  },
   // The authoring commands: create, build, follow, cancel, quota, policy (template lifecycle spec §4, §8).
   {
     method: 'post',
@@ -384,7 +396,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 23 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 25 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -399,6 +411,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.removeTemplateTag('TID', 'TAG');
     await c.updateTemplate('TID', { visibility: 'private' });
     await c.transferTemplateOwner('TID', 'github:1');
+    await c.activateTemplate('TID', {});
+    await c.deactivateTemplate('TID');
     await c.createTemplate({ id: 'x', image: 'i', spec: {} });
     await c.createTemplateBuild('TID', { image: 'i', spec: {} });
     await c.cancelTemplateBuild('TID', 'BID');
@@ -438,6 +452,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'removeTemplateTag',
         'updateTemplate',
         'transferTemplateOwner',
+        'activateTemplate',
+        'deactivateTemplate',
         'createTemplate',
         'createTemplateBuild',
         'cancelTemplateBuild',

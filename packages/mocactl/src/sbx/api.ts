@@ -76,6 +76,16 @@ export interface SbxBuild {
   };
 }
 
+/** An activation lease (POST /v1/templates/{id}/activate, template lifecycle spec §6.3). */
+export interface SbxLease {
+  templateId: string;
+  buildId: string;
+  /** Epoch seconds. */
+  leaseUntil: number;
+  /** The host it is placed on; null while no host agent has reported. */
+  host: string | null;
+}
+
 /** A template with its builds (openapi Template). */
 export interface SbxTemplateFull extends SbxTemplate {
   owner: string | null;
@@ -211,6 +221,19 @@ export class SandboxApiClient extends ControlPlaneClient {
     owner: string,
   ): Promise<{ templateId: string; owner: string; before: string | null; record: string | null }> {
     return this.json('PUT', `/v1/templates/${encodeURIComponent(id)}/owner`, { body: { owner } });
+  }
+
+  /** Take or renew the caller's activation lease on a build (`POST /v1/templates/{id}/activate`). */
+  activateTemplate(
+    id: string,
+    body: { tag?: string; build?: string; leaseSeconds?: number },
+  ): Promise<SbxLease> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/activate`, { body });
+  }
+
+  /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
+  deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
   }
 
   /** Create a template, or a new build of one's own (lifecycle spec §4): `POST /v1/templates`. */
