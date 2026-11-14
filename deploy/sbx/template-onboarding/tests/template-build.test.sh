@@ -41,6 +41,7 @@ cat >"$TMP/bin/build-snapshot" <<'MOCK'
 #!/usr/bin/env bash
 printf 'build-snapshot\n' >>"$MOCK_LOG"
 printf '%s\n' "$@" >"$MOCK_STATE/snapshot-args"
+printf '%s\n' "${SH_VERIFY_CACHE_DIR:-}" >"$MOCK_STATE/snapshot-cache-dir"
 out='' ca='' vmm='' ksha=''
 while (($#)); do
   case "$1" in
@@ -122,6 +123,11 @@ want_args="$(printf '%s\n' --kernel "$TMP/vmlinux" --rootfs "$SBX_SRV/build/$NAM
 grep -qx -- --skip-git-identity-check "$A" && grep -qx -- --guest-home "$A" && grep -qx /tmp/home "$A" ||
   fail 'build-snapshot did not get --skip-git-identity-check and --guest-home /tmp/home'
 grep -A1 -x -- --verify-timeout-s "$A" | tail -n1 | grep -qx 900 || fail 'the probe timeout is not --verify-timeout-s'
+# The verify cache's seed: SBX0's own worker binary (never Moca's /usr/local/bin one), the cache under SBX_SRV.
+grep -A1 -x -- --worker-bin "$A" | tail -n1 | grep -qx /usr/local/libexec/sbx/microvm-worker ||
+  fail "build-snapshot's --worker-bin is not SBX0's worker binary"
+grep -qx "$SBX_SRV/verify-cache" "$MOCK_STATE/snapshot-cache-dir" ||
+  fail "build-snapshot's SH_VERIFY_CACHE_DIR is not under SBX_SRV: $(cat "$MOCK_STATE/snapshot-cache-dir")"
 R="$SBX_SRV/templates/$NAME.json"
 [[ -f "$R" ]] || fail 'no record written'
 jq -e --arg w "$WORKER" --arg n "$NAME" '.schema == "moca-sbx-template/1" and .id == "acme-widget-1234"

@@ -95,7 +95,8 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 			// The key's lease state is retired with its workspace, in the same critical
 			// section: the mode and epoch stay, root_wrote is set for the new tree, and an
 			// unacknowledged event stays (retireLeaseState). Only on a lease-enabled pool: a
-			// per-Exec-only worker does no lease-state I/O, so its paths are unchanged.
+			// per-Exec-only worker touches no key's state file (its only lease-state I/O is
+			// the boot marker New writes, markLeaseBoot), so its paths are unchanged.
 			if p.cfg.LeaseEnabled {
 				retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
 			}

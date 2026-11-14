@@ -175,3 +175,112 @@ Rows for the user-scoped credential injection. The live acceptance (plan Task 15
 | Date     |       |
 | Findings |       |
 | Decision |       |
+
+## 6. Lease mode, level 1 (SBX0.3): DRAFT
+
+> **Draft: needs the security owner's sign-off.** Nothing in this section is signed off, and §6.5 is
+> empty. Lease mode stays off by default: `SBX_MODES_ALLOWED` (the control plane's
+> `SH_SANDBOX_MODES_ALLOWED`) defaults to `per-exec`, and the change that adds this draft does not
+> change that. The [lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §8.1 and §11 allow
+> `per-exec,lease` only after this section is signed off and live smoke step 8 has passed. Level 2
+> (`lease+processes`) needs a section of its own: it is out of scope here and stays off.
+
+**What level 1 is.** A sandbox in mode `lease` keeps its microVM between Execs of that one sandbox,
+so the guest's tmpfs (`/tmp`, `/var`) and its page cache last until the lease ends. Every process an
+Exec starts still dies when the Exec ends, and each Exec gets a fresh shell. The per-`Exec` claims of
+§2 hold unchanged for a `per-exec` sandbox, which stays the default. For a lease sandbox, all of them
+hold except "no process survives a call", which becomes "no process survives its Exec" (the
+guest's files do survive).
+
+The evidence statuses are §1's. "KVM gate" means a gate in
+`remote-worker/internal/vmpool/gates_lease_kvm_test.go` or `gates_lease_pool_kvm_test.go`. These are
+manual-only and need `/dev/kvm` and a `lease-v1` snapshot; §6.2 gives their status.
+
+### 6.1 What changes against per-`Exec`, and what bounds it (spec §11)
+
+| Change                                                                                                                                    | Bound                                                                                                                                                                                                                                                                                                                                                                                    | Evidence                                                                                                                                                                                                                                                                                                                                                                      | Status                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Files in the guest's tmpfs last for the lease, so an injected command can leave a file that a later command uses. The rootfs is read-only | The lease ends at its idle timeout (default 300 s; an owner may set 30 s up to the operator's ceiling, 1800 s by default), its maximum duration (8 h) plus the grace limit (30 min), a `reset` (the MCP tool and `mocactl sbx reset`), a downgrade, or the sandbox's delete. The guest has no network. A lease VM serves one sandbox, workspace key and owner only                       | `TestGateLeaseOneSandbox`, `TestGateLeaseTeardown`, `TestGateLeaseNotice` (KVM gates); smoke step 8: one guest for two commands, the idle restart and its notice, `reset`, the downgrade (`deploy/sbx/smoke.sh`, offline-tested in `deploy/sbx/tests/smoke.test.sh`)                                                                                                          | KVM gates: §6.2. Step 8: offline-tested only; **live run pending**                                           |
+| An agent could try to raise the mode                                                                                                      | No MCP tool changes the mode: the tools are `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, `sandbox_info` and `reset`, and `reset` can only lower what survives. A mode change needs the owner's user API token, which the MCP server does not give the harness. `mocactl sbx create --mode lease` and `mocactl sbx mode` refuse an upgrade without a terminal on stdin (exit 2) | `packages/mocactl/test/sbx-mode.test.ts` "create --mode lease or lease+processes refused without a TTY (exit 2)", "mode upgrade refused without a TTY; downgrade allowed"; `packages/control-plane/test/sandbox-handlers.test.ts` "lets only the owner change the mode or mint a set-mode token, admins included"                                                             | Tested. **Residual**: see §6.3, the terminal rule                                                            |
+| A token minted before a downgrade could keep a higher mode for its remaining lifetime                                                     | The worker refuses an Exec with a lower `mode_epoch` (`stale_mode`). A lost epoch file fails closed to `per-exec`, and only a `set_mode` signed by the control plane restores the mode. The set-mode token has its own `typ`, lives 300 s, and must name the caller's `sbx`, `wrk` and `wsk`. Every refusal of it gets the same `PERMISSION_DENIED` message                              | `TestGateLeaseStaleEpoch` (KVM gate); `packages/sandbox-relay/test/lease-wire.transport.test.ts`; `packages/sandbox-relay/test/lease-control.transport.test.ts` "refuses another sandbox's set-mode token...", "every set-mode token refusal tells the client the same thing", "refuses an expired set-mode token", "refuses a sandbox token presented as the set-mode token" | Tested; KVM gate: §6.2                                                                                       |
+| An operator narrowing the policy must reach sandboxes created before                                                                      | Every token mint checks the policy. A lease sandbox whose mode the list no longer names is set to `per-exec` at a new epoch, which ends its live lease at the next Exec, and the change is audited                                                                                                                                                                                       | `packages/control-plane/test/sandbox-handlers.test.ts` "downgrades a lease sandbox to per-exec at epoch+1 once its mode is not allowed..."                                                                                                                                                                                                                                    | Tested                                                                                                       |
+| An Exec could tamper with its own teardown (cgroup migration, the guest agent), or leave a process behind                                 | An unprivileged Exec uid with no capabilities and `no_new_privs`, a seccomp filter on `ptrace` and `process_vm_*`, a root-owned cgroup tree, a non-dumpable agent, setuid bits stripped and no user namespaces (spec §3.3). The cgroup kill at each Exec's end, and a fresh shell for each Exec                                                                                          | `TestGateLeasePrivilege`, `TestGateLeaseExecKillsProcesses`, `TestGateLeaseFreshShell` (KVM gates)                                                                                                                                                                                                                                                                            | KVM gates: §6.2                                                                                              |
+| Files root wrote in the workspace during a `per-exec` period, seen by the lease's unprivileged uid                                        | The ownership walk at the first lease Exec after root wrote, which follows no symlink and stays on the workspace mount. Every worker writes a `.lease-state/.boot` marker, and a lease-on boot after a lease-off one (or with no marker) assumes root wrote everywhere (ruling P4-R4)                                                                                                    | `TestGateLeaseOwnership` (KVM gate); `remote-worker/internal/vmpool/lease_state_test.go` (the boot marker)                                                                                                                                                                                                                                                                    | Tested (the marker); KVM gate: §6.2                                                                          |
+| A long-lived guest could hold a secret                                                                                                    | Nothing secret is written into a lease guest. Tokens never enter any guest (§2), and egress credentials stay on the host (§2.1)                                                                                                                                                                                                                                                          | `TestGateLeaseSecrets` (KVM gate, the lease variant of `TestGateSnapshotHoldsNoSecrets`)                                                                                                                                                                                                                                                                                      | KVM gate: §6.2                                                                                               |
+| Memory is charged by measurement, not reserved                                                                                            | Reclaim of the idle-longest lease first, never a busy one for memory, then a `memory-budget` refusal; the host-memory floor, cgroup limits, swap off                                                                                                                                                                                                                                     | `TestGateLeaseReclaim` (KVM gate); E17's squeeze point (spec §10)                                                                                                                                                                                                                                                                                                             | KVM gate: §6.2. E17b's squeeze point is **not run**. An availability bound, not a confidentiality one        |
+| Clock drift in a long-lived guest                                                                                                         | Clock correction on every lease Exec                                                                                                                                                                                                                                                                                                                                                     | `remote-worker/internal/guestagent/agent.go` (`shouldSetClock`) and its tests                                                                                                                                                                                                                                                                                                 | By construction                                                                                              |
+| A deleted sandbox's guest could outlive the record                                                                                        | `mocactl sbx rm` sends `LeaseControl sandbox_deleted` before the `DELETE` (best-effort, at most 15 s), which ends the lease. The janitor removes the sandbox's lease state file with its workspace (ruling P4-R3)                                                                                                                                                                        | `packages/mocactl/test/sbx-cli.test.ts` (rm); `packages/sandbox-relay/test/lease-control.transport.test.ts` (the op); `deploy/sbx/tests/janitor.test.sh`                                                                                                                                                                                                                      | Tested. **Residual**: see §6.3, a delete without `sandbox_deleted`                                           |
+| Lease notices and audit lines                                                                                                             | A notice carries an end reason, a time, a mode and, at level 2, process names; no command text and no token. Every `LeaseControl` writes a `sandbox_lease_control` line, refusals included; every mode change writes `sandbox_mode_changed`. A keepalive is not audited                                                                                                                  | spec §5, §8.1, §8.3; `packages/sandbox-relay/test/lease-control.transport.test.ts`                                                                                                                                                                                                                                                                                            | Tested (the audit lines); by construction (the notice fields, `proto/sandbox/v1/sandbox.proto` `LeaseEvent`) |
+
+Spec §11's two level-2 rows (a process that survives between Execs, and a tracked process that runs
+code it loads from the workspace) are out of scope here, because `lease+processes` stays off.
+
+### 6.2 The gates (spec §9)
+
+| Gate                              | Property                                                                                                  |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `TestGateLeaseOneSandbox`         | A lease VM never serves a second sandbox, workspace key or owner, and never goes back to the standby pool |
+| `TestGateLeaseExecKillsProcesses` | After each Exec nothing it started is alive (`&`, `nohup`, `setsid`, a double fork, a daemon)             |
+| `TestGateLeaseFreshShell`         | `export`, `cd`, `alias` and shell functions from one Exec are not visible in the next                     |
+| `TestGateLeaseTeardown`           | Each end reason destroys the VM and leaks no cgroup, tap, vsock or jail on the host                       |
+| `TestGateLeaseStaleEpoch`         | An older `mode_epoch` is refused; after the epoch file is lost only a signed `set_mode` restores the mode |
+| `TestGateLeasePrivilege`          | The privilege attempts of spec §9 fail, and every process the Exec started still dies                     |
+| `TestGateLeaseOwnership`          | The ownership walk after a `per-exec` period, without following a symlink                                 |
+| `TestGateLeaseNotice`             | Every end reason produces exactly one notice, on the next response and in `sandbox_info`                  |
+| `TestGateLeaseReclaim`            | The idle-longest lease goes first, a busy one is never reclaimed for memory, then `memory-budget`         |
+| `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest                                                              |
+
+Plan 2 added three more KVM gates: `TestGateLeaseFreePageReporting`, `TestGateLeaseTimeoutKeepsTheLease`
+and `TestGateLeaseExecCaps`.
+
+**Status.** The gates exist and are listed as manual-only in the gate inventory
+(`remote-worker/internal/vmpool/gates_inventory_test.go`). Plan 2's PR (#763) records them passing
+on the KVM rig, at that PR's worker. **They have not been re-run since plans 3 and 4 changed the
+worker** (the lease frames; the expiring deadline, `sandbox_deleted`, the status cap and the boot
+marker), and this draft did not run them. The reviewer should ask for a re-run at the commit to be
+deployed, and record its date and snapshot here.
+
+### 6.3 What level 1 does not claim
+
+- **That nothing persists between commands.** Within one lease, files in `/tmp` and `/var` persist
+  by design. A user or agent that needs a clean guest calls `reset`.
+- **That the terminal rule stops an agent with a local shell.** `mocactl` refuses an upgrade
+  without a terminal on stdin, which stops an agent's plain shell call. A program that opens a
+  pseudo-terminal itself (`script`, `expect`, Python's `pty`) passes it, as smoke step 8 does on
+  purpose. Its real bound is §3's: an agent whose local tools the user re-enabled acts as the user,
+  with the user's `mocactl` login. The rule is a guard against accidents, not a boundary.
+- **That every delete ends the lease at once.** A `DELETE /v1/sandboxes/{id}` from another client,
+  or an `rm` whose `sandbox_deleted` failed or took over 15 s, leaves the lease to end by its idle
+  timeout. No new token can be minted after the delete. A token already issued still reaches the
+  sandbox for up to one token lifetime plus 30 s, as for `per-exec` (§3), and each Exec it sends
+  restarts the lease's idle clock. So the full bound, from the delete, is the token lifetime plus
+  30 s, plus the last Exec's duration, plus the idle timeout (at most the operator's ceiling,
+  `SBX_IDLE_CEILING_S`, itself at most 86400 s). `deploy/sbx/setup.sh` refuses, when a lease mode
+  is allowed, a janitor wait that does not exceed the token lifetime plus 30 s plus the ceiling (the
+  relay cancels an Exec at its token's expiry, so the Exec's duration falls inside the token's
+  lifetime), so the janitor does not free the workspace under a lease still live; a lease that ends
+  after the janitor removed its state file does not write it back.
+- **That every notice arrives.** Lease events are best-effort. A lost one changes no state, and
+  `LeaseControl status` (`mocactl sbx get`, `sandbox_info`) still shows the lease.
+- **Defense against a compromised relay or worker.** Unchanged from §3.
+
+### 6.4 Open items for the security owner
+
+- **Smoke step 8 has not run live.** It is tested offline only. It needs a deployment that allows
+  `lease` and a template whose snapshot advertises `lease-v1`. Because the policy is deployment-wide,
+  run it on a test deployment, or list `lease` for the run only (`deploy/sbx/RUNBOOK.md` §13).
+- **The KVM gates at the deployed worker** (§6.2).
+- **E17b's memory-squeeze point** has not run (spec §10, pass criterion 3).
+- **The terminal-rule residual** (§6.3): accept it, or ask for a stronger rule.
+- **The delete residual** (§6.3): accept it, or ask the control plane to end the lease on delete.
+- **Turning lease on is a separate change** after sign-off: `SBX_MODES_ALLOWED=per-exec,lease` and a
+  re-run of `setup.sh` (`deploy/sbx/README.md`).
+
+### 6.5 Security owner sign-off (level 1 only)
+
+| Field    | Entry |
+| -------- | ----- |
+| Reviewer |       |
+| Date     |       |
+| Findings |       |
+| Decision |       |

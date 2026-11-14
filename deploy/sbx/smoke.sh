@@ -13,9 +13,10 @@
 #                           Every mocactl here runs with HOME set to one of them and
 #                           XDG_CONFIG_HOME / XDG_STATE_HOME unset. The smoke never logs in.
 #   SBX_SMOKE_TEMPLATE      the template to create sandboxes from (default: default)
-#   SBX_SMOKE_STEPS         the steps to run, e.g. 1,2,5 (default: all of 1-7; 3 takes ~5 min, 4
+#   SBX_SMOKE_STEPS         the steps to run, e.g. 1,2,5 (default: all of 1-8; 3 takes ~5 min, 4
 #                           waits for a token's exp, one token lifetime: ~16 min by default; 7 is a
-#                           SKIP unless its inputs below are set). `7` alone needs only HOME_A.
+#                           SKIP unless its inputs below are set; 8 takes ~1 min, and is a SKIP on a
+#                           deployment that allows no lease mode). `7` or `8` alone needs only HOME_A.
 #   SBX_SMOKE_AGENTS        the agents step 5 runs, among claude,opencode (default both); one not on
 #                           PATH is a SKIP. Each needs its own login and model already configured.
 #   SBX_SMOKE_HOST          an ssh target ([user@]host) for step 6, the KVM host running the
@@ -47,7 +48,7 @@
 #                           generated in docs/api/examples (steps 2 and 4; default python3). It also
 #                           runs the sample repository's tests locally.
 #
-# Steps (spec §10.6; 7 is SBX0.2b's), each printing `ok N - ...`, `ok N - ... # SKIP why` or `not ok N - ...: why`:
+# Steps (spec §10.6; 7 is SBX0.2b's, 8 SBX0.3's), each printing `ok N - ...`, `ok N - ... # SKIP why` or `not ok N - ...: why`:
 #   1. round trip: in a sample repository (one failing test), sbx up; sbx run fails the suite;
 #      sbx put the fix; the suite passes in the sandbox; the local tree is unchanged until
 #      sbx pull --apply, after which the suite passes locally.
@@ -75,6 +76,13 @@
 #      the credential and TTL + 5 s the sandbox gets a 401. Opt-in: github-mcp (no Authorization
 #      header sent by the client, yet `initialize` answers) and B's sandbox (401, public clone ok).
 #      The trap deletes the remote branch, the credentials and the sandboxes. The PAT is never printed.
+#   8. lease mode (docs/specs/2026-11-08-sbx-lease-mode-design.md §13): `sbx create --mode lease
+#      --idle-timeout 30` on a pseudo-terminal (`script`: an upgrade needs one), its set_mode applied;
+#      `sbx get` shows the epoch known and no lease yet; a file in /tmp is there for the next command
+#      (one guest); after 45 s idle it is gone and stderr has the `guest restarted (idle, ...)` notice;
+#      `sbx reset` prints `lease ended (reset)`; after one more command, `sbx mode per-exec` prints
+#      `lease ended (mode_change)`. A create refused as `... is not allowed on this deployment` (403
+#      mode_not_allowed: lease is off, the default) is a SKIP. Needs `script` on PATH.
 #
 # What it creates: temp directories (sample repositories, a mocactl install, token files) and
 # credentials (smoke-<ts>-<pid>-gh and -gh-mcp, named per run so two runs as the same user cannot
@@ -126,16 +134,16 @@ TEMPLATE="${SBX_SMOKE_TEMPLATE:-default}"
 [[ "$TEMPLATE" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "SBX_SMOKE_TEMPLATE='$TEMPLATE' is not a template id"
 
 STEPS=' '
-IFS=, read -ra raw <<<"${SBX_SMOKE_STEPS-1,2,3,4,5,6,7}"
-((${#raw[@]})) || die 'SBX_SMOKE_STEPS is empty: list steps 1-7, e.g. 1,2,5'
+IFS=, read -ra raw <<<"${SBX_SMOKE_STEPS-1,2,3,4,5,6,7,8}"
+((${#raw[@]})) || die 'SBX_SMOKE_STEPS is empty: list steps 1-8, e.g. 1,2,5'
 for s in "${raw[@]}"; do
-  [[ "$s" =~ ^[1-7]$ ]] || die "SBX_SMOKE_STEPS: '$s' is not a step (1-7, comma-separated)"
+  [[ "$s" =~ ^[1-8]$ ]] || die "SBX_SMOKE_STEPS: '$s' is not a step (1-8, comma-separated)"
   STEPS+="$s "
 done
 want() { [[ "$STEPS" == *" $1 "* ]]; }
 
-# Step 7's inputs. Both set: it runs; else it is a SKIP. User B is needed by steps 1-6 (as ever) and by
-# step 7 only when it is asked for twice over (SBX_SMOKE_CRED_TWO_USERS=1 and a HOME_B).
+# Step 7's inputs. Both set: it runs; else it is a SKIP. User B is needed by steps 1-6 (as ever), never by
+# step 8, and by step 7 only when it is asked for twice over (SBX_SMOKE_CRED_TWO_USERS=1 and a HOME_B).
 CRED_FILE="${SBX_SMOKE_GITHUB_TOKEN_FILE:-}" CRED_REPO="${SBX_SMOKE_GITHUB_REPO:-}"
 CRED_TTL="${SBX_SMOKE_CRED_TTL:-60}"
 CRED_ON=0 CRED_B=0 NEED_B=0
@@ -805,6 +813,100 @@ step7() {
   release a "$id"
 }
 
+# Step 8. A lease create is an upgrade, which mocactl takes only from a terminal (the user's own act,
+# never an agent's: spec §8.1), so it runs on a pseudo-terminal through `script`. util-linux's (Linux:
+# the KVM host, the runners) takes the command as one string, run by $SHELL, and needs -e for the
+# command's exit code; the BSD one (macOS) takes the words and returns the command's code. On the pty
+# stdout and stderr are one stream with CR LF line ends (the BSD one also echoes the ^D it writes for
+# its stdin's EOF): ttyx puts it all in $LOGS/NAME.out.
+ttyx() { # ttyx NAME CMD...: x, with CMD on a pseudo-terminal
+  local n="$1"
+  shift
+  if script -V 2>/dev/null | grep -q util-linux; then
+    x "$n" env SHELL="$BASH" script -qec "$(printf '%q ' "$@")" /dev/null
+  else
+    x "$n" script -q /dev/null "$@"
+  fi
+}
+# lease_created FILE: "ID MODE SETMODE CODE" from the `create --json` answer among the pty's lines
+# (SETMODE: applied, pending, error or none)
+lease_created() {
+  "$PY" -c '
+import json, sys
+for line in open(sys.argv[1], errors="replace"):
+    i, j = line.find("{"), line.rfind("}")
+    if i < 0 or j < i:
+        continue
+    try:
+        d = json.loads(line[i:j + 1])
+    except ValueError:
+        continue
+    if isinstance(d, dict) and isinstance(d.get("id"), str):
+        sm = d.get("setMode") or {}
+        out = sm.get("outcome") or ("error" if "error" in sm else "none")
+        print(d["id"], d.get("mode") or "-", out, sm.get("code") or "-")' "$1" 2>/dev/null | tail -n 1
+}
+# lease_get FILE: "MODE EPOCH STATE RESENT" from `sbx get --json` (EPOCH: known or unknown; RESENT:
+# re-sent when get had to send the mode again, else -)
+lease_get() {
+  "$PY" -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except ValueError:
+    print("unreadable")
+    sys.exit(0)
+l = d.get("lease") or {}
+print((d.get("sandbox") or {}).get("mode"), "known" if l.get("epochKnown") else "unknown",
+      l.get("state") or "error:%s" % l.get("error"), "re-sent" if "setMode" in d else "-")' "$1" 2>/dev/null
+}
+step8() {
+  local id mode setmode code f
+  command -v script >/dev/null || fail 'step 8 needs script on PATH (a pseudo-terminal for the lease create)' || return 1
+  N=$((N + 1))
+  ttyx "create-lease-$N" "$WORK/bin-a/mocactl" sbx create --template "$TEMPLATE" --name "$RUN-$N-lease" --mode lease --idle-timeout 30 --json
+  f="$LOGS/create-lease-$N.out"
+  # 403 mode_not_allowed: the control plane's message for it. Lease is off by default.
+  if [[ "$RC" != 0 ]] && grep -q 'is not allowed on this deployment' "$f"; then WHY='lease not allowed'; return 3; fi
+  read -r id mode setmode code <<<"$(lease_created "$f")"
+  # Recorded before any check: a create that went wrong after the sandbox was made still leaves it
+  # to the trap (and one whose answer never came is found by its name).
+  [[ "${id:-}" =~ $ID_RE ]] && record a "$id" ||
+    fail "user A cannot create a lease sandbox from '$TEMPLATE' (exit $RC): $(lastline "$f")" || return 1
+  [[ "$RC" == 0 ]] || fail "sbx create --mode lease exited $RC: $(lastline "$f")" || return 1
+  [[ "$mode" == lease ]] || fail "the sandbox is $mode, not lease: the control plane did not take the mode" || return 1
+  [[ "$setmode" == applied ]] || fail "the create's set_mode was $setmode ($code), not applied" || return 1
+  x lease-get as a get "$id" --json
+  [[ "$RC" == 0 ]] || fail "sbx get: exit $RC: $(lastline "$LOGS/lease-get.err")" || return 1
+  [[ "$(lease_get "$LOGS/lease-get.out")" == 'lease known none -' ]] ||
+    fail "sbx get shows '$(lease_get "$LOGS/lease-get.out")', not mode lease, the epoch known and no lease yet" || return 1
+  # One guest: a file in /tmp (outside /workspace) is still there for the next command.
+  x lease-warm as a run --sandbox "$id" -- sh -c 'echo warm > /tmp/lease-smoke'
+  [[ "$RC" == 0 ]] || fail "the first lease command: exit $RC: $(lastline "$LOGS/lease-warm.err")" || return 1
+  x lease-same as a run --sandbox "$id" -- cat /tmp/lease-smoke
+  [[ "$RC" == 0 && "$(cat "$LOGS/lease-same.out")" == warm ]] ||
+    fail "the next command did not read /tmp/lease-smoke (exit $RC, stdout '$(lastline "$LOGS/lease-same.out")'): not the same guest" || return 1
+  # The idle end: past the 30 s idle timeout the guest is gone, and the next command says so.
+  echo '# step 8: idle for 45 s (the lease idle timeout is 30 s)...'
+  job sleep 45
+  x lease-idle as a run --sandbox "$id" -- cat /tmp/lease-smoke
+  [[ "$RC" == 1 ]] && ! grep -qx warm "$LOGS/lease-idle.out" ||
+    fail "/tmp/lease-smoke outlived 45 s idle (exit $RC, stdout '$(lastline "$LOGS/lease-idle.out")'): the guest did not restart" || return 1
+  grep -qF '[sandbox] guest restarted (idle, ' "$LOGS/lease-idle.err" ||
+    fail "no idle restart notice on stderr: $(lastline "$LOGS/lease-idle.err")" || return 1
+  # reset and mode print their result on stdout, their notices on stderr (ruling P4-R15).
+  x lease-reset as a reset "$id"
+  [[ "$RC" == 0 ]] && grep -qx 'lease ended (reset)' "$LOGS/lease-reset.out" ||
+    fail "sbx reset (exit $RC) did not print 'lease ended (reset)': $(lastline "$LOGS/lease-reset.out") $(lastline "$LOGS/lease-reset.err")" || return 1
+  # A new guest, for the downgrade to end.
+  x lease-again as a run --sandbox "$id" -- true
+  [[ "$RC" == 0 ]] || fail "a command after the reset: exit $RC: $(lastline "$LOGS/lease-again.err")" || return 1
+  x lease-down as a mode per-exec "$id"
+  [[ "$RC" == 0 ]] && grep -qx 'lease ended (mode_change)' "$LOGS/lease-down.out" ||
+    fail "sbx mode per-exec (exit $RC) did not print 'lease ended (mode_change)': $(lastline "$LOGS/lease-down.out") $(lastline "$LOGS/lease-down.err")" || return 1
+  release a "$id"
+}
+
 run_step() { # run_step N TITLE FN [ARG]
   local n="$1" title="$2" rc=0
   shift 2
@@ -836,6 +938,7 @@ fi
 run_step 6 "the janitor frees a deleted sandbox's directory" step6
 
 run_step 7 'egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes' step7
+run_step 8 'lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease' step8
 
 echo "# $PASSES ok, $FAILS not ok, $SKIPS skipped"
 ((FAILS == 0)) || exit 1

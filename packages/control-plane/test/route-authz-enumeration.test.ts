@@ -102,7 +102,7 @@ describe('sandbox-scoped routes (SBX0 §5.1)', () => {
 
   it("makes EVERY sandbox-scoped route hide another user's sandbox with sandbox_not_found", async () => {
     const scoped = ROUTES.filter((r) => r.sandboxScoped);
-    expect(scoped.length).toBe(5);
+    expect(scoped.length).toBe(6);
     for (const route of scoped) {
       const d = sbx();
       const created = await HANDLERS.createSandbox!(

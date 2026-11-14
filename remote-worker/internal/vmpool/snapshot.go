@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -109,6 +110,19 @@ type VerifyOptions struct {
 	// Memfile re-hashes the memory file too (version 2): a full read of the guest's RAM
 	// image, seconds per GiB, so off by default (SH_VERIFY_MEMFILE=1 turns it on).
 	Memfile bool
+	// Cache, if set, is the path of a verify cache file (verifycache.go): a file whose
+	// identity is unchanged since a full hash on this host matched the manifest is not
+	// hashed again. Empty: every file is hashed in full, every time. The comparison against
+	// the manifest is made either way, and a bad cache only costs a full hash.
+	Cache string
+	// Settle, with Cache: a file changed too recently to be recorded safely (within the
+	// cache's racy window, ~2 s) is waited out before it is hashed, instead of being hashed
+	// and left unrecorded. For the build-time seed, which runs moments after the build
+	// last touched the files; a worker start never waits.
+	Settle bool
+	// Logf reports a cache that was ignored or not written, and how many files the cache
+	// spared. nil: log.Printf.
+	Logf func(format string, args ...any)
 }
 
 // Fill computes the component digests and Hash from the files in dir, as version 2.
@@ -237,8 +251,38 @@ func (m Manifest) VerifyWith(dir string, o VerifyOptions) error {
 			checks = append(checks, struct{ name, want string }{fileCHConfig, m.CHConfigSHA256})
 		}
 	}
+	var cache *verifyCache
+	keyDir := dir
+	if o.Cache != "" {
+		logf := o.Logf
+		if logf == nil {
+			logf = log.Printf
+		}
+		cache = openVerifyCache(o.Cache, logf)
+		cache.settle = o.Settle
+		defer cache.save() // also after a failure: a drifted file's entry is dropped
+		// Entries are keyed by the canonical absolute path, so a worker and the build-time
+		// seed (microvm-worker -verify-snapshot) agree however each spells the directory.
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			keyDir = real
+		}
+		if abs, err := filepath.Abs(keyDir); err == nil {
+			keyDir = abs
+		}
+	}
+	cachedN := 0
 	for _, c := range checks {
-		got, err := fileSHA256(filepath.Join(dir, c.name))
+		var got string
+		var err error
+		if cache != nil {
+			var hit bool
+			got, hit, err = cache.check(filepath.Join(keyDir, c.name), c.want)
+			if hit {
+				cachedN++
+			}
+		} else {
+			got, err = verifyHashFile(filepath.Join(dir, c.name))
+		}
 		if err != nil {
 			return err
 		}
@@ -246,6 +290,10 @@ func (m Manifest) VerifyWith(dir string, o VerifyOptions) error {
 			return fmt.Errorf("snapshot %s: %s drifted: manifest says %s, on disk %s — "+
 				"rebuild the snapshot rather than running an old toolchain (spec §5.5)", dir, c.name, c.want, got)
 		}
+	}
+	if cache != nil {
+		cache.logf("vmpool: verify cache %s: %d of %d snapshot files unchanged since a full check on this host, %d hashed in full",
+			o.Cache, cachedN, len(checks), len(checks)-cachedN)
 	}
 	got, err := m.ComputeHash()
 	if err != nil {

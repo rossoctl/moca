@@ -205,7 +205,13 @@ before the `end` or the `error`. `state` is `start`, `end` (with an end `reason`
   and the worker counts it as delivered when it queues it to send, not when you read it. If the connection
   breaks in between, the event is lost; `LeaseControl status` still shows the lease's state. Rarely,
   the same event arrives twice: dedupe on `at_unix_ms`.
-- **`expiring`** repeats on every lease Exec until the lease ends.
+- **`expiring`** repeats on every lease Exec until the lease ends, with the same `at_unix_ms` (the
+  lease's start plus its maximum duration) and `reason` `max_duration`. Its `ends_by_unix_ms` is the
+  lease's hard end, when it ends even mid-Exec: `at_unix_ms` plus the grace limit (30 minutes by
+  default). It is 0 on every other state, and from a worker that predates the field.
+- **`mocactl sbx` and its MCP server show each event as one line** (the copy is in
+  [the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §5), for example
+  `[sandbox] guest restarted (idle, 14:02): ...` for an idle end.
 - **A per-exec Exec never carries one.** A downgrade's `mode_change` end therefore comes back in the
   `set_mode` result's `status.pending`.
 
@@ -222,11 +228,14 @@ the mode and run it per-`Exec`, without lease events. On `LeaseControl`, the con
 `lease_unsupported` and an older worker does not answer (`DEADLINE_EXCEEDED`, below).
 
 **`LeaseControl {sandbox_id, op, set_mode_token}`** reads the lease (`LEASE_OP_STATUS`), ends it
-(`LEASE_OP_RESET`) or applies a mode change (`LEASE_OP_SET_MODE`). It carries your sandbox token, and
+(`LEASE_OP_RESET`), applies a mode change (`LEASE_OP_SET_MODE`), or ends it because you are about to
+delete the sandbox (`LEASE_OP_SANDBOX_DELETED`, the end reason `sandbox_deleted`; send it before
+`DELETE /v1/sandboxes/{id}`, as `mocactl sbx rm` does, so the guest does not idle on after the
+record is gone). It carries your sandbox token, and
 `set_mode` also a set-mode token (`typ: moca-sandbox-mode+jwt`, valid 300 s) from
 `PUT .../mode` or `POST .../mode-token`. The answer is a `LeaseStatus {mode, epoch_known, state,
-age_ms, idle_timeout_s, pending}`, read after the op. `reset` and a downgrade wait for the lease to
-end, which can take as long as an Exec in flight needs (up to 30 minutes).
+age_ms, idle_timeout_s, pending}`, read after the op. `reset`, `sandbox_deleted` and a downgrade wait
+for the lease to end, which can take as long as an Exec in flight needs (up to 30 minutes).
 
 | Code                  | Cause                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -235,16 +244,19 @@ end, which can take as long as an Exec in flight needs (up to 30 minutes).
 | `INVALID_ARGUMENT`    | No `op`                                                                                                                                                                                     |
 | `RESOURCE_EXHAUSTED`  | `sandbox busy`: the sandbox already has 4 `LeaseControl` calls in flight. Nothing was sent                                                                                                  |
 | `FAILED_PRECONDITION` | The worker refused the op; the details are its message (above, or `busy: too many lease calls in flight`, below)                                                                            |
-| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s (`status`) or 31 minutes (`reset`, `set_mode`): it may predate lease mode                                                                             |
+| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s (`status`) or 31 minutes (`reset`, `set_mode`, `sandbox_deleted`): it may predate lease mode                                                          |
 | `UNAVAILABLE`         | The template's worker is not attached, or it went away before answering                                                                                                                     |
 | `CANCELLED`           | You cancelled the call before the worker answered. The relay frees its place at once, but a `reset` or `set_mode` already sent runs on at the worker: read the outcome with `status`        |
 
 On a `PERMISSION_DENIED` from `set_mode`, fetch a fresh set-mode token once and retry. A worker
-runs at most 2 `reset` or `set_mode` calls per sandbox, and 16 in all, and answers `busy` past
-either; a `status` is never busy at the worker.
+runs at most 2 `reset`, `set_mode` or `sandbox_deleted` calls per sandbox, and 16 in all, and
+answers `busy` past either. It runs at most 32 `status` calls at once, apart from those, and answers
+`busy` past that; calls blocked in a `reset` or `set_mode` never make a `status` busy.
 
 **`LeaseKeepalive {sandbox_id}`** answers OK once the token checks pass, even when no worker is
-attached; it does nothing without a live lease. The relay does not audit it.
+attached; it does nothing without a live lease. The relay does not audit it, and it passes on at
+most one keepalive per sandbox per second: the others are answered OK and dropped. Every 30 s is
+enough (`mocactl sbx mcp` sends one every 30 s while its token's mode is a lease mode).
 
 ## Limits
 

@@ -2,10 +2,11 @@
 
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
-self-serve create (#737), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742), §7,
-provenance (#730), and §8, policy (#737); §5 and §9-§12 (the owner's and the admin's actions,
-tracing, validation, order of work, decisions) come with the issues that build them, and keep their
-numbers so a reference to a section stays valid.
+self-serve create (#737), §5.1-§5.2, the owner's and the admin's actions as built so far (#737,
+#747), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and placement by host
+memory (#744), §6.5, the pacing of cold starts (#745), §7, provenance (#730), and §8, policy
+(#737); the rest of §5, and §9-§12 (tracing, validation, order of work, decisions) come with the
+issues that build them, and keep their numbers so a reference to a section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -282,6 +283,57 @@ need an enrolled subject or an admin (SBX0 §4.2); on `harness`, any logged-in s
 `harness` profile holds no sandbox records, so there `capacity.inUse` and `lastUsedAt` are null
 (unknown), not zero.
 
+## 5. The owner's and the admin's actions
+
+Every action below is an API call that writes a provenance record naming its subject, the new value
+and the one before (§7.1), and needs the template store (`SH_PROVENANCE_DIR`; without it the route
+answers `400 invalid_request`). All mount on both route profiles (§4.1). Sandboxes and sessions
+already created keep the build they were given.
+
+### 5.1 The owner's (self-serve)
+
+**Built (#737, #747):** every route in this table. A caller who cannot see the template gets
+`404 template_not_found`, as on the reads; one who sees it but neither owns it nor is an admin gets
+`403 forbidden`.
+
+| Route                                                                                 | Who                                | Does                                                                                                                                          |
+| ------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/templates` · `POST /v1/templates/{id}/builds`                               | any client; a new build: the owner | creates a template or a build (§4)                                                                                                            |
+| `POST /v1/templates/{id}/builds/{build}/cancel`                                       | the owner                          | a `queued`, `building` or `probing` build → `failed` (`cancelled`); a `build` record                                                          |
+| `POST /v1/templates/{id}/tags {tags, build}` · `DELETE /v1/templates/{id}/tags/{tag}` | the owner                          | moves tags onto a registered build, or removes a tag; removing one never deletes the build (adopted from E2B); a `tag` record per tag changed |
+| `PATCH /v1/templates/{id} {visibility, description}`                                  | the owner                          | changes them; a `visibility` record per field changed (`{field, value, before}`)                                                              |
+
+A tag move names the build by its build id or its handle, and only a registered build takes a tag.
+After it, `id:tag` (and the bare `id`, for `default`) resolves to the new build at the next creation
+(§3.2). `default` is moved, never removed: the bare `id` must resolve. A tag already on the build,
+or a field already at its value, changes nothing and writes no record. `private` hides the template
+from other subjects (a 404, as for an id that does not exist) and refuses their new use.
+
+### 5.2 The admin's
+
+"Admin" is the existing `admin` role (`SH_ADMIN_SUBJECTS`, `packages/control-plane/src/identity.ts`).
+Admins do not approve builds; they set what policy allows and act where self-serve cannot:
+
+| Route                               | Does                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `PUT /v1/policy`                    | the policy profiles (§8): rules, envelope, registries, trusted gate-record sources; a new policy record |
+| every owner action, on any template | e.g. move another's tags, or make another's template private; the record names the admin                |
+| `PUT /v1/templates/{id}/owner`      | transfers ownership; also hands a declared template (no owner) to a subject; an `owner` record          |
+
+The new owner is a person's subject, `github:<numeric id>` or `oidc:<provider sub>` (never a
+synthetic `test:<n>`), and must be enrolled now (on the `sandbox` profile: `SH_ALLOWED_SUBJECTS`, or
+an admin). They get every owner action, and the quotas count the template as theirs from then on; a
+transfer to the current owner changes nothing.
+
+A template the deployment declared (imported once from `SH_SANDBOX_TEMPLATES` into an empty
+catalog, §3.1) has no owner, so its id blocks every self-serve create under it: `409
+template_exists`. An admin hands it to a subject with `PUT /v1/templates/{id}/owner` (an `owner`
+record with `before: null`); the subject then builds, tags and edits it like any template of theirs.
+The env list is not imported again, so a restart does not undo the transfer.
+
+Not covered here: whether a declared id should be claimable without an admin (a deployment with no
+admin cannot transfer), and per-template roles (a maintainer who may tag but not transfer).
+
 ## 6. Builds and activation on a host
 
 ### 6.1 The host agent
@@ -349,12 +401,14 @@ Known limits: a claimed build is not re-queued if the agent dies mid-build; one 
 
 **Per host:** each host's agent reports, with its inventory, its `activeLimit` (the workers it may
 run at once), its `idleLimitSeconds` (the default lease length, §6.3), its `buildConcurrency` and its
-disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`). Its operator sizes them
-from the host's memory and disk and the templates' guest sizes. `GET /v1/templates` shows each host's
-`active {limit, used}`, where `used` counts the workers that stay running on it: the leased builds
-placed or running there, and the unleased ones still draining a live sandbox. The inventory says,
-per held build, whether its worker's unit is `running`; the host's `attached` and `detached` reports
-keep that current between inventories.
+disk, from the host's own settings (`SBX_ACTIVE_LIMIT`, `SBX_IDLE_LIMIT_S`), and its memory (below).
+`activeLimit` is the upper bound on the workers it runs; the memory rule keeps new starts within the
+host's memory, so the limit need not be worked out from the templates' guest sizes by hand.
+`GET /v1/templates` shows each host's `active {limit, used}`, where `used` counts the workers that
+stay running on it: the leased builds placed or running there, and the unleased ones still draining
+a live sandbox; and its `memory` when its agent reports it. The inventory says, per held build,
+whether its worker's unit is `running`; the host's `attached` and `detached` reports keep that
+current between inventories.
 
 **Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
 Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
@@ -371,6 +425,64 @@ more than 6 minutes old (three build polls) is left out of placement, of the hos
 the default lease until it reports again, so a host whose agent died takes no new placement and no
 slot; with every host silent, readiness is the workers' presence alone, as before any reported.
 
+**Memory (#744):** each attached worker maps and locks its snapshot's whole memory file at start
+(`PinMemoryFile`; snapshots are Full, so the file is the guest's whole RAM), so an idle worker holds
+its guest's RAM, and the cost of a host is mostly its attached workers times their guest size. A
+fixed `activeLimit` fits only templates of one size on a host doing nothing else, so placement also
+counts memory, on a host whose agent reports it:
+
+- **The inventory's `memory`** (`host-agent.sh`, sent with every inventory, the build poll's and
+  each 15 s wanted run's): `memTotalMib` and `memAvailableMib` (`/proc/meminfo`), `memPressureFull10`
+  (`/proc/pressure/memory`, `full avg10`; absent with no PSI, which is no brake), `memPressureLimit`,
+  `memFloorMib` (the effective floor), `runningWorkers` (the `sbx-worker@<id>` units active),
+  `vmCommittedMib` per running worker, and `memfileMismatch`. Without MemTotal and MemAvailable no
+  figures are sent, and the host is placed by `activeLimit` alone.
+- **A build's cost** is its guest RAM (`guest_mb` of the registered spec, checked against the
+  manifest's `guest_ram_mb`; 4096 for a build with none) plus 128 MiB for the worker and its VMM.
+  The agent checks that each held build's memory file is exactly `guest_ram_mb` MiB; a mismatch is
+  reported (`memfileMismatch`, an error line), never placed on that host, and never started there
+  (`refused`), whatever a control plane asks.
+- **`vmCommittedMib`** is what a worker's running VMs hold that the kernel cannot reclaim: its
+  slice's `memory.stat` (`sbx.slice/sbx-<id>.slice`) anon + shmem + kernel. Never `memory.current`,
+  which also counts the page cache the VMs' files fill (rootfs, workspace): several GiB a worker
+  that the kernel takes back at need and that MemAvailable already counts as available. The pinned
+  memory file is file-backed and locked, so it is in neither: the worker's cost counts it.
+- **The rule,** in `place()`, per host, in the wanted order:
+  `headroom = min(total − floor − used, available − floor − pending)`, where `pending` is the cost
+  of the builds placed there in this pass whose workers are not running yet, and
+  `used = Σ cost(running workers, any build's, wanted or draining) + Σ vmCommittedMib + pending`.
+  MemAvailable already reflects what runs, so only the pending starts come off it, and two builds
+  placed in one pass both count. A build fits if `cost ≤ headroom` and the host is under
+  `activeLimit`. A build already running on a holder stays there (sticky, above): its memory is
+  paid for and it is counted already, so nothing is evicted. "Running" is the union of the held
+  builds marked `running` (kept current by the host's `attached` and `detached` reports) and the
+  inventory's `runningWorkers`. A worker an `attached` report says started since the inventory is
+  not in that inventory's MemAvailable, so its cost is in `pending` too until the next one. A host
+  reporting the build's memory file wrong is never chosen for it, even where it runs (that copy
+  then goes to `stop`, under no live sandbox).
+- **Brakes:** while `memPressureFull10` is above `memPressureLimit` (default 10), or the host's last
+  inventory is older than 60 s (about four missed reports), the host takes no new start; it keeps
+  what it runs.
+- **Settings,** in the host's `host-agent.env` (0600), never argv: `SBX_MEM_FLOOR_MIB` (default 10%
+  of MemTotal, at least 4096) and `SBX_MEM_PRESSURE_LIMIT` (default 10).
+- **Visible:** a build wanted but not placed is `unavailable` with `readinessReason` (`not_held`,
+  `no_slot`, `memory`, `memfile_mismatch`); the activation's `409 no_active_slot` carries
+  `reason: memory` (at the active limit it answers as before, with no reason), and every holder
+  reporting a wrong memory file is `409 template_unavailable` with `reason: memfile_mismatch` (a
+  rebuild clears it, not a wait). The check runs under the activation lock (§6.3), so two
+  activations cannot see the same headroom.
+- **Compatible both ways:** an agent that sends no `memory` is placed by `activeLimit` alone; a
+  control plane that does not know the field ignores it, and the agent's own memory-file check still
+  holds.
+- **Limits:** keep the host's `/srv/sbx` off tmpfs (there a memory file is shmem and is charged
+  twice). The rule does not change a worker's own budget (`--budget-mb`), the guest size or the
+  pinning, and does not move running workers. Other workloads' memory is seen only through
+  MemAvailable. Pages a VM writes that are charged to another cgroup read low in `vmCommittedMib`;
+  the MemAvailable term still binds. The sandbox lease mode (SBX0.3), if built, keeps a lease VM's
+  guest memory as anon/shmem in its worker's slice, so `vmCommittedMib` counts it with no change; its
+  per-worker reclaim and this floor act on different things (VMs and whole workers), and on one host
+  the floor should be at or above lease mode's reclaim target.
+
 ### 6.3 Leases, aging and the wanted state
 
 - **Leases:** an activation is a **lease** held by its subject, `leaseSeconds` long (60 s to a day a
@@ -386,10 +498,11 @@ slot; with every host silent, readiness is the workers' presence alone, as befor
   replacement of the subject's own activations is not built: over the quota, the activation is
   refused.
 - **Refusals:** an activation that cannot be placed is refused with no lease kept:
-  `409 template_unavailable` (no registered build under the reference, or no reporting host holds
-  it) or `409 no_active_slot` with `Retry-After` (every holder is at its `activeLimit`; the seconds
-  until the soonest a build placed on one of this build's holders loses its last live lease, or
-  60 when no lease tells, as with draining workers).
+  `409 template_unavailable` (no registered build under the reference, no reporting host holds it,
+  or every holder reports its memory file wrong, §6.2) or `409 no_active_slot` with `Retry-After`
+  (every holder is at its `activeLimit` with leased builds, or has no memory headroom for it, §6.2;
+  the seconds until the soonest a build placed on one of this build's holders loses its last live
+  lease, or 60 when no lease tells, as with draining workers).
 - **One activation at a time:** an activation's quota and placement check, its `activate` record
   and its lease write run one at a time across the deployment (owner activation and first use
   alike), so concurrent activations of different templates cannot together pass a subject's quota
@@ -421,9 +534,9 @@ So a client can name a template and go: on a deployment with template hosts
 (`SH_TEMPLATE_HOSTS`), `POST /v1/sandboxes` on a registered build that is not `active` takes the
 caller's lease (as `activate`, recorded with `reason: first_use`; its refusals `no_active_slot`,
 `template_unavailable` and `quota_exceeded` answer as they would) and answers
-`409 template_not_active` with `readiness` and `Retry-After: 30`; the client retries. A caller that
-already holds a live lease on the build (its own retry) is only answered the wait: no renewal and
-no new record per retry.
+`409 template_not_active` with `readiness` and `Retry-After` (30 s, or the build's place in its
+host's start line, §6.5); the client retries. A caller that already holds a live lease on the build
+(its own retry) is only answered the wait: no renewal and no new record per retry.
 `activate: false` starts nothing. No sandbox record is kept while waiting, so a wait never uses the
 live-sandbox cap. The gate applies whenever template hosts are configured, also before any of them
 has reported: until a host's first inventory, an attached worker serves and an absent one is
@@ -438,6 +551,83 @@ why; `mocactl sbx templates activate ID --wait` before a batch avoids the first 
 Known limits: the budget a worker is installed with still caps how many commands it runs at once
 (it is sized at install, not from the lease); a first use waits for one worker start, seconds to
 minutes by the snapshot's size and the host's disk.
+
+### 6.5 Pacing cold starts: the start limit, start lines and the idle grace
+
+**Why.** A build is `active` once its worker attaches to the relay. Before that the worker verifies
+its snapshot, maps and locks its whole memory file (`PinMemoryFile`, mmap + mlock, which reads the
+whole file from disk unless it is cached), restores a probe VM, and attaches. A host agent that
+starts every wanted worker in one pass (the units are `Type=simple`, so each start returns at once)
+has N workers read N memory files at the same time, so each start takes about
+`N × file size ÷ disk throughput`, and readiness showed only `activating`. And a worker stopped as
+soon as its last lease ended, so a template used again minutes later started cold again.
+
+Measured on one KVM host whose snapshots sit on a general-purpose cloud block volume (about
+125 MB/s), 4 GiB guests, starts measured after a release (cache not warm): cold starts one at a time
+took 78 s on average (at most 120 s), a wave of four about 3-4 minutes, and with 28 started at once the last attached
+after more than twenty minutes. Width does not raise the disk's throughput: a start limit bounds
+each start's wait and makes the line visible; it does not shorten the total.
+
+- **The start limit, in the host agent:** `SBX_START_CONCURRENCY` (default 4; at least 1, 0
+  refused) caps the workers _starting_ (started, not yet attached) at once; it is not
+  `activeLimit`, which caps running ones. Each wanted run starts up to the free slots, in the
+  wanted answer's order (oldest lease first), leaves the rest for the next run (15 s), and never
+  waits for a start to finish. The wanted answer gains `starting: [buildId]`, the builds of `run`
+  whose worker the relay does not show attached; with an older control plane that sends none, the
+  agent counts as starting its own starts younger than `SBX_START_WINDOW_S` (default 300) whose
+  unit runs and which are still wanted, so the limit holds without a control-plane change. Either
+  way a start counts for `SBX_START_WINDOW_S` at most: a listed worker still not attached after it
+  (one that crash-loops, hangs, or cannot reach the relay) is stuck, said in an error line each run,
+  and holds no slot, so a few stuck workers cannot stop every other start on a host. A listed
+  worker the agent did not start is timed from when it first sees it, and gives no start time.
+- **The measured start time:** the agent keeps its starts (`start-times`, 0600) and takes a start
+  as done when its build is still in `run` but no longer in `starting`; it reports
+  `startConcurrency` and `startSeconds`, the mean of its last ten starts (start to attach, to within
+  the 15 s poll), in the inventory's limits. `startSeconds` is absent before a start is done.
+- **Start lines, in the control plane:** on a host that reports `startConcurrency`, its placed,
+  wanted builds not attached, in the wanted order, form its start line: the first
+  `startConcurrency` are starting, the rest `queued`. A build in the line is `activating` with
+  `queued` and `queuePosition` (1-based). `Retry-After` on `409 template_not_active` becomes
+  `max(1, ceil(ceil(position / startConcurrency) × startSeconds))` once the host has measured a
+  start, else 30 s; on first use the facts are read again after the lease is taken, so the request's
+  own build has its place. The `hosts` block shows
+  `start: {concurrency, seconds, starting, queued}`. A queued activation stays `activating` longer
+  than before: a client polls with a timeout sized for the whole line (`mocactl sbx templates activate --wait` sizes its default as
+  `(ceil(position / concurrency) + 1) × startSeconds × 1.25`, at least 1800 s, at most 4 h;
+  `--timeout` wins).
+- **Start-aware placement:** §6.2's sticky placement needs no start at all: a build already
+  running on a holder (its agent's report: a held build marked running, or its `runningWorkers`;
+  attached or graced) stays there, whether or not the host reports memory figures. A graced build
+  leased again is such a build: it keeps its worker and its host.
+- **The idle grace (optional):** `SBX_IDLE_GRACE_S` (default 0, off; at most 86400), reported as
+  `limits.idleGraceSeconds`. After a build's last lease ends (`lastLeaseEnd`: a release's time, or
+  an expired lease's end), its running worker, with no live sandbox, stays in `run` until that end
+  plus the grace, listed in the wanted answer's `graced`, if the host has room under `activeLimit`
+  beside the workers it counts (§6.2: wanted and draining ones) and its memory headroom (a graced
+  worker counts as running there). A worker draining a live sandbox is never graced: it keeps its
+  slot as a draining worker, and is never displaced. Its readiness is
+  `deactivating` with `graced: true` and `gracedUntil`; a use within the grace finds it attached:
+  first use takes a lease and is served at once. The agent never starts a graced build; it only
+  keeps one running. The grace ends early for:
+  - a release with `stopNow: true` (`POST /v1/templates/{id}/deactivate`), which leaves a build with
+    no lease stopped at the next poll (its `stopNowAt`), so a benchmark can still measure each
+    task's cold start; the `deactivate` record says `stopNow: true`;
+  - a wanted build that needs the slot or the memory: the soonest-ending graced workers give way, as
+    few as fit it (a host that fits without displacing comes first). It is the only stop of a
+    worker nobody asked to stop, and only of one with no lease: the wanted answer re-reads the
+    build under the activation lock before listing it in `stop`, and a build leased since keeps its
+    worker. A host over its memory with its graced workers lets the soonest-ending go first.
+- **The shared lock:** the activation lock (§6.3) lives in its own module (`activation-lock.ts`), so
+  the wanted answer's re-check and activation share it; no call to a host runs under it.
+- **Compatibility:** an older agent sends none of the new limits: its host has no start line, its
+  Retry-After is 30 s, and it has no grace. An older control plane ignores them and sends no
+  `starting` (the agent counts its own starts) and no `graced`. Roll out the control plane before
+  setting `SBX_IDLE_GRACE_S` on a host.
+
+Known limits: the memory file's pin still reads the whole file at every cold start; prefetching
+memory files, or reporting what a host has cached, is out of scope. `startSeconds` is accurate to
+the 15 s poll. The grace is a host setting, not a client's choice. The activation lease is not the
+sandbox lease mode: a graced worker can hold lease-mode VMs only while their sandboxes live.
 
 ## 7. Provenance
 
@@ -545,17 +735,23 @@ a policy does not set it). Until an admin sets one, the default policy applies, 
 is recorded on first use, so every `check` cites a `policy` record that exists. `GET /v1/policy`
 shows it, its digest and its record.
 
-| Profile     | For                                                   | Requires, beyond the `base` rules                                                                                                                                                                                 |
-| ----------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base`      | any client's own image (a toolchain, a project's env) | Moca's rules M1, M7-M9 at create (M2-M4, M10-M17 on the build host); the image from an allowed registry; the size envelope                                                                                        |
-| `benchmark` | SWE-bench and the like                                | a gate record that passed (X1), from a **trusted source** (§8.3), whose `source_record_digest` equals the image digest (X10); X11 (no network), X12 (commits refused), X14 (a measured probe), X15 (the envelope) |
+| Profile          | For                                                   | Requires, beyond the `base` rules                                                                                                                                                                                 |
+| ---------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base`           | any client's own image (a toolchain, a project's env) | Moca's rules M1, M7-M9 at create (M2-M4, M10-M17 on the build host); the image from an allowed registry; the size envelope                                                                                        |
+| `benchmark`      | SWE-bench and the like                                | a gate record that passed (X1), from a **trusted source** (§8.3), whose `source_record_digest` equals the image digest (X10); X11 (no network), X12 (commits refused), X14 (a measured probe), X15 (the envelope) |
+| `benchmark-self` | the same, on the creating subject's own gate record   | `benchmark`'s rules, with the record self-attested (§8.3): trusted for its submitter's own templates only, which stay private                                                                                     |
+| `general-self`   | general users whose sandboxes need a network          | `benchmark-self`'s without X11: the KVM host's allowlisted egress allowed                                                                                                                                         |
 
 ### 8.1 At create (in the control plane, before any build)
 
 The profile exists; M7 (the id rule and every spec field, including a spec `id` or `image` that
 differs from the create's: `M7.spec_id`, `M7.spec_image`), M8, M9; the image pinned by digest (M1)
 **from an allowed registry** (`allowedRegistries`; a reference with no host is the build host's
-default registry, `<default>`); the profile's size envelope; for `benchmark`, X1, X10-X12, X14 and
+default registry, `<default>`) and, where the policy lists repositories for that registry
+(`allowedRepositories`), from one of them (rule `registry.repository`; whole path segments,
+`prefix/*` for a prefix; the image's path held to the entries' grammar first, so no uppercase and no
+empty, `.` or `..` segment; a registry with no list allows every repository it serves); the profile's
+size envelope; for `benchmark`, X1, X10-X12, X14 and
 X15 from the spec and the gate record; whatever the profile, X10 whenever the spec names a gate
 record (with X1's check of that record, or of any gate record sent: it passed, and is for this
 image; only `X1.trusted` is the profile's) and X12 whenever the spec skips the git identity check
@@ -581,6 +777,12 @@ the record and compares its sha256 with the one the client sent. For the first v
 replaced by an admin-loaded copy of the source's records: the policy's `trustedGateRecords`, by
 sha256 (X1.trusted). Fetching is not built. A record that is not trusted is refused for `benchmark`;
 on `base` it may still be sent, and is stored and recorded with source `client`.
+
+A profile with `selfAttest` (`benchmark-self`, `general-self`) also accepts a record the policy does
+not list, from the creating subject, for that subject's own templates only: the build is
+self-attested, private, and recorded with source `self` until an admin lists the record. The
+[subject trust spec](2026-11-08-subject-trust-gate-records-design.md) holds its rules (X1.self.scope,
+X12.self, X1.self.egress, X1.offline) and what a trust removal does.
 
 ### 8.4 The instance-id mapping
 

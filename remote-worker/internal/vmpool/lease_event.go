@@ -17,7 +17,7 @@ import (
 
 // LeaseInfo is a key's lease as LeaseStatus reports it: the stored mode (per-exec while
 // the epoch is unknown), whether the epoch is known, the live lease's state, age and idle
-// timeout, and the unacknowledged event, if any.
+// timeout, the unacknowledged event, if any, and, while the lease is expiring, its expiry.
 type LeaseInfo struct {
 	Mode        Mode
 	EpochKnown  bool
@@ -25,6 +25,19 @@ type LeaseInfo struct {
 	Age         time.Duration
 	IdleTimeout time.Duration
 	Pending     *LeaseEvent
+	Expiry      *LeaseExpiry // set only when State is LeaseExpiring
+}
+
+// LeaseExpiry is an expiring lease's notice (spec §5, plan 4): its level, when it passed
+// its maximum duration (Since), and when the grace limit ends it even mid-Exec (EndsBy =
+// Since + LeaseGraceLimit). Since is computed from the lease's start, not from the sweep
+// tick that marked it expiring, so it is the same on every Exec that carries the notice --
+// a client dedupes on it -- and EndsBy is the deadline the sweep enforces
+// (leaseGraceDeadline), not up to a LeaseScanInterval past it.
+type LeaseExpiry struct {
+	Mode   Mode
+	Since  time.Time
+	EndsBy time.Time
 }
 
 // LeaseInfo.State values (spec §5's lease state).
@@ -66,9 +79,14 @@ func (p *pool) LeaseStatus(key string) LeaseInfo {
 	if l := rp.lease; !l.started.IsZero() { // zero while startLease installs it
 		now := p.clk.Now()
 		info.Age, info.IdleTimeout = now.Sub(l.started), l.idle
-		// Computed as well as read: the sweep sets expiring only on its next tick.
-		if l.expiring || !now.Before(l.started.Add(p.cfg.leaseMaxDuration(l.mode))) {
+		// Computed as well as read: the sweep sets expiring only on its next tick. l.expiring
+		// implies the maximum duration has passed (the sweep and setLeaseLevelLocked set it
+		// from the same comparison), so Since is never in the future.
+		since := l.started.Add(p.cfg.leaseMaxDuration(l.mode))
+		if l.expiring || !now.Before(since) {
 			info.State = LeaseExpiring
+			at := leaseEventAt(since)
+			info.Expiry = &LeaseExpiry{Mode: l.mode, Since: at, EndsBy: at.Add(p.cfg.LeaseGraceLimit)}
 		}
 	}
 	return info

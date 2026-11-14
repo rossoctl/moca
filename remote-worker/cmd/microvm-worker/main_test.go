@@ -611,10 +611,33 @@ func TestPoolConfigLeaseEnv(t *testing.T) {
 	}
 }
 
+// M6 (plan 4): the relay gives reset and set_mode 31 min, the default grace plus 60 s,
+// and a downgrade or reset waits up to the grace limit. A grace above 1800 s would let the
+// relay fail a call the worker is still running, so it is refused at boot, naming why.
+func TestGraceAboveRelayTimeoutRefused(t *testing.T) {
+	for _, v := range []string{"1801", "3600"} {
+		_, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_GRACE_S": v}))
+		if err == nil {
+			t.Errorf("SH_LEASE_GRACE_S=%s was accepted; it must refuse", v)
+			continue
+		}
+		for _, want := range []string{"SH_LEASE_GRACE_S", "1800", "31 min"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("SH_LEASE_GRACE_S=%s: error %q lacks %q", v, err, want)
+			}
+		}
+	}
+	cfg, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_GRACE_S": "1800"}))
+	if err != nil || cfg.LeaseGraceLimit != 30*time.Minute {
+		t.Fatalf("SH_LEASE_GRACE_S=1800: LeaseGraceLimit %v, err %v; want 30m accepted", cfg.LeaseGraceLimit, err)
+	}
+}
+
 // PR #763 review (F5): a value that would overflow its conversion is refused, never
 // wrapped: SH_LEASE_GRACE_S=10000000000 once wrapped to a negative Duration that
 // Normalize then silently replaced with the default. The largest values that convert
-// exactly are accepted.
+// exactly are accepted, except SH_LEASE_GRACE_S, which M6 bounds far lower
+// (TestGraceAboveRelayTimeoutRefused).
 func TestPoolConfigLeaseEnvRefusesOverflow(t *testing.T) {
 	maxS := math.MaxInt64 / int64(time.Second)
 	maxMB := int64(math.MaxInt64 >> 20)
@@ -638,7 +661,9 @@ func TestPoolConfigLeaseEnvRefusesOverflow(t *testing.T) {
 	}
 	env := map[string]string{}
 	for _, k := range seconds {
-		env[k] = strconv.FormatInt(maxS, 10)
+		if k != "SH_LEASE_GRACE_S" {
+			env[k] = strconv.FormatInt(maxS, 10)
+		}
 	}
 	for _, k := range mib {
 		env[k] = strconv.FormatInt(maxMB, 10)
@@ -647,8 +672,8 @@ func TestPoolConfigLeaseEnvRefusesOverflow(t *testing.T) {
 	if err := leaseConfig(baseEnv(env), &cfg); err != nil {
 		t.Fatalf("the largest exact values: leaseConfig = %v, want accepted", err)
 	}
-	if want := time.Duration(maxS) * time.Second; cfg.LeaseGraceLimit != want || cfg.LeaseKeepaliveLoss != want {
-		t.Errorf("LeaseGraceLimit %v, LeaseKeepaliveLoss %v, want %v", cfg.LeaseGraceLimit, cfg.LeaseKeepaliveLoss, want)
+	if want := time.Duration(maxS) * time.Second; cfg.LeaseMaxDuration != want || cfg.LeaseKeepaliveLoss != want {
+		t.Errorf("LeaseMaxDuration %v, LeaseKeepaliveLoss %v, want %v", cfg.LeaseMaxDuration, cfg.LeaseKeepaliveLoss, want)
 	}
 	if want := maxMB << 20; cfg.LeaseStartBytes != want || cfg.LeaseReclaimFreeBytes != want {
 		t.Errorf("LeaseStartBytes %d, LeaseReclaimFreeBytes %d, want %d", cfg.LeaseStartBytes, cfg.LeaseReclaimFreeBytes, want)

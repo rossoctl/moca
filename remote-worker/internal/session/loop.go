@@ -106,10 +106,12 @@ type Session struct {
 	unsent atomic.Int64
 	// leaseSlots holds one token per mutating LeaseControl call running, across every
 	// connection, and leaseByKey counts them per workspace key (under leaseMu): see
-	// leaseControlCap and takeLeaseSlot.
-	leaseSlots chan struct{}
-	leaseMu    sync.Mutex
-	leaseByKey map[string]int
+	// leaseControlCap and takeLeaseSlot. leaseStatusSlots holds one per status call running
+	// (leaseStatusCap), apart from them, so neither kind can deny the other.
+	leaseSlots       chan struct{}
+	leaseStatusSlots chan struct{}
+	leaseMu          sync.Mutex
+	leaseByKey       map[string]int
 }
 
 // Idle reports that no admitted Exec is queued or running, and that every frame queued for the
@@ -129,7 +131,12 @@ func New(cfg Config, r wexec.Runner) *Session {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
 	}
-	return &Session{cfg: cfg, runner: r, cache: NewCache(CacheSize), leaseSlots: make(chan struct{}, leaseControlCap), leaseByKey: map[string]int{}}
+	return &Session{
+		cfg: cfg, runner: r, cache: NewCache(CacheSize),
+		leaseSlots:       make(chan struct{}, leaseControlCap),
+		leaseStatusSlots: make(chan struct{}, leaseStatusCap),
+		leaseByKey:       map[string]int{},
+	}
 }
 
 // slot tracks one accepted exec so an Abort can reach it whether it is running

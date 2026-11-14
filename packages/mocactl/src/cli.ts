@@ -20,7 +20,9 @@ import {
   type Io,
   type LoginHelpers,
 } from './headless.js';
+import { DiscoveringHarness } from './api/discovery.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
+import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call-record.js';
 import { sbxMain } from './sbx/cli.js';
 import { cmdGet, cmdSpawn, cmdSubagents, MAX_PROMPT_BYTES, runSpawnWorker } from './subagent.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
@@ -48,6 +50,10 @@ export const USAGE = `usage:
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
   mocactl run "prompt" --show-tools              print each tool call the turn makes, between its
                                                  text (not with --json, which streams the frames)
+  mocactl run "prompt" --record F                append one NDJSON line per HTTP attempt to F (0600):
+                                                 path, status, times, ids; a stream's bytes, sha256
+                                                 and frame count; never a token, host, prompt,
+                                                 reply or patch (kept as sha256 or length)
   mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
                                                  (--dry-run: build and report, upload nothing)
   mocactl bundles list [--json]                  your own stored bundles, newest first
@@ -102,26 +108,45 @@ export interface InteractiveOptions {
 
 export type StartInteractive = (rt: Runtime, opts: InteractiveOptions) => Promise<number>;
 
+export interface MainDeps {
+  buildRuntime?: typeof buildRuntime;
+  startInteractive?: StartInteractive;
+  signal?: AbortSignal;
+  /**
+   * Whether stdin is a terminal; Ink needs raw mode, so the interactive UI refuses without one,
+   * and `credentials add` wants its secret piped.
+   */
+  stdinIsTTY?: boolean;
+  /** All of stdin; `credentials add` reads its secret from it, `sbx run` its script. */
+  readStdin?: () => Promise<string>;
+  /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
+  readStdinBytes?: (limit?: number) => Promise<Buffer>;
+  /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
+  loginHelpers?: LoginHelpers;
+  /** The fetch every client uses; `run --record` wraps it. Tests only. */
+  fetchImpl?: typeof fetch;
+}
+
 export async function main(
   argv: string[],
   env: NodeJS.ProcessEnv,
   io: Io,
-  deps: {
-    buildRuntime?: typeof buildRuntime;
-    startInteractive?: StartInteractive;
-    signal?: AbortSignal;
-    /**
-     * Whether stdin is a terminal; Ink needs raw mode, so the interactive UI refuses without one,
-     * and `credentials add` wants its secret piped.
-     */
-    stdinIsTTY?: boolean;
-    /** All of stdin; `credentials add` reads its secret from it, `sbx run` its script. */
-    readStdin?: () => Promise<string>;
-    /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
-    readStdinBytes?: (limit?: number) => Promise<Buffer>;
-    /** `login`'s clipboard and browser; absent when nobody is at this machine's screen. */
-    loginHelpers?: LoginHelpers;
-  } = {},
+  deps: MainDeps = {},
+): Promise<number> {
+  const opened: { recorder?: CallRecorder } = {};
+  try {
+    return await mainWith(argv, env, io, deps, opened);
+  } finally {
+    opened.recorder?.close();
+  }
+}
+
+async function mainWith(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  io: Io,
+  deps: MainDeps,
+  opened: { recorder?: CallRecorder },
 ): Promise<number> {
   // `mocactl sbx` (SBX0) is its own command group with its own flags and its own control plane, so
   // it is dispatched before the global flag table rather than widening it.
@@ -171,6 +196,7 @@ export async function main(
         sandboxes: { type: 'string' },
         mount: { type: 'string' },
         'prompt-file': { type: 'string' },
+        record: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'V' },
       },
@@ -189,9 +215,37 @@ export async function main(
     return 0;
   }
 
+  // --record F: every HTTP attempt `run` makes, to the control plane and the harness, the login's
+  // refresh included, so the record is opened (or refused) before the runtime's clients exist.
+  let fetchImpl = deps.fetchImpl ?? fetch;
+  if (values.record !== undefined) {
+    if (positionals[0] !== 'run') {
+      io.err(
+        `--record only applies to \`mocactl run\` (and to \`mocactl sbx\` commands)\n${USAGE}`,
+      );
+      return 2;
+    }
+    const r = openCallRecord(values.record, 'run', Date.now, { lengthFields: RUN_LENGTH_FIELDS });
+    if ('error' in r) {
+      io.err(r.error);
+      return 2;
+    }
+    opened.recorder = r;
+    fetchImpl = r.wrapEndpoints(fetchImpl, () => [
+      { endpoint: 'control-plane', url: rt.endpoints.controlPlaneUrl },
+      {
+        endpoint: 'harness',
+        url:
+          rt.endpoints.harnessUrl ??
+          (rt.harness instanceof DiscoveringHarness ? rt.harness.discoveredUrl() : undefined),
+      },
+    ]);
+  }
   const rt = (deps.buildRuntime ?? buildRuntime)(
     { controlPlaneUrl: values['control-plane-url'], harnessUrl: values['harness-url'] },
     env,
+    undefined,
+    fetchImpl,
   );
   if (rt.configWarning) io.err(rt.configWarning);
 

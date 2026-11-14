@@ -87,6 +87,7 @@ import type { TurnQueue } from './turn-queue.js';
 import type { ResultRedisLike } from './turn-result.js';
 import type { TurnStore } from './turn-store.js';
 import type { EgressHost } from './egress-config.js';
+import type { EgressStore } from './egress-log.js';
 import { formatDestination, parseDestination } from './egress-destination.js';
 
 /** A stored destination in normalized form; a legacy or corrupt entry compares as written. */
@@ -236,6 +237,8 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /** Per-sandbox egress logs, beside `sandboxes`; absent, the routes store nothing. */
+  egress?: EgressStore;
   /**
    * The template provenance store (template lifecycle spec §7). Absent, nothing is recorded and no
    * handler's behavior changes; when present, a sandbox's create and end are recorded on its

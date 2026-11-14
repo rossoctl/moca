@@ -245,6 +245,17 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 	return cfg, err
 }
 
+// maxLeaseGraceS is the largest SH_LEASE_GRACE_S a worker boots with (plan 4, M6): the
+// relay's LeaseControl timeout for reset and set_mode is 31 min, the default grace plus
+// 60 s, and a reset or a set_mode downgrade blocks for up to the grace limit plus the cut
+// Exec's unwind. A longer grace would let the relay fail a call the worker is still
+// running, and the client would then report an op that later lands.
+//
+// Linked to LEASE_MUTATE_TIMEOUT_MS in packages/sandbox-relay/src/sandbox-caller.ts: raise one
+// only with the other (TestMaxLeaseGraceFitsTheRelayMutateTimeout and the relay's twin read
+// the other side's literal).
+const maxLeaseGraceS = 1800
+
 // leaseConfig reads the SH_LEASE_* knobs (spec §4, §6). Unset leaves a field zero for
 // vmpool's Normalize to default; a malformed value is refused, never defaulted -- the
 // WORKER_MAX_CONCURRENT posture, since a lease's lifetime or reclaim target that came
@@ -252,7 +263,8 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 // or not, so a bad value fails at start rather than when the snapshot gains lease-v1.
 //
 // A value whose conversion would overflow is refused too: a wrapped Duration is negative,
-// and Normalize would then put the default back in its place.
+// and Normalize would then put the default back in its place. SH_LEASE_GRACE_S has a
+// tighter bound, maxLeaseGraceS.
 func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	var err error
 	// read is envInt64 bounded above by limit, recording the first refusal in err.
@@ -290,6 +302,11 @@ func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	seconds("SH_LEASE_MAX_DURATION_S", &cfg.LeaseMaxDuration)
 	seconds("SH_LEASE_MAX_DURATION_L2_S", &cfg.LeaseMaxDurationProcesses)
 	seconds("SH_LEASE_GRACE_S", &cfg.LeaseGraceLimit)
+	if v := get("SH_LEASE_GRACE_S"); v != "" && cfg.LeaseGraceLimit > maxLeaseGraceS*time.Second && err == nil {
+		err = fmt.Errorf("SH_LEASE_GRACE_S=%q is above %d: the relay times reset and set_mode out at 31 min, "+
+			"and both wait up to the grace limit, so a longer grace fails them while the worker still runs them",
+			v, maxLeaseGraceS)
+	}
 	seconds("SH_LEASE_KEEPALIVE_LOSS_S", &cfg.LeaseKeepaliveLoss)
 	mib("SH_LEASE_START_MB", &cfg.LeaseStartBytes)
 	mib("SH_LEASE_PAGECACHE_MB", &cfg.LeasePageCacheBytes)
@@ -722,6 +739,11 @@ func diagStatsMux(statsFn func() vmpool.Stats, maxConcurrent int) *http.ServeMux
 }
 
 func main() {
+	// Arguments select a one-shot mode (runCLI: -verify-snapshot DIR); the worker itself
+	// takes none, it is configured by its environment.
+	if len(os.Args) > 1 {
+		os.Exit(runCLI(os.Args[1:], os.Getenv, os.Stderr))
+	}
 	// Opt-in profiling. OFF unless SH_DIAG_PPROF names a bind address, because pprof
 	// serves goroutine dumps, heap contents and command lines to anyone who can reach
 	// it -- bind loopback (127.0.0.1:6060) and reach it over ssh, never 0.0.0.0.
@@ -770,7 +792,14 @@ func main() {
 	// not on a user's first request.
 	// SH_VERIFY_MEMFILE=1 re-hashes the memory file too (a version-2 manifest): a full read
 	// of the guest's RAM image, so off by default; the build hashes it.
-	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1"}); err != nil {
+	// The verify cache (verifyCachePath; SH_VERIFY_CACHE=0 turns it off) spares the
+	// re-hash of a file whose identity is unchanged since a full hash on this host matched
+	// the manifest; the comparison with the manifest is made either way.
+	verifyCache, err := verifyCachePath(get, snapDir)
+	if err != nil {
+		log.Fatalf("microvm-worker: %v", err)
+	}
+	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1", Cache: verifyCache}); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
 	if err := verifyInstanceType(get, man.InstanceType, detectHostInstanceType); err != nil {

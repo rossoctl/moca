@@ -473,3 +473,143 @@ describe.skipIf(!havePython)('redact-provenance.py', () => {
     expect(redact(dir, 'demo-app').status).toBe(2);
   });
 });
+
+// verify-provenance.py --egress SANDBOX_ID=FILE, an optional, additive check of a
+// sandbox's exported egress log against the egress its newest `sandbox` record names.
+describe.skipIf(!havePython)('verify-provenance.py --egress', () => {
+  const TPL = 'template/demo-app';
+  const SBX = 'sbx-0123456789abcdef0123456789';
+  const NDJSON =
+    '{"bytes_down":20,"bytes_up":10,"decision":"tunnel","host":"pypi.example.com","sid":"sbx-0123456789abcdef0123456789","status":200,"time":"2026-11-08T12:00:00Z","via":"moca-egress"}\n' +
+    '{"bytes_down":0,"bytes_up":0,"decision":"destination_denied","host":"files.example.com","method":"GET","path":"/x/","sid":"sbx-0123456789abcdef0123456789","status":403,"time":"2026-11-08T12:00:01Z","via":"moca-egress"}\n';
+  const egressOf = (data: string, over: Record<string, unknown> = {}) => ({
+    events: data.split('\n').length - 1,
+    sha256: `sha256:${sha256Hex(Buffer.from(data, 'utf8'))}`,
+    dropped: 0,
+    complete: true,
+    ...over,
+  });
+  const ended = async (egress?: Record<string, unknown>, late?: Record<string, unknown>) => {
+    const s = store();
+    await onboard(s);
+    await s.append({
+      stream: TPL,
+      kind: 'sandbox',
+      subject: 'github:1',
+      body: { sandboxId: SBX, buildId: null, state: 'created' },
+    });
+    await s.append({
+      stream: TPL,
+      kind: 'sandbox',
+      subject: 'github:1',
+      body: {
+        sandboxId: SBX,
+        buildId: null,
+        state: 'terminated',
+        reason: 'deleted',
+        endedAt: 1,
+        ...(egress ? { egress } : {}),
+      },
+    });
+    if (late)
+      await s.append({
+        stream: TPL,
+        kind: 'sandbox',
+        subject: 'janitor',
+        body: { sandboxId: SBX, buildId: null, state: 'egress', egress: late },
+      });
+    return JSON.parse(JSON.stringify(await s.export([TPL]))) as ProvenanceExport;
+  };
+  const file = (data: string) => {
+    const f = join(freshDir(), 'egress.ndjson');
+    writeFileSync(f, data);
+    return f;
+  };
+
+  it('leaves the existing checks unchanged: a copy without any egress record verifies, rc 0', async () => {
+    const doc = await ended();
+    expect(verifyExport(doc).ok).toBe(true);
+    const r = runVerifier(doc);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain(`ok ${TPL}: 6 records`);
+    expect(r.out).not.toContain('egress');
+    // A copy with an egress record verifies the same way when --egress is not given.
+    const withEgress = runVerifier(await ended(egressOf(NDJSON)));
+    expect(withEgress.status).toBe(0);
+    expect(withEgress.out).not.toContain('egress');
+  });
+
+  it("checks a log's sha256 and line count against its end record, and says when it is incomplete", async () => {
+    const ok = runVerifier(await ended(egressOf(NDJSON)), '--egress', `${SBX}=${file(NDJSON)}`);
+    expect(ok.status).toBe(0);
+    expect(ok.out).toContain(`ok egress ${SBX}: 2 events, sha256:`);
+    expect(ok.out).toContain('complete');
+    const inc = runVerifier(
+      await ended(egressOf(NDJSON, { dropped: 3, complete: false })),
+      '--egress',
+      `${SBX}=${file(NDJSON)}`,
+    );
+    expect(inc.status).toBe(0);
+    expect(inc.out).toContain('INCOMPLETE, 3 dropped');
+    // With the record's droppedBy, the line names the reasons.
+    const why = runVerifier(
+      await ended(
+        egressOf(NDJSON, {
+          dropped: 5,
+          complete: false,
+          droppedBy: { proxy: 0, cap: 0, budget: 4, invalid: 1 },
+        }),
+      ),
+      '--egress',
+      `${SBX}=${file(NDJSON)}`,
+    );
+    expect(why.status).toBe(0);
+    expect(why.out).toContain('INCOMPLETE, 5 dropped (budget 4, invalid 1)');
+  });
+
+  it('takes the newest record naming egress: a later state: egress record wins over the end record', async () => {
+    const more = `${NDJSON}{"decision":"aborted","time":"2026-11-08T12:00:02Z","via":"moca-egress"}\n`;
+    const doc = await ended(egressOf(NDJSON), egressOf(more));
+    expect(runVerifier(doc, '--egress', `${SBX}=${file(more)}`).status).toBe(0);
+    const old = runVerifier(doc, '--egress', `${SBX}=${file(NDJSON)}`);
+    expect(old.status).toBe(1);
+    expect(old.out).toContain('the record names');
+  });
+
+  it('fails on a changed log, a missing record, and refuses an unreadable file (rc 2)', async () => {
+    const doc = await ended(egressOf(NDJSON));
+    const changed = runVerifier(doc, '--egress', `${SBX}=${file(NDJSON.replace('10', '11'))}`);
+    expect(changed.status).toBe(1);
+    expect(changed.out).toContain("the file's sha256 is");
+    const none = runVerifier(await ended(), '--egress', `${SBX}=${file(NDJSON)}`);
+    expect(none.status).toBe(1);
+    expect(none.out).toContain('no sandbox record of the export names its egress log');
+    expect(runVerifier(doc, '--egress', `${SBX}=/nonexistent/x`).status).toBe(2);
+    expect(runVerifier(doc, '--egress', SBX).status).toBe(2);
+  });
+
+  it('fails closed on a record whose events is not an int count or whose sha256 is not sha256:<64 hex>', async () => {
+    const one = NDJSON.split('\n')[0]! + '\n';
+    // In Python True == 1: a one-line file must not match `events: true`. (Canonical JSON holds
+    // integers only, so a float cannot be in an export at all.)
+    for (const events of [true, '1', -1]) {
+      const r = runVerifier(
+        await ended(egressOf(one, { events })),
+        '--egress',
+        `${SBX}=${file(one)}`,
+      );
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("the record's events is");
+    }
+    for (const sha256 of ['x', 42, `sha256:${'A'.repeat(64)}`]) {
+      const r = runVerifier(
+        await ended(egressOf(one, { sha256 })),
+        '--egress',
+        `${SBX}=${file(one)}`,
+      );
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("the record's sha256 is");
+      expect(r.out).toContain('not sha256:<64 hex>');
+    }
+  });
+});
