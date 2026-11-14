@@ -42,8 +42,17 @@ if [[ -n "${MOCK_JOURNAL_DIR:-}" ]]; then
 fi
 [[ -n "${MOCK_NO_ATTACH:-}" ]] || echo 'microvm-worker: attached, serving execs'
 MOCK
-chmod +x "$TMP/bin/systemctl" "$TMP/bin/journalctl"
+# findmnt: MOCK_FINDMNT_MAJMIN is the MAJ:MIN of every path; unset, nothing is mounted, so the
+# read-ahead is skipped with a warning (the blocks before the read-ahead one never touch it).
+cat >"$TMP/bin/findmnt" <<'MOCK'
+#!/usr/bin/env bash
+printf 'findmnt %s\n' "$*" >>"$MOCK_LOG"
+[[ -n "${MOCK_FINDMNT_MAJMIN:-}" ]] || exit 1
+echo "$MOCK_FINDMNT_MAJMIN"
+MOCK
+chmod +x "$TMP/bin/systemctl" "$TMP/bin/journalctl" "$TMP/bin/findmnt"
 export PATH="$TMP/bin:$PATH" SBX_UNIT_DIR="$TMP/units" SBX_ENV_DIR="$TMP/etc" SBX_SRV="$TMP/srv"
+export SBX_SYSFS="$TMP/sys" # the read-ahead's sysfs, faked in its block
 export SBX_SKIP_ROOT_CHECK=1 SBX_ATTACH_TIMEOUT=2 SBX_ATTACH_SETTLE=1 SBX_LIBEXEC_DIR="$TMP/libexec"
 INSTALL="$SRC/deploy/sbx/install-host.sh"
 # A snapshot as build-snapshot.sh writes it, as far as install-host.sh reads one: its guest RAM.
@@ -98,6 +107,8 @@ grep -q 'SH_LEASE_IDLE_CEILING_S in .* must be a whole number of seconds, 300-86
   fail "the ceiling refusal does not name 300-86400: $(cat "$TMP/out")"
 pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size or idle ceiling'
 
+# py312 has a template record (template-build.sh's); default has none.
+mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
 bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
@@ -122,7 +133,12 @@ for k in SH_PARENT_CGROUP SH_CHROOT_BASE SH_WORKSPACE_ROOT; do
   [[ -n "$va" && "$va" != "$vb" ]] || fail "$k is shared between workers ($va)"
 done
 grep -qx 'SH_PARENT_CGROUP=sbx.slice/sbx-sbx_py312.slice' "$B" || fail 'parent cgroup is not the worker slice'
-pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle, image size and idle ceiling"
+grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py312.json" "$B" || fail "$B: SH_TEMPLATE_RECORD does not name the snapshot's record"
+! grep -q '^SH_TEMPLATE_RECORD=' "$A" || fail "$A: SH_TEMPLATE_RECORD set with no record"
+grep -qx 'SANDBOX_TEMPLATE=py312' "$B" || fail "$B: SANDBOX_TEMPLATE is not the record's id"
+! grep -q '^SANDBOX_TEMPLATE=' "$A" || fail "$A: SANDBOX_TEMPLATE set with no record"
+grep -qx "SH_VERIFY_CACHE_DIR=$SBX_SRV/verify-cache" "$B" || fail 'the verify cache is not under SBX_SRV'
+pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle, image size and idle ceiling, the template record and its id as SANDBOX_TEMPLATE when there is one"
 
 # The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
 # (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
@@ -142,6 +158,30 @@ rc=0; SBX_SRV="$DEEP" bash "$INSTALL" "$(bundle sbx_deep)" --snapshot default >"
 [[ ! -e "$SBX_ENV_DIR/workers/sbx_deep.env" ]] || fail 'too long a SBX_SRV still wrote the worker env'
 [[ "$rc" != 0 ]] && grep -q 'jail path is too long for a Unix socket' "$TMP/out" || fail "too long a SBX_SRV was not refused: $(cat "$TMP/out")"
 pass 'the jail is <SBX_SRV>/jail/j<12 hex of the id>: the longest worker id fits; too long a SBX_SRV is refused'
+
+# A snapshot with template-build.sh's record ($SBX_SRV/templates/<snapshot>.json): the worker env
+# points the worker at it and names the template, so the worker checks the record at start. A record
+# for another worker is refused before anything is written; no record writes neither line (above).
+snap py-tools-0123456789ab && mkdir -p "$SBX_SRV/templates"
+printf '{"schema":"moca-sbx-template/1","id":"py-tools","worker":"sbx_py_tools_0123456789ab","snapshot":"py-tools-0123456789ab"}\n' \
+  >"$SBX_SRV/templates/py-tools-0123456789ab.json"
+bash "$INSTALL" "$(bundle sbx_py_tools_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail 'install a worker with a template record'
+R="$SBX_ENV_DIR/workers/sbx_py_tools_0123456789ab.env"
+grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py-tools-0123456789ab.json" "$R" || fail "$R: SH_TEMPLATE_RECORD is not the snapshot's record"
+grep -qx 'SANDBOX_TEMPLATE=py-tools' "$R" || fail "$R: SANDBOX_TEMPLATE is not the record's id"
+! grep -q '^SH_TEMPLATE_RECORD=\|^SANDBOX_TEMPLATE=' "$A" || fail "$A: a snapshot without a record got SH_TEMPLATE_RECORD"
+# The checks below read what the earlier installs logged: keep it, and look at this refusal alone.
+cp "$MOCK_LOG" "$TMP/mock.kept"; : >"$MOCK_LOG"
+! bash "$INSTALL" "$(bundle sbx_other_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail "installed another worker's bundle on a recorded snapshot"
+grep -q 'is for worker sbx_py_tools_0123456789ab, not this bundle' "$TMP/out" || fail 'the record refusal does not name both workers'
+[[ ! -e "$SBX_ENV_DIR/workers/sbx_other_0123456789ab.env" ]] && ! grep -q systemctl "$MOCK_LOG" || fail 'wrote or touched systemd before refusing the record'
+printf '{"schema":"other/1"}\n' >"$SBX_SRV/templates/py-tools-0123456789ab.json"
+! bash "$INSTALL" "$(bundle sbx_py_tools_0123456789ab)" --snapshot py-tools-0123456789ab >"$TMP/out" 2>&1 || fail 'accepted a record of another schema'
+grep -q 'is not a template record' "$TMP/out" || fail 'the schema refusal does not say why'
+bash "$INSTALL" --uninstall sbx_py_tools_0123456789ab >"$TMP/out" 2>&1 || fail 'uninstall the recorded worker'
+rm -rf "$SBX_SRV/templates" "$SBX_SRV/snapshots/py-tools-0123456789ab"
+cat "$TMP/mock.kept" >"$MOCK_LOG"
+pass "a snapshot's template record is wired into the worker env (SH_TEMPLATE_RECORD, SANDBOX_TEMPLATE); another worker's is refused"
 
 # A worker installed before the digest-keyed jail had $SBX_SRV/jail/<id>. A reinstall and an uninstall
 # remove that worker's own old jail (its hard-linked files stay) and say so; another worker's is kept.
@@ -925,3 +965,121 @@ for k in STANDBY_DEPTH MEMORY_RESERVE_MB; do
   [[ -n "$unit" && "$unit" == "$script" ]] || fail "install-host.sh's $k ($script) is not the unit's ($unit)"
 done
 pass "install-host.sh's standby depth and memory reserve are the unit's"
+# Snapshot read-ahead: a fake sysfs with a partitioned disk (nvme1n1p1, 259:1), a dm device
+# (dm-0, 253:0) and a device without a queue (7:9). The install finds the device by MAJ:MIN at
+# every run, records the value before the first install, and the last uninstall writes it back.
+SYS="$SBX_SYSFS" RAU="$SBX_UNIT_DIR/sbx-read-ahead.service" RAO="$SBX_ENV_DIR/read-ahead.orig" RAH="$SBX_LIBEXEC_DIR/sbx-read-ahead.sh"
+DISK="$SYS/devices/pci0/nvme/nvme1/nvme1n1" DM="$SYS/devices/virtual/block/dm-0"
+mkdir -p "$DISK/queue" "$DISK/nvme1n1p1" "$DM/queue" "$SYS/devices/virtual/noqueue" "$SYS/dev/block"
+: >"$DISK/nvme1n1p1/partition"
+ln -s ../../devices/pci0/nvme/nvme1/nvme1n1/nvme1n1p1 "$SYS/dev/block/259:1"
+ln -s ../../devices/virtual/block/dm-0 "$SYS/dev/block/253:0"
+ln -s ../../devices/virtual/noqueue "$SYS/dev/block/7:9"
+echo 128 >"$DISK/queue/read_ahead_kb"; echo 256 >"$DM/queue/read_ahead_kb"
+[[ ! -s "$EM" ]] || fail 'the read-ahead block does not start from a clean host'
+export MOCK_FINDMNT_MAJMIN=259:1
+
+# A bad value is refused before anything is written or systemd is touched.
+for bad in abc -1 08 1.5 16385 99999 ' 512'; do
+  : >"$MOCK_LOG"
+  ! SBX_READ_AHEAD_KB="$bad" bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail "accepted SBX_READ_AHEAD_KB='$bad'"
+  grep -q 'SBX_READ_AHEAD_KB=' "$TMP/out" || fail "the '$bad' refusal does not name SBX_READ_AHEAD_KB"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing SBX_READ_AHEAD_KB='$bad'"
+  [[ ! -e "$RAU" && ! -e "$SBX_ENV_DIR/workers/sbx_ra.env" ]] || fail "wrote files before refusing SBX_READ_AHEAD_KB='$bad'"
+done
+[[ "$(cat "$DISK/queue/read_ahead_kb")" == 128 ]] || fail 'a refused value changed the device'
+pass 'refuses an SBX_READ_AHEAD_KB that is not 0..16384 in decimal before touching anything'
+
+# The default, on a partition: the parent disk's queue is set, the unit carries 512.
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with the default read-ahead'
+[[ "$(cat "$DISK/queue/read_ahead_kb")" == 512 ]] || fail "the disk under the partition was not set to 512: $(cat "$DISK/queue/read_ahead_kb")"
+grep -q 'nvme1n1 read_ahead_kb 128 -> 512' "$TMP/out" || fail 'the install does not say what it changed'
+grep -qx "ExecStart=$RAH set $SBX_SRV 512" "$RAU" || fail "the unit does not carry 512: $(cat "$RAU")"
+for l in Type=oneshot RemainAfterExit=yes WantedBy=multi-user.target "RequiresMountsFor=$SBX_SRV" Before=sbx.slice; do
+  grep -qx "$l" "$RAU" || fail "the unit lacks $l: $(cat "$RAU")"
+done
+grep '^After=' "$SBX_UNIT_DIR/sbx-worker@.service" | grep -q 'sbx-read-ahead.service' || fail 'the worker is not ordered after sbx-read-ahead'
+! grep -q nvme1n1 "$RAU" || fail 'the unit names the device (it must find it by path at boot)'
+cmp -s "$RAH" "$SRC/deploy/sbx/sbx-read-ahead.sh" && [[ "$(mode "$RAH")" == 755 ]] || fail 'the helper is not installed 0755'
+[[ "$(cat "$RAO")" == 128 && "$(mode "$RAO")" == 600 ]] || fail "the original value was not recorded 0600: $(cat "$RAO")"
+for f in "$RAU" "$RAO" "$RAH"; do grep -qx "readahead $f" "$EM" || fail "the manifest lacks readahead $f"; done
+e="$(grep -nx 'systemctl enable sbx-read-ahead.service' "$MOCK_LOG" | cut -d: -f1)"
+w="$(grep -nx 'systemctl restart sbx-worker@sbx_ra.service' "$MOCK_LOG" | cut -d: -f1)"
+[[ -n "$e" && -n "$w" && "$e" -lt "$w" ]] || fail "sbx-read-ahead not enabled before the worker restart ('$e', '$w')"
+pass 'the default 512 goes into the unit and onto the partition'"'"'s disk; the old value is recorded; enabled before the worker starts'
+
+# A re-run with another value rewrites the unit and keeps the first recorded value; the boot run works.
+SBX_READ_AHEAD_KB=1024 bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail 're-run with 1024'
+[[ "$(cat "$DISK/queue/read_ahead_kb")" == 1024 && "$(cat "$RAO")" == 128 ]] || fail 'a re-run did not set 1024 or lost the first recorded value'
+grep -qx "ExecStart=$RAH set $SBX_SRV 1024" "$RAU" || fail 'the unit does not carry 1024'
+[[ "$(grep -c '^readahead ' "$EM")" == 3 ]] || fail "a re-run recorded readahead lines twice: $(cat "$EM")"
+echo 128 >"$DISK/queue/read_ahead_kb" # a reboot
+"$RAH" set "$SBX_SRV" 1024 >"$TMP/out" 2>&1 || fail 'the boot run failed'
+[[ "$(cat "$DISK/queue/read_ahead_kb")" == 1024 ]] || fail 'the boot run did not set the value'
+pass 'a re-run rewrites the unit, keeps the first recorded value; the unit'"'"'s command sets it again after a reboot'
+
+# The last uninstall writes the recorded value back and removes the unit, helper and record.
+: >"$MOCK_LOG"
+bash "$INSTALL" --uninstall sbx_ra >"$TMP/out" 2>&1 || fail 'the last uninstall with read-ahead'
+[[ "$(cat "$DISK/queue/read_ahead_kb")" == 128 ]] || fail "the last uninstall did not restore 128: $(cat "$DISK/queue/read_ahead_kb")"
+grep -qx 'systemctl disable --now sbx-read-ahead.service' "$MOCK_LOG" || fail 'sbx-read-ahead was not disabled and stopped'
+[[ ! -e "$RAU" && ! -e "$RAO" && ! -e "$RAH" ]] || fail 'the last uninstall left a read-ahead file'
+[[ ! -s "$EM" ]] || fail "the manifest is not empty after the last uninstall: $(cat "$EM")"
+pass 'the last uninstall restores the recorded value, disables and removes the unit, helper and record'
+
+# One of two workers going leaves it; a dm device has its own queue.
+export MOCK_FINDMNT_MAJMIN=253:0
+bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail 'install on dm'
+# The second worker is not started at boot (SBX_WORKER_AT_BOOT=0, a host agent's): the read-ahead still is.
+: >"$MOCK_LOG"
+SBX_WORKER_AT_BOOT=0 bash "$INSTALL" "$(bundle sbx_ra2)" --snapshot default >"$TMP/out" 2>&1 || fail 'install a second worker on dm'
+[[ "$(cat "$DM/queue/read_ahead_kb")" == 512 && "$(cat "$DISK/queue/read_ahead_kb")" == 128 ]] || fail 'dm-0 was not set alone'
+grep -qx 'systemctl enable sbx-read-ahead.service' "$MOCK_LOG" || fail 'SBX_WORKER_AT_BOOT=0 left sbx-read-ahead not enabled for boot'
+! grep -q 'systemctl enable sbx-worker@sbx_ra2' "$MOCK_LOG" || fail 'SBX_WORKER_AT_BOOT=0 enabled the worker'
+bash "$INSTALL" --uninstall sbx_ra2 >"$TMP/out" 2>&1 || fail 'uninstall one of two'
+[[ -f "$RAU" && "$(cat "$DM/queue/read_ahead_kb")" == 512 ]] || fail 'uninstalling one of two workers removed the read-ahead'
+pass 'a dm device is set through its own queue; SBX_WORKER_AT_BOOT=0 keeps the read-ahead enabled for boot; one of two uninstalls keeps it'
+
+# SBX_READ_AHEAD_KB=0 on a host that has the unit: the value goes back and the unit goes.
+: >"$MOCK_LOG"
+SBX_READ_AHEAD_KB=0 bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail 're-run with 0'
+[[ "$(cat "$DM/queue/read_ahead_kb")" == 256 && ! -e "$RAU" && ! -e "$RAO" ]] || fail '0 did not restore and remove the read-ahead'
+! grep -q '^readahead ' "$EM" || fail "0 left readahead lines: $(cat "$EM")"
+# ... and on a host without it, 0 installs nothing and never looks at the device.
+: >"$MOCK_LOG"
+SBX_READ_AHEAD_KB=0 bash "$INSTALL" "$(bundle sbx_ra2)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with 0'
+[[ ! -e "$RAU" && "$(cat "$DM/queue/read_ahead_kb")" == 256 ]] || fail '0 installed a unit or changed the device'
+! grep -q 'findmnt\|sbx-read-ahead' "$MOCK_LOG" || fail '0 still looked at the device or the unit'
+for id in sbx_ra sbx_ra2; do bash "$INSTALL" --uninstall "$id" >"$TMP/out" 2>&1 || fail "uninstall $id"; done
+pass 'SBX_READ_AHEAD_KB=0 restores and removes an installed read-ahead, and on a clean host installs none'
+
+# Not resolvable (nothing mounted, tmpfs's anonymous device, a device without a queue): a warning,
+# never a failure, and no unit.
+for mm in '' 0:42 7:9; do
+  : >"$MOCK_LOG"
+  MOCK_FINDMNT_MAJMIN="$mm" bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail "failed the install on an unresolvable device ('$mm')"
+  grep -q "WARNING: no block device found under $SBX_SRV: read-ahead not set" "$TMP/out" || fail "no warning for an unresolvable device ('$mm')"
+  [[ ! -e "$RAU" && ! -e "$RAH" && ! -e "$RAO" ]] || fail "installed the read-ahead on an unresolvable device ('$mm')"
+  ! grep -q sbx-read-ahead "$MOCK_LOG" || fail "touched sbx-read-ahead on an unresolvable device ('$mm')"
+  grep -qx 'systemctl restart sbx-worker@sbx_ra.service' "$MOCK_LOG" || fail "the worker was not started ('$mm')"
+done
+MOCK_FINDMNT_MAJMIN='' "$SRC/deploy/sbx/sbx-read-ahead.sh" set "$SBX_SRV" 512 >"$TMP/out" 2>&1 || fail 'the boot run fails on an unresolvable device'
+grep -q 'read-ahead not set' "$TMP/out" || fail 'the boot run does not warn on an unresolvable device'
+bash "$INSTALL" --uninstall sbx_ra >"$TMP/out" 2>&1 || fail 'uninstall after the unresolvable cases'
+pass 'an unresolvable device (no mount, tmpfs, no queue) is a warning: the worker installs, no unit, and the boot run exits 0'
+
+# A value the device does not take: a warning, the old value kept, the install goes on. A read-only
+# file stands in for the device's refusal, which root would write through: skipped as root.
+if [[ "$(id -u)" != 0 ]]; then
+  chmod 0444 "$DM/queue/read_ahead_kb"
+  bash "$INSTALL" "$(bundle sbx_ra)" --snapshot default >"$TMP/out" 2>&1 || fail 'failed the install on a value the device refused'
+  grep -q 'WARNING: sbx-read-ahead: dm-0 did not take read_ahead_kb 512; it is 256' "$TMP/out" || fail 'no warning for a refused value'
+  [[ "$(cat "$DM/queue/read_ahead_kb")" == 256 ]] || fail 'a refused value changed the device'
+  bash "$INSTALL" --uninstall sbx_ra >"$TMP/out" 2>&1 || fail 'uninstall after a refused value'
+  chmod 0644 "$DM/queue/read_ahead_kb"
+  pass 'a value the device does not take is a warning; the old value stays'
+else
+  echo 'skip - a value the device does not take (running as root)'
+fi
+[[ ! -s "$EM" ]] || fail "manifest not empty at the end of the read-ahead block: $(cat "$EM")"

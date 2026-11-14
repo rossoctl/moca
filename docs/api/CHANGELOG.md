@@ -3,6 +3,135 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.11.0
+
+Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),
+per the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md)
+§6.2-§6.4. Every change is additive; the template routes mount on both route profiles and need
+`SH_PROVENANCE_DIR` (else `400 invalid_request`).
+
+- New POST /v1/templates/{id}/activate `{tag?, build?, leaseSeconds?}`: takes or renews the caller's
+  activation lease on a registered build (60-86400 s; default the largest `idleLimitSeconds` of
+  the hosts that hold it, clamped to 60-86400, else 3600; renewed by calling again, without limit) and answers
+  `{templateId, buildId, leaseUntil, host}`. A build is wanted running only while a lease stands; a
+  leased build is never evicted. Each grant is an `activate` record; the lease stores its digest. Refusals keep
+  no lease: `409 template_unavailable` (no registered build under that reference, or no reporting
+  host holds it), `409 no_active_slot` with `Retry-After` (every holder at its `activeLimit` with
+  leased builds; the wait is until a build placed on one of its holders loses its last lease), `429 quota_exceeded` with `quota: active`. The quota and placement check, the
+  record and the lease write run one activation at a time across all templates.
+- New POST /v1/templates/{id}/deactivate `{all?}`: drops the caller's leases on the template (an
+  admin with `all: true`, everyone's), answering `{templateId, released}`, with a `deactivate`
+  record when any is dropped.
+- New GET /v1/hosts/{host}/wanted (host bearer): `run`, the leased builds placed on this host within
+  its `activeLimit`, and `stop`, the builds it holds with no lease and no live sandbox (and a leased
+  build it runs while placement keeps it on another host); new `WantedWorker` schema. Placement is
+  sticky (a running build stays on its host) and counts every worker that stays running on a host:
+  leased builds placed or running there, and unleased ones draining a live sandbox.
+- POST /v1/hosts/{host}/inventory: each `holds` entry gains `running` (boolean, default false):
+  whether the build's worker unit runs on the host.
+- New POST /v1/hosts/{host}/workers/report `{buildId, event, reason?}` (host bearer): `attached`,
+  `refused` or `detached`, recorded as `activate` or `deactivate` records by `host:<host>` (a
+  `refused` repeating the host's last one for a build still in its `run` is not recorded again:
+  `recorded: null`);
+  readiness still comes from the relay.
+- POST /v1/sandboxes: activation on first use. With `SH_TEMPLATE_HOSTS` set, a create on a
+  registered build that is not `active` takes the caller's lease (`reason: first_use` on its record;
+  refused as activate would be) and answers `409 template_not_active` with `readiness` and
+  `Retry-After: 30`; a caller already holding a live lease on the build is only answered the
+  wait (no renewal, no record per retry). New body field `activate` (default true; false starts nothing). No sandbox
+  record is kept while waiting. Without template hosts, nothing changes. A template imported from
+  `SH_SANDBOX_TEMPLATES` is never gated, and activate refuses it with `400 invalid_request`: the
+  deployment runs its worker, and its readiness is that worker's presence alone. The `sandbox` record's
+  `lease` is now the digest of the caller's `activate` record (null without a lease).
+- Readiness gains `activating`, `deactivating` and `unavailable` (Template, TemplateBuild); before
+  any host reports it is the presence alone, as before.
+- GET /v1/templates: `hosts` lists each reporting host's `active {limit, used}` (`used`: the
+  workers placement counts on it), `idleLimitSeconds`
+  and `disk {freeGb, floorGb}`. A host whose last inventory is over 6 minutes old is left out of
+  it and of placement until it reports again.
+- GET /v1/quota: `active.used` counts the builds the caller holds a live lease on.
+- New error codes `no_active_slot`, `template_unavailable` and `template_not_active` (409); the
+  Error schema gains `readiness`, and `quota` the value `active`.
+
+## 1.10.0
+
+Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
+§8.2. Every change is additive; the routes mount on both route profiles, need `SH_PROVENANCE_DIR`
+for the builds (else `400 invalid_request`), and answer only a host listed in `SH_TEMPLATE_HOSTS`
+(else `401 unauthorized`).
+
+- New security scheme `hostToken`: one template host's bearer, `SH_HOST_TOKEN_<ID>`. The host in
+  the path must be the one whose token is presented; no user, admin, janitor or egress token is
+  accepted.
+- New POST /v1/hosts/{host}/inventory: what the host holds (`holds`, each a `template` and its
+  `manifestHash`) and its limits (`limits`: `activeLimit`, `idleLimitSeconds`, `buildConcurrency`,
+  `diskFreeGb`, `diskFloorGb`).
+- New POST /v1/hosts/{host}/builds/claim `{max}`: up to 4 queued builds, oldest first and subjects
+  in turn, each moved to `building` and held by the host, with its job: the template id, the
+  handle, the image and the spec as `template-build.sh` reads it (the template's id and the create's
+  image always win over the spec's own; the guest size is always `guest_ram_mb`, the value the
+  policy checked), and the gate record's path when the create had one.
+- New GET /v1/hosts/{host}/blobs/{digest}: a stored document (a gate record) by sha256, base64 of
+  its exact bytes.
+- New POST /v1/hosts/{host}/builds/{build}/log (at most 200 entries a call; a build keeps its
+  last 1000) and POST /v1/hosts/{host}/builds/{build}/report, whose `event` is `building` or
+  `probing`; `failed` with `step` and `message`; or `built` with `templateRecord` and `manifest`,
+  each file as a string. A report answers only a build this host claimed (else `404 not_found`);
+  a failed or cancelled build takes no more. On `built` the control plane stores both files,
+  writes a `build` record, checks them against the create's request and registers the build (its
+  `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
+  rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
+## 1.9.0
+
+A subject's own gate record, trusted for its own templates, and repositories allowed per registry
+([#738](https://github.com/rossoctl/moca/issues/738)), per the
+[subject trust spec](../specs/2026-11-08-subject-trust-gate-records-design.md). Trust is decided by
+who submits a gate record, never by anything inside it. Every change is additive.
+
+- `Profile` adds `selfAttest`, `selfAttestEgress` and `requireOfflineGate`. The default policy adds
+  `benchmark-self` (the `benchmark` rules, no network) and `general-self` (no X11; `spec.egress` may
+  be true, the KVM host's allowlisted egress); `benchmark` stays curated (its records must be in
+  `trustedGateRecords`).
+- On a `selfAttest` profile, a record not in `trustedGateRecords` passes `X1.trusted` for the
+  creating subject's own templates. New create rules, each in the `check` record and named by a
+  `422 policy_refused`: `X1.self.scope` (another subject already self-attested the same sha256;
+  a build made while the record was trusted claims nothing, and a build that failed releases its
+  claim),
+  `X12.self` (the record must show commits refused, whatever the spec), `X1.self.egress`
+  (`spec.egress` false unless the profile allows it) and `X1.offline`.
+- `X1.offline`: on a profile that requires X1 (unless `requireOfflineGate: false`, as on
+  `general-self`), a general-gate record needs `gate.floor_checked_offline: true` (fail closed); a
+  curated family record predates the field and passes. The general-gate schema is the setting
+  `SH_GATE_RECORD_SCHEMA` (default `moca-gate-record/1`; a malformed value refuses to boot), and
+  GET /v1/policy answers it as `gateRecordSchema`, so a client's dry run applies the rule as the
+  deployment does (an older control plane without the field reads as the default).
+- The `gate` provenance record's `source` adds `self`, with `scope`: the subject the record counts
+  for, the template's owner (the submitter, except on an admin's build for another subject's
+  template).
+- `Template` and `TemplateBuild` add `attestation` (`deployment | self`), recomputed on every read
+  from the current policy: `self` for a build made on a `selfAttest` profile whose record is not
+  trusted now, whatever its trust at create. `TemplateBuild` adds `gateFloorCheckedOffline`, and
+  `gateFloorMetOffline` for a gate from a `network_needed` contract. A template with a registered
+  self-attested build reads `visibility: private`, whatever is stored.
+- New error code `self_attested` (409): a self-attested create asking for `deployment`
+  visibility, or a self-attested build added to a deployment-visible template. PATCH
+  /v1/templates/{id} answers the same refusal for `visibility: deployment` on a template with a
+  self-attested build, registered or on its way there, and PUT /v1/templates/{id}/owner for a
+  transfer of such a template to another subject.
+- PUT /v1/policy: a removal from `trustedGateRecords` that makes builds of deployment-visible
+  templates self-attested names them as `narrowed: [{template, buildId}]` in its answer and in its
+  `policy` record; those templates read as private from then on, and their owners keep using them.
+- `Policy` adds the optional `allowedRepositories`: per registry host (as the policy reads it,
+  Docker Hub as `docker.io`), the repositories a create may name there, each an exact path
+  (`library/python`) or a prefix (`library/*`), matched on whole path segments; a Docker Hub
+  official name reads as `library/<name>`. New create rule `registry.repository`, which also
+  refuses there an image path outside the entries' grammar (uppercase, or an empty, `.` or `..`
+  segment). A registry with
+  no list allows every repository, as before; a registry listed there must also be in
+  `allowedRegistries`. Its keys compare case-insensitively, as `allowedRegistries` does.
+
 ## 1.8.0
 
 Template tags, edits and owner transfer through the API

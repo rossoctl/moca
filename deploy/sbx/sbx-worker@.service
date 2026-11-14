@@ -10,7 +10,9 @@ Description=SBX0 sandbox worker %i (microvm-worker)
 # drop-in (sbx-worker@<id>.service.d/egress.conf, install-host.sh), and a --no-egress worker gets
 # none. In this shared unit it made every worker, --no-egress ones too, start whatever
 # moca-egress.service the host had, another install's included.
-After=network-online.target
+# sbx-read-ahead.service (install-host.sh, when SBX_READ_AHEAD_KB is not 0) sets the snapshot
+# device's read-ahead at boot; After= alone, so a host without it starts its workers all the same.
+After=network-online.target sbx-read-ahead.service
 Wants=network-online.target
 # As deploy/microvm/microvm-worker.service: fail loudly without KVM, and stop restarting a broken worker after 5 tries in 5 minutes.
 AssertPathExists=/dev/kvm

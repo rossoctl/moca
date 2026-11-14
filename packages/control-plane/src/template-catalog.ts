@@ -9,7 +9,8 @@ import type { SandboxTemplate } from './sandbox-config.js';
 /**
  * The template catalog (template lifecycle spec §3.1-§3.3): templates are declared in the control
  * plane's store, each a name over its builds, with tags naming builds. This holds what the read API
- * (§4) and the self-serve create (§4, §8.1) need; building, registration and activation come later.
+ * (§4), the self-serve create (§4, §8.1), the host agents' builds and registration (§6.1, §8.2,
+ * host-handlers.ts) and activation (§6.2-§6.4, activation.ts: each build's leases) need.
  *
  * Two implementations:
  *   MemoryTemplateCatalog  built from SH_SANDBOX_TEMPLATES at every start: today's behaviour, no
@@ -21,7 +22,7 @@ import type { SandboxTemplate } from './sandbox-config.js';
  * A template imported from the env list has one build, `imported:<12 hex>` (importedBuildId): the
  * list names no snapshot, so there is no manifest hash to be its id, and the worker id is
  * deployment plumbing a client never sees, so the id is a digest of it, not the worker itself. A
- * built build (a later issue) is named by its snapshot's manifest hash.
+ * registered build from a host agent is named by its snapshot's manifest hash.
  */
 
 /** Written last by the one-time import, so a start without it resumes an interrupted import. */
@@ -58,11 +59,44 @@ export interface TemplateBuild {
   createdAt: number;
   /** The digest of the provenance record that created it, when the catalog records provenance. */
   provenance?: string;
-  /** What a build host needs to build it: the image and the spec as the client sent them. */
+  /** What a host agent needs to build it (§6.1): the image and the spec as the client sent them. */
   request?: { image: string; spec: Record<string, unknown>; gateRecordSha256?: string };
+  /** Epoch milliseconds it was queued: the claim order (createdAt is whole seconds). */
+  queuedAtMs?: number;
+  /** The host that claimed it, and when (epoch seconds). */
+  claim?: { host: string; at: number };
+  /**
+   * Created on a selfAttest profile with a gate record the policy did not trust (self-attestation):
+   * a fact of its create. Whether it is self-attested NOW is recomputed from the current policy
+   * (attestationOf): an admin's promotion or removal of the record needs no rewrite.
+   */
+  selfAttested?: boolean;
+  /**
+   * Created on a selfAttest profile with a gate record, trusted or not at create: a fact of its
+   * create. Such a build reads as self-attested whenever its record is not trusted NOW
+   * (attestationOf), so a trust removal narrows it whatever the order of events.
+   */
+  selfAttestProfile?: boolean;
+  /**
+   * Its gate record's offline facts: whether the floor was checked offline, and, from a
+   * `network_needed` contract, whether the offline run met it. Absent: no gate record.
+   */
+  gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
   /** On `failed` or `rejected`: why, and at which step or rule. */
   reason?: { message: string; step?: string; rule?: string };
+  /**
+   * Activation leases (§6.3): each subject's hold on this build, until (epoch seconds). The build is
+   * wanted active while any lease is unexpired; aging is a lease running out. `since` is when the
+   * subject's hold began (renewals keep it: first leased, first placed); `record` is the digest of
+   * the `activate` record that granted the lease, which a sandbox under it cites (§7.1).
+   */
+  leases?: { subject: string; until: number; since?: number; record?: string }[];
+  /** The host agent's build log, newest last, at most LOG_MAX entries (§4 logs). */
+  log?: { at: number; level: 'info' | 'warn' | 'error'; step: string; message: string }[];
 }
+
+/** A build log keeps at most this many entries; older ones are dropped, oldest first. */
+export const LOG_MAX = 1000;
 
 export interface TemplateDoc {
   schema: typeof TEMPLATE_DOC_SCHEMA;

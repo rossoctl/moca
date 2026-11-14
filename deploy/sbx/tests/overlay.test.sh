@@ -264,8 +264,14 @@ vol="$(jq -r '.spec.template.spec.volumes[] | select(.persistentVolumeClaim.clai
   fail 'the store PVC is not mounted at /var/lib/moca/templates'
 [[ "$(cp_env SH_PROVENANCE_DIR | jq -r .value)" == /var/lib/moca/templates ]] || fail 'SH_PROVENANCE_DIR is not /var/lib/moca/templates'
 [[ "$(jq -r .spec.strategy.type <<<"$CP")" == Recreate && "$(jq -r '.spec.strategy.rollingUpdate // "none"' <<<"$CP")" == none ]] || fail 'the control plane is not strategy Recreate (store on)'
-# Nothing else of the control plane changes: its credentials volume is moca-mu1's alone, no egress store.
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | (.secret.secretName // (.projected.sources[]?.secret.name))]' <<<"$CP")" == '["moca-mu1"]' ]] ||
-  fail "store on changed the credentials volume: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+# The host agents' tokens (spec §6.1): sbx-template-hosts projected beside moca-mu1's two items, and
+# sbx-egress restated as optional (a strategic merge replaces the source list, and egress may be off);
+# SH_TEMPLATE_HOSTS from sbx-settings, optional. No egress store.
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[]?.secret | [.name, (.optional // false)]]' <<<"$CP")" == '[["moca-mu1",false],["sbx-egress",true],["sbx-template-hosts",false]]' ]] ||
+  fail "store on: the credentials volume is not moca-mu1, sbx-egress (optional) and sbx-template-hosts: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[0].secret.items[].key]' <<<"$CP")" == '["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]' ]] ||
+  fail "store on changed moca-mu1's items in the credentials volume"
+[[ "$(cp_env SH_TEMPLATE_HOSTS | jq -c .valueFrom.configMapKeyRef)" == '{"key":"SH_TEMPLATE_HOSTS","name":"sbx-settings","optional":true}' ]] ||
+  fail 'SH_TEMPLATE_HOSTS is not read from sbx-settings (optional)'
 [[ -z "$(cp_env SH_CREDENTIAL_STORE)" ]] || fail 'store on turned on the credential store'
-pass 'template store on: PVC (RWO 1Gi) mounted at /var/lib/moca/templates as SH_PROVENANCE_DIR, Recreate, credentials unchanged'
+pass 'template store on: PVC (RWO 1Gi) mounted at /var/lib/moca/templates as SH_PROVENANCE_DIR, Recreate, the host tokens projected beside moca-mu1, SH_TEMPLATE_HOSTS from sbx-settings'
