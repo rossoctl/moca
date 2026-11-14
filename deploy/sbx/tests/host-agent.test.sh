@@ -632,7 +632,7 @@ SBX_IDLE_GRACE_S=900 st_run || fail 'the grace-end run failed'
 grep -q '"agent":"stopped","worker":"sbx_s2","was":"graced"}' "$TMP/out" || fail 'the end of a grace is not logged'
 ! grep -q '"graced":' "$TMP/out" || fail 'the summary counts a grace that ended'
 [[ ! -e "$TMP/state/active-sbx-worker@sbx_s2.service" ]] || fail 'the worker whose grace ended still runs'
-# A control plane without `graced` (older than 1.12.0): nothing graced, as before.
+# A control plane without `graced` (older than 1.13.0): nothing graced, as before.
 touch "$TMP/state/active-sbx-worker@sbx_s3.service"
 jq -n '{run: [], stop: [{template: "s3", buildId: "sha256:s3", worker: "sbx_s3"}]}' >"$TMP/state/wanted-answer"
 st_run || fail 'the no-graced run failed'

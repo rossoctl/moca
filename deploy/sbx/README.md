@@ -193,6 +193,14 @@ a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx
 `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` is kept; remove it by hand when no sandbox needs
 it.
 
+A worker install also sets the kernel read-ahead of the block device holding `/srv/sbx` to
+`SBX_READ_AHEAD_KB` (default 512 KiB; `0` leaves the device alone), so a worker's cold start reads its
+snapshot's memory file faster, and installs `sbx-read-ahead.service` to set it again at each boot
+(enabled whatever `SBX_WORKER_AT_BOOT` says, so a worker a host agent starts later reads ahead too). The
+setting is device-wide: anything else on that volume (another Moca tier, other sandboxes) reads ahead
+as much. The last uninstall writes the device's earlier value back:
+[the runbook](RUNBOOK.md#snapshot-read-ahead).
+
 **A template's snapshot and worker from a container image** are what
 `deploy/sbx/template-onboarding/template-build.sh` (on the KVM host: the snapshot, checked in a
 microVM, and a template record) and `template-register.sh` (on the operator's machine: the record

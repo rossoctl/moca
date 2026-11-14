@@ -110,6 +110,10 @@
 #                      left the host WORSE off than before it ran. Publishing by rename
 #                      after verification means a failed build leaves the previous
 #                      good snapshot exactly where it was.
+#   9. seed_verify_cache -- after publishing, best-effort and never failing the build:
+#                      the worker binary's own -verify-snapshot does the first full
+#                      check of $OUT and records it in the worker's verify cache,
+#                      so the first worker start does not re-hash the snapshot.
 #
 # Needs a KVM host with the chosen VMM installed; it cannot run in CI. What CAN run
 # everywhere is deploy/microvm/tests/build-snapshot.test.sh, which pins this script's
@@ -147,6 +151,9 @@ VCPUS=1
 # verify_guest_command. VERIFY_TIMEOUT_S bounds it in the guest.
 VERIFY_COMMAND=""
 VERIFY_TIMEOUT_S=600
+# The microvm-worker binary that seeds the worker's verify cache after publishing
+# (seed_verify_cache). Best-effort: a missing or older binary only skips the seed.
+WORKER_BIN="/usr/local/bin/microvm-worker"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -155,6 +162,7 @@ build-snapshot.sh --kernel PATH --rootfs PATH --agent PATH --image NAME
                   [--guest-ram-mb 256] [--out DIR] [--egress-ca PATH]
                   [--skip-git-identity-check] [--guest-home /tmp/DIR [--guest-home-gitconfig]] [--vcpus 1]
                   [--verify-command CMD [--verify-timeout-s 600]]
+                  [--worker-bin /usr/local/bin/microvm-worker]
 
 Builds one golden snapshot, ON THE INSTANCE TYPE THAT WILL RUN IT (spec §2.4:
 restore requires identical hardware and software). --instance-type is an OVERRIDE:
@@ -189,6 +197,10 @@ artifact works.
                            exit fails the build and publishes nothing. The last 16 KiB of its
                            output are logged. Default: unset, so the check is `true` as before.
 --verify-timeout-s N       the guest-side timeout for --verify-command, 1-86400 s (default 600).
+--worker-bin PATH          the microvm-worker that seeds its verify cache for the published
+                           snapshot (`microvm-worker -verify-snapshot OUT`), so the first worker
+                           start skips re-hashing it (default /usr/local/bin/microvm-worker;
+                           SBX0 hosts: SBX_WORKER_BIN). Best-effort: never fails the build.
 USAGE
   exit 2
 }
@@ -254,6 +266,11 @@ while [ $# -gt 0 ]; do
       ;;
     --verify-timeout-s)
       VERIFY_TIMEOUT_S="${2:-}"
+      shift 2
+      ;;
+    --worker-bin)
+      WORKER_BIN="${2:-}"
+      [ -n "$WORKER_BIN" ] || usage
       shift 2
       ;;
     -h | --help)
@@ -2572,6 +2589,44 @@ publish_snapshot() {
 }
 
 # ---------------------------------------------------------------------------
+# 9. seed_verify_cache
+# ---------------------------------------------------------------------------
+# A worker verifies its snapshot at every start: kernel, rootfs, agent and vmstate hashed in
+# full, several GiB. With its verify cache (remote-worker/internal/vmpool/verifycache.go) a
+# file whose identity is unchanged since a full hash on this host matched the manifest is not
+# hashed again -- but without this step the first start after a build is still a full read,
+# and a snapshot is often rebuilt and then cold-started only a few times. So the worker's
+# OWN code does that first full check here, right after publishing, while the files are still
+# in the page cache: `microvm-worker -verify-snapshot $OUT` verifies $OUT against its
+# manifest (memfile included) and records the matches in the cache file the worker for $OUT
+# reads (one implementation of the cache, not a shell copy of its format).
+#
+# Best-effort, after publish: it can never fail or undo a build. A missing binary is skipped
+# with a log line; a failure (an older binary without -verify-snapshot, an unwritable cache)
+# is logged and the build still succeeds, its first start hashing in full as before. The
+# environment is cleared (env -i) so an older binary, which takes no arguments and would
+# start as a worker, stops at once on its missing SH_SNAPSHOT_DIR instead of registering;
+# only the three cache settings pass through.
+seed_verify_cache() {
+  if [ ! -x "$WORKER_BIN" ]; then
+    log "verify cache not seeded: no executable microvm-worker at $WORKER_BIN (--worker-bin); its first start hashes the snapshot in full"
+    return 0
+  fi
+  local rc=0
+  local -a envs=(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+  [ -z "${SH_VERIFY_CACHE+x}" ] || envs+=("SH_VERIFY_CACHE=$SH_VERIFY_CACHE")
+  [ -z "${SH_VERIFY_CACHE_PATH+x}" ] || envs+=("SH_VERIFY_CACHE_PATH=$SH_VERIFY_CACHE_PATH")
+  [ -z "${SH_VERIFY_CACHE_DIR+x}" ] || envs+=("SH_VERIFY_CACHE_DIR=$SH_VERIFY_CACHE_DIR")
+  env -i "${envs[@]}" "$WORKER_BIN" -verify-snapshot "$OUT" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "verify cache seeded for $OUT"
+  else
+    log "verify cache not seeded ($WORKER_BIN -verify-snapshot exited $rc; a binary older than the verify cache has no such mode); the snapshot is published and fine, its first start hashes it in full"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 main() {
   require_root
   preflight
@@ -2587,6 +2642,7 @@ main() {
   lock_down
   verify_restore
   publish_snapshot
+  seed_verify_cache
   log "done: $OUT"
 }
 
