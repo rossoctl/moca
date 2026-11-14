@@ -523,6 +523,25 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     operationId: 'transferTemplateOwner',
   },
+  // Template lifecycle spec §6.3: take, renew or release the caller's activation lease.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/activate',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'activateTemplate',
+  },
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/deactivate',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    bodyRequired: false,
+    operationId: 'deactivateTemplate',
+  },
   {
     method: 'GET',
     path: '/v1/policy',
@@ -588,6 +607,23 @@ export const ROUTES: readonly RouteSpec[] = [
     profiles: BOTH,
     maxBodyBytes: 1024 * 1024,
     operationId: 'hostBuildReport',
+  },
+  // Template lifecycle spec §6.3: the host's wanted state, and its workers' starts and stops.
+  {
+    method: 'GET',
+    path: '/v1/hosts/{host}/wanted',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostWanted',
+  },
+  {
+    method: 'POST',
+    path: '/v1/hosts/{host}/workers/report',
+    auth: 'host',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'hostWorkerReport',
   },
   // SBX0 §5.1: the sandbox resource, on the sandbox profile only (sandbox-handlers.ts).
   {

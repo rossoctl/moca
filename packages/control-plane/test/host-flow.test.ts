@@ -417,6 +417,8 @@ describe('host authentication', () => {
       'hostBuildReport',
       'hostClaimBuilds',
       'hostInventory',
+      'hostWanted',
+      'hostWorkerReport',
     ]);
     for (const r of host) expect(r.path.startsWith('/v1/hosts/{host}/'), r.path).toBe(true);
     expect(matchRoute('POST', '/v1/hosts/host-1/builds/claim', 'harness')?.route.operationId).toBe(

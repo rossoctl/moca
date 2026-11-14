@@ -791,9 +791,10 @@ reason), and 2 on a usage or settings error, before any sandbox is touched.
 
 The self-serve template build of the
 [template lifecycle spec](../../docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md)
-§6.1. `deploy/sbx/host-agent.sh --once` is one poll of a KVM host's agent: it reports what the host
-holds, claims queued template builds (clients create them with `POST /v1/templates`), runs
-`template-build.sh` on each with its gate record, and reports the result. The control plane
+§6.1, and the activation of §6.3. `deploy/sbx/host-agent.sh --once` is one poll of a KVM host's
+agent: it reports what the host holds, claims queued template builds (clients create them with
+`POST /v1/templates`), runs `template-build.sh` on each with its gate record, and reports the
+result; then it starts and stops installed workers by the host's wanted state. The control plane
 registers or rejects each built build by policy; nobody approves it. It needs:
 
 - on the control plane, the template store and this host's bearer: run `setup.sh` with
@@ -808,9 +809,10 @@ registers or rejects each built build by policy; nobody approves it. It needs:
 - on the host, `/etc/sbx/host-agent.env` (`SBX_API_URL`, `SBX_HOST_ID`, `SBX_KERNEL`, optionally
   `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB`, `SBX_BUILD_CONCURRENCY`, `SBX_ACTIVE_LIMIT`,
   `SBX_IDLE_LIMIT_S`, `SBX_REGISTRY`), the token alone in `/etc/sbx/host-agent.token` (0600, root),
-  the script at `/usr/local/libexec/sbx-host-agent.sh`, and `sbx-host-agent.service` with its timer
-  (every 2 minutes) in `/etc/systemd/system`; then
-  `systemctl daemon-reload && systemctl enable --now sbx-host-agent.timer`. The unit sets
+  the script at `/usr/local/libexec/sbx-host-agent.sh`, and in `/etc/systemd/system`
+  `sbx-host-agent.service` with its timer (every 2 minutes) and `sbx-host-agent-wanted.service`
+  with its timer (every 15 s, the wanted state alone); then `systemctl daemon-reload` and
+  `systemctl enable --now sbx-host-agent.timer sbx-host-agent-wanted.timer`. The unit sets
   `SBX_TEMPLATE_BUILD` to the checkout at `/srv/sbx/src` (the agent cannot find it from
   `/usr/local/libexec`) and `REGISTRY_AUTH_FILE=/run/containers/0/auth.json` (it hides root's
   home): log root's podman in with `--authfile /run/containers/0/auth.json`. With `SBX_REGISTRY`
@@ -823,8 +825,9 @@ registers or rejects each built build by policy; nobody approves it. It needs:
 It never claims a build below `SBX_DISK_FLOOR_GB` of free disk (default 60), claims at most
 `SBX_BUILD_CONCURRENCY` builds a poll (default 1, at most 4), and checks a gate record's bytes
 against their sha256 before building with it. The token stays in a 0600 header file, never in argv
-or the log. A bad setting is refused (exit 2) before any call. Each poll ends with one summary line,
-`{"agent":"summary","claimed","built","failed","errors"}`, in the unit's journal.
+or the log. A bad setting is refused (exit 2) before any call. Each run ends with one summary line,
+`{"agent":"summary","claimed","built","failed","started","stopped","errors"}`, in the unit's
+journal.
 
 **Nothing that names where an image lives leaves the host.** A failed build's reason and its
 uploaded log are redacted (`SBX_REGISTRY` exactly, then URLs, registry hosts, IP addresses and
@@ -840,8 +843,45 @@ build), so it does not stay `building`. Text that
 reached the store before a redaction rule existed is removed offline with
 `template-onboarding/redact-provenance.py` (its `--catalog-only` mode for a build's stored log).
 
-**A registered build's worker is still installed by an operator.** The agent builds and reports; it
-installs and starts no worker. A worker's relay token is minted only by `setup.sh`, so for a new
+**Activation: the agent runs the workers the control plane wants.** A client takes a lease on a
+registered build (`POST /v1/templates/{id}/activate`, or `mocactl sbx templates activate ID`), or a
+sandbox create on an inactive build takes one (activation on first use: `409 template_not_active`
+with `Retry-After`, retried by `mocactl`). A build is wanted running only while a lease stands. The
+templates declared in `SBX_TEMPLATES_FILE` (`SH_SANDBOX_TEMPLATES`) are not affected: their workers
+are the deployment's to run, they take no lease, and a create on one is never gated. Each
+host's wanted state (`GET /v1/hosts/<id>/wanted`) lists the leased builds placed on it, at most
+`SBX_ACTIVE_LIMIT` of them, in `run`, and the builds it holds with no lease and no live sandbox in
+`stop`. After each build poll, and every 15 s in `sbx-host-agent-wanted.service` (`host-agent.sh
+--wanted-only`: no claim, no build), the agent stops each `stop` worker whose unit is active, then
+starts each `run` worker whose `sbx-worker@<id>` unit is installed and not active, and reports each start,
+refusal and stop (`attached`, `refused`, `detached`) as provenance; readiness is the relay's
+attached record, never these reports. A worker with a live sandbox is never stopped: it drains
+first. A lock (`/srv/sbx/.activation.lock`) keeps the two units from starting or stopping workers at
+once; the one without it skips, saying so. A host whose last inventory is over 6 minutes old (three
+build polls) is left out of placement and of `GET /v1/templates`' hosts until it reports again, so
+a stopped or removed agent takes no new placement and no slot. Size the limits:
+
+- `SBX_ACTIVE_LIMIT` is how many workers the host runs at once: each pins its snapshot's guest
+  memory whole from its start, with its standby VMs, so size it from the host's memory and the
+  templates' guest sizes, leaving the host's own reserve. 0 (unset) places nothing on the host.
+  Every worker that stays running counts against it: the leased builds placed or running on the
+  host (the inventory says which units run; a running build stays on its host), and an unleased
+  one still draining a live sandbox, until it stops.
+- `SBX_IDLE_LIMIT_S` is the default lease length a client gets when it names none (the largest of
+  the hosts' that hold the build, clamped to 60-86400 s; else 3600 s). A lease is renewed by activating again.
+- The policy's `quota.active` caps the builds one subject holds a lease on at once
+  (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the use.
+
+A refused activation keeps no lease: `409 template_unavailable` (no registered build, or no host
+that reports holds it) or `409 no_active_slot` with `Retry-After` (every host holding it is at
+its limit with leased builds; nothing leased is evicted). The activation check and lease write run
+one at a time, under a lock in the control plane's process: keep one control-plane process per
+template store (the Deployment's one replica, the store's ReadWriteOnce volume).
+
+**A registered build's worker is still installed by an operator.** The agent builds, reports, and
+starts and stops installed workers; it installs none, and a wanted build whose worker is not
+installed is reported `refused` (`worker not installed`). A worker's relay token is minted only by
+`setup.sh`, so for a new
 template: add a worker id to `SBX_WORKERS` and the template to `SBX_TEMPLATES_FILE`, re-run
 `setup.sh`, and install the worker on the host that built the snapshot, as in §5, with
 `--snapshot <snapshot>` (the record's `snapshot`, `$SBX_SRV/templates/<snapshot>.json`).
@@ -857,7 +897,8 @@ Known limits: a claimed build is not re-queued if the agent dies mid-build (canc
 /v1/templates/{id}/builds/{build}/cancel`, and create it again); one poll builds up to
 `SBX_BUILD_CONCURRENCY` builds, and builds are not scheduled across hosts.
 
-To remove the agent: `systemctl disable --now sbx-host-agent.timer`, delete the two units,
+To remove the agent: `systemctl disable --now sbx-host-agent.timer sbx-host-agent-wanted.timer`,
+delete the four units,
 `/usr/local/libexec/sbx-host-agent.sh`, `/etc/sbx/host-agent.env` and `/etc/sbx/host-agent.token`,
 and `systemctl daemon-reload`; drop the host from `SBX_TEMPLATE_HOSTS` and re-run `setup.sh` to
 revoke its token.

@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # deploy/sbx/host-agent.sh -- sbx-host-agent, a KVM host's template agent
 # (docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md §6.1). One run is one poll:
-# report the inventory, claim queued builds, build each with template-build.sh, report the outcome.
-# The control plane registers or rejects a built build by policy (§8.2); nothing here does.
+# report the inventory, claim queued builds, build each with template-build.sh, report the outcome;
+# then start and stop installed workers as the control plane wants (§6.3). The control plane
+# registers or rejects a built build by policy (§8.2) and decides what runs; nothing here does.
 #
 # It installs no worker: a registered build's worker is installed by an operator (install-host.sh,
-# from the template record template-build.sh wrote, with its relay token from setup.sh).
+# from the template record template-build.sh wrote, with its relay token from setup.sh). A wanted
+# build whose worker is not installed is reported `refused`, never installed here.
 #
 #   sudo deploy/sbx/host-agent.sh --once          one poll (the unit's timer runs it)
+#   sudo deploy/sbx/host-agent.sh --wanted-only   the inventory and the wanted state only: no claim,
+#                                                 no build (sbx-host-agent-wanted's timer, every 15 s,
+#                                                 so an activation waits seconds, not behind a build)
+#
+# The wanted state (GET /v1/hosts/<id>/wanted): `run` lists the leased builds placed on this host,
+# `stop` the ones it holds with no lease and no live sandbox (or that another host is placed on). The
+# agent stops each `stop` worker whose unit is active, then starts each `run` worker whose
+# sbx-worker@<id> unit is installed and not active, reporting each start (`attached`), refusal (`refused`, with why) and stop (`detached`) to POST
+# /v1/hosts/<id>/workers/report. Readiness is the relay's attached record, never these reports. A
+# lock ($SBX_SRV/.activation.lock, flock) keeps a build poll and a --wanted-only run from applying
+# the wanted state at once: the one that does not get it skips, saying so.
 #
 # Run it through the unit (systemctl start sbx-host-agent.service): the unit loads host-agent.env; a
 # bare run sees none of it and refuses (SBX_API_URL). Installed outside the tree, it needs
@@ -42,8 +55,8 @@
 # effort, on any way out short of `built`.
 #
 # The token never reaches argv or a log: curl reads it from a 0600 header file. Output: one JSON line
-# per action, then one summary line {"agent":"summary","claimed","built","failed","errors"}. A refusal
-# of its own settings is exit 2.
+# per action, then one summary line {"agent":"summary","claimed","built","failed","started","stopped",
+# "errors"}. A refusal of its own settings is exit 2.
 set -euo pipefail
 export LC_ALL=C
 
@@ -51,17 +64,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${SBX_TEMPLATE_BUILD:=$REPO_ROOT/deploy/sbx/template-onboarding/template-build.sh}"
 HOST_ID_RE='^[a-z0-9][a-z0-9-]{0,30}$'
 HANDLE_RE='^b-[0-9a-f]{26}$'
+WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 TEMPLATE_ID_RE='^[a-z0-9][a-z0-9-]{0,30}$'
 DIGEST_RE='^sha256:[0-9a-f]{64}$'
 
 say() { printf '%s\n' "$*"; }
 refuse() { echo "sbx-host-agent: $*" >&2; exit 2; }
-CLAIMED=0 BUILT=0 FAILED=0 ERRORS=0
+CLAIMED=0 BUILT=0 FAILED=0 ERRORS=0 STARTED=0 STOPPED=0
 error() { ERRORS=$((ERRORS + 1)); say "{\"agent\":\"error\",\"why\":$(jq -Rn --arg w "$1" '$w')}"; }
 
 check_settings() {
   local t
-  for t in jq curl df mktemp base64 sha256sum; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
+  for t in jq curl df mktemp base64 sha256sum systemctl flock; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
   SBX_SRV="${SBX_SRV-/srv/sbx}" SBX_ENV_DIR="${SBX_ENV_DIR-/etc/sbx}"
   [[ "$SBX_SRV" =~ ^(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || refuse "SBX_SRV='$SBX_SRV' must be an absolute path other than /"
   [[ "${SBX_API_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || refuse 'SBX_API_URL must be https://<api host>'
@@ -108,15 +122,18 @@ held_records() {
   done
 }
 
-# The snapshots this host holds, by manifest hash, as template-build.sh's records name them, and
-# its limits.
+# The snapshots this host holds, by manifest hash, as template-build.sh's records name them, each
+# with whether its worker's unit is running (the control plane counts running workers against
+# SBX_ACTIVE_LIMIT and keeps a running build on this host), and its limits.
 inventory() {
-  local f out="$WORK/inventory.json"
+  local f w r out="$WORK/inventory.json"
   {
     printf '{"holds":['
     local sep=''
     while IFS= read -r f; do
-      printf '%s%s' "$sep" "$(jq -c '{template: .id, manifestHash: .manifest_hash}' "$f")"
+      w="$(jq -r '.worker // ""' "$f")" r=false
+      if [[ "$w" =~ $WORKER_RE ]] && systemctl is-active --quiet "sbx-worker@$w.service"; then r=true; fi
+      printf '%s%s' "$sep" "$(jq -c --argjson r "$r" '{template: .id, manifestHash: .manifest_hash, running: $r}' "$f")"
       sep=','
     done < <(held_records)
     printf '],"limits":{"activeLimit":%d,"idleLimitSeconds":%d,"buildConcurrency":%d,"diskFreeGb":%d,"diskFloorGb":%d}}' \
@@ -245,8 +262,68 @@ build_one() { # build_one JOB_JSON
   say "{\"agent\":\"reported\",\"build\":\"$handle\",\"outcome\":$(jq -c . <<<"$out")}"
 }
 
+worker_report() { # worker_report BUILD_ID EVENT [REASON]
+  jq -cn --arg b "$1" --arg e "$2" --arg r "${3:-}" '{buildId: $b, event: $e} + (if $r == "" then {} else {reason: $r} end)' \
+    >"$WORK/worker.json"
+  api POST "/v1/hosts/$SBX_HOST_ID/workers/report" "$WORK/worker.json" >/dev/null || error "worker report for $1 failed"
+}
+
+# Start what is wanted and installed; stop what is not wanted (the control plane leaves out a worker
+# with live sandboxes). Readiness is the relay's attached record, never this report. Under a lock, so
+# the build poll's pass and the --wanted-only one never start or stop the same worker at once; the
+# one that does not get it skips (the other is applying the same wanted state).
+activation() {
+  local wanted w b unit
+  exec 9>"$SBX_SRV/.activation.lock"
+  if ! flock -n 9; then
+    say '{"agent":"skipped","why":"another run is applying the wanted state"}'
+    exec 9>&-
+    return 0
+  fi
+  if ! wanted="$(api GET "/v1/hosts/$SBX_HOST_ID/wanted")"; then
+    error 'wanted state unreadable'; exec 9>&-; return 0
+  fi
+  if ! jq -e '(.run | type) == "array" and (.stop | type) == "array"' >/dev/null 2>&1 <<<"$wanted"; then
+    error 'wanted state malformed'; exec 9>&-; return 0
+  fi
+  # Stops first, so a slot a stopped worker frees is free before a start uses it.
+  while IFS=$'\t' read -r w b; do
+    [[ "$w" =~ $WORKER_RE ]] || { error 'a worker id to stop is malformed'; continue; }
+    unit="sbx-worker@$w.service"
+    systemctl is-active --quiet "$unit" || continue
+    if systemctl stop "$unit"; then
+      STOPPED=$((STOPPED + 1)); worker_report "$b" detached; say "{\"agent\":\"stopped\",\"worker\":\"$w\"}"
+    else
+      error "stop $unit failed"
+    fi
+  done < <(jq -r '.stop[] | [.worker, .buildId] | @tsv' <<<"$wanted")
+  while IFS=$'\t' read -r w b; do
+    [[ "$w" =~ $WORKER_RE ]] || { error 'a wanted worker id is malformed'; continue; }
+    unit="sbx-worker@$w.service"
+    if [[ ! -f "$SBX_ENV_DIR/workers/$w.env" ]]; then
+      worker_report "$b" refused 'worker not installed on this host (install-host.sh with its setup.sh bundle)'
+      say "{\"agent\":\"refused\",\"worker\":\"$w\",\"why\":\"not installed\"}"
+      continue
+    fi
+    systemctl is-active --quiet "$unit" && continue
+    # Returns at once (Type=simple): the worker reads its snapshot and attaches after this.
+    if systemctl start "$unit"; then
+      STARTED=$((STARTED + 1)); worker_report "$b" attached; say "{\"agent\":\"started\",\"worker\":\"$w\"}"
+    else
+      worker_report "$b" refused "systemctl start $unit failed"; error "start $unit failed"
+    fi
+  done < <(jq -r '.run[] | [.worker, .buildId] | @tsv' <<<"$wanted")
+  exec 9>&-
+}
+
+summary() {
+  say "{\"agent\":\"summary\",\"claimed\":$CLAIMED,\"built\":$BUILT,\"failed\":$FAILED,\"started\":$STARTED,\"stopped\":$STOPPED,\"errors\":$ERRORS}"
+}
+
 main() {
-  [[ $# -eq 1 && "$1" == --once ]] || { echo 'usage: host-agent.sh --once' >&2; exit 2; }
+  [[ $# -eq 1 && ( "$1" == --once || "$1" == --wanted-only ) ]] ||
+    { echo 'usage: host-agent.sh --once | --wanted-only' >&2; exit 2; }
+  local mode="$1"
   command -v jq >/dev/null || refuse 'needs jq on PATH'
   check_settings
   WORK="$(umask 077 && mktemp -d)"
@@ -256,6 +333,11 @@ main() {
   (umask 077 && printf 'Authorization: Bearer %s\n' "$(<"$SBX_HOST_TOKEN_FILE")" >"$HDR")
   if ! inventory; then
     say '{"agent":"skipped","why":"control plane unreachable or refused the inventory"}'
+    return 0
+  fi
+  if [[ "$mode" == --wanted-only ]]; then
+    activation
+    summary
     return 0
   fi
   local free
@@ -275,7 +357,10 @@ main() {
       error 'claim failed'
     fi
   fi
-  say "{\"agent\":\"summary\",\"claimed\":$CLAIMED,\"built\":$BUILT,\"failed\":$FAILED,\"errors\":$ERRORS}"
+  # The wanted state is applied whether or not a build was claimed (a registry login or the disk
+  # floor holds builds, never activations).
+  activation
+  summary
 }
 
 main "$@"

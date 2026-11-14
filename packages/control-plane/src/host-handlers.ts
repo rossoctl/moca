@@ -3,6 +3,8 @@ import { asRecord, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
+import { liveLeases, place, type HostView } from './activation.js';
+import { isLive } from './sandbox-store.js';
 
 /**
  * The template host agent's routes (template lifecycle spec §6.1): a KVM host's `sbx-host-agent`
@@ -18,6 +20,14 @@ import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalo
  * The control plane never trusts a report it cannot tie to its chain: a report must answer a build
  * this host claimed. On `built` it checks the build record against the create's request and the
  * policy (§8.2) and registers or rejects the build, automatically, with a `check` record.
+ *
+ *   GET  /v1/hosts/{host}/wanted             the builds this host should run (leased and placed on
+ *                                            it), and those it holds that it should stop (no lease
+ *                                            left, no live sandbox)
+ *   POST /v1/hosts/{host}/workers/report     {buildId, event: attached | refused | detached, reason?}
+ *
+ * Readiness itself is never taken from a report: `active` is the relay's attached record (§3.3).
+ * The worker reports are provenance: who ran what, where, when.
  */
 
 const MANIFEST_HASH_RE = /^sha256:[0-9a-f]{64}$/;
@@ -49,6 +59,17 @@ export interface HostState {
   at: number;
   /** manifest hash -> template id, what the host holds. */
   holds: Record<string, string>;
+  /**
+   * The held builds whose worker unit runs: as the last inventory said, then kept current by the
+   * host's attached and detached reports, so placement counts what the host really runs.
+   */
+  running: string[];
+  /**
+   * buildId -> the last `refused` report (its reason) this host made for a build it is still asked
+   * to run: a repeat is not recorded again (hostWorkerReport). Cleared once the build leaves the
+   * host's `run`, or on any other report for it.
+   */
+  refused?: Record<string, string>;
   limits: {
     activeLimit: number;
     idleLimitSeconds: number;
@@ -70,6 +91,40 @@ export class HostRegistry {
   all(): [string, HostState][] {
     return [...this.hosts.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
   }
+}
+
+/**
+ * A host whose last inventory is older than this is left out of placement, of the hosts block and of
+ * the default lease until it reports again: three of the build poll's two-minute intervals (the
+ * --wanted-only timer re-sends it every 15 s). A host whose agent died or was removed then takes no
+ * new placement and no activeLimit slot, and a deployment whose every host is silent reads
+ * readiness from the workers' presence alone, as before any host reported.
+ */
+export const HOST_STALE_S = 360;
+
+/** The hosts as their agents last reported (§6.1), as placement reads them: fresh ones only. */
+export function hostViewsOf(deps: CpDeps): HostView[] {
+  return freshHosts(deps).map(([id, h]) => ({
+    id,
+    holds: h.holds,
+    activeLimit: h.limits.activeLimit,
+    running: h.running,
+  }));
+}
+
+/** The workers with a live sandbox: never stopped under one, so they drain and keep their slot. */
+export async function busyWorkers(deps: CpDeps, nowS: number): Promise<Set<string>> {
+  const busy = new Set<string>();
+  if (deps.sandboxes) {
+    for (const r of await deps.sandboxes.listAll(nowS)) if (isLive(r, nowS)) busy.add(r.worker);
+  }
+  return busy;
+}
+
+/** The hosts whose last inventory is at most HOST_STALE_S old, by id. */
+export function freshHosts(deps: CpDeps): [string, HostState][] {
+  const nowS = seconds(deps);
+  return (deps.hosts?.all() ?? []).filter(([, h]) => nowS - h.at <= HOST_STALE_S);
 }
 
 function catalogOf(deps: CpDeps) {
@@ -189,10 +244,94 @@ function reportable(y: TemplateBuild, host: string): void {
 }
 
 export const HOST_HANDLERS: Record<string, Handler> = {
+  /**
+   * The wanted state (§6.3): `run`, the registered builds this host holds that are leased and
+   * placed on it (the same placement activate judges by), and `stop`, the ones it holds with no
+   * live lease, or that it runs while placement keeps them on another host. A worker is never
+   * stopped under a live sandbox: it drains first, so a build with one is in neither list.
+   */
+  hostWanted: async (ctx, deps) => {
+    const host = hostOf(ctx);
+    const { cat } = catalogOf(deps);
+    const nowS = seconds(deps);
+    const docs = await cat.list();
+    const busy = await busyWorkers(deps, nowS);
+    const p = place(docs, hostViewsOf(deps), nowS, busy);
+    const mine = deps.hosts?.get(host);
+    const run: Record<string, unknown>[] = [];
+    const stop: Record<string, unknown>[] = [];
+    for (const d of docs) {
+      for (const b of d.builds) {
+        if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
+        const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
+        if (p.placed.get(b.buildId) === host) {
+          run.push(entry);
+          continue;
+        }
+        if (mine.refused) delete mine.refused[b.buildId];
+        // Stopped when no lease is left, or when it runs here while placement keeps it on another
+        // host (one worker id on two hosts): this host's copy stops. Never under a live sandbox.
+        const unleased = liveLeases(b, nowS).length === 0;
+        if (!busy.has(b.worker) && (unleased || mine.running.includes(b.buildId))) stop.push(entry);
+      }
+    }
+    return { status: 200, body: { run, stop } };
+  },
+
+  /**
+   * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
+   * installed, or the start failed) or stopped (`detached`), for a registered build this host
+   * holds: an `activate` or `deactivate` record by the host, except a refusal repeating the host's
+   * last one for a build still in its `run` (answered `recorded: null`). Readiness still comes from
+   * the relay.
+   */
+  hostWorkerReport: async (ctx, deps) => {
+    const host = hostOf(ctx);
+    const { cat, prov } = catalogOf(deps);
+    const b = asRecord(ctx.body);
+    const event = b.event;
+    if (event !== 'attached' && event !== 'refused' && event !== 'detached') {
+      throw new CpError('invalid_request', 'event must be attached, refused or detached');
+    }
+    const buildId = typeof b.buildId === 'string' ? b.buildId : '';
+    const doc = (await cat.list()).find((d) =>
+      d.builds.some((x) => x.buildId === buildId && x.status === 'registered'),
+    );
+    if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
+      throw new CpError('not_found', 'no registered build this host holds');
+    }
+    const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
+    // What the host runs, as placement counts it, without waiting for its next inventory: started
+    // (attached) runs; stopped (detached) and not started (refused) do not.
+    const st = deps.hosts!.get(host)!;
+    const others = st.running.filter((x) => x !== buildId);
+    st.running = event === 'attached' ? [...others, buildId] : others;
+    // A refusal the same as this host's last one for a build it is still asked to run (the agent
+    // retries every 15 s: a worker not installed, a unit whose start keeps failing) is not appended
+    // again: the template's stream is append-only provenance, and would grow by one record a poll.
+    st.refused ??= {};
+    if (event === 'refused') {
+      if (st.refused[buildId] === (reason ?? '')) {
+        return { status: 200, body: { recorded: null } };
+      }
+      st.refused[buildId] = reason ?? '';
+    } else {
+      delete st.refused[buildId];
+    }
+    await prov.append({
+      stream: `template/${doc.id}`,
+      kind: event === 'detached' ? 'deactivate' : 'activate',
+      subject: `host:${host}`,
+      body: { buildId, event, ...(reason ? { reason } : {}) },
+    });
+    return { status: 200, body: { recorded: event } };
+  },
+
   hostInventory: async (ctx, deps) => {
     const host = hostOf(ctx);
     const b = asRecord(ctx.body);
     const holds: Record<string, string> = {};
+    const running: string[] = [];
     const inv = Array.isArray(b.holds) ? b.holds : [];
     for (const h of inv) {
       const r = asRecord(h);
@@ -202,6 +341,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         typeof r.template === 'string'
       ) {
         holds[r.manifestHash] = r.template;
+        if (r.running === true) running.push(r.manifestHash);
       }
     }
     const l = asRecord(b.limits);
@@ -212,7 +352,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       diskFreeGb: nonNeg(l.diskFreeGb) ?? 0,
       diskFloorGb: nonNeg(l.diskFloorGb) ?? 0,
     };
-    deps.hosts?.set(host, { at: seconds(deps), holds, limits });
+    // A host's unrepeated refusals outlive its inventories (each poll replaces the rest).
+    const refused = deps.hosts?.get(host)?.refused ?? {};
+    deps.hosts?.set(host, { at: seconds(deps), holds, running, refused, limits });
     return { status: 200, body: { host, holds: Object.keys(holds).length } };
   },
 
