@@ -169,8 +169,16 @@ export class NoticeDedupe {
    * the caller's own; otherwise false, and nothing is marked.
    */
   claim(ev: LeaseEvent): boolean {
-    if (ev.state === 'expiring' || ev.atUnixMs <= this.newestMs) return false;
-    return this.mark(ev);
+    return this.claimable(ev) && this.mark(ev);
+  }
+
+  /** Whether `claim(ev)` would succeed, marking nothing: a caller may claim it later. */
+  claimable(ev: LeaseEvent): boolean {
+    return (
+      ev.state !== 'expiring' &&
+      ev.atUnixMs > this.newestMs &&
+      !this.seen.has(`${ev.state}:${ev.atUnixMs}`)
+    );
   }
 
   private mark(ev: LeaseEvent): boolean {

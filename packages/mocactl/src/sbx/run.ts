@@ -1,8 +1,10 @@
 import { posix } from 'node:path';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
+  ExecAbortedError,
   execFailureText,
   ExecMachineryError,
+  ExecRefusedError,
   TOKEN_MARGIN_S,
   type Exec,
   type ExecResult,
@@ -203,8 +205,15 @@ export async function cmdRun(
     }
     return r.exitCode;
   } catch (err) {
-    // The worker sends lease events before an error too (spec §5): said before the failure.
-    if (err instanceof ExecMachineryError) printNotices(c, id, err.lease);
+    // The worker sends lease events before an error too (spec §5): said before the failure, or
+    // the refusal, or the interrupt; the worker acked them, so nothing else will say them.
+    if (
+      err instanceof ExecMachineryError ||
+      err instanceof ExecRefusedError ||
+      err instanceof ExecAbortedError
+    ) {
+      printNotices(c, id, err.lease);
+    }
     return execFailed(c, err);
   } finally {
     x.close();

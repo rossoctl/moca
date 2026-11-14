@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
+  ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
   LEASE_RULE,
@@ -19,6 +20,7 @@ import {
   writeFileCommand,
   type ExecConnOptions,
   type ExecResult,
+  type LeaseEvent,
   type LeaseStatusView,
 } from '@moca/sandbox-client';
 import { describe, expect, it, vi } from 'vitest';
@@ -611,6 +613,30 @@ describe('mocactl sbx run lease notices (spec §5)', () => {
     expect(await runIt(s, () => boom)).toBe(125);
     expect(s.io.errs[0]).toBe(leaseNotice(later, Date.now()));
     expect(s.io.errs[1]).toMatch(/^sbx: /);
+    // A refused or aborted Exec carries the events it had received too (re-review New-2).
+    const refusedEnd = { ...end, reason: 'grace_limit', atUnixMs: end.atUnixMs + 120_000 };
+    expect(
+      await runIt(s, () => new ExecRefusedError('token rejected', 16, [refusedEnd as LeaseEvent])),
+    ).toBe(125);
+    expect(s.io.errs[0]).toBe(leaseNotice(refusedEnd, Date.now()));
+    expect(s.io.errs[1]).toMatch(/^sbx: /);
+    const abortedEnd = { ...end, reason: 'reset', atUnixMs: end.atUnixMs + 180_000 };
+    const ac = new AbortController();
+    s.io.errs.length = 0;
+    expect(
+      await sbxMain(['run', '--sandbox', SBX, '--', 'true'], s.env, s.io, {
+        home: s.home,
+        fetchImpl: mint().fetchImpl,
+        signal: ac.signal,
+        execFactory: fakeExec(() => {
+          ac.abort(); // Ctrl-C while the command runs
+          const e = new ExecAbortedError(ac.signal);
+          e.lease = [abortedEnd as LeaseEvent];
+          return e;
+        }).factory,
+      }),
+    ).toBe(130);
+    expect(s.io.errs).toEqual([leaseNotice(abortedEnd, Date.now())]);
     // An expiring event is shown on every result: it marks nothing seen.
     const exp = {
       ...end,

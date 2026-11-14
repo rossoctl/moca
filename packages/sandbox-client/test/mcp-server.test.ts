@@ -662,6 +662,35 @@ describe('lease mode (plan 4, spec §5)', () => {
     expect(text(await call(client, 'sandbox_info', {}))).toContain('\nlast end: reset, 14:02\n');
   });
 
+  it('a reset whose reply lands as it is cancelled leaves its end for the next result (re-review New-1)', async () => {
+    let first = true;
+    const { client } = await connect({
+      exec: async () => res({ lease: [RESET_END] }), // the worker keeps the end pending: it rides here
+      mode: 'lease',
+      lease: async (op, o) => {
+        if (op !== 'reset' || !first) return NO_LEASE;
+        first = false;
+        // The worker's answer arrives just as the call is cancelled: the SDK discards it.
+        return new Promise<LeaseStatusView>((resolve) =>
+          o?.signal?.addEventListener('abort', () =>
+            resolve({ ...NO_LEASE, mode: 'lease', epochKnown: true, pending: RESET_END }),
+          ),
+        );
+      },
+    });
+    const ac = new AbortController();
+    const p = call(client, 'reset', {}, ac.signal);
+    await sleep(10);
+    ac.abort();
+    await expect(p).rejects.toThrow();
+    await sleep(10);
+    // Never said by the reset, so said by the next result, once.
+    expect(text(await call(client, 'bash', { command: 'x' })).split('\n')[0]).toMatch(
+      /^\[sandbox\] guest restarted \(reset, 14:02\)/,
+    );
+    expect(text(await call(client, 'bash', { command: 'y' }))).toBe('ok\n');
+  });
+
   it('reset answers no lease for a pending reset end it has already seen (review #4569829039)', async () => {
     const f = leaseFake(ACTIVE);
     const { client } = await connect({

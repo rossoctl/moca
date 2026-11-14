@@ -284,6 +284,11 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
    * lease end goes unsaid.
    */
   const held: LeaseEvent[] = [];
+  /**
+   * The end the running `reset` reported itself, claimed when its result is sent. Resets run one
+   * at a time (the queue), so one slot is enough.
+   */
+  let ownEnd: LeaseEvent | undefined;
 
   /**
    * The lease fields of `sandbox_info` for the current mode (the latest token's, else the
@@ -342,10 +347,12 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     // Before the first mint the record read at start may be stale: read it again (one GET).
     currentMode: async () => o.leaseMode?.() ?? (await current()).mode,
     // The reset's own end, newer than anything seen: `reset`'s text says it, so the next
-    // result's notices do not repeat it (as mocactl's P4-R17), and `last end` names it.
+    // result's notices do not repeat it (as mocactl's P4-R17), and `last end` names it. It is
+    // claimed only once the call's result is sent (`run`): a reply that lands as the call is
+    // cancelled is discarded, and its end must stay deliverable as a notice.
     resetEnded: (p) => {
-      if (p?.state !== 'end' || p.reason !== 'reset' || !dedupe.claim(p)) return false;
-      noteEnds([p]);
+      if (p?.state !== 'end' || p.reason !== 'reset' || !dedupe.claimable(p)) return false;
+      ownEnd = p;
       return true;
     },
   });
@@ -424,17 +431,24 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
       return { ...r, content: [{ type: 'text', text: lines.join('\n') }, ...r.content] };
     };
     const run = async (): Promise<CallToolResult> => {
+      // Only the reset sets or reads `ownEnd`: sandbox_info is never queued, and may run beside it.
+      const resets = tool.name === 'reset';
       try {
         const r: ToolResult = await tool.run(args, counted, extra.signal);
+        const own = resets ? ownEnd : undefined;
+        if (resets) ownEnd = undefined;
         if (extra.signal.aborted) {
           // Resolved as the cancel arrived: the SDK discards this result, so its notices wait for
-          // the next one instead of being marked seen here (review #4569829034).
+          // the next one instead of being marked seen here (review #4569829034), and a reset's
+          // own end is not claimed: nobody reads the text that says it.
           held.push(...events);
           return refuse(CANCELLED);
         }
+        if (own && dedupe.claim(own)) noteEnds([own]);
         record(!r.isError);
         return noticed(r as CallToolResult);
       } catch (err) {
+        if (resets) ownEnd = undefined;
         // The SDK sends nothing for a cancelled request; the record says why it ended.
         if (extra.signal.aborted) {
           held.push(...events);

@@ -118,6 +118,12 @@ describe('NoticeDedupe (spec §5: events may repeat)', () => {
     const older = ev({ state: 'end', reason: 'reset', atUnixMs: AT - 1 });
     expect(d.claim(older)).toBe(false); // older than an event seen
     expect(d.take([older])).toEqual([older]); // a claim that fails marks nothing
+    // claimable asks without marking.
+    const later = ev({ state: 'end', reason: 'reset', atUnixMs: AT + 10 });
+    expect(d.claimable(later)).toBe(true);
+    expect(d.claimable(later)).toBe(true);
+    expect(d.take([later])).toEqual([later]);
+    expect(d.claimable(later)).toBe(false);
   });
 
   it('keeps every expiring event, and an expiring does not hide a later end at the same ms', () => {
