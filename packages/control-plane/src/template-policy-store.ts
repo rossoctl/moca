@@ -44,6 +44,7 @@ export class FilePolicyStore implements PolicyStore {
   private async write(
     policy: Policy,
     subject: string,
+    extra?: Record<string, unknown>,
   ): Promise<{ policy: Policy; record: string }> {
     const { digest } = await this.provenance.append({
       stream: 'policy',
@@ -52,6 +53,7 @@ export class FilePolicyStore implements PolicyStore {
       body: {
         policy: policy as unknown as Record<string, unknown>,
         digest: policyDigest(policy),
+        ...(extra ?? {}),
       },
     });
     const doc = { policy, record: digest };
@@ -76,9 +78,13 @@ export class FilePolicyStore implements PolicyStore {
     return this.serial(async () => (await this.read()) ?? this.write(DEFAULT_POLICY, 'deployment'));
   }
 
-  set(policy: Policy, subject: string): Promise<{ policy: Policy; record: string }> {
+  set(
+    policy: Policy,
+    subject: string,
+    extra?: Record<string, unknown>,
+  ): Promise<{ policy: Policy; record: string }> {
     const bad = policyProblems(policy);
     if (bad.length) return Promise.reject(new Error(bad.join('; ')));
-    return this.serial(() => this.write(policy, subject));
+    return this.serial(() => this.write(policy, subject, extra));
   }
 }

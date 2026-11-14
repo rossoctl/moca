@@ -65,6 +65,23 @@ export interface TemplateBuild {
   queuedAtMs?: number;
   /** The host that claimed it, and when (epoch seconds). */
   claim?: { host: string; at: number };
+  /**
+   * Created on a selfAttest profile with a gate record the policy did not trust (self-attestation):
+   * a fact of its create. Whether it is self-attested NOW is recomputed from the current policy
+   * (attestationOf): an admin's promotion or removal of the record needs no rewrite.
+   */
+  selfAttested?: boolean;
+  /**
+   * Created on a selfAttest profile with a gate record, trusted or not at create: a fact of its
+   * create. Such a build reads as self-attested whenever its record is not trusted NOW
+   * (attestationOf), so a trust removal narrows it whatever the order of events.
+   */
+  selfAttestProfile?: boolean;
+  /**
+   * Its gate record's offline facts: whether the floor was checked offline, and, from a
+   * `network_needed` contract, whether the offline run met it. Absent: no gate record.
+   */
+  gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
   /** On `failed` or `rejected`: why, and at which step or rule. */
   reason?: { message: string; step?: string; rule?: string };
   /**

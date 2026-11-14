@@ -85,6 +85,12 @@ TPL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TPL_DIR/../../.." && pwd)"
 : "${SBX_SRV:=/srv/sbx}"
 : "${SBX_MIN_FREE_GB:=50}"
+# The verify cache's seed: SBX0's own worker binary, never Moca's /usr/local/bin one (an SBX0
+# build runs no Moca binary), and the cache under SBX0's own tree, where install-host.sh points each
+# worker, so removing SBX_SRV removes it too. A missing binary only skips the seed.
+: "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
+: "${SH_VERIFY_CACHE_DIR:=$SBX_SRV/verify-cache}"
+export SH_VERIFY_CACHE_DIR
 # The two builders, overridable for the tests only.
 : "${SBX_BUILD_ROOTFS:=$REPO_ROOT/deploy/microvm/build-rootfs.sh}"
 : "${SBX_BUILD_SNAPSHOT:=$REPO_ROOT/deploy/microvm/build-snapshot.sh}"
@@ -354,6 +360,7 @@ fi
 args=(--kernel "$KERNEL" --rootfs "$BUILD/rootfs" --agent "$AGENT" --image "$NAME" --vmm "$VMM"
   --guest-ram-mb "$RAM" --vcpus "$VCPUS" --out "$OUT"
   --verify-command "$(verify_command)" --verify-timeout-s "$(jq -r '.probe.timeout_s' "$SPEC")")
+args+=(--worker-bin "$SBX_WORKER_BIN")
 [[ -z "$GUEST_HOME" ]] || args+=(--guest-home "$GUEST_HOME")
 [[ -z "$EGRESS_CA" ]] || args+=(--egress-ca "$EGRESS_CA")
 [[ "$(jq -r '.skip_git_identity_check // false' "$SPEC")" != true ]] || args+=(--skip-git-identity-check)
