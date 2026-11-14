@@ -45,6 +45,11 @@ const SHARED = [
   'POST /v1/hosts/{host}/builds/{build}/report',
   'GET /v1/hosts/{host}/wanted',
   'POST /v1/hosts/{host}/workers/report',
+  'GET /v1/subjects',
+  'PUT /v1/subjects/{subject}',
+  'DELETE /v1/subjects/{subject}',
+  'PUT /v1/subjects/{subject}/roles/admin',
+  'DELETE /v1/subjects/{subject}/roles/admin',
 ];
 
 const servers: Server[] = [];

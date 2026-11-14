@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
+import { MembersStore } from '../src/members.js';
 import { ProvenanceStore, recordDigest, sha256Hex } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
@@ -608,5 +609,33 @@ describe('owner transfer (§5.2)', () => {
     await registered(d);
     const r = (await transfer(d, ID, 'oidc:erin@example.test')).body as Body;
     expect(r).toMatchObject({ owner: 'oidc:erin@example.test', before: alice.sub });
+  });
+
+  it('hands a template to a subject enrolled through /v1/subjects, not before', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cp-tadmin-members-'));
+    const provenance = new ProvenanceStore({ dir, now: () => NOW_MS });
+    const members = new MembersStore({
+      dir,
+      provenance,
+      bootstrap: { allowed: [alice.sub, bob.sub], admins: [admin.sub] },
+    });
+    const d = makeDeps({
+      newId: () => `${(++seq).toString(16).padStart(26, '0')}000000`,
+      templates: new FileTemplateCatalog({ dir, declared: [], provenance }),
+      provenance,
+      policy: new FilePolicyStore({ dir, provenance }),
+      members,
+      config: { routeProfile: 'sandbox' },
+    });
+    await d.policy!.set(policy, admin.sub);
+    await registered(d);
+    const carol = 'github:5555';
+    expect(await codeOf(() => transfer(d, ID, carol))).toBe('invalid_request');
+    await HANDLERS.enrollSubject!(
+      ctx({ principal: admin, params: { subject: carol }, body: { enrolled: true } }),
+      d,
+    );
+    const r = (await transfer(d, ID, carol)).body as Body;
+    expect(r).toMatchObject({ owner: carol, before: alice.sub });
   });
 });

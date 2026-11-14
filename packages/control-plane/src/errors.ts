@@ -40,6 +40,9 @@ export const CP_ERROR_CODES = [
   'template_not_active',
   'mode_not_allowed',
   'self_attested',
+  'bootstrap_subject',
+  'self_revoke',
+  'admin_granted',
   'digest_mismatch',
   'bundle_quota_exceeded',
   'config_bundle_not_found',
@@ -125,6 +128,12 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: deployment visibility for a template with a self-attested build, until an admin trusts its
   // gate record (trustedGateRecords).
   self_attested: 409,
+  // 409: the subject is enrolled or an admin by the deployment's settings, which the API never edits.
+  bootstrap_subject: 409,
+  // 409: an admin may not revoke its own admin role.
+  self_revoke: 409,
+  // 409: an unenroll of a subject that holds an admin grant: the grant would keep its access.
+  admin_granted: 409,
   // A client-built bundle whose bytes do not hash to the digest it claimed (config-bundle store).
   digest_mismatch: 400,
   // 429: the config-bundle byte budget (per subject or deployment-wide) is full; retry after expiry.

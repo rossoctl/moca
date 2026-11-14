@@ -568,7 +568,8 @@ time, not by digest; a verifier older than a kind refuses a store holding one.
   against its policy, and matching a `build` record's manifest hash to a snapshot at hand.
 - **Redaction**, for data that must not be kept:
   `deploy/sbx/template-onboarding/redact-provenance.py STORE_DIR TEMPLATE_ID --pattern RE [--apply]`
-  (control plane stopped) rewrites the matching records of one stream and every later one, moves the
+  (control plane stopped) rewrites the matching records of one stream (a record matches where a
+  pattern changes one of its string values; keys are never rewritten) and every later one, moves the
   head, and appends a note to `redactions.log` (counts and heads, never the matched text);
   `--catalog-only` redacts text only the template catalog keeps. Dry run by default. An export taken
   before a redaction no longer verifies against the new head, by design.

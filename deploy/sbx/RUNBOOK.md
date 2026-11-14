@@ -192,6 +192,53 @@ Edit the list and re-run `setup.sh`. The control plane rolls with the new list:
 Admins (`SBX_ADMIN_SUBJECTS`) may list, read and delete every sandbox, but never mint a token for
 another user's: they cannot run commands in another user's code.
 
+**Enrollment and admins through the API** (on a deployment with a template store,
+`SBX_TEMPLATE_STORE=1`). The settings above stay the bootstrap; an admin named in
+`SBX_ADMIN_SUBJECTS` adds to them without a `setup.sh` run (an API-granted admin can't change
+access: `403`), each change a record on the `members` provenance stream:
+
+```bash
+mocactl sbx admin subjects                                   # who is enrolled, and how
+mocactl sbx admin subjects enroll github:<id>                # or unenroll; oidc:<sub> too
+mocactl sbx admin subjects grant github:<id> --until 1h      # a temporary admin: lapses by itself (365d at most)
+mocactl sbx admin subjects revoke github:<id>
+```
+
+Each change reads the subjects first and prints `old -> new` with its record; if the subject changed
+between that read and the write (another admin at once), it says so and exits 1: check and write
+again. A login issued for another deployment (another control plane or issuer) is refused before the
+write.
+
+It takes effect at the subject's next request. A subject in `SBX_ALLOWED_SUBJECTS` or
+`SBX_ADMIN_SUBJECTS` can't be unenrolled or revoked this way (`409 bootstrap_subject`): change the
+settings for those. Enrolling one of them writes nothing (it is already enrolled). Before removing a
+subject from the settings, check its `storeEnrolled` in `mocactl sbx admin subjects --json`
+(`enrolled (env, api too)` in the list): if true, the store still enrolls it, so unenroll it through
+the API once the settings no longer name it. An admin can't revoke its own role.
+A subject holding an admin grant can't be unenrolled while it does (`409 admin_granted`): revoke
+the role first.
+If the store's `members.json` can't be read (damaged by hand, a bad restore), the subjects in the
+settings keep working, with a warning in the control plane's log (once a minute at most), while API enrollments and grants
+don't count (those subjects are refused) until the file is restored: the settings stay the way back
+in.
+
+**What this changes for an operator:**
+
+- **Who controls access.** Without a store, every enrollment or admin change is a `setup.sh` run.
+  With one, an admin named in `SBX_ADMIN_SUBJECTS` enrolls subjects and grants admin through the
+  API. The record on the `members` stream is then the trace, so read it (`GET /v1/subjects`, the
+  provenance export) as part of any access review.
+- **Roles come from the store, not the login.** With a store, the control plane replaces a token's
+  `roles` claim, on every request, with the subject's roles now (the settings plus the store's
+  grants). Two consequences:
+  - **A login minted as a user acts as an admin** if its subject holds an API admin grant. Check
+    `GET /v1/subjects` before treating a login as user-only.
+  - **Revocation is immediate.** Removing a subject from `SBX_ADMIN_SUBJECTS` (a `setup.sh` run), or
+    revoking an API grant, takes effect at the subject's next request, even for an admin token that
+    is still valid. But `setup.sh` can't remove an API grant (those live in the store, on its
+    volume), so after removing an admin from the settings, check `GET /v1/subjects` for API admins
+    too. For a temporary admin, prefer an API grant with `--until`: it lapses by itself.
+
 ## 5. Adding, updating and removing a template
 
 The template onboarding folder, `deploy/sbx/template-onboarding/` (its `GUIDE.md` and

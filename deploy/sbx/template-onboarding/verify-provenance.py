@@ -25,7 +25,8 @@ import sys
 EXPORT_SCHEMA = "moca-provenance-export/1"
 RECORD_SCHEMA = "moca-provenance-record/1"
 KINDS = {"policy", "create", "gate", "build", "check", "activate", "deactivate", "tag", "visibility",
-         "owner", "retire", "reject", "use", "sandbox", "session"}
+         "owner", "retire", "reject", "use", "sandbox", "session", "member", "role"}
+MEMBER_KINDS = {"member", "role"}  # the members stream's kinds, and the only ones it holds
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -95,6 +96,8 @@ def verify(doc):
             if kind not in KINDS:
                 errors.append(f"{where}: unknown kind {kind}")
             if (kind == "policy") != (stream == "policy"):
+                errors.append(f"{where}: a {kind} record in stream {stream}")
+            if (kind in MEMBER_KINDS) != (stream == "members"):
                 errors.append(f"{where}: a {kind} record in stream {stream}")
             body = r.get("body") or {}
             if kind == "check":

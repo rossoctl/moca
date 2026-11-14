@@ -3,6 +3,37 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.12.0
+
+Enrollment and the admin role through the API
+([#739](https://github.com/rossoctl/moca/issues/739)), per the
+[enrollment and roles spec](../specs/2026-11-08-enrollment-and-roles-api-design.md). Every change is
+additive; without `SH_PROVENANCE_DIR` nothing changes.
+
+- New GET /v1/subjects (every enrolled subject with its roles, each with `source: env | api`),
+  PUT and DELETE /v1/subjects/{subject} (enroll with `{"enrolled": true}`, unenroll), and PUT and
+  DELETE /v1/subjects/{subject}/roles/admin (grant, with an optional `until` in epoch seconds, at
+  most 366 days ahead; revoke), on both route profiles. Any admin reads the list; only an admin named in
+  `SH_ADMIN_SUBJECTS` changes it (`403 forbidden` otherwise). The same holds for a PUT /v1/policy
+  that widens the policy (a trusted gate record, a registry or a repository added): an admin by an
+  API grant may narrow it and change its quotas. Each change answers the subject with
+  the `record` it wrote (null when nothing changed). With no store the routes answer
+  `400 invalid_request`. A `Subject` carries `storeEnrolled` (the store's own enrollment, apart from
+  the settings and any role); enrolling a subject the settings enroll writes nothing
+  (`record: null`).
+- A subject on these routes is `github:<numeric id>` or `oidc:<provider sub>` (the sub pattern the
+  OIDC login verifies); `test:<n>` and anything else is `400 invalid_request`. New `Subject` schema.
+- New error codes `bootstrap_subject` (409: unenrolling or revoking a subject the settings enroll or
+  make admin) and `self_revoke` (409: an admin revoking its own role).
+- With a store, roles and enrollment are evaluated per request: the control plane replaces a
+  verified token's `roles` with the subject's roles now, so a grant, a revoke or a lapsed `until`
+  takes effect at the subject's next request. The login, the refresh and the egress owner check use
+  the same evaluation. Without a store the token's claims stand, as before.
+- Each change is a record on a new `members` provenance stream: `member {subject, enrolled, before}`
+  and `role {subject, role, state: granted | revoked | expired, until, before}`, naming the acting
+  admin (`control-plane` for an `expired`, written once). `verify-provenance.py` and `verifyExport`
+  accept the two kinds on that stream only.
+
 ## 1.11.0
 
 Activation leases and the hosts' wanted state ([#742](https://github.com/rossoctl/moca/issues/742)),

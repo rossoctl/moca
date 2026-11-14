@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.11.0
+  version: 1.12.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -125,6 +125,9 @@ components:
             - template_not_active
             - mode_not_allowed
             - self_attested
+            - bootstrap_subject
+            - self_revoke
+            - admin_granted
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -730,6 +733,34 @@ components:
             `moca-gate-record/1`): a record of it needs `gate.floor_checked_offline: true` for
             X1.offline. On GET /v1/policy only; absent from an older control plane, read as the
             default
+    Subject:
+      type: object
+      required: [subject, enrolled, source, storeEnrolled, roles]
+      properties:
+        subject:
+          { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
+        enrolled:
+          type: boolean
+          description: enrolled by any route (the settings, the members store, or an admin role)
+        source:
+          type: string
+          enum: [env, api]
+          description: "`env`: the deployment's settings; `api`: the members store"
+        storeEnrolled:
+          type: boolean
+          description: |
+            Whether the members store itself enrolls it, apart from the settings and any role: what an
+            unenroll changes, and what keeps the subject enrolled once the settings drop it.
+        roles:
+          type: array
+          items:
+            type: object
+            required: [role, source, until, by]
+            properties:
+              role: { type: string, enum: [admin] }
+              source: { type: string, enum: [env, api] }
+              until: { type: [integer, 'null'], description: epoch seconds; null for no expiry }
+              by: { type: [string, 'null'], description: the admin who granted it (null for env) }
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -2575,6 +2606,10 @@ paths:
         record's sha256 from trustedGateRecords, the builds that become self-attested on a
         deployment-visible template make that template private on read; they are named as
         `narrowed` in the answer and in the `policy` record, so the narrowing is never silent.
+        A change that widens it (adds to trustedGateRecords or allowedRegistries, or adds to or
+        drops a registry's allowedRepositories list) needs an admin named in SH_ADMIN_SUBJECTS
+        where a members store is kept: an admin by an API grant is refused `403 forbidden`, and may
+        still narrow it and change its quotas.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -2917,6 +2952,236 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
           description: '`not_found`: no registered build this host holds'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/subjects:
+    get:
+      operationId: listSubjects
+      summary: Every enrolled subject, with its roles and where each comes from (an admin)
+      description: |
+        Enrollment and roles spec §4. Any admin may read it. A subject is enrolled by the deployment's
+        settings (`source: env`: SH_ALLOWED_SUBJECTS, SH_ADMIN_SUBJECTS) or through this API
+        (`source: api`). Roles are evaluated per request: an API grant past its `until` is not listed.
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: the subjects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subjects]
+                properties:
+                  subjects: { type: array, items: { $ref: '#/components/schemas/Subject' } }
+        '400':
+          description: '`invalid_request`: a malformed subject or body, or no members store (SH_PROVENANCE_DIR unset)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin, or (a change) not an admin named in the settings'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/subjects/{subject}:
+    put:
+      operationId: enrollSubject
+      summary: Enroll a subject (an admin)
+      description: |
+        Body `{"enrolled": true}`. Writes a `member` record on the `members` provenance stream, naming
+        the admin. Enrolled at the subject's next request. Enrolling one already enrolled writes nothing,
+        and so does enrolling one the settings enroll (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS): it is
+        answered unchanged (`record: null`), so the store never holds an enrollment hidden behind the
+        settings.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: subject
+          in: path
+          required: true
+          schema:
+            { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enrolled]
+              properties: { enrolled: { type: boolean, enum: [true] } }
+      responses:
+        '200':
+          description: enrolled
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Subject'
+                  - type: object
+                    required: [record]
+                    properties:
+                      record:
+                        type: [string, 'null']
+                        description: the `member` or `role` record written (null when nothing changed)
+        '400':
+          description: '`invalid_request`: a malformed subject or body, or no members store (SH_PROVENANCE_DIR unset)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin, or (a change) not an admin named in the settings'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: unenrollSubject
+      summary: Unenroll a subject enrolled through the API (an admin)
+      description: |
+        Writes a `member` record. The subject is refused at its next request (`403 not_enrolled`); its
+        live sandboxes run to their expiry and its templates keep their owner. A subject enrolled by
+        the settings can't be unenrolled here: `409 bootstrap_subject`. A subject holding an admin grant
+        is enrolled by it, so unenrolling it would change nothing: `409 admin_granted` (revoke the role
+        first).
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: subject
+          in: path
+          required: true
+          schema:
+            { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
+      responses:
+        '200':
+          description: unenrolled (or it was not)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Subject'
+                  - type: object
+                    required: [record]
+                    properties:
+                      record:
+                        type: [string, 'null']
+                        description: the `member` or `role` record written (null when nothing changed)
+        '400':
+          description: '`invalid_request`: a malformed subject or body, or no members store (SH_PROVENANCE_DIR unset)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin, or (a change) not an admin named in the settings'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`bootstrap_subject`: enrolled by SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS; `admin_granted`: it holds an admin grant (revoke it first)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/subjects/{subject}/roles/admin:
+    put:
+      operationId: grantAdmin
+      summary: Grant the admin role, optionally until a time (an admin)
+      description: |
+        Only an admin named in the settings (SH_ADMIN_SUBJECTS) may grant it; an API-granted admin
+        is refused `403 forbidden`. An optional `until` (epoch seconds, in the future and at most 366
+        days ahead, so a value in milliseconds is refused `400 invalid_request`) makes it
+        lapse by itself; the first request that
+        sees it lapsed writes a `role` record `expired`, once. A grant writes a `role` record
+        `granted`, naming the admin and `until`. Effective at the subject's next request.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: subject
+          in: path
+          required: true
+          schema:
+            { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                until:
+                  {
+                    type: [integer, 'null'],
+                    description: 'epoch seconds, at most 366 days ahead; absent or null: no expiry',
+                  }
+      responses:
+        '200':
+          description: granted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Subject'
+                  - type: object
+                    required: [record]
+                    properties:
+                      record:
+                        type: [string, 'null']
+                        description: the `member` or `role` record written (null when nothing changed)
+        '400':
+          description: '`invalid_request`: a malformed subject or body, or no members store (SH_PROVENANCE_DIR unset)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin, or (a change) not an admin named in the settings'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`bootstrap_subject`: an admin by SH_ADMIN_SUBJECTS'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: revokeAdmin
+      summary: Revoke an API-granted admin role (an admin)
+      description: |
+        Writes a `role` record `revoked`. Refused for an admin by the settings (`409
+        bootstrap_subject`) and for the caller's own role (`409 self_revoke`), so the API can't
+        lock itself out.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: subject
+          in: path
+          required: true
+          schema:
+            { type: string, pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$' }
+      responses:
+        '200':
+          description: revoked (or it held none)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Subject'
+                  - type: object
+                    required: [record]
+                    properties:
+                      record:
+                        type: [string, 'null']
+                        description: the `member` or `role` record written (null when nothing changed)
+        '400':
+          description: '`invalid_request`: a malformed subject or body, or no members store (SH_PROVENANCE_DIR unset)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin, or (a change) not an admin named in the settings'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`bootstrap_subject` (an admin by SH_ADMIN_SUBJECTS), or `self_revoke`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

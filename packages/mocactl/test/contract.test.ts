@@ -179,6 +179,12 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     reads: ['subject', 'templates', 'buildsQueued', 'active', 'sandboxes'],
   },
   { method: 'get', path: '/v1/policy', reads: ['policy', 'digest', 'record'] },
+  // `sbx admin subjects`: the change routes answer a Subject plus its record (allOf).
+  { method: 'get', path: '/v1/subjects', reads: ['subjects'] },
+  { method: 'put', path: '/v1/subjects/{subject}', sends: ['enrolled'] },
+  { method: 'delete', path: '/v1/subjects/{subject}' },
+  { method: 'put', path: '/v1/subjects/{subject}/roles/admin', sends: ['until'] },
+  { method: 'delete', path: '/v1/subjects/{subject}/roles/admin' },
 ];
 
 // The fields of each Sandbox and template `mocactl sbx ls` / `templates` print.
@@ -390,7 +396,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [] });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 23 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 25 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -412,13 +418,19 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.cancelTemplateBuild('TID', 'BID');
     await c.getQuota();
     await c.getPolicy();
+    await c.listSubjects();
+    await c.enrollSubject('SUBJ');
+    await c.unenrollSubject('SUBJ');
+    await c.grantAdmin('SUBJ', 1);
+    await c.revokeAdmin('SUBJ');
     const seen = calls.map(
       (k) =>
         `${k.method.toLowerCase()} ${new URL(k.url).pathname
           .replace('/ID', '/{id}')
           .replace('/TID', '/{id}')
           .replace('/BID', '/{build}')
-          .replace('/TAG', '/{tag}')}`,
+          .replace('/TAG', '/{tag}')
+          .replace('/SUBJ', '/{subject}')}`,
     );
     expect(new Set(seen)).toEqual(new Set(SBX_USED.map((u) => `${u.method} ${u.path}`)));
     // A new method on SandboxApiClient must be called above and listed in SBX_USED.
@@ -447,6 +459,11 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'cancelTemplateBuild',
         'getQuota',
         'getPolicy',
+        'listSubjects',
+        'enrollSubject',
+        'unenrollSubject',
+        'grantAdmin',
+        'revokeAdmin',
       ]),
     );
   });

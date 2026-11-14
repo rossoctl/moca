@@ -219,12 +219,22 @@ export function sandboxConfigFromEnv(env: NodeJS.ProcessEnv): SandboxConfig {
 }
 
 /**
- * Who may use the sandbox profile (spec §4.2): the allow list, plus admins. The harness profile has
- * no allow list (MU1 admits any GitHub account), so this is always true there.
+ * Who may use the sandbox profile (spec §4.2): the allow list, plus admins, plus a subject the
+ * members store enrolls (`storeEnrolled`). The harness profile has no allow list (MU1 admits any
+ * GitHub account), so this is always true there.
  */
-export function isEnrolled(subject: string, roles: string[], config: CpConfig): boolean {
+export function isEnrolled(
+  subject: string,
+  roles: string[],
+  config: CpConfig,
+  storeEnrolled = false,
+): boolean {
   if (config.routeProfile !== 'sandbox') return true;
-  return roles.includes('admin') || (config.sandbox?.allowedSubjects ?? []).includes(subject);
+  return (
+    roles.includes('admin') ||
+    storeEnrolled ||
+    (config.sandbox?.allowedSubjects ?? []).includes(subject)
+  );
 }
 
 /**
