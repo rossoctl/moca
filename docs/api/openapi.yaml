@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.11.0
+  version: 1.12.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -126,6 +126,7 @@ components:
             - template_retired
             - build_in_use
             - mode_not_allowed
+            - self_attested
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -444,7 +445,14 @@ components:
         visibility:
           type: string
           enum: [private, deployment]
-          description: '`private`: listed and served only to its owner and admins'
+          description: |
+            `private`: listed and served only to its owner and admins. In effect: `private` while
+            any registered build is self-attested now (a trust removal narrows a template on the
+            next read), else as set
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: '`self` when any registered build is self-attested now'
         onboarding:
           type: [string, 'null']
           description: "`registered` once any build is; else the newest build's status"
@@ -544,6 +552,25 @@ components:
             message: { type: string }
             step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
             rule: { type: string, description: the gating rule, on a rejection }
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: |
+            Recomputed on every read from the current policy: `self` when the build was created on
+            a selfAttest profile with a gate record trustedGateRecords does not list now, whether or
+            not it was listed at create; `deployment` otherwise (a promotion or removal of the
+            record changes it, nothing rewritten)
+        gateFloorCheckedOffline:
+          type: [boolean, 'null']
+          description: |
+            Its gate record's `gate.floor_checked_offline` (true for a curated family record, which
+            predates the field); false only on a profile that allows it (`general-self`); null with
+            no gate record
+        gateFloorMetOffline:
+          type: boolean
+          description: |
+            Present only for a gate from a `network_needed` contract: its `gate.floor_met_offline`,
+            whether the offline run met the floor anyway
         spec:
           type: object
           description: on GET /v1/templates/{id} and the builds routes only
@@ -646,6 +673,28 @@ components:
                 type: array
                 items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
                 description: gating rule ids beyond the base rules; an unknown id is refused
+              selfAttest:
+                type: boolean
+                description: |
+                  A gate record the policy does not trust still passes X1.trusted when the creating
+                  subject submitted it, for that subject's own templates only. The build is
+                  self-attested: private, its commits always refused (X12.self), never
+                  deployment-visible until an admin adds the record's sha256 to trustedGateRecords.
+                  Absent: false. The default policy holds `benchmark-self` and `general-self`
+              selfAttestEgress:
+                type: boolean
+                description: |
+                  On a self-attested record only, whether spec.egress may be true (the KVM host's
+                  allowlisted egress, never unrestricted). Absent: false. `benchmark-self` keeps it
+                  false (benchmark integrity); `general-self` sets it
+              requireOfflineGate:
+                type: boolean
+                description: |
+                  Whether the gate's test floor must have been checked offline (X1.offline). A
+                  general-gate record (the schema GET /v1/policy names as `gateRecordSchema`) needs
+                  `gate.floor_checked_offline: true` (fail closed); a curated family record predates
+                  the field and passes without it. Absent: true on a profile that requires X1;
+                  `general-self` sets it false
               envelope:
                 type: object
                 required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
@@ -666,6 +715,19 @@ components:
           description: |
             registry hosts. `<default>` is a reference with no host, which the build host pulls from
             its own configured registry; Docker Hub is `docker.io` (`index.docker.io` reads as it)
+        allowedRepositories:
+          type: object
+          additionalProperties:
+            type: array
+            minItems: 1
+            items: { type: string }
+          description: |
+            Optional, per registry (a key of `allowedRegistries`): the repositories an image may come
+            from there, each an exact path (`library/python`) or a prefix (`library/*`), matched on
+            whole path segments. A registry with no entry allows every repository it serves. A Docker
+            Hub official name (`python`) reads as `library/python`. From a listed registry, an
+            image path outside the entries' grammar (uppercase, or an empty, `.` or `..` segment)
+            is refused too. A refusal is rule `registry.repository`.
         trustedGateRecords:
           type: array
           items: { type: string }
@@ -702,6 +764,13 @@ components:
         policy: { $ref: '#/components/schemas/Policy' }
         digest: { type: string, description: the sha256 of the policy itself }
         record: { type: string, description: the provenance policy record's digest }
+        gateRecordSchema:
+          type: string
+          description: |
+            The general-gate record schema this deployment reads (`SH_GATE_RECORD_SCHEMA`, default
+            `moca-gate-record/1`): a record of it needs `gate.floor_checked_offline: true` for
+            X1.offline. On GET /v1/policy only; absent from an older control plane, read as the
+            default
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -1927,7 +1996,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: "`template_exists`: another subject's template"
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2027,6 +2099,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: `visibility: deployment` for a template with a self-attested build,
+            registered or on its way there, until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds:
     get:
       operationId: listTemplateBuilds
@@ -2093,7 +2172,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: "`template_exists`: another subject's template"
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2491,6 +2573,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: the template has a self-attested build, registered or on its way
+            there: it keeps its owner until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/activate:
     post:
       operationId: activateTemplate
@@ -2638,7 +2727,10 @@ paths:
       summary: Set the template policy (an admin); recorded
       description: |
         The policy is stored as sent, after validation (each problem named), and a new `policy`
-        record names the admin who set it. Enforced on the next create.
+        record names the admin who set it. Enforced on the next create. When it removes a gate
+        record's sha256 from trustedGateRecords, the builds that become self-attested on a
+        deployment-visible template make that template private on read; they are named as
+        `narrowed` in the answer and in the `policy` record, so the narrowing is never silent.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -2647,10 +2739,22 @@ paths:
             schema: { $ref: '#/components/schemas/Policy' }
       responses:
         '200':
-          description: the policy as set
+          description: the policy as set, and `narrowed` when a trust removal narrowed templates
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PolicyView' }
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/PolicyView' }
+                  - type: object
+                    properties:
+                      narrowed:
+                        type: array
+                        items:
+                          type: object
+                          required: [template, buildId]
+                          properties:
+                            template: { type: string }
+                            buildId: { type: string }
         '400':
           description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
           content:

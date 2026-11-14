@@ -19,6 +19,26 @@ export const PROFILE_RULES = ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'] as const;
 export interface Profile {
   /** Rule ids beyond the base rules (from PROFILE_RULES); the benchmark profile's are the X rules. */
   requires: string[];
+  /**
+   * Self-attestation: a gate record the policy does not trust still passes X1.trusted when the
+   * creating subject submitted it, for that subject's own templates only. The build is then
+   * self-attested: shown as such, private, never deployment-visible until an admin adds the
+   * record's sha256 to trustedGateRecords. Absent: false.
+   */
+  selfAttest?: boolean;
+  /**
+   * On a self-attested record only: whether spec.egress may be true (the KVM host's allowlisted
+   * egress, never unrestricted). Absent: false. `benchmark-self` keeps it false (benchmark
+   * integrity, X11); `general-self` sets it, for general users whose sandboxes need the host's
+   * allowlisted network.
+   */
+  selfAttestEgress?: boolean;
+  /**
+   * Whether the gate's test floor must have been checked offline (X1.offline,
+   * gateFloorCheckedOffline). Absent: true on any profile that requires X1, so `benchmark` and
+   * `benchmark-self` refuse a record whose floor needed the network; `general-self` sets it false.
+   */
+  requireOfflineGate?: boolean;
   /** The size envelope: a spec outside it is refused (X15 for benchmark). */
   envelope: {
     maxGuestMb: number;
@@ -39,6 +59,14 @@ export interface Policy {
    * registry, allowed as `<default>`. Hosts compare case-insensitively.
    */
   allowedRegistries: string[];
+  /**
+   * Optional, per registry (the key as `registryOf` returns it): the repositories an image may come
+   * from there. A registry with no list allows every repository it serves (as before); one with a
+   * list allows only those, each an exact repository path (`library/python`) or a prefix ending in
+   * `/*` (`library/*`), matched on whole path segments. A registry named here must also be in
+   * `allowedRegistries` (Docker Hub, say, opened to named repositories only, not to all of it).
+   */
+  allowedRepositories?: Record<string, string[]>;
   /**
    * The sha256 of each gate record the benchmark profile trusts (spec §8.3: an admin-loaded
    * copy of the trusted source's records, until a fetch from the trusted source exists).
@@ -83,12 +111,60 @@ export const DEFAULT_POLICY: Policy = {
         exact: { guestMb: 4096, vcpus: 2 },
       },
     },
+    // Self-attestation: a subject's own gate record, for its own templates; offline (benchmark integrity).
+    'benchmark-self': {
+      requires: ['X1', 'X10', 'X11', 'X12', 'X14', 'X15'],
+      selfAttest: true,
+      selfAttestEgress: false,
+      envelope: {
+        maxGuestMb: 4096,
+        maxVcpus: 2,
+        maxWorkspaceMb: 8192,
+        exact: { guestMb: 4096, vcpus: 2 },
+      },
+    },
+    // Self-attestation: the same without X11, for general users whose sandboxes need the host's
+    // allowlisted egress.
+    'general-self': {
+      requires: ['X1', 'X10', 'X12', 'X14', 'X15'],
+      selfAttest: true,
+      selfAttestEgress: true,
+      requireOfflineGate: false,
+      envelope: {
+        maxGuestMb: 4096,
+        maxVcpus: 2,
+        maxWorkspaceMb: 8192,
+        exact: { guestMb: 4096, vcpus: 2 },
+      },
+    },
   },
   defaultProfile: 'base',
   allowedRegistries: ['<default>'],
   trustedGateRecords: [],
   quota: { templates: 100, buildsQueued: 10, active: 8, owned: DEFAULT_OWNED },
 };
+
+/**
+ * The default general-gate record schema (`SH_GATE_RECORD_SCHEMA`): the format an image builder
+ * writes for Moca. A deployment that consumes another builder's records sets the setting to that
+ * builder's schema string.
+ */
+export const DEFAULT_GATE_RECORD_SCHEMA = 'moca-gate-record/1';
+
+/**
+ * Whether a gate record's test floor was checked offline: a general-gate record (schema
+ * `gateRecordSchema`, `SH_GATE_RECORD_SCHEMA`) always carries `gate.floor_checked_offline`, false
+ * only from a contract with `network_needed`; fail closed, so absent or false is not offline. Any
+ * other schema (the curated family records) predates the field, and their gates ran offline: absent
+ * is offline.
+ */
+export function gateFloorCheckedOffline(
+  gate: Record<string, unknown>,
+  gateRecordSchema: string = DEFAULT_GATE_RECORD_SCHEMA,
+): boolean {
+  const v = (gate.gate as Record<string, unknown> | undefined)?.floor_checked_offline;
+  return gate.schema === gateRecordSchema ? v === true : v !== false;
+}
 
 /** The template id rule (M7); refused past 31 characters, never truncated. */
 export const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
@@ -134,6 +210,18 @@ export interface CreateInput {
   profile?: string;
   /** The gate record, as the exact bytes the client sent (its sha256 is what is trusted). */
   gateRecordBytes?: Buffer;
+  /**
+   * The creating subject (self-attestation): on a `selfAttest` profile, a gate record it submits is
+   * trusted for its own template. Who submits is the control plane's to know; nothing in the record
+   * counts.
+   */
+  subject?: string;
+  /**
+   * The other subjects that already self-attested this gate record's sha256 (keyed by subject and
+   * sha256): a self-attested record belongs to its first submitter, so another subject's create on
+   * it is refused rather than riding on someone else's attestation.
+   */
+  gateSelfSubmitters?: string[];
 }
 
 export interface RuleResult {
@@ -149,8 +237,13 @@ export interface CheckResult {
   /** The first failed rule, for the 422. */
   failed?: RuleResult;
   gateRecordSha256?: string;
-  /** Whether the gate record's sha256 is in trustedGateRecords. Absent with no gate record. */
-  gateTrusted?: boolean;
+  /**
+   * How the gate record is trusted: `trusted`, its sha256 is in trustedGateRecords; `self`, not
+   * listed (on a `selfAttest` profile, trusted only by its submitter). Absent with no gate record.
+   */
+  gateTrust?: 'trusted' | 'self';
+  /** The gate record's offline facts (gate.floor_checked_offline, gate.floor_met_offline). */
+  gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
 }
 
 export function policyDigest(p: Policy): string {
@@ -186,13 +279,67 @@ export function registryOf(image: string): string {
   return r === 'index.docker.io' ? 'docker.io' : r;
 }
 
+function registryHostOf(image: string): string {
+  const first = image.split('/')[0] ?? '';
+  return image.includes('/') &&
+    (first.includes('.') || first.includes(':') || first === 'localhost')
+    ? first
+    : '<default>';
+}
+
+/**
+ * The repository path of an image reference: without its registry host, its digest and any tag.
+ * On Docker Hub (`docker.io`) a one-segment name is an official image, `library/<name>`, as Docker
+ * reads it. Other paths compare as given.
+ */
+export function repositoryOf(image: string): string {
+  const name = image.split('@')[0] ?? '';
+  const host = registryHostOf(image);
+  let path = host === '<default>' ? name : name.slice(host.length + 1);
+  // A tag is a final `:x` after the last `/` (a port is in the host, already removed).
+  const slash = path.lastIndexOf('/');
+  const colon = path.lastIndexOf(':');
+  if (colon > slash) path = path.slice(0, colon);
+  if (registryOf(image) === 'docker.io' && !path.includes('/')) path = `library/${path}`;
+  return path;
+}
+
+/**
+ * Whether `repo` is admitted by one allowlist entry: an exact path, or a `prefix/*` entry that admits
+ * any repository with at least one more path segment under `prefix`. Whole segments only, so
+ * `library/python` never admits `library/python-evil` or `library/python/x`.
+ */
+export function repositoryAllowed(repo: string, entry: string): boolean {
+  if (entry.endsWith('/*')) {
+    const prefix = entry.slice(0, -2);
+    return prefix.length > 0 && repo.startsWith(`${prefix}/`) && repo.length > prefix.length + 1;
+  }
+  return repo === entry;
+}
+
+/** A repository path: lowercase segments, each letters and digits separated by `.`, `_` or `-`. */
+const REPOSITORY_PATH = '[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*';
+const REPOSITORY_RE = new RegExp(`^${REPOSITORY_PATH}$`);
+/** An allowlist entry: a repository path, or one ending in `/*` (a prefix). */
+const REPOSITORY_ENTRY_RE = new RegExp(`^${REPOSITORY_PATH}(?:\\/\\*)?$`);
+
 const int = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
 
 /**
  * Every create-time rule, in order. Returns all results (for the `check` record) and the first
  * failure (for the 422). Never throws on bad input: a malformed field is a failed rule.
  */
-export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
+export interface CheckOptions {
+  /** The general-gate record schema (`SH_GATE_RECORD_SCHEMA`); absent: DEFAULT_GATE_RECORD_SCHEMA. */
+  gateRecordSchema?: string;
+}
+
+export function checkCreate(
+  input: CreateInput,
+  policy: Policy,
+  opts: CheckOptions = {},
+): CheckResult {
+  const gateSchema = opts.gateRecordSchema ?? DEFAULT_GATE_RECORD_SCHEMA;
   const results: RuleResult[] = [];
   const rule = (id: string, passed: boolean, message: string) =>
     results.push(passed ? { rule: id, passed } : { rule: id, passed, message });
@@ -223,6 +370,28 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     pinned && allowed.includes(registryOf(input.image)),
     `image registry ${pinned ? registryOf(input.image) : '?'} is not allowed (policy allowedRegistries)`,
   );
+  if (pinned) {
+    const reg = registryOf(input.image);
+    // Hosts compare case-insensitively, as in allowedRegistries: every key naming this registry
+    // in any case contributes its list, so a key in another case never leaves the registry open.
+    const lists = Object.entries(policy.allowedRepositories ?? {})
+      .filter(([k]) => k.toLowerCase() === reg)
+      .map(([, l]) => l);
+    const list = lists.length > 0 ? lists.flat() : undefined;
+    if (list) {
+      const repo = repositoryOf(input.image);
+      // The image's path is held to the entries' grammar first: lowercase, no empty, `.` or `..`
+      // segment. The matcher and the build host's puller then read one path the same way.
+      const wellFormed = REPOSITORY_RE.test(repo);
+      rule(
+        'registry.repository',
+        wellFormed && list.some((e) => repositoryAllowed(repo, e)),
+        wellFormed
+          ? `image repository ${repo} is not allowed from registry ${reg} (policy allowedRepositories)`
+          : `image repository ${repo} is malformed (lowercase path segments of letters and digits, separated by '.', '_' or '-'), from registry ${reg}, which lists its repositories (policy allowedRepositories)`,
+      );
+    }
+  }
   // The guest size has one key the build tool reads, guest_ram_mb, and an alias, guest_mb. A spec
   // with both is refused (even equal): the policy checks one number and the build uses one, never
   // two that could differ. The stored spec takes guest_ram_mb (normalizeSpec).
@@ -357,7 +526,11 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     );
   }
   const req = new Set(profile?.requires ?? []);
+  // Self-attestation: a record the policy does not trust, accepted only because its submitter is
+  // the one creating.
+  const selfAttest = profile?.selfAttest === true;
   const trusted = gateSha !== undefined && policy.trustedGateRecords.includes(gateSha);
+  const selfAttested = selfAttest && gateSha !== undefined && !trusted;
   const checkGate = req.has('X1') || named || input.gateRecordBytes !== undefined;
   if (checkGate) {
     rule(
@@ -371,8 +544,10 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
   if (req.has('X1')) {
     rule(
       'X1.trusted',
-      trusted,
-      'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
+      trusted || (selfAttested && !!input.subject),
+      selfAttest
+        ? 'a self-attested profile needs the gate record sent with the create, by the subject who owns the template'
+        : 'the gate record is not one the policy trusts (spec §8.3: its sha256 must be listed in trustedGateRecords)',
     );
   }
   if (checkGate) {
@@ -381,6 +556,12 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
       gate !== null && gate.image?.digest === digest,
       'the gate record is for another image',
     );
+    if (profile?.requireOfflineGate !== false)
+      rule(
+        'X1.offline',
+        gate === null || gateFloorCheckedOffline(gate, gateSchema),
+        `the ${profileName} profile needs the gate's floor checked offline (the record's run needed the network)`,
+      );
   }
   if (req.has('X10') && s.source_record_digest === undefined) {
     rule('X10', false, 'the benchmark profile needs spec.source_record_digest (X10)');
@@ -391,6 +572,28 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
       s.egress === false,
       'a benchmark template has no network: spec.egress must be false (X11)',
     );
+  if (selfAttested) {
+    const others = (input.gateSelfSubmitters ?? []).filter((x) => x !== input.subject);
+    rule(
+      'X1.self.scope',
+      others.length === 0,
+      'this gate record is self-attested by another subject; a self-attested record counts only for its submitter',
+    );
+    // A self-run gate is reviewed by no one but its submitter: commits refused always (X12 strict),
+    // and egress only where the profile allows it (the host's allowlist, never the template's).
+    rule(
+      'X12.self',
+      gate !== null &&
+        gate.observed?.testbed?.agent_can_commit === 'no' &&
+        gate.observed?.guest?.git_identity === 'none',
+      'a self-attested gate record must show commits refused (agent_can_commit no, git_identity none), whatever the spec (X12)',
+    );
+    rule(
+      'X1.self.egress',
+      profile?.selfAttestEgress === true || s.egress === false,
+      `the ${profileName} profile allows no egress for a self-attested template: spec.egress must be false`,
+    );
+  }
   // X12, whatever the profile: a skip of the git identity check is backed by a gate record
   // showing commits refused, or refused. The build host checks the skip only when given a gate
   // record, so an unbacked skip would be checked by neither side.
@@ -426,7 +629,17 @@ export function checkCreate(input: CreateInput, policy: Policy): CheckResult {
     results,
     passed: failed === undefined,
     ...(failed ? { failed } : {}),
-    ...(gateSha ? { gateRecordSha256: gateSha, gateTrusted: trusted } : {}),
+    ...(gateSha ? { gateRecordSha256: gateSha, gateTrust: trusted ? 'trusted' : 'self' } : {}),
+    ...(gate !== null
+      ? {
+          gateFloor: {
+            checkedOffline: gateFloorCheckedOffline(gate, gateSchema),
+            ...(typeof gate.gate?.floor_met_offline === 'boolean'
+              ? { metOffline: gate.gate.floor_met_offline as boolean }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -468,6 +681,13 @@ export function policyProblems(p: unknown): string[] {
           ![e.exact.guestMb, e.exact.vcpus].every((x) => int(x) && x > 0))
       )
         out.push(`${n}.envelope.exact must hold positive whole numbers guestMb, vcpus`);
+      for (const f of ['selfAttest', 'selfAttestEgress', 'requireOfflineGate'] as const)
+        if (pr?.[f] !== undefined && typeof pr[f] !== 'boolean')
+          out.push(`${n}.${f} must be true or false`);
+      if (pr?.selfAttestEgress === true && pr.selfAttest !== true)
+        out.push(`${n}.selfAttestEgress needs selfAttest`);
+      if (pr?.selfAttest === true && !pr.requires?.includes?.('X1'))
+        out.push(`${n}.selfAttest needs X1 in requires (a gate record to attest)`);
     }
   }
   if (typeof o.defaultProfile !== 'string' || !o.profiles?.[o.defaultProfile])
@@ -477,6 +697,29 @@ export function policyProblems(p: unknown): string[] {
     !o.allowedRegistries.every((r) => typeof r === 'string' && r.length > 0)
   )
     out.push('allowedRegistries must be a list of hosts');
+  const repos = (o as { allowedRepositories?: unknown }).allowedRepositories;
+  if (repos !== undefined) {
+    if (!repos || typeof repos !== 'object' || Array.isArray(repos))
+      out.push('allowedRepositories must map a registry to a list of repositories');
+    else
+      for (const [reg, list] of Object.entries(repos as Record<string, unknown>)) {
+        if (
+          !Array.isArray(o.allowedRegistries) ||
+          !o.allowedRegistries.some(
+            (r) => typeof r === 'string' && r.toLowerCase() === reg.toLowerCase(),
+          )
+        )
+          out.push(`allowedRepositories.${reg}: the registry must also be in allowedRegistries`);
+        if (
+          !Array.isArray(list) ||
+          list.length === 0 ||
+          !list.every((e) => typeof e === 'string' && REPOSITORY_ENTRY_RE.test(e))
+        )
+          out.push(
+            `allowedRepositories.${reg} must be a non-empty list of repository paths (a/b, or a/* for a prefix)`,
+          );
+      }
+  }
   if (
     !Array.isArray(o.trustedGateRecords) ||
     !o.trustedGateRecords.every((r) => typeof r === 'string' && /^sha256:[0-9a-f]{64}$/.test(r))
@@ -498,6 +741,13 @@ export function policyProblems(p: unknown): string[] {
  */
 export interface PolicyStore {
   current(): Promise<{ policy: Policy; record: string }>;
-  /** Store a new policy, and record it. */
-  set(policy: Policy, subject: string): Promise<{ policy: Policy; record: string }>;
+  /**
+   * Store a new policy, and record it. `extra` is added to the `policy` record's body beside the
+   * policy (self-attestation: the builds a trust removal narrows), never into the policy itself.
+   */
+  set(
+    policy: Policy,
+    subject: string,
+    extra?: Record<string, unknown>,
+  ): Promise<{ policy: Policy; record: string }>;
 }
