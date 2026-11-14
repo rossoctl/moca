@@ -251,9 +251,15 @@ deployed, and record its date and snapshot here.
   with the user's `mocactl` login. The rule is a guard against accidents, not a boundary.
 - **That every delete ends the lease at once.** A `DELETE /v1/sandboxes/{id}` from another client,
   or an `rm` whose `sandbox_deleted` failed or took over 15 s, leaves the lease to end by its idle
-  timeout (at most the operator's ceiling). No new token can be minted after the delete. A token
-  already issued still reaches the sandbox for up to one token lifetime plus 30 s, as for `per-exec`
-  (§3).
+  timeout. No new token can be minted after the delete. A token already issued still reaches the
+  sandbox for up to one token lifetime plus 30 s, as for `per-exec` (§3), and each Exec it sends
+  restarts the lease's idle clock. So the full bound, from the delete, is the token lifetime plus
+  30 s, plus the last Exec's duration, plus the idle timeout (at most the operator's ceiling,
+  `SBX_IDLE_CEILING_S`, itself at most 86400 s). `deploy/sbx/setup.sh` refuses, when a lease mode
+  is allowed, a janitor wait that does not exceed the token lifetime plus 30 s plus the ceiling (the
+  relay cancels an Exec at its token's expiry, so the Exec's duration falls inside the token's
+  lifetime), so the janitor does not free the workspace under a lease still live; a lease that ends
+  after the janitor removed its state file does not write it back.
 - **That every notice arrives.** Lease events are best-effort. A lost one changes no state, and
   `LeaseControl status` (`mocactl sbx get`, `sandbox_info`) still shows the lease.
 - **Defense against a compromised relay or worker.** Unchanged from §3.

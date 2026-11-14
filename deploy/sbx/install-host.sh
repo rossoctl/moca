@@ -526,7 +526,31 @@ validate_worker() {
   check_snapshot_ca
   check_snapshot_ram
   check_jail_path "$id"
+  check_lease_state "$id"
   W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb" W_IDLE_CEILING="$ceiling"
+}
+
+# check_lease_state WORKER_ID: the worker's .lease-state, if there is one, is a real directory (as the
+# janitor requires before it removes a state file there), so clear_boot_marker never reaches through a
+# symlink. A refusal comes before anything is written.
+check_lease_state() {
+  local dir="$SBX_SRV/workspaces/$1/.lease-state"
+  [[ -e "$dir" || -L "$dir" ]] || return 0
+  [[ -d "$dir" && ! -L "$dir" ]] ||
+    die "$dir is a symlink or not a directory: move it aside (the worker keeps its lease state files there), then re-run"
+  [[ ! -d "$dir/.boot" || -L "$dir/.boot" ]] || die "$dir/.boot is a directory: remove it, then re-run"
+}
+
+# clear_boot_marker WORKER_ID: deletes the worker's lease boot marker, .lease-state/.boot, before the
+# worker (re)starts. A worker built before the marker never writes lease=off, so after a rollback past
+# it a marker could still say lease=on, and the next lease-on boot would trust root_wrote = false on
+# states a lease-off boot made untrue (ruling R7). With no marker, that boot marks root_wrote on every
+# known state, conservatively. A symlinked marker goes as the link (rm never follows it); the
+# directory itself was checked by check_lease_state.
+clear_boot_marker() {
+  local f="$SBX_SRV/workspaces/$1/.lease-state/.boot"
+  [[ -e "$f" || -L "$f" ]] || return 0
+  rm -f -- "$f"
 }
 
 install_worker() {
@@ -539,6 +563,7 @@ install_worker() {
     record "file $ca"
   fi
   install -d -m 0700 "$SBX_SRV/workspaces/$id" "$(jail_dir "$id")"
+  clear_boot_marker "$id"
   (
     umask 077
     {

@@ -202,10 +202,14 @@ refusals=(
   'export SBX_MODES_ALLOWED="per-exec, lease" => SBX_MODES_ALLOWED must be a comma list'
   'export SBX_MODES_ALLOWED=per-exec, => SBX_MODES_ALLOWED must be a comma list'
   'export SBX_MODES_ALLOWED=LEASE => SBX_MODES_ALLOWED must be a comma list'
-  'export SBX_IDLE_CEILING_S=20 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-999999'
-  'export SBX_IDLE_CEILING_S=299 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-999999'
+  'export SBX_IDLE_CEILING_S=20 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_IDLE_CEILING_S=299 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
   'export SBX_IDLE_CEILING_S=30m => SBX_IDLE_CEILING_S must be'
   'export SBX_IDLE_CEILING_S=1000000 => SBX_IDLE_CEILING_S must be'
+  'export SBX_IDLE_CEILING_S=86401 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_MODES_ALLOWED=per-exec,lease SBX_IDLE_CEILING_S=3600 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed the token lifetime plus the 30 s leeway plus SBX_IDLE_CEILING_S \(4530 s\) when a lease mode is allowed'
+  'export SBX_MODES_ALLOWED=lease+processes SBX_IDLE_CEILING_S=2700 SBX_JANITOR_WAIT_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed .* \(3630 s\)'
+  'export SBX_MODES_ALLOWED=per-exec,lease SBX_TOKEN_TTL_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3900 s\) must exceed .* \(5430 s\)'
   'export SBX_WORKSPACE_IMAGE_MB=-1 => SBX_WORKSPACE_IMAGE_MB must be a positive whole number'
   'export SBX_MAX_TOTAL=999999999 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_MAX_TOTAL must be'
   'export SBX_MAX_TOTAL=1 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_WORKSPACE_IMAGE_MB must be'
@@ -501,7 +505,7 @@ pass 'SBX_TOKEN_TTL_MINUTES and SBX_RETENTION_DAYS reach sbx-settings in seconds
 # 4c'. The lease policy (lease-mode spec §8.1): SBX_MODES_ALLOWED and SBX_IDLE_CEILING_S reach
 # sbx-settings and move the hash; the ceiling also reaches every worker bundle, so the control
 # plane's clamp and the worker's agree.
-run_setup export SBX_MODES_ALLOWED=per-exec,lease,lease+processes SBX_IDLE_CEILING_S=3600 ||
+run_setup export SBX_MODES_ALLOWED=per-exec,lease,lease+processes SBX_IDLE_CEILING_S=3600 SBX_JANITOR_WAIT_MINUTES=76 ||
   fail 'a run with a lease policy failed'
 [[ "$(cm sbx-settings SH_SANDBOX_MODES_ALLOWED)" == per-exec,lease,lease+processes ]] || fail 'SBX_MODES_ALLOWED not written'
 [[ "$(cm sbx-settings SH_SANDBOX_IDLE_CEILING_S)" == 3600 ]] || fail 'SBX_IDLE_CEILING_S not written'
@@ -531,6 +535,17 @@ grep -qx 'SBX_JANITOR_AGE=3660' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_
 run_setup export SBX_JANITOR_WAIT_MINUTES=120 || fail 'a 120 min wait was refused'
 grep -qx 'SBX_JANITOR_AGE=7200' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=120 is not 7200 s'
 pass 'the janitor wait defaults to max(60, TTL + 5) min (65 at TTL 60), and an explicit one is written in seconds'
+
+# 4d'. The idle ceiling against the janitor (review #4569829097): with a lease mode allowed, a token
+# minted before a delete keeps a lease live for its lifetime plus 30 s plus the idle timeout, so the
+# wait must exceed all three; the defaults (15 min, 1800 s) pass. Per-exec only, the ceiling is unused.
+run_setup export SBX_MODES_ALLOWED=per-exec,lease || fail 'the default wait was refused with lease allowed at the default ceiling'
+run_setup export SBX_MODES_ALLOWED=per-exec,lease SBX_IDLE_CEILING_S=3600 SBX_JANITOR_WAIT_MINUTES=76 ||
+  fail 'a 76 min wait (4560 s > 4530 s) was refused'
+grep -qx 'SBX_JANITOR_AGE=4560' "$GEN/janitor/janitor.env" || fail 'SBX_JANITOR_WAIT_MINUTES=76 is not 4560 s'
+run_setup export SBX_IDLE_CEILING_S=86400 || fail 'the 86400 s ceiling was refused with per-exec only'
+run_setup true || fail 'the run back to the defaults failed'
+pass 'the idle ceiling is at most 86400 s, and with a lease mode the janitor wait must exceed TTL + 30 s + the ceiling'
 
 # 4e. An API CA (SBX_API_CA_FILE) for a Route certificate the host does not trust: bundled, then
 # dropped from the bundle when unset again.

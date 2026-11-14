@@ -178,6 +178,36 @@ grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$SBX_ENV_DIR/workers/sbx_old.env" || fa
 bash "$INSTALL" --uninstall sbx_old >"$TMP/out" 2>&1 || fail 'uninstall sbx_old'
 pass 'a bundle without the image size or the idle ceiling gets the 2048 MiB and 1800 s defaults'
 
+# A worker install deletes the lease boot marker (review #4569829075): a worker binary from before the
+# marker never writes lease=off, so after a rollback past it the marker could still say lease=on. With
+# none, the next lease-on boot marks root_wrote on every known state, conservatively.
+WS="$SBX_SRV/workspaces/sbx_mark"
+mkdir -p "$WS/.lease-state"
+echo 'lease=on' >"$WS/.lease-state/.boot"
+echo '{"known":true}' >"$WS/.lease-state/sbx-aaaa.json"
+bash "$INSTALL" "$(bundle sbx_mark)" --snapshot default >"$TMP/out" 2>&1 || fail "install sbx_mark: $(cat "$TMP/out")"
+[[ ! -e "$WS/.lease-state/.boot" ]] || fail 'the install left the lease boot marker'
+[[ -f "$WS/.lease-state/sbx-aaaa.json" ]] || fail "the install removed a key's lease state file"
+# A symlinked marker is removed as the link, never what it points to.
+echo keep >"$TMP/elsewhere"
+ln -s "$TMP/elsewhere" "$WS/.lease-state/.boot"
+bash "$INSTALL" "$(bundle sbx_mark)" --snapshot default >"$TMP/out" 2>&1 || fail "reinstall sbx_mark: $(cat "$TMP/out")"
+[[ ! -e "$WS/.lease-state/.boot" && ! -L "$WS/.lease-state/.boot" ]] || fail 'the symlinked marker is still there'
+[[ "$(cat "$TMP/elsewhere")" == keep ]] || fail "the marker's symlink target was touched"
+# A symlinked .lease-state is refused before systemd is touched, and nothing it points to is removed.
+rm -rf "$WS/.lease-state"
+mkdir -p "$TMP/planted"
+echo 'lease=on' >"$TMP/planted/.boot"
+ln -s "$TMP/planted" "$WS/.lease-state"
+n0="$(wc -l <"$MOCK_LOG")" # the checks below read the log of the installs above: keep it
+! bash "$INSTALL" "$(bundle sbx_mark)" --snapshot default >"$TMP/out" 2>&1 || fail 'installed over a symlinked .lease-state'
+grep -q '.lease-state' "$TMP/out" || fail "the symlinked .lease-state refusal does not name it: $(cat "$TMP/out")"
+! tail -n +$((n0 + 1)) "$MOCK_LOG" | grep -q systemctl || fail 'touched systemd before refusing a symlinked .lease-state'
+[[ -f "$TMP/planted/.boot" ]] || fail 'removed a .boot through a symlinked .lease-state'
+rm -f "$WS/.lease-state"
+bash "$INSTALL" --uninstall sbx_mark >"$TMP/out" 2>&1 || fail 'uninstall sbx_mark'
+pass "a worker install deletes the lease boot marker (a symlink as the link), keeps the keys' state, and refuses a symlinked .lease-state"
+
 [[ -f "$SBX_UNIT_DIR/sbx-worker@.service" && -f "$SBX_UNIT_DIR/sbx.slice" ]] || fail 'template unit or parent slice missing'
 [[ -f "$SBX_UNIT_DIR/sbx-sbx_py312.slice" ]] || fail 'per-worker slice missing'
 grep -qx 'Slice=sbx-%i.slice' "$SBX_UNIT_DIR/sbx-worker@.service" || fail 'unit is not in its worker slice'

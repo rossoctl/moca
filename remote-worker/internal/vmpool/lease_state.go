@@ -142,18 +142,22 @@ func loadLeaseStateIfAny(root, key string) leaseState {
 // A file that is already gone stays gone: s is the run's cached copy, and the worker's own
 // removals update that cache, so a missing file was removed by the host's janitor
 // (deploy/sbx/janitor.sh) for a deleted sandbox. Writing the cache back would leave a file
-// no sandbox owns. The janitor removes it only SBX_JANITOR_AGE after the termination, at
-// least max(60 min, TTL + 5 min), which is later than the sandbox's last lease end: at
-// most the idle ceiling, 30 min, after its last Exec, which came before the termination.
-// So no lease of that key is live to need the file. The stat below and the save are not
-// atomic against the janitor's removal; losing that race leaves one small file, which the
-// janitor's next run removes (the workspace is gone and the record terminated).
+// no sandbox owns. The janitor removes it only SBX_JANITOR_AGE after the termination, and
+// deploy/sbx/setup.sh refuses, when a lease mode is allowed, a wait that does not exceed
+// the token lifetime plus the relay's 30 s leeway plus SBX_IDLE_CEILING_S (at most
+// 86400 s): a token minted just before the delete reaches the sandbox that long, and each
+// of its Execs restarts the idle clock, so the sandbox's last lease ends before the
+// janitor's wait does. So no lease of that key is live to need the file. Should one be
+// (a hand-set wait), endLeaseLocked applies the same check and does not write the file
+// back either. The stat below and the save are not atomic against the janitor's removal;
+// losing that race leaves one small file, which the janitor's next run removes (the
+// workspace is gone and the record terminated).
 func retireLeaseState(root, key string, s leaseState) {
 	if !s.Known && s.Pending == nil {
 		removeLeaseState(root, key)
 		return
 	}
-	if _, err := os.Stat(leaseStatePath(root, key)); errors.Is(err, os.ErrNotExist) {
+	if leaseStateFileGone(root, key) {
 		return
 	}
 	kept := leaseState{Pending: s.Pending}
@@ -163,6 +167,14 @@ func retireLeaseState(root, key string, s leaseState) {
 	if err := saveLeaseState(root, key, kept); err != nil {
 		log.Printf("vmpool: retire the lease state for %q: %v", key, err)
 	}
+}
+
+// leaseStateFileGone reports that key's state file does not exist. For a run whose cached
+// state is known, that means the host's janitor removed it for a deleted sandbox: the
+// worker's own removals update the cache (retireLeaseState, endLeaseLocked).
+func leaseStateFileGone(root, key string) bool {
+	_, err := os.Stat(leaseStatePath(root, key))
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // removeLeaseState deletes key's state file. A missing file is not an error; any other

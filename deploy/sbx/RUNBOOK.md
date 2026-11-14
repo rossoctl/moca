@@ -143,6 +143,19 @@ no longer exceeds the token lifetime plus 30 s.
 `install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
 path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
 
+**Rolling a worker back past lease mode (plan 4), then forward again.** Every worker since plan 4
+writes `<workspace root>/.lease-state/.boot` at boot, `lease=on` or `lease=off`; a lease-on boot
+after a lease-off one first marks every known lease state `root_wrote`, because a lease-off worker
+runs per-`Exec` commands as root without recording it. A worker binary from before plan 4 writes no
+marker, so while a host runs one the marker can still say `lease=on`. A rollback alone is safe: the
+old binary has no lease mode. Rolling forward again is safe too, as long as it goes through
+`install-host.sh`: every worker install deletes `.lease-state/.boot` before it restarts the worker
+(a symlinked marker goes as the link; a symlinked `.lease-state` is refused), so the first new boot
+finds no marker and marks every known state, conservatively. A rollback done with an older
+`install-host.sh` leaves the marker, and the next forward install clears it. Never roll forward by
+replacing `SBX_WORKER_BIN` and restarting the unit alone; if that happened, stop the worker, delete
+`/srv/sbx/workspaces/<id>/.lease-state/.boot`, and start it again.
+
 ## 3. Changing the sandbox lifetime
 
 `SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,

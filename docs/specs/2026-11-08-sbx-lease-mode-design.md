@@ -651,14 +651,25 @@ The routes, as built (plan 3; `docs/api/openapi.yaml`):
 lease-off worker records no per-`Exec` root writes (§3.3; P4-R4). The janitor removes
 `.lease-state/<wsk>.json` with a deleted sandbox's workspace, and also when the worker already
 reclaimed that workspace (P4-R3). A kept state is written back only while its file exists, so a file
-the janitor removed is not recreated.
+the janitor removed is not recreated, by the workspace's removal or by a lease's end.
+`deploy/sbx/install-host.sh` deletes `.lease-state/.boot` at every worker install, before the
+worker restarts (symlink-safe: a symlinked `.lease-state` is refused). A worker from before this
+marker never writes `lease=off`, so after a rollback past plan 4 the marker could still say
+`lease=on`; the forward install clears it, and the first new boot marks every known state
+`root_wrote`, conservatively. So a rollback followed by a forward install is safe. A rollback alone,
+done with an older `install-host.sh`, leaves the marker, and the next forward install clears it
+(RUNBOOK §2).
 
 **As built (plan 4), the deploy inputs.** `deploy/sbx/setup.sh` takes `SBX_MODES_ALLOWED` (default
 `per-exec`: lease stays off) and `SBX_IDLE_CEILING_S` (default 1800). They become the control
 plane's `SH_SANDBOX_MODES_ALLOWED` and `SH_SANDBOX_IDLE_CEILING_S`, and the ceiling also goes into
 every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the control plane and the workers clamp alike.
 The ceiling's minimum there is 300 s, not the control plane's 30, because the worker refuses to boot
-with a ceiling below its 300 s default idle timeout (P4-R19).
+with a ceiling below its 300 s default idle timeout (P4-R19); its maximum is 86400 s. When
+`SBX_MODES_ALLOWED` names a lease mode, the janitor's wait must exceed the token lifetime plus 30 s
+plus the ceiling: a token minted just before a delete reaches the sandbox that long, and each of its
+Execs restarts the idle clock, so the sandbox's last lease ends before the janitor frees its
+workspace.
 
 ### 8.3 New calls on `sandbox/v1` (additive)
 

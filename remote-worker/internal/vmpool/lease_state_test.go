@@ -319,6 +319,45 @@ func TestRetireDoesNotRecreateARemovedStateFile(t *testing.T) {
 	}
 }
 
+// Review #4569829097: a lease live past the janitor's reclaim (a large idle ceiling) ends
+// after the janitor removed the deleted sandbox's state file. The end must not write it back:
+// no sandbox owns it, and once the record is purged nothing would remove it again.
+func TestLeaseEndDoesNotRecreateARemovedStateFile(t *testing.T) {
+	for _, end := range []struct {
+		name string
+		do   func(t *testing.T, p *pool, clk *fakeClock)
+	}{
+		{"reset", func(t *testing.T, p *pool, _ *fakeClock) {
+			if err := p.EndLease("k", LeaseEndReset); err != nil {
+				t.Fatalf("EndLease: %v", err)
+			}
+		}},
+		{"idle", func(t *testing.T, p *pool, clk *fakeClock) {
+			clk.Advance(31 * time.Second)
+			waitFor(t, func() bool { return liveLease(p, "k") == nil })
+		}},
+	} {
+		t.Run(end.name, func(t *testing.T) {
+			p, _, clk := leasePool(t, nil)
+			mustSetMode(t, p, "k", ModeLease, 1)
+			mustExec(t, p, "k", leaseExecIdle(secretCommand, 30*time.Second))
+			leaseAlive(t, p, "before the janitor")
+			path := leaseStatePath(p.cfg.WorkspaceRoot, "k")
+			if err := os.Remove(path); err != nil { // the janitor, under the live lease
+				t.Fatal(err)
+			}
+			end.do(t, p, clk)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("the lease end recreated a state file the janitor removed: %v", err)
+			}
+			// The cache follows the disk: nothing known, nothing pending.
+			if info := p.LeaseStatus("k"); info.EpochKnown || info.Pending != nil {
+				t.Fatalf("LeaseStatus = %+v, want no known epoch and nothing pending", info)
+			}
+		})
+	}
+}
+
 // bootLeasePool is New over root, with lease support on or off (the lease-v1 manifest
 // feature), closed before it returns: only what New did at boot is left to look at.
 func bootLeasePool(t *testing.T, root string, lease bool) {

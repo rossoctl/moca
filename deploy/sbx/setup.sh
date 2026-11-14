@@ -28,7 +28,7 @@
 #                           of per-exec, lease and lease+processes (lease-mode spec §8.1). Lease mode
 #                           stays off (per-exec) until the live smoke and the security review's lease
 #                           section (README)
-#   SBX_IDLE_CEILING_S      optional; 300-999999, default 1800: the longest lease idle timeout an owner
+#   SBX_IDLE_CEILING_S      optional; 300-86400, default 1800: the longest lease idle timeout an owner
 #                           may set, in seconds. Also every worker bundle's SH_LEASE_IDLE_CEILING_S, so
 #                           the control plane and the workers clamp alike; at least 300, the worker's
 #                           default idle timeout, which it refuses to start above its ceiling
@@ -57,7 +57,8 @@
 #                           router's default certificate (API)
 #   SBX_JANITOR_WAIT_MINUTES optional; default max(60, SBX_TOKEN_TTL_MINUTES + 5): how long after a
 #                           sandbox ends the host janitor frees its workspace. Must exceed the token
-#                           lifetime plus the relay's 30 s leeway (spec §8.1, §8.3)
+#                           lifetime plus the relay's 30 s leeway (spec §8.1, §8.3), and, when
+#                           SBX_MODES_ALLOWED names a lease mode, that plus SBX_IDLE_CEILING_S too
 #   SBX_API_CA_FILE         optional; a PEM CA the janitor trusts for the API Route, when that Route's
 #                           certificate (the router's default, say) is not publicly trusted
 # SBX_CLIENTS, increment 1a's static client tokens, is gone and refused.
@@ -164,8 +165,18 @@ validate() {
     die 'SBX_MODES_ALLOWED must be a comma list of per-exec, lease and lease+processes, no spaces'
   # The control plane's floor is 30 s, but the same value is the workers' SH_LEASE_IDLE_CEILING_S, and
   # a worker refuses to start with a ceiling below its default idle timeout, 300 s.
-  [[ "$SBX_IDLE_CEILING_S" =~ $COUNT6_RE ]] && ((SBX_IDLE_CEILING_S >= 300)) ||
-    die "SBX_IDLE_CEILING_S must be a whole number of seconds, 300-999999 (a worker's ceiling must be at least its default idle timeout, 300 s)"
+  # At most a day: the janitor's wait must outlast it when a lease mode is allowed (below).
+  [[ "$SBX_IDLE_CEILING_S" =~ $COUNT6_RE ]] && ((SBX_IDLE_CEILING_S >= 300 && SBX_IDLE_CEILING_S <= 86400)) ||
+    die "SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400 (a worker's ceiling must be at least its default idle timeout, 300 s)"
+  # A token minted just before a delete reaches the sandbox for its lifetime plus the relay's 30 s
+  # leeway, and each Exec it sends restarts the lease's idle clock, so a lease can stay live that long
+  # plus the idle timeout. The janitor must not free the workspace (and its lease state file) under
+  # a lease still running: its wait must exceed all three (vmpool's retireLeaseState relies on it).
+  if [[ "$SBX_MODES_ALLOWED" == *lease* ]]; then
+    local lease_live_s=$((TOKEN_TTL_S + 30 + SBX_IDLE_CEILING_S))
+    ((JANITOR_AGE_S > lease_live_s)) ||
+      die "SBX_JANITOR_WAIT_MINUTES ($JANITOR_AGE_S s) must exceed the token lifetime plus the 30 s leeway plus SBX_IDLE_CEILING_S ($lease_live_s s) when a lease mode is allowed: the janitor would free a workspace under a lease that is still live; raise it to at least $((lease_live_s / 60 + 1)) minutes"
+  fi
   local v
   for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
     [[ "${!v:-}" =~ $COUNT6_RE ]] || die "$v must be a positive whole number of at most six digits"
