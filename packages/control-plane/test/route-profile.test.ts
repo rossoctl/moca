@@ -45,6 +45,8 @@ const SHARED = [
   'POST /v1/hosts/{host}/builds/{build}/report',
   'GET /v1/hosts/{host}/wanted',
   'POST /v1/hosts/{host}/workers/report',
+  // The egress proxy's events into sandboxes' logs.
+  'POST /v1/hosts/{host}/egress',
 ];
 
 const servers: Server[] = [];
@@ -64,6 +66,7 @@ const SANDBOX_ONLY = [
   'createSandbox',
   'deleteSandbox',
   'getSandbox',
+  'getSandboxEgress',
   'janitorSandboxes',
   'listSandboxes',
   'lookupEgressCredential',

@@ -3,6 +3,33 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.14.0
+
+Per-sandbox egress records ([#752](https://github.com/rossoctl/moca/issues/752)), per the
+[egress records spec](../specs/2026-11-08-sandbox-egress-records-design.md): what a sandbox reached
+through the KVM host's egress proxy, readable through the API and named in the sandbox's provenance.
+Every change is additive.
+
+- New GET /v1/sandboxes/{id}/egress?after=&limit= (the owner or an admin, as GET /v1/sandboxes/{id})
+  gives `{events, next, summary}`. The events are the proxy's audit events exactly as it wrote them
+  (new `EgressEvent` schema), in arrival order. `summary` (new `EgressSummary` schema) is
+  `{byHost: {host: {count, decisions, bytesUp, bytesDown}}, total, dropped, droppedBy: {proxy, cap,
+budget, invalid}, complete, sealed, sha256}`, on the first page (no `after`); null on the pages
+  after it.
+- `?format=ndjson` gives the whole log as `application/x-ndjson`: each event's canonical JSON, each
+  followed by `\n`. Its sha256 is `summary.sha256`.
+- New POST /v1/hosts/{host}/egress `{events, cursor, oversized?}` (host bearer): the host agent's
+  batches of up to 1000 events and its journal cursor, idempotent by (host, cursor), answering
+  `{accepted, refused, capped, overBudget, invalid, dropped, cursor}`. A log holds at most 10,000
+  events and 4 MiB of lines, and all logs together at most 64 MiB of lines; the rest count as
+  dropped.
+- GET /v1/hosts/{host}/wanted gains `egressSids`, the workspace keys whose events the host ships (the
+  set the egress route accepts); the agent sends no other sandbox's or session's events.
+- The `sandbox` provenance record that ends a sandbox (`state: terminated`) gains
+  `egress: {events, sha256, dropped, droppedBy, complete}`. Events that arrive in the 600 s after the
+  end are still taken; if any did, one more `sandbox` record with `state: egress` names the final
+  log. No record kind is added.
+
 ## 1.13.0
 
 Pacing template workers' cold starts ([#745](https://github.com/rossoctl/moca/issues/745)), per the

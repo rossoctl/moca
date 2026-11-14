@@ -61,6 +61,13 @@ import {
   type SandboxView,
 } from './sandbox-store.js';
 import { mintSandboxToken, mintSetModeToken } from './sandbox-token.js';
+import {
+  allLines,
+  EGRESS_GRACE_S,
+  ENTRY_ID_RE,
+  summarize,
+  type EgressStore,
+} from './egress-log.js';
 import type { TokenClaims } from './token.js';
 
 /**
@@ -348,8 +355,86 @@ async function sandboxEnded(
       reason,
       expiresAt: rec.expiresAt,
       ...(reason === 'deleted' ? { endedAt: nowS } : {}),
+      ...(deps.egress ? { egress: await egressDigest(deps.egress, rec.id) } : {}),
     },
   });
+}
+
+/**
+ * What a `sandbox` record names of the egress log: its digest, and its completeness
+ * with the reasons (`droppedBy`: proxy, cap, budget, invalid).
+ */
+async function egressDigest(store: EgressStore, id: string) {
+  const s = await summarize(store, id);
+  return {
+    events: s.total,
+    sha256: s.sha256,
+    dropped: s.dropped,
+    droppedBy: s.droppedBy,
+    complete: s.complete,
+  };
+}
+
+/** The egress log's NDJSON export, a store page at a time: each line and its `\n`. */
+async function* ndjson(store: EgressStore, id: string): AsyncGenerator<string> {
+  let chunk = '';
+  let n = 0;
+  for await (const line of allLines(store, id)) {
+    chunk += `${line}\n`;
+    if (++n % EGRESS_STREAM_LINES === 0) {
+      yield chunk;
+      chunk = '';
+    }
+  }
+  if (chunk) yield chunk;
+}
+const EGRESS_STREAM_LINES = 1000;
+
+/**
+ * Seals each ended sandbox's egress log once its grace has passed (egress-log.ts EGRESS_GRACE_S),
+ * in the janitor's sweep after recordExpiries. A log that changed after its end record named it
+ * (events that arrived in the grace) gets one more `sandbox` record, `state: 'egress'`, naming the
+ * final log: the newest `sandbox` record of a sandbox that carries `egress` is its log's digest.
+ *
+ * The seal comes last, after the record is written: a sweep that fails before it (the chain, the
+ * digest or the append) leaves the log unsealed, so the next sweep does the work again. Past the
+ * grace the host post takes no events for the sandbox, so the log no longer changes, and the
+ * compare with the chain's newest record keeps a repeated sweep from writing a second record.
+ */
+async function sealEgress(deps: CpDeps, recs: SandboxRecord[], nowS: number): Promise<void> {
+  const store = deps.egress;
+  const retentionS = deps.config.sandbox?.retentionS ?? 0;
+  if (!store) return;
+  const due = recs.filter(
+    (r) => !isLive(r, nowS) && nowS >= (r.deletedAt ?? r.expiresAt) + EGRESS_GRACE_S,
+  );
+  const chains = new Map<string, Awaited<ReturnType<ProvenanceStore['chain']>>>();
+  for (const r of due) {
+    if ((await store.meta(r.id)).sealed) continue;
+    if (deps.provenance) {
+      const stream = `template/${r.template}`;
+      if (!chains.has(stream)) chains.set(stream, await deps.provenance.chain(stream));
+      const named = chains
+        .get(stream)!
+        .filter(
+          (x) =>
+            x.kind === 'sandbox' &&
+            (x.body as { sandboxId?: string }).sandboxId === r.id &&
+            (x.body as { egress?: unknown }).egress !== undefined,
+        )
+        .pop()?.body.egress as { sha256?: string; dropped?: number } | undefined;
+      const now = await egressDigest(store, r.id);
+      if (!named || named.sha256 !== now.sha256 || named.dropped !== now.dropped) {
+        await deps.provenance.append({
+          stream,
+          kind: 'sandbox',
+          subject: 'janitor',
+          body: { sandboxId: r.id, buildId: r.buildId ?? null, state: 'egress', egress: now },
+        });
+      }
+    }
+    await store.seal(r.id, (r.deletedAt ?? r.expiresAt) + retentionS);
+  }
 }
 
 /**
@@ -2059,6 +2144,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     if (outcome === 'not_found') throw new CpError('sandbox_not_found', 'no such sandbox');
     if (outcome === 'deleted') {
       await audit(deps, ctx.principal!.sub, rec.id, 'sandbox_deleted');
+      // The egress log is kept as long as the record, whose retention now runs from the delete.
+      await deps.egress?.expireAt(rec.id, now + cfg.retentionS);
       await sandboxEnded(deps, rec, ctx.principal!.sub, 'deleted', now);
     }
     // Idempotent: a second delete, or a delete after expiry, reports how it actually ended.
@@ -2066,6 +2153,46 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     return {
       status: 200,
       body: { id: rec.id, state: 'terminated', reason: ended.reason ?? 'deleted' },
+    };
+  },
+
+  /**
+   * A sandbox's egress log, for whoever may read the sandbox (GET /v1/sandboxes/{id}):
+   * `{events, next, summary}` a page at a time (`after` is the last page's `next`; `summary` on the
+   * first page, null after it), or with
+   * `format=ndjson` the whole log, whose sha256 is `summary.sha256` and the end record's.
+   */
+  getSandboxEgress: async (ctx, deps) => {
+    const rec = await assertSandboxOwner(ctx, deps, { admin: true });
+    if (!deps.egress) throw new CpError('internal_error', 'the egress log is not configured');
+    const format = ctx.query.get('format');
+    if (format !== null && format !== 'json' && format !== 'ndjson')
+      throw new CpError('invalid_request', "format must be 'json' or 'ndjson'");
+    if (format === 'ndjson') {
+      // Streamed a store page at a time (server.ts writeStream), never built whole in memory.
+      return {
+        status: 200,
+        body: ndjson(deps.egress, rec.id),
+        contentType: 'application/x-ndjson',
+      };
+    }
+    const after = ctx.query.get('after');
+    if (after !== null && !ENTRY_ID_RE.test(after))
+      throw new CpError('invalid_request', "after must be a page's next");
+    const rawLimit = ctx.query.get('limit');
+    const limit = rawLimit === null ? 100 : Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new CpError('invalid_request', 'limit must be 1-1000');
+    const page = await deps.egress.page(rec.id, after, limit);
+    return {
+      status: 200,
+      body: {
+        events: page.map((e) => JSON.parse(e.line) as unknown),
+        next: page.length === limit ? page[page.length - 1]!.id : null,
+        // On the first page only: the summary reads the whole log, so a page after it (`after`)
+        // costs that page alone, and paging a log through is linear in its length.
+        summary: after === null ? await summarize(deps.egress, rec.id) : null,
+      },
     };
   },
 
@@ -2170,6 +2297,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       else terminated.push({ wsk: v.wsk, wrk: v.worker, terminatedAt: v.terminatedAt! });
     }
     await recordExpiries(deps, all, now);
+    await sealEgress(deps, all, now);
     return { status: 200, body: { live, terminated } };
   },
 };

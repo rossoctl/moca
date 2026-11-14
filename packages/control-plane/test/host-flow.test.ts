@@ -416,6 +416,7 @@ describe('host authentication', () => {
       'hostBuildLog',
       'hostBuildReport',
       'hostClaimBuilds',
+      'hostEgress',
       'hostInventory',
       'hostWanted',
       'hostWorkerReport',

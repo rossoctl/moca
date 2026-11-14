@@ -443,6 +443,7 @@ describe('activation (§6.2-§6.3)', () => {
       run: [],
       starting: [],
       stop: [{ template: 't1', buildId: hash('1'), worker: 'sbx_t1' }],
+      egressSids: [],
     });
   });
 
