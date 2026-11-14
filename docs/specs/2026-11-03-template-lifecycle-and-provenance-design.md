@@ -3,9 +3,10 @@
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
 self-serve create (#737), §5.1-§5.2, the owner's and the admin's actions as built so far (#737,
-#747), §7, provenance (#730), and §8, policy (#737); §6 and §9-§12 (builds and activation on a
-host, tracing, validation, order of work, decisions) and the rest of §5 come with the issues that
-build them, and keep their numbers so a reference to a section stays valid.
+#747), §6.1, the host agent's builds (#741), §7, provenance (#730), and §8, policy (#737); the
+rest of §5 and of §6, and §9-§12 (activation on a host, tracing, validation, order of work,
+decisions) come with the issues that build them, and keep their numbers so a reference to a
+section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -196,7 +197,7 @@ subject that only an admin raises) is `429 quota_exceeded` naming which
 (`quota`); the quota is read and the build written under one lock per subject, so concurrent creates
 for different ids never pass one check together. Another subject's id is `409 template_exists` (`404 template_not_found` when that
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
-record) and `check` records (§7.1) and queues the build for a build host (§6.1, a later issue).
+record) and `check` records (§7.1) and queues the build for a host agent (§6.1).
 
 **Reuse.** A create that matches a build already registered answers
 `200 {buildId, status: "registered", reused: true}`; one that matches a build still on its way
@@ -332,6 +333,68 @@ The env list is not imported again, so a restart does not undo the transfer.
 Not covered here: whether a declared id should be claimable without an admin (a deployment with no
 admin cannot transfer), and per-template roles (a maintainer who may tag but not transfer).
 
+## 6. Builds and activation on a host
+
+### 6.1 The host agent
+
+A **new, small service** on each KVM host, `sbx-host-agent` (`deploy/sbx/host-agent.sh`, run by
+`sbx-host-agent.service` and its timer; not an extension of the host janitor, which keeps its one
+job), beside the workers. It **polls** the control plane and **reports** to it; it never listens, as
+the janitor does not (a per-host bearer, no inbound port, SBX0 §8.3). The deployment lists its hosts
+in `SH_TEMPLATE_HOSTS` and gives each its own bearer, `SH_HOST_TOKEN_<ID>`; a host route answers
+only the host whose token is presented, for itself.
+
+Its job here is to **build**: it claims `queued` builds and runs `template-build.sh` on them, as an
+operator does by hand. A build is claimed only while the host's free disk is above its floor
+(`SBX_DISK_FLOOR_GB`, default 60 GB, the `template-build.sh` refusal), and at most
+`SBX_BUILD_CONCURRENCY` a poll (default 1). Starting and stopping workers (activation) is a later
+issue; until then a registered build's worker is installed by an operator (`install-host.sh`, from
+the template record `template-build.sh` wrote, with the relay token that only `setup.sh` mints).
+
+**Each host declares the snapshots it holds**: the control plane does not assign templates to
+hosts. A build lands on the host that claimed it, and then is in that host's inventory. On every
+poll:
+
+| Step | Agent                                                                                                                                     | Control plane                                                            |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 1    | `POST /v1/hosts/{host}/inventory`: each held snapshot's template id and manifest hash; the host's limits, free disk                       | keeps the last inventory of each host                                    |
+| 2    | `POST /v1/hosts/{host}/builds/claim`: up to its free build slots                                                                          | hands out `queued` builds, oldest first, one subject's at a time in turn |
+| 3    | fetches a cited gate record (`GET /v1/hosts/{host}/blobs/{sha256}`) and checks its bytes against the sha256                               | serves the stored bytes                                                  |
+| 4    | builds; `POST /v1/hosts/{host}/builds/{build}/log` and `/report` (`building`, `probing`, `built` with T and S, or `failed` with the step) | records them; on `built`, checks policy and registers or rejects (§8.2)  |
+
+A claimed build's job is the spec as the policy checked it: the template's id and the create's
+image always win over keys of the same name in the spec, and the guest size is always named
+`guest_ram_mb` (the API also takes `guest_mb`; `template-build.sh` reads only `guest_ram_mb`). A
+report is accepted only for a build handed to that host, and a failed or cancelled build takes no
+more reports; the check is made again inside the template's update, with the report's records, so
+an owner's cancel that lands while a report is being written stands and no record says it
+registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
+and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
+template's first registered build takes the `default` tag. A build id names one build of a
+template: a build whose manifest hash another build of the template already has (the same image
+and spec created again under another profile or gate record, which the build finds already built)
+is rejected, rule `T.unique`, naming that build.
+
+**Nothing that names where an image lives leaves the host.** The control plane keeps what it is
+sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
+reason and log (`SBX_REGISTRY`, URLs, registry hosts, IP addresses, 12-digit account numbers) and
+keeps the full log on the host (a 0700 directory). T and S go byte for byte, so they cannot be
+redacted: one that names `SBX_REGISTRY` is not sent, and the build fails `leak_refused`. A
+failure's reason leads with a code a client can branch on: `pull_failed`, `probe_failed`,
+`disk_floor`, `spec_refused`, `build_failed` or `leak_refused`; or `agent_error`, when the agent
+cannot carry on with a build it claimed (a gate record it cannot fetch or whose bytes do not match
+its sha256, a report not accepted, no template record or manifest after the build). An agent that
+is still running reports every build it claimed: `built`, or `failed` on any other way out.
+
+**The build host handles untrusted images** in a self-serve model. The image is pulled only from a
+registry the policy allows (§8.1), its export runs as today (`build-rootfs.sh`, as root, owners
+kept, M4) into a size-capped scratch directory, and everything the image runs, runs inside the
+Firecracker guest. Hardening the export of a hostile image is recorded, not solved, for the first
+version.
+
+Known limits: a claimed build is not re-queued if the agent dies mid-build; one poll builds up to
+`SBX_BUILD_CONCURRENCY` builds, with no scheduling across hosts.
+
 ## 7. Provenance
 
 Nothing in the control plane records where a sandbox template came from, who changed it, or which
@@ -460,7 +523,7 @@ still applies its own checks, since a host is never trusted to have been asked o
 ### 8.2 At build and registration
 
 On the build host, the build tool applies its checks (M1-M4, M10-M13, M15, and X10, X12 with the
-gate record). When the host agent (§6.1, a later issue) reports a build `built`, the control plane
+gate record). When the host agent (§6.1) reports a build `built`, the control plane
 re-checks the build record against the create's spec and the policy, and registers the build or
 rejects it with the failing rule, with a `check` record either way. A build is registered only with
 a passed `check` against the policy named at create.

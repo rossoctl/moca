@@ -3,6 +3,36 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.10.0
+
+Template host agents and their routes ([#741](https://github.com/rossoctl/moca/issues/741)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §6.1 and
+§8.2. Every change is additive; the routes mount on both route profiles, need `SH_PROVENANCE_DIR`
+for the builds (else `400 invalid_request`), and answer only a host listed in `SH_TEMPLATE_HOSTS`
+(else `401 unauthorized`).
+
+- New security scheme `hostToken`: one template host's bearer, `SH_HOST_TOKEN_<ID>`. The host in
+  the path must be the one whose token is presented; no user, admin, janitor or egress token is
+  accepted.
+- New POST /v1/hosts/{host}/inventory: what the host holds (`holds`, each a `template` and its
+  `manifestHash`) and its limits (`limits`: `activeLimit`, `idleLimitSeconds`, `buildConcurrency`,
+  `diskFreeGb`, `diskFloorGb`).
+- New POST /v1/hosts/{host}/builds/claim `{max}`: up to 4 queued builds, oldest first and subjects
+  in turn, each moved to `building` and held by the host, with its job: the template id, the
+  handle, the image and the spec as `template-build.sh` reads it (the template's id and the create's
+  image always win over the spec's own; the guest size is always `guest_ram_mb`, the value the
+  policy checked), and the gate record's path when the create had one.
+- New GET /v1/hosts/{host}/blobs/{digest}: a stored document (a gate record) by sha256, base64 of
+  its exact bytes.
+- New POST /v1/hosts/{host}/builds/{build}/log (at most 200 entries a call; a build keeps its
+  last 1000) and POST /v1/hosts/{host}/builds/{build}/report, whose `event` is `building` or
+  `probing`; `failed` with `step` and `message`; or `built` with `templateRecord` and `manifest`,
+  each file as a string. A report answers only a build this host claimed (else `404 not_found`);
+  a failed or cancelled build takes no more. On `built` the control plane stores both files,
+  writes a `build` record, checks them against the create's request and registers the build (its
+  `buildId` becomes the manifest hash; a template's first registered build takes `default`) or
+  rejects it with `reason.rule`, writing a `check` record (`at: registration`) either way.
+
 ## 1.9.0
 
 A subject's own gate record, trusted for its own templates, and repositories allowed per registry

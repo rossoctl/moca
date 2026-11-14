@@ -63,6 +63,11 @@ describe('the route table', () => {
         'GET /v1/policy',
         'PUT /v1/policy',
         'GET /v1/quota',
+        'POST /v1/hosts/{host}/inventory',
+        'POST /v1/hosts/{host}/builds/claim',
+        'GET /v1/hosts/{host}/blobs/{digest}',
+        'POST /v1/hosts/{host}/builds/{build}/log',
+        'POST /v1/hosts/{host}/builds/{build}/report',
         'POST /v1/sandboxes',
         'GET /v1/sandboxes',
         'GET /v1/sandboxes/{id}',
@@ -138,6 +143,8 @@ describe('the route table', () => {
       (r) =>
         r.path.startsWith('/v1/') &&
         !r.path.startsWith('/v1/auth/') &&
+        // A template host agent's routes take its host token (template lifecycle spec §6.1).
+        !(r.path.startsWith('/v1/hosts/{host}/') && r.auth === 'host') &&
         r.auth !== (EXEMPT.get(`${r.method} ${r.path}`) ?? 'api'),
     );
     expect(wrong.map((r) => r.path)).toEqual([]);

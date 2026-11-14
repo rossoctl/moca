@@ -904,6 +904,7 @@ async function admitBuild(
             worker: '',
             spec: buildSpec(built),
             createdAt: now,
+            queuedAtMs: deps.now(),
             provenance: created.digest,
             request: {
               image: b.image as string,
@@ -1376,8 +1377,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const docs = await visibleTemplates(deps, p);
     const live = await readinessFacts(deps);
     const templates = docs.map((d) => templateBody(d, live, false));
-    // Per-host limits and use (§4, §6.2) are reported by a host agent, which a later issue adds:
-    // an empty list means "no host reports", never "no limit".
+    // Per-host limits and use (§4, §6.2) come from the host agents' inventories (host-handlers.ts);
+    // listing them here is a later issue: an empty list means "no host reports", never "no limit".
     return { status: 200, body: { templates, hosts: [] } };
   },
 

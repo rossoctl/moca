@@ -83,6 +83,20 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     ctx.egressHost = found;
     return;
   }
+  if (route.auth === 'host') {
+    // As for egress: every configured host compared, no early return, digests of fixed length. The
+    // host named in the path must be the one whose token was presented (a host acts only as itself).
+    const want = presented ? createHash('sha256').update(presented).digest() : undefined;
+    let found: string | undefined;
+    for (const h of deps.config.templateHosts ?? []) {
+      const have = createHash('sha256').update(h.token).digest();
+      if (want && timingSafeEqual(want, have) && found === undefined) found = h.id;
+    }
+    if (!found || found !== ctx.params.host)
+      throw new CpError('unauthorized', 'host authentication failed');
+    ctx.host = found;
+    return;
+  }
   if (!presented) throw new CpError('token_required', 'this route requires a token');
   // requiredScope 'api' is what stops a session token rewriting credentials or creating a second
   // session, and stops the shared exchange bearer standing in for a user identity (plan gap #7).
