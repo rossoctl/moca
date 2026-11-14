@@ -8,6 +8,8 @@ export interface SbxTemplate {
   tools: string[];
   /** The default build's readiness (template lifecycle spec §3.3); absent from an older control plane. */
   readiness?: string | null;
+  /** Why the default build is `unavailable` (template lifecycle spec §6.2); only then. */
+  readinessReason?: SbxReadinessReason;
   /** tag -> build id; absent from an older control plane. */
   tags?: Record<string, string>;
 }
@@ -82,6 +84,9 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** Why placement left a wanted build waiting (openapi ReadinessReason, template lifecycle spec §6.2). */
+export type SbxReadinessReason = 'not_held' | 'no_slot' | 'memory' | 'memfile_mismatch';
+
 /** One build of a template (openapi TemplateBuild, template lifecycle spec §3.2, §3.3). */
 export interface SbxBuild {
   buildId: string;
@@ -90,6 +95,15 @@ export interface SbxBuild {
   status: string;
   profile: string;
   readiness: string | null;
+  /** Present only with readiness `unavailable`: why it is not placed. */
+  readinessReason?: SbxReadinessReason;
+  /** Only while `activating` on a host that reports its start limit (§6.5): waiting for a start slot. */
+  queued?: boolean;
+  /** With `queued`: its 1-based place in the host's start line. */
+  queuePosition?: number;
+  /** Only while in its host's idle grace (§6.5), until `gracedUntil` (epoch seconds). */
+  graced?: true;
+  gracedUntil?: number;
   capacity: { running: number; inUse: number | null } | null;
   lastUsedAt: number | null;
   tags: string[];
@@ -134,6 +148,38 @@ export interface SbxTagsMoved {
   buildId: string;
   /** `before`: the build the tag named until now (null: new); `record`: null when unchanged. */
   tags: { tag: string; buildId: string; before: string | null; record: string | null }[];
+}
+
+/** One KVM host as `GET /v1/templates` reports it (template lifecycle spec §6.2). */
+export interface SbxHost {
+  id: string;
+  active: { limit: number; used: number };
+  idleLimitSeconds: number;
+  disk: { freeGb: number; floorGb: number };
+  /** Only from a host agent that reports its memory: placement's figures, in MiB. */
+  memory?: {
+    totalMib: number;
+    availableMib: number;
+    floorMib: number;
+    usedMib: number;
+    headroomMib: number;
+    pressureFull10: number | null;
+    pressureLimit: number | null;
+    brake: 'pressure' | 'stale' | null;
+    runningWorkers: number;
+    memfileMismatch: string[];
+    reportedAt: number;
+  };
+  /** Only from a host agent that reports its start limit (§6.5): the limit, start time, start line. */
+  start?: {
+    concurrency: number;
+    seconds: number | null;
+    starting: number | null;
+    queued: number | null;
+  };
+  /** Only from a host agent that sets an idle grace (§6.5): its length, and the builds in it now. */
+  idleGraceSeconds?: number;
+  graced?: number;
 }
 
 /** What a create answers (openapi TemplateQueued): the build to follow. */
@@ -202,6 +248,11 @@ export class SandboxApiClient extends ControlPlaneClient {
     return (await this.json<{ templates: SbxTemplate[] }>('GET', '/v1/templates')).templates;
   }
 
+  /** The KVM hosts' limits and use: the `hosts` block of `GET /v1/templates` (§6.2). */
+  async listHosts(): Promise<SbxHost[]> {
+    return (await this.json<{ hosts?: SbxHost[] }>('GET', '/v1/templates')).hosts ?? [];
+  }
+
   /** One template with its builds and their specs (`GET /v1/templates/{id}`). */
   getTemplate(id: string): Promise<SbxTemplateFull> {
     return this.json('GET', `/v1/templates/${encodeURIComponent(id)}`);
@@ -262,9 +313,15 @@ export class SandboxApiClient extends ControlPlaneClient {
     return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/activate`, { body });
   }
 
-  /** Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`). */
-  deactivateTemplate(id: string): Promise<{ templateId: string; released: number }> {
-    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body: {} });
+  /**
+   * Release the caller's activation leases on a template (`POST /v1/templates/{id}/deactivate`);
+   * `stopNow` skips the host's idle grace.
+   */
+  deactivateTemplate(
+    id: string,
+    body: { stopNow?: boolean } = {},
+  ): Promise<{ templateId: string; released: number }> {
+    return this.json('POST', `/v1/templates/${encodeURIComponent(id)}/deactivate`, { body });
   }
 
   /** Create a template, or a new build of one's own (lifecycle spec §4): `POST /v1/templates`. */

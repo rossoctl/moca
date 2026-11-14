@@ -402,6 +402,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
+    await c.listHosts();
     await c.createSandbox({ template: 'node22' });
     await c.listSandboxes();
     await c.getSandbox('ID');
@@ -439,6 +440,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
       new Set([
         'sandboxDiscovery',
         'listTemplates',
+        'listHosts',
         'createSandbox',
         'listSandboxes',
         'getSandbox',
