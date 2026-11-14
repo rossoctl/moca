@@ -130,6 +130,17 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     );
   });
 
+  it('reads SH_GATE_RECORD_SCHEMA: absent by default, set when given, refused when malformed', () => {
+    expect(configFromEnv(env({})).sandbox).not.toHaveProperty('gateRecordSchema');
+    expect(
+      configFromEnv(env({ SH_GATE_RECORD_SCHEMA: 'builder.example/gate/1' })).sandbox
+        ?.gateRecordSchema,
+    ).toBe('builder.example/gate/1');
+    expect(() => configFromEnv(env({ SH_GATE_RECORD_SCHEMA: 'a gate/1' }))).toThrow(
+      /^SH_GATE_RECORD_SCHEMA must be a schema string/,
+    );
+  });
+
   it('names the variable in a refusal, never its value', () => {
     // A refusal lands in a pod log; a mistyped secret must not ride along with it.
     const short = 'janitor-secret-too-short'; // notsecret

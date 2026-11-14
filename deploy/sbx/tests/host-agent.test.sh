@@ -8,7 +8,10 @@
 # floor or without a registry login; nothing that names where an image lives leaves the host (a
 # failure's reason and log redacted, a record naming SBX_REGISTRY not sent); the wanted state starts
 # installed workers and stops unwanted ones (systemctl mocked), each reported, under a lock that
-# --wanted-only runs share; and the agent refuses its own bad settings before it calls anything.
+# --wanted-only runs share; the inventory reports the host's memory (/proc and the workers' slices'
+# memory.stat, under SBX_SYS_ROOT) and a memory file of the wrong size is reported and never started;
+# at most SBX_START_CONCURRENCY workers start at once, never waited on, and the measured start time is
+# reported; a graced build is kept running, never started; and the agent refuses its own bad settings before it calls anything.
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP="$(mktemp -d)"
@@ -55,6 +58,7 @@ printf 'build %s\n' "$*" >>"$MOCK_LOG"
 spec="$1" id="$(jq -r .id "$1")" d="$(jq -r .image "$1")"; d="${d##*@sha256:}"; name="$id-${d:0:12}"
 mkdir -p "$SBX_SRV/snapshots/$name"
 printf '{"hash_version":2,"hash":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","guest_ram_mb":1}' >"$SBX_SRV/snapshots/$name/manifest.json"
+dd if=/dev/zero of="$SBX_SRV/snapshots/$name/memfile" bs=1 count=0 seek=1048576 2>/dev/null # 1 MiB, sparse
 jq -n --arg n "$name" --arg id "$id" '{schema: "moca-sbx-template/1", id: $id, snapshot: $n, manifest_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}' \
   >"$SBX_SRV/templates/$name.json"
 echo "==> built template $id"
@@ -83,6 +87,19 @@ mkdir -p "$TMP/workers"
 export PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/log" MOCK_STATE="$TMP/state" MOCK_TOKEN_FILE="$TMP/token" MOCK_GATE="$GATE"
 export SBX_API_URL=https://cp.example.invalid SBX_HOST_ID=host-1 SBX_HOST_TOKEN_FILE="$TMP/token" SBX_KERNEL="$TMP/kernel"
 export SBX_SRV="$TMP/srv" SBX_ENV_DIR="$TMP" SBX_TEMPLATE_BUILD="$TMP/bin/template-build" SBX_DISK_FLOOR_GB=0
+# The system root /proc and /sys/fs/cgroup are read from: a host of 16 GiB, 12 free.
+SYS="$TMP/sys"
+mkdir -p "$SYS/proc/pressure" "$SYS/sys/fs/cgroup/sbx.slice"
+printf 'MemTotal:       16777216 kB\nMemFree:         1000000 kB\nMemAvailable:   12582912 kB\n' >"$SYS/proc/meminfo"
+printf 'some avg10=0.50 avg60=0.20 avg300=0.10 total=1234\nfull avg10=0.25 avg60=0.10 avg300=0.05 total=567\n' >"$SYS/proc/pressure/memory"
+export SBX_SYS_ROOT="$SYS"
+# snapfiles DIR MIB [BYTES]: a snapshot's manifest (guest_ram_mb MIB) and a sparse memfile of BYTES
+# (default MIB x 1 MiB), as build-snapshot.sh leaves them.
+snapfiles() {
+  mkdir -p "$1"
+  printf '{"hash_version":2,"guest_ram_mb":%s}' "$2" >"$1/manifest.json"
+  dd if=/dev/zero of="$1/memfile" bs=1 count=0 seek="${3:-$(($2 * 1048576))}" 2>/dev/null
+}
 
 job() { # job [GATE_SHA]: the claim answer, one build of the worked example
   jq -n --arg d "$DIGEST" --arg g "${1:-}" '{builds: [{template: "django-django-11133", build: "b-0123456789abcdef0123456789",
@@ -358,5 +375,278 @@ rm -f "$TMP/state/locked"
 ! bash "$A" --once --wanted-only >"$TMP/out" 2>&1 || fail 'accepted two modes'
 printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
 pass 'with --wanted-only, applies the wanted state and claims nothing; one run at a time applies it'
+
+# 13. Memory: the inventory's `memory` object, from /proc and the workers' slices.
+#     Two held builds of 4 GiB guests: m1 running (its slice's memory.stat: 448 MiB anon, 16 MiB shmem,
+#     48 MiB kernel, and the memfile plus 3.5 GiB of page cache as file, which never counts), m2
+#     stopped. The floor's default is 10% of MemTotal, at least 4096; a set floor is reported as set.
+rm -rf "$TMP/srv/templates" "$TMP/srv/snapshots"; mkdir -p "$TMP/srv/templates" "$TMP/srv/snapshots"
+rm -f "$TMP/state/active-"*
+HM1="sha256:$(printf '1%.0s' {1..64})" HM2="sha256:$(printf '2%.0s' {1..64})"
+for i in 1 2; do
+  h="$HM1"; [[ "$i" == 1 ]] || h="$HM2"
+  snapfiles "$TMP/srv/snapshots/m$i-snap" 4096
+  jq -n --arg h "$h" --arg i "$i" '{schema: "moca-sbx-template/1", id: ("m" + $i), worker: ("sbx_m" + $i), snapshot: ("m" + $i + "-snap"), manifest_hash: $h}' \
+    >"$TMP/srv/templates/m$i-snap.json"
+done
+touch "$TMP/state/active-sbx-worker@sbx_m1.service"
+mkdir -p "$SYS/sys/fs/cgroup/sbx.slice/sbx-sbx_m1.slice"
+MIB=1048576
+memstat() { # anon shmem kernel file [kernel_split]: a memory.stat for m1's slice, MiB
+  local f="$SYS/sys/fs/cgroup/sbx.slice/sbx-sbx_m1.slice/memory.stat"
+  { printf 'anon %d\nfile %d\n' $(($1 * MIB)) $(($4 * MIB))
+    if [[ -n "${5:-}" ]]; then printf 'kernel_stack %d\npagetables %d\nslab %d\n' $((MIB * 8)) $((MIB * 8)) $((($3 - 16) * MIB))
+    else printf 'kernel %d\n' $(($3 * MIB)); fi
+    printf 'file_mapped %d\nshmem %d\nunevictable %d\ninactive_file %d\n' $((4096 * MIB)) $(($2 * MIB)) $((4096 * MIB)) $((3584 * MIB))
+  } >"$f"
+  echo $((($1 + $3 + $4) * MIB)) >"$SYS/sys/fs/cgroup/sbx.slice/sbx-sbx_m1.slice/memory.current"
+}
+memstat 448 16 48 $((4096 + 3584))
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+mem_run() { : >"$MOCK_LOG"; rm -f "$TMP/state/POST_"*; bash "$A" --wanted-only >"$TMP/out" 2>&1; }
+INV="$TMP/state/POST_v1_hosts_host-1_inventory"
+mem_run || fail 'the memory run failed'
+jq -e --arg h1 "$HM1" '.memory == {memTotalMib: 16384, memAvailableMib: 12288, memFloorMib: 4096, memPressureFull10: 0.25,
+    memPressureLimit: 10, runningWorkers: ["sbx_m1"], vmCommittedMib: {sbx_m1: 512}, memfileMismatch: []}
+  and .limits.activeLimit == 0 and (.holds | length) == 2' "$INV" >/dev/null || fail "the memory object: $(jq -c .memory "$INV")"
+grep -q '"psi"\|"sliceUnread"\|"memfileMismatch"' "$TMP/out" && fail 'a memory note in a summary with nothing to say'
+grep -q '"errors":0' "$TMP/out" || fail 'the memory run counted an error'
+# The 10% default on a big host (256 GiB: 26214 MiB), and a set floor and pressure limit as set.
+printf 'MemTotal:       268435456 kB\nMemAvailable:   200000000 kB\n' >"$SYS/proc/meminfo"
+mem_run || fail 'the big-host run failed'
+jq -e '.memory.memFloorMib == 26214' "$INV" >/dev/null || fail "the 10% floor: $(jq -c .memory.memFloorMib "$INV")"
+SBX_MEM_FLOOR_MIB=2048 SBX_MEM_PRESSURE_LIMIT=2.5 mem_run || fail 'the set-floor run failed'
+jq -e '.memory.memFloorMib == 2048 and .memory.memPressureLimit == 2.5' "$INV" >/dev/null || fail 'a set floor or pressure limit'
+printf 'MemTotal:       16777216 kB\nMemFree:         1000000 kB\nMemAvailable:   12582912 kB\n' >"$SYS/proc/meminfo"
+# The kernel's three older lines in place of `kernel` (kernel_stack + pagetables + slab): the same 512.
+memstat 448 16 48 $((4096 + 3584)) split
+mem_run || fail 'the split-kernel run failed'
+jq -e '.memory.vmCommittedMib == {sbx_m1: 512}' "$INV" >/dev/null || fail "no kernel line: $(jq -c .memory.vmCommittedMib "$INV")"
+pass 'reports memTotal, memAvailable, PSI full avg10, the effective floor (10%, at least 4096; or set), and each running worker'"'"'s VMs from its slice'"'"'s memory.stat, never its page cache'
+
+# 14. No /proc/pressure: no memPressureFull10 (no brake), one "psi":"absent" in the summary; never a
+#     refusal. An unreadable slice: that worker left out of vmCommittedMib, and the summary names it.
+mv "$SYS/proc/pressure" "$SYS/proc/pressure.off"
+rm -f "$SYS/sys/fs/cgroup/sbx.slice/sbx-sbx_m1.slice/memory.stat"
+mem_run || fail 'the no-PSI run failed'
+jq -e '(.memory | has("memPressureFull10") | not) and .memory.vmCommittedMib == {} and .memory.runningWorkers == ["sbx_m1"]' "$INV" >/dev/null ||
+  fail "no PSI, an unread slice: $(jq -c .memory "$INV")"
+[[ "$(grep -o '"psi":"absent"' "$TMP/out" | wc -l | tr -d ' ')" == 1 ]] || fail 'the absent PSI is not said exactly once'
+grep -q '"agent":"summary".*"psi":"absent","sliceUnread":\["sbx_m1"\]' "$TMP/out" || fail 'the summary does not say psi absent and the unread slice'
+grep -q '"errors":0' "$TMP/out" || fail 'no PSI counted as an error'
+mv "$SYS/proc/pressure.off" "$SYS/proc/pressure"
+# A cache-heavy slice: 9 MiB anon, 27 kernel, 0 shmem, 7637 file (the 4092 memfile + cache).
+memstat 9 0 27 7637
+mem_run || fail 'the cache-heavy run failed'
+jq -e '.memory.vmCommittedMib == {sbx_m1: 36}' "$INV" >/dev/null ||
+  fail "the page cache counted as committed: $(jq -c .memory.vmCommittedMib "$INV")"
+# A memory.stat with no anon line is unread, never 0.
+printf 'file %d\nkernel %d\n' $((4096 * MIB)) $((27 * MIB)) >"$SYS/sys/fs/cgroup/sbx.slice/sbx-sbx_m1.slice/memory.stat"
+mem_run || fail 'the no-anon run failed'
+jq -e '.memory.vmCommittedMib == {}' "$INV" >/dev/null || fail 'a memory.stat without anon was not left out'
+grep -q '"sliceUnread":\["sbx_m1"\]' "$TMP/out" || fail 'a memory.stat without anon was not named'
+memstat 448 16 48 $((4096 + 3584))
+pass 'no /proc/pressure: no brake field, said once; an unreadable or anon-less memory.stat is left out and named; page cache never counts'
+
+# 15. A memory file that is not guest_ram_mb x 1 MiB: reported (memfileMismatch, an error line, the
+#     summary's count), and that build's worker never started here, whatever the wanted state says.
+snapfiles "$TMP/srv/snapshots/m2-snap" 4096 $((2048 * 1048576))
+: >"$TMP/workers/sbx_m2.env"
+jq -n --arg h "$HM2" '{run: [{template: "m2", buildId: $h, worker: "sbx_m2"}], stop: []}' >"$TMP/state/wanted-answer"
+mem_run || fail 'the mismatch run failed'
+jq -e --arg h "$HM2" '.memory.memfileMismatch == [$h]' "$INV" >/dev/null || fail 'the mismatch is not in the inventory'
+grep -q '"agent":"error","why":"memfile mismatch: build '"$HM2"' (snapshot m2-snap): its memory file is 2147483648 bytes, not guest_ram_mb 4096 x 1 MiB' "$TMP/out" ||
+  fail 'the mismatch is not an error line'
+grep -q '"agent":"summary".*"memfileMismatch":1' "$TMP/out" || fail 'the summary does not count the mismatch'
+grep -q 'systemctl start sbx-worker@sbx_m2.service' "$MOCK_LOG" && fail 'started a build whose memory file does not match'
+jq -e --arg h "$HM2" '.event == "refused" and .buildId == $h and (.reason | startswith("memfile mismatch"))' "$TMP/state/POST_v1_hosts_host-1_workers_report" >/dev/null ||
+  fail 'the refusal was not reported'
+rm -f "$TMP/srv/snapshots/m2-snap/memfile"
+mem_run || fail 'the missing-memfile run failed'
+jq -e --arg h "$HM2" '.memory.memfileMismatch == [$h]' "$INV" >/dev/null || fail 'a missing memfile is not a mismatch'
+snapfiles "$TMP/srv/snapshots/m2-snap" 4096
+mem_run || fail 'the fixed run failed'
+jq -e '.memory.memfileMismatch == []' "$INV" >/dev/null || fail 'a matching memfile is still a mismatch'
+grep -q 'systemctl start sbx-worker@sbx_m2.service' "$MOCK_LOG" || fail 'a matching memfile is not started'
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+rm -f "$TMP/state/active-sbx-worker@sbx_m2.service"
+pass 'a memory file that is not guest_ram_mb x 1 MiB is reported in the inventory and the summary, and never started'
+
+# 16. Its memory settings, refused (exit 2) before any call; no /proc/meminfo: no figures (an error
+#     line), placement by activeLimit alone, never a refusal.
+for bad in 'SBX_MEM_FLOOR_MIB=0' 'SBX_MEM_FLOOR_MIB=4G' 'SBX_MEM_FLOOR_MIB=04096' 'SBX_MEM_PRESSURE_LIMIT=0' \
+  'SBX_MEM_PRESSURE_LIMIT=abc' 'SBX_MEM_PRESSURE_LIMIT=101' 'SBX_MEM_PRESSURE_LIMIT=-1' 'SBX_MEM_PRESSURE_LIMIT=1.234'; do
+  : >"$MOCK_LOG"
+  rc=0; env "$bad" bash "$A" --once >"$TMP/out" 2>&1 || rc=$?
+  [[ "$rc" == 2 ]] || fail "accepted $bad (rc $rc)"
+  [[ ! -s "$MOCK_LOG" ]] || fail "called the control plane before refusing $bad"
+done
+mv "$SYS/proc/meminfo" "$SYS/proc/meminfo.off"
+mem_run || fail 'the no-meminfo run failed'
+jq -e '(.memory | has("memTotalMib") or has("memAvailableMib") or has("memFloorMib") | not) and .memory.runningWorkers == ["sbx_m1"]' "$INV" >/dev/null ||
+  fail "no meminfo: $(jq -c .memory "$INV")"
+grep -q 'no MemTotal or MemAvailable in /proc/meminfo' "$TMP/out" || fail 'no meminfo is not an error line'
+mv "$SYS/proc/meminfo.off" "$SYS/proc/meminfo"
+pass 'refuses a bad SBX_MEM_FLOOR_MIB or SBX_MEM_PRESSURE_LIMIT before calling anything; no /proc/meminfo is an error line, not a refusal'
+
+# 17. The start limit: SBX_START_CONCURRENCY, default 4, 0 refused; at most that many
+#     workers starting at once, in the wanted order, the rest queued for a later run (startQueued);
+#     "starting" from the wanted answer's `starting`, or, from a control plane without it, the agent's
+#     own starts of the last SBX_START_WINDOW_S; a start never waited on; startSeconds once one is done.
+rm -f "$TMP/state/active-"* "$TMP/srv/start-times" "$TMP/srv/start-seconds"
+for i in 1 2 3 4 5 6; do : >"$TMP/workers/sbx_s$i.env"; done
+# wanted [STARTING_JSON]: the six builds s1..s6 in `run`, in that order; with `starting` when given.
+wanted() {
+  jq -n --arg st "${1:-}" '{run: [range(1; 7) | tostring | {template: ("s" + .), buildId: ("sha256:s" + .), worker: ("sbx_s" + .)}],
+    stop: []} + (if $st == "" then {} else {starting: ($st | fromjson)} end)' >"$TMP/state/wanted-answer"
+}
+started() { grep -o 'systemctl start sbx-worker@sbx_s[0-9]' "$MOCK_LOG" | sed 's/.*@sbx_//' | tr '\n' ' '; }
+st_run() { : >"$MOCK_LOG"; rm -f "$TMP/state/POST_"*; bash "$A" --wanted-only >"$TMP/out" 2>&1; }
+# The default, reported; no startSeconds before a start is done.
+wanted '[]'
+st_run || fail 'the start-limit run failed'
+jq -e '.limits.startConcurrency == 4 and (.limits | has("startSeconds") | not)' "$INV" >/dev/null || fail "the default start limit: $(jq -c .limits "$INV")"
+# Six wanted, none starting: the first four start, in order; two wait, and the summary says so.
+[[ "$(started)" == 's1 s2 s3 s4 ' ]] || fail "six wanted, none starting, started: $(started)"
+grep -q '"agent":"summary".*"startQueued":2}' "$TMP/out" || fail 'the summary does not count the queued starts'
+grep -q '"started":4' "$TMP/out" || fail 'the summary does not count four starts'
+[[ "$(stat -c %a "$TMP/srv/start-times" 2>/dev/null || stat -f %Lp "$TMP/srv/start-times")" == 600 ]] || fail 'start-times is not 0600'
+[[ "$(wc -l <"$TMP/srv/start-times" | tr -d ' ')" == 4 ]] || fail 'start-times does not hold the four starts'
+# Three still starting (s1-s3, from `starting`), s4 attached 40 s after its start: one slot, s5 starts.
+T40=$(($(date +%s) - 40))
+awk -v t="$T40" 'BEGIN { FS = OFS = "\t" } $1 == "sbx_s4" { $3 = t } { print }' "$TMP/srv/start-times" >"$TMP/st" && cat "$TMP/st" >"$TMP/srv/start-times"
+wanted '["sha256:s1","sha256:s2","sha256:s3","sha256:s5","sha256:s6"]'
+st_run || fail 'the three-starting run failed'
+[[ "$(started)" == 's5 ' ]] || fail "three starting, started: $(started)"
+grep -q '"startQueued":1}' "$TMP/out" || fail 'the summary does not count the one queued'
+grep -q '"agent":"attached","worker":"sbx_s4","startSeconds":4[0-2]}' "$TMP/out" || fail 'the done start is not said'
+# The next inventory reports the measured start time (s4's 40 s) beside the limit.
+st_run || fail 'the run after a done start failed'
+jq -e '.limits.startConcurrency == 4 and (.limits.startSeconds | . >= 40 and . <= 42)' "$INV" >/dev/null ||
+  fail "startSeconds after a done start: $(jq -c .limits "$INV")"
+[[ "$(stat -c %a "$TMP/srv/start-seconds" 2>/dev/null || stat -f %Lp "$TMP/srv/start-seconds")" == 600 ]] || fail 'start-seconds is not 0600'
+# A set limit is reported as set.
+rm -f "$TMP/state/active-"* "$TMP/srv/start-times"
+wanted '[]'
+SBX_START_CONCURRENCY=2 st_run || fail 'the set-limit run failed'
+{ [[ "$(started)" == 's1 s2 ' ]] && jq -e '.limits.startConcurrency == 2' "$INV" >/dev/null; } || fail "a set limit of 2: $(started)"
+pass 'starts at most SBX_START_CONCURRENCY (default 4) less those starting, in order; queues the rest (startQueued); startSeconds once a start is done'
+
+# 18. An older control plane (no `starting`): the agent's own starts of the last SBX_START_WINDOW_S
+#     count as starting, so the limit still holds; past the window they no longer count.
+rm -f "$TMP/state/active-"* "$TMP/srv/start-times" "$TMP/srv/start-seconds"
+wanted ''
+st_run || fail 'the old-control-plane run failed'
+{ [[ "$(started)" == 's1 s2 s3 s4 ' ]] && grep -q '"startQueued":2}' "$TMP/out"; } || fail "old control plane, first run: $(started)"
+st_run || fail 'the second old-control-plane run failed'
+{ [[ -z "$(started)" ]] && grep -q '"startQueued":2}' "$TMP/out"; } || fail "old control plane, four in the window, started: $(started)"
+OLD=$(($(date +%s) - 400))
+awk -v t="$OLD" 'BEGIN { FS = OFS = "\t" } { $3 = t; print }' "$TMP/srv/start-times" >"$TMP/st" && cat "$TMP/st" >"$TMP/srv/start-times"
+st_run || fail 'the past-the-window run failed'
+{ [[ "$(started)" == 's5 s6 ' ]] && ! grep -q '"startQueued"' "$TMP/out"; } || fail "old control plane, past the window, started: $(started)"
+jq -e '.limits | has("startSeconds") | not' "$INV" >/dev/null || fail 'startSeconds without a starting list'
+pass 'with a control plane without a starting list, its own starts of the last SBX_START_WINDOW_S count, so the limit holds'
+
+# 19. A start is never waited on: a worker that never attaches (still in `starting` run after run)
+#     holds its slot, and each run returns at once; no `systemctl start --wait` (the mock blocks on one).
+cat >"$TMP/bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
+case "$1" in
+is-active) [[ -f "$MOCK_STATE/active-${!#}" ]] ;;
+start) [[ " $* " != *" --wait "* && " $* " != *" --block "* ]] || sleep 40; touch "$MOCK_STATE/active-${!#}" ;;
+stop) rm -f "$MOCK_STATE/active-$2" ;;
+esac
+MOCK
+chmod +x "$TMP/bin/systemctl"
+rm -f "$TMP/state/active-"* "$TMP/srv/start-times"
+wanted '["sha256:s1","sha256:s2","sha256:s3","sha256:s4","sha256:s5","sha256:s6"]'
+for r in 1 2 3; do
+  t0=$SECONDS
+  st_run || fail "the never-attaching run $r failed"
+  ((SECONDS - t0 < 30)) || fail "run $r waited on a start ($((SECONDS - t0)) s)"
+  grep -q -- '--wait\|--block' "$MOCK_LOG" && fail 'a start was waited on'
+  grep -q '"startQueued":2}' "$TMP/out" || fail "run $r: the two not started are not queued"
+done
+n=0; for f in "$TMP/state/active-sbx-worker@sbx_s"*; do [[ -e "$f" ]] && n=$((n + 1)); done
+((n == 4)) || fail 'more than four started while none attached'
+pass 'activation never waits on a start: workers that never attach hold their slots and each run returns at once'
+
+# 19b. ... but a start counts for SBX_START_WINDOW_S at most: a listed worker still not attached after
+#     it is stuck (an error line names it) and frees its slot. A listed active unit the book does not
+#     hold is entered as first seen (`seen`), and its attach gives no start time.
+OLD=$(($(date +%s) - 400))
+awk -v t="$OLD" 'BEGIN { FS = OFS = "\t" } $1 != "sbx_s4" { $3 = t } { print }' "$TMP/srv/start-times" >"$TMP/st" && cat "$TMP/st" >"$TMP/srv/start-times"
+st_run || fail 'the stuck-start run failed'
+[[ "$(started)" == 's5 s6 ' ]] || fail "three stuck, one starting, started: $(started)"
+for w in sbx_s1 sbx_s2 sbx_s3; do
+  grep -q "\"agent\":\"error\".*worker $w started 4[0-9][0-9] s ago and is not attached" "$TMP/out" || fail "$w is not said stuck"
+done
+! grep -q 'worker sbx_s4 started' "$TMP/out" || fail 'a start within the window is said stuck'
+! grep -q '"startQueued"' "$TMP/out" || fail 'starts queued behind stuck workers'
+rm -f "$TMP/srv/start-times" "$TMP/srv/start-seconds"
+st_run || fail 'the first-seen run failed'
+[[ "$(grep -c $'\tseen$' "$TMP/srv/start-times")" == 6 ]] || fail "listed units not entered as seen: $(cat "$TMP/srv/start-times")"
+wanted '[]'
+st_run || fail 'the seen-attached run failed'
+grep -q '"agent":"attached","worker":"sbx_s1"}' "$TMP/out" || fail 'a seen worker attaching is not said'
+[[ ! -e "$TMP/srv/start-seconds" ]] || fail "a seen worker gave a start time: $(cat "$TMP/srv/start-seconds")"
+pass 'a listed start counts for SBX_START_WINDOW_S at most: past it, stuck, said, and its slot freed; an unknown one is timed from first seen'
+
+# 20. Its start settings, refused (exit 2) before any call.
+for bad in 'SBX_START_CONCURRENCY=0' 'SBX_START_CONCURRENCY=04' 'SBX_START_CONCURRENCY=-1' 'SBX_START_CONCURRENCY=four' \
+  'SBX_START_CONCURRENCY=1.5' 'SBX_START_WINDOW_S=0' 'SBX_START_WINDOW_S=5m'; do
+  : >"$MOCK_LOG"
+  rc=0; env "$bad" bash "$A" --once >"$TMP/out" 2>&1 || rc=$?
+  [[ "$rc" == 2 ]] || fail "accepted $bad (rc $rc)"
+  [[ ! -s "$MOCK_LOG" ]] || fail "called the control plane before refusing $bad"
+done
+grep -q 'SBX_START_WINDOW_S must be' "$TMP/out" || fail 'the window refusal does not say why'
+rm -f "$TMP/state/active-"*
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+pass 'refuses SBX_START_CONCURRENCY 0 or anything but a whole number from 1, and a bad SBX_START_WINDOW_S, before calling anything'
+
+# 21. The idle grace: SBX_IDLE_GRACE_S, default 0, reported as limits.idleGraceSeconds;
+#     a graced build (the wanted answer's `graced`) is kept running and never started, counted in the
+#     summary ("graced":<n>, only when > 0); its stop is logged as ending a grace.
+rm -f "$TMP/state/active-"* "$TMP/srv/start-times" "$TMP/srv/start-seconds" "$TMP/srv/graced"
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+st_run || fail 'the default-grace run failed'
+jq -e '.limits.idleGraceSeconds == 0' "$INV" >/dev/null || fail "the default grace: $(jq -c .limits "$INV")"
+! grep -q '"graced"' "$TMP/out" || fail 'the summary says graced with none'
+SBX_IDLE_GRACE_S=900 st_run || fail 'the set-grace run failed'
+jq -e '.limits.idleGraceSeconds == 900' "$INV" >/dev/null || fail "a set grace: $(jq -c .limits "$INV")"
+# s1 wanted, s2 and s3 graced (s2's unit running, s3's not): s1 starts, s2 is counted, s3 never started.
+touch "$TMP/state/active-sbx-worker@sbx_s2.service"
+jq -n '{run: [range(1; 4) | tostring | {template: ("s" + .), buildId: ("sha256:s" + .), worker: ("sbx_s" + .)}],
+  stop: [], starting: ["sha256:s1"], graced: ["sha256:s2", "sha256:s3"]}' >"$TMP/state/wanted-answer"
+SBX_IDLE_GRACE_S=900 st_run || fail 'the graced run failed'
+[[ "$(started)" == 's1 ' ]] || fail "a graced build was started: $(started)"
+grep -q '"agent":"summary".*"graced":1}' "$TMP/out" || fail 'the summary does not count the graced worker'
+[[ "$(stat -c %a "$TMP/srv/graced" 2>/dev/null || stat -f %Lp "$TMP/srv/graced")" == 600 ]] || fail 'the graced list is not 0600'
+! grep -q 'sbx_s2\|sbx_s3' "$TMP/srv/start-times" || fail 'a graced build entered the start book'
+# s2's grace ends (displaced or over): in `stop`, stopped, and said to end a grace.
+jq -n '{run: [{template: "s1", buildId: "sha256:s1", worker: "sbx_s1"}],
+  stop: [{template: "s2", buildId: "sha256:s2", worker: "sbx_s2"}], starting: [], graced: []}' >"$TMP/state/wanted-answer"
+SBX_IDLE_GRACE_S=900 st_run || fail 'the grace-end run failed'
+grep -q '"agent":"stopped","worker":"sbx_s2","was":"graced"}' "$TMP/out" || fail 'the end of a grace is not logged'
+! grep -q '"graced":' "$TMP/out" || fail 'the summary counts a grace that ended'
+[[ ! -e "$TMP/state/active-sbx-worker@sbx_s2.service" ]] || fail 'the worker whose grace ended still runs'
+# A control plane without `graced` (older than 1.13.0): nothing graced, as before.
+touch "$TMP/state/active-sbx-worker@sbx_s3.service"
+jq -n '{run: [], stop: [{template: "s3", buildId: "sha256:s3", worker: "sbx_s3"}]}' >"$TMP/state/wanted-answer"
+st_run || fail 'the no-graced run failed'
+grep -q '"agent":"stopped","worker":"sbx_s3"}' "$TMP/out" || fail 'a plain stop is logged as a grace'
+# Its settings, refused (exit 2) before any call.
+for bad in 'SBX_IDLE_GRACE_S=-1' 'SBX_IDLE_GRACE_S=01' 'SBX_IDLE_GRACE_S=x' 'SBX_IDLE_GRACE_S=1.5' 'SBX_IDLE_GRACE_S=86401'; do
+  : >"$MOCK_LOG"
+  rc=0; env "$bad" bash "$A" --once >"$TMP/out" 2>&1 || rc=$?
+  [[ "$rc" == 2 ]] || fail "accepted $bad (rc $rc)"
+  [[ ! -s "$MOCK_LOG" ]] || fail "called the control plane before refusing $bad"
+done
+grep -q 'SBX_IDLE_GRACE_S must be' "$TMP/out" || fail 'the grace refusal does not say why'
+rm -f "$TMP/state/active-"*
+printf '{"run":[],"stop":[]}' >"$TMP/state/wanted-answer"
+pass 'reports SBX_IDLE_GRACE_S (default 0), keeps graced workers running without starting any, counts them, logs a grace that ends, refuses a bad value'
 
 echo 'all host-agent.sh tests passed'

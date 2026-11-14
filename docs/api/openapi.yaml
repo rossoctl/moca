@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.10.0
+  version: 1.14.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -124,6 +124,7 @@ components:
             - template_unavailable
             - template_not_active
             - mode_not_allowed
+            - self_attested
             - digest_mismatch
             - bundle_quota_exceeded
             - config_bundle_not_found
@@ -157,7 +158,12 @@ components:
         sessionId: { type: string }
         reason:
           type: string
-          description: 'sandbox_terminated only: deleted | expired'
+          description: |
+            sandbox_terminated: deleted | expired. no_active_slot: `memory` when no holder under its
+            active limit has the memory for the worker (1.12.0; absent at the active limit, as
+            before). template_unavailable: `memfile_mismatch` when every holder reports the
+            snapshot's memory file is not the guest's size. template_not_active with readiness
+            `unavailable`: the build's readinessReason
         rule:
           type: string
           description: |
@@ -503,7 +509,14 @@ components:
         visibility:
           type: string
           enum: [private, deployment]
-          description: '`private`: listed and served only to its owner and admins'
+          description: |
+            `private`: listed and served only to its owner and admins. In effect: `private` while
+            any registered build is self-attested now (a trust removal narrows a template on the
+            next read), else as set
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: '`self` when any registered build is self-attested now'
         onboarding:
           type: [string, 'null']
           description: "`registered` once any build is; else the newest build's status"
@@ -511,6 +524,8 @@ components:
           type: [string, 'null']
           description: the default build's readiness
           enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
         tags:
           type: object
           additionalProperties: { type: string }
@@ -518,6 +533,16 @@ components:
         builds:
           type: array
           items: { $ref: '#/components/schemas/TemplateBuild' }
+    ReadinessReason:
+      type: string
+      enum: [not_held, no_slot, memory, memfile_mismatch]
+      description: |
+        present only with readiness `unavailable` (1.12.0): why placement left the build waiting.
+        `not_held` no host holds its snapshot; `no_slot` every holder is at its active limit;
+        `memory` a holder under its limit has no memory headroom for the worker now (template
+        lifecycle spec §6.2: its floor, a pressure brake, or an inventory older than 60 s);
+        `memfile_mismatch` every holder reports the snapshot's memory file is not the guest's size
+        (a rebuild clears it, not a wait)
     TemplateBuild:
       type: object
       description: One build of a template, an immutable snapshot (template lifecycle spec §3.2, §3.3)
@@ -540,10 +565,40 @@ components:
             presence record for its worker; `activating` an activation lease stands and a host
             holding it is asked to run it, not attached yet; `deactivating` attached with no lease
             (draining: a worker is never stopped under a live sandbox); `inactive` no lease, not
-            attached; `unavailable` leased, but no host that reports holds it or every holder is at
-            its active limit; `unknown` the relay's presence could not be read; null for a build
-            that is not registered. Before any host agent reports, readiness is the presence alone
-            (`active` or `inactive`)
+            attached; `unavailable` leased, but no host that reports holds it, every holder is at
+            its active limit, none has the memory for its worker, or every holder reports its
+            memory file wrong (`readinessReason` says which); `unknown` the relay's presence could
+            not be read; null for a build that is not registered. Before any host agent reports,
+            readiness is the presence alone (`active` or `inactive`)
+        readinessReason:
+          $ref: '#/components/schemas/ReadinessReason'
+        queued:
+          type: boolean
+          description: |
+            1.13.0 (template lifecycle spec §6.5), present only with readiness `activating` on a host
+            whose agent reports its start limit: true while the build waits for a start slot (its
+            place in the host's start line is beyond the host's startConcurrency), false once its
+            worker is starting. A queued build stays `activating` longer than before: poll with a
+            timeout sized for the host's whole start line
+        queuePosition:
+          type: integer
+          minimum: 1
+          description: |
+            1.13.0, with `queued`: the build's 1-based place among its host's placed, wanted builds
+            not attached yet, first leased first; the first startConcurrency are starting
+        graced:
+          type: boolean
+          enum: [true]
+          description: |
+            1.13.0 (§6.5), present only while the build is in its host's idle grace: no lease left,
+            and its worker kept running (readiness `deactivating`) until `gracedUntil`, unless a
+            wanted build needs its slot or a release with `stopNow` ends it. A use within the grace
+            finds it active, with no cold start
+        gracedUntil:
+          type: integer
+          description: |
+            1.13.0, with `graced`: epoch seconds the grace ends (its last lease's end plus the host's
+            idleGraceSeconds)
         capacity:
           type: [object, 'null']
           description: for an active build
@@ -578,6 +633,25 @@ components:
             message: { type: string }
             step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
             rule: { type: string, description: the gating rule, on a rejection }
+        attestation:
+          type: string
+          enum: [deployment, self]
+          description: |
+            Recomputed on every read from the current policy: `self` when the build was created on
+            a selfAttest profile with a gate record trustedGateRecords does not list now, whether or
+            not it was listed at create; `deployment` otherwise (a promotion or removal of the
+            record changes it, nothing rewritten)
+        gateFloorCheckedOffline:
+          type: [boolean, 'null']
+          description: |
+            Its gate record's `gate.floor_checked_offline` (true for a curated family record, which
+            predates the field); false only on a profile that allows it (`general-self`); null with
+            no gate record
+        gateFloorMetOffline:
+          type: boolean
+          description: |
+            Present only for a gate from a `network_needed` contract: its `gate.floor_met_offline`,
+            whether the offline run met the floor anyway
         spec:
           type: object
           description: on GET /v1/templates/{id} and the builds routes only
@@ -666,6 +740,28 @@ components:
                 type: array
                 items: { type: string, enum: [X1, X10, X11, X12, X14, X15] }
                 description: gating rule ids beyond the base rules; an unknown id is refused
+              selfAttest:
+                type: boolean
+                description: |
+                  A gate record the policy does not trust still passes X1.trusted when the creating
+                  subject submitted it, for that subject's own templates only. The build is
+                  self-attested: private, its commits always refused (X12.self), never
+                  deployment-visible until an admin adds the record's sha256 to trustedGateRecords.
+                  Absent: false. The default policy holds `benchmark-self` and `general-self`
+              selfAttestEgress:
+                type: boolean
+                description: |
+                  On a self-attested record only, whether spec.egress may be true (the KVM host's
+                  allowlisted egress, never unrestricted). Absent: false. `benchmark-self` keeps it
+                  false (benchmark integrity); `general-self` sets it
+              requireOfflineGate:
+                type: boolean
+                description: |
+                  Whether the gate's test floor must have been checked offline (X1.offline). A
+                  general-gate record (the schema GET /v1/policy names as `gateRecordSchema`) needs
+                  `gate.floor_checked_offline: true` (fail closed); a curated family record predates
+                  the field and passes without it. Absent: true on a profile that requires X1;
+                  `general-self` sets it false
               envelope:
                 type: object
                 required: [maxGuestMb, maxVcpus, maxWorkspaceMb]
@@ -686,6 +782,19 @@ components:
           description: |
             registry hosts. `<default>` is a reference with no host, which the build host pulls from
             its own configured registry; Docker Hub is `docker.io` (`index.docker.io` reads as it)
+        allowedRepositories:
+          type: object
+          additionalProperties:
+            type: array
+            minItems: 1
+            items: { type: string }
+          description: |
+            Optional, per registry (a key of `allowedRegistries`): the repositories an image may come
+            from there, each an exact path (`library/python`) or a prefix (`library/*`), matched on
+            whole path segments. A registry with no entry allows every repository it serves. A Docker
+            Hub official name (`python`) reads as `library/python`. From a listed registry, an
+            image path outside the entries' grammar (uppercase, or an empty, `.` or `..` segment)
+            is refused too. A refusal is rule `registry.repository`.
         trustedGateRecords:
           type: array
           items: { type: string }
@@ -722,6 +831,13 @@ components:
         policy: { $ref: '#/components/schemas/Policy' }
         digest: { type: string, description: the sha256 of the policy itself }
         record: { type: string, description: the provenance policy record's digest }
+        gateRecordSchema:
+          type: string
+          description: |
+            The general-gate record schema this deployment reads (`SH_GATE_RECORD_SCHEMA`, default
+            `moca-gate-record/1`): a record of it needs `gate.floor_checked_offline: true` for
+            X1.offline. On GET /v1/policy only; absent from an older control plane, read as the
+            default
   responses:
     Unauthorized:
       description: no token, a bad token, or a failed exchange or janitor authentication
@@ -1880,9 +1996,13 @@ paths:
                       per KVM host, its limits and use, as its host agent last reported them
                       (template lifecycle spec §6.2); `active.used` counts the workers that stay
                       running on it (leased builds placed or running there, unleased ones draining a
-                      live sandbox). Empty means no host has reported, never that
-                      there is no limit. A host whose last inventory is over 6 minutes old is left
-                      out, here and in placement, until it reports again
+                      live sandbox; graced builds are counted apart, in `graced`). Empty means no host
+                      has reported, never that there is no limit. A host whose last inventory is over 6
+                      minutes old is left out, here and in placement, until it reports again. `memory`
+                      (1.12.0) only from an agent that reports it: then placement also needs the memory
+                      for each new worker. `start` (1.13.0) only from an agent that reports its start
+                      limit; `idleGraceSeconds` and `graced` (1.13.0) only from an agent that sets an idle
+                      grace
                     items:
                       type: object
                       required: [id, active, idleLimitSeconds, disk]
@@ -1896,6 +2016,85 @@ paths:
                           properties:
                             freeGb: { type: integer }
                             floorGb: { type: integer }
+                        memory:
+                          type: object
+                          description: |
+                            template lifecycle spec §6.2, all in MiB. `usedMib` is what placement
+                            counts: each running worker's guest RAM + 128 (4096 + 128 for a build
+                            with no recorded guest size), its VMs' committed memory, and the builds
+                            placed here not started yet. `headroomMib` = min(total − floor − used,
+                            available − floor − the pending starts), 0 while `brake` is set; a new
+                            worker starts here only if its cost fits it
+                          required:
+                            [
+                              totalMib,
+                              availableMib,
+                              floorMib,
+                              usedMib,
+                              headroomMib,
+                              pressureFull10,
+                              pressureLimit,
+                              brake,
+                              runningWorkers,
+                              memfileMismatch,
+                              reportedAt,
+                            ]
+                          properties:
+                            totalMib: { type: integer }
+                            availableMib: { type: integer }
+                            floorMib:
+                              type: integer
+                              description: |
+                                the effective floor the agent applies: SBX_MEM_FLOOR_MIB, else 10%
+                                of MemTotal, at least 4096
+                            usedMib: { type: integer }
+                            headroomMib: { type: integer }
+                            pressureFull10:
+                              type: [number, 'null']
+                              description: memory PSI `full avg10` (a percentage); null with no /proc/pressure
+                            pressureLimit: { type: [number, 'null'] }
+                            brake:
+                              type: [string, 'null']
+                              enum: [pressure, stale, null]
+                              description: |
+                                why the host takes no new start now (what it runs is kept): PSI over
+                                its limit, or its last inventory over 60 s old; null otherwise
+                            runningWorkers:
+                              { type: integer, description: the template workers running there }
+                            memfileMismatch:
+                              type: array
+                              items: { type: string }
+                              description: build ids never placed there (their memory file is not the guest's size)
+                            reportedAt:
+                              { type: integer, description: epoch seconds of its last inventory }
+                        start:
+                          type: object
+                          description: |
+                            1.13.0 (template lifecycle spec §6.5), only from an agent that reports
+                            its start limit: at most `concurrency` workers start at once there
+                            (SBX_START_CONCURRENCY); `seconds` its measured mean cold start, start
+                            to attach (null before one is done); `starting` and `queued` its start
+                            line now (placed, wanted builds not attached: within the limit, and
+                            beyond it), null when the relay's presence cannot be read
+                          required: [concurrency, seconds, starting, queued]
+                          properties:
+                            concurrency: { type: integer, minimum: 1 }
+                            seconds: { type: [number, 'null'] }
+                            starting: { type: [integer, 'null'] }
+                            queued: { type: [integer, 'null'] }
+                        idleGraceSeconds:
+                          type: integer
+                          minimum: 1
+                          description: |
+                            1.13.0 (§6.5), only from an agent that sets one (SBX_IDLE_GRACE_S above
+                            0): how long a released build's worker is kept running there
+                        graced:
+                          type: integer
+                          description: |
+                            1.13.0, beside idleGraceSeconds: the builds in the host's idle grace now
+                            (no lease, worker kept running). Each still holds its whole pinned
+                            memory file, counted in `memory.usedMib`, and a slot of `active.limit`
+                            until a wanted build needs it
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
     post:
@@ -1947,7 +2146,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: "`template_exists`: another subject's template"
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1981,6 +2183,76 @@ paths:
         '403': { $ref: '#/components/responses/NotEnrolled' }
         '404':
           description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      operationId: updateTemplate
+      summary: Change a template's description or visibility (the owner, or an admin)
+      description: |
+        Template lifecycle spec §5.1. `private` hides it from other subjects (they get 404, as for an
+        id that does not exist) and refuses their new use; their sandboxes and sessions already made
+        keep running. Each field that changes writes a `visibility` record (`field`, the new value
+        and the one before); a field already at its value changes nothing.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                visibility: { type: string, enum: [private, deployment] }
+                description:
+                  type: string
+                  maxLength: 1024
+                  description: no lone surrogate (a provenance record cannot hold one)
+      responses:
+        '200':
+          description: changed (or already so)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, visibility, description, changes]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  visibility: { type: string, enum: [private, deployment] }
+                  description: { type: string }
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      required: [field, value, before, record]
+                      properties:
+                        field: { type: string, enum: [visibility, description] }
+                        value: { type: string }
+                        before: { type: string }
+                        record: { type: string, description: the visibility record written }
+        '400':
+          description: '`invalid_request`: no field, a bad value (a description holding a lone surrogate is one), or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: `visibility: deployment` for a template with a self-attested build,
+            registered or on its way there, until an admin trusts its gate record
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2050,7 +2322,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: "`template_exists`: another subject's template"
+          description: |
+            `template_exists`: another subject's template; or `self_attested`: a self-attested
+            create asking for `deployment` visibility, or a self-attested build added to a
+            deployment-visible template
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2133,6 +2408,75 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/tags:
+    post:
+      operationId: moveTemplateTags
+      summary: Move tags onto a registered build (the owner, or an admin)
+      description: |
+        Template lifecycle spec §3.2, §5.1: tags are labels on builds, moved without rebuilding.
+        After the move, `id:tag` (and the bare `id`, for `default`) resolves to the new build for
+        new sandboxes and sessions; those already created keep their build. Each tag that changes
+        writes a `tag` record (the new build and the one before); a tag already on the build
+        changes nothing (`record: null`). A build that is not registered: `400 invalid_request`.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags, build]
+              properties:
+                tags:
+                  type: array
+                  minItems: 1
+                  maxItems: 16
+                  uniqueItems: true
+                  items: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,30}$' }
+                build: { type: string, description: a build id or handle of this template }
+      responses:
+        '200':
+          description: moved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, buildId, tags]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  buildId: { type: string }
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, buildId, before, record]
+                      properties:
+                        tag: { type: string }
+                        buildId: { type: string }
+                        before:
+                          type: [string, 'null']
+                          description: the build it named until now; null if new
+                        record:
+                          type: [string, 'null']
+                          description: the tag record written; null if unchanged
+        '400':
+          description: '`invalid_request`: bad tags, a build that is not registered, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     get:
       operationId: listTemplateTags
       summary: A template's tags, each with the build it names and when and by whom it was set
@@ -2168,6 +2512,114 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/tags/{tag}:
+    delete:
+      operationId: removeTemplateTag
+      summary: Remove a tag (the owner, or an admin); its build stays
+      description: |
+        Template lifecycle spec §5.1. The tag goes; the build it named is not deleted and stays
+        addressable by its build id. `default` is moved, never removed (`400 invalid_request`): the
+        bare `id` must resolve. A `tag` record (`buildId: null`, the one before) names the caller.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tag, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: removed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, tag, buildId, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string }
+                  tag: { type: string }
+                  buildId: { type: 'null' }
+                  before: { type: string }
+                  record: { type: string }
+        '400':
+          description: '`invalid_request`: the default tag, a tag name not matching `^[a-z0-9][a-z0-9-]{0,30}$`, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: "`not_enrolled`, or `forbidden`: neither the template's owner nor an admin"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such tag on it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/owner:
+    put:
+      operationId: transferTemplateOwner
+      summary: Transfer a template to another enrolled subject (an admin)
+      description: |
+        Template lifecycle spec §5.2. The new owner gets every owner action and its quota counts the
+        template from now on; sandboxes and sessions already made keep their subjects. An `owner`
+        record names the admin, the new owner and the one before; a transfer to the current owner
+        changes nothing (`record: null`). The new owner must be enrolled (on the sandbox profile:
+        SH_ALLOWED_SUBJECTS, or an admin). A template the deployment declared (imported from
+        SH_SANDBOX_TEMPLATES, no owner) is handed to a subject the same way, `before: null`; its id
+        then belongs to that subject, who can build, tag and edit it. A restart does not re-import it.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner]
+              properties:
+                owner:
+                  type: string
+                  description: github:<numeric id> or oidc:<provider sub>; never test:<n>
+                  pattern: '^(?:github:[0-9]+|oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127})$'
+      responses:
+        '200':
+          description: transferred (or already theirs)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, owner, before, record]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: the admin }
+                  owner: { type: string }
+                  before: { type: [string, 'null'], description: null for a declared template }
+                  record:
+                    { type: [string, 'null'], description: the owner record; null if unchanged }
+        '400':
+          description: '`invalid_request`: a malformed or unenrolled subject, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `self_attested`: the template has a self-attested build, registered or on its way
+            there: it keeps its owner until an admin trusts its gate record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/activate:
     post:
       operationId: activateTemplate
@@ -2181,11 +2633,12 @@ paths:
         digest as `lease`. One activation at a time: the quota and placement check, the record and
         the lease write run under one lock across all templates. Refusals keep no lease:
         `409 template_unavailable` (no registered build under that reference, or no host that
-        reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
-        with leased builds, or a lease in the same second as a placed build; Retry-After is the
-        seconds until a build placed on one of this build's holders loses its last live lease, else
-        60), `429 quota_exceeded`
-        with `quota: active`. Needs SH_PROVENANCE_DIR.
+        reports holds it; `reason: memfile_mismatch` when every holder reports its memory file
+        wrong), `409 no_active_slot` with `Retry-After` (every holder at its active limit with
+        leased builds, or a lease in the same second as a placed build; `reason: memory` when a
+        holder under its limit has no memory headroom for the worker; Retry-After is the seconds
+        until a build placed on one of this build's holders loses its last live lease, else 60),
+        `429 quota_exceeded` with `quota: active`. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2248,6 +2701,13 @@ paths:
         admin with `{all: true}`, every subject's) and writes a `deactivate` record when it drops
         any. A build stays wanted while another subject's lease stands; with none left its host
         agent stops the worker once no live sandbox runs on it. Needs SH_PROVENANCE_DIR.
+
+        On a host with an idle grace (SBX_IDLE_GRACE_S, 1.13.0, §6.5) the running worker of a build
+        left with no lease is kept for that long after the release, so a use soon after is warm.
+        `stopNow: true` skips the grace: once no lease is left (after this release), the worker is
+        stopped at the host's next poll, as on a host with no grace; a build already in its grace
+        has it ended (`released: 0`). The `deactivate` record carries `stopNow: true`. A stopNow
+        while others hold leases changes nothing for them.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2259,6 +2719,11 @@ paths:
               type: object
               properties:
                 all: { type: boolean, description: admins only; ignored otherwise }
+                stopNow:
+                  type: boolean
+                  description: |
+                    1.13.0, skip the host's idle grace (force a cold start next time); not a boolean
+                    is `400 invalid_request`
       responses:
         '200':
           description: released
@@ -2310,7 +2775,10 @@ paths:
       summary: Set the template policy (an admin); recorded
       description: |
         The policy is stored as sent, after validation (each problem named), and a new `policy`
-        record names the admin who set it. Enforced on the next create.
+        record names the admin who set it. Enforced on the next create. When it removes a gate
+        record's sha256 from trustedGateRecords, the builds that become self-attested on a
+        deployment-visible template make that template private on read; they are named as
+        `narrowed` in the answer and in the `policy` record, so the narrowing is never silent.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -2319,10 +2787,22 @@ paths:
             schema: { $ref: '#/components/schemas/Policy' }
       responses:
         '200':
-          description: the policy as set
+          description: the policy as set, and `narrowed` when a trust removal narrowed templates
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PolicyView' }
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/PolicyView' }
+                  - type: object
+                    properties:
+                      narrowed:
+                        type: array
+                        items:
+                          type: object
+                          required: [template, buildId]
+                          properties:
+                            template: { type: string }
+                            buildId: { type: string }
         '400':
           description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
           content:
@@ -2375,9 +2855,22 @@ paths:
         Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
         the host in the path must be the one whose token is presented. Body
         `{holds: [{template, manifestHash, running?}], limits: {activeLimit, idleLimitSeconds,
-        buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
-        inventory in its own process; the agent re-sends it on every poll. A host whose last inventory is
-        over 6 minutes old is left out of placement until it reports again.
+        buildConcurrency, diskFreeGb, diskFloorGb}, memory?}`. The control plane keeps each host's
+        last inventory in its own process; the agent re-sends it on every poll. A host whose last
+        inventory is over 6 minutes old is left out of placement until it reports again.
+
+        `memory` (1.12.0) is optional: an agent before it sends none, and its host is placed by
+        `activeLimit` alone, as before; a control plane before it ignores it. Each field is
+        optional and a malformed one is dropped. `memTotalMib`, `memAvailableMib` and
+        `memFloorMib` are used only all three together.
+
+        `limits.startConcurrency` and `limits.startSeconds` (1.13.0, §6.5) are optional: the agent's
+        start limit (SBX_START_CONCURRENCY, a whole number from 1) and the mean of its last cold
+        starts, start to attach, in seconds (absent before one is done; used only beside
+        startConcurrency). Without startConcurrency (an older agent) its builds have no place in a
+        start line, and Retry-After is as before. `limits.idleGraceSeconds` (1.13.0, §6.5) is
+        optional: SBX_IDLE_GRACE_S, a whole number of seconds, 0 (off) to 86400. Absent (an older
+        agent), malformed or 0: no grace, as before.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2409,6 +2902,57 @@ paths:
                     buildConcurrency: { type: integer }
                     diskFreeGb: { type: integer }
                     diskFloorGb: { type: integer }
+                    startConcurrency:
+                      type: integer
+                      minimum: 1
+                      description: |
+                        SBX_START_CONCURRENCY (default 4), at most this many workers starting at
+                        once (1.13.0)
+                    startSeconds:
+                      type: number
+                      description: |
+                        the mean of the last (up to 10) cold starts, start to attach, seconds (1.13.0)
+                    idleGraceSeconds:
+                      type: integer
+                      minimum: 0
+                      maximum: 86400
+                      description: |
+                        SBX_IDLE_GRACE_S (default 0, off), how long a released build's worker is
+                        kept running (1.13.0)
+                memory:
+                  type: object
+                  description: what the host agent reads of its memory (template lifecycle spec §6.2)
+                  properties:
+                    memTotalMib: { type: integer, description: /proc/meminfo MemTotal, MiB }
+                    memAvailableMib: { type: integer, description: /proc/meminfo MemAvailable, MiB }
+                    memFloorMib:
+                      type: integer
+                      description: the effective floor (SBX_MEM_FLOOR_MIB, else 10% of MemTotal, at least 4096)
+                    memPressureFull10:
+                      type: number
+                      description: |
+                        /proc/pressure/memory `full avg10`, a percentage; absent with no
+                        /proc/pressure (no brake)
+                    memPressureLimit:
+                      type: number
+                      description: SBX_MEM_PRESSURE_LIMIT (default 10); above it, no new start on this host
+                    runningWorkers:
+                      type: array
+                      items: { type: string }
+                      description: the workers of held builds whose sbx-worker unit is active
+                    vmCommittedMib:
+                      type: object
+                      additionalProperties: { type: integer }
+                      description: |
+                        worker id -> its VMs' unreclaimable memory, MiB: its slice's memory.stat
+                        anon + shmem + kernel, never page cache; a worker whose slice could not be
+                        read is absent
+                    memfileMismatch:
+                      type: array
+                      items: { type: string }
+                      description: |
+                        manifest hashes of held builds whose memory file is not guest_ram_mb x 1 MiB:
+                        never placed on this host
       responses:
         '200':
           description: recorded
@@ -2570,12 +3114,20 @@ paths:
       summary: The workers a host agent should run (leased and placed on it) and stop (no lease, no live sandbox)
       description: |
         Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
-        holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
-        placement an activation is judged by; a build already running on a holder stays there).
-        `stop`: the ones it holds with no live lease, and a leased one it runs while placement keeps
-        it on another host, each with no live sandbox on its worker; a worker with a live sandbox is
-        in neither list (it drains first, and counts against the host's `activeLimit` meanwhile).
-        The agent starts only workers already installed on the host.
+        holds whose lease stands and which placement puts on it, within its `activeLimit` and,
+        from an agent that reports its memory, its memory headroom (the same placement an
+        activation is judged by; a build already running on a holder stays there). `stop`: the
+        ones it holds with no live lease and no idle grace, and a leased one it runs while placement
+        keeps it on another host, each with no live sandbox on its worker; a worker with a live
+        sandbox is in neither list (it drains first, and counts against the host's `activeLimit`
+        meanwhile). The agent starts only workers already installed on the host.
+
+        `run` is in the wanted order, first leased first (1.13.0, §6.5: the order the agent starts
+        them in, at most its start limit at once). On a host with an idle grace the graced builds
+        follow the wanted ones in `run`, soonest grace end first, and are listed in `graced`. A
+        graced worker displaced for a wanted build is re-checked for a lease when the answer is
+        made: a build leased since is left out of `stop` (its worker keeps running; it is in `run`
+        from the next answer).
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -2590,6 +3142,25 @@ paths:
                 properties:
                   run: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
                   stop: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
+                  starting:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      1.13.0 (§6.5): the build ids of `run` whose worker is not attached to the
+                      relay (its presence, which readiness reads), in `run`'s order. The agent
+                      counts those whose unit is active as starting, for SBX_START_WINDOW_S at
+                      most from its start (past it a worker is stuck and holds no start slot), and
+                      starts at most SBX_START_CONCURRENCY less those. Absent from a control plane before 1.13.0,
+                      or when the presence cannot be read: the agent then counts its own recent
+                      starts (SBX_START_WINDOW_S).
+                  graced:
+                    type: array
+                    items: { type: string }
+                    description: |
+                      1.13.0 (§6.5), only for a host whose agent reports an idle grace: the build
+                      ids of `run` with no lease, kept running in the grace. The agent never starts
+                      one (a grace keeps a running worker) and counts those it runs in its summary.
+                      Absent from a control plane before 1.13.0, or for a host with no grace.
                   egressSids:
                     type: array
                     items: { type: string }
@@ -2598,7 +3169,7 @@ paths:
                       every sandbox on a worker of a build it holds, live or ended less than 600 s
                       ago, the set `POST /v1/hosts/{host}/egress` accepts. The agent sends only these
                       sandboxes' events (and `audit_dropped` reports), so the proxy's other clients'
-                      events never leave the host. Absent from a control plane before 1.10.0: the agent
+                      events never leave the host. Absent from a control plane before 1.14.0: the agent
                       then sends nothing.
         '400':
           description: '`invalid_request`: this deployment stores no templates'
@@ -2745,9 +3316,12 @@ paths:
         (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
         create takes the caller's activation lease (as POST /v1/templates/{id}/activate, with its
         refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
-        `activate` record says `reason: first_use`; not taken again while the caller holds a live lease on
-        the build, so a retry writes nothing) and answers `409 template_not_active` with
-        `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
+        `activate` record says `reason: first_use`; not taken again while the caller holds a live
+        lease on the build, so a retry writes nothing) and answers `409 template_not_active` with
+        `readiness` and `Retry-After`; retry after the wait. Retry-After is 30 s, or (1.13.0, §6.5)
+        the build's place in its host's start line, when the host's agent reports its start limit
+        and a measured start time: `ceil(ceil(queuePosition / startConcurrency) × startSeconds)`. A
+        build in its host's idle grace (1.13.0) is served at once. With `activate: false` nothing is
         started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
         The gate applies before any host has reported too: an attached worker serves, an absent one
         is refused. Without template hosts the create succeeds as before, and so it does on a template
@@ -2820,7 +3394,8 @@ paths:
           description: |
             `name_conflict`: the caller already has a live sandbox with that name;
             `template_not_active` (Retry-After), with `readiness`: the build is not active yet, its
-            activation started unless `activate: false`; `no_active_slot` (Retry-After) and
+            activation started unless `activate: false` (with readiness `unavailable`, `reason` is
+            its readinessReason); `no_active_slot` (Retry-After) and
             `template_unavailable`: as activate
           content:
             application/json:

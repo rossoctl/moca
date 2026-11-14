@@ -722,6 +722,11 @@ func diagStatsMux(statsFn func() vmpool.Stats, maxConcurrent int) *http.ServeMux
 }
 
 func main() {
+	// Arguments select a one-shot mode (runCLI: -verify-snapshot DIR); the worker itself
+	// takes none, it is configured by its environment.
+	if len(os.Args) > 1 {
+		os.Exit(runCLI(os.Args[1:], os.Getenv, os.Stderr))
+	}
 	// Opt-in profiling. OFF unless SH_DIAG_PPROF names a bind address, because pprof
 	// serves goroutine dumps, heap contents and command lines to anyone who can reach
 	// it -- bind loopback (127.0.0.1:6060) and reach it over ssh, never 0.0.0.0.
@@ -770,7 +775,14 @@ func main() {
 	// not on a user's first request.
 	// SH_VERIFY_MEMFILE=1 re-hashes the memory file too (a version-2 manifest): a full read
 	// of the guest's RAM image, so off by default; the build hashes it.
-	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1"}); err != nil {
+	// The verify cache (verifyCachePath; SH_VERIFY_CACHE=0 turns it off) spares the
+	// re-hash of a file whose identity is unchanged since a full hash on this host matched
+	// the manifest; the comparison with the manifest is made either way.
+	verifyCache, err := verifyCachePath(get, snapDir)
+	if err != nil {
+		log.Fatalf("microvm-worker: %v", err)
+	}
+	if err := man.VerifyWith(snapDir, vmpool.VerifyOptions{Memfile: get("SH_VERIFY_MEMFILE") == "1", Cache: verifyCache}); err != nil {
 		log.Fatalf("microvm-worker: %v", err)
 	}
 	if err := verifyInstanceType(get, man.InstanceType, detectHostInstanceType); err != nil {

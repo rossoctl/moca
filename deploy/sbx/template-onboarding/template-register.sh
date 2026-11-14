@@ -145,12 +145,26 @@ fi
 [[ -n "$NEW_WORKERS" ]] || die 'SBX_WORKERS would be empty'
 
 # Write both files whole, through a temporary file beside each, keeping their modes: a failure part
-# way leaves the previous file, never half of one.
+# way leaves the previous file, never half of one. A path that is a symlink is written through to the
+# file it names, with that file's mode, so the link stays a link: replacing the link itself would
+# leave a regular file with the link's own mode (0777 on Linux) in its place.
+resolve_link() {
+  local p="$1" l n=0
+  while [[ -L "$p" ]]; do
+    ((n++ < 40)) || die "$1: too many levels of symbolic links"
+    l="$(readlink "$p")"
+    if [[ "$l" == /* ]]; then p="$l"; else p="$(dirname "$p")/$l"; fi
+  done
+  printf '%s' "$p"
+}
 write_file() {
-  local path="$1" tmp
+  local path tmp mode
+  path="$(resolve_link "$1")"
+  [[ -f "$path" ]] || die "$1: not a regular file (or a link to one)"
+  mode="$(stat -L -c '%a' "$path" 2>/dev/null || stat -L -f '%Lp' "$path")"
   tmp="$(mktemp "$path.XXXXXX")"
   cat >"$tmp"
-  chmod "$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")" "$tmp"
+  chmod "$mode" "$tmp"
   mv "$tmp" "$path"
 }
 jq . <<<"$NEW_TEMPLATES" | write_file "$TEMPLATES"

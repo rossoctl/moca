@@ -109,6 +109,9 @@ export const OPENCODE_OFF: readonly string[] = Object.freeze([
   // `patch`'s newer name in current OpenCode: switching off a tool an older one lacks is harmless.
   'apply_patch',
   'multiedit',
+  // Loads SKILL.md files from the laptop's skill directories (~/.claude/skills and others) into the
+  // session: laptop content the sandboxed agent should not see, as in a benchmark run.
+  'skill',
 ]);
 export const MARK_BEGIN = '<!-- sbx:begin -->';
 export const MARK_END = '<!-- sbx:end -->';

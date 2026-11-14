@@ -7,13 +7,34 @@ import {
   seconds,
 } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
-import { MIN_IDLE_TIMEOUT_S, type SandboxConfig } from './sandbox-config.js';
-import { canonicalJson, sha256Hex, type ProvenanceStore } from './provenance.js';
-import { hostManaged, liveLeases, place, readinessOf, type Placement } from './activation.js';
+import {
+  canonicalJson,
+  LONE_SURROGATE_RE,
+  sha256Hex,
+  type AppendInput,
+  type ProvenanceStore,
+} from './provenance.js';
+import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
+import { isEnrolled, MIN_IDLE_TIMEOUT_S, type SandboxConfig } from './sandbox-config.js';
+import {
+  hostManaged,
+  lastLeaseEnd,
+  liveLeases,
+  place,
+  readinessOf,
+  readinessReasonOf,
+  startQueue,
+  startRetryAfterS,
+  type HostView,
+  type Placement,
+  type StartQueue,
+} from './activation.js';
+import { activationLock } from './activation-lock.js';
 import { busyWorkers, freshHosts, hostViewsOf } from './host-handlers.js';
 import { SubjectQueue } from './subject-document.js';
 import {
   checkCreate,
+  DEFAULT_GATE_RECORD_SCHEMA,
   normalizeSpec,
   ownedLimit,
   policyDigest,
@@ -52,7 +73,8 @@ import type { TokenClaims } from './token.js';
 /**
  * The sandbox resource's handlers (SBX0 spec §5.1), mounted on the `sandbox` route profile only,
  * and the template routes (template lifecycle spec §4: reads, self-serve create, cancel, the policy
- * and the quota; §6.3: activation leases), mounted on both.
+ * and the quota; §5.1-§5.2: tags, edits and owner transfer; §6.3: activation leases), mounted on
+ * both.
  * Only TYPES come from handlers.ts, which spreads this table into HANDLERS: a runtime import back
  * would be a module cycle.
  */
@@ -447,17 +469,55 @@ function catalog(deps: CpDeps): TemplateCatalog {
   return deps.templates ?? new MemoryTemplateCatalog(deps.config.sandbox?.templates ?? []);
 }
 
-const canSee = (d: TemplateDoc, p: TokenClaims): boolean =>
-  d.visibility === 'deployment' || d.owner === p.sub || isAdmin(p);
+/**
+ * The trust a build's gate record has NOW (self-attestation): `deployment` when its sha256 is in the
+ * current policy's trustedGateRecords, or the build names no gate record; `self` when it was
+ * created on a selfAttest profile with a record the policy does not (or no longer) trust, whether
+ * or not the record was trusted at create (`selfAttestProfile`; `selfAttested` implies it).
+ * Recomputed on every read, never stored, so an admin's promotion or removal needs no rewrite.
+ */
+export function attestationOf(
+  b: TemplateBuild,
+  trusted: ReadonlySet<string>,
+): 'deployment' | 'self' {
+  const g = b.request?.gateRecordSha256;
+  const onSelfProfile = b.selfAttestProfile === true || b.selfAttested === true;
+  return onSelfProfile && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
+}
+
+/**
+ * A template's visibility in effect (self-attestation): `private` whenever any of its registered
+ * builds is self-attested now, whatever is stored, so a record whose trust an admin removed narrows
+ * its templates on the next read. Otherwise the stored visibility.
+ */
+export function effectiveVisibility(
+  d: TemplateDoc,
+  trusted: ReadonlySet<string>,
+): 'private' | 'deployment' {
+  return d.visibility === 'deployment' &&
+    d.builds.some((b) => b.status === 'registered' && attestationOf(b, trusted) === 'self')
+    ? 'private'
+    : d.visibility;
+}
+
+/** The current policy's trusted gate records, or none on a deployment without a policy store. */
+async function trustedSet(deps: CpDeps): Promise<ReadonlySet<string>> {
+  return new Set(deps.policy ? (await deps.policy.current()).policy.trustedGateRecords : []);
+}
+
+const canSee = (d: TemplateDoc, p: TokenClaims, trusted: ReadonlySet<string>): boolean =>
+  effectiveVisibility(d, trusted) === 'deployment' || d.owner === p.sub || isAdmin(p);
 
 async function visibleTemplates(deps: CpDeps, p: TokenClaims): Promise<TemplateDoc[]> {
-  return (await catalog(deps).list()).filter((d) => canSee(d, p));
+  const trusted = await trustedSet(deps);
+  return (await catalog(deps).list()).filter((d) => canSee(d, p, trusted));
 }
 
 /** 404 for a template the caller cannot see, as for one that does not exist (no existence oracle). */
 async function visibleTemplate(deps: CpDeps, p: TokenClaims, id: string): Promise<TemplateDoc> {
   const d = await catalog(deps).get(id);
-  if (!d || !canSee(d, p)) throw new CpError('template_not_found', 'no such template');
+  if (!d || !canSee(d, p, await trustedSet(deps)))
+    throw new CpError('template_not_found', 'no such template');
   return d;
 }
 
@@ -475,16 +535,26 @@ interface ReadinessFacts {
   lastUsed: Map<string, number> | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
+  /**
+   * The hosts' start lines (§6.5): placed, wanted builds not attached, per host that reports its
+   * startConcurrency; null without placement or presence.
+   */
+  queue: StartQueue | null;
+  /** The hosts as last reported (empty without host agents): a start line's Retry-After reads them. */
+  hosts: HostView[];
   nowS: number;
+  /** The current policy's trusted gate records (self-attestation: attestation and visibility in effect). */
+  trusted: ReadonlySet<string>;
 }
 
 async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<ReadinessFacts> {
+  const trusted = await trustedSet(deps);
   const nowS = seconds(deps);
   const hosts = hostViewsOf(deps);
-  const placement =
-    hosts.length > 0
-      ? place(docs ?? (await catalog(deps).list()), hosts, nowS, await busyWorkers(deps, nowS))
-      : null;
+  // The workers with a live sandbox: they drain and keep their slot, and are never graced (§6.5).
+  const busy = await busyWorkers(deps, nowS);
+  const list = hosts.length > 0 ? (docs ?? (await catalog(deps).list())) : [];
+  const placement = hosts.length > 0 ? place(list, hosts, nowS, busy) : null;
   let attached: Map<string, number> | null = null;
   if (deps.presence) {
     try {
@@ -494,8 +564,9 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
       attached = null;
     }
   }
+  const queue = placement && attached ? startQueue(list, hosts, placement, attached, nowS) : null;
   if (deps.config.routeProfile !== 'sandbox' || !deps.sandboxes) {
-    return { attached, inUse: null, lastUsed: null, placement, nowS };
+    return { attached, inUse: null, lastUsed: null, placement, queue, hosts, nowS, trusted };
   }
   const inUse = new Map<string, number>();
   const lastUsed = new Map<string, number>();
@@ -504,7 +575,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
     lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
   }
-  return { attached, inUse, lastUsed, placement, nowS };
+  return { attached, inUse, lastUsed, placement, queue, hosts, nowS, trusted };
 }
 
 /**
@@ -516,11 +587,20 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
 function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
   const readiness =
     b.status !== 'registered' ? null : readinessOf(b, f.nowS, f.placement, f.attached);
+  const readinessReason = readinessReasonOf(b, readiness, f.placement);
+  // Waiting for a start slot on its host (§6.5): present only on an `activating` build.
+  const line = readiness === 'activating' ? f.queue?.byBuild.get(b.buildId) : undefined;
+  // In its host's idle grace (§6.5): no lease, its worker kept running until gracedUntil.
+  const grace = b.status === 'registered' ? f.placement?.graced.get(b.buildId) : undefined;
   return {
     buildId: b.buildId,
     status: b.status,
     profile: b.profile,
     readiness,
+    // Why an `unavailable` build is not placed: present only then.
+    ...(readinessReason ? { readinessReason } : {}),
+    ...(line ? { queued: line.queued, queuePosition: line.position } : {}),
+    ...(grace ? { graced: true, gracedUntil: grace.until } : {}),
     capacity:
       readiness === 'active'
         ? {
@@ -539,6 +619,16 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     handle: b.handle ?? b.buildId,
     // On failed or rejected: why, and the step or the rule (§4).
     reason: b.reason ?? null,
+    // Self-attestation: whether its gate record is trusted deployment-wide now, or only by its submitter.
+    attestation: attestationOf(b, f.trusted),
+    // Its gate's floor checked offline (gate.floor_checked_offline); null with no gate record, and
+    // true for a gate record created before the field (whose gates ran offline).
+    gateFloorCheckedOffline:
+      b.gateFloor?.checkedOffline ?? (b.request?.gateRecordSha256 ? true : null),
+    // Only from a network_needed gate: whether its offline run met the floor anyway.
+    ...(b.gateFloor?.metOffline !== undefined
+      ? { gateFloorMetOffline: b.gateFloor.metOffline }
+      : {}),
     ...(full ? { spec: b.spec } : {}),
   };
 }
@@ -546,16 +636,25 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
 /** One template on the wire (openapi Template): today's three fields first, then its builds. */
 function templateBody(d: TemplateDoc, f: ReadinessFacts, full: boolean) {
   const def = resolveBuild(d, {});
+  const defBody = def ? buildBody(d, def, f, false) : null;
   return {
     id: d.id,
     description: d.description,
     tools: def?.spec.tools ?? [],
     owner: d.owner,
-    visibility: d.visibility,
+    // In effect: private while any registered build is self-attested.
+    visibility: effectiveVisibility(d, f.trusted),
+    // Self-attestation: `self` when any registered build is self-attested now.
+    attestation: d.builds.some(
+      (b) => b.status === 'registered' && attestationOf(b, f.trusted) === 'self',
+    )
+      ? 'self'
+      : 'deployment',
     onboarding: d.builds.some((b) => b.status === 'registered')
       ? 'registered'
       : (d.builds[0]?.status ?? null),
-    readiness: def ? buildBody(d, def, f, false).readiness : null,
+    readiness: defBody?.readiness ?? null,
+    ...(defBody?.readinessReason ? { readinessReason: defBody.readinessReason } : {}),
     tags: { ...d.tags },
     builds: d.builds.map((b) => buildBody(d, b, f, full)),
   };
@@ -584,7 +683,7 @@ async function resolveForUse(
   const r =
     at >= 0 ? { build: ref.slice(at + 1) } : colon >= 0 ? { tag: ref.slice(colon + 1) } : {};
   const d = await catalog(deps).get(id);
-  const b = d && canSee(d, p) ? resolveBuild(d, r) : null;
+  const b = d && canSee(d, p, await trustedSet(deps)) ? resolveBuild(d, r) : null;
   if (!d || !b || b.status !== 'registered' || !b.worker) {
     throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
   }
@@ -663,6 +762,25 @@ function quotaLock(cat: TemplateCatalog): SubjectQueue {
   return q;
 }
 
+/** Thrown inside a create's write when the template changed owner since it was read. */
+const OWNER_MOVED = new Error('the template changed owner');
+
+/**
+ * One create at a time per gate record sha256, per catalog, within this process: X1.self.scope's
+ * lookup (who already self-attested the record) and the create's write run as one step, so two
+ * subjects sending the same untrusted record at once can't both claim it. The catalog serializes
+ * its own writes per id the same way, in this process; a deployment runs one control plane.
+ */
+/** The build statuses that release a self-attested claim (X1.self.scope): ended without a template. */
+const CLAIM_RELEASED = new Set<TemplateBuild['status']>(['failed']);
+
+const gateClaimQueues = new WeakMap<TemplateCatalog, SubjectQueue>();
+function gateClaimQueue(cat: TemplateCatalog): SubjectQueue {
+  let q = gateClaimQueues.get(cat);
+  if (!q) gateClaimQueues.set(cat, (q = new SubjectQueue()));
+  return q;
+}
+
 /**
  * The shared body of both create routes. `existing`: true for POST /v1/templates/{id}/builds (the
  * template must exist and be the caller's), false for POST /v1/templates (a new id, or the
@@ -670,7 +788,7 @@ function quotaLock(cat: TemplateCatalog): SubjectQueue {
  */
 async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   const p = requireEnrolled(ctx, deps);
-  const { cat, policy, prov } = writable(deps);
+  const { cat } = writable(deps);
   const b = asRecord(ctx.body);
   const id = existing ? (ctx.params.id ?? '') : typeof b.id === 'string' ? b.id.toLowerCase() : '';
   const spec = asRecord(b.spec);
@@ -687,7 +805,55 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   if (b.visibility !== undefined && b.visibility !== 'private' && b.visibility !== 'deployment') {
     throw new CpError('invalid_request', "visibility must be 'private' or 'deployment'");
   }
+  const gateSha = gateRecordBytes ? `sha256:${sha256Hex(gateRecordBytes)}` : undefined;
+  const admit = () => admitBuild(deps, existing, p, b, id, spec, gateRecordBytes, gateSha);
+  return gateSha ? gateClaimQueue(cat).run(gateSha, admit) : admit();
+}
+
+/** createBuild's checks and write, under the gate record's claim queue when it sends one. */
+async function admitBuild(
+  deps: CpDeps,
+  existing: boolean,
+  p: TokenClaims,
+  b: Record<string, unknown>,
+  id: string,
+  spec: Record<string, unknown>,
+  gateRecordBytes: Buffer | undefined,
+  gateSha: string | undefined,
+) {
+  const { cat, policy, prov } = writable(deps);
   const { policy: pol, record: policyRecord } = await policy.current();
+  // Self-attestation: the subject a self-attested record counts for is the template's owner (the
+  // gate record's `scope` and X1.self.scope's key alike). An admin adding a build to another
+  // subject's template attests for that owner; an imported template (owner null) has none, so a
+  // self-attested record is refused there (X1.trusted).
+  const prior = existing && isAdmin(p) ? await cat.get(id) : null;
+  const attester = prior && prior.owner !== p.sub ? prior.owner : p.sub;
+  // Who already self-attested this record (keyed by subject and sha256), from the catalog: a build
+  // self-attested at create (selfAttested) names its record's sha256, and its template the owner it
+  // counts for. A claim is made by an admitted self-attested create and held while its build is
+  // queued, building, probing, built, registered, rejected or retired (a real use, or an admin's
+  // decision). It is released when the build ends `failed`, which never admitted a template, so no
+  // one holds a published record with a build that fails. A refused create claims nothing.
+  const gateSelfSubmitters =
+    gateSha && !pol.trustedGateRecords.includes(gateSha)
+      ? [
+          ...new Set(
+            (await cat.list())
+              .filter(
+                (d) =>
+                  d.owner !== null &&
+                  d.builds.some(
+                    (x) =>
+                      x.selfAttested === true &&
+                      x.request?.gateRecordSha256 === gateSha &&
+                      !CLAIM_RELEASED.has(x.status),
+                  ),
+              )
+              .map((d) => d.owner as string),
+          ),
+        ]
+      : [];
   const result = checkCreate(
     {
       id,
@@ -695,8 +861,13 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
       spec,
       ...(typeof b.profile === 'string' ? { profile: b.profile } : {}),
       ...(gateRecordBytes ? { gateRecordBytes } : {}),
+      ...(attester ? { subject: attester } : {}),
+      gateSelfSubmitters,
     },
     pol,
+    deps.config.sandbox?.gateRecordSchema
+      ? { gateRecordSchema: deps.config.sandbox.gateRecordSchema }
+      : {},
   );
   const stream = `template/${id}`;
   const checkBody = {
@@ -733,6 +904,14 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
     const f = result.failed!;
     throw new CpError('policy_refused', f.message ?? f.rule, undefined, { rule: f.rule });
   }
+  // A self-attested create never makes its template deployment-visible.
+  const selfAttestedCreate =
+    result.gateTrust === 'self' && pol.profiles[result.profile]?.selfAttest === true;
+  if (selfAttestedCreate && b.visibility === 'deployment')
+    throw new CpError(
+      'self_attested',
+      'a self-attested template is private until an admin trusts its gate record (trustedGateRecords)',
+    );
   const now = seconds(deps);
   const handle = buildHandle(deps.newId());
   const quota = pol.quota;
@@ -741,113 +920,159 @@ async function createBuild(ctx: RequestCtx, deps: CpDeps, existing: boolean) {
   let reused: TemplateBuild | undefined;
   // The quota is the template's owner's: an admin adding a build to another's template uses the
   // owner's buildsQueued, not its own. The owner's lock is held around the check and the write
-  // (quotaLock). A template's owner never changes, so reading it before the lock is safe; a new id
-  // another subject takes meanwhile is refused inside, before any quota is read.
-  const charged = (await cat.get(id))?.owner ?? p.sub;
-  const doc = await quotaLock(cat).run(charged, () =>
-    cat.update(id, async (cur) => {
-      if (existing && !cur) throw new CpError('template_not_found', 'no such template');
-      if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
-        // 404 for a private template, 409 for a visible one: never an existence oracle for private.
-        throw cur.visibility === 'private' && !isAdmin(p)
-          ? new CpError('template_not_found', 'no such template')
-          : new CpError('template_exists', `template '${id}' belongs to another subject`);
-      }
-      // §3.2: the same inputs are the same build. One registered, or still on its way there, is
-      // answered instead of a second build (two creates would otherwise queue two builds that
-      // register under one manifest hash).
-      reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
-      if (reused) return cur!;
-      const u = await usage(cat, charged);
-      // A template takes a slot when it holds none yet: a new id, or one whose builds all failed,
-      // were cancelled or were retired (usage does not count it). Checking only new ids would let
-      // a subject bring such templates back past the quota.
-      const holdsSlot = cur?.builds.some((x) => REUSABLE.has(x.status)) ?? false;
-      if (!holdsSlot && u.templates >= quota.templates) {
-        throw new CpError(
-          'quota_exceeded',
-          `at most ${quota.templates} templates per subject`,
-          undefined,
-          { quota: 'templates' },
-        );
-      }
-      // A new id is one more document and stream for good: a create-then-cancel loop frees its
-      // templates and buildsQueued slots, never this one.
-      if (!cur && u.owned >= ownedLimit(quota)) {
-        throw new CpError(
-          'quota_exceeded',
-          `at most ${ownedLimit(quota)} template ids owned per subject, in any status`,
-          undefined,
-          { quota: 'owned' },
-        );
-      }
-      if (u.buildsQueued >= quota.buildsQueued) {
-        throw new CpError(
-          'quota_exceeded',
-          `at most ${quota.buildsQueued} builds queued per subject`,
-          undefined,
-          { quota: 'buildsQueued' },
-        );
-      }
-      if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
-      const created = await prov.append({
-        stream,
-        kind: 'create',
-        subject: p.sub,
-        body: {
-          image: b.image as string,
-          // A round trip through JSON: what the client sent, as the wire carries it (no undefined),
-          // with the guest size under the key the build reads (normalizeSpec).
-          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
-          profile: result.profile,
-          handle,
-          ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
-        },
-      });
-      if (result.gateRecordSha256) {
-        await prov.append({
-          stream,
-          kind: 'gate',
-          subject: p.sub,
-          body: {
-            record_sha256: result.gateRecordSha256,
-            // `trusted`: in trustedGateRecords. `client`: any other (a profile that does not require
-            // X1). The policy record in force names what the trust was at create, after any change.
-            source: result.gateTrusted ? 'trusted' : 'client',
-            policy: policyRecord,
-          },
-        });
-      }
-      await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
-      const build: TemplateBuild = {
-        buildId: handle,
-        handle,
-        status: 'queued',
-        profile: result.profile,
-        worker: '',
-        spec: buildSpec(built),
-        createdAt: now,
-        queuedAtMs: deps.now(),
-        provenance: created.digest,
-        request: {
-          image: b.image as string,
-          spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
-          ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
-        },
-      };
-      const base: TemplateDoc = cur ?? {
-        schema: TEMPLATE_DOC_SCHEMA,
-        id,
-        owner: p.sub,
-        visibility: (b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment',
-        description: String(built.description ?? ''),
-        tags: {},
-        builds: [],
-        createdAt: now,
-      };
-      return { ...base, builds: [build, ...base.builds] };
-    }),
-  );
+  // (quotaLock); a new id another subject takes meanwhile is refused inside, before any quota is
+  // read. The owner is read before the lock, and an admin's transfer (PUT …/owner) can move it in
+  // between: the write sees another owner, writes nothing, and the step runs again under the new
+  // owner's lock.
+  let doc: TemplateDoc | undefined;
+  for (let attempt = 1; !doc; attempt++) {
+    const charged = (await cat.get(id))?.owner ?? p.sub;
+    try {
+      doc = await quotaLock(cat).run(charged, () =>
+        cat.update(id, async (cur) => {
+          if (existing && !cur) throw new CpError('template_not_found', 'no such template');
+          if (cur && cur.owner !== p.sub && !(existing && isAdmin(p))) {
+            // 404 for a private template, 409 for a visible one: never an existence oracle for
+            // private.
+            throw cur.visibility === 'private' && !isAdmin(p)
+              ? new CpError('template_not_found', 'no such template')
+              : new CpError('template_exists', `template '${id}' belongs to another subject`);
+          }
+          // The owner charged is the one read before the lock; a transfer meanwhile runs it again.
+          if ((cur?.owner ?? p.sub) !== charged) throw OWNER_MOVED;
+          // A self-attested build on a template others can see would reach them on its owner's own
+          // gate (self-attestation): refused; the template must be private, or an admin trusts the
+          // record.
+          if (selfAttestedCreate && cur && cur.visibility === 'deployment')
+            throw new CpError(
+              'self_attested',
+              `template '${id}' is deployment-visible: it must be private before a self-attested build is added`,
+            );
+          // The record was checked as attested for `attester`; the template's owner must still be
+          // it (an admin's transfer meanwhile refuses the create, to be sent again).
+          if (selfAttestedCreate && (cur ? cur.owner : p.sub) !== attester)
+            throw new CpError(
+              'self_attested',
+              `template '${id}' changed owner during the create; send it again`,
+            );
+          // §3.2: the same inputs are the same build. One registered, or still on its way there,
+          // is answered instead of a second build (two creates would otherwise queue two builds
+          // that register under one manifest hash).
+          reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
+          if (reused) return cur!;
+          const u = await usage(cat, charged);
+          // A template takes a slot when it holds none yet: a new id, or one whose builds all
+          // failed, were cancelled or were retired (usage does not count it). Checking only new
+          // ids would let a subject bring such templates back past the quota.
+          const holdsSlot = cur?.builds.some((x) => REUSABLE.has(x.status)) ?? false;
+          if (!holdsSlot && u.templates >= quota.templates) {
+            throw new CpError(
+              'quota_exceeded',
+              `at most ${quota.templates} templates per subject`,
+              undefined,
+              { quota: 'templates' },
+            );
+          }
+          // A new id is one more document and stream for good: a create-then-cancel loop frees
+          // its templates and buildsQueued slots, never this one.
+          if (!cur && u.owned >= ownedLimit(quota)) {
+            throw new CpError(
+              'quota_exceeded',
+              `at most ${ownedLimit(quota)} template ids owned per subject, in any status`,
+              undefined,
+              { quota: 'owned' },
+            );
+          }
+          if (u.buildsQueued >= quota.buildsQueued) {
+            throw new CpError(
+              'quota_exceeded',
+              `at most ${quota.buildsQueued} builds queued per subject`,
+              undefined,
+              { quota: 'buildsQueued' },
+            );
+          }
+          if (gateRecordBytes) await prov.putBlob(gateRecordBytes);
+          const created = await prov.append({
+            stream,
+            kind: 'create',
+            subject: p.sub,
+            body: {
+              image: b.image as string,
+              // A round trip through JSON: what the client sent, as the wire carries it (no
+              // undefined), with the guest size under the key the build reads (normalizeSpec).
+              spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+              profile: result.profile,
+              handle,
+              ...(result.gateRecordSha256 ? { gate_record_sha256: result.gateRecordSha256 } : {}),
+            },
+          });
+          if (result.gateRecordSha256) {
+            await prov.append({
+              stream,
+              kind: 'gate',
+              subject: p.sub,
+              body: {
+                record_sha256: result.gateRecordSha256,
+                // `trusted`: in trustedGateRecords. `self` (self-attestation): trusted only for the
+                // template owner's templates, on a selfAttest profile, which `scope` names (the
+                // submitter, or the owner an admin added the build for). `client`: any other (a profile
+                // that does not require X1). The policy record in force names what the trust was at
+                // create, after any later change.
+                source:
+                  result.gateTrust === 'trusted'
+                    ? 'trusted'
+                    : selfAttestedCreate
+                      ? 'self'
+                      : 'client',
+                ...(selfAttestedCreate ? { scope: attester } : {}),
+                policy: policyRecord,
+              },
+            });
+          }
+          await prov.append({ stream, kind: 'check', subject: 'policy', body: checkBody });
+          const build: TemplateBuild = {
+            buildId: handle,
+            handle,
+            status: 'queued',
+            profile: result.profile,
+            worker: '',
+            spec: buildSpec(built),
+            createdAt: now,
+            queuedAtMs: deps.now(),
+            provenance: created.digest,
+            request: {
+              image: b.image as string,
+              spec: JSON.parse(JSON.stringify(built)) as Record<string, unknown>,
+              ...(result.gateRecordSha256 ? { gateRecordSha256: result.gateRecordSha256 } : {}),
+            },
+            ...(selfAttestedCreate ? { selfAttested: true } : {}),
+            // On a selfAttest profile, the record's trust is the policy's at each read, not at create.
+            ...(result.gateRecordSha256 && pol.profiles[result.profile]?.selfAttest === true
+              ? { selfAttestProfile: true }
+              : {}),
+            ...(result.gateFloor ? { gateFloor: result.gateFloor } : {}),
+          };
+          const base: TemplateDoc = cur ?? {
+            schema: TEMPLATE_DOC_SCHEMA,
+            id,
+            owner: p.sub,
+            visibility: selfAttestedCreate
+              ? 'private'
+              : ((b.visibility as 'private' | 'deployment' | undefined) ?? 'deployment'),
+            description: String(built.description ?? ''),
+            tags: {},
+            builds: [],
+            createdAt: now,
+          };
+          return { ...base, builds: [build, ...base.builds] };
+        }),
+      );
+    } catch (err) {
+      if (err !== OWNER_MOVED) throw err;
+      if (attempt >= 3)
+        throw new CpError('internal_error', "the template's owner kept changing; retry the create");
+    }
+  }
   if (reused) {
     await auditBestEffort(deps, 'template_build_reused', id, {
       subject: p.sub,
@@ -927,6 +1152,20 @@ function buildSpec(spec: Record<string, unknown>): TemplateBuild['spec'] {
   };
 }
 
+/**
+ * A change's records (§7.1), appended inside the catalog's write, as create does: the write
+ * happens only after they are on the chain, so a change is never stored without its record. Every
+ * body is checked as canonical JSON before the first append, so a body the chain refuses refuses
+ * the change and writes nothing. A failed write after the appends leaves records of a change not
+ * stored, which a reader sees against the catalog; never the reverse. Returns their digests.
+ */
+async function appendRecords(prov: ProvenanceStore, inputs: AppendInput[]): Promise<string[]> {
+  for (const x of inputs) canonicalJson(x.body);
+  const digests: string[] = [];
+  for (const x of inputs) digests.push((await prov.append(x)).digest);
+  return digests;
+}
+
 /** The statuses an owner may cancel (§5.1): not yet built. */
 const CANCELLABLE = new Set<TemplateBuild['status']>(['queued', 'building', 'probing']);
 
@@ -936,15 +1175,12 @@ const CANCELLABLE = new Set<TemplateBuild['status']>(['queued', 'building', 'pro
  * further report from a build host, so it never registers.
  */
 async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
-  const p = requireEnrolled(ctx, deps);
-  const { cat, prov } = writable(deps);
-  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
-  if (d0.owner !== p.sub && !isAdmin(p))
-    throw new CpError('forbidden', "only the template's owner cancels its builds");
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'cancels its builds');
   const ref = ctx.params.build ?? '';
   let cancelled: TemplateBuild | undefined;
-  await cat.update(d0.id, async (cur) => {
-    const x = cur!.builds.find((y) => y.handle === ref || y.buildId === ref);
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    const x = cur.builds.find((y) => y.handle === ref || y.buildId === ref);
     if (!x) throw new CpError('template_not_found', 'no such build of this template');
     if (!CANCELLABLE.has(x.status))
       throw new CpError(
@@ -956,13 +1192,15 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
       status: 'failed',
       reason: { message: `cancelled by ${p.sub}`, step: 'cancelled' },
     };
-    return { ...cur!, builds: cur!.builds.map((y) => (y === x ? cancelled! : y)) };
-  });
-  await prov.append({
-    stream: `template/${d0.id}`,
-    kind: 'build',
-    subject: p.sub,
-    body: { handle: cancelled!.handle ?? cancelled!.buildId, outcome: 'cancelled' },
+    await appendRecords(prov, [
+      {
+        stream: `template/${d0.id}`,
+        kind: 'build',
+        subject: p.sub,
+        body: { handle: cancelled.handle ?? cancelled.buildId, outcome: 'cancelled' },
+      },
+    ]);
+    return { ...cur, builds: cur.builds.map((y) => (y === x ? cancelled! : y)) };
   });
   await auditBestEffort(deps, 'template_build_cancelled', d0.id, {
     subject: p.sub,
@@ -976,18 +1214,59 @@ async function cancelBuild(ctx: RequestCtx, deps: CpDeps) {
 
 /**
  * Per host: its limits, its use (the workers placement counts on it: placed, running, draining) and
- * its disk (§4, §6.2), as its agent
- * last reported them. Empty when no host has reported, never meaning "no limit"; a host silent for
- * over HOST_STALE_S is left out, as placement leaves it out.
+ * its disk (§4, §6.2), as its agent last reported them, and, from an agent that reports it, its
+ * memory: the figures, the effective floor, the use and headroom placement counts, and the brake
+ * (pressure or a stale inventory) that stops new starts; from an agent that reports them, its start
+ * limit, measured start time and start line, and its idle grace with the builds in it (§6.5, apart
+ * from `used`). Empty when no host has reported, never meaning "no limit"; a host silent for over
+ * HOST_STALE_S is left out, as placement leaves it out.
  */
 function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
   const used = f.placement?.used ?? new Map<string, number>();
-  return freshHosts(deps).map(([id, h]) => ({
-    id,
-    active: { limit: h.limits.activeLimit, used: used.get(id) ?? 0 },
-    idleLimitSeconds: h.limits.idleLimitSeconds,
-    disk: { freeGb: h.limits.diskFreeGb, floorGb: h.limits.diskFloorGb },
-  }));
+  const graced = new Map<string, number>();
+  for (const g of f.placement?.graced.values() ?? [])
+    graced.set(g.host, (graced.get(g.host) ?? 0) + 1);
+  return freshHosts(deps).map(([id, h]) => {
+    const q = f.queue?.byHost.get(id);
+    const start = h.start
+      ? {
+          concurrency: h.start.concurrency,
+          seconds: h.start.seconds ?? null,
+          starting: q?.starting ?? null,
+          queued: q?.queued ?? null,
+        }
+      : undefined;
+    const m = h.memory;
+    const u = f.placement?.memory.get(id);
+    const memory =
+      m && m.totalMib !== undefined && u
+        ? {
+            totalMib: m.totalMib,
+            availableMib: m.availableMib!,
+            floorMib: m.floorMib!,
+            usedMib: u.usedMib,
+            headroomMib: u.headroomMib,
+            pressureFull10: m.pressureFull10 ?? null,
+            pressureLimit: m.pressureLimit ?? null,
+            brake: u.brake,
+            runningWorkers: (m.running ?? []).length,
+            memfileMismatch: [...(m.memfileMismatch ?? [])].sort(),
+            reportedAt: h.at,
+          }
+        : undefined;
+    return {
+      id,
+      active: { limit: h.limits.activeLimit, used: used.get(id) ?? 0 },
+      idleLimitSeconds: h.limits.idleLimitSeconds,
+      disk: { freeGb: h.limits.diskFreeGb, floorGb: h.limits.diskFloorGb },
+      ...(memory ? { memory } : {}),
+      ...(start ? { start } : {}),
+      // Its idle grace and the builds in it now, only from an agent that sets one.
+      ...(h.idleGraceSeconds
+        ? { idleGraceSeconds: h.idleGraceSeconds, graced: graced.get(id) ?? 0 }
+        : {}),
+    };
+  });
 }
 
 /** The builds `subject` holds a live lease on (§6.3): what the `active` quota counts. */
@@ -1039,31 +1318,6 @@ const deploymentRun = (id: string) =>
     'invalid_request',
     `template '${id}' is run by the deployment (SH_SANDBOX_TEMPLATES); it takes no activation lease`,
   );
-
-/**
- * The deployment-wide activation lock. takeLease checks the subject's active quota and the hosts'
- * activeLimit against EVERY template's leases, then writes one template's lease; the catalog
- * serializes writes per template id only, so two activations of different templates (by one
- * subject, or placed on one host) could each pass the check before either lease was written, and
- * together overshoot. One lease-taking check-and-write at a time, per catalog, closes that: each
- * activation sees every earlier one's lease. It covers the policy read, the catalog read,
- * placement, the `activate` record and the lease write (record first, so no lease is stored
- * without its record), and nothing that calls a host. A path that only drops leases (deactivate)
- * does not take it: a drop can only free quota or a slot, so an activation that read the leases
- * before a drop judged against more leases than remain, never fewer.
- *
- * It is process-local, which suffices because one control plane process owns the store: the
- * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is
- * ReadWriteOnce with the Recreate strategy (deploy/k8s/overlays/ocp-sbx/template-store), so no
- * second pod writes it, even during a rollout. A control plane with more than one replica on a
- * shared store would need a store-level lock (or a check-and-set on the whole catalog) instead.
- */
-const ACTIVATION_LOCKS = new WeakMap<TemplateCatalog, SubjectQueue>();
-function activationLock(cat: TemplateCatalog): SubjectQueue {
-  let q = ACTIVATION_LOCKS.get(cat);
-  if (!q) ACTIVATION_LOCKS.set(cat, (q = new SubjectQueue()));
-  return q;
-}
 
 /**
  * Takes or renews `p`'s lease on `target` (§6.3) and records it, or refuses with no lease kept:
@@ -1152,25 +1406,40 @@ async function takeLeaseLocked(
       ? d
       : { ...d, builds: d.builds.map((x) => (x.buildId === target.buildId ? withLease(x) : x)) },
   );
+  // A graced worker gives its slot up to this lease (it is not `placed`, so never "displaced"
+  // below); the workers with a live sandbox drain, keep their slot, and are never graced.
   const busy = await busyWorkers(deps, nowS);
   const pl = place(trial, hosts, nowS, busy);
   // A held build is never evicted to make room (§6.3): placement breaks a tie of equal `since` (whole
   // seconds) by buildId, so a lease taken in the same second as a placed one could otherwise sort
   // ahead of it and push it off its host. Such a lease waits, as one that does not fit.
   const before = place(docs, hosts, nowS, busy);
-  const displaces = [...before.placed.keys()].some(
+  const displaced = [...before.placed.keys()].find(
     (x) => x !== target.buildId && !pl.placed.has(x),
   );
-  if (hosts.length > 0 && pl.unplaced.get(target.buildId) === 'not_held') {
+  const displaces = displaced !== undefined;
+  // Displacing, the refusal's reason is the displaced build's: what would push it off.
+  const why =
+    displaced !== undefined ? pl.unplaced.get(displaced) : pl.unplaced.get(target.buildId);
+  if (hosts.length > 0 && why === 'not_held') {
     throw new CpError('template_unavailable', "no host holds this build's snapshot", undefined, {
       readiness: 'unavailable',
     });
   }
-  if (pl.unplaced.get(target.buildId) === 'no_slot' || displaces) {
-    // Retry-After: the soonest a slot on one of this build's holders can free, that is the soonest
-    // another build placed on one of them loses its last live lease. Other hosts' builds, and other
-    // subjects' leases on a build that stays leased, free nothing here. 60 s when no leased build
-    // holds those slots (draining workers, whose end no lease tells).
+  // Every holder reports this build's memory file wrong: no wait clears it, a rebuild does.
+  if (!displaces && why === 'memfile_mismatch') {
+    throw new CpError(
+      'template_unavailable',
+      "every host holding this build reports its memory file is not the guest's size",
+      undefined,
+      { readiness: 'unavailable', reason: 'memfile_mismatch' },
+    );
+  }
+  if (why === 'no_slot' || why === 'memory' || displaces) {
+    // Retry-After: the soonest a slot (or the memory) on one of this build's holders can free, that
+    // is the soonest another build placed on one of them loses its last live lease. Other hosts'
+    // builds, and other subjects' leases on a build that stays leased, free nothing here. 60 s when
+    // no leased build holds those slots (draining workers, whose end no lease tells).
     const holders = new Set(
       hosts.filter((h) => h.holds[target.buildId] !== undefined).map((h) => h.id),
     );
@@ -1180,11 +1449,16 @@ async function takeLeaseLocked(
         .filter((x) => x.buildId !== target.buildId && holders.has(pl.placed.get(x.buildId) ?? ''))
         .map((x) => Math.max(...liveLeases(x, nowS).map((l) => l.until)) - nowS),
     );
+    // A memory refusal says so; one at the active limit answers exactly as before.
     throw new CpError(
       'no_active_slot',
-      'every host holding this build is at its active limit with leased builds',
+      why === 'memory'
+        ? 'no host holding this build has the memory for its worker now (memory-aware placement)'
+        : 'every host holding this build is at its active limit with leased builds',
       undefined,
-      { readiness: 'unavailable' },
+      why === 'memory'
+        ? { readiness: 'unavailable', reason: 'memory' }
+        : { readiness: 'unavailable' },
       Number.isFinite(free) ? Math.max(1, free) : 60,
     );
   }
@@ -1213,31 +1487,52 @@ async function takeLeaseLocked(
 /**
  * Deactivate (§6.3): drop this subject's leases on the template's builds (an admin with
  * `all: true`, everyone's); a build stays wanted while another subject's lease stands. A drop is
- * a `deactivate` record; one that drops nothing writes none.
+ * a `deactivate` record; one that drops nothing writes none. When none is left, the time is kept
+ * as the build's lastLeaseEnd, from which a host's idle grace runs (§6.5). `stopNow: true` skips
+ * that grace: a build left with no lease is stopped at the next wanted answer (forced cold), and
+ * the `deactivate` record says `stopNow: true`.
  */
 async function deactivate(ctx: RequestCtx, deps: CpDeps) {
   const p = requireEnrolled(ctx, deps);
   const { cat, prov } = writable(deps);
   const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
   const b = asRecord(ctx.body);
+  if (b.stopNow !== undefined && typeof b.stopNow !== 'boolean')
+    throw new CpError('invalid_request', 'stopNow must be a boolean');
+  const stopNow = b.stopNow === true;
   const nowS = seconds(deps);
   const all = isAdmin(p) && b.all === true;
   let dropped = 0;
+  // Builds whose idle grace this stopNow ends: unleased, with a lease end it had not covered yet.
+  let ended = 0;
   await cat.update(d0.id, async (cur) => ({
     ...cur!,
     builds: cur!.builds.map((x) => {
       const live = (x.leases ?? []).filter((l) => l.until > nowS);
       const keep = live.filter((l) => !(all || l.subject === p.sub));
       dropped += live.length - keep.length;
-      return { ...x, leases: keep };
+      // The end of its last lease: now when this drop leaves none, else what the expired leases
+      // this write clears said (lastLeaseEnd reads them before they go).
+      const prior = lastLeaseEnd(x, nowS);
+      const end = keep.length === 0 && live.length > 0 ? nowS : prior;
+      const out: TemplateBuild = {
+        ...x,
+        leases: keep,
+        ...(end !== undefined ? { lastLeaseEnd: end } : {}),
+      };
+      if (stopNow && keep.length === 0 && x.status === 'registered' && end !== undefined) {
+        if (x.stopNowAt === undefined || end > x.stopNowAt) ended += 1;
+        out.stopNowAt = nowS;
+      }
+      return out;
     }),
   }));
-  if (dropped > 0) {
+  if (dropped > 0 || ended > 0) {
     await prov.append({
       stream: `template/${d0.id}`,
       kind: 'deactivate',
       subject: p.sub,
-      body: { leases: dropped, all },
+      body: { leases: dropped, all, ...(stopNow ? { stopNow: true } : {}) },
     });
   }
   return { status: 200, body: { templateId: d0.id, released: dropped } };
@@ -1268,7 +1563,7 @@ async function requireActive(
   // A build imported from SH_SANDBOX_TEMPLATES is the deployment's to run, never a host's: no gate,
   // as on a deployment without host agents.
   if (!hostManaged(t.build)) return;
-  const facts = await readinessFacts(deps);
+  let facts = await readinessFacts(deps);
   const readiness = readinessOf(t.build, facts.nowS, facts.placement, facts.attached);
   if (readiness === 'active') return;
   let now = readiness;
@@ -1282,10 +1577,25 @@ async function requireActive(
     (readiness === 'inactive' || readiness === 'deactivating' || readiness === 'activating')
   ) {
     // Its refusals (no_active_slot, quota_exceeded, template_unavailable) answer as activate's.
-    await takeLease(deps, p, t.doc, t.build, undefined, 'first_use');
+    const lease = await takeLease(deps, p, t.doc, t.build, undefined, 'first_use');
+    // A build in its idle grace has its worker attached, and the lease keeps it there (placement
+    // prefers the host running it): it serves now, with no wait (§6.5).
+    const graced = facts.placement?.graced.get(t.build.buildId);
+    if (graced && lease.host === graced.host && readiness === 'deactivating') return;
     now = 'activating';
     started = true;
+    // The lease may have placed it just now: its start line is read after it (§6.5).
+    if (readiness !== 'activating') facts = await readinessFacts(deps);
   }
+  // On a host whose agent reports its start limit and time, the wait its place in the host's
+  // start line implies (§6.5); else FIRST_USE_RETRY_S, as before.
+  const line = now === 'activating' ? facts.queue?.byBuild.get(t.build.buildId) : undefined;
+  const estimate = line
+    ? startRetryAfterS(
+        line,
+        facts.hosts.find((h) => h.id === line.host),
+      )
+    : null;
   throw new CpError(
     'template_not_active',
     started
@@ -1294,9 +1604,304 @@ async function requireActive(
         ? `template '${t.doc.id}' is ${now}: retry after the wait`
         : `template '${t.doc.id}' is ${now}; activate it (POST /v1/templates/${t.doc.id}/activate) or retry without activate: false`,
     undefined,
-    { readiness: now },
-    FIRST_USE_RETRY_S,
+    {
+      readiness: now,
+      ...(now === 'unavailable' && facts.placement?.unplaced.get(t.build.buildId)
+        ? { reason: facts.placement.unplaced.get(t.build.buildId)! }
+        : {}),
+    },
+    estimate ?? FIRST_USE_RETRY_S,
   );
+}
+
+/**
+ * The owner's actions (§5.1): the template's owner, or an admin (every owner action is open to
+ * admins, on any template, §5.2). A caller who cannot see the template gets 404, as on the reads.
+ */
+async function ownTemplate(ctx: RequestCtx, deps: CpDeps, verb: string) {
+  const p = requireEnrolled(ctx, deps);
+  const w = writable(deps);
+  const trusted = await trustedSet(deps);
+  const own = (d: TemplateDoc | null): TemplateDoc => ownerCheck(d, p, verb, trusted);
+  const d0 = own(await catalog(deps).get(ctx.params.id ?? ''));
+  return { p, ...w, d0, own, trusted };
+}
+
+/**
+ * The owner's check on a document: 404 for one the caller cannot see (or none), 403 for one that
+ * is neither theirs nor an admin's to act on. `ownTemplate` makes it on the document as read, for
+ * an early answer; each write makes it again on the document under the template's lock, so an
+ * owner transfer (or a change to private) between the two is seen and the old owner's change
+ * refused.
+ */
+function ownerCheck(
+  d: TemplateDoc | null,
+  p: TokenClaims,
+  verb: string,
+  trusted: ReadonlySet<string>,
+): TemplateDoc {
+  if (!d || !canSee(d, p, trusted)) throw new CpError('template_not_found', 'no such template');
+  if (d.owner !== p.sub && !isAdmin(p))
+    throw new CpError('forbidden', `only the template's owner, or an admin, ${verb}`);
+  return d;
+}
+
+/**
+ * Tags (§3.2, §5.1): the owner, or an admin, moves tags onto a registered build without rebuilding;
+ * a reference `id:tag` (and `id` for `default`) then resolves to the new build for new sandboxes
+ * and sessions, and those already created keep theirs. Each tag that changes is a `tag` record with
+ * the new build and the one before (§7.1); a tag already on the build writes nothing.
+ */
+async function moveTemplateTags(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'moves its tags');
+  const b = asRecord(ctx.body);
+  const tags = b.tags;
+  if (!Array.isArray(tags) || tags.length === 0 || tags.length > 16)
+    throw new CpError('invalid_request', 'tags must be a list of 1-16 tag names');
+  for (const t of tags)
+    if (typeof t !== 'string' || !TEMPLATE_ID_RE.test(t))
+      throw new CpError(
+        'invalid_request',
+        `tag '${String(t)}' must match ${TEMPLATE_ID_RE.source}`,
+      );
+  if (new Set(tags).size !== tags.length)
+    throw new CpError('invalid_request', 'a tag is listed twice');
+  const ref = typeof b.build === 'string' ? b.build : '';
+  const nowS = seconds(deps);
+  let buildId = '';
+  let moved: { tag: string; from: string | null }[] = [];
+  const records: Record<string, string> = {};
+  // The build is checked under the template's write lock, so it is still registered when tagged.
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    moved = [];
+    const target = cur.builds.find((x) => x.buildId === ref || x.handle === ref);
+    if (!target) throw new CpError('template_not_found', 'no such build of this template');
+    if (target.status !== 'registered')
+      throw new CpError(
+        'invalid_request',
+        `the build is ${target.status}; only a registered build is tagged`,
+      );
+    buildId = target.buildId;
+    const next = { ...cur.tags };
+    const meta = { ...(cur.tagsMeta ?? {}) };
+    for (const t of tags as string[]) {
+      // An own property only: a tag such as `constructor` is not Object.prototype's.
+      const from = Object.hasOwn(next, t) ? next[t]! : null;
+      if (from === buildId) continue;
+      moved.push({ tag: t, from });
+      next[t] = buildId;
+      meta[t] = { at: nowS, by: p.sub };
+    }
+    const digests = await appendRecords(
+      prov,
+      moved.map((m) => ({
+        stream: `template/${d0.id}`,
+        kind: 'tag' as const,
+        subject: p.sub,
+        body: { tag: m.tag, buildId, before: m.from },
+      })),
+    );
+    moved.forEach((m, i) => (records[m.tag] = digests[i]!));
+    return { ...cur, tags: next, tagsMeta: meta };
+  });
+  if (moved.length > 0)
+    await auditBestEffort(deps, 'template_tags_moved', d0.id, {
+      subject: p.sub,
+      decision: 'template_tags_moved',
+    });
+  return {
+    status: 200,
+    body: {
+      templateId: d0.id,
+      subject: p.sub,
+      buildId,
+      // `before`: what the tag named until now (null: it is new); an unchanged tag names its build.
+      tags: (tags as string[]).map((t) => {
+        const m = moved.find((x) => x.tag === t);
+        return { tag: t, buildId, before: m ? m.from : buildId, record: records[t] ?? null };
+      }),
+    },
+  };
+}
+
+/**
+ * Remove a tag (§5.1): its build is never deleted and stays addressable by its build id. `default`
+ * is moved, never removed: the bare id must resolve. A `tag` record with `buildId: null`.
+ */
+async function removeTemplateTag(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'removes its tags');
+  const tag = ctx.params.tag ?? '';
+  if (!TEMPLATE_ID_RE.test(tag))
+    throw new CpError('invalid_request', `tag '${tag}' must match ${TEMPLATE_ID_RE.source}`);
+  if (tag === 'default')
+    throw new CpError(
+      'invalid_request',
+      'the default tag is moved (POST …/tags), never removed: the bare id must resolve',
+    );
+  let before = '';
+  let record = '';
+  await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    const b = Object.hasOwn(cur.tags, tag) ? cur.tags[tag] : undefined;
+    if (b === undefined)
+      throw new CpError('template_not_found', `no tag '${tag}' on this template`);
+    before = b;
+    const next = { ...cur.tags };
+    const meta = { ...(cur.tagsMeta ?? {}) };
+    delete next[tag];
+    delete meta[tag];
+    [record] = await appendRecords(prov, [
+      {
+        stream: `template/${d0.id}`,
+        kind: 'tag',
+        subject: p.sub,
+        body: { tag, buildId: null, before },
+      },
+    ]);
+    return { ...cur, tags: next, tagsMeta: meta };
+  });
+  await auditBestEffort(deps, 'template_tag_removed', d0.id, {
+    subject: p.sub,
+    decision: 'template_tag_removed',
+  });
+  return {
+    status: 200,
+    body: { templateId: d0.id, subject: p.sub, tag, buildId: null, before, record },
+  };
+}
+
+type TemplateEdit = { field: 'visibility' | 'description'; value: string; before: string };
+
+/**
+ * Edit (§5.1): the owner, or an admin, changes a template's description or visibility. `private`
+ * hides it from other subjects (they get 404, as for an id that does not exist) and refuses their
+ * new use; their sandboxes and sessions already created keep running. Each field that changes is a
+ * `visibility` record (the field, the new value and the one before), so every edit is on the chain.
+ */
+async function updateTemplate(ctx: RequestCtx, deps: CpDeps) {
+  const { p, cat, prov, d0, own, trusted } = await ownTemplate(ctx, deps, 'edits it');
+  const b = asRecord(ctx.body);
+  if (b.visibility === undefined && b.description === undefined)
+    throw new CpError('invalid_request', 'nothing to change: send visibility or description');
+  if (b.visibility !== undefined && b.visibility !== 'private' && b.visibility !== 'deployment')
+    throw new CpError('invalid_request', "visibility must be 'private' or 'deployment'");
+  if (
+    b.description !== undefined &&
+    (typeof b.description !== 'string' || b.description.length > 1024)
+  )
+    throw new CpError('invalid_request', 'description must be a string of at most 1024 characters');
+  // A JSON body can carry a lone surrogate (`"\ud800"`), which a provenance record cannot hold.
+  if (typeof b.description === 'string' && LONE_SURROGATE_RE.test(b.description))
+    throw new CpError('invalid_request', 'description must not hold a lone surrogate');
+  const visibility = b.visibility as 'private' | 'deployment' | undefined;
+  const description = b.description as string | undefined;
+  let changes: TemplateEdit[] = [];
+  const records: Record<string, string> = {};
+  const after = await cat.update(d0.id, async (c) => {
+    const cur = own(c);
+    // Self-attestation (subject-trust spec §6): a template with a self-attested build, registered
+    // or on its way there, stays private until an admin trusts the record; refused as at create.
+    if (
+      visibility === 'deployment' &&
+      cur.visibility !== 'deployment' &&
+      cur.builds.some((x) => REUSABLE.has(x.status) && attestationOf(x, trusted) === 'self')
+    )
+      throw new CpError(
+        'self_attested',
+        'a self-attested template is private until an admin trusts its gate record (trustedGateRecords)',
+      );
+    changes = [];
+    if (visibility !== undefined && visibility !== cur.visibility)
+      changes.push({ field: 'visibility', value: visibility, before: cur.visibility });
+    if (description !== undefined && description !== cur.description)
+      changes.push({ field: 'description', value: description, before: cur.description });
+    const digests = await appendRecords(
+      prov,
+      changes.map((c) => ({
+        stream: `template/${d0.id}`,
+        kind: 'visibility' as const,
+        subject: p.sub,
+        body: { field: c.field, value: c.value, before: c.before },
+      })),
+    );
+    changes.forEach((c, i) => (records[c.field] = digests[i]!));
+    return {
+      ...cur,
+      ...(visibility !== undefined ? { visibility } : {}),
+      ...(description !== undefined ? { description } : {}),
+    };
+  });
+  if (changes.length > 0)
+    await auditBestEffort(deps, 'template_updated', d0.id, {
+      subject: p.sub,
+      decision: 'template_updated',
+    });
+  return {
+    status: 200,
+    body: {
+      templateId: d0.id,
+      subject: p.sub,
+      visibility: after.visibility,
+      description: after.description,
+      changes: changes.map((c) => ({ ...c, record: records[c.field]! })),
+    },
+  };
+}
+
+/**
+ * Transfer ownership (§5.2): an admin makes another enrolled subject the template's owner, for
+ * example when its creator leaves. The new owner gets every owner action, and the quotas count it
+ * as theirs from now on; sandboxes and sessions already made keep their own subjects. An `owner`
+ * record names the admin, the new owner and the one before.
+ *
+ * A template the deployment declared (imported from SH_SANDBOX_TEMPLATES, owner null) is handed to
+ * a subject the same way, `before: null`: its id otherwise blocks every self-serve create under it
+ * (`409 template_exists`). The import runs once, into an empty catalog, so a restart does not take
+ * it back.
+ */
+async function transferTemplateOwner(ctx: RequestCtx, deps: CpDeps) {
+  const p = requireEnrolled(ctx, deps);
+  if (!isAdmin(p))
+    throw new CpError('forbidden', 'transferring a template requires the admin role');
+  const { cat, prov } = writable(deps);
+  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
+  const owner = asRecord(ctx.body).owner;
+  if (typeof owner !== 'string' || !MEMBER_SUBJECT_RE.test(owner))
+    throw new CpError('invalid_request', `owner must be a subject, ${MEMBER_SUBJECT_FORMS}`);
+  // The new owner must be able to act on it: enrolled now (the allow list, or an admin).
+  if (!isEnrolled(owner, deps.identity.rolesFor(owner), deps.config))
+    throw new CpError(
+      'invalid_request',
+      `${owner} is not enrolled: add them to SH_ALLOWED_SUBJECTS first`,
+    );
+  let before = null as string | null;
+  let record: string | null = null;
+  const trusted = await trustedSet(deps);
+  await cat.update(d0.id, async (cur) => {
+    if (!cur) throw new CpError('template_not_found', 'no such template');
+    before = cur.owner;
+    if (before === owner) return cur;
+    // Self-attestation (subject-trust spec §6): a subject's own gate record counts for that subject's
+    // own templates only, so a template with a self-attested build, registered or on its way there,
+    // is not handed to another subject until an admin trusts the record.
+    if (cur.builds.some((x) => REUSABLE.has(x.status) && attestationOf(x, trusted) === 'self'))
+      throw new CpError(
+        'self_attested',
+        "a self-attested template keeps its owner until an admin trusts its gate record (trustedGateRecords): the record counts for its submitter's own templates only",
+      );
+    [record] = await appendRecords(prov, [
+      { stream: `template/${d0.id}`, kind: 'owner', subject: p.sub, body: { owner, before } },
+    ]);
+    return { ...cur, owner };
+  });
+  if (owner !== before) {
+    await auditBestEffort(deps, 'template_owner_transferred', d0.id, {
+      subject: p.sub,
+      decision: 'template_owner_transferred',
+    });
+  }
+  return { status: 200, body: { templateId: d0.id, subject: p.sub, owner, before, record } };
 }
 
 export const SANDBOX_HANDLERS: Record<string, Handler> = {
@@ -1319,7 +1924,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const tags = Object.entries(d.tags)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([tag, buildId]) => {
-        const m = d.tagsMeta?.[tag];
+        const m = d.tagsMeta && Object.hasOwn(d.tagsMeta, tag) ? d.tagsMeta[tag] : undefined;
         return { tag, buildId, assignedAt: m?.at ?? d.createdAt, assignedBy: m?.by ?? d.owner };
       });
     return { status: 200, body: { tags } };
@@ -1352,6 +1957,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   createTemplateBuild: (ctx, deps) => createBuild(ctx, deps, true),
   cancelTemplateBuild: cancelBuild,
 
+  // The owner's and the admin's actions (§5.1-§5.2): tags, edits and owner transfer.
+  moveTemplateTags,
+  removeTemplateTag,
+  updateTemplate,
+  transferTemplateOwner,
+
   // Activation leases (§6.3): take or renew, and release.
   activateTemplate: activate,
   deactivateTemplate: deactivate,
@@ -1361,7 +1972,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   getPolicy: async (ctx, deps) => {
     requireEnrolled(ctx, deps);
     const { policy, record } = await policyStore(deps).current();
-    return { status: 200, body: { policy, digest: policyDigest(policy), record } };
+    // The general-gate schema rides along, so a client's dry run applies X1.offline as this
+    // deployment does.
+    const gateRecordSchema = deps.config.sandbox?.gateRecordSchema ?? DEFAULT_GATE_RECORD_SCHEMA;
+    return {
+      status: 200,
+      body: { policy, digest: policyDigest(policy), record, gateRecordSchema },
+    };
   },
 
   putPolicy: async (ctx, deps) => {
@@ -1370,9 +1987,37 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const store = policyStore(deps);
     const bad = policyProblems(ctx.body);
     if (bad.length) throw new CpError('invalid_request', bad.join('; '));
-    const { policy, record } = await store.set(ctx.body as Policy, p.sub);
+    // Self-attestation: a record whose trust this removes narrows its deployment-visible templates
+    // to private on read. Name each narrowed build in the policy record, so nothing is silent. The
+    // policy itself is what the admin sent, every field kept as sent.
+    const before = new Set((await store.current()).policy.trustedGateRecords);
+    const after = new Set((ctx.body as Policy).trustedGateRecords);
+    const narrowed: { template: string; buildId: string }[] = [];
+    if ([...before].some((g) => !after.has(g)) && deps.templates)
+      for (const d of await deps.templates.list())
+        if (effectiveVisibility(d, before) === 'deployment')
+          for (const x of d.builds)
+            if (
+              x.status === 'registered' &&
+              attestationOf(x, before) === 'deployment' &&
+              attestationOf(x, after) === 'self'
+            )
+              narrowed.push({ template: d.id, buildId: x.buildId });
+    const { policy, record } = await store.set(
+      ctx.body as Policy,
+      p.sub,
+      narrowed.length ? { narrowed } : undefined,
+    );
     await auditBestEffort(deps, 'policy_set', 'policy', { subject: p.sub, decision: 'policy_set' });
-    return { status: 200, body: { policy, digest: policyDigest(policy), record } };
+    return {
+      status: 200,
+      body: {
+        policy,
+        digest: policyDigest(policy),
+        record,
+        ...(narrowed.length ? { narrowed } : {}),
+      },
+    };
   },
 
   getQuota: async (ctx, deps) => {
