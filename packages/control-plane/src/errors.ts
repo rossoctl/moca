@@ -35,6 +35,9 @@ export const CP_ERROR_CODES = [
   'template_not_found',
   'template_exists',
   'policy_refused',
+  'no_active_slot',
+  'template_unavailable',
+  'template_not_active',
   'mode_not_allowed',
   'self_attested',
   'digest_mismatch',
@@ -108,6 +111,14 @@ const STATUS: Record<CpErrorCode, number> = {
   template_exists: 409,
   // 422: a create the policy refuses at create (spec §8.1); `rule` names the gating rule.
   policy_refused: 422,
+  // 409: every host holding the build is at its active limit with leased builds (template lifecycle
+  // spec §6.3); Retry-After says when the earliest lease ends.
+  no_active_slot: 409,
+  // 409: no host holds this build's snapshot, or the build is not registered (§3.3 `unavailable`).
+  template_unavailable: 409,
+  // 409: a sandbox create on a build that is not active (§6.4); its activation has started unless the
+  // create said `activate: false`. Retry-After says when to try again.
+  template_not_active: 409,
   // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
   // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
   mode_not_allowed: 403,
@@ -192,6 +203,8 @@ export class CpError extends Error {
     readonly sessionId?: string,
     /** Extra body fields a client branches on, e.g. sandbox_terminated's `reason`. Never a secret. */
     readonly extra?: Record<string, string>,
+    /** Seconds for a `Retry-After` header, on a refusal that may clear (no_active_slot, §6.3). */
+    readonly retryAfterS?: number,
   ) {
     super(message ?? code);
     this.name = 'CpError';
@@ -224,7 +237,12 @@ export function writeError(res: WritableRes, err: unknown): void {
     const body: Record<string, string> = { ...extra, error: err.code };
     if (err.message && err.message !== err.code) body.message = err.message;
     if (err.sessionId) body.sessionId = err.sessionId;
-    res.writeHead(statusFor(err.code), JSON_HEADERS);
+    res.writeHead(
+      statusFor(err.code),
+      err.retryAfterS !== undefined && Number.isSafeInteger(err.retryAfterS) && err.retryAfterS >= 0
+        ? { ...JSON_HEADERS, 'Retry-After': String(err.retryAfterS) }
+        : JSON_HEADERS,
+    );
     res.end(JSON.stringify(body));
     return;
   }

@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ApiError, errorFromResponse } from '../src/api/errors.js';
-import { sbxMain } from '../src/sbx/cli.js';
-import { refusalText } from '../src/sbx/commands.js';
+import { openSbxRuntime, sbxMain } from '../src/sbx/cli.js';
+import { refusalText, SBX_EXIT } from '../src/sbx/commands.js';
 import { dryRun } from '../src/sbx/dry-run.js';
+import { cmdActivate } from '../src/sbx/templates.js';
 import {
   cleanupTmp,
   fakeCp,
@@ -14,13 +15,15 @@ import {
   SBX,
   setup,
   TOKEN,
+  URL_,
   workspaces,
   type Handler,
 } from './helpers/sbx.js';
 
 // The template commands of mocactl (template lifecycle spec §4, §8): `sbx templates` with readiness
 // and tags, `templates show`, `create --template ID[@BUILD] --seed`, and the authoring commands
-// (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`). example.com hosts only.
+// (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`); and activation (§6.3):
+// `templates activate` and `templates deactivate`. example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -272,6 +275,131 @@ describe('create --template id@build, --seed', () => {
     expect(await s.run(['create', '--template', 'my-python', '--seed'])).toBe(0);
     expect(s.w.err()).toContain('the template has no seed');
     expect(s.ws.get(SBX).sent).toEqual([]);
+  });
+});
+
+describe('sbx templates activate and deactivate (§6.3)', () => {
+  const LEASE = {
+    templateId: 'my-python',
+    buildId: BUILD_ID,
+    leaseUntil: 1_800_003_600,
+    host: 'host-1',
+  };
+
+  it('takes a lease, naming the build and its length, and prints it', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
+    });
+    expect(
+      await w.run(['templates', 'activate', 'my-python', '--build', BUILD_ID, '--lease', '600']),
+    ).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ build: BUILD_ID, leaseSeconds: 600 });
+    expect(w.out()).toBe(
+      `my-python ${BUILD_ID} leased until ${new Date(1_800_003_600_000).toISOString()} on host-1\n`,
+    );
+    expect(await w.run(['templates', 'activate', 'my-python', '--json'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({});
+    expect(JSON.parse(w.out())).toEqual(LEASE);
+  });
+
+  it('releases the leases', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/deactivate': () => ({
+        status: 200,
+        body: { templateId: 'my-python', released: 1 },
+      }),
+    });
+    expect(await w.run(['templates', 'deactivate', 'my-python'])).toBe(0);
+    expect(w.out()).toBe('my-python: released 1 lease\n');
+  });
+
+  it('fails a refused activation at once, naming the refusal', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/activate': () => ({
+        status: 409,
+        body: {
+          error: 'template_unavailable',
+          message: "no host holds this build's snapshot",
+          readiness: 'unavailable',
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'activate', 'my-python', '--wait'])).toBe(1);
+    expect(w.err()).toContain("no host holds this build's snapshot");
+    expect(w.cp.calls.filter((c) => c.path.includes('/activate'))).toHaveLength(1);
+  });
+
+  it('refuses a bad --lease, --wait or --timeout where they do not apply, and a missing ID', async () => {
+    const w = world({});
+    for (const argv of [
+      ['templates', 'activate', 'my-python', '--lease', '30'],
+      ['templates', 'activate', 'my-python', '--lease', '1h'],
+      ['templates', 'show', 'my-python', '--wait'],
+      ['templates', 'activate', 'my-python', '--timeout', '60'],
+      ['templates', 'deactivate', 'my-python', '--build', BUILD_ID],
+      ['templates', 'activate'],
+      ['templates', 'deactivate', 'a', 'b'],
+      ['create', '--lease', '600'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toHaveLength(0);
+  });
+
+  /** cmdActivate on a scripted control plane, with a fake clock: what it slept and said. */
+  function waiting(routes: Record<string, Handler>) {
+    const s = setup();
+    const cp = fakeCp(routes);
+    const { rt, api } = openSbxRuntime(URL_, s.env, { home: s.home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    return { ...s, cp, slept, c: { rt, api, url: URL_, io: s.io, json: false } };
+  }
+
+  it('--wait: retries no_active_slot after its Retry-After, then reads the build until active, saying why it waits', async () => {
+    let tries = 0;
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/activate': () =>
+        ++tries < 2
+          ? {
+              status: 409,
+              body: { error: 'no_active_slot', message: 'full', readiness: 'unavailable' },
+              headers: { 'retry-after': '20' },
+            }
+          : { status: 200, body: LEASE },
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ readiness: ++reads < 3 ? 'activating' : 'active' }),
+      }),
+    });
+    expect(await cmdActivate(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([20_000, 5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain('my-python: waiting: no active slot');
+    // Said once, however many reads say the same.
+    expect(errs.match(/waiting: activating: its host is starting its worker/g)).toHaveLength(1);
+    expect(w.io.outs.join('')).toContain(`my-python ${BUILD_ID} active, leased until`);
+  });
+
+  it('--wait: exits 5 when the build is not active within --timeout', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/activate': () => ({ status: 200, body: LEASE }),
+      [`GET /v1/templates/my-python/builds/${encodeURIComponent(BUILD_ID)}`]: () => ({
+        status: 200,
+        body: build({ readiness: 'activating' }),
+      }),
+    });
+    expect(await cmdActivate(w.c, 'my-python', { wait: true, timeoutS: 12 })).toBe(
+      SBX_EXIT.timedOut,
+    );
+    expect(w.slept).toEqual([5000, 5000, 2000]);
+    expect(w.io.errs.join('')).toContain('timed out after 12 s');
   });
 });
 

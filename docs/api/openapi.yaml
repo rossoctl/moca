@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.10.0
+  version: 1.12.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -51,6 +51,13 @@ components:
         One KVM host's egress token (`SH_EGRESS_TOKEN_<ID>`, SBX0.2b §4.2); admits
         POST /v1/egress/credential only. Compared against every configured host; no user,
         admin or janitor token is accepted there.
+    hostToken:
+      type: http
+      scheme: bearer
+      description: |
+        One template host agent's token (`SH_HOST_TOKEN_<ID>`, `SH_TEMPLATE_HOSTS`; template
+        lifecycle spec §6.1); admits the /v1/hosts/{host}/ routes for that host only. Distinct
+        from every egress and janitor token; no user or admin token is accepted there.
   parameters:
     sessionId:
       name: id
@@ -113,6 +120,9 @@ components:
             - template_not_found
             - template_exists
             - policy_refused
+            - no_active_slot
+            - template_unavailable
+            - template_not_active
             - mode_not_allowed
             - self_attested
             - digest_mismatch
@@ -159,8 +169,15 @@ components:
             X11, X12, X14, X15; deploy/sbx/template-onboarding/governance/GATING-RULES.md)
         quota:
           type: string
-          enum: [templates, buildsQueued, owned]
-          description: 'quota_exceeded on a template create: which quota'
+          enum: [templates, buildsQueued, owned, active]
+          description: |
+            quota_exceeded on a template create (`templates`, `buildsQueued`, `owned`) or an
+            activation (`active`): which quota
+        readiness:
+          type: string
+          description: |
+            template_unavailable, no_active_slot and template_not_active: the build's readiness
+            (template lifecycle spec §3.3)
     TurnGrants:
       type: object
       description: |
@@ -447,7 +464,7 @@ components:
         readiness:
           type: [string, 'null']
           description: the default build's readiness
-          enum: [active, inactive, unknown, null]
+          enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
         tags:
           type: object
           additionalProperties: { type: string }
@@ -471,12 +488,16 @@ components:
         profile: { type: string, description: the policy profile; `imported` for the env list's }
         readiness:
           type: [string, 'null']
-          enum: [active, inactive, unknown, null]
+          enum: [active, activating, deactivating, inactive, unavailable, unknown, null]
           description: |
             for a registered build (§3.3), from facts: `active` the relay holds an attached
-            presence record for its worker; `inactive` it holds none; `unknown` the relay's
-            presence could not be read; null for a build that is not registered. Later states
-            (`activating`, `deactivating`, `unavailable`, `retired`) come with activation and retire
+            presence record for its worker; `activating` an activation lease stands and a host
+            holding it is asked to run it, not attached yet; `deactivating` attached with no lease
+            (draining: a worker is never stopped under a live sandbox); `inactive` no lease, not
+            attached; `unavailable` leased, but no host that reports holds it or every holder is at
+            its active limit; `unknown` the relay's presence could not be read; null for a build
+            that is not registered. Before any host agent reports, readiness is the presence alone
+            (`active` or `inactive`)
         capacity:
           type: [object, 'null']
           description: for an active build
@@ -539,6 +560,13 @@ components:
             workspace_mb: { type: integer }
             seed: { type: string }
             tools: { type: array, items: { type: string } }
+    WantedWorker:
+      type: object
+      required: [template, buildId, worker]
+      properties:
+        template: { type: string }
+        buildId: { type: string }
+        worker: { type: string, description: the relay sandbox id of the build's worker }
     TemplateCreate:
       type: object
       required: [image, spec]
@@ -1882,15 +1910,25 @@ paths:
                   hosts:
                     type: array
                     description: |
-                      per KVM host, its limits and use, as its host agent reports them (template
-                      lifecycle spec §6.2). Always empty here: a later issue adds the host agent
-                      and defines the items. Empty means no host has reported, never that there
-                      is no limit
+                      per KVM host, its limits and use, as its host agent last reported them
+                      (template lifecycle spec §6.2); `active.used` counts the workers that stay
+                      running on it (leased builds placed or running there, unleased ones draining a
+                      live sandbox). Empty means no host has reported, never that
+                      there is no limit. A host whose last inventory is over 6 minutes old is left
+                      out, here and in placement, until it reports again
                     items:
                       type: object
-                      required: [id]
+                      required: [id, active, idleLimitSeconds, disk]
                       properties:
                         id: { type: string }
+                        active: { $ref: '#/components/schemas/LimitUse' }
+                        idleLimitSeconds: { type: integer }
+                        disk:
+                          type: object
+                          required: [freeGb, floorGb]
+                          properties:
+                            freeGb: { type: integer }
+                            floorGb: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
     post:
@@ -2416,6 +2454,120 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/activate:
+    post:
+      operationId: activateTemplate
+      summary: Take or renew your activation lease on a registered build; a host agent starts its worker
+      description: |
+        Template lifecycle spec §6.3. Body `{tag?, build?, leaseSeconds?}`: the build by tag
+        (default `default`) or build id; the lease 60-86400 s (default the largest
+        `idleLimitSeconds` of the hosts that hold it, clamped to 60-86400, else 3600), renewed by calling again, without limit.
+        A build is wanted running only while a lease stands, and a leased build is never evicted.
+        An `activate` record on the template's stream; a sandbox created under the lease cites its
+        digest as `lease`. One activation at a time: the quota and placement check, the record and
+        the lease write run under one lock across all templates. Refusals keep no lease:
+        `409 template_unavailable` (no registered build under that reference, or no host that
+        reports holds it), `409 no_active_slot` with `Retry-After` (every holder at its active limit
+        with leased builds, or a lease in the same second as a placed build; Retry-After is the
+        seconds until a build placed on one of this build's holders loses its last live lease, else
+        60), `429 quota_exceeded`
+        with `quota: active`. Needs SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tag: { type: string }
+                build: { type: string }
+                leaseSeconds: { type: integer, minimum: 60, maximum: 86400 }
+      responses:
+        '200':
+          description: leased
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, buildId, leaseUntil, host]
+                properties:
+                  templateId: { type: string }
+                  buildId: { type: string }
+                  leaseUntil: { type: integer, description: epoch seconds }
+                  host:
+                    type: [string, 'null']
+                    description: the host it is placed on; null while no host agent has reported
+        '400':
+          description: |
+            `invalid_request` (a lease outside 60-86400 s; a template imported from
+            SH_SANDBOX_TEMPLATES, which the deployment runs and which takes no lease; also: this
+            deployment stores no templates)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`template_unavailable`, or `no_active_slot` with Retry-After; with `readiness`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`quota_exceeded`, with `quota: active`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/deactivate:
+    post:
+      operationId: deactivateTemplate
+      summary: Release your activation leases on a template; with none left, its worker drains and stops
+      description: |
+        Template lifecycle spec §6.3. Drops the caller's live leases on the template's builds (an
+        admin with `{all: true}`, every subject's) and writes a `deactivate` record when it drops
+        any. A build stays wanted while another subject's lease stands; with none left its host
+        agent stops the worker once no live sandbox runs on it. Needs SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                all: { type: boolean, description: admins only; ignored otherwise }
+      responses:
+        '200':
+          description: released
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, released]
+                properties:
+                  templateId: { type: string }
+                  released: { type: integer, description: the leases dropped }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotEnrolled' }
+        '404':
+          description: '`template_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/policy:
     get:
       operationId: getPolicy
@@ -2489,10 +2641,10 @@ paths:
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
         The policy's quotas and the caller's use: templates owned (with a build registered or on its
-        way there), builds queued, building or probing, templates held active (0 until activation
-        exists), and template ids owned in any status (`owned`). On the sandbox profile, `sandboxes` is
-        SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and the caller's
-        live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
+        way there), builds queued, building or probing, builds the caller holds a live activation
+        lease on (§6.3), and template ids owned in any status (`owned`). On the sandbox profile,
+        `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
+        the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       responses:
         '200':
@@ -2516,6 +2668,283 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/hosts/{host}/inventory:
+    post:
+      operationId: hostInventory
+      summary: A host agent reports what it holds (by manifest hash) and its limits
+      description: |
+        Template lifecycle spec §6.1. The host's own bearer, SH_HOST_TOKEN_<ID> (SH_TEMPLATE_HOSTS);
+        the host in the path must be the one whose token is presented. Body
+        `{holds: [{template, manifestHash, running?}], limits: {activeLimit, idleLimitSeconds,
+        buildConcurrency, diskFreeGb, diskFloorGb}}`. The control plane keeps each host's last
+        inventory in its own process; the agent re-sends it on every poll. A host whose last inventory is
+        over 6 minutes old is left out of placement until it reports again.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                holds:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      template: { type: string }
+                      manifestHash: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+                      running:
+                        type: boolean
+                        default: false
+                        description: |
+                          whether the build's worker unit runs on the host (placement counts it
+                          against activeLimit and keeps the build there)
+                limits:
+                  type: object
+                  properties:
+                    activeLimit: { type: integer }
+                    idleLimitSeconds: { type: integer }
+                    buildConcurrency: { type: integer }
+                    diskFreeGb: { type: integer }
+                    diskFloorGb: { type: integer }
+      responses:
+        '200':
+          description: recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string }
+                  holds: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/hosts/{host}/builds/claim:
+    post:
+      operationId: hostClaimBuilds
+      summary: A host agent claims up to `max` (at most 4) queued builds, oldest first, subjects in turn
+      description: |
+        Each claimed build moves to `building`, held by this host. Each comes with its template
+        id, handle, image, the spec as template-build.sh reads it, and where to fetch its gate
+        record (`/v1/hosts/{host}/blobs/{sha256}`).
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { max: { type: integer } } }
+      responses:
+        '200':
+          description: the claimed builds (possibly none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [builds]
+                properties:
+                  builds:
+                    type: array
+                    items:
+                      type: object
+                      required: [template, build, image, spec]
+                      properties:
+                        template: { type: string }
+                        build: { type: string }
+                        image: { type: string }
+                        spec: { type: object }
+                        gateRecord: { type: string }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/hosts/{host}/blobs/{digest}:
+    get:
+      operationId: hostBlob
+      summary: A document the store holds by sha256 (a gate record), for a host agent
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: digest, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the document, base64 of its exact bytes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sha256: { type: string }
+                  base64: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/builds/{build}/log:
+    post:
+      operationId: hostBuildLog
+      summary: A host agent appends log entries to a build it claimed (at most 200 a call)
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      level: { type: string, enum: [info, warn, error] }
+                      step: { type: string }
+                      message: { type: string }
+      responses:
+        '200':
+          description: appended
+          content:
+            application/json:
+              schema: { type: object, properties: { appended: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`: no such build claimed by this host'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/builds/{build}/report:
+    post:
+      operationId: hostBuildReport
+      summary: A host agent reports a step of a build it claimed; `built` registers or rejects it
+      description: |
+        `{event: building | probing}`; `{event: failed, step, message}`; or `{event: built,
+        templateRecord, manifest}`, each the host's file (T, S) as a string. On `built` the
+        control plane stores both byte for byte, writes a `build` record, checks them against the
+        create's request (§8.2: image, R's digest, manifest hash and version 2, size, gate
+        record, X12) and registers the build (its id becomes the manifest hash; the template's
+        first takes `default`) or rejects it naming the rule, writing a `check` record either way.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: the build's new status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string }
+                  buildId: { type: string }
+                  rule: { type: string }
+        '400':
+          description: '`invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`: no such build claimed by this host'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/hosts/{host}/wanted:
+    get:
+      operationId: hostWanted
+      summary: The workers a host agent should run (leased and placed on it) and stop (no lease, no live sandbox)
+      description: |
+        Template lifecycle spec §6.3. The host's own bearer. `run`: the registered builds this host
+        holds whose lease stands and which placement puts on it, within its `activeLimit` (the same
+        placement an activation is judged by; a build already running on a holder stays there).
+        `stop`: the ones it holds with no live lease, and a leased one it runs while placement keeps
+        it on another host, each with no live sandbox on its worker; a worker with a live sandbox is
+        in neither list (it drains first, and counts against the host's `activeLimit` meanwhile).
+        The agent starts only workers already installed on the host.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: the wanted state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, stop]
+                properties:
+                  run: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
+                  stop: { type: array, items: { $ref: '#/components/schemas/WantedWorker' } }
+        '400':
+          description: '`invalid_request`: this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/hosts/{host}/workers/report:
+    post:
+      operationId: hostWorkerReport
+      summary: A host agent reports a worker attached, refused or detached (provenance; readiness is the relay's)
+      description: |
+        Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
+        worker unit started) and `refused` (not started, with why: not installed, or the start
+        failed) write an `activate` record, `detached` (stopped) a `deactivate` record, each with
+        the subject `host:<host>`. A `refused` that repeats this host's last one for the build (the
+        same reason) while the build stays in the host's `run` is not recorded again (`recorded:
+        null`): the agent retries every 15 s, and the stream is append-only. Readiness never comes
+        from a report: `active` is the relay's attached record.
+      security: [{ hostToken: [] }]
+      parameters:
+        - { name: host, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [buildId, event]
+              properties:
+                buildId: { type: string }
+                event: { type: string, enum: [attached, refused, detached] }
+                reason: { type: string, maxLength: 1024 }
+      responses:
+        '200':
+          description: recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recorded:
+                    type: [string, 'null']
+                    description: the event recorded; null for a repeated refusal, not recorded
+        '400':
+          description: '`invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`not_found`: no registered build this host holds'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/sandboxes:
     description: |
       Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers
@@ -2526,6 +2955,19 @@ paths:
       description: |
         Enrolled subjects and admins only. Does no I/O to the worker: the first Exec creates the
         workspace, so a new sandbox always starts empty (SBX0 §5.1).
+
+        Activation on first use (template lifecycle spec §6.4), on a deployment with template hosts
+        (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
+        create takes the caller's activation lease (as POST /v1/templates/{id}/activate, with its
+        refusals: `409 no_active_slot`, `409 template_unavailable`, `429 quota_exceeded`; the
+        `activate` record says `reason: first_use`; not taken again while the caller holds a live lease on
+        the build, so a retry writes nothing) and answers `409 template_not_active` with
+        `readiness` and `Retry-After: 30`; retry after the wait. With `activate: false` nothing is
+        started. No sandbox record is kept while waiting, so a wait never uses the live-sandbox cap.
+        The gate applies before any host has reported too: an attached worker serves, an absent one
+        is refused. Without template hosts the create succeeds as before, and so it does on a template
+        imported from SH_SANDBOX_TEMPLATES (no host holds it: the deployment runs its worker). The `sandbox` record's
+        `lease` is the digest of the `activate` record of the caller's live lease on the build.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -2541,6 +2983,12 @@ paths:
                     a template from GET /v1/templates, as `id` (its `default` tag), `id:tag` or
                     `id@<build id>`: resolved to one registered build at creation and kept for the
                     sandbox's life (template lifecycle spec §3.2)
+                activate:
+                  type: boolean
+                  default: true
+                  description: |
+                    false: on a build that is not active, be refused without starting its
+                    activation (§6.4)
                 name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$' }
                 labels:
                   type: object
@@ -2584,12 +3032,18 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`name_conflict`: the caller already has a live sandbox with that name'
+          description: |
+            `name_conflict`: the caller already has a live sandbox with that name;
+            `template_not_active` (Retry-After), with `readiness`: the build is not active yet, its
+            activation started unless `activate: false`; `no_active_slot` (Retry-After) and
+            `template_unavailable`: as activate
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '429':
-          description: '`quota_exceeded`: per-user or deployment-wide live sandboxes (SBX0 §5.3)'
+          description: |
+            `quota_exceeded`: per-user or deployment-wide live sandboxes (SBX0 §5.3), or, on first
+            use, the active-template quota (`quota: active`)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

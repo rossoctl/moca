@@ -18,7 +18,8 @@ import { baselineAtHead } from './push.js';
 /**
  * The template commands of mocactl (template lifecycle spec §4, §8): the reads a client makes
  * before a create (quota, policy), one template and its builds or one build, create and follow a
- * build, cancel it, and `create --seed`, which runs the served build's own seed. Every command has
+ * build, cancel it, and `create --seed`, which runs the served build's own seed; and activation
+ * (§6.3): take or renew a lease, wait for the build to be active, release it. Every command has
  * `--json` (the API's answer, never a token); a wait that runs out of time exits 5.
  */
 
@@ -26,6 +27,15 @@ import { baselineAtHead } from './push.js';
 export const FOLLOW_TIMEOUT_S = 3600;
 /** Between two polls of a build, in milliseconds. */
 export const POLL_MS = 5000;
+/** `templates activate --wait`'s limit with no --timeout, in seconds. */
+export const ACTIVATE_TIMEOUT_S = 1800;
+/** Why a leased build is not active yet, for a person. */
+const WAITING: Record<string, string> = {
+  activating: 'activating: its host is starting its worker',
+  inactive: 'inactive: no host agent has reported it yet',
+  unavailable: 'unavailable: no host that holds it has a free slot',
+  unknown: "unknown: the relay's presence cannot be read",
+};
 /** A wait for a queue slot (`429 buildsQueued`) when the answer names no Retry-After. */
 const QUEUE_SLOT_WAIT_MS = 30_000;
 
@@ -207,8 +217,11 @@ async function pollBuild(
   }
 }
 
+/** A wait ran out: exit 5, saying what was waited for. */
 const timedOut = (c: SbxCtx, what: string, s: number) => {
-  c.io.err(`sbx: timed out after ${s} s waiting for ${what} (exit ${SBX_EXIT.timedOut})`);
+  c.io.err(
+    `sbx: timed out after ${s} s waiting for ${sanitizeRemote(what)} (exit ${SBX_EXIT.timedOut})`,
+  );
   return SBX_EXIT.timedOut;
 };
 
@@ -557,5 +570,99 @@ export async function seedSandbox(
     return { seed, exitCode: 0, clean: git ? dirty === 0 : null, head };
   } finally {
     x.close();
+  }
+}
+
+/**
+ * `templates activate ID [--build B] [--lease S] [--wait [--timeout S]]` (§6.3): take or renew the
+ * caller's lease. Without --wait, the lease answer. With it, a `409 no_active_slot` is retried after
+ * its Retry-After, and the build is read until it is `active`, saying why it waits; any other
+ * refusal fails at once. A wait past --timeout (default ACTIVATE_TIMEOUT_S) exits 5.
+ */
+export async function cmdActivate(
+  c: SbxCtx,
+  id: string,
+  opts: { build?: string; leaseSeconds?: number; wait: boolean; timeoutS?: number },
+): Promise<number> {
+  const timeoutS = opts.timeoutS ?? ACTIVATE_TIMEOUT_S;
+  const end = c.rt.now() + timeoutS * 1000;
+  const body = {
+    ...(opts.build !== undefined ? { build: opts.build } : {}),
+    ...(opts.leaseSeconds !== undefined ? { leaseSeconds: opts.leaseSeconds } : {}),
+  };
+  try {
+    let said = '';
+    const say = (why: string) => {
+      if (why !== said) c.io.err(`${sanitizeRemote(id)}: waiting: ${why}`);
+      said = why;
+    };
+    let lease;
+    for (;;) {
+      try {
+        lease = await c.api.activateTemplate(id, body);
+        break;
+      } catch (err) {
+        if (!(opts.wait && err instanceof ApiError && err.code === 'no_active_slot')) throw err;
+        say('no active slot: every host holding it is at its limit with leased builds');
+        const left = end - c.rt.now();
+        if (left <= 0) return timedOut(c, `an active slot for ${id}`, timeoutS);
+        await c.rt.sleep(Math.min(Math.max(1, err.retryAfterS ?? 30) * 1000, left), c.signal);
+        if (c.signal?.aborted) throw err;
+      }
+    }
+    const until = new Date(lease.leaseUntil * 1000).toISOString();
+    if (!opts.wait) {
+      if (c.json) c.io.out(JSON.stringify(lease) + '\n');
+      else
+        c.io.out(
+          `${sanitizeRemote(lease.templateId)} ${sanitizeRemote(lease.buildId)} leased until ${until}` +
+            `${lease.host ? ` on ${sanitizeRemote(lease.host)}` : ''}\n`,
+        );
+      return SBX_EXIT.ok;
+    }
+    for (;;) {
+      let b: SbxBuild | undefined;
+      try {
+        b = await c.api.getTemplateBuild(id, lease.buildId);
+      } catch (err) {
+        if (!transient(err)) throw err;
+      }
+      if (b?.readiness === 'active') {
+        if (c.json) c.io.out(JSON.stringify({ ...lease, readiness: b.readiness }) + '\n');
+        else
+          c.io.out(
+            `${sanitizeRemote(id)} ${sanitizeRemote(b.buildId)} active, leased until ${until}\n`,
+          );
+        return SBX_EXIT.ok;
+      }
+      if (b && b.status !== 'registered') {
+        c.io.err(
+          `sbx: ${sanitizeRemote(id)} ${sanitizeRemote(b.buildId)} cannot become active: it is ${sanitizeRemote(b.status)}`,
+        );
+        return SBX_EXIT.failed;
+      }
+      if (b) say(WAITING[b.readiness ?? ''] ?? sanitizeRemote(b.readiness ?? 'no readiness'));
+      const left = end - c.rt.now();
+      if (left <= 0) return timedOut(c, `${id} ${lease.buildId} to be active`, timeoutS);
+      await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
+      if (c.signal?.aborted) return SBX_EXIT.failed;
+    }
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/** `templates deactivate ID` (§6.3): release the caller's leases on the template. */
+export async function cmdDeactivate(c: SbxCtx, id: string): Promise<number> {
+  try {
+    const r = await c.api.deactivateTemplate(id);
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.templateId)}: released ${r.released} lease${r.released === 1 ? '' : 's'}\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
   }
 }

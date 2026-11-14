@@ -1,0 +1,12 @@
+# deploy/sbx/sbx-host-agent.timer -- poll the control plane for template builds every 2 minutes
+# (template lifecycle spec §6.1). A poll that is still building delays the next: oneshot units do
+# not overlap.
+[Unit]
+Description=Run the SBX0 template host agent every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+
+[Install]
+WantedBy=timers.target
