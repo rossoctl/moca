@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.16.0
+  version: 1.17.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -311,6 +311,17 @@ components:
             text: { type: string }
             gate: { type: object }
             reason: { type: string }
+            seed:
+              type: object
+              description: |
+                `responded` on a templated session only: where its workspace's seed came from
+                (`source`: `build` or `declared`; `buildId` with `build`), session-templates spec §5.2
+            workspace:
+              type: object
+              description: |
+                `responded` on a templated session only: the workspace's patch after the turn, the
+                data plane's `TurnWorkspace` (harness-openapi.yaml): `baseline`, `patch` or
+                `patchBase64`, `patchSha256`, `patchBytes`, or `patchRefused`, or `error`
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -3972,8 +3983,15 @@ paths:
                     type: string
                     description: |
                       the template's seed, a bash command the data plane runs once per workspace;
-                      present only beside sandboxTemplate, while the deployment declares it with a
-                      seed
+                      present only beside sandboxTemplate. For a session pinned to a manifest-hash
+                      build through the template store, that build's own `spec.seed` (none when the
+                      build has none); otherwise the deployment's declared seed, while it declares one
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: |
+                      where sandboxSeed came from, sent with it: `build` (the pinned build's spec) or
+                      `declared` (SH_SANDBOX_TEMPLATES). The turn reports it as `sandbox.seed`
                   sandboxBuildId:
                     type: string
                     pattern: '^sha256:[0-9a-f]{64}$'
@@ -4106,6 +4124,26 @@ paths:
                       deployment's default as it stood when the session was created. A record that
                       pinned none is resolved against the session instead. Absent whenever the
                       deployment declares no tiers.
+                  sandboxTemplate:
+                    type: string
+                    description: |
+                      as on /internal/credentials: the session's sandbox template, so a queued turn
+                      of a templated session runs only on its workers (session-templates spec §5.2).
+                      From the session, whose template and build are written once, at creation.
+                      Sent even when the deployment no longer declares it (fail closed)
+                  sandboxSeed:
+                    type: string
+                    description: as on /internal/credentials; only beside sandboxTemplate
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: as on /internal/credentials; only beside sandboxSeed
+                  sandboxBuildId:
+                    type: string
+                    pattern: '^sha256:[0-9a-f]{64}$'
+                    description: |
+                      as on /internal/credentials: the build the session is pinned to; only beside
+                      sandboxTemplate, for a manifest-hash build
                   model:
                     type: object
                     description: |

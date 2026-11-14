@@ -91,6 +91,47 @@ describe('HarnessClient.streamTurn', () => {
     },
   );
 
+  // session-templates spec §5.1: a templated turn's placement and patch end the turn either way.
+  it('a sync JSON reply keeps sandbox and workspace on its terminal frame', async () => {
+    const sandbox = {
+      id: 'w',
+      tier: 'microvm',
+      seed: { source: 'build', buildId: 'b' },
+    };
+    const workspace = { baseline: 'abc', patch: 'diff\n', patchSha256: 'sha256:x', patchBytes: 5 };
+    const { fetch } = scriptedFetch(
+      json({ sessionId: 's1', response: '', stopReason: 'stop', sandbox, workspace }),
+    );
+    const frames = await collect(
+      new HarnessClient('http://h', fetch).streamTurn({ sessionId: 's1', prompt: 'p', token: 't' }),
+    );
+    expect(frames.at(-1)).toEqual({
+      type: 'done',
+      sessionId: 's1',
+      stopReason: 'stop',
+      sandbox,
+      workspace,
+    });
+  });
+
+  it('a streamed done frame keeps them too', async () => {
+    const workspace = {
+      baseline: 'abc',
+      patchRefused: 'too_large',
+      patchBytes: 9,
+      patchSha256: 'sha256:y',
+    };
+    const { fetch } = scriptedFetch(
+      sseResponse([
+        sseText([{ type: 'done', sessionId: 's1', stopReason: 'stop', workspace }] as any[]),
+      ]),
+    );
+    const frames = await collect(
+      new HarnessClient('http://h', fetch).streamTurn({ sessionId: 's1', prompt: 'p', token: 't' }),
+    );
+    expect(frames.at(-1)).toMatchObject({ type: 'done', workspace });
+  });
+
   it('stops at the terminal frame even if more bytes follow', async () => {
     const { fetch } = scriptedFetch(
       sseResponse([

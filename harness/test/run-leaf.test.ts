@@ -981,3 +981,108 @@ describe('runLeaf: the session sandbox tier reaches sandbox selection', () => {
     expect(tierOf()).toBeUndefined();
   });
 });
+
+// A queued turn of a templated session is a prompt leaf whose config carries the session's
+// template, seed and build (the dequeue exchange): it runs on the hands an interactive turn would.
+describe("runPromptLeaf on a templated session's hands (session-templates spec §4, §5, §5.1)", () => {
+  const base: LeafEnvelope = {
+    sessionId: 'sess-1',
+    item: { item_id: 'x', file: 'f', pattern: 'p' },
+    kind: 'prompt',
+    prompt: 'Fix the bug.',
+  };
+  const B = 'sha256:' + 'b'.repeat(64);
+  const okTurn = () =>
+    vi.fn(async () => ({ sessionId: 'sess-1', response: 'fixed', stopReason: 'end_turn' }));
+  function leased(captureOut = 'abc\ndiff --git a/f b/f\n', seedExit = 0) {
+    const commands: string[] = [];
+    const transport = {
+      exec: vi.fn(async (c: string) => {
+        commands.push(c);
+        if (c.includes('.moca-seeded'))
+          return { stdout: Buffer.alloc(0), exitCode: seedExit, truncated: false };
+        return { stdout: Buffer.from(captureOut), exitCode: 0, truncated: false };
+      }),
+      close: vi.fn(async () => {}),
+    };
+    const release = vi.fn(async () => {});
+    selectPoolSandboxMock.mockReset().mockResolvedValue({
+      transport,
+      podCwd: '/workspace',
+      sandboxId: 'sbx-1',
+      heartbeat: vi.fn(async () => {}),
+      release,
+    });
+    return { commands, release };
+  }
+
+  it("selects the template's workers pinned to the build, seeds, and returns the patch", async () => {
+    const { commands, release } = leased();
+    const executeTurn = okTurn();
+    const r = await runLeaf(
+      base,
+      {
+        sandboxTemplate: 'example-repo',
+        sandboxSeed: 'cp -a /opt/src/. .',
+        sandboxSeedSource: 'build',
+        sandboxBuildId: B,
+      },
+      { executeTurn },
+    );
+    expect(selectPoolSandboxMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ template: 'example-repo', build: B }),
+    );
+    // The seed ran before the turn, in the leased workspace; the capture after it.
+    expect(commands[0]).toContain('.moca-seeded');
+    expect(commands[0]).toContain("'/workspace'");
+    expect(commands.at(-1)).toContain('diff --cached --binary');
+    expect(r).toMatchObject({
+      status: 'responded',
+      text: 'fixed',
+      seed: { source: 'build', buildId: B },
+      workspace: { baseline: 'abc', patch: 'diff --git a/f b/f\n' },
+    });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed seed fails the leaf before the turn, and returns the lease', async () => {
+    const { release } = leased('', 3);
+    const executeTurn = okTurn();
+    const r = await runLeaf(
+      base,
+      { sandboxTemplate: 'example-repo', sandboxSeed: 'false' },
+      { executeTurn },
+    );
+    expect(r).toMatchObject({ status: 'failed', reason: 'error' });
+    expect((r as { message?: string }).message).toContain("'example-repo'");
+    expect(executeTurn).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('a template without a seed: its workers, no seed, still a patch', async () => {
+    const { commands } = leased();
+    const r = await runLeaf(base, { sandboxTemplate: 'py312' }, { executeTurn: okTurn() });
+    expect(selectPoolSandboxMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ template: 'py312' }),
+    );
+    expect(commands.some((c) => c.includes('.moca-seeded'))).toBe(false);
+    expect(r).not.toHaveProperty('seed');
+    expect(r).toHaveProperty('workspace');
+  });
+
+  it('an untemplated session: no template asked for, nothing run, no patch', async () => {
+    const { commands } = leased();
+    const r = await runLeaf(base, { sandboxBuildId: B }, { executeTurn: okTurn() });
+    const opts = selectPoolSandboxMock.mock.calls[0][3] as Record<string, unknown>;
+    expect(opts).not.toHaveProperty('template');
+    expect(opts).not.toHaveProperty('build');
+    expect(commands).toEqual([]);
+    expect(r).toEqual({ status: 'responded', text: 'fixed', usage: undefined });
+  });
+});

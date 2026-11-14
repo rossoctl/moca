@@ -304,9 +304,11 @@ describe('buildConfig marks every server turn (MI1 R3)', () => {
       anthropicBaseUrl: 'https://x',
       sandboxTemplate: 'py312',
       sandboxSeed: 'echo hi',
+      sandboxSeedSource: 'build' as const,
     };
     expect(buildConfig(auth).sandboxTemplate).toBe('py312');
     expect(buildConfig(auth).sandboxSeed).toBe('echo hi');
+    expect(buildConfig(auth).sandboxSeedSource).toBe('build');
     expect(buildConfig(null).sandboxTemplate).toBeUndefined();
   });
 

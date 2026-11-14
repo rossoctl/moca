@@ -121,6 +121,8 @@ describe('the exchange and the views', () => {
     const res = await exchangeCredential(await token(t, { template: 'django-django-11133' }), t);
     expect(res.sandboxTemplate).toBe('django-django-11133');
     expect(res.sandboxSeed).toBe('cp -a /opt/repo/. /workspace/');
+    // No store: the seed is the declared one, and says so.
+    expect(res.sandboxSeedSource).toBe('declared');
   });
 
   it('names a template without a seed, and no seed', async () => {
@@ -128,6 +130,7 @@ describe('the exchange and the views', () => {
     const res = await exchangeCredential(await token(t, { template: 'py312' }), t);
     expect(res.sandboxTemplate).toBe('py312');
     expect(res).not.toHaveProperty('sandboxSeed');
+    expect(res).not.toHaveProperty('sandboxSeedSource');
   });
 
   it('omits both for a session without a template, and on a deployment without templates', async () => {

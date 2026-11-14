@@ -93,6 +93,22 @@ describe('cmdRun', () => {
     expect(lines.map((l) => l.type)).toEqual(['session', 'text', 'text', 'done']);
   });
 
+  it("prints a templated turn's seed origin and workspace patch on its terminal frame with --json", async () => {
+    const o = io();
+    const sandbox = {
+      id: 'w-1',
+      tier: 'microvm',
+      seed: { source: 'build' as const, buildId: 'sha256:' + 'b'.repeat(64) },
+    };
+    const workspace = { baseline: 'abc', patch: 'diff\n', patchSha256: 'sha256:x', patchBytes: 5 };
+    const rt = runtime({
+      harness: fakeHarness([{ frames: [{ ...doneFrame('s-new'), sandbox, workspace }] }]),
+    });
+    expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: true })).toBe(0);
+    const last = JSON.parse(o.stdout.trim().split('\n').at(-1)!);
+    expect(last).toMatchObject({ type: 'done', sandbox, workspace });
+  });
+
   it('asks for --option when several inference credentials exist', async () => {
     const o = io();
     const rt = runtime({

@@ -53,6 +53,12 @@ export interface ExchangeResponse {
   sandboxTemplate?: string;
   sandboxSeed?: string;
   /**
+   * Where `sandboxSeed` came from, sent with it: `build` when it is the pinned build's own
+   * `spec.seed` in the template store (combined control plane spec §3.4), `declared` when it is
+   * SH_SANDBOX_TEMPLATES's. A client checks the turn's `sandbox.seed` against its pin with it.
+   */
+  sandboxSeedSource?: 'build' | 'declared';
+  /**
    * The build the session resolved its template to (`sha256:<manifest hash>`, combined control plane
    * spec §3.4): the data plane keeps the session on workers labelled `moca.dev/build`
    * with it. Absent for a session without a resolved build, so that response is unchanged.
@@ -121,6 +127,42 @@ export function sessionTemplate(
   if (!rec.sandboxTemplate) return undefined;
   const t = templates?.find((x) => x.id === rec.sandboxTemplate);
   return { id: rec.sandboxTemplate, ...(t?.seed ? { seed: t.seed } : {}) };
+}
+
+/**
+ * The seed a session's workspace is filled with: the PINNED build's own `spec.seed` when the
+ * session resolved a `sha256:` build through the template store (combined control plane spec §3.4:
+ * a self-serve template is in no env list, and each build carries its own seed, lifecycle spec
+ * §3.2), else the declared one (sessionTemplate). The build is the session's, never the newest. A
+ * build with no seed (or an empty one) sends none, even if the env list declares one: the build is
+ * what the session runs. A store that cannot answer FAILS CLOSED, as sessionTemplate does: the
+ * exchange refuses (a CpError the data plane reads as retryable: credential_unavailable, and a
+ * dequeue leaves the turn pending), never a turn on a workspace without its build's seed. Only a
+ * template or build the store does not hold falls back to the declared seed.
+ */
+export async function sessionSeed(
+  rec: SessionRecord,
+  deps: Pick<CpDeps, 'templates' | 'config'>,
+): Promise<{ seed: string; source: 'build' | 'declared' } | undefined> {
+  if (!rec.sandboxTemplate) return undefined;
+  const build = rec.sandboxBuildId;
+  if (build?.startsWith('sha256:') && deps.templates) {
+    let doc: Awaited<ReturnType<NonNullable<CpDeps['templates']>['get']>>;
+    try {
+      doc = await deps.templates.get(rec.sandboxTemplate);
+    } catch (err) {
+      if (err instanceof CpError) throw err;
+      console.error(
+        `[control-plane] template store read failed for session ${rec.sessionId}: ` +
+          `${(err as Error)?.message ?? String(err)}`,
+      );
+      throw new CpError('internal_error', "the template store could not read the session's build");
+    }
+    const b = doc?.builds.find((x) => x.buildId === build);
+    if (b) return b.spec.seed?.trim() ? { seed: b.spec.seed, source: 'build' } : undefined;
+  }
+  const declared = sessionTemplate(rec, deps.config.sessionTemplates)?.seed;
+  return declared ? { seed: declared, source: 'declared' } : undefined;
 }
 
 /**
@@ -416,6 +458,11 @@ export async function exchangeCredential(
     refuseMisdirectedSecret(resolved, rec.sessionId);
   }
 
+  // Before the audit, as everything that can refuse is: a store that cannot answer for the seed
+  // refuses the exchange (sessionSeed), so no credential is recorded as issued and then withheld.
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
+
   const exchangeEntry = {
     subject: rec.owner,
     sessionId: rec.sessionId,
@@ -440,8 +487,9 @@ export async function exchangeCredential(
   }
 
   const tier = sessionTier(rec, deps.config.sandboxTiers);
-  const template = sessionTemplate(rec, deps.config.sessionTemplates);
-  // A turn of a session pinned to a build keeps that build's worker running between turns.
+  // A turn of a session pinned to a build keeps that build's worker running between turns. After
+  // the audit and every refusal (the template and seed are resolved above), so a refused exchange
+  // holds nothing; best effort, it never refuses one itself.
   if (template) await holdPinnedWorker(rec, deps);
   return {
     mode,
@@ -455,7 +503,7 @@ export async function exchangeCredential(
     ...(rec.configRef ? { configRef: rec.configRef } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
     ...(template ? { sandboxTemplate: template.id } : {}),
-    ...(template?.seed ? { sandboxSeed: template.seed } : {}),
+    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
     // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
     ...(template && rec.sandboxBuildId?.startsWith('sha256:')
       ? { sandboxBuildId: rec.sandboxBuildId }

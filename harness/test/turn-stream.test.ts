@@ -189,3 +189,34 @@ describe('terminalFrame selection & parity', () => {
     },
   );
 });
+
+describe('terminalFrame carries where the turn ran and its patch (session-templates spec §5.1)', () => {
+  const sandbox = {
+    id: 'w-1',
+    tier: 'microvm',
+    seed: { source: 'build' as const, buildId: 'sha256:' + 'b'.repeat(64) },
+  };
+  const workspace = { baseline: 'abc', patch: 'diff\n', patchSha256: 'sha256:x', patchBytes: 5 };
+
+  it('on done', () => {
+    const f = terminalFrame({
+      sessionId: 's',
+      response: '',
+      stopReason: 'stop',
+      sandbox,
+      workspace,
+    });
+    expect(f).toMatchObject({ type: 'done', sandbox, workspace });
+  });
+
+  it('on error', () => {
+    const f = terminalFrame({
+      sessionId: 's',
+      response: '',
+      stopReason: 'error',
+      sandbox,
+      workspace,
+    });
+    expect(f).toMatchObject({ type: 'error', sandbox, workspace });
+  });
+});

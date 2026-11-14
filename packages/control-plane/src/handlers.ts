@@ -74,7 +74,7 @@ import {
   type SandboxTemplate,
 } from './sandbox-config.js';
 import type { ProvenanceStore } from './provenance.js';
-import type { PresenceReader, TemplateCatalog } from './template-catalog.js';
+import type { PresenceReader, TemplateBuild, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
 import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
@@ -379,6 +379,28 @@ function loginBody(
     refreshToken: refresh.refreshToken,
     refreshExpiresAt: refresh.absExpS,
   };
+}
+
+/**
+ * A `session` record on its build's chain (lifecycle spec §7.1), written BEST EFFORT: it records a
+ * create or delete that has already happened, so a failed append is logged and the write stands, as
+ * the audit mirroring does (auditBestEffort). Throwing would answer 500 for a session that exists,
+ * or is gone, and a client retrying that create would make a second session.
+ */
+async function appendSessionRecord(
+  deps: CpDeps,
+  stream: string,
+  subject: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await deps.provenance!.append({ stream, kind: 'session', subject, body });
+  } catch (err) {
+    console.error(
+      `[control-plane] session record write failed for ${String(body.sessionId)} (${String(body.state)}): ` +
+        `${(err as Error)?.message ?? String(err)} -- the write itself SUCCEEDED`,
+    );
+  }
 }
 
 async function turnInFlight(sessionId: string, deps: CpDeps): Promise<boolean> {
@@ -987,11 +1009,11 @@ export const HANDLERS: Record<string, Handler> = {
     // (combined control plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
     // caller may see. Its activation on first use (§6.4) comes last, below, once nothing else can
     // refuse the create.
-    let resolved: { id: string; buildId: string } | undefined;
+    let resolved: { id: string; buildId: string; build: TemplateBuild } | undefined;
     let forUse: Awaited<ReturnType<typeof resolveForUse>> | undefined;
     if (requestedTemplate !== undefined && deps.templates && deps.provenance) {
       forUse = await resolveForUse(deps, p, requestedTemplate);
-      resolved = { id: forUse.id, buildId: forUse.buildId };
+      resolved = { id: forUse.id, buildId: forUse.buildId, build: forUse.build };
     }
     const templates = deps.config.sessionTemplates;
     if (requestedTemplate !== undefined && !resolved && !templates) {
@@ -1078,6 +1100,22 @@ export const HANDLERS: Record<string, Handler> = {
     resolveAuditLog(deps)({ event: 'audit', ...sessionCreatedEntry });
     await deps.index.audit(sessionCreatedEntry);
     const iat = seconds(deps);
+    // The session on its build's chain (lifecycle spec §7.1), as a sandbox is: its lease is the
+    // caller's live lease on the build, as the digest of the activate record that granted it (null:
+    // no lease, e.g. no host agents). Written after the session is stored, so a create that any check
+    // refuses, its activation on first use included, writes no `created` record.
+    if (resolved && deps.provenance) {
+      const live = (resolved.build.leases ?? []).find((l) => l.subject === p.sub && l.until > iat);
+      await appendSessionRecord(deps, `template/${resolved.id}`, p.sub, {
+        sessionId,
+        buildId: resolved.buildId,
+        // Null for a build imported from SH_SANDBOX_TEMPLATES, which names no snapshot, as on a
+        // sandbox's record: resolveForUse returns only registered builds, imported ones included.
+        templateManifestHash: resolved.buildId.startsWith('sha256:') ? resolved.buildId : null,
+        lease: live?.record ?? null,
+        state: 'created',
+      });
+    }
     return {
       status: 201,
       body: {
@@ -1214,6 +1252,23 @@ export const HANDLERS: Record<string, Handler> = {
     };
     resolveAuditLog(deps)({ event: 'audit', ...deletedEntry });
     await deps.index.audit(deletedEntry);
+    // Its end on the build's chain (§7.1): a session has a build id only when its template resolved
+    // through the store at creation, which wrote its `created` record, so the same gate on both
+    // sides gives every `created` its end, an `imported:` build's included.
+    if (deps.provenance && rec.sandboxTemplate && rec.sandboxBuildId) {
+      await appendSessionRecord(
+        deps,
+        `template/${rec.sandboxTemplate}`,
+        ctx.principal?.sub ?? rec.owner,
+        {
+          sessionId: rec.sessionId,
+          buildId: rec.sandboxBuildId,
+          state: 'terminated',
+          reason: 'deleted',
+          endedAt: seconds(deps),
+        },
+      );
+    }
     // 202 rather than pretending a synchronous delete happened; a sweeper reaps what the in-flight
     // turn writes on its way out (spec §7.3).
     return { status: inFlight ? 202 : 204, body: undefined };

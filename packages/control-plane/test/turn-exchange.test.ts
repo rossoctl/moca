@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
-import { AUDIT_STREAM, OwnershipIndex } from '../src/ownership.js';
+import { AUDIT_STREAM, OwnershipIndex, sessionKey } from '../src/ownership.js';
 import type { TurnRecord, TurnState } from '../src/turn-record.js';
 import { TurnStore } from '../src/turn-store.js';
+import { exchangeCredential } from '../src/exchange.js';
 import { exchangeTurnCredential } from '../src/turn-exchange.js';
 import { alice, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -381,6 +382,125 @@ describe('the envelope in the response', () => {
     expect(keys).not.toContain('credentialName');
     expect(keys).not.toContain('anthropicAuthToken');
     expect(JSON.stringify(res.envelope)).not.toContain(res.anthropicAuthToken);
+  });
+});
+
+/**
+ * A queued turn of a templated session runs on that template's workers, pinned to its build and
+ * seeded, exactly as an interactive one does: the dequeue exchange returns what the session
+ * exchange returns (session-templates spec §3.4, combined control plane spec §3.4).
+ */
+describe("the session's sandbox template on the dequeue exchange", () => {
+  const PY312 = { id: 'py312', worker: 'w-py', description: '', tools: [], seed: 'echo hi' };
+  const B = 'sha256:' + 'b'.repeat(64);
+
+  async function templatedSession(d: ExDeps, template: string): Promise<string> {
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    const res = await HANDLERS.createSession!(
+      ctx({
+        principal: alice,
+        body: { credentials: { inference: 'my-anthropic' }, sandbox: { template } },
+      }),
+      d,
+    );
+    return (res.body as { sessionId: string }).sessionId;
+  }
+
+  it('returns a declared template and its seed, as the session exchange does', async () => {
+    const d = exDeps({ config: { sessionTemplates: [PY312] } });
+    const sid = await templatedSession(d, 'py312');
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+    expect(res).toMatchObject({
+      sandboxTemplate: 'py312',
+      sandboxSeed: 'echo hi',
+      sandboxSeedSource: 'declared',
+    });
+    expect(res).not.toHaveProperty('sandboxBuildId');
+  });
+
+  it("returns a pinned session's build and that build's own seed", async () => {
+    const d = exDeps({
+      config: { sessionTemplates: [PY312] },
+      templates: {
+        get: async (id: string) =>
+          id === 'py312'
+            ? { builds: [{ buildId: B, spec: { seed: 'cp -a /opt/src/. /workspace/' } }] }
+            : null,
+      } as never,
+    });
+    const sid = await templatedSession(d, 'py312');
+    // The build the session resolved at creation (written once, as createSession does with a store).
+    await d.fake.redis.hSet(sessionKey(sid), { sandboxBuildId: B });
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+    expect(res).toMatchObject({
+      sandboxTemplate: 'py312',
+      sandboxBuildId: B,
+      sandboxSeed: 'cp -a /opt/src/. /workspace/',
+      sandboxSeedSource: 'build',
+    });
+  });
+
+  it("refuses, issuing nothing, when the store cannot read a pinned session's build", async () => {
+    const d = exDeps({
+      config: { sessionTemplates: [PY312] },
+      templates: {
+        get: async () => {
+          throw new Error('EIO');
+        },
+      } as never,
+    });
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    const created = await HANDLERS.createSession!(
+      ctx({
+        principal: alice,
+        body: { credentials: { inference: 'my-anthropic' }, sandbox: { template: 'py312' } },
+      }),
+      d,
+    );
+    const { sessionId: sid, token } = created.body as { sessionId: string; token: string };
+    await d.fake.redis.hSet(sessionKey(sid), { sandboxBuildId: B });
+    const turnId = await queuedTurn(d, sid);
+    const before = (d.fake.streams.get(AUDIT_STREAM) ?? []).length;
+    const err = console.error;
+    console.error = () => {};
+    try {
+      // Not the declared seed: a self-serve build has none there, so a fallback would run the turn
+      // on an unseeded workspace. A refusal the data plane retries (the claim leaves it pending).
+      expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('internal_error');
+      expect(await codeOf(() => exchangeCredential(token, d))).toBe('internal_error');
+    } finally {
+      console.error = err;
+    }
+    const entries = (d.fake.streams.get(AUDIT_STREAM) ?? []).slice(before);
+    expect(entries.filter((e) => e.decision === 'credential_issued')).toEqual([]);
+  });
+
+  it('falls back to the declared seed when the store holds no such build', async () => {
+    const d = exDeps({
+      config: { sessionTemplates: [PY312] },
+      templates: { get: async () => null } as never,
+    });
+    const sid = await templatedSession(d, 'py312');
+    await d.fake.redis.hSet(sessionKey(sid), { sandboxBuildId: B });
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+    expect(res).toMatchObject({ sandboxSeed: 'echo hi', sandboxSeedSource: 'declared' });
+  });
+
+  it('still names a template the deployment no longer declares, without a seed (fail closed)', async () => {
+    const d = exDeps({ config: { sessionTemplates: [PY312] } });
+    const sid = await templatedSession(d, 'py312');
+    const gone = { ...d, config: { ...d.config, sessionTemplates: [] } };
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), gone);
+    expect(res.sandboxTemplate).toBe('py312');
+    expect(res).not.toHaveProperty('sandboxSeed');
+  });
+
+  it('returns none of them for an untemplated session', async () => {
+    const d = exDeps({ config: { sessionTemplates: [PY312] } });
+    const sid = await session(d);
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+    for (const k of ['sandboxTemplate', 'sandboxSeed', 'sandboxSeedSource', 'sandboxBuildId'])
+      expect(res).not.toHaveProperty(k);
   });
 });
 

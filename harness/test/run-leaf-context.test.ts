@@ -240,6 +240,40 @@ describe('frozen context on a prompt leaf', () => {
     expect((r as { message: string }).message).toContain('relay sandbox pool');
   });
 
+  it("a templated session's workload run selects its workload's sandbox, with none of the template", async () => {
+    const { lease, transport } = relayLease();
+    selectPoolSandboxMock.mockReset().mockResolvedValue(lease);
+    const WL = `w-${'a'.repeat(32)}`;
+    const e = env(vi.fn());
+    e.internalContext!.workload = WL;
+    e.internalContext!.ownerScope = 'b'.repeat(32);
+    const executeTurn = okTurn();
+    const r = await runLeaf(
+      e,
+      {
+        sandboxTemplate: 'example-repo',
+        sandboxSeed: 'cp -a /opt/src/. .',
+        sandboxSeedSource: 'build',
+        sandboxBuildId: 'sha256:' + 'c'.repeat(64),
+      },
+      { executeTurn, overlayContext: vi.fn(async () => '/workspace/.moca-context/runs/run-1') },
+    );
+    expect(r).toMatchObject({ status: 'responded' });
+    // Workload sandboxes carry no template label: asking for one would never match (a 503 forever).
+    const opts = selectPoolSandboxMock.mock.calls[0]![3] as Record<string, unknown>;
+    expect(opts).toMatchObject({ workload: WL });
+    expect(opts).not.toHaveProperty('template');
+    expect(opts).not.toHaveProperty('build');
+    // No seed, no patch capture, and the turn is told of no template either.
+    const ran = transport.exec.mock.calls.map((c) => String(c[0]));
+    expect(ran.some((c) => c.includes('.moca-seeded'))).toBe(false);
+    expect(ran.some((c) => c.includes('diff --cached'))).toBe(false);
+    expect(r).not.toHaveProperty('workspace');
+    const cfg = executeTurn.mock.calls[0]![0].config ?? {};
+    for (const k of ['sandboxTemplate', 'sandboxSeed', 'sandboxSeedSource', 'sandboxBuildId'])
+      expect(cfg).not.toHaveProperty(k);
+  });
+
   it('refuses a malformed workload key or owner scope, or one without the other, before selecting', async () => {
     selectPoolSandboxMock.mockReset();
     const WL = `w-${'a'.repeat(32)}`;

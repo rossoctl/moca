@@ -2,6 +2,7 @@ import { createClient, type RedisClientType } from 'redis';
 import { resilientClientOptions, swallowRedisErrors } from '@moca/session-backend';
 import type { Verdict } from './verdict.js';
 import type { LeafResult, LeafUsage } from './run-leaf.js';
+import type { TurnSeed, TurnWorkspace } from './run-turn.js';
 
 export interface LeafResultRecord {
   status: 'done' | 'failed' | 'aborted' | 'paused' | 'solved' | 'responded';
@@ -13,6 +14,9 @@ export interface LeafResultRecord {
   usage: LeafUsage | null; // solve/prompt cumulative token usage (for run cost pricing); null otherwise
   sessionId: string; // RAW (un-sanitized) id, for caller correlation
   ts: string;
+  /** A templated session's prompt leaf only (session-templates spec §5.1); absent otherwise. */
+  seed?: TurnSeed;
+  workspace?: TurnWorkspace;
 }
 
 /** Minimal structural Redis surface — lets unit tests inject an in-memory fake. */
@@ -54,7 +58,14 @@ export function toResultRecord(
   if (result.status === 'solved')
     return { ...base, status: 'solved', patch: result.patch, usage: result.usage ?? null };
   if (result.status === 'responded')
-    return { ...base, status: 'responded', text: result.text, usage: result.usage ?? null };
+    return {
+      ...base,
+      status: 'responded',
+      text: result.text,
+      usage: result.usage ?? null,
+      ...(result.seed ? { seed: result.seed } : {}),
+      ...(result.workspace ? { workspace: result.workspace } : {}),
+    };
   if (result.status === 'paused') {
     return {
       ...base,

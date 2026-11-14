@@ -83,9 +83,10 @@ async function registered(
   h: string,
   worker: string,
   principal = alice,
+  spec: Record<string, unknown> = BASE_SPEC,
 ): Promise<void> {
   await HANDLERS.createTemplate!(
-    ctx({ principal, body: { id, image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+    ctx({ principal, body: { id, image: IMAGE, spec, profile: 'base' } }),
     d,
   );
   const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
@@ -650,6 +651,184 @@ describe('activation on first use (§6.4)', () => {
     expect(await refusal(() => session({ template: 't1', activate: 'no' }))).toMatchObject({
       code: 'invalid_request',
     });
+  });
+
+  it("a pinned session's seed is its build's own spec.seed, and says so", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    await activate(d, 't1');
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    // The seed is the pinned build's own spec.seed, not the env list's (t1 is in none).
+    const ex = await exchangeCredential((r.body as Body).token as string, d);
+    expect(ex).toMatchObject({
+      sandboxTemplate: 't1',
+      sandboxBuildId: hash('1'),
+      sandboxSeed: SPEC.seed,
+      sandboxSeedSource: 'build',
+    });
+    expect(SPEC.seed).toMatch(/\S/);
+  });
+
+  it("a pinned session's span is on its build's chain: created, then deleted (§7.1)", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    await activate(d, 't1');
+    const act = (await d.provenance!.chain('template/t1'))
+      .filter((x) => x.kind === 'activate')
+      .at(-1)!;
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    const sid = (r.body as Body).sessionId as string;
+    const created = (await d.provenance!.chain('template/t1')).at(-1)!;
+    expect(created).toMatchObject({
+      kind: 'session',
+      subject: alice.sub,
+      body: {
+        sessionId: sid,
+        buildId: hash('1'),
+        templateManifestHash: hash('1'),
+        lease: recordDigestOf(act),
+        state: 'created',
+      },
+    });
+    // Its end, on the same chain, once.
+    now += 5000;
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+    const ended = (await d.provenance!.chain('template/t1')).at(-1)!;
+    expect(ended).toMatchObject({
+      kind: 'session',
+      subject: alice.sub,
+      body: {
+        sessionId: sid,
+        buildId: hash('1'),
+        state: 'terminated',
+        reason: 'deleted',
+        endedAt: Math.floor(now / 1000),
+      },
+    });
+    expect(
+      (await d.provenance!.chain('template/t1')).filter((x) => x.kind === 'session'),
+    ).toHaveLength(2);
+  });
+
+  it('a session with no lease cites none, and an untemplated session writes no record', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await seedCredential(d);
+    // No host agent has reported: no activation gate, so no lease.
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: 't1' } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'session',
+      body: { lease: null, state: 'created' },
+    });
+    const before = (await d.provenance!.chain('template/t1')).length;
+    const plain = await HANDLERS.createSession!(ctx({ principal: alice, body: {} }), d);
+    expect(plain.status).toBe(201);
+    await HANDLERS.deleteSession!(
+      ctx({ principal: alice, params: { id: (plain.body as Body).sessionId as string } }),
+      d,
+    );
+    expect(await d.provenance!.chain('template/t1')).toHaveLength(before);
+  });
+
+  it("an imported build's session: a null manifest hash at create, and its end record", async () => {
+    const d = await setup(8, [{ id: 'py', worker: 'sbx_py', description: 'py', tools: [] }]);
+    attachedNow = ['sbx_py'];
+    await seedCredential(d);
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: 'py' } } }),
+      d,
+    );
+    expect(r.status).toBe(201);
+    const sid = (r.body as Body).sessionId as string;
+    const created = (await d.provenance!.chain('template/py')).at(-1)!;
+    expect(created).toMatchObject({
+      kind: 'session',
+      body: { sessionId: sid, templateManifestHash: null, lease: null, state: 'created' },
+    });
+    expect((created.body as Body).buildId).toMatch(/^imported:[0-9a-f]{12}$/);
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+    const records = (await d.provenance!.chain('template/py')).filter((x) => x.kind === 'session');
+    expect(records.map((x) => (x.body as Body).state)).toEqual(['created', 'terminated']);
+    expect(records[1].body).toMatchObject({
+      sessionId: sid,
+      buildId: (created.body as Body).buildId,
+      reason: 'deleted',
+    });
+  });
+
+  it('a session record that cannot be written is logged; the create and the delete stand', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await seedCredential(d);
+    const append = d.provenance!.append.bind(d.provenance!);
+    d.provenance!.append = (async (rec: Parameters<typeof append>[0]) => {
+      if (rec.kind === 'session') throw new Error('EIO');
+      return append(rec);
+    }) as typeof append;
+    const logged: string[] = [];
+    const err = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map(String).join(' '));
+    try {
+      const r = await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { template: 't1' } } }),
+        d,
+      );
+      expect(r.status).toBe(201);
+      const sid = (r.body as Body).sessionId as string;
+      const del = await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: sid } }), d);
+      expect(del.status).toBe(204);
+      expect(await d.index.get(sid)).toBeNull();
+      expect(logged.filter((l) => l.includes('session record write failed'))).toHaveLength(2);
+    } finally {
+      console.error = err;
+    }
+  });
+
+  it('a build without a seed sends none, even where the env list declares one', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1', alice, { ...BASE_SPEC, seed: '' });
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await seedCredential(d);
+    await activate(d, 't1');
+    const declared = {
+      ...d,
+      config: {
+        ...d.config,
+        sessionTemplates: [
+          { id: 't1', worker: 'sbx_t1', description: '', tools: [], seed: 'echo env' },
+        ],
+      },
+    };
+    const r = await HANDLERS.createSession!(
+      ctx({ principal: alice, body: { sandbox: { template: 't1' } } }),
+      declared,
+    );
+    expect(r.status).toBe(201);
+    const ex = await exchangeCredential((r.body as Body).token as string, declared);
+    expect(ex).toMatchObject({ sandboxTemplate: 't1', sandboxBuildId: hash('1') });
+    expect(ex).not.toHaveProperty('sandboxSeed');
+    expect(ex).not.toHaveProperty('sandboxSeedSource');
   });
 
   it('on combined, a session create by a subject not enrolled never takes a lease (spec §3.2, §3.4)', async () => {
