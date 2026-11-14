@@ -34,6 +34,13 @@ export interface TurnAuth {
   configRef?: string;
   /** The session's sandbox tier from the exchange (P6.3); absent ⇒ the data plane's default. */
   sandboxTier?: string;
+  /** The session's sandbox template and its seed from the exchange (session-templates spec §3.4); absent ⇒ none. */
+  sandboxTemplate?: string;
+  sandboxSeed?: string;
+  /** Where the seed came from (`build`: the pinned build's spec; `declared`: SH_SANDBOX_TEMPLATES). */
+  sandboxSeedSource?: 'build' | 'declared';
+  /** The build the session's template resolved to (`sha256:…`); absent ⇒ any build of it. */
+  sandboxBuildId?: string;
   /** The session's model from the exchange (per-session model spec §5.1); absent ⇒ the deployment default. */
   model?: SessionModelSpec;
 }
@@ -255,6 +262,40 @@ export function validateExchangeBody(body: Record<string, unknown>): ExchangeRes
   if (body.model !== undefined && !isSessionModel(body.model)) {
     throw new CpError('credential_unavailable', 'control plane returned a malformed model');
   }
+  // A present template that is not a non-empty string would be dropped, and the session's turn run
+  // on an untemplated worker: refuse instead (session-templates spec §3.4). The seed likewise.
+  if (
+    body.sandboxTemplate !== undefined &&
+    (typeof body.sandboxTemplate !== 'string' || body.sandboxTemplate === '')
+  ) {
+    throw new CpError(
+      'credential_unavailable',
+      'control plane returned a malformed sandboxTemplate',
+    );
+  }
+  if (body.sandboxSeed !== undefined && typeof body.sandboxSeed !== 'string') {
+    throw new CpError('credential_unavailable', 'control plane returned a malformed sandboxSeed');
+  }
+  if (
+    body.sandboxSeedSource !== undefined &&
+    body.sandboxSeedSource !== 'build' &&
+    body.sandboxSeedSource !== 'declared'
+  ) {
+    throw new CpError(
+      'credential_unavailable',
+      'control plane returned a malformed sandboxSeedSource',
+    );
+  }
+  // A malformed build would be dropped and the turn run on any build of the template: refuse.
+  if (
+    body.sandboxBuildId !== undefined &&
+    (typeof body.sandboxBuildId !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(body.sandboxBuildId))
+  ) {
+    throw new CpError(
+      'credential_unavailable',
+      'control plane returned a malformed sandboxBuildId',
+    );
+  }
   return body as unknown as ExchangeResponse;
 }
 
@@ -308,7 +349,32 @@ export async function resolveTurnAuth(
     ...(typeof resolved.sandboxTier === 'string' && resolved.sandboxTier
       ? { sandboxTier: resolved.sandboxTier }
       : {}),
+    ...templateAuth(resolved),
     ...(resolved.model ? { model: resolved.model } : {}),
+  };
+}
+
+/**
+ * The session's sandbox template, seed and build from a validated exchange body, for TurnAuth: the
+ * session exchange's and the dequeue exchange's alike, so a queued turn runs on the hands an
+ * interactive one would. As for the tier, only a non-empty string is a template; the seed, its
+ * source and the build only beside one.
+ */
+export function templateAuth(
+  resolved: ExchangeResponse,
+): Pick<TurnAuth, 'sandboxTemplate' | 'sandboxSeed' | 'sandboxSeedSource' | 'sandboxBuildId'> {
+  if (typeof resolved.sandboxTemplate !== 'string' || !resolved.sandboxTemplate) return {};
+  return {
+    sandboxTemplate: resolved.sandboxTemplate,
+    ...(typeof resolved.sandboxSeed === 'string' && resolved.sandboxSeed
+      ? {
+          sandboxSeed: resolved.sandboxSeed,
+          ...(resolved.sandboxSeedSource ? { sandboxSeedSource: resolved.sandboxSeedSource } : {}),
+        }
+      : {}),
+    ...(typeof resolved.sandboxBuildId === 'string' && resolved.sandboxBuildId
+      ? { sandboxBuildId: resolved.sandboxBuildId }
+      : {}),
   };
 }
 

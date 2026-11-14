@@ -13,6 +13,7 @@ import {
   devicePrompt,
   cmdPromote,
   cmdRun,
+  HEADLESS_CAPACITY_WAIT_MS,
   type Io,
 } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
@@ -92,6 +93,22 @@ describe('cmdRun', () => {
     expect(lines.map((l) => l.type)).toEqual(['session', 'text', 'text', 'done']);
   });
 
+  it("prints a templated turn's seed origin and workspace patch on its terminal frame with --json", async () => {
+    const o = io();
+    const sandbox = {
+      id: 'w-1',
+      tier: 'microvm',
+      seed: { source: 'build' as const, buildId: 'sha256:' + 'b'.repeat(64) },
+    };
+    const workspace = { baseline: 'abc', patch: 'diff\n', patchSha256: 'sha256:x', patchBytes: 5 };
+    const rt = runtime({
+      harness: fakeHarness([{ frames: [{ ...doneFrame('s-new'), sandbox, workspace }] }]),
+    });
+    expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: true })).toBe(0);
+    const last = JSON.parse(o.stdout.trim().split('\n').at(-1)!);
+    expect(last).toMatchObject({ type: 'done', sandbox, workspace });
+  });
+
   it('asks for --option when several inference credentials exist', async () => {
     const o = io();
     const rt = runtime({
@@ -131,6 +148,60 @@ describe('cmdRun', () => {
     expect(o.stderr.join('\n')).toContain(
       "unknown model 'gpt-x'; declared: m1, m2 (or empty for the deployment default)",
     );
+  });
+
+  it('sends an undeclared --option sandboxTemplate (id@build), and waits out template_not_active', async () => {
+    const asked: unknown[] = [];
+    const pin = 'django-django-11133@sha256:' + 'c'.repeat(64);
+    const cp = fakeControlPlane({
+      listCredentials: async () => [credential('a')],
+      discovery: async () =>
+        ({
+          harnessUrl: null,
+          sandboxTiers: null,
+          sandboxTemplates: [{ id: 'matplotlib-matplotlib-23476', description: '', tools: [] }],
+        }) as never,
+      createSession: async (req) => {
+        asked.push(req);
+        if (asked.length === 1)
+          throw new ApiError('control-plane', 409, 'template_not_active', 'activating', 1);
+        return { sessionId: 's-pin', token: 'st', expiresAt: 4_000_000_000 };
+      },
+    });
+    const o = io();
+    expect(
+      await cmdRun(runtime({ cp }), o, {
+        prompt: 'hi',
+        options: { sandboxTemplate: pin },
+        json: false,
+      }),
+    ).toBe(0);
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toMatchObject({ sandbox: { template: pin } });
+    expect(o.stderr.join('\n')).toContain("the session's template is activating; retrying in 1 s");
+  });
+
+  it('reports unknown_template and template_retired from the control plane as given', async () => {
+    for (const [status, code, msg] of [
+      [400, 'unknown_template', 'no such template (GET /v1/templates lists them)'],
+      [410, 'template_retired', "template 'x' build sha256:… is retired"],
+    ] as const) {
+      const o = io();
+      const cp = fakeControlPlane({
+        listCredentials: async () => [credential('a')],
+        createSession: async () => {
+          throw new ApiError('control-plane', status, code, msg);
+        },
+      });
+      expect(
+        await cmdRun(runtime({ cp }), o, {
+          prompt: 'hi',
+          options: { sandboxTemplate: 'x@sha256:' + 'd'.repeat(64) },
+          json: false,
+        }),
+      ).toBe(1);
+      expect(o.stderr.join('\n')).toContain(msg);
+    }
   });
 
   it('uses the credential named with --option', async () => {
@@ -236,6 +307,46 @@ describe('cmdRun', () => {
     const calls = (rt.cp as unknown as { calls: string[] }).calls;
     expect(calls).toContain('mintSessionToken');
     expect(calls).not.toContain('createSession');
+  });
+
+  it('refuses an empty --session instead of starting a new session', async () => {
+    const o = io();
+    const rt = runtime();
+    expect(await cmdRun(rt, o, { prompt: 'hi', session: '', options: {}, json: false })).toBe(2);
+    expect(o.stderr.join('\n')).toContain('--session needs a session id');
+    const calls = (rt.cp as unknown as { calls: string[] }).calls;
+    expect(calls).not.toContain('createSession');
+    expect(calls).not.toContain('mintSessionToken');
+  });
+
+  it("prints the harness's reason beside 'no capacity', terminal-safe", async () => {
+    const o = io();
+    const busy = new ApiError(
+      'harness',
+      503,
+      'sandbox_unavailable',
+      "no attached sandbox in sandbox tier 'container'\u001b[2J",
+      5,
+    );
+    const rt = runtime({
+      harness: fakeHarness([{ error: busy }, { frames: [doneFrame('s-new')] }]),
+    });
+    expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false })).toBe(0);
+    const line = o.stderr.find((l) => l.includes('no capacity')) ?? '';
+    expect(line).toContain("(no attached sandbox in sandbox tier 'container'");
+    expect(line).not.toMatch(/\u001b/);
+  });
+
+  it('gives up on "no capacity" after HEADLESS_CAPACITY_WAIT_MS and exits 1', async () => {
+    const o = io();
+    const busy = new ApiError('harness', 503, 'sandbox_unavailable', undefined, 600);
+    const rt = runtime({
+      harness: fakeHarness(Array.from({ length: 5 }, () => ({ error: busy }))),
+    });
+    expect(await cmdRun(rt, o, { prompt: 'hi', options: {}, json: false })).toBe(1);
+    // 600 s a wait: one fits in 15 min, the second would pass it.
+    expect(o.stderr.filter((l) => l.includes('retrying in 600s'))).toHaveLength(1);
+    expect(HEADLESS_CAPACITY_WAIT_MS).toBe(15 * 60 * 1000);
   });
 
   it('strips escape sequences from reply text written to the terminal', async () => {

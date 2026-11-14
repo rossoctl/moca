@@ -296,6 +296,22 @@ describe('buildConfig marks every server turn (MI1 R3)', () => {
     expect(buildConfig(null).sandboxTier).toBeUndefined();
   });
 
+  it('passes the session template and its seed (session-templates spec §3.4)', () => {
+    const auth = {
+      subject: 'github:1',
+      sessionId: 's',
+      credential: { mode: 'direct' as const, value: 'k' }, // notsecret
+      anthropicBaseUrl: 'https://x',
+      sandboxTemplate: 'py312',
+      sandboxSeed: 'echo hi',
+      sandboxSeedSource: 'build' as const,
+    };
+    expect(buildConfig(auth).sandboxTemplate).toBe('py312');
+    expect(buildConfig(auth).sandboxSeed).toBe('echo hi');
+    expect(buildConfig(auth).sandboxSeedSource).toBe('build');
+    expect(buildConfig(null).sandboxTemplate).toBeUndefined();
+  });
+
   it('passes the session model as sessionModel, never as model (per-session model spec §5.1)', () => {
     const auth = {
       subject: 'github:1',

@@ -92,6 +92,40 @@ describe('claimTurn', () => {
     expect(claimed!.config.upstreamCredential).toMatchObject({ header: 'x-api-key' });
   });
 
+  it("carries a templated session's template, seed and build onto the config it hands to runLeaf", async () => {
+    const B = 'sha256:' + 'b'.repeat(64);
+    const d = deps({
+      fetchImpl: reply(
+        200,
+        ok({
+          sandboxTemplate: 'example-repo',
+          sandboxSeed: 'cp -a /opt/src/. /workspace/',
+          sandboxSeedSource: 'build',
+          sandboxBuildId: B,
+        }),
+      ),
+    });
+    const claimed = await claimTurn(TURN, 1, d);
+    expect(claimed!.config).toMatchObject({
+      sandboxTemplate: 'example-repo',
+      sandboxSeed: 'cp -a /opt/src/. /workspace/',
+      sandboxSeedSource: 'build',
+      sandboxBuildId: B,
+    });
+    // An untemplated session's claim carries none of them.
+    const plain = await claimTurn(TURN, 1, deps());
+    for (const k of ['sandboxTemplate', 'sandboxSeed', 'sandboxSeedSource', 'sandboxBuildId'])
+      expect(plain!.config).not.toHaveProperty(k);
+  });
+
+  it('refuses a malformed template field rather than run the turn on other hands', async () => {
+    const d = deps({
+      fetchImpl: reply(200, ok({ sandboxTemplate: 'example-repo', sandboxBuildId: 'latest' })),
+    });
+    await expect(claimTurn(TURN, 1, d)).rejects.toThrow(/sandboxBuildId/);
+    expect(markRunning).not.toHaveBeenCalled();
+  });
+
   it('flips the record to running with the delivery count as attempts', async () => {
     await claimTurn(TURN, 3, deps());
     expect(markRunning).toHaveBeenCalledWith(TURN, 3);

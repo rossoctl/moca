@@ -8,6 +8,8 @@ export {
 export { redactUrl } from './redact-url.js';
 export {
   TIER_LABEL,
+  TEMPLATE_LABEL,
+  BUILD_LABEL,
   WORKLOAD_LABEL,
   OWNER_LABEL,
   detachedKey,

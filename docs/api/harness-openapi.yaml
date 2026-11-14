@@ -13,7 +13,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.0.0
+  version: 1.3.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -81,8 +81,12 @@ paths:
         carried `Retry-After`.
 
         Authenticated turns run on the caller's exchanged credential, with the session's
-        config bundle and sandbox tier taken from the control plane — never from the request
-        (ADR-0038) — and create the session if absent. Unauthenticated turns (SH_REQUIRE_AUTH
+        config bundle, sandbox tier and sandbox template taken from the control plane — never
+        from the request (ADR-0038) — and create the session if absent. A session with a
+        template runs only on workers serving it (and, pinned to a manifest-hash build, only on
+        workers labelled moca.dev/build with that build), and a template's seed runs once in the
+        session's workspace before the turn's first tool call; a session with none runs only
+        on untemplated workers. Unauthenticated turns (SH_REQUIRE_AUTH
         off, no token) run on the operator's ambient credential: a named session must already
         exist (404 session_not_found otherwise), and an omitted sessionId starts a fresh one.
 
@@ -199,9 +203,10 @@ paths:
         '503':
           description: |
             Retryable, from one of three causes: no sandbox capacity right now (every candidate
-            is at its cap, none is present yet, or the session's own sandbox is briefly absent —
-            sandbox_unavailable, whose message names the cause: a pool, tier, template or
-            sandbox id, never a secret), the control-plane credential exchange failed
+            is at its cap, none is present yet — none of the session's tier or template, say —
+            or the session's own sandbox is briefly absent — sandbox_unavailable, whose message
+            names the cause: a pool, tier, template or sandbox id, never a secret), the
+            control-plane credential exchange failed
             (credential_unavailable — the control plane is unreachable or its answer was
             unusable), or a detachable turn could not take its lease because Redis did not
             answer, or did not answer within SH_TURN_REGISTRY_TIMEOUT_MS (default 5000) —
@@ -214,7 +219,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '500':
-          description: internal_error — not retryable as-is
+          description: |
+            internal_error — not retryable as-is; among its causes, a sandbox template's seed
+            that failed (its output is in the workspace's .moca-seed.log)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -666,18 +673,67 @@ components:
         stopReason: { type: string }
         errorMessage: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
-        sandbox:
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
+    TurnPlacement:
+      type: object
+      description: Where the turn ran; `workspaceReset` explains why earlier files are gone.
+      properties:
+        id: { type: string }
+        tier: { type: string }
+        seed:
           type: object
-          description: Where the turn ran; `workspaceReset` explains why earlier files are gone.
+          description: |
+            A seeded template's seed origin (session-templates spec §5): `build`, the pinned
+            build's own `spec.seed` in the control plane's template store (`buildId` names it), or
+            `declared`, the deployment's SH_SANDBOX_TEMPLATES. Absent when no seed applies.
+          required: [source]
           properties:
-            id: { type: string }
-            tier: { type: string }
-            workspaceReset:
-              type: object
-              description: Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE frame).
-              properties:
-                from: { type: string }
-                reason: { type: string, enum: [detached, retiered] }
+            source: { type: string, enum: [build, declared] }
+            buildId: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        workspaceReset:
+          type: object
+          description: |
+            Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
+            frame). `retiered`: the sandbox now serves another tier or sandbox template.
+          properties:
+            from: { type: string }
+            reason: { type: string, enum: [detached, retiered] }
+    TurnWorkspace:
+      type: object
+      description: |
+        A templated session's workspace after the turn (session-templates spec §5.1), taken in
+        the turn's sandbox before its lease is returned: `git diff --cached --binary` from the
+        seed's baseline commit to everything in the workspace now, staged in a throwaway index
+        (Moca's own files left out: `.moca-*`, `.sh-config*` and `leaves/*/.sh-config`), with
+        `a/` and `b/` prefixes, no color and no renames whatever the workspace's git config says,
+        so it applies with `git apply`. Present on every templated turn that leased its
+        sandbox; a failed capture is `error` alone and never fails the turn.
+      properties:
+        baseline:
+          type: string
+          description: The commit the seed left the workspace at (`.moca-baseline`), else HEAD.
+        patch:
+          type: string
+          description: The whole diff, when it is valid UTF-8. Never truncated.
+        patchBase64:
+          type: string
+          description: The whole diff as base64, in place of `patch`, when it is not valid UTF-8.
+        patchSha256:
+          type: string
+          description: '`sha256:<hex>` of the diff bytes.'
+        patchBytes: { type: integer, description: The diff's length in bytes. }
+        patchRefused:
+          type: string
+          enum: [too_large]
+          description: |
+            The diff is over SH_TURN_PATCH_MAX_BYTES (default 4 MiB, at most the transport's
+            8 MiB output cap): `patch` is left out, never cut.
+        error:
+          type: string
+          description: |
+            Why no patch was taken (no baseline commit, a baseline that is not a full commit id,
+            a failed exec).
     LeafUsage:
       type: object
       description: Cumulative token usage, for run cost pricing.
@@ -775,6 +831,8 @@ components:
         sessionId: { type: string }
         stopReason: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
     FrameError:
       type: object
       required: [type, sessionId, stopReason]
@@ -785,6 +843,8 @@ components:
         stopReason: { type: string }
         errorMessage: { type: string }
         usage: { $ref: '#/components/schemas/LeafUsage' }
+        sandbox: { $ref: '#/components/schemas/TurnPlacement' }
+        workspace: { $ref: '#/components/schemas/TurnWorkspace' }
         abortReason:
           type: string
           enum: [cancelled, unwatched, restarting, lease_lost, owner_lost]
@@ -922,6 +982,16 @@ components:
             status: { type: string, enum: [responded] }
             text: { type: string }
             usage: { $ref: '#/components/schemas/LeafUsage' }
+            seed:
+              description: |
+                A templated session's prompt run only: the seed's origin (session-templates spec
+                §5.2), as `TurnPlacement.seed`.
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, enum: [build, declared] }
+                buildId: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+            workspace: { $ref: '#/components/schemas/TurnWorkspace' }
         - type: object
           required: [status, reason]
           properties:

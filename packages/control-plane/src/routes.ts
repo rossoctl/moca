@@ -10,8 +10,17 @@
  * `sandbox` is the sandbox service's (SH_ROUTE_PROFILE=sandbox). An ALLOW list per route: a route
  * that does not name a profile is not mounted there, so one added later is invisible to the
  * sandbox profile until someone deliberately lists it (route-profile.test.ts enumerates this).
+ * `combined` (combined control plane spec §3.1) is both in one process: it mounts every route that
+ * names `harness` or `sandbox`. A route lists only `harness` and `sandbox`, never `combined`.
  */
-export type RouteProfile = 'harness' | 'sandbox';
+export type RouteProfile = 'harness' | 'sandbox' | 'combined';
+
+/** Whether a route's allow list mounts it on `profile`: `combined` takes either list. */
+export function mountsOn(profiles: readonly RouteProfile[], profile: RouteProfile): boolean {
+  return profile === 'combined'
+    ? profiles.includes('harness') || profiles.includes('sandbox')
+    : profiles.includes(profile);
+}
 
 export interface RouteSpec {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -793,8 +802,12 @@ export function matchRoute(
 ): { route: RouteSpec; params: Record<string, string> } | null {
   const pathname = url.split('?')[0] ?? '';
   for (const { route, re, names } of COMPILED) {
-    if (route.method !== method || !route.profiles.includes(profile)) continue;
-    if (profile === 'sandbox' && route.requiresEgress && !opts.egress) continue;
+    if (route.method !== method || !mountsOn(route.profiles, profile)) continue;
+    // Egress gates a route on `sandbox`; on `combined` only the sandbox-only one (the credential
+    // routes stay mounted for its harness users, as on `harness`).
+    const gated =
+      profile === 'sandbox' || (profile === 'combined' && !route.profiles.includes('harness'));
+    if (gated && route.requiresEgress && !opts.egress) continue;
     if (route.feature && !opts[route.feature]) continue;
     const m = re.exec(pathname);
     if (!m) continue;

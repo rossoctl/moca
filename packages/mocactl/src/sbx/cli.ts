@@ -3,7 +3,14 @@ import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type SandboxModeName } from '@moca/sandbox-client';
-import { loadConfig, normalizeUrl, resolvePaths, type Paths, type TuiConfig } from '../config.js';
+import {
+  loadConfig,
+  normalizeUrl,
+  resolvePaths,
+  storedLoginUrl,
+  type Paths,
+  type TuiConfig,
+} from '../config.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io, LoginHelpers } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
@@ -242,8 +249,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
 --record F (every command that calls the API but token, login, logout and credentials): one
 NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
-comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, or the one remembered at
-login. The login is kept apart from \`mocactl login\`'s, so both can be active at once.
+comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
+login, or the login's own (a login minted by an operator). The login is kept apart from \`mocactl login\`'s, so both can be active at once.
 exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out,
 130 interrupted (Ctrl-C)`;
 
@@ -287,8 +294,19 @@ export function resolveSbxUrl(
   flag: string | undefined,
   env: NodeJS.ProcessEnv,
   config: TuiConfig,
+  login?: string,
 ): string | undefined {
-  return normalizeUrl(flag || env.MOCACTL_SBX_URL || config.sbxControlPlaneUrl);
+  return normalizeUrl(flag || env.MOCACTL_SBX_URL || config.sbxControlPlaneUrl || login);
+}
+
+/**
+ * The control plane the sandbox-service login itself names (`sbx-auth.json`'s `controlPlaneUrl`):
+ * the last fallback, for a login file present without `sbx login`'s config.json entry (one copied
+ * from another machine, say), since `sbx login` also remembers its URL in config.json.
+ */
+export function loginControlPlaneUrl(env: NodeJS.ProcessEnv, home: string): string | undefined {
+  const u = storedLoginUrl(sbxPaths(resolvePaths(env, home)).authFile);
+  return u && /^https?:\/\//.test(u) ? u : undefined;
 }
 
 /** Where resolveSbxUrl's answer came from, by the same precedence (and the same `||`). */
@@ -296,10 +314,12 @@ export function sbxUrlSource(
   flag: string | undefined,
   env: NodeJS.ProcessEnv,
   config: TuiConfig,
-): 'flag' | 'env' | 'config' | undefined {
+  login?: string,
+): 'flag' | 'env' | 'config' | 'login' | undefined {
   if (flag) return 'flag';
   if (env.MOCACTL_SBX_URL) return 'env';
-  return config.sbxControlPlaneUrl ? 'config' : undefined;
+  if (config.sbxControlPlaneUrl) return 'config';
+  return login ? 'login' : undefined;
 }
 
 /**
@@ -356,13 +376,14 @@ export async function openSbx(
   } = {},
 ): Promise<{ rt: Runtime; api: SandboxApiClient; url: string; explicitUrl?: string } | number> {
   const remembered = loadConfig(resolvePaths(env, deps.home ?? homedir())).config;
-  const url = resolveSbxUrl(flags.controlPlaneUrl, env, remembered);
+  const fromLogin = loginControlPlaneUrl(env, deps.home ?? homedir());
+  const url = resolveSbxUrl(flags.controlPlaneUrl, env, remembered, fromLogin);
   if (!url) {
     io.err('sbx: no sandbox control plane: pass --control-plane-url URL, or set MOCACTL_SBX_URL');
     return SBX_EXIT.usage;
   }
-  const explicitUrl =
-    sbxUrlSource(flags.controlPlaneUrl, env, remembered) === 'config' ? undefined : url;
+  const source = sbxUrlSource(flags.controlPlaneUrl, env, remembered, fromLogin);
+  const explicitUrl = source === 'config' || source === 'login' ? undefined : url;
   const opened = {
     ...openSbxRuntime(url, env, deps),
     url,

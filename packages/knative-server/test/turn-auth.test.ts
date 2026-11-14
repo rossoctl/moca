@@ -272,6 +272,67 @@ describe('the one rule /turn enforces', () => {
     );
     expect(auth).not.toHaveProperty('sandboxTier');
   });
+
+  it('carries the session template and its seed, and only a non-empty string (session-templates spec §3.4)', async () => {
+    const exchangeWith = (extra: Record<string, unknown>) =>
+      deps({
+        fetchImpl: fakeExchange({
+          status: 200,
+          body: {
+            mode: 'direct',
+            anthropicAuthToken: 'sk-alice', // notsecret
+            anthropicBaseUrl: 'https://gateway.example/v1',
+            sessionId: 'sid-1',
+            subject: 'github:1234',
+            ...extra,
+          },
+        }).fetchImpl,
+      });
+    const turn = (d: ReturnType<typeof deps>) =>
+      resolveTurnAuth({ authorization: `Bearer ${sessionToken()}` }, { sessionId: 'sid-1' }, d);
+    const auth = await turn(exchangeWith({ sandboxTemplate: 'py312', sandboxSeed: 'echo hi' }));
+    expect(auth?.sandboxTemplate).toBe('py312');
+    expect(auth?.sandboxSeed).toBe('echo hi');
+    // A seed without a template is not a seed; a non-string template is no template.
+    const seedOnly = await turn(exchangeWith({ sandboxSeed: 'echo hi' }));
+    expect(seedOnly).not.toHaveProperty('sandboxSeed');
+    // A malformed template fails the turn rather than running it untemplated.
+    await expect(turn(exchangeWith({ sandboxTemplate: 7 }))).rejects.toThrow(
+      'malformed sandboxTemplate',
+    );
+    await expect(turn(exchangeWith({ sandboxTemplate: '' }))).rejects.toThrow(
+      'malformed sandboxTemplate',
+    );
+    await expect(turn(exchangeWith({ sandboxTemplate: 'py312', sandboxSeed: 7 }))).rejects.toThrow(
+      'malformed sandboxSeed',
+    );
+    // The seed's origin rides with it, and an unknown one fails the turn.
+    expect(
+      (
+        await turn(
+          exchangeWith({
+            sandboxTemplate: 'py312',
+            sandboxSeed: 'echo hi',
+            sandboxSeedSource: 'build',
+          }),
+        )
+      )?.sandboxSeedSource,
+    ).toBe('build');
+    await expect(
+      turn(
+        exchangeWith({ sandboxTemplate: 'py312', sandboxSeed: 'echo hi', sandboxSeedSource: 'x' }),
+      ),
+    ).rejects.toThrow('malformed sandboxSeedSource');
+    // The build a session is pinned to: carried beside its template, refused malformed.
+    const B = 'sha256:' + 'b'.repeat(64);
+    expect(
+      (await turn(exchangeWith({ sandboxTemplate: 'py312', sandboxBuildId: B })))?.sandboxBuildId,
+    ).toBe(B);
+    expect(await turn(exchangeWith({ sandboxBuildId: B }))).not.toHaveProperty('sandboxBuildId');
+    await expect(
+      turn(exchangeWith({ sandboxTemplate: 'py312', sandboxBuildId: 'imported:abc' })),
+    ).rejects.toThrow('malformed sandboxBuildId');
+  });
 });
 
 describe('authorizeRunRead (MI1 R7)', () => {

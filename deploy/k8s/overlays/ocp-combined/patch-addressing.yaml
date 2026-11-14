@@ -1,0 +1,40 @@
+# ocp-single's cross-namespace env strings, for THIS overlay's namespace placeholder: the
+# namespace transformer fixes metadata.namespace, but not these literal hostnames, which
+# ocp-single's patch-addressing.yaml writes against ITS placeholder (moca-single). A generated
+# overlay with the real namespace patches these again, as deploy/k8s/setup.sh does for ocp-single.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-supervisor, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: supervisor
+          env:
+            - { name: SH_RELAY_ADDR, value: 'sandbox-relay-exec.moca-sbx-combined.svc:9444' }
+            - {
+                name: SH_CONTROL_PLANE_URL,
+                value: 'http://moca-control-plane.moca-sbx-combined.svc:8080',
+              }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_SANDBOX_NAMESPACE, value: moca-sbx-combined }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: moca-sandbox, namespace: moca-sandbox }
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          env:
+            - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca-sbx-combined.svc:9443' }

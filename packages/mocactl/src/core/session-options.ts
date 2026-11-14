@@ -38,6 +38,14 @@ export interface SessionOptionField {
    * the server to check, rather than blocking (per-session model spec §4.2: accepted unverified).
    */
   acceptUnlisted?: boolean;
+  /**
+   * A value the caller gave that is not among the choices is still sent, even when there are
+   * choices, for the server to resolve and check: the sandbox template, whose choices are only the
+   * deployment's declared ids while a control plane with a template store may also resolve
+   * references such as `id:tag` and `id@<build>`. A wrong one is the server's refusal, shown as
+   * the server words it.
+   */
+  sendUnlisted?: boolean;
   /** `values` are the fields resolved before this one, so a choice can depend on them (the model on the credential). */
   source(api: ControlPlaneApi, values: Record<string, string>): Promise<Choice[]>;
   toRequest(value: string, req: CreateSessionRequest): CreateSessionRequest;
@@ -91,6 +99,41 @@ export const sandboxTierField: SessionOptionField = {
     }));
   },
   toRequest: (value, req) => ({ ...req, sandbox: { ...req.sandbox, tier: value } }),
+};
+
+/**
+ * The session's sandbox template (session-templates spec §6). 'none' is a real choice, offered
+ * first and preselected: a session with no template runs on untemplated workers, so a deployment
+ * that declares one template must not have it picked for every session (the one-choice shortcut).
+ * '' means "send no template".
+ */
+export const sandboxTemplateField: SessionOptionField = {
+  key: 'sandboxTemplate',
+  label: 'Sandbox template',
+  emptyHint: 'this deployment declares no sandbox templates',
+  serverMayResolve: true,
+  serverDefaults: true,
+  sendUnlisted: true,
+  async source(api, _values) {
+    let templates: Discovery['sandboxTemplates'];
+    try {
+      templates = (await api.discovery()).sandboxTemplates;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
+    if (!Array.isArray(templates)) return [];
+    const ids = templates
+      .map((t) => (t && typeof t === 'object' ? (t as { id?: unknown }).id : undefined))
+      .filter((id): id is string => typeof id === 'string' && id !== '');
+    if (ids.length === 0) return [];
+    return [
+      { value: '', label: 'none', isDefault: true },
+      ...ids.map((id) => ({ value: id, label: sanitizeRemote(id) })),
+    ];
+  },
+  toRequest: (value, req) =>
+    value === '' ? req : { ...req, sandbox: { ...req.sandbox, template: value } },
 };
 
 function isSandboxTiers(v: unknown): v is NonNullable<Discovery['sandboxTiers']> {
@@ -169,6 +212,7 @@ export const SESSION_OPTION_FIELDS: readonly SessionOptionField[] = [
   inferenceCredentialField,
   modelField,
   sandboxTierField,
+  sandboxTemplateField,
 ];
 
 export type Resolution =
@@ -194,6 +238,10 @@ export async function resolveSessionOptions(
     const choices = await field.source(api, values);
     const wanted = given[field.key];
     if (wanted !== undefined && choices.some((c) => c.value === wanted)) {
+      values[field.key] = wanted;
+      continue;
+    }
+    if (wanted !== undefined && wanted !== '' && field.sendUnlisted) {
       values[field.key] = wanted;
       continue;
     }

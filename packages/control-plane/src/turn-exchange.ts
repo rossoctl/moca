@@ -5,11 +5,14 @@ import {
   placeholderFor,
   refuseMisdirectedSecret,
   resolveInference,
+  sessionSeed,
+  sessionTemplate,
   sessionTier,
   type CredentialMode,
   type ExchangeResponse,
 } from './exchange.js';
 import type { CpDeps } from './handlers.js';
+import { holdPinnedWorker } from './host-handlers.js';
 import { isTerminalState, type TurnCaps } from './turn-record.js';
 
 /**
@@ -132,6 +135,12 @@ export async function exchangeTurnCredential(
     refuseMisdirectedSecret(resolved, turn.sessionId);
   }
 
+  // The session's template and seed (read below), resolved before the audit as every refusal is: a
+  // store that cannot answer for the seed refuses the claim (sessionSeed), which leaves the turn
+  // pending, and no credential is recorded as issued and then withheld.
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
+
   const entry = {
     subject: turn.owner,
     sessionId: turn.sessionId,
@@ -189,6 +198,17 @@ export async function exchangeTurnCredential(
   // own tier retiers the session's sandbox, and a retier starts its workspace empty
   // (`select-sandbox.ts`, `reason: 'retiered'`).
   const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
+  // The session's sandbox template, its seed and its build, exactly as the session exchange returns
+  // them (session-templates spec §3.4, combined control plane spec §3.4), so a queued turn of a
+  // templated session runs on that template's workers, pinned to its build, and seeded. Read from
+  // the session, not copied onto the turn record, and that is a pin all the same: a session's
+  // template and build are written once, at creation, and no route changes them, so the record of
+  // a turn queued an hour ago and the session now agree. A template the deployment no longer
+  // declares is still sent, without a seed, so the turn is refused rather than run untemplated.
+  // Both are resolved above, before the audit.
+  // A queued turn of a session pinned to a build keeps that build's worker, as an interactive one:
+  // after the audit and every refusal, so a refused claim holds nothing.
+  if (rec.sandboxTemplate) await holdPinnedWorker(rec, deps);
   return {
     turnId: turn.turnId,
     mode,
@@ -204,6 +224,12 @@ export async function exchangeTurnCredential(
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
     ...(turn.cfg ? { configRef: turn.cfg } : {}),
     ...(tier ? { sandboxTier: tier } : {}),
+    ...(template ? { sandboxTemplate: template.id } : {}),
+    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
+    // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
+    ...(template && rec.sandboxBuildId?.startsWith('sha256:')
+      ? { sandboxBuildId: rec.sandboxBuildId }
+      : {}),
     ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
   };
 }

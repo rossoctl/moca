@@ -471,6 +471,9 @@ export async function cmdBundleDelete(
   return 0;
 }
 
+/** The most a headless turn waits on "no capacity" before it fails (SessionDeps.maxCapacityWaitMs). */
+export const HEADLESS_CAPACITY_WAIT_MS = 15 * 60 * 1000;
+
 export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<number> {
   if (!ready(rt, io)) return 2;
   const manager = new SessionManager({
@@ -479,7 +482,17 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
     transcripts: rt.transcripts,
     now: rt.now,
     sleep: rt.sleep,
+    maxCapacityWaitMs: HEADLESS_CAPACITY_WAIT_MS,
+    onActivationWait: (s) => io.err(`the session's template is activating; retrying in ${s} s`),
   });
+
+  // An explicit empty --session is a mistake (a script whose id lookup came back empty), not a
+  // request for a new session: starting one silently ran the prompt in a fresh session with no
+  // options.
+  if (opts.session !== undefined && opts.session.trim() === '') {
+    io.err('--session needs a session id (it was empty); leave it out to start a new session');
+    return 2;
+  }
 
   let session: ActiveSession;
   try {
@@ -561,7 +574,12 @@ export async function cmdRun(rt: Runtime, io: Io, opts: RunOptions): Promise<num
       else if (opts.showTools && e.frame.type === 'tool_result' && e.frame.isError)
         io.out('  (that command failed)\n');
     } else if (e.kind === 'retrying') {
-      io.err(`the harness has no capacity — retrying in ${e.seconds}s`);
+      // The server's reason, when it gives one (a pool, tier or template; server-originated, so
+      // sanitized), tells a wait that will end from one that will not.
+      io.err(
+        `the harness has no capacity — retrying in ${e.seconds}s` +
+          (e.reason ? ` (${sanitizeRemote(e.reason)})` : ''),
+      );
     } else if (e.kind === 'turn-end') {
       outcome = e.outcome;
       failure = e.error;

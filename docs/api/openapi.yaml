@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.15.0
+  version: 1.18.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -254,6 +254,27 @@ components:
             tiers), today's deployment default, which the data plane applies; null whenever the
             deployment declares no tiers, even for a session that recorded one (the data plane
             then runs untiered)
+        sandboxTemplate:
+          type: [string, 'null']
+          description: |
+            the sandbox template the session runs on (session-templates spec §3.3): present on a
+            deployment that declares templates (SH_SANDBOX_TEMPLATES) and on every `combined`
+            deployment (whose template list is always set, empty when the variable is), null there
+            for a session with none; present too for any session that named one, even once the
+            deployment no longer declares it (its turns then find no worker and are refused).
+            Absent otherwise, and so are sandboxBuildId and templateManifestHash
+        sandboxBuildId:
+          type: [string, 'null']
+          description: |
+            present exactly when sandboxTemplate is: the build the template resolved to at creation
+            through the template store (combined control plane spec §3.4), kept for the session's
+            life; a manifest-hash build's turns run only on workers labelled moca.dev/build with
+            it. Null for a session with no template, or one created without a template store
+        templateManifestHash:
+          type: [string, 'null']
+          description: |
+            present exactly when sandboxTemplate is: the manifest hash of sandboxBuildId; null when
+            sandboxBuildId is null or an imported build
         model:
           type: [string, 'null']
           description: |
@@ -292,6 +313,17 @@ components:
             text: { type: string }
             gate: { type: object }
             reason: { type: string }
+            seed:
+              type: object
+              description: |
+                `responded` on a templated session only: where its workspace's seed came from
+                (`source`: `build` or `declared`; `buildId` with `build`), session-templates spec §5.2
+            workspace:
+              type: object
+              description: |
+                `responded` on a templated session only: the workspace's patch after the turn, the
+                data plane's `TurnWorkspace` (harness-openapi.yaml): `baseline`, `patch` or
+                `patchBase64`, `patchSha256`, `patchBytes`, or `patchRefused`, or `error`
     CredentialDescriptor:
       type: object
       required: [name, kind, consumer, destination, binding]
@@ -996,13 +1028,36 @@ paths:
                         properties:
                           names: { type: array, items: { type: string } }
                           default: { type: string }
+                      sandboxTemplates:
+                        type: array
+                        description: |
+                          the templates a session may name at creation (SH_SANDBOX_TEMPLATES),
+                          without their seeds; absent when the deployment declares none
+                        items:
+                          type: object
+                          required: [id, description, tools]
+                          properties:
+                            id: { type: string }
+                            description: { type: string }
+                            tools: { type: array, items: { type: string } }
                       version:
                         type: [string, 'null']
                         description: |
                           the deployment's version (MOCA_VERSION, baked in at image build), so a client
                           can show it; `dev` when nothing was baked in, and `null` permitted for
                           compatibility with a control plane that reports none
-                      profile: { type: string, enum: [harness] }
+                      profile:
+                        type: string
+                        enum: [harness, combined]
+                        description: |
+                          `combined` (combined control plane spec §3.1) serves sessions and sandboxes:
+                          its body adds `execEndpoint` and `execCa`, as the sandbox profile's
+                      execEndpoint:
+                        type: string
+                        description: combined profile only -- host:port of the exec Route
+                      execCa:
+                        type: string
+                        description: combined profile only -- PEM of a self-issued exec certificate
                   - type: object
                     description: the sandbox profile (SBX0 §4.1)
                     required: [profile, execEndpoint]
@@ -1463,6 +1518,24 @@ paths:
                   type: object
                   properties:
                     tier: { type: string }
+                    template:
+                      type: string
+                      description: |
+                        a template id from GET /v1/discovery's sandboxTemplates; 400 when unknown, or
+                        on a deployment that declares none. Omitted: none, and the session runs only
+                        on untemplated workers. With a template store (SH_PROVENANCE_DIR) it
+                        resolves through the store as a sandbox's template does (combined control
+                        plane spec §3.4): `id`, `id:tag` or `id@sha256:…`, a registered build the
+                        caller may see (`400 unknown_template` otherwise), recorded as the session's
+                        sandboxBuildId; and, with host agents, activation on first use
+                        (`409 template_not_active`), which only a subject enrolled for sandboxes
+                        starts (`403 not_enrolled` otherwise, combined control plane spec §3.4)
+                    activate:
+                      type: boolean
+                      default: true
+                      description: |
+                        false to be refused on a template that is not active without starting its
+                        activation (template lifecycle spec §6.4)
                 model:
                   type: string
                   pattern: '^[\x21-\x7e]{1,256}$'
@@ -1487,6 +1560,23 @@ paths:
                     description: false when the catalog could not be read and the id was accepted unchecked
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: |
+            `not_enrolled` (combined profile): the session's template is not active and nobody is
+            starting it, and the caller is not enrolled for sandboxes, so it cannot start it. With
+            `sandbox.activate: false` the answer is 409 instead, as for anyone.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            `template_not_active` (Retry-After): the session's template is not active yet, its
+            activation started (by an enrolled caller) unless `sandbox.activate` is false, or
+            already started by another subject; `no_active_slot` (Retry-After),
+            `template_unavailable`: as activate (template lifecycle spec §6.4)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: |
             `config_bundle_not_found`: `configRef` names a digest that is not stored (never
@@ -3277,10 +3367,13 @@ paths:
         activation is judged by; a build already running on a holder stays there). `stop`: the
         ones it holds with no live lease and no idle grace, and a leased one it runs while placement
         keeps it on another host, each with no live sandbox on its worker, and the retired ones it
-        holds (§5.1) with no live sandbox; a worker with a live sandbox is in neither list (it
-        drains first, and counts against the host's `activeLimit` meanwhile). A build imported from
-        SH_SANDBOX_TEMPLATES is in neither list, retired or not: the deployment runs its worker.
-        The agent starts only workers already installed on the host.
+        holds (§5.1) with no live sandbox; a worker with a live
+        sandbox is in neither list (it drains first, and counts against the host's `activeLimit`
+        meanwhile). So is a worker a session pinned to its build had a turn on within the hold, when
+        the session's subject is enrolled for sandboxes (combined control plane spec §3.4: the hosts'
+        idle limit from that turn's credential exchange). The agent starts only workers already
+        installed on the host. A build imported from SH_SANDBOX_TEMPLATES is in neither list,
+        retired or not: the deployment runs its worker.
 
         `run` is in the wanted order, first leased first (1.13.0, §6.5: the order the agent starts
         them in, at most its start limit at once). On a host with an idle grace the graced builds
@@ -4047,6 +4140,34 @@ paths:
                       the tier the session's turn runs in (P6.3): the recorded tier, or today's
                       default for a session that recorded none; absent whenever the deployment
                       declares no tiers, even for a session that recorded one
+                  sandboxTemplate:
+                    type: string
+                    description: |
+                      the sandbox template the session named at creation; the data plane runs the
+                      turn only on workers labelled moca.dev/template with it. Absent when the
+                      session named none. Sent even when the deployment no longer declares it, so
+                      the turn is refused rather than run on an untemplated worker (fail closed)
+                  sandboxSeed:
+                    type: string
+                    description: |
+                      the template's seed, a bash command the data plane runs once per workspace;
+                      present only beside sandboxTemplate. For a session pinned to a manifest-hash
+                      build through the template store, that build's own `spec.seed` (none when the
+                      build has none); otherwise the deployment's declared seed, while it declares one
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: |
+                      where sandboxSeed came from, sent with it: `build` (the pinned build's spec) or
+                      `declared` (SH_SANDBOX_TEMPLATES). The turn reports it as `sandbox.seed`
+                  sandboxBuildId:
+                    type: string
+                    pattern: '^sha256:[0-9a-f]{64}$'
+                    description: |
+                      the manifest-hash build the session's template resolved to at creation
+                      (combined control plane spec §3.4); the data plane runs the turn only on
+                      workers labelled moca.dev/build with it, and refuses it when none is
+                      attached. Present only beside sandboxTemplate, for a manifest-hash build
                   model:
                     type: object
                     description: |
@@ -4171,6 +4292,26 @@ paths:
                       deployment's default as it stood when the session was created. A record that
                       pinned none is resolved against the session instead. Absent whenever the
                       deployment declares no tiers.
+                  sandboxTemplate:
+                    type: string
+                    description: |
+                      as on /internal/credentials: the session's sandbox template, so a queued turn
+                      of a templated session runs only on its workers (session-templates spec §5.2).
+                      From the session, whose template and build are written once, at creation.
+                      Sent even when the deployment no longer declares it (fail closed)
+                  sandboxSeed:
+                    type: string
+                    description: as on /internal/credentials; only beside sandboxTemplate
+                  sandboxSeedSource:
+                    type: string
+                    enum: [build, declared]
+                    description: as on /internal/credentials; only beside sandboxSeed
+                  sandboxBuildId:
+                    type: string
+                    pattern: '^sha256:[0-9a-f]{64}$'
+                    description: |
+                      as on /internal/credentials: the build the session is pinned to; only beside
+                      sandboxTemplate, for a manifest-hash build
                   model:
                     type: object
                     description: |

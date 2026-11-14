@@ -164,6 +164,15 @@ describe('lookupEgressCredential', () => {
     );
   });
 
+  it('on combined, answers no_credential for an owner not enrolled, though login is open there', async () => {
+    d.config.routeProfile = 'combined';
+    expect((await call(d, KVM, { sandbox: sbxA, host: 'github.com' })).status).toBe(200);
+    d.config.sandbox!.allowedSubjects = [];
+    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'github.com' }))).toBe(
+      'no_credential',
+    );
+  });
+
   it('returns every path-scoped credential for a gateway host, longest prefix first', async () => {
     const r = await call(d, KVM, { sandbox: sbxA, host: 'mcp.corp' });
     const c = (r.body as Body).credentials;

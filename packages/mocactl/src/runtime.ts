@@ -18,6 +18,7 @@ import {
   resolvePaths,
   saveAuth,
   saveConfig,
+  storedLoginUrl,
   type CachedAuth,
   type Endpoints,
   type Paths,
@@ -140,7 +141,14 @@ export function buildRuntime(
   const resolved = resolvePaths(env, home);
   const paths = opts.paths ? opts.paths(resolved) : resolved;
   const loaded = loadConfig(paths);
-  const resolvedEndpoints = resolveEndpoints(flags, env, loaded.config);
+  // The login's own URL is the last fallback, so a command after `mocactl login --control-plane-url
+  // URL` needs no flag or SH_CONTROL_PLANE_URL to reach the control plane it logged in to.
+  const resolvedEndpoints = resolveEndpoints(
+    flags,
+    env,
+    loaded.config,
+    storedLoginUrl(paths.authFile),
+  );
   const endpoints =
     opts.harness === false
       ? { controlPlaneUrl: resolvedEndpoints.controlPlaneUrl }

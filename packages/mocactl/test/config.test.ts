@@ -225,4 +225,19 @@ describe('endpoints', () => {
     });
     expect(resolveEndpoints({}, env, config).controlPlaneUrl).toBe('http://env');
   });
+
+  it("falls back last to the login's own control plane, and only to an http(s) URL", () => {
+    const login = 'https://cp.example.invalid/';
+    expect(resolveEndpoints({}, {}, DEFAULT_CONFIG, login).controlPlaneUrl).toBe(
+      'https://cp.example.invalid',
+    );
+    const config = { ...DEFAULT_CONFIG, controlPlaneUrl: 'http://cfg' };
+    expect(resolveEndpoints({}, {}, config, login).controlPlaneUrl).toBe('http://cfg');
+    expect(
+      resolveEndpoints({}, { SH_CONTROL_PLANE_URL: 'http://env' }, DEFAULT_CONFIG, login)
+        .controlPlaneUrl,
+    ).toBe('http://env');
+    expect(resolveEndpoints({}, {}, DEFAULT_CONFIG, 'file:///etc').controlPlaneUrl).toBeUndefined();
+    expect(resolveEndpoints({}, {}, DEFAULT_CONFIG).controlPlaneUrl).toBeUndefined();
+  });
 });

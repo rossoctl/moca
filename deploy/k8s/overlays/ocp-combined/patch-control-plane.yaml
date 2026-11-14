@@ -1,0 +1,73 @@
+# The control plane on the combined route profile (combined control plane design §3.5): the
+# harness's settings from the base stay, and SBX0's are added from sbx-settings, as ocp-sbx's
+# patch-control-plane.yaml reads them. The harness's credentials are FILES on their own volume
+# (pvc-credentials.yaml), so the control plane makes no Kubernetes API call: no service account
+# token, and the base's credentials Role is deleted (kustomization.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  # An RWO volume cannot attach to the surge pod of a rolling update on a multi-node cluster.
+  strategy: { type: Recreate, rollingUpdate: null }
+  template:
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_ROUTE_PROFILE, value: combined }
+            - { name: SH_CREDENTIAL_STORE, value: file }
+            - { name: SH_CREDENTIAL_DIR, value: /var/lib/moca/credentials }
+            - { name: SH_CREDENTIAL_NAMESPACE, $patch: delete }
+            - name: SH_ALLOWED_SUBJECTS
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_ALLOWED_SUBJECTS } }
+            - name: SH_SANDBOX_TEMPLATES
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TEMPLATES } }
+            - name: SH_SANDBOX_EXEC_ENDPOINT
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_ENDPOINT } }
+            - name: SH_SANDBOX_EXEC_CA
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_CA, optional: true } }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            - name: SH_SANDBOX_LIFETIME_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_LIFETIME_SECONDS } }
+            - name: SH_SANDBOX_TOKEN_TTL_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_TTL_SECONDS } }
+            - name: SH_SANDBOX_RETENTION_SECONDS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_RETENTION_SECONDS } }
+            - name: SH_SANDBOX_MAX_PER_SUBJECT
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_PER_SUBJECT } }
+            - name: SH_SANDBOX_MAX_TOTAL
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_TOTAL } }
+          volumeMounts:
+            - { name: credential-store, mountPath: /var/lib/moca/credentials }
+      volumes:
+        - name: credential-store
+          persistentVolumeClaim: { claimName: moca-credentials }
+        # Every credential BOTH profiles need, each a file in /run/credentials: the harness's KEK and
+        # exchange token, SBX0's janitor token, the host agents' tokens, and egress (optional). The
+        # template-store component REPLACES this projected volume's source list with SBX0's alone,
+        # so this patch, applied after it, restates the whole combined list.
+        - name: credentials
+          projected:
+            defaultMode: 256 # 0400
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+                    - { key: SH_CREDENTIAL_KEK, path: SH_CREDENTIAL_KEK }
+                    - { key: SH_EXCHANGE_TOKEN, path: SH_EXCHANGE_TOKEN }
+                    - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+              - secret: { name: sbx-egress, optional: true }
+              - secret: { name: sbx-template-hosts }
+              - secret:
+                  name: moca-test-users
+                  optional: true
+                  items:
+                    - { key: SH_TEST_USER_SECRET, path: SH_TEST_USER_SECRET }

@@ -309,6 +309,23 @@ describe('sandbox profile', () => {
       expect(await d.credentials.get('github:1234', 'gh2')).toBeNull();
     });
 
+    it('refuses it on combined too, where the credential routes keep the harness behaviour', async () => {
+      const d = egressDeps();
+      d.config.routeProfile = 'combined';
+      await put(d, 'gh', ['github.com']);
+      expect(await codeOf(() => put(d, 'gh2', ['GitHub.com']))).toBe('destination_conflict');
+      // An inference credential is not an egress one: no conflict check.
+      const inf = await HANDLERS.putCredential!(
+        ctx({
+          principal: alice,
+          params: { name: 'inf' },
+          body: body({ consumer: 'inference', destination: { hosts: ['github.com'] } }),
+        }),
+        d,
+      );
+      expect(inf.status).toBe(204);
+    });
+
     it('allows sibling and nested prefixes', async () => {
       const d = egressDeps();
       await put(d, 'mcp-a', ['mcp.corp/github']);

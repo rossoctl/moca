@@ -9,7 +9,7 @@ export { CAPACITY_REFUSAL, SandboxCapacityRefusedError } from './transport.js';
 export { createCapacityLatch, type CapacityLatch } from './capacity-latch.js';
 // Exported for the relay, which must set its ingress limit to the SAME value the Go
 // worker uses — see MAX_EXEC_MESSAGE_BYTES on why the two cannot move independently.
-export { MAX_EXEC_MESSAGE_BYTES } from './transport.js';
+export { DEFAULT_OUTPUT_CAP, MAX_EXEC_MESSAGE_BYTES } from './transport.js';
 export { GrpcRelayTransport, type ExecClientLike } from './grpc-relay-transport.js';
 export {
   WorkerFrame,

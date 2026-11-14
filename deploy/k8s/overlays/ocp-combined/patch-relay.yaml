@@ -1,0 +1,27 @@
+# The relay serving both Exec callers (combined control plane design §3.6): the harness's exec
+# token, from the base, AND per-sandbox tokens (SBX0 §3), from sbx-token-keys. The relay classifies
+# each call, the harness's token first (sandbox-relay/src/main.ts execCaller). Its exec listener
+# stays on all interfaces for the in-cluster exec Service the supervisor uses; the base's
+# NetworkPolicy admits only the supervisor to it, and the exec Route reaches it through the
+# exec-tls sidecar.
+# The isolation boundary this changes: the harness's exec token is not scoped to a sandbox, and it
+# allows Exec into ANY attached worker, so here also into the sandboxes of enrolled users. A
+# compromised supervisor (which holds that token) reaches them; with a separate SBX0 namespace it
+# could not (design §3.6 and §6).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-relay
+  namespace: moca
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-relay
+          env:
+            - name: SH_SANDBOX_TOKEN_PUBLIC_KEYS
+              valueFrom: { secretKeyRef: { name: sbx-token-keys, key: PUBLIC_KEYS } }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            - name: SH_SANDBOX_MAX_INFLIGHT
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_INFLIGHT } }

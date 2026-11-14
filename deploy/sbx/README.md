@@ -52,6 +52,7 @@ Optional inputs:
 | `SBX_{API,ATTACH,EXEC}_TLS_{CERT,KEY}` | none                | the Route's certificate; otherwise the router's (api) or a self-signed one                                                                                                                                                                                                                                                          |
 | `SBX_JANITOR_WAIT_MINUTES`             | 60                  | how long after a sandbox ends the janitor frees its workspace (below)                                                                                                                                                                                                                                                               |
 | `SBX_API_CA_FILE`                      | none                | a PEM CA the host janitor trusts for the API Route (below)                                                                                                                                                                                                                                                                          |
+| `SBX_PROFILE`                          | sandbox             | `combined`: one control plane for Moca Pi sessions and sandboxes ([below](#one-control-plane-for-sessions-and-sandboxes))                                                                                                                                                                                                           |
 
 **Lease mode (SBX0.3)** has two policy inputs
 ([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` writes
@@ -239,6 +240,32 @@ and touches nothing when the control plane is unreachable. Each run logs one JSO
 Uninstalling the last worker leaves the janitor in place. `install-host.sh --uninstall-janitor`
 removes it. Re-run `--janitor` with a new bundle after changing `SBX_JANITOR_WAIT_MINUTES`,
 `SBX_API_HOST` or `SBX_API_CA_FILE`.
+
+### One control plane for sessions and sandboxes
+
+`SBX_PROFILE=combined` deploys `deploy/k8s/overlays/ocp-combined` instead of `ocp-sbx`: the control
+plane on the `combined` route profile, serving Moca Pi sessions (the supervisor and its Route) and
+sandboxes from one template store, so a session and a sandbox can run on the same build under one
+activation lease ([design](../../docs/specs/2026-11-05-combined-control-plane-design.md)). Use a
+namespace of its own, not an SBX0 one: the run refuses, before applying anything, a namespace whose
+`moca-mu1` holds `SH_JANITOR_TOKEN` but no `SH_EXCHANGE_TOKEN`, or that has the `sbx-api` Route,
+unless `SBX_CONVERT_TO_COMBINED=1` says the conversion is meant. It needs, beside the inputs above:
+
+    SBX_PROFILE=combined
+    SBX_MOCA_HOST=<supervisor route host>      # a fourth distinct host; SBX_MOCA_TLS_{CERT,KEY} optional
+    SBX_SANDBOX_IMAGE=<repo>@sha256:<digest>   # the in-cluster container sandbox (SBX_SANDBOX_REPLICAS, default 0)
+    SBX_IMAGE=<repo>@sha256:<digest>           # pinned by digest too
+
+It turns the template store on, adds the harness's keys to `moca-mu1`, and writes its files to
+`deploy/sbx/.generated-<namespace>/`, so an SBX0 namespace's generated files stay as they are.
+Egress credentials are not supported with it yet. On `combined` any GitHub account can log in and use
+sessions; the sandbox routes and template writes still need `SBX_ALLOWED_SUBJECTS` or an admin.
+
+Clients log in once to the API host: `mocactl login --control-plane-url https://<api host>` for
+sessions and `mocactl sbx login --control-plane-url https://<api host>` for sandboxes; later commands
+use the login's control plane. When a Route's certificate is self-signed (`moca-ca.crt` for the
+supervisor Route, in the generated folder) or the router's is not publicly trusted, set
+`NODE_EXTRA_CA_CERTS=<ca.pem>` for `mocactl`.
 
 ## 3. Status
 

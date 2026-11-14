@@ -72,3 +72,26 @@ describe('the runtime control-plane client on a rejected token', () => {
     },
   );
 });
+
+describe("the runtime's control plane after `mocactl login --control-plane-url URL`", () => {
+  it("is the login's own, with no flag, SH_CONTROL_PLANE_URL or config.json", () => {
+    const home = mkdtempSync(join(tmpdir(), 'mocactl-rt-login-url-'));
+    const rt0 = buildRuntime({ controlPlaneUrl: 'https://cp.example.invalid' }, {}, home);
+    saveAuth(rt0.paths, {
+      apiToken: 'api-1',
+      subject: 'github:1',
+      roles: [],
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      controlPlaneUrl: 'https://cp.example.invalid',
+    });
+    // `credentials add` builds its runtime with no URL at all.
+    const rt = buildRuntime({}, {}, home);
+    expect(rt.endpoints.controlPlaneUrl).toBe('https://cp.example.invalid');
+    expect(rt.auth?.apiToken).toBe('api-1');
+    expect(rt.cp).toBeDefined();
+    // A URL named another way still wins, and the login is not sent there.
+    const other = buildRuntime({}, { SH_CONTROL_PLANE_URL: 'https://other.example.invalid' }, home);
+    expect(other.endpoints.controlPlaneUrl).toBe('https://other.example.invalid');
+    expect(other.auth).toBeNull();
+  });
+});

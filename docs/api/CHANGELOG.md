@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.15.0
+## 1.18.0
 
 Retire a template, or one build of it ([#749](https://github.com/rossoctl/moca/issues/749)), per the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.1. Every
@@ -33,6 +33,86 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
   sandbox, except a `shared` one; and one worker id is never in both `run` and `stop` (two
   registered builds from one image share it); POST /v1/hosts/{host}/workers/report takes `detached` for a retired build. Removing a
   retired build's worker and snapshot from its host is not part of this version.
+
+## 1.17.0
+
+A session's seed from its build, its workspace's patch, its records, and its queued turns on its
+template ([#751](https://github.com/rossoctl/moca/issues/751)), per the
+[session templates spec](../specs/2026-10-30-session-sandbox-templates-design.md) §5-§5.2 and the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §7.1.
+Additive.
+
+- POST /internal/credentials: for a session pinned to a manifest-hash build through the template
+  store, `sandboxSeed` is that build's own `spec.seed` (none when the build has none), and
+  `sandboxSeedSource` (`build` or `declared`) is sent with any seed.
+- POST /internal/turn-credentials returns `sandboxTemplate`, `sandboxSeed`, `sandboxSeedSource` and
+  `sandboxBuildId` as POST /internal/credentials does, so a queued turn of a templated session runs
+  on its template's workers, pinned to its build, and seeded.
+- GET /v1/sessions/{id}/turns/{turnId}: a `responded` result of a templated session carries
+  `workspace` (the patch after the turn) and, with a seed, `seed` (`{source, buildId?}`).
+- With a template store, a session whose template resolved through it writes a `session` record on
+  `template/<id>` at creation (`state: created`, with its build, manifest hash and lease) and at
+  delete (`state: terminated`, `reason: deleted`, `endedAt`).
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.3.0: a templated
+session's turn result (and its terminal `done` and `error` frames) carries `workspace`
+(`TurnWorkspace`: the patch from the seed's baseline commit, whole or refused over
+`SH_TURN_PATCH_MAX_BYTES`, never cut) and `sandbox.seed`; a `/v1/runs` prompt run of a templated
+session runs on its template and its `responded` result carries both too.
+
+## 1.16.0
+
+Sessions and sandboxes from one combined control plane
+([#750](https://github.com/rossoctl/moca/issues/750)), per the
+[combined control plane spec](../specs/2026-11-05-combined-control-plane-design.md). Additive: the
+`harness` and `sandbox` profiles answer as before.
+
+- `SH_ROUTE_PROFILE=combined` mounts every route of both profiles. Its GET /v1/discovery answers
+  `profile: "combined"` with the harness fields plus `execEndpoint` and `execCa`.
+- On `combined` login is open, as on `harness`; the sandbox routes and the template writes need an
+  enrolled subject (`403 not_enrolled` otherwise, test users included), and the template, policy and
+  quota reads take any logged-in subject. Its API tokens carry the harness issuer.
+- With a template store (`SH_PROVENANCE_DIR`), POST /v1/sessions resolves `sandbox.template` through
+  it as POST /v1/sandboxes does: `id`, `id:tag` or `id@sha256:…`, else 400 `unknown_template`; the
+  build is kept for the session's life. `sandbox.activate` (default true) and activation on first
+  use apply: 409 `template_not_active` with Retry-After, or `no_active_slot`,
+  `template_unavailable`. Only a subject enrolled for sandboxes starts an activation; on `combined`
+  another subject waits (409) on one already starting and is refused (`403 not_enrolled`) on a
+  template nobody is starting. The activation is the create's last check, so a create refused for
+  another reason holds no lease.
+- The `Session` view adds `sandboxBuildId` and `templateManifestHash` beside `sandboxTemplate`.
+- POST /internal/credentials returns `sandboxBuildId` for a session pinned to a manifest-hash build.
+  Each exchange of such a session (and of its queued turns) keeps that build's worker running for
+  the hosts' idle limit from the turn, as a live sandbox does (GET /v1/hosts/{host}/wanted leaves it
+  out of `stop`), when the session's subject is enrolled for sandboxes; it starts no worker and
+  takes no lease. A turn of a subject not enrolled runs while the worker is up but extends nothing.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.2.0: a session pinned
+to a build runs only on workers labelled `moca.dev/build` with it, and its turn is refused (503
+`sandbox_unavailable`) when none is attached.
+
+## 1.15.0
+
+Sandbox templates for agent sessions
+([#731](https://github.com/rossoctl/moca/issues/731)), per the
+[session templates spec](../specs/2026-10-30-session-sandbox-templates-design.md). Additive: a
+deployment that does not set `SH_SANDBOX_TEMPLATES` on the harness profile answers exactly as
+before.
+
+- POST /v1/sessions accepts `sandbox.template`, fixed for the session's life. A non-string is
+  400 `invalid_request`; so is an id the deployment does not declare (the message lists the
+  declared ids), and any template on a deployment that declares none.
+- The `Session` view gains `sandboxTemplate` (null for none) on a deployment that declares
+  templates, and for any session that named one.
+- GET /v1/discovery gains `sandboxTemplates: [{id, description, tools}]`, the declared templates
+  without their seeds; absent when none are declared.
+- POST /internal/credentials returns `sandboxTemplate` and `sandboxSeed` for a session that named a
+  template, and neither otherwise. A template the deployment no longer declares is still returned,
+  without a seed, so its turns are refused rather than run on an untemplated worker.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.1.0: authenticated
+turns take the session's template from the control plane, a failed seed is a 500, and
+`workspace_reset`'s `retiered` also covers a sandbox that now serves another template.
 
 ## 1.14.0
 

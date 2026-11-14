@@ -154,7 +154,8 @@ export async function cmdLogin(
       if (err instanceof ApiError && err.status === 404) return {};
       throw err;
     });
-    if (d.profile !== 'sandbox') {
+    // `combined` serves sessions and sandboxes in one control plane (combined control plane spec).
+    if (d.profile !== 'sandbox' && d.profile !== 'combined') {
       c.io.err(
         `sbx: ${c.url} is not the sandbox service (its /v1/discovery has no sandbox profile)`,
       );
