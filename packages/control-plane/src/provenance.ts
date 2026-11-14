@@ -134,6 +134,27 @@ export function recordDigest(r: ProvenanceRecord): string {
   return `sha256:${sha256Hex(canonicalJson(r))}`;
 }
 
+/**
+ * The digest of a build's `build` record (outcome `built`): what a retire cites as `buildRecord`.
+ * Matched by the build's handle when it has one, so a build that was built and then rejected (its
+ * `buildId` stays its handle, not the manifest hash) still finds its record; by the manifest hash
+ * otherwise. Null for a build that never produced one (imported, or retired before it was built).
+ */
+export async function buildRecordOf(
+  store: ProvenanceStore,
+  template: string,
+  build: { buildId: string; handle?: string },
+): Promise<string | null> {
+  const r = (await store.chain(`template/${template}`)).find((x) => {
+    const body = x.body as { outcome?: string; handle?: string; manifest_hash?: string };
+    if (x.kind !== 'build' || body.outcome !== 'built') return false;
+    return build.handle !== undefined
+      ? body.handle === build.handle
+      : body.manifest_hash === build.buildId;
+  });
+  return r ? recordDigest(r) : null;
+}
+
 const hexOf = (digest: string): string => digest.slice('sha256:'.length);
 
 export interface AppendInput {

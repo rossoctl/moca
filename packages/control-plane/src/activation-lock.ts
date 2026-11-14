@@ -13,7 +13,11 @@ import type { TemplateCatalog } from './template-catalog.js';
  * does not take it: a drop can only free quota or a slot, so an activation that read the leases
  * before a drop judged against more leases than remain, never fewer. The wanted answer takes it
  * for its idle-grace stops' lease re-check (§6.5), so no lease is written between the re-check and
- * the answer.
+ * the answer. A retire takes it (§5.1): it ends a build's use, and takeLease re-reads the build's
+ * status under it, so a lease is never written onto a build retired after the activation resolved
+ * it. A sandbox create writes its record under it too, after the same re-read (notRetired), so no
+ * sandbox lands on a build as it is retired; it holds the lock for one catalog read and one record
+ * write.
  *
  * It is process-local, which suffices because one control plane process owns the store: the
  * Deployment runs one replica (deploy/k8s/base/control-plane.yaml), and the file catalog's volume is

@@ -110,6 +110,12 @@ export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): num
     // or a proxy's page) means the URL is not a sandbox-profile control plane -- a MOCA (harness
     // profile) one, or one from before SBX0.
     io.err('sbx: that control plane has no sandbox routes: is it the sandbox service?');
+  } else if (err instanceof ApiError && err.code === 'template_retired') {
+    // 410 (template lifecycle spec §5.1): not a typo in the id, so say what retired means.
+    io.err(
+      `sbx: ${describeError(err)}: a retired template or build is never served again; ` +
+        'use another build (mocactl sbx templates show ID) or another template',
+    );
   } else if (err instanceof ApiError) {
     io.err(`sbx: ${refusalText(err)}`);
   } else {

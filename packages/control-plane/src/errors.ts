@@ -38,6 +38,8 @@ export const CP_ERROR_CODES = [
   'no_active_slot',
   'template_unavailable',
   'template_not_active',
+  'template_retired',
+  'build_in_use',
   'mode_not_allowed',
   'self_attested',
   'digest_mismatch',
@@ -119,6 +121,10 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: a sandbox create on a build that is not active (§6.4); its activation has started unless the
   // create said `activate: false`. Retry-After says when to try again.
   template_not_active: 409,
+  // 410 Gone: the template, or the build a reference names, is retired (§5.1); its records stay.
+  template_retired: 410,
+  // 409: a live sandbox still runs on the build; delete it (or let it end), then retry (§5.1).
+  build_in_use: 409,
   // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
   // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
   mode_not_allowed: 403,

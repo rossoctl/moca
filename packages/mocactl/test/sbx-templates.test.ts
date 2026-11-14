@@ -7,7 +7,7 @@ import { openSbxRuntime, sbxMain } from '../src/sbx/cli.js';
 import type { SbxHost } from '../src/sbx/api.js';
 import { refusalText, SBX_EXIT } from '../src/sbx/commands.js';
 import { dryRun } from '../src/sbx/dry-run.js';
-import { cmdActivate, sizedActivateTimeoutS } from '../src/sbx/templates.js';
+import { cmdActivate, cmdRetire, sizedActivateTimeoutS } from '../src/sbx/templates.js';
 import {
   cleanupTmp,
   fakeCp,
@@ -26,7 +26,8 @@ import {
 // (`quota`, `policy`, `templates create|build|follow|cancel`, `--dry-run`); and activation (§6.3):
 // `templates activate` and `templates deactivate`; and the hosts' slots and memory (§6.2):
 // `sbx hosts`, and why an unavailable build waits; and cold-start pacing (§6.5): the start line, the
-// sized `activate --wait`, the idle grace and `deactivate --stop-now`. example.com hosts only.
+// sized `activate --wait`, the idle grace and `deactivate --stop-now`; and retire (§5.1):
+// `templates retire`. example.com hosts only.
 
 afterEach(cleanupTmp);
 
@@ -556,6 +557,209 @@ describe('sbx templates activate and deactivate (§6.3)', () => {
     );
     expect(w.slept).toEqual([5000, 5000, 2000]);
     expect(w.io.errs.join('')).toContain('timed out after 12 s');
+  });
+});
+
+describe('sbx templates retire (§5.1)', () => {
+  const HANDLE = 'b-0123456789abcdef0123456789';
+  const RECORD = `sha256:${'d'.repeat(64)}`;
+  const retiredBuild = (record: string | null = RECORD) => ({
+    build: HANDLE,
+    buildId: BUILD_ID,
+    readiness: 'retired',
+    record,
+  });
+  const BUILD_PATH = `GET /v1/templates/my-python/builds/${HANDLE}`;
+
+  it('retires a template with a reason, and prints each build; one already retired says so', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/retire': () => ({
+        status: 200,
+        body: {
+          templateId: 'my-python',
+          subject: 'github:1',
+          status: 'retired',
+          builds: [retiredBuild(), { ...retiredBuild(null), build: 'b-old' }],
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--reason', 'superseded'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({ reason: 'superseded' });
+    expect(w.out()).toBe(
+      `retired my-python ${HANDLE}\nretired my-python b-old (already retired)\n`,
+    );
+    expect(await w.run(['templates', 'retire', 'my-python', '--json'])).toBe(0);
+    expect(w.cp.calls.at(-1)!.body).toEqual({});
+    expect(JSON.parse(w.out())).toMatchObject({ templateId: 'my-python', status: 'retired' });
+  });
+
+  it('retires one build with --build, by DELETE', async () => {
+    const w = world({
+      [`DELETE /v1/templates/my-python/builds/${HANDLE}`]: () => ({
+        status: 200,
+        body: {
+          templateId: 'my-python',
+          subject: 'github:1',
+          status: 'retired',
+          ...retiredBuild(),
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--build', HANDLE])).toBe(0);
+    expect(w.cp.calls.at(-1)!.method).toBe('DELETE');
+    expect(w.out()).toBe(`retired my-python ${HANDLE}\n`);
+  });
+
+  it('fails a refused retire, naming the refusal', async () => {
+    const w = world({
+      'POST /v1/templates/my-python/retire': () => ({
+        status: 409,
+        body: { error: 'build_in_use', message: `build ${HANDLE} still serves a live sandbox` },
+      }),
+    });
+    expect(await w.run(['templates', 'retire', 'my-python', '--wait'])).toBe(1);
+    expect(w.err()).toContain('still serves a live sandbox');
+    expect(w.cp.calls).toHaveLength(1);
+  });
+
+  it('says in words that a retired template is never served again', async () => {
+    const w = world({
+      'POST /v1/sandboxes': () => ({
+        status: 410,
+        body: { error: 'template_retired', message: "template 'my-python' is retired" },
+      }),
+    });
+    expect(await w.run(['create', '--template', 'my-python'])).toBe(1);
+    expect(w.err()).toContain("template 'my-python' is retired");
+    expect(w.err()).toContain('never served again');
+  });
+
+  it('refuses --reason with --build or elsewhere, and --timeout without --wait', async () => {
+    const w = world({});
+    for (const argv of [
+      ['templates', 'retire', 'my-python', '--build', HANDLE, '--reason', 'x'],
+      ['templates', 'show', 'my-python', '--reason', 'x'],
+      ['templates', 'retire', 'my-python', '--timeout', '60'],
+      ['templates', 'retire', 'my-python', '--lease', '600'],
+      ['templates', 'retire'],
+    ]) {
+      expect(await w.run(argv), argv.join(' ')).toBe(2);
+    }
+    expect(w.cp.calls).toHaveLength(0);
+  });
+
+  /** cmdRetire on a scripted control plane, with a fake clock: what it slept and said. */
+  function waiting(routes: Record<string, Handler>) {
+    const s = setup();
+    const cp = fakeCp(routes);
+    const { rt, api } = openSbxRuntime(URL_, s.env, { home: s.home, fetchImpl: cp.fetchImpl });
+    const slept: number[] = [];
+    let t = 0;
+    rt.sleep = async (ms: number) => {
+      slept.push(ms);
+      t += ms;
+    };
+    rt.now = () => t;
+    return { ...s, cp, slept, c: { rt, api, url: URL_, io: s.io, json: false } };
+  }
+  const retireRoute = () => ({
+    status: 200,
+    body: {
+      templateId: 'my-python',
+      subject: 'github:1',
+      status: 'retired',
+      builds: [retiredBuild()],
+    },
+  });
+
+  const RUNNING = { running: 3, inUse: 1 };
+  const retiredRead = (capacity: unknown, heldBy: unknown = ['host-1']) =>
+    build({ status: 'retired', readiness: 'retired', capacity, heldBy });
+
+  it('--wait: reads the build until its worker stops, saying once that it still runs', async () => {
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      // The snapshot stays held (no removal yet): only the worker's stop is waited for.
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(++reads < 3 ? RUNNING : null) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    // Said once, however many reads say the same.
+    expect(errs.match(/retired, its worker still runs \(1 in use\)/g)).toHaveLength(1);
+    expect(errs).toContain(`my-python ${HANDLE}: retired, its worker stopped`);
+  });
+
+  it("--wait: keeps waiting while its worker's state cannot be read (running null)", async () => {
+    let reads = 0;
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({
+        status: 200,
+        body: retiredRead(++reads < 3 ? { running: null, inUse: null } : null),
+      }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([5000, 5000]);
+    const errs = w.io.errs.join('');
+    expect(errs.match(/its worker's state cannot be read; still waiting/g)).toHaveLength(1);
+    expect(errs).toContain('retired, its worker stopped');
+  });
+
+  it('--wait: done at once without host agents (heldBy null)', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING, null) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    expect(w.io.errs.join('')).toContain(
+      `my-python ${HANDLE}: retired; no host agent holds it, so its worker is not host-managed`,
+    );
+  });
+
+  it('--wait: done at once when no host holds the build (heldBy empty, worker attached)', async () => {
+    // Host agents exist, but none holds this build (an imported template's operator-run worker):
+    // none will stop its worker, so waiting could only time out.
+    for (const capacity of [RUNNING, { running: null, inUse: null }]) {
+      const w = waiting({
+        'POST /v1/templates/my-python/retire': retireRoute,
+        [BUILD_PATH]: () => ({ status: 200, body: retiredRead(capacity, []) }),
+      });
+      expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+      expect(w.slept).toEqual([]);
+      const errs = w.io.errs.join('');
+      expect(errs).toContain('no host agent holds it, so its worker is not host-managed');
+      expect(errs).not.toContain('its worker still runs');
+    }
+  });
+
+  it('--wait: done at once for a shared build, its worker kept for a build not retired', async () => {
+    // Two builds of one template from one image share a worker id; the other is still wanted.
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: { ...retiredRead(null), shared: true } }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true })).toBe(SBX_EXIT.ok);
+    expect(w.slept).toEqual([]);
+    const errs = w.io.errs.join('');
+    expect(errs).toContain(
+      `my-python ${HANDLE}: retired; its worker also serves a build that is not retired`,
+    );
+    expect(errs).not.toContain('its worker stopped');
+  });
+
+  it('--wait: exits 5 when its worker still runs at --timeout', async () => {
+    const w = waiting({
+      'POST /v1/templates/my-python/retire': retireRoute,
+      [BUILD_PATH]: () => ({ status: 200, body: retiredRead(RUNNING) }),
+    });
+    expect(await cmdRetire(w.c, 'my-python', { wait: true, timeoutS: 12 })).toBe(SBX_EXIT.timedOut);
+    expect(w.slept).toEqual([5000, 5000, 2000]);
+    expect(w.io.errs.join('')).toContain(
+      `timed out after 12 s waiting for my-python ${HANDLE} to stop its worker`,
+    );
   });
 });
 

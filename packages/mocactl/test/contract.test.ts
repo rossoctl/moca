@@ -127,7 +127,30 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
   {
     method: 'get',
     path: '/v1/templates/{id}/builds/{build}',
-    reads: ['buildId', 'handle', 'status', 'readiness', 'capacity', 'reason', 'tags', 'spec'],
+    reads: [
+      'buildId',
+      'handle',
+      'status',
+      'readiness',
+      'capacity',
+      'heldBy',
+      'shared',
+      'reason',
+      'tags',
+      'spec',
+    ],
+  },
+  // `sbx templates retire` (template lifecycle spec §5.1).
+  {
+    method: 'post',
+    path: '/v1/templates/{id}/retire',
+    reads: ['templateId', 'subject', 'status', 'builds'],
+    sends: ['reason'],
+  },
+  {
+    method: 'delete',
+    path: '/v1/templates/{id}/builds/{build}',
+    reads: ['templateId', 'build', 'buildId', 'record', 'status'],
   },
   // `sbx templates tag`, `untag`, `edit` and `transfer` (template lifecycle spec §5.1-§5.2).
   {
@@ -197,6 +220,7 @@ const SBX_TEMPLATE_READS = ['id', 'description', 'tools', 'readiness', 'tags'];
 
 // Codes the client branches on (api/errors.ts, core/session-manager.ts, sbx/commands.ts).
 const CODES_USED = [
+  'template_retired',
   'token_required',
   'token_invalid',
   'token_expired',
@@ -411,7 +435,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [], sandbox: {} });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 25 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 27 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -433,6 +457,8 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.transferTemplateOwner('TID', 'github:1');
     await c.activateTemplate('TID', {});
     await c.deactivateTemplate('TID');
+    await c.retireTemplate('TID');
+    await c.retireTemplate('TID', { build: 'BID' });
     await c.createTemplate({ id: 'x', image: 'i', spec: {} });
     await c.createTemplateBuild('TID', { image: 'i', spec: {} });
     await c.cancelTemplateBuild('TID', 'BID');
@@ -473,6 +499,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'transferTemplateOwner',
         'activateTemplate',
         'deactivateTemplate',
+        'retireTemplate',
         'createTemplate',
         'createTemplateBuild',
         'cancelTemplateBuild',

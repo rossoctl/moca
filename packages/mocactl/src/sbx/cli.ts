@@ -68,6 +68,7 @@ import {
   cmdHosts,
   cmdPolicy,
   cmdQuota,
+  cmdRetire,
   cmdShowTemplate,
   readCreateInputs,
 } from './templates.js';
@@ -131,6 +132,16 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  release your leases on a template; with none left,
                                                  its worker drains and stops (after the host's idle
                                                  grace, if it has one; --stop-now skips the grace)
+  mocactl sbx templates retire ID [--build BUILD] [--reason TEXT] [--wait [--timeout S]] [--json]
+                                                 retire a template you own (every build), or one
+                                                 build: never served again, refused while a sandbox
+                                                 runs on it, not undone (a new build is the way
+                                                 back). --reason: kept in its record (not with
+                                                 --build). --wait: until its worker has stopped
+                                                 (default 300 s; exit 5 on a timeout), at once for
+                                                 a build no host holds, or one whose worker a
+                                                 build not retired uses; waiting for
+                                                 its removal from every host comes with #743
   mocactl sbx hosts [--json]                     per KVM host: active slots, start line, memory
                                                  headroom and floor, idle grace, disk
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed]
@@ -438,13 +449,23 @@ const TEMPLATE_SUBS = [
   ...TEMPLATE_ADMIN_SUBS,
   'activate',
   'deactivate',
+  'retire',
 ];
 /** The `templates` subcommands that take one template ID. */
-const TEMPLATE_ONE_ID = ['build', 'show', 'follow', 'cancel', 'edit', 'activate', 'deactivate'];
+const TEMPLATE_ONE_ID = [
+  'build',
+  'show',
+  'follow',
+  'cancel',
+  'edit',
+  'activate',
+  'deactivate',
+  'retire',
+];
 /** The `templates` subcommands that take --build, and those that take --timeout (a wait; activate's
- * only with --wait). */
-const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag', 'activate'];
-const TAKES_TIMEOUT = ['follow', 'create', 'build', 'activate'];
+ * and retire's only with --wait). */
+const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag', 'activate', 'retire'];
+const TAKES_TIMEOUT = ['follow', 'create', 'build', 'activate', 'retire'];
 /** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env', 'get', 'reset', 'egress']);
 /** The commands that act on one sandbox through `--sandbox ID` only. */
@@ -584,6 +605,7 @@ async function sbxMainWith(
         timeout: { type: 'string' },
         lease: { type: 'string' },
         wait: { type: 'boolean' },
+        reason: { type: 'string' },
         'stop-now': { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
@@ -678,6 +700,7 @@ async function sbxMainWith(
   // `templates SUB`: the template subcommand, for the flags that apply to some of them only.
   const sub = command === 'templates' ? arg : undefined;
   const activating = sub === 'activate';
+  const retiring = sub === 'retire';
   if (
     values.timeout !== undefined &&
     command !== 'run' &&
@@ -695,8 +718,8 @@ async function sbxMainWith(
     io.err(`sbx: --${createFlag} only applies to templates create and build\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if (values.timeout !== undefined && activating && !values.wait) {
-    io.err(`sbx: --timeout with templates activate needs --wait\n${SBX_USAGE}`);
+  if (values.timeout !== undefined && (activating || retiring) && !values.wait) {
+    io.err(`sbx: --timeout with templates ${sub} needs --wait\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   if (values.id !== undefined && sub !== 'create') {
@@ -715,8 +738,22 @@ async function sbxMainWith(
     io.err(`sbx: templates build takes one --spec\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  if ((values.lease !== undefined || values.wait !== undefined) && !activating) {
-    io.err(`sbx: --lease and --wait only apply to templates activate\n${SBX_USAGE}`);
+  if (values.lease !== undefined && !activating) {
+    io.err(`sbx: --lease only applies to templates activate\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.wait !== undefined && !(activating || retiring)) {
+    io.err(`sbx: --wait only applies to templates activate and templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && !retiring) {
+    io.err(`sbx: --reason only applies to templates retire\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  if (values.reason !== undefined && values.build !== undefined) {
+    io.err(
+      `sbx: --reason is kept for a whole template's retire; retiring one build (--build) takes none\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
   if (values['stop-now'] !== undefined && !(command === 'templates' && arg === 'deactivate')) {
@@ -767,8 +804,8 @@ async function sbxMainWith(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2),
-  // and activate and deactivate (§6.3); bare `templates` lists them.
+  // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2,
+  // retire among them), and activate and deactivate (§6.3); bare `templates` lists them.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -1140,6 +1177,13 @@ async function sbxMainWith(
           ...(timeout !== undefined ? { timeoutS: timeout } : {}),
         });
       if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!, values['stop-now'] === true);
+      if (arg === 'retire')
+        return cmdRetire(ctx, extra[0]!, {
+          ...(values.build !== undefined ? { build: values.build } : {}),
+          ...(values.reason !== undefined ? { reason: values.reason } : {}),
+          wait: values.wait === true,
+          ...(timeout !== undefined ? { timeoutS: timeout } : {}),
+        });
       return cmdTemplates(ctx);
     case 'hosts':
       return cmdHosts(ctx);

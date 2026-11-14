@@ -219,12 +219,13 @@ export function wantedBuilds(
 /**
  * Placement (§6.2, with its memory rule). Each host's count starts at the workers that stay
  * running on it whatever this pass decides: the wanted builds it runs, and the unleased ones it
- * runs whose worker has a live sandbox (`busy`: they drain, and are never stopped under one). Then,
- * in the wanted order (first leased, first placed), a build already running on a holder stays there
- * (the first by id, when more than one runs it), counted already and paid for: no start at all
- * (§6.5), and no displacement for it; any other goes to a holder under its activeLimit, the one
- * that fits without displacing a graced build first, then the lowest count, then by id. A build no
- * host holds is `not_held`; one whose every holder is full is `no_slot`.
+ * runs whose worker has a live sandbox (`busy`: they drain, and are never stopped under one),
+ * retired builds included. Then, in the wanted order (first leased, first placed), a build already
+ * running on a holder stays there (the first by id, when more than one runs it), counted already
+ * and paid for: no start at all (§6.5), and no displacement for it; any other goes to a holder
+ * under its activeLimit, the one that fits without displacing a graced build first, then the
+ * lowest count, then by id. A build no host holds is `not_held`; one whose every holder is full is
+ * `no_slot`.
  *
  * A host that reports its memory figures must also have room for a build it does not run yet:
  *   pending  = Σ cost(placed here this pass, its worker not running yet; or running by an attached
@@ -267,12 +268,15 @@ export function place(
   const wanted = wantedBuilds(docs, nowS);
   const wantedIds = new Set(wanted.map((w) => w.build.buildId));
   const workerOf = new Map<string, string>();
+  // A retired build's worker still draining a live sandbox keeps running too (§5.1), so it counts.
   const buildOfWorker = new Map<string, string>();
   for (const d of docs)
     for (const b of d.builds)
-      if (b.status === 'registered') {
+      if (b.status === 'registered' || (b.status === 'retired' && b.worker !== '')) {
         workerOf.set(b.buildId, b.worker);
-        if (b.worker) buildOfWorker.set(b.worker, b.buildId);
+        // A worker a registered build shares is that build's; a retired one's own is its own.
+        if (b.worker && (b.status === 'registered' || !buildOfWorker.has(b.worker)))
+          buildOfWorker.set(b.worker, b.buildId);
       }
   // Every build's cost by its worker, whatever its status: a draining or retired build's worker
   // that still runs holds its memfile as much as a wanted one's.

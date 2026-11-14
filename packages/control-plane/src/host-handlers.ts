@@ -5,6 +5,7 @@ import { recordDigest } from './provenance.js';
 import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
 import { activationLock } from './activation-lock.js';
 import {
+  hostManaged,
   liveLeases,
   place,
   unattachedPlaced,
@@ -468,6 +469,25 @@ function registrationResults(
 /** The statuses a host may still report on: claimed, and not yet registered, rejected or failed. */
 const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
 
+/**
+ * The build ids and workers of every build that is not retired, in every template. A retired build
+ * that shares either with one (the same snapshot built again, a twin in another template, a worker
+ * id two builds from one image share) names a snapshot or worker still needed: it is never stopped
+ * for the retire (that build's own entries decide whether the worker runs), and it reports no
+ * capacity to wait out (sandbox-handlers.ts buildBody).
+ */
+export function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
+  const ids = new Set<string>();
+  const workers = new Set<string>();
+  for (const d of docs)
+    for (const b of d.builds) {
+      if (b.status === 'retired') continue;
+      ids.add(b.buildId);
+      if (b.worker) workers.add(b.worker);
+    }
+  return (b) => ids.has(b.buildId) || (b.worker !== '' && workers.has(b.worker));
+}
+
 /** Refuses a report on a build that is not this host's, or that takes no more reports. */
 function reportable(y: TemplateBuild, host: string): void {
   if (y.claim?.host !== host) throw new CpError('not_found', 'no such build claimed by this host');
@@ -573,8 +593,14 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * and placed on it (the same placement activate judges by), in start order; `stop`, the ones it
    * holds with no live lease and no idle grace, or that it runs while placement keeps them on
    * another host; `starting`, those placed but not yet attached; and `graced`, those kept running
-   * through their idle grace (see wantedAnswer). A worker is never stopped under a live sandbox: it
-   * drains first, so a build with one is in no stop list.
+   * through their idle grace (see wantedAnswer). `stop` also lists the retired builds it holds
+   * (§5.1: no longer wanted, never run again), except one whose snapshot or worker a build that is
+   * not retired shares (liveSnapshots): that build's entries decide. A worker in `run` for one build
+   * is never in `stop` for another that shares its worker id. A worker is never stopped under a
+   * live sandbox: it drains first, so a build with one is in no stop list. Removing a retired
+   * build's worker and snapshot from the host is not asked here. A build imported from
+   * SH_SANDBOX_TEMPLATES (not hostManaged) is in no list, retired or not: the deployment runs its
+   * worker.
    * `egressSids`: the workspace keys of the sandboxes whose egress events the agent ships
    * (hostSandboxes), and no others.
    */
@@ -592,9 +618,9 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
-   * holds: an `activate` or `deactivate` record by the host, except a refusal repeating the host's
-   * last one for a build still in its `run` (answered `recorded: null`). Readiness still comes from
-   * the relay.
+   * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
+   * `deactivate` record by the host, except a refusal repeating the host's last one for a build
+   * still in its `run` (answered `recorded: null`). Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -605,11 +631,19 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'event must be attached, refused or detached');
     }
     const buildId = typeof b.buildId === 'string' ? b.buildId : '';
+    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too.
+    const ok = (x: { status: string }) =>
+      x.status === 'registered' || (event === 'detached' && x.status === 'retired');
     const doc = (await cat.list()).find((d) =>
-      d.builds.some((x) => x.buildId === buildId && x.status === 'registered'),
+      d.builds.some((x) => x.buildId === buildId && ok(x)),
     );
     if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
-      throw new CpError('not_found', 'no registered build this host holds');
+      throw new CpError(
+        'not_found',
+        event === 'detached'
+          ? 'no registered or retired build this host holds'
+          : 'no registered build this host holds',
+      );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
     // What the host runs, as placement counts it, without waiting for its next inventory: started
@@ -943,10 +977,20 @@ async function wantedAnswer(
   // agent starts nothing for them: their units run).
   const keep: Record<string, unknown>[] = [];
   const displaced: Record<string, unknown>[] = [];
+  const shared = liveSnapshots(docs);
   for (const d of docs) {
     for (const b of d.builds) {
-      if (b.status !== 'registered' || !mine || mine.holds[b.buildId] === undefined) continue;
+      if (!mine || mine.holds[b.buildId] === undefined || !hostManaged(b)) continue;
       const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
+      // A retired build has no lease and is never placed or graced: its worker stops once idle.
+      if (b.status === 'retired') {
+        // Its snapshot or worker serves a build that is not retired: left alone.
+        if (shared(b)) continue;
+        if (mine.refused) delete mine.refused[b.buildId];
+        if (b.worker && !busy.has(b.worker)) stop.push(entry);
+        continue;
+      }
+      if (b.status !== 'registered') continue;
       if (p.placed.get(b.buildId) === host) {
         run.push(entry);
         continue;
@@ -998,6 +1042,11 @@ async function wantedAnswer(
       ((a.buildId as string) < (b.buildId as string) ? -1 : 1),
   );
   run.push(...keep);
+  // One worker id can serve two builds (two builds of one template from one image): a worker in
+  // `run` for one (wanted or graced) is never in `stop` for the other, or every poll would stop and
+  // restart it.
+  const runs = new Set(run.map((e) => e.worker));
+  const stops = stop.filter((e) => !runs.has(e.worker));
   // Of `run`, the builds whose worker is not attached to the relay (its presence, as readiness
   // reads it); the agent counts those whose unit it runs as starting. Absent when the presence
   // cannot be read: the agent then counts its own recent starts.
@@ -1018,7 +1067,7 @@ async function wantedAnswer(
     status: 200,
     body: {
       run,
-      stop,
+      stop: stops,
       ...(starting ? { starting } : {}),
       ...(grace ? { graced: keep.map((x) => x.buildId as string) } : {}),
     },

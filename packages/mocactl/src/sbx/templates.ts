@@ -20,10 +20,11 @@ import { baselineAtHead } from './push.js';
 /**
  * The template commands of mocactl (template lifecycle spec §4, §8): the reads a client makes
  * before a create (quota, policy), one template and its builds or one build, create and follow a
- * build, cancel it, and `create --seed`, which runs the served build's own seed; and activation
- * (§6.3): take or renew a lease, wait for the build to be active, release it; and the KVM hosts'
- * slots, start line, memory, idle grace and disk (§6.2, §6.5). Every command has `--json` (the
- * API's answer, never a token); a wait that runs out of time exits 5.
+ * build, cancel it, and `create --seed`, which runs the served build's own seed; activation (§6.3):
+ * take or renew a lease, wait for the build to be active, release it; retire (§5.1), waiting until
+ * no host holds the build; and the KVM hosts' slots, start line, memory, idle grace and disk (§6.2,
+ * §6.5). Every command has `--json` (the API's answer, never a token); a wait that runs out of time
+ * exits 5.
  */
 
 /** `templates follow`'s default bound, in seconds; also the bound of a create's wait for a queue slot. */
@@ -32,6 +33,8 @@ export const FOLLOW_TIMEOUT_S = 3600;
 export const POLL_MS = 5000;
 /** `templates activate --wait`'s limit with no --timeout, in seconds: the floor of a sized one. */
 export const ACTIVATE_TIMEOUT_S = 1800;
+/** `templates retire --wait`'s limit with no --timeout, in seconds. */
+export const RETIRE_TIMEOUT_S = 300;
 /** The sized limit's ceiling: a host reporting an outlier start time never makes --wait sit longer. */
 export const ACTIVATE_TIMEOUT_CAP_S = 14_400;
 
@@ -178,7 +181,9 @@ function readinessText(
 ): string {
   if (b.readiness === null) return '';
   const c = b.capacity;
-  const cap = c ? ` (running ${c.running}${c.inUse !== null ? `, in use ${c.inUse}` : ''})` : '';
+  const cap = c
+    ? ` (running ${c.running ?? '?'}${c.inUse !== null ? `, in use ${c.inUse}` : ''})`
+    : '';
   const extra = [
     ...(!c && b.readinessReason ? [sanitizeRemote(b.readinessReason)] : []),
     ...(b.queued ? [`queued at ${b.queuePosition ?? '?'}`] : []),
@@ -801,6 +806,97 @@ export async function cmdDeactivate(c: SbxCtx, id: string, stopNow = false): Pro
         `${sanitizeRemote(r.templateId)}: released ${r.released} lease${r.released === 1 ? '' : 's'}` +
           `${stopNow ? ', stopped now (no idle grace)' : ''}\n`,
       );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
+}
+
+/**
+ * `templates retire ID [--build B] [--reason T] [--wait [--timeout S]]` (§5.1): retire the template
+ * (every build of it) or build B, and print each build retired. With --wait, then read each build
+ * until it is `retired` and its worker no longer runs (`capacity` null: the host stopped it, after
+ * the wanted state's `stop`), saying so while it still runs; `running` null, presence unreadable,
+ * is waited out too, never taken as stopped. Only a host agent that holds the build stops its
+ * worker (the wanted state's `stop` lists the builds a host holds), so a build no host holds has
+ * nothing to wait for: `heldBy` null (no host agents; or absent, from an older control plane) or
+ * empty (no host holds it, such as an imported template whose worker an operator runs). Then a
+ * worker that still runs is said to be not host-managed, to be stopped where it runs. Nor does a
+ * `shared` build (its snapshot or worker serves a build that is not retired): its worker is kept
+ * running for that build, and that is said. A wait past
+ * --timeout (default RETIRE_TIMEOUT_S) exits 5. Waiting for the snapshot's removal from every host
+ * comes with the host's removal step (#743).
+ */
+export async function cmdRetire(
+  c: SbxCtx,
+  id: string,
+  opts: { build?: string; reason?: string; wait: boolean; timeoutS?: number },
+): Promise<number> {
+  const timeoutS = opts.timeoutS ?? RETIRE_TIMEOUT_S;
+  try {
+    const r = await c.api.retireTemplate(id, {
+      ...(opts.build !== undefined ? { build: opts.build } : {}),
+      ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+    });
+    const builds = r.builds ?? [{ build: r.build ?? opts.build ?? '', record: r.record ?? null }];
+    if (c.json) c.io.out(JSON.stringify(r) + '\n');
+    else
+      for (const b of builds)
+        c.io.out(
+          `retired ${sanitizeRemote(r.templateId)} ${sanitizeRemote(b.build)}` +
+            `${b.record ? '' : ' (already retired)'}\n`,
+        );
+    if (!opts.wait) return SBX_EXIT.ok;
+    const end = c.rt.now() + timeoutS * 1000;
+    for (const { build } of builds) {
+      let said = '';
+      for (;;) {
+        let b: SbxBuild | undefined;
+        try {
+          b = await c.api.getTemplateBuild(r.templateId, build);
+        } catch (err) {
+          if (!transient(err)) throw err;
+        }
+        // Its worker serves a build that is not retired too: kept running for it, never stopped.
+        if (b && b.status === 'retired' && b.shared === true) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired; its worker also ` +
+              'serves a build that is not retired, so it keeps running for that build',
+          );
+          break;
+        }
+        if (b && b.status === 'retired' && b.capacity === null) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired, its worker stopped`,
+          );
+          break;
+        }
+        // No host holds it (heldBy null, absent or empty): no host agent will stop its worker.
+        if (b && b.status === 'retired' && (b.heldBy ?? []).length === 0) {
+          c.io.err(
+            `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired; no host agent ` +
+              'holds it, so its worker is not host-managed: stop it where it runs',
+          );
+          break;
+        }
+        if (b) {
+          const inUse = b.capacity?.inUse;
+          const why =
+            b.status !== 'retired'
+              ? sanitizeRemote(b.status)
+              : b.capacity?.running === null
+                ? "retired, its worker's state cannot be read; still waiting"
+                : `retired, its worker still runs${typeof inUse === 'number' ? ` (${inUse} in use)` : ''}`;
+          if (why !== said)
+            c.io.err(`${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: ${why}`);
+          said = why;
+        }
+        const left = end - c.rt.now();
+        if (left <= 0) return timedOut(c, `${r.templateId} ${build} to stop its worker`, timeoutS);
+        await c.rt.sleep(Math.min(POLL_MS, left), c.signal);
+        if (c.signal?.aborted) return SBX_EXIT.failed;
+      }
+    }
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
