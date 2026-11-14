@@ -1725,8 +1725,18 @@ function policyWidens(cur: Policy, next: Policy): string[] {
   const lower = (xs: string[]) => new Set(xs.map((x) => x.toLowerCase()));
   const regs = lower(cur.allowedRegistries);
   if (next.allowedRegistries.some((r) => !regs.has(r.toLowerCase()))) out.push('allowedRegistries');
-  const repos = (m: Record<string, string[]> | undefined) =>
-    new Map(Object.entries(m ?? {}).map(([k, v]) => [k.toLowerCase(), new Set(v)]));
+  // Each registry's effective list, as admitBuild reads it: the union of the lists of every key
+  // that names it in any case, so a second key in another case can't widen it unseen.
+  const repos = (m: Record<string, string[]> | undefined) => {
+    const out = new Map<string, Set<string>>();
+    for (const [k, v] of Object.entries(m ?? {})) {
+      const reg = k.toLowerCase();
+      const set = out.get(reg) ?? new Set<string>();
+      for (const x of v) set.add(x);
+      out.set(reg, set);
+    }
+    return out;
+  };
   const was = repos(cur.allowedRepositories);
   const now = repos(next.allowedRepositories);
   const nextRegs = lower(next.allowedRegistries);

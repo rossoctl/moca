@@ -275,6 +275,16 @@ describe('the admin role (spec §3, §6)', () => {
       { ...base, allowedRegistries: [...base.allowedRegistries, 'quay.io'] },
       { ...base, allowedRepositories: { 'docker.io': ['library/python', 'library/node'] } },
       { ...base, allowedRepositories: {} },
+      // A second key in another case: the registry's list is the union of both, so it widens,
+      // whichever key comes first.
+      {
+        ...base,
+        allowedRepositories: { 'docker.io': ['library/python'], 'DOCKER.IO': ['library/node'] },
+      },
+      {
+        ...base,
+        allowedRepositories: { 'DOCKER.IO': ['library/node'], 'docker.io': ['library/python'] },
+      },
     ]) {
       expect(await codeOf(() => put(who(CAROL), wider))).toBe('forbidden');
       expect((await policy.current()).policy).toEqual(base);
