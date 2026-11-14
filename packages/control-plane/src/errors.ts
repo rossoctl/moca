@@ -36,6 +36,7 @@ export const CP_ERROR_CODES = [
   'template_exists',
   'policy_refused',
   'mode_not_allowed',
+  'self_attested',
   'bootstrap_subject',
   'self_revoke',
   'admin_granted',
@@ -113,6 +114,9 @@ const STATUS: Record<CpErrorCode, number> = {
   // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
   // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
   mode_not_allowed: 403,
+  // 409: deployment visibility for a template with a self-attested build, until an admin trusts its
+  // gate record (trustedGateRecords).
+  self_attested: 409,
   // 409: the subject is enrolled or an admin by the deployment's settings, which the API never edits.
   bootstrap_subject: 409,
   // 409: an admin may not revoke its own admin role.

@@ -192,7 +192,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Templates      | `GET /v1/templates`, `GET /v1/templates/{id}`, `GET /v1/templates/{id}/builds[/{build}]`, `GET /v1/templates/{id}/tags`: both route profiles (API 1.4.0)                                                |
 | Self-serve     | `POST /v1/templates`, `POST /v1/templates/{id}/builds`, `POST /v1/templates/{id}/builds/{build}/cancel`, `GET` and `PUT /v1/policy`, `GET /v1/quota`: both route profiles (API 1.5.0)                   |
 | Template admin | `POST /v1/templates/{id}/tags`, `DELETE /v1/templates/{id}/tags/{tag}`, `PATCH /v1/templates/{id}` (the owner, or an admin), `PUT /v1/templates/{id}/owner` (an admin): both route profiles (API 1.8.0) |
-| Subjects       | `GET /v1/subjects`; `PUT`, `DELETE /v1/subjects/{subject}[/roles/admin]` (enroll, unenroll; grant with an optional `until`, revoke): both route profiles (API 1.9.0)                                    |
+| Subjects       | `GET /v1/subjects`; `PUT`, `DELETE /v1/subjects/{subject}[/roles/admin]` (enroll, unenroll; grant with an optional `until`, revoke): both route profiles (API 1.10.0)                                   |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -227,7 +227,7 @@ visibility (`private` hides it from other subjects, as a 404). An admin transfer
 (`github:<id>` or `oidc:<sub>`), including one the deployment declared, which has no owner until then. Each change is a
 provenance record (`tag`, `visibility` or `owner`) naming the new value and the one before.
 
-Who is enrolled and who is an admin (API 1.9.0, with a template store): the deployment's settings
+Who is enrolled and who is an admin (API 1.10.0, with a template store): the deployment's settings
 (`SH_ALLOWED_SUBJECTS`, `SH_ADMIN_SUBJECTS`) are the bootstrap, and admins add to them through `/v1/subjects`: any admin
 reads the list, only an admin named in `SH_ADMIN_SUBJECTS` changes it. Roles and enrollment are evaluated per request, so
 a grant, a revoke or a lapsed `until` takes effect at the subject's next request; a token's `roles` claim reports what

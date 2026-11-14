@@ -1455,16 +1455,28 @@ pub_snippet="$pub_tmproot/publish_snippet.sh"
   fn_body cleanup_on_exit
   fn_body lock_down
   fn_body publish_snapshot
+  fn_body seed_verify_cache
   printf '%s\n' "$main_body"
 } >"$pub_snippet"
 
-# $1 = verify outcome (0 or 1), $2 = "pre" to seed a previously-good $OUT.
-# Echoes "<exit code>|<manifest contents or MISSING>|<leftover pending/retired dirs>".
+# $1 = verify outcome (0 or 1), $2 = "pre" to seed a previously-good $OUT, $3 = the mock
+# microvm-worker's exit code for the verify-cache seed ("none": no binary at all).
+# Echoes "<exit code>|<manifest contents or MISSING>|<leftover pending/retired dirs>|<seed>",
+# <seed> being the mock's argv and what $OUT held when it ran (manifest), or NONE.
 run_publish_scenario() {
-  local verify_rc="$1" seed="$2"
-  local root out rc manifest leftovers
+  local verify_rc="$1" seed="$2" worker_rc="${3:-0}"
+  local root out rc manifest leftovers seeded
   root="$(mktemp -d "$pub_tmproot/scenario.XXXXXX")"
   out="$root/snapshots/default"
+  if [ "$worker_rc" != none ]; then
+    # The mock records its argv, its environment's SH_SNAPSHOT_DIR (env -i must clear it),
+    # and the published manifest it was pointed at, then exits as told. Literal: the mock's
+    # own shell expands these, not this one.
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh\nprintf "%%s %%s %%s snapdir=%%s|" "$0" "$1" "$(cat "$2/manifest.json")" "${SH_SNAPSHOT_DIR:-unset}" >>"%s"\nexit %s\n' \
+      "$root/seed.log" "$worker_rc" >"$root/microvm-worker"
+    chmod 0755 "$root/microvm-worker"
+  fi
   if [ "$seed" = "pre" ]; then
     mkdir -p "$out"
     printf 'PREVIOUS-GOOD\n' >"$out/manifest.json"
@@ -1482,6 +1494,8 @@ run_publish_scenario() {
     for f in vmstate memfile kernel rootfs agent; do printf 'stub-%s\n' "$f" >"$STAGE/$f"; done
     printf 'FRESHLY-BUILT\n' >"$STAGE/manifest.json"
     VMM="firecracker"
+    WORKER_BIN="$root/microvm-worker"
+    export SH_SNAPSHOT_DIR="/must-not-reach-the-seed"
     PENDING=""
     CLEANUP_PID=""
     CLEANUP_JAIL=""
@@ -1512,7 +1526,7 @@ run_publish_scenario() {
     install() { cp "${@:$#-1:1}" "${@:$#:1}"; }
     chown() { :; }
     verify_restore() { return "$verify_rc"; }
-    : "$OUT" "$STAGE" "$PENDING" "$VMM" "$CLEANUP_PID" "$CLEANUP_JAIL" \
+    : "$OUT" "$STAGE" "$PENDING" "$VMM" "$WORKER_BIN" "$CLEANUP_PID" "$CLEANUP_JAIL" \
       "$CLEANUP_EXTRA_DIR" "$CLEANUP_FS_PID" "$CLEANUP_PENDING_DIR"
     # shellcheck disable=SC1090
     . "$pub_snippet"
@@ -1530,23 +1544,34 @@ run_publish_scenario() {
     manifest="MISSING"
   fi
   leftovers="$(find "$root/snapshots" -maxdepth 1 -name '.build-snapshot-*' 2>/dev/null | wc -l | tr -d ' ')"
-  printf '%s|%s|%s\n' "$rc" "$manifest" "$leftovers"
+  seeded="NONE"
+  if [ -f "$root/seed.log" ]; then
+    seeded="$(sed -e "s#$root/microvm-worker#BIN#" -e "s#$out#OUT#" "$root/seed.log")"
+  fi
+  printf '%s|%s|%s|%s\n' "$rc" "$manifest" "$leftovers" "$seeded"
 }
 
 got="$(run_publish_scenario 0 pre)"
-check "verify passes, previous snapshot present: main succeeds, \$OUT holds the NEW snapshot, nothing left behind" \
-  "$got" "0|FRESHLY-BUILT|0"
+check "verify passes, previous snapshot present: main succeeds, \$OUT holds the NEW snapshot, nothing left behind, the verify cache is seeded from the published \$OUT with a cleared environment" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
 got="$(run_publish_scenario 0 nopre)"
-check "verify passes, no previous snapshot: main succeeds, \$OUT is created, nothing left behind" \
-  "$got" "0|FRESHLY-BUILT|0"
+check "verify passes, no previous snapshot: main succeeds, \$OUT is created, nothing left behind, seeded" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
+# The verify-cache seed is best-effort: a failing (e.g. older) or missing worker binary never fails a
+# build that would otherwise succeed.
+got="$(run_publish_scenario 0 pre 1)"
+check "the seed fails (an older microvm-worker): the build still succeeds and \$OUT is published" \
+  "$got" "0|FRESHLY-BUILT|0|BIN -verify-snapshot FRESHLY-BUILT snapdir=unset|"
+got="$(run_publish_scenario 0 pre none)"
+check "no microvm-worker binary: the build still succeeds, no seed" "$got" "0|FRESHLY-BUILT|0|NONE"
 # The two that would have gone green on the pre-fix order, with $OUT holding a sealed,
 # self-consistent snapshot that does not restore:
 got="$(run_publish_scenario 1 pre)"
-check "verify FAILS: main fails, the PREVIOUS good snapshot is untouched, and the unverified one is removed" \
-  "$got" "1|PREVIOUS-GOOD|0"
+check "verify FAILS: main fails, the PREVIOUS good snapshot is untouched, the unverified one is removed, nothing seeded" \
+  "$got" "1|PREVIOUS-GOOD|0|NONE"
 got="$(run_publish_scenario 1 nopre)"
 check "verify FAILS with no previous snapshot: main fails and \$OUT is never created" \
-  "$got" "1|MISSING|0"
+  "$got" "1|MISSING|0|NONE"
 chmod -R u+rwX "$pub_tmproot" 2>/dev/null
 rm -rf "$pub_tmproot"
 trap - EXIT
@@ -1853,10 +1878,10 @@ for drift in real drifted; do
   fi
 done
 
-echo "== SBX0.2b: the manifest fingerprint is the DER sha256, outside hash"
+echo "== SBX0.2b: the manifest fingerprint is the DER sha256, inside hash (version 2)"
 mw="$EGT/mf"; mkdir -p "$mw/stage"
 for mode in with without chv; do
-  : >"$mw/stage/kernel"; : >"$mw/stage/rootfs"; : >"$mw/stage/agent"
+  : >"$mw/stage/kernel"; : >"$mw/stage/rootfs"; : >"$mw/stage/agent"; : >"$mw/stage/vmstate"; : >"$mw/stage/memfile"
   vmm=firecracker
   [ "$mode" = chv ] && vmm=cloud-hypervisor
   {
@@ -1880,10 +1905,10 @@ done
 check "manifest carries egress_ca_sha256 with the flag" \
   "$(grep -cF "\"egress_ca_sha256\": \"$want_sha\"" "$mw/with.json")" "1"
 check "manifest has no egress_ca_sha256 without the flag" "$(grep -c egress_ca "$mw/without.json")" "0"
-check "the hash is unchanged by the field" \
-  "$(grep '"hash"' "$mw/with.json" | tr -d ',')" "$(grep '"hash"' "$mw/without.json")"
-check "the field comes after hash (outside it)" \
-  "$(awk '/"hash"/{h=NR} /egress_ca_sha256/{e=NR} END{print (h<e)?"yes":"no"}' "$mw/with.json")" "yes"
+check "the hash changes with the field (version 2 covers it)" \
+  "$([ "$(grep '"hash"' "$mw/with.json")" != "$(grep '"hash"' "$mw/without.json")" ] && echo yes || echo no)" "yes"
+check "the without-flag manifest is valid JSON" \
+  "$(python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mw/without.json" && echo yes || echo no)" "yes"
 check "the manifest's kernel_release is the probed guest kernel" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kernel_release"])' "$mw/without.json")" "6.1.155-guest"
 check "the Firecracker manifest's features are [lease-v1, balloon-fpr-v1]" \
@@ -1895,6 +1920,58 @@ check "the with-flag manifest is valid JSON" \
   "$(python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$mw/with.json" && echo yes || echo no)" "yes"
 check "assemble_rootfs calls install_egress_ca only when the flag is set" \
   "$(fn_body assemble_rootfs | grep -cF '[ -n "$EGRESS_CA" ] && install_egress_ca')" "1"
+echo "== manifest hash version 2 matches vmpool.Manifest.ComputeHash"
+mv2="$EGT/mv2"; mkdir -p "$mv2/stage"
+for f in kernel rootfs agent vmstate memfile; do printf '%s-bytes' "$f" >"$mv2/stage/$f"; done
+mkdir -p "$mv2/rootfs/etc"
+printf 'image=i@sha256:%s\ndigest=sha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'a%.0s' {1..64})" >"$mv2/rootfs/etc/moca-rootfs-source"
+{
+  echo 'log() { :; }'
+  echo "STAGE='$mv2/stage'; ROOTFS='$mv2/rootfs'; IMAGE=i; VMM=firecracker; INSTANCE_TYPE=t; GUEST_RAM_MB=256; VCPUS=1; EGRESS_CA=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+  printf '%s\n' "MANIFEST_CAPABILITIES='git"$'\n'"bash'"
+  sed -n '/^write_manifest() {/,/^MANIFEST$/p' "$SCRIPT"
+  echo '}'
+  echo 'write_manifest'
+} >"$mv2/run.sh"
+bash "$mv2/run.sh" >/dev/null 2>&1
+check "the version-2 manifest is valid JSON with hash_version 2" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hash_version"])' "$mv2/stage/manifest.json" 2>/dev/null)" "2"
+# Recompute the hash from the manifest's own fields, in the line format the Go side pins
+# (TestManifestV2HashMatchesBuildSnapshot): a drift on either side fails one of the two.
+check "the manifest records the rootfs's source image digest" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_image_digest",""))' "$mv2/stage/manifest.json")" "sha256:$(printf 'a%.0s' {1..64})"
+check "the hash is the version-2 lines' sha256, computed from the manifest's fields" \
+  "$(python3 - "$mv2/stage/manifest.json" <<'PY'
+import hashlib, json, sys
+m = json.load(open(sys.argv[1]))
+lines = ["moca-snapshot-manifest/2"] + [f"{k}:{v}" for k, v in [
+    ("image", m["image"]), ("vmm", m["vmm"]), ("instance_type", m["instance_type"]),
+    ("kernel_release", m["kernel_release"]), ("guest_ram_mb", m["guest_ram_mb"]), ("vcpus", m["vcpus"]),
+    ("capabilities", ",".join(sorted(m["capabilities"]))), ("built_at", m["built_at"]),
+    ("kernel", m["kernel_sha256"]), ("rootfs", m["rootfs_sha256"]), ("agent", m["agent_sha256"]),
+    ("vmstate", m["vmstate_sha256"]), ("memfile", m["memfile_sha256"]),
+    ("ch_config", m.get("ch_config_sha256", "")), ("egress_ca", m.get("egress_ca_sha256", "")),
+    ("source_image_digest", m.get("source_image_digest", ""))]]
+print("ok" if m["hash"] == "sha256:" + hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest() else "mismatch")
+PY
+)" "ok"
+# The capabilities are sorted by byte, as Go's sort.Strings is, whatever the build host's locale:
+# en_US collates "a" before "B", byte order puts "B" first. (A host without that locale sorts by byte
+# anyway, and the check still holds.)
+{
+  echo 'log() { :; }'
+  echo "STAGE='$mv2/stage'; ROOTFS='$mv2/rootfs'; IMAGE=i; VMM=firecracker; INSTANCE_TYPE=t; GUEST_RAM_MB=256; VCPUS=1; EGRESS_CA=''; MANIFEST_GUEST_KERNEL=6.1.155-guest"
+  printf '%s\n' "MANIFEST_CAPABILITIES='a"$'\n'"B'"
+  sed -n '/^write_manifest() {/,/^MANIFEST$/p' "$SCRIPT"
+  echo '}'
+  echo 'write_manifest'
+} >"$mv2/run-locale.sh"
+LC_ALL=en_US.UTF-8 bash "$mv2/run-locale.sh" >/dev/null 2>&1
+check "the manifest's capabilities are in byte order under an en_US locale" \
+  "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["capabilities"]))' "$mv2/stage/manifest.json" 2>/dev/null)" "B,a"
+check "the Go golden lines hash to the digest snapshot_test.go pins" \
+  "$(printf 'moca-snapshot-manifest/2\nimage:i\nvmm:firecracker\ninstance_type:t\nkernel_release:k\nguest_ram_mb:256\nvcpus:1\ncapabilities:bash,git\nbuilt_at:2026-11-03T00:00:00Z\nkernel:sha256:k\nrootfs:sha256:r\nagent:sha256:a\nvmstate:sha256:v\nmemfile:sha256:m\nch_config:\negress_ca:\nsource_image_digest:sha256:s\n' | sha256sum | cut -d' ' -f1)" \
+  "$(sed -n 's/^const manifestV2Golden = "\([0-9a-f]*\)"$/\1/p' "$(dirname "$SCRIPT")/../../remote-worker/internal/vmpool/snapshot_test.go")"
 rm -rf "$EGT"
 
 echo "== balloon-fpr-v1: the Firecracker golden snapshot carries a reporting-only balloon"
