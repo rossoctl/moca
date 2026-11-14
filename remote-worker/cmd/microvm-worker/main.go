@@ -245,6 +245,17 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 	return cfg, err
 }
 
+// maxLeaseGraceS is the largest SH_LEASE_GRACE_S a worker boots with (plan 4, M6): the
+// relay's LeaseControl timeout for reset and set_mode is 31 min, the default grace plus
+// 60 s, and a reset or a set_mode downgrade blocks for up to the grace limit plus the cut
+// Exec's unwind. A longer grace would let the relay fail a call the worker is still
+// running, and the client would then report an op that later lands.
+//
+// Linked to LEASE_MUTATE_TIMEOUT_MS in packages/sandbox-relay/src/sandbox-caller.ts: raise one
+// only with the other (TestMaxLeaseGraceFitsTheRelayMutateTimeout and the relay's twin read
+// the other side's literal).
+const maxLeaseGraceS = 1800
+
 // leaseConfig reads the SH_LEASE_* knobs (spec §4, §6). Unset leaves a field zero for
 // vmpool's Normalize to default; a malformed value is refused, never defaulted -- the
 // WORKER_MAX_CONCURRENT posture, since a lease's lifetime or reclaim target that came
@@ -252,7 +263,8 @@ func poolConfig(get func(string) string) (vmpool.Config, error) {
 // or not, so a bad value fails at start rather than when the snapshot gains lease-v1.
 //
 // A value whose conversion would overflow is refused too: a wrapped Duration is negative,
-// and Normalize would then put the default back in its place.
+// and Normalize would then put the default back in its place. SH_LEASE_GRACE_S has a
+// tighter bound, maxLeaseGraceS.
 func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	var err error
 	// read is envInt64 bounded above by limit, recording the first refusal in err.
@@ -290,6 +302,11 @@ func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	seconds("SH_LEASE_MAX_DURATION_S", &cfg.LeaseMaxDuration)
 	seconds("SH_LEASE_MAX_DURATION_L2_S", &cfg.LeaseMaxDurationProcesses)
 	seconds("SH_LEASE_GRACE_S", &cfg.LeaseGraceLimit)
+	if v := get("SH_LEASE_GRACE_S"); v != "" && cfg.LeaseGraceLimit > maxLeaseGraceS*time.Second && err == nil {
+		err = fmt.Errorf("SH_LEASE_GRACE_S=%q is above %d: the relay times reset and set_mode out at 31 min, "+
+			"and both wait up to the grace limit, so a longer grace fails them while the worker still runs them",
+			v, maxLeaseGraceS)
+	}
 	seconds("SH_LEASE_KEEPALIVE_LOSS_S", &cfg.LeaseKeepaliveLoss)
 	mib("SH_LEASE_START_MB", &cfg.LeaseStartBytes)
 	mib("SH_LEASE_PAGECACHE_MB", &cfg.LeasePageCacheBytes)

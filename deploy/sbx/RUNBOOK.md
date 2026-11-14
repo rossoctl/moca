@@ -155,6 +155,19 @@ no longer exceeds the token lifetime plus 30 s.
 `install-host.sh` for that worker, or `--uninstall <id>`, removes the old `/srv/sbx/jail/<id>` (only that
 path, once the worker is stopped) and logs `removed <path>`; its workspace data is not touched.
 
+**Rolling a worker back past lease mode (plan 4), then forward again.** Every worker since plan 4
+writes `<workspace root>/.lease-state/.boot` at boot, `lease=on` or `lease=off`; a lease-on boot
+after a lease-off one first marks every known lease state `root_wrote`, because a lease-off worker
+runs per-`Exec` commands as root without recording it. A worker binary from before plan 4 writes no
+marker, so while a host runs one the marker can still say `lease=on`. A rollback alone is safe: the
+old binary has no lease mode. Rolling forward again is safe too, as long as it goes through
+`install-host.sh`: every worker install deletes `.lease-state/.boot` before it restarts the worker
+(a symlinked marker goes as the link; a symlinked `.lease-state` is refused), so the first new boot
+finds no marker and marks every known state, conservatively. A rollback done with an older
+`install-host.sh` leaves the marker, and the next forward install clears it. Never roll forward by
+replacing `SBX_WORKER_BIN` and restarting the unit alone; if that happened, stop the worker, delete
+`/srv/sbx/workspaces/<id>/.lease-state/.boot`, and start it again.
+
 ## 3. Changing the sandbox lifetime
 
 `SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,
@@ -751,6 +764,8 @@ ok 4 - delete: the mint is refused at once; the kept token is cancelled at exp +
 ok 5 - claude fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply
 ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply # SKIP opencode not on PATH
 ok 6 - the janitor frees a deleted sandbox's directory
+ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes # SKIP SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO not both set
+ok 8 - lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease # SKIP lease not allowed
 ```
 
 It exits 0 when every step is `ok` or skipped, 1 when any step is `not ok` (the line gives the
@@ -758,7 +773,7 @@ reason), and 2 on a usage or settings error, before any sandbox is touched. On a
 step 6: step 3 runs a command that is silent for 5 minutes, and step 4 waits for a token to expire
 (one token lifetime plus the 30 s leeway). With step 6 it is closer to 70–90 minutes, because step 6
 waits out the host's own janitor wait (`setup.sh` keeps it at `max(60, SBX_TOKEN_TTL_MINUTES + 5)`
-minutes, so 65 min with 60-minute tokens).
+minutes, so 65 min with 60-minute tokens). Step 8 adds about a minute where lease mode is allowed.
 
 | Variable                                                                 | Default                                      | What it is                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -769,7 +784,7 @@ minutes, so 65 min with 60-minute tokens).
 | `SBX_SMOKE_GITHUB_MCP`                                                   | (unset)                                      | `1`: step 7 also checks the `github-mcp` preset (`api.githubcopilot.com` must be in the host's egress allowlist)                                                                                                                                                                                                                                                       |
 | `SBX_SMOKE_CRED_TWO_USERS`                                               | (unset)                                      | `1`, with `SBX_SMOKE_HOME_B`: step 7 also checks that user B's sandbox gets a 401 and a public clone works; otherwise that check is a SKIP                                                                                                                                                                                                                             |
 | `SBX_SMOKE_TEMPLATE`                                                     | `default`                                    | the template every sandbox is created from                                                                                                                                                                                                                                                                                                                             |
-| `SBX_SMOKE_STEPS`                                                        | `1,2,3,4,5,6,7`                              | the steps to run; `1,2,5` leaves out the slow ones                                                                                                                                                                                                                                                                                                                     |
+| `SBX_SMOKE_STEPS`                                                        | `1,2,3,4,5,6,7,8`                            | the steps to run; `1,2,5` leaves out the slow ones                                                                                                                                                                                                                                                                                                                     |
 | `SBX_SMOKE_AGENTS`                                                       | `claude,opencode`                            | the agents step 5 runs, headless; one not on `PATH` is a SKIP. Each needs its own login and model configured                                                                                                                                                                                                                                                           |
 | `SBX_SMOKE_HOST`                                                         | (unset: step 6 is a SKIP)                    | an ssh target (`[user@]host`) for the template's KVM host, with passwordless `sudo`                                                                                                                                                                                                                                                                                    |
 | `SBX_SMOKE_HOST_ENV_DIR`, `SBX_SMOKE_HOST_SRV`, `SBX_SMOKE_HOST_LIBEXEC` | `/etc/sbx`, `/srv/sbx`, `/usr/local/libexec` | that host's `SBX_ENV_DIR`, `SBX_SRV` and `SBX_LIBEXEC_DIR`, if `install-host.sh` was given others                                                                                                                                                                                                                                                                      |
@@ -788,6 +803,23 @@ SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMO
 `mocactl` on stdin only; its trap deletes the credentials (`smoke-<ts>-<pid>-gh` and `-gh-mcp`, named
 per run so two runs as the same user cannot revoke one another), the remote branch
 `sbx-smoke-<ts>` and the sandboxes, even on failure.
+
+Step 8 (lease mode, [lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §13) also
+runs alone with only user A's login. It needs a deployment that allows `lease` and a template whose
+worker's snapshot advertises `lease-v1`. On the default deployment (`SBX_MODES_ALLOWED=per-exec`) the
+create is refused with 403 `mode_not_allowed`, and the step is a SKIP (`# SKIP lease not allowed`):
+
+```bash
+SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMOKE_STEPS=8 \
+  deploy/sbx/smoke.sh
+```
+
+`SBX_MODES_ALLOWED` is deployment-wide: listing `lease` for the smoke lets every enrolled user create
+lease sandboxes. Until `docs/sbx/security-review.md` §6 is signed off, run step 8 on a test
+deployment, or list `lease` for the run only and set `SBX_MODES_ALLOWED` back afterwards (§2's
+re-run of `setup.sh`; the next token mint then moves any lease sandbox left to `per-exec`). The
+create is an upgrade, which `mocactl` takes only from a terminal, so the step runs it under `script`
+(util-linux `script -qec` on Linux, the BSD `script -q` on macOS), which must be on `PATH`.
 
 What each step does:
 
@@ -824,6 +856,13 @@ What each step does:
    `curl`, without `gh`) names the PAT's owner. The placeholder sent from this machine must get a 401.
    User A deletes the credential, the step waits `SBX_SMOKE_CRED_TTL` + 5 s, and the sandbox must get
    a 401. Optionally `github-mcp`, and B's sandbox (401, public clone ok).
+8. Creates a sandbox with `sbx create --mode lease --idle-timeout 30 --json` under `script`, and
+   checks that its `set_mode` was applied and that `sbx get --json` shows the epoch known and no
+   lease yet. It runs `sh -c 'echo warm > /tmp/lease-smoke'`, and then `cat /tmp/lease-smoke` must
+   print `warm`: the same guest. After 45 s idle the same `cat` must fail
+   (exit 1), with `[sandbox] guest restarted (idle, <HH:MM>): ...` on stderr. `sbx reset` must print
+   `lease ended (reset)`, and after one more command `sbx mode per-exec` must print
+   `lease ended (mode_change)`, both on stdout. Then it deletes the sandbox.
 
 What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
 fixed the test by the shortest route, or tried its local tools first and was denied. The

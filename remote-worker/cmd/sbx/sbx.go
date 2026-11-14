@@ -49,8 +49,9 @@ SBX_TLS=1 (dial the exec endpoint over TLS, as SBX0's exec Route), SBX_CA_FILE (
 added to the system roots, e.g. a sandbox token grant's execCa),
 SBX_BUSY_RETRY_S (seconds, default 30: how long in all to wait and retry a command refused before it started,
 because the worker or the relay was at capacity; 0 never retries).
-` + "`sbx run`" + ` exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed
-(or that the command outlived its token), 75 that the sandbox refused the command at capacity until
+` + "`sbx run`" + ` prints the sandbox's lease notices (a guest restart, a new guest, a lease about to end) to stderr,
+one line each. It exits with the command's own exit code; 124 means it timed out, 125 that the sandbox failed
+(or that the command outlived its token, or that it refused a lease command: stale_mode, lease_unsupported), 75 that the sandbox refused the command at capacity until
 SBX_BUSY_RETRY_S ran out (nothing ran), 128 + n that signal n killed it.
 Unlike sbx.py, this client dials plaintext unless SBX_TLS=1, and reads no SBX_TOKEN_CMD (so the exports of
 ` + "`mocactl sbx env`" + ` are not enough: give SBX_TOKEN or SBX_TOKEN_FILE).
@@ -168,7 +169,8 @@ type result struct {
 	stdout, stderr []byte
 	exitCode       int32
 	truncated      bool
-	timedOut       bool // the command ran out of SBX_TIMEOUT: the worker's in-stream ExecError "timeout:<n>"
+	timedOut       bool             // the command ran out of SBX_TIMEOUT: the worker's in-stream ExecError "timeout:<n>"
+	leases         []*pb.LeaseEvent // the lease events of the stream, in order, printed by call (notice.go)
 }
 
 // timeoutMessage is the worker's whole ExecError text for a command that ran out of its timeout,
@@ -206,7 +208,8 @@ func refusalClass(code codes.Code, msg string) string {
 }
 
 // execOnce runs one command. An error (an *execFailure) is the machinery failing (VM boot, worker gone, a timeout,
-// a refused token, a refusal at capacity), never the command's own exit status, which comes back in result.
+// a refused token, a refusal at capacity), never the command's own exit status, which comes back in result. The
+// lease events seen before an error come back with it, so call can print them.
 func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, command string, stdin []byte) (result, error) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+cfg.token)
 	stream, err := c.Exec(ctx, &pb.ExecRequest{
@@ -229,12 +232,14 @@ func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64
 	for {
 		ev, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			return result{}, &execFailure{msg: "exec failed: the stream ended without an End event"}
+			return r, &execFailure{msg: "exec failed: the stream ended without an End event"}
 		}
 		if err != nil {
-			return result{}, rpcErr(err, started)
+			return r, rpcErr(err, started)
 		}
 		switch {
+		case ev.GetLease() != nil:
+			r.leases = append(r.leases, ev.GetLease())
 		case ev.GetChunk() != nil:
 			started = true
 			ch := ev.GetChunk()
@@ -258,7 +263,7 @@ func execOnce(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64
 					f.reason = m
 				}
 			}
-			return result{}, f
+			return r, f
 		}
 	}
 }
@@ -418,7 +423,8 @@ func call(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op
 	started := env.now()
 	var waited time.Duration
 	attempt := 1
-	attemptStart := started // each attempt's own start, for its refused record; the clock is read once per event
+	attemptStart := started   // each attempt's own start, for its refused record; the clock is read once per event
+	notices := noticeDedupe{} // each lease event is printed once in this run, even when a retry repeats it
 	env.cur.Store(id)
 	for {
 		// Each attempt caps its own timeout to what the token has left at its start (capTimeout): a retry after a
@@ -427,6 +433,9 @@ func call(ctx context.Context, c pb.SandboxExecClient, cfg config, id uint64, op
 		var capped bool
 		acfg.timeoutS, capped = capTimeout(cfg.token, cfg.timeoutS, attemptStart)
 		r, err := execOnce(ctx, c, acfg, id, command, stdin)
+		if len(r.leases) > 0 {
+			printNotices(stderr, notices, r.leases, env.now())
+		}
 		var f *execFailure
 		if err != nil && errors.As(err, &f) && f.refused != "" && cfg.busyRetry > 0 && ctx.Err() == nil {
 			next := env.jitter(busyBackoff(attempt))

@@ -113,7 +113,8 @@ func specMode(s wexec.Spec) (Mode, error) {
 // deliverLeaseEvents reports key's lease on the Exec's response, through the session's
 // wexec.LeaseSink: the pending event, acknowledged only once the sink has queued it (an
 // event not queued stays pending, so the next Exec carries it), and an "expiring" notice
-// while the lease is past its maximum duration. Called for an Exec whose mode is not
+// while the lease is past its maximum duration: reason max_duration, at_unix_ms when it
+// passed it, ends_by_unix_ms that plus the grace limit (LeaseExpiry). Called for an Exec whose mode is not
 // per-exec only: a client that never asked for a lease never sees an event.
 func (r Runner) deliverLeaseEvents(key string, sink wexec.Sink) {
 	ls, ok := sink.(wexec.LeaseSink)
@@ -126,8 +127,16 @@ func (r Runner) deliverLeaseEvents(key string, sink wexec.Sink) {
 			r.Pool.AckLeaseEvent(key, ev.At)
 		}
 	}
-	if info.State == LeaseExpiring {
-		_ = ls.Lease(&pb.LeaseEvent{State: LeaseExpiring})
+	if x := info.Expiry; x != nil {
+		// Never acknowledged: it rides on every lease Exec while the lease is expiring.
+		_ = ls.Lease(&pb.LeaseEvent{
+			State:        LeaseExpiring,
+			Reason:       string(LeaseEndMaxDuration),
+			AtUnixMs:     x.Since.UnixMilli(),
+			Mode:         x.Mode.Proto(),
+			AgeMs:        uint64(max(info.Age.Milliseconds(), 0)),
+			EndsByUnixMs: x.EndsBy.UnixMilli(),
+		})
 	}
 }
 
@@ -152,8 +161,9 @@ func wireError(err error) error {
 }
 
 // LeaseControl answers the relay's LeaseControl frame (session.LeaseController): status
-// reads the lease, reset ends it, set_mode applies a verified mode change; each returns
-// the status after the op. Reset and a set_mode downgrade BLOCK until the lease has ended
+// reads the lease, reset and sandbox_deleted end it with that reason (neither takes a mode
+// or an epoch), set_mode applies a verified mode change; each returns the status after the
+// op. Reset, sandbox_deleted and a set_mode downgrade BLOCK until the lease has ended
 // (up to LeaseGraceLimit); the session runs this off its receive loop. ctx is ignored: the
 // Pool's lease calls take none, so an op runs to completion once started.
 func (r Runner) LeaseControl(_ context.Context, key string, op pb.LeaseOp, mode pb.SandboxMode, epoch uint64) (*pb.LeaseStatus, error) {
@@ -161,6 +171,10 @@ func (r Runner) LeaseControl(_ context.Context, key string, op pb.LeaseOp, mode 
 	case pb.LeaseOp_LEASE_OP_STATUS:
 	case pb.LeaseOp_LEASE_OP_RESET:
 		if err := r.Pool.EndLease(key, LeaseEndReset); err != nil {
+			return nil, wireError(err)
+		}
+	case pb.LeaseOp_LEASE_OP_SANDBOX_DELETED:
+		if err := r.Pool.EndLease(key, LeaseEndSandboxDeleted); err != nil {
 			return nil, wireError(err)
 		}
 	case pb.LeaseOp_LEASE_OP_SET_MODE:

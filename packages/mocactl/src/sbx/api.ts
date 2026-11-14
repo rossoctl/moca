@@ -1,3 +1,4 @@
+import type { SandboxModeName } from '@moca/sandbox-client';
 import { ControlPlaneClient } from '../api/control-plane.js';
 
 /** The sandbox service's HTTP API (SBX0 §5.1), on top of the control-plane client's auth and retry. */
@@ -24,7 +25,47 @@ export interface SbxSandbox {
   expiresAt: number;
   terminatedAt: number | null;
   labels: Record<string, string>;
+  /** The sandbox's mode (lease-mode spec §8.1). */
+  mode: SandboxModeName;
+  /** The lease idle timeout in seconds; 0 = the worker's default. */
+  idleTimeoutS: number;
+  /** Raised by every accepted mode change; 0 for per-exec from create, 1 for a lease mode. */
+  modeEpoch: number;
 }
+
+/** The mode fields as a control plane from before modes answers them: absent. */
+type WireSandbox<T extends SbxSandbox> = Omit<T, 'mode' | 'idleTimeoutS' | 'modeEpoch'> &
+  Partial<Pick<SbxSandbox, 'mode' | 'idleTimeoutS' | 'modeEpoch'>>;
+
+/**
+ * A sandbox with its mode fields: a control plane from before modes sends none, which is a per-exec
+ * sandbox at epoch 0 with the worker's idle timeout (lease-mode spec §8.1).
+ */
+function withMode<T extends SbxSandbox>(s: WireSandbox<T>): T {
+  return {
+    ...s,
+    mode: s.mode === 'lease' || s.mode === 'lease+processes' ? s.mode : 'per-exec',
+    idleTimeoutS: s.idleTimeoutS ?? 0,
+    modeEpoch: s.modeEpoch ?? 0,
+  } as T;
+}
+
+/** The body of a sandbox create (openapi `POST /v1/sandboxes`). */
+export interface SbxSandboxCreate {
+  template: string;
+  name?: string;
+  labels?: Record<string, string>;
+  /** Default per-exec; a lease mode must be allowed by the deployment (403 `mode_not_allowed`). */
+  mode?: SandboxModeName;
+  /** Omitted: the worker's default (stored as 0). */
+  idleTimeoutS?: number;
+}
+
+/** What a create answers: the sandbox, and the build it was served (template lifecycle spec §9). */
+export type SbxCreated = SbxSandbox & {
+  buildId?: string | null;
+  templateManifestHash?: string | null;
+};
 
 export interface SbxToken {
   token: string;
@@ -336,24 +377,25 @@ export class SandboxApiClient extends ControlPlaneClient {
     return this.json('GET', '/v1/policy');
   }
 
-  createSandbox(body: {
-    template: string;
-    name?: string;
-    labels?: Record<string, string>;
-  }): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
-    return this.json('POST', '/v1/sandboxes', { body });
+  async createSandbox(body: SbxSandboxCreate): Promise<SbxCreated> {
+    return withMode(await this.json<WireSandbox<SbxCreated>>('POST', '/v1/sandboxes', { body }));
   }
 
   async listSandboxes(opts: { all?: boolean } = {}): Promise<SbxSandbox[]> {
     return (
-      await this.json<{ sandboxes: SbxSandbox[] }>('GET', '/v1/sandboxes', {
+      await this.json<{ sandboxes: WireSandbox<SbxSandbox>[] }>('GET', '/v1/sandboxes', {
         query: { all: opts.all ? '1' : undefined },
       })
-    ).sandboxes;
+    ).sandboxes.map(withMode);
   }
 
-  getSandbox(id: string): Promise<SbxSandbox> {
-    return this.json('GET', `/v1/sandboxes/${encodeURIComponent(id)}`);
+  /** `signal` aborts the request (`rm`'s bounded lease step). */
+  async getSandbox(id: string, opts: { signal?: AbortSignal } = {}): Promise<SbxSandbox> {
+    return withMode(
+      await this.json<WireSandbox<SbxSandbox>>('GET', `/v1/sandboxes/${encodeURIComponent(id)}`, {
+        signal: opts.signal,
+      }),
+    );
   }
 
   deleteSandbox(id: string): Promise<{ id: string; state: 'terminated'; reason: string }> {
@@ -378,7 +420,35 @@ export class SandboxApiClient extends ControlPlaneClient {
     return Buffer.from(await res.arrayBuffer());
   }
 
-  mintSandboxToken(id: string): Promise<SbxToken> {
-    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/token`);
+  /** `signal` aborts the request (`rm`'s bounded lease step). */
+  mintSandboxToken(id: string, opts: { signal?: AbortSignal } = {}): Promise<SbxToken> {
+    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/token`, {
+      signal: opts.signal,
+    });
+  }
+
+  /**
+   * Change the mode (lease-mode spec §8.1): `PUT /v1/sandboxes/{id}/mode`. Every accepted call
+   * raises the epoch. An omitted `idleTimeoutS` is stored as 0, not kept. The set-mode token is for
+   * one `LeaseControl set_mode`, never cached (M8).
+   */
+  async setSandboxMode(
+    id: string,
+    body: { mode: SandboxModeName; idleTimeoutS?: number },
+  ): Promise<{ sandbox: SbxSandbox; setModeToken: string }> {
+    const r = await this.json<{ sandbox: WireSandbox<SbxSandbox>; setModeToken: string }>(
+      'PUT',
+      `/v1/sandboxes/${encodeURIComponent(id)}/mode`,
+      { body },
+    );
+    return { sandbox: withMode(r.sandbox), setModeToken: r.setModeToken };
+  }
+
+  /**
+   * A set-mode token for the mode and epoch the record holds now, raising nothing (spec §8.2):
+   * `POST /v1/sandboxes/{id}/mode-token`. What a lease create sends, since the create answers none.
+   */
+  mintSandboxModeToken(id: string): Promise<{ setModeToken: string }> {
+    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/mode-token`);
   }
 }

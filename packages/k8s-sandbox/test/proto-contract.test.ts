@@ -155,7 +155,7 @@ describe('Chunk stream discriminator (ST3)', () => {
 // SBX0.3 plan 3: the lease wire. Every addition is a new field or oneof member, so an
 // old peer's bytes decode with the new fields at their zero values.
 describe('sandbox/v1 lease wire (additive)', () => {
-  const event: LeaseEvent = {
+  const event = LeaseEvent.fromPartial({
     reqId: 9,
     state: 'end',
     reason: 'idle',
@@ -163,7 +163,7 @@ describe('sandbox/v1 lease wire (additive)', () => {
     mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
     ageMs: 42_000,
     processes: ['p1', 'p2'],
-  };
+  });
   const status: LeaseStatus = {
     mode: SandboxMode.SANDBOX_MODE_LEASE,
     epochKnown: true,
@@ -211,6 +211,19 @@ describe('sandbox/v1 lease wire (additive)', () => {
     expect(LeaseOp.LEASE_OP_STATUS).toBe(1);
     expect(LeaseOp.LEASE_OP_RESET).toBe(2);
     expect(LeaseOp.LEASE_OP_SET_MODE).toBe(3);
+    expect(LeaseOp.LEASE_OP_SANDBOX_DELETED).toBe(4);
+  });
+
+  it('round-trips LeaseEvent.endsByUnixMs (field 8)', () => {
+    const expiring = LeaseEvent.fromPartial({
+      reqId: 9,
+      state: 'expiring',
+      atUnixMs: 1_731_400_000_123,
+      endsByUnixMs: 1_731_400_600_000,
+    });
+    expect(LeaseEvent.decode(LeaseEvent.encode(expiring).finish())).toEqual(expiring);
+    // tag (8 << 3) | 0 = 0x40 leads the encoding of the field.
+    expect(LeaseEvent.encode(LeaseEvent.fromPartial({ endsByUnixMs: 1 })).finish()[0]).toBe(0x40);
   });
 
   it('round-trips each new message', () => {

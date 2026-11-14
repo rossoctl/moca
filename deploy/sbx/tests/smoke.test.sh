@@ -7,7 +7,8 @@
 # run the selected steps only; print `ok N` / `not ok N` and exit 1 on a failure; delete every
 # sandbox it created, as its owner, even on failure, and nothing else; never print a token.
 # Step 7 (egress credentials) runs against a fake curl, git and gh as well, and the PAT, a canary in a
-# file, must appear in no output line and no logged argv.
+# file, must appear in no output line and no logged argv. Step 8 (lease mode) runs against a fake
+# script (util-linux's and the BSD one) and the fake mocactl's leases.
 # SMOKE_SH overrides the script under test.
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -79,12 +80,39 @@ mine() { # mine ID: refuse a sandbox that is not this user's, as the control pla
 }
 live() { mine "$1"; [[ "$(cut -d' ' -f2 "$MOCK_DIR/sb/$1")" == ready || "$cmd/${MOCK_MINT_DELETED:-}" == token/1 ]] || { echo 'sbx: sandbox was deleted' >&2; exit 1; }; }
 bound() { sed -n 's/.*"id": *"\(sbx-[0-9a-f]*\)".*/\1/p' .sbx/sandbox.json 2>/dev/null; }
+# Lease mode (step 8). $L/<id>.mode is "mode epoch idle"; $L/<id>.guest ("last-exec-end") is a live
+# lease, whose guest /tmp is $L/<id>.tmp; $L/<id>.ended an end not yet shown ("reason HH:MM").
+# MOCK_LEASE_NO_IDLE=1: the idle timeout never ends the lease. MOCK_LEASE_PER_EXEC=1: every
+# command gets a new guest (a worker that never kept the VM). MOCK_SET_MODE_PENDING=1: the create's
+# set_mode cannot reach the worker. MOCK_MODE_NOT_ALLOWED=1: the deployment lists no lease mode.
+L="$MOCK_DIR/lease"
+mkdir -p "$L"
+hhmm() { "$REAL_DATE" +%H:%M; }
+readmode() { m=per-exec e=0 i=0; [[ ! -f "$L/$1.mode" ]] || read -r m e i <"$L/$1.mode"; }
+idle_check() { # idle_check ID: a lease idle past its timeout (default 300 s) ends, as the sweep does
+  local last idle="${i:-0}"
+  [[ -f "$L/$1.guest" && "${MOCK_LEASE_NO_IDLE:-}" != 1 ]] || return 0
+  ((idle > 0)) || idle=300
+  last="$(cat "$L/$1.guest")"
+  (($(now) - last > idle)) || return 0
+  rm -rf "$L/$1.guest" "$L/$1.tmp"
+  echo "idle $(hhmm)" >"$L/$1.ended"
+}
+take_end() { # take_end ID: the unseen end's notice, on stderr; 0 if there was one
+  local why at
+  [[ -f "$L/$1.ended" ]] || return 1
+  read -r why at <"$L/$1.ended"
+  rm -f "$L/$1.ended"
+  echo "[sandbox] guest restarted ($why, $at): /tmp, installs outside /workspace and background processes are gone" >&2
+}
 cmd="$1"; shift
-id='' args=() CREATE_NAME=''
+id='' args=() CREATE_NAME='' MODE='' IDLE=''
 while (($#)); do
   case "$1" in
   --sandbox) id="$2"; shift 2 ;;
   --name) CREATE_NAME="$2"; shift 2 ;;
+  --mode) MODE="$2"; shift 2 ;;
+  --idle-timeout) IDLE="$2"; shift 2 ;;
   --timeout | --template) shift 2 ;;
   --force | --apply) shift ;;
   --) shift; args+=("$@"); break ;;
@@ -140,11 +168,52 @@ ls)
     for f in "$MOCK_DIR"/sb/*; do [[ -e "$f" ]] && echo "$(basename "$f") $(cat "$f")"; done
   fi ;;
 create)
+  # A lease create is an upgrade: only from a terminal (MOCK_TTY=1, set by the fake script).
+  if [[ -n "$MODE" && "$MODE" != per-exec ]]; then
+    [[ "${MOCK_TTY:-}" == 1 ]] || { echo 'sbx: an upgrade needs a terminal: run it yourself' >&2; exit 2; }
+    [[ "${MOCK_MODE_NOT_ALLOWED:-}" != 1 ]] || { echo "sbx: mode '$MODE' is not allowed on this deployment" >&2; exit 1; }
+  fi
   nid="$(new)"
   mkdir -p "$MOCK_DIR/names"; printf '%s' "$CREATE_NAME" >"$MOCK_DIR/names/$nid"
   # MOCK_CREATE_LOST=1: the server made it, but the answer never arrives.
   [[ "${MOCK_CREATE_LOST:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; }
-  echo "$nid" ;;
+  if [[ -n "$MODE" && "$MODE" != per-exec ]]; then
+    echo "$MODE 1 ${IDLE:-0}" >"$L/$nid.mode"
+    echo "created $nid (default), expires in 7 days" >&2
+    if [[ "${MOCK_SET_MODE_PENDING:-}" == 1 ]]; then
+      echo "sbx: lease pending (unavailable): the sandbox runs per-Exec until \"mocactl sbx get $nid\" re-sends the mode" >&2
+      sm='{"outcome":"pending","code":"unavailable"}'
+    else
+      echo "mode $MODE (epoch 1)" >&2
+      sm='{"outcome":"applied"}'
+    fi
+    if [[ " ${args[*]:-} " == *' --json '* ]]; then
+      echo "{\"id\":\"$nid\",\"template\":\"default\",\"mode\":\"$MODE\",\"modeEpoch\":1,\"idleTimeoutS\":${IDLE:-0},\"setMode\":$sm}"
+    else echo "$nid"; fi
+  else
+    echo "$nid"
+  fi ;;
+get)
+  live "${args[0]}"; readmode "${args[0]}"; idle_check "${args[0]}"; take_end "${args[0]}" || true
+  lease=null
+  if [[ "$m" != per-exec ]]; then
+    st=none; [[ ! -f "$L/${args[0]}.guest" ]] || st=active
+    lease="{\"mode\":\"$m\",\"epochKnown\":true,\"state\":\"$st\",\"ageMs\":0,\"idleTimeoutS\":$i}"
+  fi
+  echo "{\"sandbox\":{\"id\":\"${args[0]}\",\"mode\":\"$m\",\"modeEpoch\":$e,\"idleTimeoutS\":$i},\"lease\":$lease}" ;;
+reset)
+  live "${args[0]}"; readmode "${args[0]}"; idle_check "${args[0]}"; take_end "${args[0]}" || true
+  if [[ -f "$L/${args[0]}.guest" ]]; then rm -rf "$L/${args[0]}.guest" "$L/${args[0]}.tmp"; echo 'lease ended (reset)'; else echo 'no lease'; fi ;;
+mode)
+  # mode MODE ID: an upgrade only from a terminal; a downgrade to per-exec ends a live lease.
+  live "${args[1]}"; readmode "${args[1]}"; idle_check "${args[1]}"; take_end "${args[1]}" || true
+  [[ "${args[0]}" == per-exec || "${MOCK_TTY:-}" == 1 ]] || { echo 'sbx: an upgrade needs a terminal: run it yourself' >&2; exit 2; }
+  e=$((e + 1))
+  echo "${args[0]} $e $i" >"$L/${args[1]}.mode"
+  echo "mode ${args[0]} (epoch $e)"
+  if [[ "${args[0]}" == per-exec && -f "$L/${args[1]}.guest" ]]; then
+    rm -rf "$L/${args[1]}.guest" "$L/${args[1]}.tmp"; echo 'lease ended (mode_change)'
+  fi ;;
 token) live "${args[0]}"; echo "tok.$user.${args[0]}.$(($(now) + ${MOCK_TTL:-900}))" ;;
 env)
   live "${args[0]}"
@@ -155,7 +224,22 @@ rm)
   # MOCK_RM_FAIL_ONCE=1: the first rm fails (the step's own); the cleanup's retry succeeds.
   if [[ "${MOCK_RM_FAIL_ONCE:-}" == 1 && ! -e "$MOCK_DIR/rm-failed" ]]; then : >"$MOCK_DIR/rm-failed"; echo 'sbx: mock rm failure' >&2; exit 1; fi
   echo "$user deleted" >"$MOCK_DIR/sb/${args[0]}"; echo "deleted ${args[0]}" >&2 ;;
-run) id="${id:-$(bound)}"; live "$id"; cd "$(ws "$id")" && "${args[@]}" ;;
+run)
+  id="${id:-$(bound)}"; live "$id"; readmode "$id"
+  [[ "$m" != per-exec ]] || { cd "$(ws "$id")" && "${args[@]}"; exit; }
+  # A lease: the guest's /tmp is $L/<id>.tmp, kept while the lease lives; the notice goes to stderr.
+  idle_check "$id"
+  ended=0; take_end "$id" 2>"$L/$id.notice" && ended=1
+  if [[ ! -f "$L/$id.guest" || "${MOCK_LEASE_PER_EXEC:-}" == 1 ]]; then
+    rm -rf "$L/$id.tmp"; mkdir -p "$L/$id.tmp"
+    ((ended)) || echo "[sandbox] new guest ($m, $(hhmm))" >"$L/$id.notice"
+  fi
+  g=() T="$L/$id.tmp"
+  for a in "${args[@]}"; do g+=("${a//\/tmp\//$T/}"); done
+  rc=0; (cd "$(ws "$id")" && "${g[@]}") || rc=$?
+  now >"$L/$id.guest"
+  cat "$L/$id.notice" >&2; rm -f "$L/$id.notice"
+  exit "$rc" ;;
 put) id="${id:-$(bound)}"; live "$id"; cat >"$(ws "$id")/${args[0]}" ;;
 up)
   id="$(new)"
@@ -348,8 +432,32 @@ printf 'claude %s\n' "$*" >>"$MOCK_LOG"
 mocactl sbx mcp </dev/null
 echo 'Fixed add() and ran the tests.'
 MOCK
+# script (step 8): util-linux's (MOCK_SCRIPT_FLAVOR=util-linux, the KVM host and the runners) or the
+# BSD one (the default, macOS), as far as smoke.sh uses them: -V tells them apart, util-linux's takes
+# `-qec CMD /dev/null` and runs CMD with $SHELL, the BSD one `-q /dev/null CMD...`. The command gets a
+# "terminal" (MOCK_TTY=1) and, as through a pty, stdout and stderr merged with CR LF line ends; the
+# BSD one also echoes the ^D it writes for its stdin's EOF first, on the same line.
+cat >"$TMP/bin/script" <<'MOCK'
+#!/usr/bin/env bash
+printf 'script %s\n' "$*" >>"$MOCK_LOG"
+flavor="${MOCK_SCRIPT_FLAVOR:-bsd}"
+if [[ "$*" == -V ]]; then
+  [[ "$flavor" != util-linux ]] || { echo 'script from util-linux 2.39.3'; exit 0; }
+  echo 'script: illegal option -- V' >&2; exit 1
+fi
+pty() { awk '{ printf "%s\r\n", $0 }'; }
+if [[ "$flavor" == util-linux ]]; then
+  [[ "$# $1 $3" == '3 -qec /dev/null' ]] || { echo "mock script: unexpected: $*" >&2; exit 97; }
+  MOCK_TTY=1 "${SHELL:-/bin/sh}" -c "$2" 2>&1 | pty
+  exit "${PIPESTATUS[0]}"
+fi
+[[ "$1 $2" == '-q /dev/null' && $# -gt 2 ]] || { echo "mock script: unexpected: $*" >&2; exit 97; }
+shift 2
+{ printf '\004\b\b'; MOCK_TTY=1 "$@" 2>&1; } | pty
+exit "${PIPESTATUS[0]}"
+MOCK
 # Shims that must never run: the SKIP case puts them first on PATH.
-for t in mocactl git python3 ssh claude opencode node curl sh; do
+for t in mocactl git python3 ssh claude opencode node curl sh script; do
   printf '#!/bin/sh\necho "%s $*" >>"%s"\nexit 97\n' "$t" "$TMP/forbidden.log" >"$TMP/failbin/$t"
 done
 chmod +x "$TMP/bin/"* "$TMP/failbin/"* "$TMP/host/libexec/sbx-janitor.sh"
@@ -358,7 +466,7 @@ export PATH="$TMP/bin:$BASEPATH"
 
 reset_state() {
   # cred-* takes the .read and .owner side files with it.
-  rm -rf "$MOCK_DIR"/cred-* "$MOCK_DIR/remote-branches" "$MOCK_DIR/sb" "$MOCK_DIR/n" "$MOCK_DIR/names" "$MOCK_DIR/rm-failed" "$MOCK_SRV/workspaces/sbx_default" "$TMP"/home-?/.local
+  rm -rf "$MOCK_DIR"/cred-* "$MOCK_DIR/remote-branches" "$MOCK_DIR/sb" "$MOCK_DIR/n" "$MOCK_DIR/names" "$MOCK_DIR/lease" "$MOCK_DIR/rm-failed" "$MOCK_SRV/workspaces/sbx_default" "$TMP"/home-?/.local
   mkdir -p "$MOCK_DIR/sb" "$MOCK_SRV/workspaces/sbx_default"
   # A sandbox of user A's that this run did not create: it must outlive every run.
   echo 'a ready' >"$MOCK_DIR/sb/sbx-ffffffffffffffffffffffffff"
@@ -385,6 +493,8 @@ smoke() {
   )
 }
 has() { grep -qxF -- "$1" "$TMP/out" || fail "no line '$1'"; }
+STEP8='lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease'
+STEP8_OK="ok 8 - $STEP8"
 hasnt() { ! grep -qF -- "$1" "$TMP/out" || fail "a line has '$1'"; }
 created() { sed -n 's/^mocactl user=\(.\) .* sbx create .*/\1/p; s/^mocactl user=\(.\) .* sbx up .*/\1/p' "$MOCK_LOG" | wc -l | tr -d ' '; }
 # Every sandbox the run created is deleted by its owner, and the one it did not is never named in an rm.
@@ -428,7 +538,7 @@ reject 'a URL with a path' 'SBX_API_URL must be https://<api host>' SBX_API_URL=
 reject 'no home B' 'set SBX_SMOKE_HOME_B to a HOME already logged in' -u SBX_SMOKE_HOME_B
 reject 'a home that is no directory' "SBX_SMOKE_HOME_A='$TMP/nope' is not a directory" SBX_SMOKE_HOME_A="$TMP/nope"
 reject 'one home for both users' 'are the same directory' SBX_SMOKE_HOME_B="$TMP/home-a/."
-reject 'a step out of range' "SBX_SMOKE_STEPS: '8' is not a step" SBX_SMOKE_STEPS=1,8
+reject 'a step out of range' "SBX_SMOKE_STEPS: '9' is not a step" SBX_SMOKE_STEPS=1,9
 reject 'a step that is no number' "SBX_SMOKE_STEPS: 'x' is not a step" SBX_SMOKE_STEPS=x
 reject 'empty steps' 'SBX_SMOKE_STEPS is empty' SBX_SMOKE_STEPS=
 reject 'an unknown agent' "SBX_SMOKE_AGENTS: 'cursor' is not claude or opencode" SBX_SMOKE_AGENTS=claude,cursor
@@ -455,12 +565,13 @@ has 'ok 5 - claude fixes the failing test through mocactl sbx mcp; the tree is u
 has 'ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply # SKIP opencode not on PATH'
 has "ok 6 - the janitor frees a deleted sandbox's directory"
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes # SKIP SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO not both set'
-has '# 6 ok, 0 not ok, 2 skipped'
-[[ "$(grep -o '^ok [0-9]' "$TMP/out" | tr -d '\n')" == 'ok 1ok 2ok 3ok 4ok 5ok 5ok 6ok 7' ]] || fail 'the steps did not run in order'
+has "$STEP8_OK"
+has '# 7 ok, 0 not ok, 2 skipped'
+[[ "$(grep -o '^ok [0-9]' "$TMP/out" | tr -d '\n')" == 'ok 1ok 2ok 3ok 4ok 5ok 5ok 6ok 7ok 8' ]] || fail 'the steps did not run in order'
 ! grep -q '^not ok' "$TMP/out" || fail 'a step is not ok'
 all_cleaned
-[[ "$(created)" == 6 ]] || fail "created $(created) sandboxes, not 6 (steps 1, 2 x2, 3, 4, 5)"
-pass 'a full run: ok 1-6 in order, step 7 a SKIP without its inputs, an agent not installed is a SKIP, and every sandbox it made is deleted by its owner'
+[[ "$(created)" == 7 ]] || fail "created $(created) sandboxes, not 7 (steps 1, 2 x2, 3, 4, 5, 8)"
+pass 'a full run: ok 1-6 and 8 in order, step 7 a SKIP without its inputs, an agent not installed is a SKIP, and every sandbox it made is deleted by its owner'
 
 # What the full run sent: every mocactl as one of the two homes, with the URL, no XDG overrides.
 ! grep '^mocactl ' "$MOCK_LOG" | grep -qv "^mocactl user=[ab] url=https://api.sbx.example xdg= " || fail 'a mocactl ran without the HOME, URL or XDG settings'
@@ -471,7 +582,8 @@ grep -q '^mocactl user=b .* sbx env sbx-' "$MOCK_LOG" || fail "no env by B for A
 # Step 2's denial: B's token with A's workspace key.
 grep -q '^client user=b wsk=sbx-0*2 req_id=[0-9]* cmd=true$' "$MOCK_LOG" || fail "no Exec with B's token on A's workspace key"
 # Step 2's same req_id: both users, one id, one command.
-mapfile -t same < <(grep "^client .* cmd=sleep 3; cat .smoke-marker$" "$MOCK_LOG")
+same=() # no mapfile: this file runs on bash 3.2 too
+while IFS= read -r l; do same+=("$l"); done < <(grep "^client .* cmd=sleep 3; cat .smoke-marker$" "$MOCK_LOG")
 [[ "${#same[@]}" == 2 ]] || fail "not two same-command Execs: ${#same[@]}"
 [[ "${same[0]#*req_id=}" == "${same[1]#*req_id=}" ]] || fail "the two Execs had different req_ids"
 [[ "${same[0]} ${same[1]}" == *'client user=a '*'client user=b '* || "${same[0]} ${same[1]}" == *'client user=b '*'client user=a '* ]] || fail 'the same req_id was not sent by both users'
@@ -496,7 +608,7 @@ pass 'never prints a sandbox, login or janitor token'
 reset_state
 smoke SBX_SMOKE_STEPS=1,6 -u SBX_SMOKE_HOST >"$TMP/out" 2>&1 || fail "steps 1,6 exited $?"
 has 'ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository'
-for n in 2 3 4 5 7; do grep -q "^ok $n - .* # SKIP not in SBX_SMOKE_STEPS\$" "$TMP/out" || fail "step $n not skipped"; done
+for n in 2 3 4 5 7 8; do grep -q "^ok $n - .* # SKIP not in SBX_SMOKE_STEPS\$" "$TMP/out" || fail "step $n not skipped"; done
 has "ok 6 - the janitor frees a deleted sandbox's directory # SKIP SBX_SMOKE_HOST not set"
 ! grep -q ' sbx --sandbox\| --timeout 400\|^client\|^claude\|^ssh' "$MOCK_LOG" || fail 'a skipped step ran'
 [[ "$(created)" == 1 ]] || fail "created $(created) sandboxes for step 1 alone"
@@ -658,7 +770,7 @@ credrun >"$TMP/out" 2>&1 || fail "step 7 exited $?"
 has '# step 7: second-user check skipped (no second user)'
 ! grep -q "ok 7 - B's sandbox" "$TMP/out" || fail 'the second-user sub-step printed its own ok line'
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes'
-has '# 1 ok, 0 not ok, 6 skipped'
+has '# 1 ok, 0 not ok, 7 skipped'
 all_cleaned
 [[ "$(created)" == 1 ]] || fail "step 7 created $(created) sandboxes, not 1"
 grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials add smoke-[0-9]+-[0-9]+-gh --preset github$' "$MOCK_LOG" || fail 'no credentials add with the github preset as A'
@@ -845,3 +957,63 @@ grep -q "sbx credentials add smoke-[0-9]*-[0-9]*-gh-mcp --preset github-mcp\$" "
 ! grep -q 'credentials add smoke-gh ' "$MOCK_LOG" || fail 'the run still used the shared fixed name smoke-gh'
 nopat
 pass 'the credentials are named per run, so concurrent runs cannot share or revoke one another'
+
+# --- Step 8: lease mode --------------------------------------------------------------------------
+# The fake mocactl keeps a lease's guest /tmp while the lease lives, ends it once idle past its
+# timeout on the fake clock, and refuses a lease create without a terminal, which only the fake
+# script gives. Step 8 needs user A only.
+leaserun() { smoke SBX_SMOKE_STEPS=8 -u SBX_SMOKE_HOME_B "$@"; }
+for flavor in bsd util-linux; do
+  reset_state
+  leaserun MOCK_SCRIPT_FLAVOR="$flavor" >"$TMP/out" 2>&1 || fail "step 8 ($flavor script) exited $?"
+  has "$STEP8_OK"
+  has '# 1 ok, 0 not ok, 7 skipped'
+  all_cleaned
+  [[ "$(created)" == 1 ]] || fail "step 8 created $(created) sandboxes, not 1"
+  # The create: as user A, under the script of the host's flavor, a lease with a 30 s idle timeout.
+  grep -qE '^mocactl user=a [^ ]+ xdg= sbx create --template default --name smoke-[0-9]+-[0-9]+-1-lease --mode lease --idle-timeout 30 --json$' "$MOCK_LOG" ||
+    fail 'no lease create as user A with --mode lease --idle-timeout 30 --json'
+  case "$flavor" in
+  bsd) grep -qE '^script -q /dev/null [^ ]+/bin-a/mocactl sbx create .* --mode lease ' "$MOCK_LOG" ;;
+  *) grep -qE '^script -qec [^ ]+/bin-a/mocactl sbx create .* --mode lease .* /dev/null$' "$MOCK_LOG" ;;
+  esac || fail "the lease create did not run under the $flavor script"
+  id="$(sed -nE 's/^mocactl user=a [^ ]+ xdg= sbx get (sbx-[0-9a-f]+) --json$/\1/p' "$MOCK_LOG")"
+  [[ -n "$id" ]] || fail 'no sbx get --json of the lease sandbox'
+  calls="$(sed -nE 's/^mocactl user=a [^ ]+ xdg= sbx ((get|run|reset|mode|rm) .*)$/\1/p' "$MOCK_LOG" | sed "s/$id/ID/g")"
+  [[ "$calls" == "get ID --json
+run --sandbox ID -- sh -c echo warm > /tmp/lease-smoke
+run --sandbox ID -- cat /tmp/lease-smoke
+run --sandbox ID -- cat /tmp/lease-smoke
+reset ID
+run --sandbox ID -- true
+mode per-exec ID
+rm --force ID" ]] || fail "step 8's calls, in order, were: $(printf '%s' "$calls" | tr '\n' '|')"
+  has '# step 8: idle for 45 s (the lease idle timeout is 30 s)...'
+  for secret in tok. api-secret; do hasnt "$secret"; done
+done
+pass 'step 8: a lease create under script (BSD and util-linux), get, one guest for two commands, an idle restart and its notice, reset, a downgrade, rm'
+
+# A deployment that allows no lease mode answers the create 403 mode_not_allowed: a SKIP.
+reset_state
+leaserun MOCK_MODE_NOT_ALLOWED=1 >"$TMP/out" 2>&1 || fail "step 8 on a deployment without lease exited $?"
+has "$STEP8_OK # SKIP lease not allowed"
+has '# 0 ok, 0 not ok, 8 skipped'
+! grep -qE ' sbx (get|run|reset|mode) ' "$MOCK_LOG" || fail 'step 8 went on after a refused lease create'
+all_cleaned
+pass 'step 8 is a SKIP when the deployment does not allow lease mode'
+
+# Failures: each `not ok 8`, exit 1, and the trap deletes the lease sandbox.
+leasefail() { # leasefail WHY ENV...
+  local why="$1" rc=0
+  shift
+  reset_state
+  leaserun "$@" >"$TMP/out" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "$why: exit $rc, not 1"
+  grep -q "^not ok 8 - .*: .*$why" "$TMP/out" || fail "no 'not ok 8 - ...: ...$why'"
+  grep -q '^# cleanup: deleted sbx-[0-9a-f]* (user A)$' "$TMP/out" || fail "$why: the trap did not delete the lease sandbox"
+  all_cleaned
+}
+leasefail 'not the same guest' MOCK_LEASE_PER_EXEC=1
+leasefail 'outlived 45 s idle' MOCK_LEASE_NO_IDLE=1
+leasefail 'set_mode was pending (unavailable)' MOCK_SET_MODE_PENDING=1
+pass 'a guest not kept, a lease that never idles out, a pending set_mode: each `not ok 8`, and the trap deletes the sandbox'

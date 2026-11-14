@@ -98,8 +98,12 @@ export interface LeaseControlAuditLine {
   reason?: string;
 }
 
-/** The op as an audit line names it; `unspecified` for 0 or a value this relay does not know. */
-export type LeaseOpName = 'status' | 'reset' | 'set_mode' | 'unspecified';
+/**
+ * The op as an audit line names it; `unspecified` for 0 or a value this relay does not know.
+ * `sandbox_deleted` is the control plane's notice that the sandbox is gone: the worker ends the
+ * lease with that reason. Like reset, it takes no mode and no epoch.
+ */
+export type LeaseOpName = 'status' | 'reset' | 'set_mode' | 'sandbox_deleted' | 'unspecified';
 
 /**
  * - `ok`: the worker answered without an error;
@@ -121,6 +125,8 @@ export function leaseOpName(op: LeaseOp): LeaseOpName {
       return 'reset';
     case LeaseOp.LEASE_OP_SET_MODE:
       return 'set_mode';
+    case LeaseOp.LEASE_OP_SANDBOX_DELETED:
+      return 'sandbox_deleted';
     default:
       return 'unspecified';
   }
@@ -297,8 +303,11 @@ export function armDeadline(
 /** How long a LeaseControl status waits for the worker's answer. */
 export const LEASE_STATUS_TIMEOUT_MS = 15_000;
 /**
- * How long a reset or set_mode waits: the worker's LeaseGraceLimit (30 min,
- * remote-worker/internal/vmpool/config.go), for which EndLease and SetMode can block, plus 60 s.
+ * How long a mutate op (reset, set_mode, sandbox_deleted) waits: the worker's LeaseGraceLimit
+ * (30 min, remote-worker/internal/vmpool/config.go), for which EndLease and SetMode can block, plus
+ * 60 s. Linked to `maxLeaseGraceS` in remote-worker/cmd/microvm-worker/main.go, the largest grace a
+ * worker boots with: raise one only with the other (a contract test on each side reads the other's
+ * literal).
  */
 export const LEASE_MUTATE_TIMEOUT_MS = 31 * 60_000;
 
@@ -627,7 +636,10 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     return { status: result.status };
   }
 
-  /** A sandbox caller's LeaseKeepalive: its own worker only, its own workspace. Not audited. */
+  /**
+   * A sandbox caller's LeaseKeepalive: its own worker only, its own workspace. Not audited. Answered
+   * OK even when the relay coalesces it (LEASE_KEEPALIVE_COALESCE_MS) and writes no frame.
+   */
   function sandboxLeaseKeepalive(claims: SandboxTokenClaims, req: LeaseKeepaliveRequest): void {
     if (req.sandboxId !== claims.wrk) {
       throw grpcError(
