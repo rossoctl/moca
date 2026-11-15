@@ -1583,17 +1583,22 @@ func TestSweptLeasesSyncInParallel(t *testing.T) {
 		return Result{}, nil
 	})
 	clk.Advance(p.cfg.LeaseIdleDefault) // every lease is idle at this tick
-	waitFor(t, func() bool { return calls.Load() == int32(len(keys)) && lc.liveCount() == 1 })
-	// The keys whose VMs are gone have their gates back: a fresh lease starts at once.
+	// The keys whose VMs are gone have their gates back (and the sweep's pin dropped) while
+	// the wedged one still holds its own: a fresh lease starts at once on them.
 	var free string
-	for _, k := range keys {
-		if pinnedCount(p, k) == 0 {
-			free = k
+	waitFor(t, func() bool {
+		var released []string
+		for _, k := range keys {
+			if pinnedCount(p, k) == 0 {
+				released = append(released, k)
+			}
 		}
-	}
-	if free == "" {
-		t.Fatal("every key is still held, want the unwedged victims' gates released")
-	}
+		if calls.Load() != int32(len(keys)) || lc.liveCount() != 1 || len(released) != len(keys)-1 {
+			return false
+		}
+		free = released[0]
+		return true
+	})
 	reportTable(lc, &fakeTable{})
 	errc := execAsync(p, free, level2Exec("ls", 1))
 	if err := recvWithin(t, errc, "an Exec on a swept key while another victim's sync is wedged"); err != nil {
