@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -949,24 +950,71 @@ const leaseEndSyncCommand = "sync"
 // an end must not hang on a guest that cannot answer.
 const LeaseEndSyncTimeout = 30 * time.Second
 
+// LeaseCloseSyncTimeout is Close's one bound on syncing every lease it detaches, together
+// (PR #814 review). The worker units stop with TimeoutStopSec=30 and KillMode=control-group
+// (microvm-worker.service, sbx-worker@.service), so Close must sync and destroy within
+// that: it syncs its victims concurrently, waits at most this long for all of them, then
+// destroys them all. A guest that has not answered by then loses its unsynced writes,
+// rather than every lease after it in a loop losing theirs to systemd's SIGKILL.
+const LeaseCloseSyncTimeout = 20 * time.Second
+
 // destroyLeaseVictim is destroyLeaseVM for an ended (or detached) lease: a victim marked
-// sync has its guest synced first. A failed sync is logged; the destroy goes ahead. A
-// sync that succeeded answers with the guest's whole tracked table, like every lease End,
-// and that refreshes the end before the end is reported (refreshEndedTracked).
+// sync has its guest synced first (syncLeaseVictim). The destroy goes ahead whatever the
+// sync did.
 func (p *pool) destroyLeaseVictim(v *leaseVictim) error {
-	if v.sync {
-		ctx, cancel := context.WithTimeout(context.Background(), LeaseEndSyncTimeout)
-		res, err := v.vm.Run(ctx, Command{Command: leaseEndSyncCommand, Lease: true,
-			TimeoutS: uint32(LeaseEndSyncTimeout / time.Second), CapBytes: OutputCapBytes}, discardingSink{})
-		cancel()
-		if err != nil || res.ExitCode != 0 || res.TeardownFailed {
-			log.Printf("vmpool: lease end sync workspace_key=%q vm=%s: exit %d, teardown_failed=%t, %v; destroying it anyway",
-				v.key, vmID(v.vm), res.ExitCode, res.TeardownFailed, err)
-		} else {
-			p.refreshEndedTracked(v, res.Tracked)
-		}
-	}
+	p.syncLeaseVictim(context.Background(), v)
 	return p.destroyLeaseVM(v.key, v.vm)
+}
+
+// syncLeaseVictim runs a victim's sync step when it is marked sync, bounded by
+// LeaseEndSyncTimeout and ctx. A failed sync is logged. A sync that succeeded answers with
+// the guest's whole tracked table, like every lease End, and that refreshes the end before
+// the end is reported (refreshEndedTracked).
+func (p *pool) syncLeaseVictim(ctx context.Context, v *leaseVictim) {
+	if !v.sync {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, LeaseEndSyncTimeout)
+	res, err := v.vm.Run(ctx, Command{Command: leaseEndSyncCommand, Lease: true,
+		TimeoutS: uint32(LeaseEndSyncTimeout / time.Second), CapBytes: OutputCapBytes}, discardingSink{})
+	cancel()
+	if err != nil || res.ExitCode != 0 || res.TeardownFailed {
+		log.Printf("vmpool: lease end sync workspace_key=%q vm=%s: exit %d, teardown_failed=%t, %v; destroying it anyway",
+			v.key, vmID(v.vm), res.ExitCode, res.TeardownFailed, err)
+		return
+	}
+	p.refreshEndedTracked(v, res.Tracked)
+}
+
+// syncLeaseVictimsWithin syncs vs concurrently and waits for them, at most bound in all
+// (Close's LeaseCloseSyncTimeout): past it each sync's context is cancelled, and the
+// returned wait is for the caller to call once it has destroyed the VMs, so that a sync
+// stuck where it cannot see the cancel (a vsock connect) ends with its VM before the
+// caller returns.
+func (p *pool) syncLeaseVictimsWithin(vs []*leaseVictim, bound time.Duration) (wait func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	var wg sync.WaitGroup
+	for _, v := range vs {
+		if !v.sync {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.syncLeaseVictim(ctx, v)
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	cancel()
+	return func() { <-done }
 }
 
 // refreshEndedTracked applies the table an ended lease's sync step reported (ruling
@@ -1012,12 +1060,30 @@ func (p *pool) refreshEndedTracked(v *leaseVictim, next []TrackedProcess) {
 }
 
 // destroyLeaseVictims destroys each victim's VM, then releases its gate: the order that
-// keeps a queued Exec from mounting the workspace while the old VM still holds it.
+// keeps a queued Exec from mounting the workspace while the old VM still holds it. The
+// victims go in parallel, each with its own sync bound, and each gate is released as soon
+// as its own VM is gone: one wedged guest holds only its own key (PR #814 review). It
+// returns once every victim is done.
 func (p *pool) destroyLeaseVictims(vs []*leaseVictim) {
+	p.destroyLeaseVictimsThen(vs, nil)
+}
+
+// destroyLeaseVictimsThen is destroyLeaseVictims, calling after (when set) for each victim
+// once its gate is released.
+func (p *pool) destroyLeaseVictimsThen(vs []*leaseVictim, after func(*leaseVictim)) {
+	var wg sync.WaitGroup
 	for _, v := range vs {
-		p.destroyLeaseVictim(v)
-		<-v.gate
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.destroyLeaseVictim(v)
+			<-v.gate
+			if after != nil {
+				after(v)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // destroyLeaseVM tears a lease VM down synchronously; the caller holds its gate. Not
@@ -1032,14 +1098,15 @@ func (p *pool) destroyLeaseVM(key string, vm VM) error {
 	return err
 }
 
-// destroySweptLeases is destroyLeaseVictims for the lease sweep's victims: it also drops
-// the pin the sweep took, once the gate is released.
+// destroySweptLeases is destroyLeaseVictims for the lease sweep's victims (idle,
+// max_duration, keepalive_lost, memory_reclaim): it also drops the pin the sweep took, once
+// the gate is released. A batch's victims sync in parallel, so a wedged guest delays only
+// its own key's next Exec. endLeaseLocked has already removed each victim's charge: with
+// the syncs in parallel, admission counts a victim's still-running VM as free for at most
+// one sync bound per batch, not one per victim in turn (PR #814 review; keeping the charge
+// until the destroy was declined).
 func (p *pool) destroySweptLeases(vs []*leaseVictim) {
-	for _, v := range vs {
-		p.destroyLeaseVictim(v)
-		<-v.gate
-		p.unpin(v.rp)
-	}
+	p.destroyLeaseVictimsThen(vs, func(v *leaseVictim) { p.unpin(v.rp) })
 }
 
 // leaseMaxDuration is how long a lease in mode m runs before it expires (spec §4): level

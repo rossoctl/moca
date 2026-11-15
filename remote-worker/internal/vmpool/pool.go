@@ -203,7 +203,10 @@ type pool struct {
 	mu     sync.Mutex
 	runs   map[string]*runPool
 	closed bool
-	seq    uint64
+	// closeSyncBound is Close's one bound on syncing the leases it detaches
+	// (LeaseCloseSyncTimeout); a field so a test need not wait it out.
+	closeSyncBound time.Duration
+	seq            uint64
 
 	counters *counters
 
@@ -271,7 +274,8 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	if err := markLeaseBoot(cfg.WorkspaceRoot, cfg.LeaseEnabled); err != nil {
 		return nil, err
 	}
-	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters()}
+	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters(),
+		closeSyncBound: LeaseCloseSyncTimeout}
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
 	p.reaper = newReaper(cfg.DeferReapWorkers)
@@ -1034,10 +1038,16 @@ func (p *pool) Close() error {
 			}
 		}
 	}
+	// The detached leases: synced concurrently under one bound (LeaseCloseSyncTimeout,
+	// below the units' TimeoutStopSec), then destroyed, each gate released after its VM.
+	waitSyncs := p.syncLeaseVictimsWithin(leases, p.closeSyncBound)
 	for _, v := range leases {
-		if err := p.destroyLeaseVictim(v); err != nil && firstErr == nil {
+		if err := p.destroyLeaseVM(v.key, v.vm); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	waitSyncs()
+	for _, v := range leases {
 		<-v.gate
 	}
 

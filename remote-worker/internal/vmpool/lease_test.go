@@ -167,6 +167,7 @@ func (v *leaseFakeVM) Run(ctx context.Context, c Command, out Sink) (Result, err
 		v.l.rec.Unlock()
 		v.l.record("sync " + v.id)
 		if fn != nil {
+			c.ctxDone = ctx.Done()
 			return fn(c)
 		}
 		return Result{Tracked: tracked}, nil

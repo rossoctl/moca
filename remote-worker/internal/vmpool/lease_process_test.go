@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1492,4 +1493,112 @@ func TestLeaseEndSyncRefreshesTheMirror(t *testing.T) {
 			}
 		})
 	}
+}
+
+// level2On makes key's lease a level-2 one with web running: an end syncs its guest.
+func level2On(t *testing.T, p *pool, lc *leaseLauncher, key string) {
+	t.Helper()
+	tab := &fakeTable{}
+	tab.set(running("1", "web", 412, time.Unix(1_700_000_000, 0)))
+	reportTable(lc, tab)
+	mustSetMode(t, p, key, ModeLeaseProcesses, 1)
+	mustExec(t, p, key, processExec(ExecKindProcessStart, ProcessArgs{Name: "web"}, 1))
+}
+
+// syncedBeforeDestroyed reports whether every destroyed VM was synced first.
+func syncedBeforeDestroyed(events []string) (synced, destroyed int, ok bool) {
+	seen := map[string]bool{}
+	ok = true
+	for _, ev := range events {
+		switch {
+		case strings.HasPrefix(ev, "sync "):
+			seen[strings.TrimPrefix(ev, "sync ")] = true
+			synced++
+		case strings.HasPrefix(ev, "destroyed "):
+			destroyed++
+			if !seen[strings.TrimPrefix(ev, "destroyed ")] {
+				ok = false
+			}
+		}
+	}
+	return synced, destroyed, ok
+}
+
+// PR #814 review: Close syncs the level-2 leases it detaches concurrently, under one overall
+// bound (LeaseCloseSyncTimeout, below the units' TimeoutStopSec=30), then destroys them all.
+// One wedged guest neither holds Close past the bound nor keeps the others from their sync.
+func TestCloseSyncsLeasesConcurrentlyUnderOneBound(t *testing.T) {
+	if LeaseCloseSyncTimeout != 20*time.Second || LeaseCloseSyncTimeout >= LeaseEndSyncTimeout {
+		t.Fatalf("LeaseCloseSyncTimeout = %s, want 20 s, below TimeoutStopSec=30", LeaseCloseSyncTimeout)
+	}
+	p, lc, _ := processPool(t)
+	keys := []string{"a", "b", "c", "d"}
+	for _, k := range keys {
+		level2On(t, p, lc, k)
+	}
+	var calls atomic.Int32
+	lc.setSyncFn(func(c Command) (Result, error) {
+		if calls.Add(1) == 1 {
+			<-c.ctxDone // the wedged guest: it answers nothing until the bound
+			return Result{}, ErrAborted
+		}
+		return Result{}, nil
+	})
+	p.closeSyncBound = 300 * time.Millisecond
+	start := time.Now()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("Close took %s with one wedged guest, want about the %s bound", el, p.closeSyncBound)
+	}
+	synced, destroyed, ok := syncedBeforeDestroyed(lc.eventLog())
+	if synced != len(keys) || destroyed != len(keys) || !ok {
+		t.Fatalf("events %q: want every lease VM synced, then destroyed", lc.eventLog())
+	}
+	if lc.liveCount() != 0 {
+		t.Fatalf("live VMs after Close = %d, want 0", lc.liveCount())
+	}
+}
+
+// PR #814 review: a sweep's victims (idle here; memory_reclaim takes the same path) sync in
+// parallel, each releasing its gate once its own VM is destroyed. A wedged first guest does
+// not hold the others' destroys, nor an Exec waiting on another key's gate.
+func TestSweptLeasesSyncInParallel(t *testing.T) {
+	p, lc, clk := processPool(t)
+	keys := []string{"a", "b", "c"}
+	for _, k := range keys {
+		level2On(t, p, lc, k)
+	}
+	wedge := make(chan struct{})
+	var unwedge sync.Once
+	release := func() { unwedge.Do(func() { close(wedge) }) }
+	t.Cleanup(release) // before the pool's Close, which waits for the reclaim goroutine
+	var calls atomic.Int32
+	lc.setSyncFn(func(c Command) (Result, error) {
+		if calls.Add(1) == 1 {
+			<-wedge
+			return Result{}, ErrAborted
+		}
+		return Result{}, nil
+	})
+	clk.Advance(p.cfg.LeaseIdleDefault) // every lease is idle at this tick
+	waitFor(t, func() bool { return calls.Load() == int32(len(keys)) && lc.liveCount() == 1 })
+	// The keys whose VMs are gone have their gates back: a fresh lease starts at once.
+	var free string
+	for _, k := range keys {
+		if pinnedCount(p, k) == 0 {
+			free = k
+		}
+	}
+	if free == "" {
+		t.Fatal("every key is still held, want the unwedged victims' gates released")
+	}
+	reportTable(lc, &fakeTable{})
+	errc := execAsync(p, free, level2Exec("ls", 1))
+	if err := recvWithin(t, errc, "an Exec on a swept key while another victim's sync is wedged"); err != nil {
+		t.Fatalf("Exec on %s: %v", free, err)
+	}
+	release()
+	waitFor(t, func() bool { return lc.liveCount() == 1 }) // the wedged one, destroyed; free's new lease
 }

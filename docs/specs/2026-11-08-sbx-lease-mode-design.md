@@ -610,7 +610,13 @@ be running)`.
   `agent_dead` end syncs too, since it also covers the host's own deadline and an abort, where the
   guest lives on (P5-R36), and so does `memory_reclaim`: losing a tracked process's writes is worse
   than a reclaim that waits on a wedged guest. `teardown_failed` skips the sync, and so does
-  `sandbox_deleted`, whose workspace is going away (P5-R39).
+  `sandbox_deleted`, whose workspace is going away (P5-R39). Ends that come together do not queue
+  behind one another: a sweep's victims (`idle`, `memory_reclaim`, …) sync in parallel, each
+  releasing its sandbox once its own VM is gone, so a wedged guest delays only its own sandbox. A
+  worker stopping (`worker_restart`) syncs every level-2 lease at once under one bound of 20 s,
+  below the worker units' `TimeoutStopSec=30`, then destroys them all; a guest that has not
+  answered by then loses its unsynced writes, rather than systemd killing the worker before the
+  later leases are synced.
 - **The end's sync refreshes the end** (P5-R38). The sync's `End` carries the guest's whole table,
   like every lease `End`. A process that exited since the last call is then dropped from the end's
   stopped list (the pending event and its copy on disk, or, for a closed pool's detach, the open
