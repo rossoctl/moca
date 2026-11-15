@@ -1667,8 +1667,10 @@ exit 0`, epoch)
 				t.Fatalf("r%d took uid %d while leaver's cgroup tracked/p%s still holds a process of it", i, u, leaver.ID)
 			}
 		}
-		// Three running is below the limit, but the last uid is still populated: refused.
-		want := fmt.Sprintf("process_limit: %d running (SH_LEASE_MAX_PROCESSES)", DefaultLeaseMaxProcesses)
+		// Three running is below the limit, but the last uid is still populated: refused, and the
+		// refusal says that leftover children hold it (PR #814 review).
+		want := fmt.Sprintf("process_limit: %d running, 1 uids held by leftover children of exited processes (process_stop them)",
+			DefaultLeaseMaxProcesses-1)
 		if got := g.processRefusal(t, key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: "r3"}, "exec sleep 600", epoch)); got != want {
 			t.Fatalf("a start with every free uid taken and one held by a populated cgroup: refusal %q, want %q", got, want)
 		}
