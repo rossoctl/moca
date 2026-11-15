@@ -102,11 +102,13 @@ export async function serveSbxMcp(
     else if (!beat && !closed) beat = setInterval(keepalive, KEEPALIVE_MS);
     server?.tokenMinted(tokenMode);
   };
-  const open = () =>
+  /** The connection, opened at the first call; `signal` aborts that opening's requests. */
+  const open = (signal?: AbortSignal) =>
     (conn ??= openExec(c.api, id, factory, {
       sandboxExpiresAt: s.expiresAt,
       onToken,
       keepalive: () => leased,
+      ...(signal ? { signal } : {}),
     }).catch((err: unknown) => {
       conn = undefined; // the next call asks again; this one fails as it is
       throw err;
@@ -117,12 +119,13 @@ export async function serveSbxMcp(
   const processCall: ProcessCall = async (op, args, opts) => (await open()).process(op, args, opts);
   /**
    * A fresh token's mode, for the process tools' gate (P5-R29): the connection's first mint if it
-   * is not open yet, else one forced re-mint. `onToken` sees it, so the list follows it too.
+   * is not open yet, else one forced re-mint. `onToken` sees it, so the list follows it too. The
+   * tool call's signal reaches both, so a cancelled call stops its mint (PR #814 review).
    */
-  const refreshMode = async () => {
+  const refreshMode = async (signal?: AbortSignal) => {
     const first = conn === undefined;
-    const opened = await open();
-    if (!first) await opened.remint();
+    const opened = await open(signal);
+    if (!first) await opened.remint(signal);
     return tokenMode;
   };
   const info = async () => {

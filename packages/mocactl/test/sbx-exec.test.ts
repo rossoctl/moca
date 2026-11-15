@@ -1062,6 +1062,8 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       record?: () => string;
       /** Answers `reset` in place of the default; gets the call's signal. */
       reset?: (signal?: AbortSignal) => Promise<LeaseStatusView>;
+      /** Wraps the control plane's fetch (a mint that hangs, say). */
+      fetchWrap?: (f: typeof fetch) => typeof fetch;
     } = {},
   ) {
     const { home, env, io } = setup();
@@ -1108,7 +1110,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
       home,
-      fetchImpl: cp.fetchImpl,
+      fetchImpl: over.fetchWrap ? over.fetchWrap(cp.fetchImpl) : cp.fetchImpl,
       execFactory: factory,
       mcpTransport: serverSide,
     });
@@ -1397,6 +1399,45 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     await m.client.callTool({ name: 'process_list', arguments: {} });
     expect(m.mints()).toBe(2);
     expect(m.processOps).toEqual(['start', 'list']);
+    await m.client.close();
+    await m.served;
+  });
+
+  // PR #814 review: the gate's forced re-mint gets the tool call's AbortSignal, so a cancelled
+  // process tool call stops its mint rather than leaving it to run on.
+  it("a cancelled process call aborts the gate's forced re-mint", async () => {
+    let tokenPosts = 0;
+    let mintSignal: AbortSignal | undefined;
+    let markReached!: () => void;
+    const reached = new Promise<void>((r) => (markReached = r));
+    const m = leaseSession(['lease', 'lease+processes'], {
+      record: () => 'lease+processes',
+      fetchWrap: (f) =>
+        (async (input: string | URL, init?: RequestInit) => {
+          const isMint = init?.method === 'POST' && String(input).endsWith('/token');
+          if (!isMint || ++tokenPosts === 1) return f(input, init);
+          // The re-mint hangs until its request is aborted.
+          mintSignal = init?.signal ?? undefined;
+          markReached();
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
+              once: true,
+            });
+          });
+        }) as typeof fetch,
+    });
+    await m.connect();
+    await m.bash('echo'); // the held token: lease
+    const ac = new AbortController();
+    const call = m.client.callTool({ name: 'process_list', arguments: {} }, undefined, {
+      signal: ac.signal,
+    });
+    await reached;
+    expect(mintSignal).toBeDefined();
+    ac.abort();
+    await expect(call).rejects.toThrow();
+    await vi.waitFor(() => expect(mintSignal!.aborted).toBe(true));
+    expect(m.processOps).toEqual([]);
     await m.client.close();
     await m.served;
   });
