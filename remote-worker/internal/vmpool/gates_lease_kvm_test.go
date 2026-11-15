@@ -2,12 +2,18 @@ package vmpool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // The lease level-1 gates (spec §9). Unlike every other gate in this package they drive
@@ -43,6 +49,52 @@ func requireLeaseSnapshot(t *testing.T) (string, Manifest) {
 			"build one with deploy/microvm/build-snapshot.sh from this branch", snapshotDir, FeatureLeaseV1, m.Features)
 	}
 	return snapshotDir, m
+}
+
+// requireLeaseProcessesSnapshot is requireLeaseSnapshot for a gate's level-2 half (plan 5):
+// it also skips, NOT RUN, unless the snapshot advertises lease-processes-v1. On a lease-v1
+// snapshot without it, a gate's level-1 half still runs and only its level-2 subtest skips.
+func requireLeaseProcessesSnapshot(t *testing.T) (string, Manifest) {
+	t.Helper()
+	snapshotDir, m := requireLeaseSnapshot(t)
+	if !m.HasFeature(FeatureLeaseProcessesV1) {
+		t.Skipf("NOT RUN (no signal, not a pass): snapshot %s does not advertise %q (features %v); "+
+			"the level-2 half needs one built with deploy/microvm/build-snapshot.sh from this branch",
+			snapshotDir, FeatureLeaseProcessesV1, m.Features)
+	}
+	return snapshotDir, m
+}
+
+// TestLeaseLevel2HalvesSkipWithoutTheFeature pins the split the level-2 halves rely on, where
+// no rig is needed to see it: against a lease-v1 snapshot without lease-processes-v1, the
+// lease check passes (a gate's level-1 half runs) and the level-2 check skips; with both
+// features neither skips.
+func TestLeaseLevel2HalvesSkipWithoutTheFeature(t *testing.T) {
+	for _, tc := range []struct {
+		features   []string
+		level2Runs bool
+	}{
+		{[]string{FeatureLeaseV1}, false},
+		{[]string{FeatureLeaseV1, FeatureLeaseProcessesV1}, true},
+	} {
+		dir := t.TempDir()
+		b, err := json.Marshal(Manifest{Features: tc.features})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, fileManifest), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("SH_VMM", "firecracker")
+		t.Setenv("SH_SNAPSHOT_IMAGE_DIR", dir)
+		var level1, level2 *testing.T
+		t.Run("level1", func(t *testing.T) { level1 = t; requireLeaseSnapshot(t) })
+		t.Run("level2", func(t *testing.T) { level2 = t; requireLeaseProcessesSnapshot(t) })
+		if level1.Skipped() || level2.Skipped() == tc.level2Runs {
+			t.Errorf("features %v: level 1 skipped %v, level 2 skipped %v; want level 1 run, level 2 run %v",
+				tc.features, level1.Skipped(), level2.Skipped(), tc.level2Runs)
+		}
+	}
 }
 
 // leaseGateVM restores and resumes one Firecracker VM from a lease-v1 snapshot, or skips
@@ -229,6 +281,14 @@ time.sleep(300)
 // Exec in the same VM (spec §9).
 func TestGateLeaseExecKillsProcesses(t *testing.T) {
 	requireKVM(t)
+	t.Run("level1", testLeaseExecKillsProcessesLevel1)
+	t.Run("level2", testLeaseExecKillsProcessesLevel2)
+}
+
+// testLeaseExecKillsProcessesLevel1 is TestGateLeaseExecKillsProcesses's level-1 half.
+// Each half is a subtest, so a level-1 failure cannot hide the level-2 result, and
+// -run .../level2 runs level 2 alone.
+func testLeaseExecKillsProcessesLevel1(t *testing.T) {
 	run := leaseRunner(t, leaseGateVM(t, "vm-lkill"))
 
 	// Built from variables so that the Exec's own bash command line, which the /proc scan
@@ -250,6 +310,7 @@ python3 -c ` + shQuote(leaseDaemonScript) + ` "$m-marker"
 	if got != "none\n" {
 		t.Errorf("processes Run 1 started survived into Run 2:\n%s", got)
 	}
+
 }
 
 // TestGateLeaseFreshShell: no shell state crosses Execs -- not a variable, a directory, a
@@ -320,6 +381,14 @@ print("mountsys=" + ("ok" if r == 0 else errno.errorcode.get(e, str(e))))
 // would find it.
 func TestGateLeasePrivilege(t *testing.T) {
 	requireKVM(t)
+	t.Run("level1", testLeasePrivilegeLevel1)
+	t.Run("level2", testLeasePrivilegeLevel2)
+}
+
+// testLeasePrivilegeLevel1 is TestGateLeasePrivilege's level-1 half. Each half is a
+// subtest, so a level-1 failure cannot hide the level-2 result, and -run .../level2
+// runs level 2 alone.
+func testLeasePrivilegeLevel1(t *testing.T) {
 	run := leaseRunner(t, leaseGateVM(t, "vm-lpriv"))
 
 	const pattern = `[l]ease-priv-marker`
@@ -408,5 +477,353 @@ m=lease-priv; python3 -c 'import time; time.sleep(300)' "$m-marker" >/dev/null 2
 	requireProbeWorked(t, got)
 	if got != "none\n" {
 		t.Errorf("Run 2 found what Run 1 left behind (a marker here means a cgroup escape worked):\n%s", got)
+	}
+
+}
+
+// The level-2 halves (plan 5, spec §7, §9): tracked processes, driven through the launcher
+// as the level-1 halves are. A process kind is a lease request with Kind and Process set,
+// answered as JSON on stdout (guestagent/tracked_linux.go).
+
+// leaseProcess sends one process kind to vm and returns its stdout, or the guest's refusal.
+// A process_start carries the default SH_LEASE_MAX_PROCESSES, as the pool sends it. An
+// answer that is not a refusal must exit 0 and tear down cleanly.
+func leaseProcess(t *testing.T, vm VM, kind ExecKind, args ProcessArgs, cmd string) (string, error) {
+	t.Helper()
+	c := Command{Command: cmd, Lease: true, TimeoutS: ProcessKindMinTimeoutS, CapBytes: OutputCapBytes,
+		Kind: kind, Process: args}
+	if kind == ExecKindProcessStart {
+		c.MaxProcesses = DefaultLeaseMaxProcesses
+	}
+	var out capturingSink
+	res, err := vm.Run(context.Background(), c, &out)
+	if err != nil {
+		return out.out(), err
+	}
+	if res.ExitCode != 0 || res.TeardownFailed {
+		t.Fatalf("%s %+v: exit %d, teardown_failed %v, stdout %q, stderr %q",
+			kind, args, res.ExitCode, res.TeardownFailed, out.out(), out.stderr.String())
+	}
+	return out.out(), nil
+}
+
+// gateTracked is process_start's answer.
+type gateTracked struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	PID  int    `json:"pid"`
+}
+
+// parseTrackedStart decodes process_start's answer, failing unless it names a process.
+func parseTrackedStart(t *testing.T, out string) gateTracked {
+	t.Helper()
+	var st gateTracked
+	if err := json.Unmarshal([]byte(out), &st); err != nil || st.ID == "" || st.PID <= 0 {
+		t.Fatalf("process_start answered %q (%v), want {id, name, pid}", out, err)
+	}
+	return st
+}
+
+// leaseStartTracked starts a tracked process on vm and returns it.
+func leaseStartTracked(t *testing.T, vm VM, name, cmd string) gateTracked {
+	t.Helper()
+	out, err := leaseProcess(t, vm, ExecKindProcessStart, ProcessArgs{Name: name}, cmd)
+	if err != nil {
+		t.Fatalf("process_start %q: %v", name, err)
+	}
+	return parseTrackedStart(t, out)
+}
+
+// parseTrackedList decodes process_list's answer: the guest's table, as the host mirrors it.
+func parseTrackedList(t *testing.T, out string) []TrackedProcess {
+	t.Helper()
+	var rows []ga.TrackedProcess
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("process_list answered %q: %v", out, err)
+	}
+	return trackedFromGuest(rows)
+}
+
+// leaseListTracked is vm's process_list.
+func leaseListTracked(t *testing.T, vm VM) []TrackedProcess {
+	t.Helper()
+	out, err := leaseProcess(t, vm, ExecKindProcessList, ProcessArgs{}, "")
+	if err != nil {
+		t.Fatalf("process_list: %v", err)
+	}
+	return parseTrackedList(t, out)
+}
+
+// trackedByID is the row of ps with id, and whether there is one.
+func trackedByID(ps []TrackedProcess, id string) (TrackedProcess, bool) {
+	for _, tp := range ps {
+		if tp.ID == id {
+			return tp, true
+		}
+	}
+	return TrackedProcess{}, false
+}
+
+// waitGate polls cond every 100 ms until it holds, failing after within.
+func waitGate(t *testing.T, within time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within %s", what, within)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// leaseWaitLogs polls vm's process_logs of args until they contain every want, and
+// returns them.
+func leaseWaitLogs(t *testing.T, vm VM, args ProcessArgs, wants ...string) string {
+	t.Helper()
+	var logs string
+	waitGate(t, 15*time.Second, fmt.Sprintf("process_logs %+v holding %q", args, wants), func() bool {
+		out, err := leaseProcess(t, vm, ExecKindProcessLogs, args, "")
+		if err != nil {
+			t.Fatalf("process_logs %+v: %v", args, err)
+		}
+		logs = out
+		for _, w := range wants {
+			if !strings.Contains(out, w) {
+				return false
+			}
+		}
+		return true
+	})
+	return logs
+}
+
+// trackedPIDs parses scanProcs list output (`<pid> <cmdline>` lines, or `none`) into pids.
+func trackedPIDs(t *testing.T, out string) []int {
+	t.Helper()
+	requireProbeWorked(t, out)
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "none" || line == "" {
+			continue
+		}
+		f, _, _ := strings.Cut(line, " ")
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatalf("scan line %q: %v", line, err)
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// leaseSleeper is a tracked command whose process sleeps 300 s with marker in its argv,
+// built from a variable so the command text never carries the marker (as the level-1
+// gates do): only the process itself matches its bracketed pattern.
+func leaseSleeper(prefix, suffix string) string {
+	return `m=` + prefix + `; exec python3 -c 'import time; time.sleep(300)' "$m-` + suffix + `"`
+}
+
+// testLeaseExecKillsProcessesLevel2: at level 2, process_start processes are an Exec's only
+// survivors (spec §9). A tracked process, and a child it put in a session of its own, outlive
+// every later Exec, each in the tracked process's cgroup; everything an Exec started is gone
+// by the next one; and process_stop takes the tracked process's child with it.
+func testLeaseExecKillsProcessesLevel2(t *testing.T) {
+	requireLeaseProcessesSnapshot(t)
+	vm := leaseGateVM(t, "vm-lkill2")
+	run := leaseRunner(t, vm)
+	run("true") // the lease's first request, which normalises the workspace
+
+	const execPattern = `[s]leep 30[0-3]|[l]ease-kill-marker`
+	const mainPattern, childPattern = `[l]ease-tracked-marker-main`, `[l]ease-tracked-marker-child`
+	st := leaseStartTracked(t, vm, "survivor", `m=lease-tracked
+setsid python3 -c 'import time; time.sleep(300)' "$m-marker-child" >/dev/null 2>&1 &
+exec python3 -c 'import time; time.sleep(300)' "$m-marker-main"`)
+
+	started := []procWant{
+		{`[s]leep 300`, false}, {`[s]leep 301`, false}, {`[s]leep 302`, false}, {`[s]leep 303`, false},
+		{`[l]ease-kill-marker`, true}, {mainPattern, false}, {childPattern, false},
+	}
+	out := run(`s=30; m=lease-kill
+sleep ${s}0 & setsid sleep ${s}1 & nohup sleep ${s}2 >/dev/null 2>&1 & (sleep ${s}3 &)
+python3 -c ` + shQuote(leaseDaemonScript) + ` "$m-marker"
+` + countProcs(started...))
+	requireStarted(t, out, started...)
+
+	got := run(leftoverProcs(execPattern))
+	requireProbeWorked(t, got)
+	if got != "none\n" {
+		t.Errorf("processes an Exec started survived into the next one at level 2:\n%s", got)
+	}
+	mains := trackedPIDs(t, run(leftoverProcs(mainPattern)))
+	children := trackedPIDs(t, run(leftoverProcs(childPattern)))
+	if len(mains) != 1 || mains[0] != st.PID || len(children) != 1 {
+		t.Fatalf("after two Execs: tracked process pids %v (process_start said %d), its child %v; want each alive once",
+			mains, st.PID, children)
+	}
+	// Both in the tracked process's own cgroup, not in an Exec's and not at the root.
+	want := "/tracked/p" + st.ID
+	for _, pid := range []int{mains[0], children[0]} {
+		if cg := strings.TrimSpace(run(fmt.Sprintf("cat /proc/%d/cgroup", pid))); !strings.HasPrefix(cg, "0::/") || !strings.HasSuffix(cg, want) {
+			t.Errorf("pid %d is in cgroup %q, want one ending %s", pid, cg, want)
+		}
+	}
+	if tp, ok := trackedByID(leaseListTracked(t, vm), st.ID); !ok || !tp.running() || tp.PID != st.PID || tp.DisplayName() != "survivor" {
+		t.Fatalf("process_list row for %s = %+v (found %v), want survivor running as pid %d", st.ID, tp, ok, st.PID)
+	}
+
+	if _, err := leaseProcess(t, vm, ExecKindProcessStop, ProcessArgs{Name: "survivor"}, ""); err != nil {
+		t.Fatalf("process_stop survivor: %v", err)
+	}
+	for _, pat := range []string{mainPattern, childPattern} {
+		if got := run(leftoverProcs(pat)); got != "none\n" {
+			t.Errorf("after process_stop, %s is still alive:\n%s", pat, got)
+		}
+	}
+}
+
+// leaseVictimScript is a tracked process that holds a canary in memory: it prints its
+// buffer's address, pid, identity, HOME and umask, then checks the canary every 0.2 s,
+// printing CHANGED if it ever differs. Once /workspace/.lease-victim-check exists it prints
+// the canary as it then reads it. argv[1] is the canary, argv[2] the marker.
+const leaseVictimScript = `
+import ctypes, os, sys, time
+canary = sys.argv[1].encode()
+buf = ctypes.create_string_buffer(canary, 64)
+um = os.umask(0); os.umask(um)
+print("addr=%d len=%d pid=%d uid=%d gid=%d home=%s umask=%04o" % (ctypes.addressof(buf), len(canary),
+      os.getpid(), os.getuid(), os.getgid(), os.environ.get("HOME", ""), um), flush=True)
+told = False
+while True:
+    if buf.value != canary:
+        print("CHANGED", buf.value, flush=True)
+    if not told and os.path.exists("/workspace/.lease-victim-check"):
+        print("canary=" + buf.value.decode("utf-8", "replace"), flush=True)
+        told = True
+    time.sleep(0.2)
+`
+
+// leaseAttackScript runs, as a lease Exec, every route spec §3.3 closes from an Exec to a
+// running tracked process: argv is <pid> <addr> <len>. It prints one <route>=<errno name>
+// (or <route>=ok when the call succeeded) per route.
+const leaseAttackScript = `
+import ctypes, errno, os, signal, sys
+libc = ctypes.CDLL(None, use_errno=True)
+pid, addr, n = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+def report(name, r):
+    e = ctypes.get_errno()
+    print("%s=%s" % (name, "ok" if r != -1 else errno.errorcode.get(e, str(e))), flush=True)
+class iovec(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+for name, req in (("ptrace_attach", 16), ("ptrace_seize", 0x4206)):
+    report(name, libc.ptrace(ctypes.c_long(req), ctypes.c_long(pid), None, None))
+mine = ctypes.create_string_buffer(b"X" * n, n)
+local, remote = iovec(ctypes.addressof(mine), n), iovec(addr, n)
+libc.process_vm_writev.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+libc.process_vm_readv.argtypes = libc.process_vm_writev.argtypes
+report("vm_writev", libc.process_vm_writev(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0))
+report("vm_readv", libc.process_vm_readv(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0))
+try:
+    fd = os.open("/proc/%d/mem" % pid, os.O_RDWR)
+    try:
+        os.pwrite(fd, b"X" * n, addr)
+        print("mem=written")
+    except OSError as e:
+        print("mem=opened-" + errno.errorcode.get(e.errno, str(e.errno)))
+    os.close(fd)
+except OSError as e:
+    print("mem=" + errno.errorcode.get(e.errno, str(e.errno)))
+for name, sig in (("kill_term", signal.SIGTERM), ("kill_zero", 0)):
+    try:
+        os.kill(pid, sig)
+        print(name + "=ok")
+    except OSError as e:
+        print(name + "=" + errno.errorcode.get(e.errno, str(e.errno)))
+`
+
+// testLeasePrivilegeLevel2 is the tracked half of TestGateLeasePrivilege (spec §3.3, §9,
+// Review Focus 2): a tracked process runs under its own uid from the tracked range, in the
+// sbx-ws group, with no capabilities, no_new_privs, the seccomp filter, umask 0002 and its
+// own HOME; and a lease Exec can neither ptrace, process_vm_writev, write /proc/<pid>/mem
+// of, nor signal it, nor move itself into its cgroup. The process's memory and command are
+// unchanged afterwards, and it is still running.
+func testLeasePrivilegeLevel2(t *testing.T) {
+	requireLeaseProcessesSnapshot(t)
+	vm := leaseGateVM(t, "vm-lpriv2")
+	run := leaseRunner(t, vm)
+	run("true")
+
+	const canary = "lease-victim-canary-5f1e0c"
+	st := leaseStartTracked(t, vm, "victim", "m=lease-victim; exec python3 -c "+shQuote(leaseVictimScript)+
+		" "+shQuote(canary)+` "$m-marker"`)
+	logs := leaseWaitLogs(t, vm, ProcessArgs{Name: "victim"}, "addr=")
+	m := regexp.MustCompile(`addr=(\d+) len=(\d+) pid=(\d+) uid=(\d+) gid=(\d+) home=(\S*) umask=(\d+)`).FindStringSubmatch(logs)
+	if m == nil {
+		t.Fatalf("the victim's first line is missing from its logs:\n%s", logs)
+	}
+	addr, n, pid, uid := m[1], m[2], m[3], m[4]
+	if pid != strconv.Itoa(st.PID) {
+		t.Fatalf("the victim reports pid %s, process_start said %d", pid, st.PID)
+	}
+	if u, _ := strconv.Atoi(uid); u < 20000 || u >= 20000+DefaultLeaseMaxProcesses || m[5] != "7000" {
+		t.Errorf("the tracked process runs as uid %s gid %s, want a uid in 20000..%d and gid 7000 (sbx-ws)",
+			uid, m[5], 20000+DefaultLeaseMaxProcesses-1)
+	}
+	if m[6] != "/tmp/sbx-proc/"+uid || m[7] != "0002" {
+		t.Errorf("HOME %q umask %s, want /tmp/sbx-proc/%s and 0002 (ruling P5-R12, spec §3.3)", m[6], m[7], uid)
+	}
+
+	cmdline := fmt.Sprintf(`tr '\0' ' ' </proc/%s/cmdline; echo`, pid)
+	before := run(cmdline)
+	if !strings.Contains(before, "lease-victim-marker") {
+		t.Fatalf("an Exec reads the victim's command line as %q, want its marker: the later comparison would prove nothing", before)
+	}
+	status := run(fmt.Sprintf(`awk '/^(Uid|Gid|CapEff|CapBnd|NoNewPrivs|Seccomp):/' /proc/%s/status
+stat -c 'home=%%a:%%u' /tmp/sbx-proc/%s`, pid, uid))
+	for _, want := range []string{
+		"Uid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n", "Gid:\t7000\t7000\t7000\t7000\n",
+		"CapEff:\t0000000000000000\n", "CapBnd:\t0000000000000000\n", "NoNewPrivs:\t1\n", "Seccomp:\t2\n",
+		"home=700:" + uid + "\n",
+	} {
+		if !strings.Contains(status, want) {
+			t.Errorf("the tracked process's status lacks %q:\n%s", want, status)
+		}
+	}
+
+	// The attack, from a lease Exec (uid 7000), and the cgroup move it would need instead.
+	out := run(`python3 -c ` + shQuote(leaseAttackScript) + " " + pid + " " + addr + " " + n + `
+e=$(mktemp); { echo $BASHPID > /sys/fs/cgroup/moca-execs/tracked/p` + st.ID + `/cgroup.procs; } 2>"$e"; echo trackedprocs=$?
+echo "trackedprocserr=$(tr '\n' ' ' <"$e")"; rm -f "$e"`)
+	for _, route := range []string{"ptrace_attach", "ptrace_seize", "vm_writev", "vm_readv"} {
+		if !strings.Contains(out, "\n"+route+"=EPERM\n") && !strings.HasPrefix(out, route+"=EPERM\n") {
+			t.Errorf("%s on the tracked process did not fail with EPERM:\n%s", route, out)
+		}
+	}
+	if !strings.Contains(out, "\nmem=EACCES\n") && !strings.Contains(out, "\nmem=EPERM\n") {
+		t.Errorf("opening the tracked process's /proc/<pid>/mem for writing did not fail with EACCES or EPERM:\n%s", out)
+	}
+	for _, route := range []string{"kill_term", "kill_zero"} {
+		if !strings.Contains(out, "\n"+route+"=EPERM\n") {
+			t.Errorf("%s on the tracked process did not fail with EPERM:\n%s", route, out)
+		}
+	}
+	if m := regexp.MustCompile(`(?m)^trackedprocs=(\d+)$`).FindStringSubmatch(out); m == nil || m[1] == "0" {
+		t.Errorf("an Exec wrote its pid into the tracked cgroup: %v\n%s", m, out)
+	}
+	if m := regexp.MustCompile(`(?m)^trackedprocserr=(.*)$`).FindStringSubmatch(out); m == nil || !strings.Contains(m[1], "Permission denied") {
+		t.Errorf("the tracked cgroup.procs write: %v, want \"Permission denied\"\n%s", m, out)
+	}
+
+	// Unchanged: the victim reads its canary as it was, has never seen it change, and its
+	// command line and pid are the same.
+	run("touch /workspace/.lease-victim-check")
+	logs = leaseWaitLogs(t, vm, ProcessArgs{Name: "victim"}, "canary=")
+	if !strings.Contains(logs, "canary="+canary+"\n") || strings.Contains(logs, "CHANGED") {
+		t.Errorf("the tracked process's memory changed under the attack:\n%s", logs)
+	}
+	if after := run(cmdline); after != before {
+		t.Errorf("the tracked process's command line changed: %q, then %q", before, after)
+	}
+	if tp, ok := trackedByID(leaseListTracked(t, vm), st.ID); !ok || !tp.running() || tp.PID != st.PID {
+		t.Errorf("after the attack the victim's row is %+v (found %v), want running as pid %d", tp, ok, st.PID)
 	}
 }

@@ -47,7 +47,7 @@ func requireRootCgroupV2(t *testing.T) {
 // package directory need not be traversable by uid 7000.
 func runInShim(t *testing.T, home string, argv ...string) string {
 	t.Helper()
-	args := append([]string{ShimArg, testExecID, testExecID, home, "--"}, argv...)
+	args := append([]string{ShimArg, testExecID, testExecID, home, "sbx", "-", "--"}, argv...)
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Dir = "/"
 	out, err := cmd.CombinedOutput()
@@ -61,7 +61,7 @@ func TestShimDropsToTheExecUserWithNoPrivileges(t *testing.T) {
 	requireRootCgroupV2(t)
 	home := t.TempDir()
 	out := runInShim(t, home, "bash", "-c",
-		`echo "uid=$(id -u)"; echo "gid=$(id -g)"; echo "groups=$(id -G)"; echo "home=$HOME"; `+
+		`echo "uid=$(id -u)"; echo "gid=$(id -g)"; echo "groups=$(id -G)"; echo "home=$HOME"; echo "user=$USER"; echo "logname=$LOGNAME"; `+
 			`grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):' /proc/self/status`)
 
 	got := map[string]string{}
@@ -79,6 +79,8 @@ func TestShimDropsToTheExecUserWithNoPrivileges(t *testing.T) {
 		"gid":        testExecID,
 		"groups":     testExecID,
 		"home":       home,
+		"user":       "sbx",
+		"logname":    "sbx",
 		"CapInh":     "0000000000000000",
 		"CapPrm":     "0000000000000000",
 		"CapEff":     "0000000000000000",
@@ -100,7 +102,7 @@ func TestShimDropsToTheExecUserWithNoPrivileges(t *testing.T) {
 // execs the test binary, and root's execve keeps the inheritable set.
 func TestShimClearsAnInheritedCapabilitySet(t *testing.T) {
 	requireRootCgroupV2(t)
-	args := []string{ShimArg, testExecID, testExecID, t.TempDir(), "--",
+	args := []string{ShimArg, testExecID, testExecID, t.TempDir(), "sbx", "-", "--",
 		"grep", "-E", "^(CapInh|CapAmb):", "/proc/self/status"}
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Dir = "/"
@@ -178,7 +180,7 @@ func TestShimResetsTheInheritedOomScoreAdj(t *testing.T) {
 	requireRootCgroupV2(t)
 	cmd := exec.Command("sh", "-c",
 		`echo -1000 > /proc/self/oom_score_adj && echo "pre=$(cat /proc/self/oom_score_adj)" && exec "$0" "$@"`,
-		os.Args[0], ShimArg, testExecID, testExecID, t.TempDir(), "--",
+		os.Args[0], ShimArg, testExecID, testExecID, t.TempDir(), "sbx", "-", "--",
 		"sh", "-c", `cat /proc/self/oom_score_adj; { echo -1000 > /proc/self/oom_score_adj; } 2>/dev/null; echo rc=$?`)
 	cmd.Dir = "/"
 	out, err := cmd.CombinedOutput()
@@ -187,6 +189,25 @@ func TestShimResetsTheInheritedOomScoreAdj(t *testing.T) {
 	}
 	if want := "pre=-1000\n0\nrc=1\n"; string(out) != want {
 		t.Errorf("output %q, want %q", out, want)
+	}
+}
+
+// The agent ignores TERM, INT and HUP (cmd/guest-agent), and an ignored disposition
+// survives fork and execve. The shim must hand the command default dispositions, or
+// process_stop's TERM (and an Exec's own kill -INT or timeout -s HUP) would do nothing.
+// sh stands in for the agent: it ignores them, then execs the shim, which inherits that.
+func TestShimResetsInheritedIgnoredSignals(t *testing.T) {
+	requireRootCgroupV2(t)
+	cmd := exec.Command("sh", "-c", `trap '' HUP INT TERM PIPE USR1; exec "$0" "$@"`,
+		os.Args[0], ShimArg, testExecID, testExecID, t.TempDir(), "sbx", "-", "--",
+		"grep", "-E", "^Sig(Ign|Blk):", "/proc/self/status")
+	cmd.Dir = "/"
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim: %v\n%s", err, out)
+	}
+	if want := "SigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n"; string(out) != want {
+		t.Errorf("the command's signal state:\n%s\nwant nothing blocked or ignored", out)
 	}
 }
 
@@ -262,21 +283,39 @@ func TestShimArgsRejectAnEmptyHomeOrCommand(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"empty home", []string{"7000", "7000", "", "--", "true"}},
-		{"empty argv[0]", []string{"7000", "7000", "/tmp/sbx-home", "--", ""}},
-		{"no argv", []string{"7000", "7000", "/tmp/sbx-home", "--"}},
-		{"root uid", []string{"0", "7000", "/tmp/sbx-home", "--", "true"}},
-		{"no separator", []string{"7000", "7000", "/tmp/sbx-home", "true", "x"}},
+		{"empty home", []string{"7000", "7000", "", "sbx", "-", "--", "true"}},
+		{"empty user", []string{"7000", "7000", "/tmp/sbx-home", "", "-", "--", "true"}},
+		{"no user", []string{"7000", "7000", "/tmp/sbx-home", "-", "--", "true"}},
+		{"no cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "--", "true"}},
+		{"bad cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "/etc", "--", "true"}},
+		{"bare fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd", "--", "true"}},
+		{"absolute fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:/etc", "--", "true"}},
+		{"escaping fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:../x", "--", "true"}},
+		{"empty fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:", "--", "true"}},
+		{"empty argv[0]", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--", ""}},
+		{"no argv", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--"}},
+		{"root uid", []string{"0", "7000", "/tmp/sbx-home", "sbx", "-", "--", "true"}},
+		{"no separator", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "true", "x"}},
 	} {
-		if _, _, _, _, err := parseShimArgs(tc.args); err == nil {
+		if _, err := parseShimArgs(tc.args); err == nil {
 			t.Errorf("%s: parseShimArgs(%q) accepted it", tc.name, tc.args)
 		}
 	}
-	if _, _, _, _, err := parseShimArgs([]string{"7000", "7000", "/tmp/sbx-home", "--", "true"}); err != nil {
+	got, err := parseShimArgs([]string{"20001", "7000", "/tmp/sbx-proc/20001", "sbxp1", "fd:sub/deep", "--", "true", "x"})
+	if err != nil {
 		t.Errorf("valid args rejected: %v", err)
 	}
+	if got.uid != 20001 || got.gid != 7000 || got.home != "/tmp/sbx-proc/20001" || got.user != "sbxp1" || !got.cwdFromFD || got.cwdRel != "sub/deep" || !slices.Equal(got.argv, []string{"true", "x"}) {
+		t.Errorf("parseShimArgs = %+v", got)
+	}
+	if got, err := parseShimArgs([]string{"20001", "7000", "/tmp/sbx-proc/20001", "sbxp1", "fd:.", "--", "true"}); err != nil || !got.cwdFromFD || got.cwdRel != "." {
+		t.Errorf("cwd fd:.: %+v, %v; want the workspace root itself", got, err)
+	}
+	if got, err := parseShimArgs([]string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--", "true"}); err != nil || got.cwdFromFD {
+		t.Errorf("cwd -: %+v, %v; want the inherited cwd", got, err)
+	}
 	// The same check must be what the shim process does: step "args", exit 127.
-	cmd := exec.Command(os.Args[0], ShimArg, "7000", "7000", "", "--", "true")
+	cmd := exec.Command(os.Args[0], ShimArg, "7000", "7000", "", "sbx", "-", "--", "true")
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 127 || !strings.Contains(string(out), "guest-agent: lease-shim: args: ") {
@@ -354,6 +393,13 @@ func mountIsNosuid(t *testing.T, path string) bool {
 // parent are 0700 root and the Exec runs as 7000.
 func newLeaseAgent(t *testing.T) (*Agent, string) {
 	t.Helper()
+	return newLeaseAgentWith(t, nil)
+}
+
+// newLeaseAgentWith is newLeaseAgent with the lease options adjusted by opt (nil: none).
+// The tracked processes' homes go under a scratch parent, not the test host's /tmp.
+func newLeaseAgentWith(t *testing.T, opt func(*LeaseOptions)) (*Agent, string) {
+	t.Helper()
 	requireRootCgroupV2(t)
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -396,11 +442,19 @@ func newLeaseAgent(t *testing.T) (*Agent, string) {
 			t.Fatal(err)
 		}
 	}
+	trackedHomes := t.TempDir()
+	if err := os.Chmod(trackedHomes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origHomes := trackedHomeParent
+	trackedHomeParent = filepath.Join(trackedHomes, "sbx-proc") // leasePrepare makes it
+	t.Cleanup(func() { trackedHomeParent = origHomes })
 	id, _ := strconv.Atoi(testExecID)
-	a, err := NewAgent(AgentOptions{
-		WorkDir: work, ScratchDir: t.TempDir(),
-		Lease: LeaseOptions{CgroupRoot: root, UID: id, GID: id, Home: filepath.Join(homeParent, "home"), ShimPath: os.Args[0]},
-	})
+	lo := LeaseOptions{CgroupRoot: root, UID: id, GID: id, Home: filepath.Join(homeParent, "home"), ShimPath: os.Args[0]}
+	if opt != nil {
+		opt(&lo)
+	}
+	a, err := NewAgent(AgentOptions{WorkDir: work, ScratchDir: t.TempDir(), Lease: lo})
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -408,14 +462,16 @@ func newLeaseAgent(t *testing.T) (*Agent, string) {
 	return a, root
 }
 
-// removeCgroupTree removes root's per-Exec cgroups, then root. A cgroup left by a
-// failed teardown may take a moment to empty after its cgroup.kill, so it retries.
+// removeCgroupTree removes root's per-Exec and tracked cgroups, then root. A cgroup left
+// by a failed teardown, or a tracked process still running, may take a moment to empty
+// after its cgroup.kill, so it retries.
 func removeCgroupTree(t *testing.T, root string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		subs, _ := filepath.Glob(filepath.Join(root, "e*"))
-		for _, s := range subs {
+		tracked, _ := filepath.Glob(filepath.Join(root, "tracked", "p[0-9]*"))
+		for _, s := range append(append(subs, tracked...), filepath.Join(root, "tracked")) {
 			_ = os.WriteFile(filepath.Join(s, "cgroup.kill"), []byte("1"), 0)
 			_ = os.Remove(s)
 		}
@@ -1307,5 +1363,123 @@ func TestLeaseMemoryHintReadsTheCgroupFiles(t *testing.T) {
 	}
 	if got := leaseMemoryHintFor(filepath.Join(root, "missing"), 1); got != "" {
 		t.Fatalf("hint with unreadable root files = %q, want none", got)
+	}
+}
+
+func TestShimEnvSetsTheGivenUser(t *testing.T) {
+	got := shimEnv([]string{"PATH=/bin", "HOME=/root", "USER=root", "LOGNAME=root", "USERX=kept"}, "/tmp/sbx-proc-20001", "sbxp1")
+	want := []string{"PATH=/bin", "USERX=kept", "HOME=/tmp/sbx-proc-20001", "USER=sbxp1", "LOGNAME=sbxp1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("shimEnv = %q, want %q", got, want)
+	}
+}
+
+// waitStatusExit is the wait status of a process that exited with code.
+func waitStatusExit(code int) syscall.WaitStatus { return syscall.WaitStatus(code << 8) }
+
+// runLease calls cancel after every Exec and expect before every fork; a tracked
+// process outlives both, so its registration must too. It fires once.
+func TestReaperTrackedRegistrationSurvivesCancelAndExpect(t *testing.T) {
+	r := newReaper()
+	var got []int
+	r.track(100, func(ws syscall.WaitStatus) { got = append(got, ws.ExitStatus()) })
+	r.cancel()
+	r.expect()
+	r.cancel()
+	r.deliver(100, waitStatusExit(7))
+	r.deliver(100, waitStatusExit(8)) // a recycled pid, untracked now: an orphan
+	if !slices.Equal(got, []int{7}) {
+		t.Fatalf("onExit calls = %v, want one, with code 7", got)
+	}
+}
+
+// A tracked process can exit between its fork and track: its status is then in early,
+// and track hands it over at once. track closes the registration window, as await does.
+func TestReaperTrackHandsOverAnEarlyExit(t *testing.T) {
+	r := newReaper()
+	r.expect()
+	r.deliver(100, waitStatusExit(5))
+	var got []int
+	r.track(100, func(ws syscall.WaitStatus) { got = append(got, ws.ExitStatus()) })
+	if !slices.Equal(got, []int{5}) {
+		t.Fatalf("onExit calls = %v, want one, with code 5", got)
+	}
+	if r.pending || len(r.early) != 0 || len(r.tracked) != 0 {
+		t.Fatalf("after track: pending %v, early %v, tracked %d; want the window closed and nothing held", r.pending, r.early, len(r.tracked))
+	}
+}
+
+// onExit runs without the reaper's lock, so it may call back into the reaper.
+func TestReaperOnExitRunsOutsideTheLock(t *testing.T) {
+	r := newReaper()
+	done := make(chan struct{})
+	r.track(100, func(syscall.WaitStatus) { r.cancel(); close(done) })
+	go r.deliver(100, waitStatusExit(0))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("onExit deadlocked against the reaper's lock")
+	}
+}
+
+// The same with a real child and the real reaper loop: registered with track, the
+// child's exit reaches onExit although cancel and expect ran while it lived.
+func TestReaperTrackedChildIsReapedAfterCancel(t *testing.T) {
+	r := startReaper()
+	t.Cleanup(r.stop)
+	r.expect()
+	pid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-c", "sleep 0.3; exit 7"}, &syscall.ProcAttr{})
+	if err != nil {
+		r.cancel()
+		t.Fatal(err)
+	}
+	got := make(chan syscall.WaitStatus, 1)
+	r.track(pid, func(ws syscall.WaitStatus) { got <- ws })
+	r.cancel()
+	r.expect()
+	r.cancel()
+	select {
+	case ws := <-got:
+		if !ws.Exited() || ws.ExitStatus() != 7 {
+			t.Fatalf("status %v, want exit 7", ws)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the tracked child's exit never reached onExit")
+	}
+}
+
+// The tracked range must be real and must not hold the exec uid: a tracked process
+// sharing the Exec's uid could be traced by any later Exec (spec §3.3). Checked before
+// leasePrepare touches anything, so no root is needed.
+func TestLeasePrepareRejectsABadTrackedUIDRange(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		base, max int
+	}{
+		{"negative base", -1, 4},
+		{"negative count", 20000, -1},
+		{"holds the exec uid", 6998, 4},
+		{"starts at the exec uid", 7000, 1},
+	} {
+		_, err := NewAgent(AgentOptions{WorkDir: t.TempDir(), ScratchDir: t.TempDir(), Lease: LeaseOptions{
+			CgroupRoot: filepath.Join(t.TempDir(), "never-made"), UID: 7000, GID: 7000, Home: filepath.Join(t.TempDir(), "home"),
+			TrackedUIDBase: tc.base, MaxTrackedUIDs: tc.max,
+		}})
+		if err == nil || !strings.Contains(err.Error(), "tracked uids") {
+			t.Errorf("%s: NewAgent err = %v, want a tracked uids refusal", tc.name, err)
+		}
+	}
+}
+
+func TestLeaseTrackedUIDDefaults(t *testing.T) {
+	if DefaultTrackedUIDBase != 20000 || DefaultMaxTrackedUIDs != 4 {
+		t.Fatalf("defaults %d, %d; want 20000 and 4 (global constraints)", DefaultTrackedUIDBase, DefaultMaxTrackedUIDs)
+	}
+	a, _ := newLeaseAgent(t)
+	if lo := a.opts.Lease; lo.TrackedUIDBase != 20000 || lo.MaxTrackedUIDs != 4 {
+		t.Fatalf("lease options %+v, want the tracked defaults filled in", lo)
+	}
+	if a.lease.uids == nil || a.lease.uids.base != 20000 || a.lease.uids.n != 4 {
+		t.Fatalf("uid allocator %+v, want 20000 and 4", a.lease.uids)
 	}
 }

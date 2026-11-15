@@ -55,6 +55,15 @@ func (e *LeaseEndedError) Error() string { return fmt.Sprintf("vmpool: lease_end
 
 func (e *LeaseEndedError) Unwrap() error { return ErrLeaseEnded }
 
+// ProcessError is a tracked-process request answered with a refusal in its wire string
+// (process_not_found: <id or name>, process_limit: ..., lease_unsupported: unknown kind
+// ...): the guest's own, passed through from its error frame with the lease kept
+// (runLease), or the host's, for a process kind with no lease to ask (answerWithoutLease).
+// Error is the wire string itself, so it reaches the client unchanged.
+type ProcessError struct{ Msg string }
+
+func (e *ProcessError) Error() string { return e.Msg }
+
 // RefusalReason names why the pool declined. Spec §6 requires a memory-driven
 // refusal to be recorded DISTINCTLY from a MaxRuns refusal — "or the two ceilings
 // get conflated and neither is diagnosable" — and §7.3 reports ExecErrors by cause.
@@ -81,6 +90,9 @@ const (
 	// RefuseLeaseUnsupported is a lease-mode request on a worker that cannot serve
 	// one: not the Firecracker arm, or a snapshot without lease-v1.
 	RefuseLeaseUnsupported RefusalReason = "lease-unsupported"
+	// RefuseProcessesNotEnabled is a tracked-process kind at a served mode below
+	// lease+processes (spec §7): processes_not_enabled on the wire.
+	RefuseProcessesNotEnabled RefusalReason = "processes-not-enabled"
 )
 
 // RefusalError carries a reason to microvm-worker, which counts it and returns an

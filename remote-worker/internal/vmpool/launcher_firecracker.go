@@ -1266,8 +1266,7 @@ func (v *firecrackerVM) Run(ctx context.Context, c Command, out Sink) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("firecracker: run %s: dial vsock: %w", v.id, err)
 	}
-	wrapped := c
-	wrapped.Command = wrapCommand(c.Command)
+	wrapped := wrapForGuest(c, wrapCommand)
 	// runOverConn is THE protocol implementation (guestconn.go) — reused here rather
 	// than re-implemented, per this task's constraint that there must be exactly one.
 	return runOverConn(ctx, conn, wrapped, out, time.Now())

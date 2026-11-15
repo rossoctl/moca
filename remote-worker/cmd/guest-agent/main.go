@@ -43,6 +43,8 @@ func main() {
 		leaseUID        = flag.Int("lease-uid", 7000, "uid a lease Exec runs as")
 		leaseGID        = flag.Int("lease-gid", 7000, "gid a lease Exec runs as")
 		leaseHome       = flag.String("lease-home", "/tmp/sbx-home", "HOME of the lease exec identity; created at startup")
+		leaseTrackedUID = flag.Int("lease-tracked-uid-base", guestagent.DefaultTrackedUIDBase, "first uid of the tracked-process range; each tracked process runs under its own uid (0 means the default)")
+		leaseTrackedN   = flag.Int("lease-tracked-uids", guestagent.DefaultMaxTrackedUIDs, "how many uids the tracked-process range holds (0 means the default; the range cannot be turned off)")
 	)
 	flag.Parse()
 
@@ -55,6 +57,7 @@ func main() {
 		// fails here, at boot, if it cannot: the snapshot build then never sees an agent.
 		Lease: guestagent.LeaseOptions{
 			CgroupRoot: *leaseCgroupRoot, UID: *leaseUID, GID: *leaseGID, Home: *leaseHome,
+			TrackedUIDBase: *leaseTrackedUID, MaxTrackedUIDs: *leaseTrackedN,
 		},
 	})
 	if err != nil {

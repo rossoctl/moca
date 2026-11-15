@@ -1,6 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { LeaseEvent, SandboxMode } from '../src/gen/sandbox/v1/sandbox.js';
-import { NoticeDedupe, leaseNotice, noticeLines } from '../src/lease.js';
+import {
+  LeaseEvent,
+  LeaseStatus,
+  SandboxMode,
+  TrackedProcess,
+} from '../src/gen/sandbox/v1/sandbox.js';
+import {
+  NoticeDedupe,
+  leaseNotice,
+  leaseStatusView,
+  noticeLines,
+  processRow,
+  processStateText,
+  trackedProcessView,
+} from '../src/lease.js';
 
 // The notice's HH:MM is local time: pin the zone so the copy is exact.
 let tz: string | undefined;
@@ -83,6 +96,29 @@ describe('leaseNotice (spec §5 copy)', () => {
     expect(leaseNotice(ev({ state: 'start', atUnixMs: pm }), pm)).toContain('23:59');
   });
 
+  it('formats a downgrade that stopped tracked processes (plan 5, Global Constraints copy)', () => {
+    expect(
+      leaseNotice(
+        ev({
+          state: 'processes_stopped',
+          reason: 'mode_change',
+          processes: ['web (pid 412)', 'p2 (pid 518)'],
+        }),
+        AT,
+      ),
+    ).toBe('[sandbox] tracked processes stopped (mode_change, 14:02): web (pid 412), p2 (pid 518)');
+    expect(
+      leaseNotice(
+        ev({ state: 'processes_stopped', reason: 'mode_change', processes: ['web (pid 412)'] }),
+        AT,
+      ),
+    ).toBe('[sandbox] tracked processes stopped (mode_change, 14:02): web (pid 412)');
+    // The worker sends none without a process; one that did would name nobody.
+    expect(leaseNotice(ev({ state: 'processes_stopped', reason: 'mode_change' }), AT)).toBe(
+      '[sandbox] tracked processes stopped (mode_change, 14:02)',
+    );
+  });
+
   it('returns undefined for an unknown state', () => {
     expect(leaseNotice(ev({ state: 'resumed' }), AT)).toBeUndefined();
     expect(leaseNotice(ev({ state: '' }), AT)).toBeUndefined();
@@ -157,5 +193,86 @@ describe('noticeLines (spec §5: one result, its lines)', () => {
   it('drops a state it does not know, and is empty for no events', () => {
     expect(noticeLines([ev({ state: 'later' })], AT)).toEqual([]);
     expect(noticeLines([], AT)).toEqual([]);
+  });
+});
+
+describe('tracked processes as a client shows them (plan 5, spec §7)', () => {
+  const tp = (over: Partial<TrackedProcess>) =>
+    TrackedProcess.fromPartial({ id: '3', name: 'web', pid: 412, state: 'running', ...over });
+
+  it('reads a TrackedProcess into the view', () => {
+    expect(
+      trackedProcessView(tp({ code: 0, ageMs: 130_400, memoryBytes: 12 * 1024 * 1024 })),
+    ).toEqual({
+      id: '3',
+      name: 'web',
+      pid: 412,
+      state: 'running',
+      code: 0,
+      ageMs: 130_400,
+      memoryBytes: 12 * 1024 * 1024,
+    });
+  });
+
+  it('names the state running, exited(<code>) or killed(<signal>)', () => {
+    expect(processStateText(trackedProcessView(tp({})))).toBe('running');
+    expect(processStateText(trackedProcessView(tp({ state: 'exited', code: 0 })))).toBe(
+      'exited(0)',
+    );
+    expect(processStateText(trackedProcessView(tp({ state: 'exited', code: 2 })))).toBe(
+      'exited(2)',
+    );
+    expect(processStateText(trackedProcessView(tp({ state: 'killed', code: 9 })))).toBe(
+      'killed(9)',
+    );
+    // A state this client does not know is shown as it came.
+    expect(processStateText(trackedProcessView(tp({ state: 'zombie' })))).toBe('zombie');
+  });
+
+  it('renders a row as `id name (pid n): state, age, memory`', () => {
+    const v = trackedProcessView(tp({ ageMs: 130_400, memoryBytes: 12.5 * 1024 * 1024 }));
+    expect(processRow(v)).toBe('p3 web (pid 412): running, 2m10s, 12.5 MiB');
+    // An unnamed process (the guest names it p<id>) shows its id once (ruling P5-R40).
+    expect(processRow({ ...v, id: '4', name: 'p4' })).toBe(
+      'p4 (pid 412): running, 2m10s, 12.5 MiB',
+    );
+    // An exited row has no age (final review M6): it counts from the start, not a runtime.
+    expect(
+      processRow(
+        trackedProcessView(tp({ state: 'killed', code: 9, ageMs: 4_999, memoryBytes: 0 })),
+      ),
+    ).toBe('p3 web (pid 412): killed(9), 0.0 MiB');
+    expect(processRow(trackedProcessView(tp({ state: 'exited', code: 1, ageMs: 7_380_000 })))).toBe(
+      'p3 web (pid 412): exited(1), 0.0 MiB',
+    );
+  });
+
+  it('carries the full tracked table on the lease status view, and none when it is empty', () => {
+    const s = LeaseStatus.fromPartial({
+      mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+      state: 'active',
+      processes: [tp({}), tp({ id: '4', name: 'p4', pid: 9, state: 'exited', code: 1 })],
+    });
+    expect(leaseStatusView(s).processes!.map((v) => `${v.id}:${v.state}`)).toEqual([
+      '3:running',
+      '4:exited',
+    ]);
+    expect(leaseStatusView(LeaseStatus.fromPartial({ state: 'active' }))).not.toHaveProperty(
+      'processes',
+    );
+  });
+
+  it("carries a set_mode downgrade's stopped processes, and none when it is empty (plan 5 Task 10)", () => {
+    const s = LeaseStatus.fromPartial({
+      mode: SandboxMode.SANDBOX_MODE_LEASE,
+      state: 'active',
+      stopped: [tp({ state: 'killed', code: 15 })],
+    });
+    expect(leaseStatusView(s).stopped).toEqual([
+      trackedProcessView(tp({ state: 'killed', code: 15 })),
+    ]);
+    expect(leaseStatusView(LeaseStatus.fromPartial({ state: 'active' }))).not.toHaveProperty(
+      'stopped',
+    );
   });
 });

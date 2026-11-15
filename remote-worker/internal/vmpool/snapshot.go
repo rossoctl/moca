@@ -88,6 +88,13 @@ type Manifest struct {
 // (deploy/microvm/build-snapshot.sh). A worker refuses lease mode without it.
 const FeatureLeaseV1 = "lease-v1"
 
+// FeatureLeaseProcessesV1 marks an image built for lease level 2, tracked processes:
+// the sbxp<n> identities (uids 20000..20003, group sbx-ws, HOME /tmp/sbx-proc/<uid>) and
+// an agent started with that tracked uid range, with cgroup.kill proved in the guest
+// (deploy/microvm/build-snapshot.sh). Firecracker builds only, always beside lease-v1. A
+// worker refuses a process kind (process_start, list, logs, stop) without it.
+const FeatureLeaseProcessesV1 = "lease-processes-v1"
+
 // FeatureBalloonFPRV1 marks a snapshot whose VM carries a virtio-balloon in free-page
 // reporting mode only (amount 0, never inflated): the guest returns the pages it frees, so
 // an idle lease's measured charge follows its working set rather than its peak (spec §6).

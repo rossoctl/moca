@@ -19,7 +19,9 @@ service SandboxExec {
 }
 ```
 
-The two lease calls matter only for a sandbox in a lease mode: see [Lease mode](#lease-mode).
+The two lease calls matter only for a sandbox in a lease mode: see [Lease mode](#lease-mode). At
+`lease+processes`, an `Exec` can also start and manage a tracked process instead of running a
+command: see [Tracked processes](#tracked-processes-leaseprocesses).
 
 `SandboxWorker.Attach` in the same file is the workers' side; clients never call it.
 
@@ -257,6 +259,80 @@ answers `busy` past either. It runs at most 32 `status` calls at once, apart fro
 attached; it does nothing without a live lease. The relay does not audit it, and it passes on at
 most one keepalive per sandbox per second: the others are answered OK and dropped. Every 30 s is
 enough (`mocactl sbx mcp` sends one every 30 s while its token's mode is a lease mode).
+
+## Tracked processes (`lease+processes`)
+
+At level 2 a process can outlive the `Exec` that started it, if it was started as a **tracked
+process**. Everything else an Exec starts (`&`, `nohup`, `setsid`) still dies when the Exec ends.
+The design is [the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §7;
+`mocactl sbx proc` and the MCP server's process tools are built on the calls below.
+
+**A process call is an `Exec` with a kind.** `Exec.kind` (field 11) is an `ExecKind`, and
+`Exec.process` (field 12) its `ProcessArgs`:
+
+| `Exec.kind`               | `ProcessArgs` it reads                                  | Answer, on stdout with exit 0                                                           |
+| ------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `EXEC_KIND_COMMAND` (0)   | none                                                    | a command, as before: the default, and what a client that never sets the field sends    |
+| `EXEC_KIND_PROCESS_START` | `name` (optional), `cwd` (in `/workspace`, the default) | JSON `{"id", "name", "pid"}`. The command is `Exec.command`, run as `bash -c <command>` |
+| `EXEC_KIND_PROCESS_LIST`  | none                                                    | a JSON array of rows, exited processes included                                         |
+| `EXEC_KIND_PROCESS_LOGS`  | `id` or `name`; `tail` (0: 200 lines)                   | the last lines of the process's combined stdout and stderr, as text                     |
+| `EXEC_KIND_PROCESS_STOP`  | `id` or `name`; `signal` (empty: `TERM`)                | the process's final row, as JSON                                                        |
+
+- **A row** is `{"id", "name", "pid", "state", "code", "started_unix_ms", "memory_bytes"}`. `state`
+  is `running`, `exited` (`code` is the exit code) or `killed` (`code` is the signal). `id` is a
+  decimal string; `mocactl` and the MCP server show it as `p<id>`.
+- **Selecting a process:** set `id` or `name`. An id wins over an equal name.
+- **A name** is 1 to 64 characters of `[A-Za-z0-9._-]`, never shaped like an id (`^p?[0-9]+$`),
+  and unique among the **running** processes. Starting a name that only an exited process holds
+  replaces that entry. Unnamed is allowed.
+- **A process runs** in its own cgroup, in its own session, with stdin from `/dev/null`, under a uid
+  of its own (not the Exec uid), in the requested `cwd`. Its output goes to a 4 MiB ring in the
+  guest. At most `SH_LEASE_MAX_PROCESSES` (4 by default) run at once; exited ones do not count, and
+  an exited one stays listed until the lease ends. `process_stop` sends the signal to everything
+  the process started, and kills what is left 10 s later.
+- **Later Execs reach it** through localhost ports or files in `/workspace`. The guest still has no
+  network, so nothing outside the sandbox can.
+- **Without a lease,** list, logs and stop answer as for no processes, and start no lease.
+- **Send a timeout of at least 30 s.** The worker raises a lower one to 30 s: a stop can take
+  about 20 s.
+
+**The lease reports them.** `TrackedProcess {id, name, pid, state, code, age_ms, memory_bytes}`
+carries the same rows on the lease messages:
+
+- `LeaseEvent.tracked` (field 9), with their display strings, `<name> (pid <n>)`, in
+  `LeaseEvent.processes`: on an `end`, the processes the end stopped; on the `processes_stopped`
+  event, those a downgrade from `lease+processes` to `lease` stopped while the lease goes on;
+- `LeaseStatus.processes` (field 7): the whole table, exited processes included;
+- `LeaseStatus.stopped` (field 8): in the answer to a `set_mode` downgrade only, the processes it
+  stopped. It is empty when a lease Exec of yours got there first and did the stop; that Exec then
+  carried the `processes_stopped` event.
+
+**The refusals.** The relay's are a gRPC status; the worker's and the guest's arrive as an
+`error` event's message, as a lease error does. Nothing ran, and none of them ends the lease:
+
+| Answer                                                                                                             | Means                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `FAILED_PRECONDITION` `processes_not_enabled: <detail>` from the relay, or the same `error` from the worker        | the sandbox's mode is below `lease+processes`. Your token may predate an upgrade: mint a fresh one and retry once, as `mocactl` does |
+| `INVALID_ARGUMENT` `unknown exec kind <n>`                                                                         | the relay does not know the kind                                                                                                     |
+| `lease_unsupported: <detail>`                                                                                      | the worker has no level 2: a container worker, a snapshot without `lease-processes-v1`, or a kind it does not know                   |
+| `FAILED_PRECONDITION` `lease_unsupported: this sandbox's worker does not support tracked processes` from the relay | the worker does not advertise `sbx:lease-processes-v1` (below): nothing reached it                                                   |
+| `process_not_found: <id or name>`                                                                                  | no process by that id or name                                                                                                        |
+| `process_limit: <n> running (SH_LEASE_MAX_PROCESSES)`                                                              | the running cap is reached                                                                                                           |
+| `process_limit: <n> running, <m> uids held by leftover children of exited processes (process_stop them)`           | no tracked uid is free: leftovers of exited processes hold some; `process_stop` those entries                                        |
+| `process_name_taken: <name>`                                                                                       | a running process has that name                                                                                                      |
+| `process_name_invalid: <detail>`                                                                                   | the name breaks the rule above                                                                                                       |
+| `process_cwd: <detail>`                                                                                            | the `cwd` is not a directory inside `/workspace`                                                                                     |
+| `process_signal: unknown signal <s>`                                                                               | `signal` is not a signal name (with or without `SIG`) or number                                                                      |
+
+**Mixed versions: a process kind is refused, never run as a command.** A worker that serves the
+process kinds says so in its Hello, with the capability `sbx:lease-processes-v1`: a microVM worker
+whose snapshot advertises `lease-processes-v1`. The relay forwards a process kind only to a worker
+that advertises it, and refuses it otherwise with `FAILED_PRECONDITION`
+`lease_unsupported: this sandbox's worker does not support tracked processes`, before anything
+reaches the worker. That covers a worker from before level 2, which does not know `Exec.kind` and
+would run a `process_start`'s command as a plain command. Nothing ran; retrying does not help until
+the operator upgrades the worker. Level 2 is off by default: only a deployment that allows
+`lease+processes` issues a token whose mode claim is `lease+processes`.
 
 ## Limits
 

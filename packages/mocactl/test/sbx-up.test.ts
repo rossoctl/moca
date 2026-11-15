@@ -10,7 +10,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ExecMachineryError, sandboxRules, WORKSPACE } from '@moca/sandbox-client';
+import {
+  ExecMachineryError,
+  leaseNotice,
+  sandboxRules,
+  WORKSPACE,
+  type LeaseEvent,
+} from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
@@ -26,8 +32,10 @@ import {
   cleanupTmp,
   git,
   harness,
+  leaseEnd,
   repo,
   sandbox,
+  withLeaseEvents,
 } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
@@ -254,6 +262,29 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
 });
 
 describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
+  it('push, pull and up say the lease events their Execs carried (plan-4 M2)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    const queue: LeaseEvent[][] = [];
+    const run = (argv: string[]) => {
+      h.io.errs.length = 0;
+      h.io.outB.length = 0;
+      return sbxMain(argv, h.env, h.io, {
+        home: h.home,
+        fetchImpl: h.cp.fetchImpl,
+        cwd: h.r,
+        execFactory: withLeaseEvents(h.ws.factory, queue),
+      });
+    };
+    let at = 1_800_000_100_000;
+    for (const argv of [['push'], ['pull'], ['up']]) {
+      const end = leaseEnd({ reason: 'idle', atUnixMs: (at += 60_000) });
+      queue.push([end]);
+      expect(await run(argv), argv.join(' ')).toBe(0);
+      expect(h.io.errs, argv.join(' ')).toContain(leaseNotice(end, Date.now()));
+    }
+  });
+
   it('push is refused while changes are not yet pulled; --force pushes', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);

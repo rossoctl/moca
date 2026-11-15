@@ -108,7 +108,8 @@ GEN="$SBX_DIR/.generated"
 OVERLAY_REL=../../k8s/overlays/ocp-sbx # from $GEN; ocp-combined with SBX_PROFILE=combined (validate)
 # GEN is .generated-<namespace> with SBX_PROFILE=combined (validate), at the same depth, so OVERLAY_REL holds.
 API_ROUTE='sbx-api'
-HOSTS_TO_REINSTALL='' # workers whose SH_WORKSPACE_IDLE this run changes (check_host_idle)
+HOSTS_TO_REINSTALL='' # workers whose SH_WORKSPACE_IDLE or SH_LEASE_IDLE_CEILING_S this run changes
+REINSTALL_SETTINGS='' # which of the two changed, for write_bundles' last warning (check_host_*)
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { echo "deploy/sbx/setup.sh: $*" >&2; exit 1; }
@@ -223,6 +224,7 @@ validate() {
   WORKSPACE_IDLE_H=$((SBX_LIFETIME_DAYS * 24 + 48))
   ((WORKSPACE_IDLE_H * 3600 > LIFETIME_S)) || die 'SH_WORKSPACE_IDLE must exceed SH_SANDBOX_LIFETIME_SECONDS'
   check_host_idle
+  check_host_ceiling
 
   validate_templates
   validate_egress
@@ -374,12 +376,35 @@ check_host_idle() {
   done
   [[ -n "$changed" ]] || return 0
   HOSTS_TO_REINSTALL="${changed# }"
+  REINSTALL_SETTINGS=SH_WORKSPACE_IDLE
   local cause='SBX_LIFETIME_DAYS changed'
   [[ " $olds " != *" unset "* ]] || cause='a bundle from before increment 1b carries none'
   if [[ "${SBX_ACK_HOSTS:-}" != 1 ]]; then
     die "SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h for worker(s) ${HOSTS_TO_REINSTALL} (${cause}), and a running worker keeps its old value until deploy/sbx/install-host.sh is re-run on its host. Re-run install-host.sh on every host first, or set SBX_ACK_HOSTS=1 to apply now and re-run install-host.sh with the new bundles on every host right after"
   fi
   log "WARNING: SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h (SBX_ACK_HOSTS=1): re-run deploy/sbx/install-host.sh with the new bundle on the host of each of: ${HOSTS_TO_REINSTALL}"
+}
+
+# A running worker also keeps the SH_LEASE_IDLE_CEILING_S it was installed with. Unlike the idle, a
+# stale ceiling cannot free a live workspace: the worker only clamps an owner's lease idle timeout to
+# its old ceiling. So a change is a warning, not a refusal, and its hosts join HOSTS_TO_REINSTALL. A
+# bundle from before the ceiling carries none, and install-host.sh gives such a worker 1800 s.
+check_host_ceiling() {
+  local env id old changed='' olds=''
+  for env in "$GEN"/workers/*/worker.env; do
+    [[ -f "$env" ]] || continue
+    id="$(basename "$(dirname "$env")")"
+    [[ " $SBX_WORKERS " == *" $id "* ]] || continue
+    old="$( (grep -E '^SH_LEASE_IDLE_CEILING_S=' "$env" || true) | tail -1 | cut -d= -f2-)"
+    old="${old:-1800}"
+    [[ "$old" != "$SBX_IDLE_CEILING_S" ]] || continue
+    changed+=" $id"
+    [[ " $olds " == *" $old "* ]] || olds+=" $old"
+    [[ " $HOSTS_TO_REINSTALL " == *" $id "* ]] || HOSTS_TO_REINSTALL+="${HOSTS_TO_REINSTALL:+ }$id"
+  done
+  [[ -n "$changed" ]] || return 0
+  REINSTALL_SETTINGS+="${REINSTALL_SETTINGS:+ and }SH_LEASE_IDLE_CEILING_S"
+  log "WARNING: SH_LEASE_IDLE_CEILING_S changes from${olds} to ${SBX_IDLE_CEILING_S} for worker(s)${changed}, and a running worker keeps its old ceiling until deploy/sbx/install-host.sh is re-run on its host with the new bundle"
 }
 
 # The rules of the control plane's parseTemplates (packages/control-plane/src/sandbox-config.ts),
@@ -990,7 +1015,7 @@ write_bundles() {
   log "worker bundles: $GEN/workers/<id>  (copy to the KVM host, run deploy/sbx/install-host.sh, delete the copy)"
   log "janitor bundle: $GEN/janitor  (copy to every KVM host, run deploy/sbx/install-host.sh --janitor, delete the copy)"
   [[ -z "${HOSTS_TO_REINSTALL:-}" ]] ||
-    log "WARNING: the SH_WORKSPACE_IDLE changed: re-run deploy/sbx/install-host.sh now on the host of each of: $HOSTS_TO_REINSTALL"
+    log "WARNING: $REINSTALL_SETTINGS changed: re-run deploy/sbx/install-host.sh now on the host of each of: $HOSTS_TO_REINSTALL"
 }
 
 # The host janitor's bundle (spec §8.1, §8.3): janitor.env (the API URL and the wait, in seconds;

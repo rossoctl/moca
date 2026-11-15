@@ -53,6 +53,13 @@ func leaseNotice(ev *pb.LeaseEvent, now time.Time) (string, bool) {
 		return fmt.Sprintf("[sandbox] guest restarts within %d min (max_duration)", min), true
 	case "start":
 		return fmt.Sprintf("[sandbox] new guest (%s, %s)", modeName(ev.GetMode()), hhmm(ev.GetAtUnixMs())), true
+	case "processes_stopped":
+		// A downgrade from lease+processes stopped them (plan 5); the lease itself goes on.
+		who := ""
+		if ps := ev.GetProcesses(); len(ps) > 0 {
+			who = ": " + strings.Join(ps, ", ")
+		}
+		return fmt.Sprintf("[sandbox] tracked processes stopped (%s, %s)%s", ev.GetReason(), hhmm(ev.GetAtUnixMs()), who), true
 	}
 	return "", false
 }

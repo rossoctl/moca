@@ -6,6 +6,7 @@ import {
   type LeaseEvent,
   type LeaseOpName,
   type LeaseStatusView,
+  type TrackedProcessView,
 } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sbxMain } from '../src/sbx/cli.js';
@@ -268,6 +269,64 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
     expect(w.err()).not.toContain('no command runs');
   });
 
+  it("create --json says a refused set_mode's error, exit 1 (plan-4 Task 7 m2)", async () => {
+    const w = world({
+      setMode: () => new LeaseControlError('failed', 'stale_mode: epoch 2 > 1', 'stale_mode: ...'),
+    });
+    expect(await w.run(['create', '--mode', 'lease', '--json'])).toBe(1);
+    expect(JSON.parse(w.out())).toMatchObject({
+      id: SBX,
+      mode: 'lease',
+      setMode: { error: 'set_mode failed (failed): stale_mode: epoch 2 > 1' },
+    });
+    expect(w.err()).toContain(`sbx: ${SBX}: created, but its mode was not sent`);
+  });
+
+  it("a lease create whose set-mode token mint fails is the control plane's answer, exit 1, the sandbox named (plan-4 Task 7 m2)", async () => {
+    for (const json of [false, true]) {
+      const s = setup();
+      const cp = fakeCp({
+        'POST /v1/sandboxes': () => ({
+          status: 201,
+          body: sandbox({ mode: 'lease', modeEpoch: 1 }),
+        }),
+        [`POST /v1/sandboxes/${SBX}/mode-token`]: () => ({
+          status: 403,
+          body: { error: 'mode_not_allowed', message: "mode 'lease' is no longer allowed" },
+        }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+      });
+      const lease = fakeLease(() => APPLIED);
+      const factory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...lease,
+      });
+      expect(
+        await sbxMain(['create', '--mode', 'lease', ...(json ? ['--json'] : [])], s.env, s.io, {
+          home: s.home,
+          fetchImpl: cp.fetchImpl,
+          execFactory: factory,
+          stdinIsTTY: true,
+        }),
+      ).toBe(1);
+      const out = s.io.outs.join('');
+      if (json) {
+        expect(JSON.parse(out)).toMatchObject({
+          id: SBX,
+          setMode: { error: expect.stringContaining("mode 'lease' is no longer allowed") },
+        });
+      } else expect(out).toBe(`${SBX}\n`);
+      const err = s.io.errs.join('\n');
+      expect(err).toContain(`sbx: ${SBX}: created, but its mode was not sent`);
+      expect(err).toContain("mode 'lease' is no longer allowed");
+      // No set_mode went out without its token.
+      expect(lease.calls).toEqual([]);
+    }
+  });
+
   it('a control plane that ignores the mode is said so, and no set_mode is sent', async () => {
     const s = setup();
     const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
@@ -412,9 +471,21 @@ const ev = (over: Partial<LeaseEvent>): LeaseEvent => ({
   ageMs: 60_000,
   processes: [],
   endsByUnixMs: 0,
+  tracked: [],
   ...over,
 });
 const ACTIVE: LeaseStatusView = { ...APPLIED, state: 'active', ageMs: 42_000 };
+/** A tracked process as the worker's status gives it (plan 5). */
+const proc = (over: Partial<TrackedProcessView> = {}): TrackedProcessView => ({
+  id: '3',
+  name: 'web',
+  pid: 412,
+  state: 'running',
+  code: 0,
+  ageMs: 130_400,
+  memoryBytes: 12.5 * 1024 * 1024,
+  ...over,
+});
 /** A lease call that waits until its signal aborts, then fails as the relay's CANCELLED does. */
 const untilAborted = (_op: LeaseOpName, _t?: string, o: { signal?: AbortSignal } = {}) =>
   new Promise<LeaseStatusView>((_res, rej) => {
@@ -562,10 +633,10 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
     const other = leaseWorld({ record: { mode: 'lease' }, cwd: tmp('sbx-mode-unbound-') });
     expect(await other.run(['mode', 'per-exec', SBX])).toBe(0);
     expect(other.err()).not.toContain(HINT);
-    // lease and lease+processes share one rules block: nothing to update.
-    const same = leaseWorld({ record: { mode: 'lease' }, cwd: bound() });
-    expect(await same.run(['mode', 'lease+processes'])).toBe(0);
-    expect(same.err()).not.toContain(HINT);
+    // lease+processes has its own rules block (plan 5: the process tools): it changes too.
+    const l2 = leaseWorld({ record: { mode: 'lease' }, cwd: bound() });
+    expect(await l2.run(['mode', 'lease+processes'])).toBe(0);
+    expect(l2.err()).toContain(HINT);
     // A mode the control plane refused changed nothing.
     const refused = leaseWorld({ tty: false, record: { mode: 'per-exec' }, cwd: bound() });
     expect(await refused.run(['mode', 'lease'])).toBe(2);
@@ -603,6 +674,99 @@ describe('mocactl sbx mode (lease-mode spec §8.1, §8.2)', () => {
     expect(await w.run(['mode', 'per-exec', SBX])).toBe(0);
     expect(w.out()).toBe('mode per-exec (epoch 4)\n');
     expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
+  });
+
+  it('mode lease+processes → lease prints the processes the downgrade stopped (plan 5, P5-R30)', async () => {
+    const stopped = [
+      proc({ state: 'killed', code: 15 }),
+      proc({ id: '4', name: '', pid: 9, state: 'exited', code: 0 }),
+    ];
+    const w = leaseWorld({
+      record: { mode: 'lease+processes', modeEpoch: 2 },
+      lease: () => ({ ...ACTIVE, stopped }),
+    });
+    expect(await w.run(['mode', 'lease', SBX])).toBe(0);
+    expect(w.out()).toBe(
+      'mode lease (epoch 3)\nstopped 2 tracked processes: web (pid 412), p4 (pid 9)\n',
+    );
+    // A racing lease Exec did the stop (P5-R21): set_mode stopped nothing, and says nothing of it.
+    const r = leaseWorld({
+      record: { mode: 'lease+processes', modeEpoch: 2 },
+      lease: () => ACTIVE,
+    });
+    expect(await r.run(['mode', 'lease', SBX])).toBe(0);
+    expect(r.out()).toBe('mode lease (epoch 3)\n');
+    // One stopped: singular (fix round 1).
+    const one = leaseWorld({
+      record: { mode: 'lease+processes', modeEpoch: 2 },
+      lease: () => ({ ...ACTIVE, stopped: [proc()] }),
+    });
+    expect(await one.run(['mode', 'lease', SBX])).toBe(0);
+    expect(one.out()).toBe('mode lease (epoch 3)\nstopped 1 tracked process: web (pid 412)\n');
+    // The worker's names are sanitized.
+    const x = leaseWorld({
+      record: { mode: 'lease+processes' },
+      lease: () => ({ ...ACTIVE, stopped: [proc({ name: 'w\u001b[2Jb' })] }),
+    });
+    expect(await x.run(['mode', 'lease', SBX])).toBe(0);
+    expect(x.out()).not.toContain('\u001b');
+  });
+
+  it('mode whose connection cannot be opened says the mode is stored, but set_mode was not sent, exit 1 (plan-4 Task 8 m4)', async () => {
+    // The token mint fails: the control plane's answer.
+    const s = setup();
+    const rec = sandbox({ mode: 'lease', modeEpoch: 1 });
+    const cp = fakeCp({
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: rec }),
+      [`PUT /v1/sandboxes/${SBX}/mode`]: () => ({
+        status: 200,
+        body: { sandbox: { ...rec, mode: 'per-exec', modeEpoch: 2 }, setModeToken: 'smt-put' },
+      }),
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 409,
+        body: { error: 'sandbox_terminated', message: 'sandbox has expired', reason: 'expired' },
+      }),
+    });
+    let opened = 0;
+    expect(
+      await sbxMain(['mode', 'per-exec', SBX], s.env, s.io, {
+        home: s.home,
+        fetchImpl: cp.fetchImpl,
+        execFactory: () => {
+          opened++;
+          throw new Error('not dialled');
+        },
+      }),
+    ).toBe(1);
+    expect(opened).toBe(0);
+    expect(s.io.errs.join('\n')).toContain(
+      'sbx: mode per-exec stored (epoch 2), but set_mode was not sent',
+    );
+    expect(s.io.errs.join('\n')).toContain('sandbox has expired');
+    expect(s.io.outs.join('')).toBe('');
+    // The dial fails: the sandbox failure text.
+    const f = setup();
+    const cp2 = fakeCp({
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: rec }),
+      [`PUT /v1/sandboxes/${SBX}/mode`]: () => ({
+        status: 200,
+        body: { sandbox: { ...rec, mode: 'per-exec', modeEpoch: 2 }, setModeToken: 'smt-put' },
+      }),
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+    });
+    expect(
+      await sbxMain(['mode', 'per-exec', SBX], f.env, f.io, {
+        home: f.home,
+        fetchImpl: cp2.fetchImpl,
+        execFactory: () => {
+          throw new Error('bad exec endpoint');
+        },
+      }),
+    ).toBe(1);
+    expect(f.io.errs).toEqual([
+      'sbx: mode per-exec stored (epoch 2), but set_mode was not sent',
+      'sbx: sandbox failure: bad exec endpoint',
+    ]);
   });
 
   it('mode retries without a carried idle timeout the deployment no longer allows (P4-R18)', async () => {
@@ -803,6 +967,50 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
     const u = leaseWorld({ lease: () => new LeaseControlError('timeout', 'slow') });
     expect(await u.run(['get', SBX, '--json'])).toBe(0);
     expect(JSON.parse(u.out()).lease).toEqual({ error: 'timeout' });
+  });
+
+  it('get lists the tracked processes of a lease+processes sandbox (plan 5)', async () => {
+    const processes = [
+      proc(),
+      proc({ id: '4', name: 'p4', pid: 9, state: 'exited', code: 1, ageMs: 4_999, memoryBytes: 0 }),
+    ];
+    const w = leaseWorld({
+      record: { mode: 'lease+processes', modeEpoch: 3 },
+      lease: () => ({ ...ACTIVE, mode: 'lease+processes', processes }),
+    });
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.out()).toBe(
+      [
+        `id            ${SBX}`,
+        'template      node22',
+        'mode          lease+processes',
+        'epoch         3',
+        'idle timeout  worker default',
+        'lease         active (age 42 s)',
+        'processes     p3 web (pid 412): running, 2m10s, 12.5 MiB',
+        '              p4 (pid 9): exited(1), 0.0 MiB',
+        // The worker's mirror, refreshed by each call (P5-R38): a status touches no guest.
+        '              (as of the last call)',
+        '',
+      ].join('\n'),
+    );
+    expect(await w.run(['get', SBX, '--json'])).toBe(0);
+    expect(JSON.parse(w.out()).lease.processes).toEqual(processes);
+    // None tracked: said so, at lease+processes only.
+    const n = leaseWorld({ record: { mode: 'lease+processes' } });
+    expect(await n.run(['get', SBX])).toBe(0);
+    expect(n.out()).toContain('lease         active (age 42 s)\nprocesses     none\n');
+    const l = leaseWorld({ record: { mode: 'lease' } });
+    expect(await l.run(['get', SBX])).toBe(0);
+    expect(l.out()).not.toContain('processes    ');
+    // A failed status: the processes are as unknown as the lease.
+    const u = leaseWorld({
+      record: { mode: 'lease+processes' },
+      lease: () => new LeaseControlError('unavailable', 'no worker'),
+    });
+    expect(await u.run(['get', SBX])).toBe(0);
+    expect(u.out()).toContain('lease         unknown (unavailable)\n');
+    expect(u.out()).not.toContain('processes    ');
   });
 
   it('get re-sends set_mode on an unknown epoch', async () => {

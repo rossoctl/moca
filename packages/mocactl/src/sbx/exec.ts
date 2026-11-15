@@ -6,6 +6,7 @@ import {
   type ExecConnOptions,
   type LeaseOpName,
   type LeaseStatusView,
+  type ProcessCall,
   type SandboxModeName,
   type SandboxTokenGrant,
   type TokenFn,
@@ -26,12 +27,16 @@ export type LeaseControlFn = (
   opts?: { signal?: AbortSignal },
 ) => Promise<LeaseStatusView>;
 
-/** Builds the gRPC connection; a seam so tests run the commands against a fake. */
+/**
+ * Builds the gRPC connection; a seam so tests run the commands against a fake. `process` (plan 5)
+ * is optional so that a fake for commands that make no process call need not have one.
+ */
 export type ExecFactory = (o: ExecConnOptions) => {
   exec: Exec;
   close(): void;
   leaseControl: LeaseControlFn;
   leaseKeepalive: () => Promise<void>;
+  process?: ProcessCall;
 };
 const realFactory: ExecFactory = (o) => {
   const c = new SandboxExecConn(o);
@@ -40,7 +45,13 @@ const realFactory: ExecFactory = (o) => {
     close: c.close,
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
+    process: c.process,
   };
+};
+
+/** A connection without process calls (a test fake) fails a process call plainly. */
+const noProcess: ProcessCall = async () => {
+  throw new Error('this connection has no process calls');
 };
 
 /** Seconds of token life a held token must keep beyond what the connection asks (spec §6.5). */
@@ -107,10 +118,16 @@ export function sandboxTokenFn(
   now: () => number = Date.now,
   /** Called with each token minted, before any caller gets it (`sbx mcp` reads its mode). */
   onMint?: (t: SbxToken) => void,
-): { token: TokenFn; first(signal?: AbortSignal): Promise<SbxToken> } {
+): {
+  token: TokenFn;
+  first(signal?: AbortSignal): Promise<SbxToken>;
+  /** A fresh mint now, whatever is held; `signal` stops this caller's wait (and its request). */
+  force(signal?: AbortSignal): Promise<SbxToken>;
+} {
   let cur: SbxToken | undefined;
   let pending: Promise<SbxToken> | undefined;
-  const mint = (signal?: AbortSignal) =>
+  const mint = (signal?: AbortSignal) => untilAborted(mintShared(signal), signal);
+  const mintShared = (signal?: AbortSignal) =>
     (pending ??= api.mintSandboxToken(id, signal ? { signal } : {}).then(
       (t) => {
         pending = undefined;
@@ -135,7 +152,31 @@ export function sandboxTokenFn(
   return {
     token: async ({ force, minValidS }) => grantOf(await get(force, minValidS)),
     first: (signal?: AbortSignal) => get(false, MIN_LEFT_S, signal),
+    force: (signal?: AbortSignal) => get(true, MIN_LEFT_S, signal),
   };
+}
+
+/**
+ * `p`, or its signal's abort reason once `signal` aborts first: a caller that joined a mint
+ * another caller started stops waiting on its own cancel, without cancelling the mint.
+ */
+function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 export interface OpenedExec {
@@ -143,6 +184,13 @@ export interface OpenedExec {
   close(): void;
   leaseControl: LeaseControlFn;
   leaseKeepalive(): Promise<void>;
+  /** The process calls (plan 5, spec §7). */
+  process: ProcessCall;
+  /**
+   * Mints a fresh sandbox token now, as the next Exec would after a refusal (P5-R29). `signal`
+   * (a cancelled tool call's) aborts it.
+   */
+  remint(signal?: AbortSignal): Promise<void>;
   /** The first token, minted before dialing: where to dial and which worker and workspace. */
   token: SbxToken;
   /** The token's lifetime (`exp − iat`), 0 if unreadable: the default timeout is this minus 60. */
@@ -197,6 +245,10 @@ export async function openExec(
     close: c.close,
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
+    process: c.process ?? noProcess,
+    remint: async (signal?: AbortSignal) => {
+      await t.force(signal);
+    },
     token: first,
     lifetimeS: grantOf(first).lifetimeS,
   };

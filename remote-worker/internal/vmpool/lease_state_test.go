@@ -200,7 +200,7 @@ func TestEffectiveModeEqualEpochServesTheLowerMode(t *testing.T) {
 
 func TestSetModeRestoresAfterLoss(t *testing.T) {
 	p, root := leaseTestPool(t)
-	if err := p.SetMode("k", ModeLease, 7); err != nil {
+	if err := setModeErr(p, "k", ModeLease, 7); err != nil {
 		t.Fatalf("SetMode: %v", err)
 	}
 	m, err := effectiveMode(t, p, "k", Exec{Mode: ModeLease, ModeEpoch: 7})
@@ -214,17 +214,17 @@ func TestSetModeRestoresAfterLoss(t *testing.T) {
 
 func TestSetModeRefusesALowerEpoch(t *testing.T) {
 	p, _ := leaseTestPool(t)
-	if err := p.SetMode("k", ModeLease, 7); err != nil {
+	if err := setModeErr(p, "k", ModeLease, 7); err != nil {
 		t.Fatal(err)
 	}
 	// SetMode on a run that exists already updates what the run serves from.
 	if _, err := effectiveMode(t, p, "k", Exec{Mode: ModeLease, ModeEpoch: 7}); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.SetMode("k", ModePerExec, 6); ReasonOf(err) != RefuseStaleMode {
+	if err := setModeErr(p, "k", ModePerExec, 6); ReasonOf(err) != RefuseStaleMode {
 		t.Fatalf("SetMode(epoch 6 after 7) = %v, want %s", err, RefuseStaleMode)
 	}
-	if err := p.SetMode("k", ModePerExec, 8); err != nil {
+	if err := setModeErr(p, "k", ModePerExec, 8); err != nil {
 		t.Fatalf("SetMode(8): %v", err)
 	}
 	if _, err := effectiveMode(t, p, "k", Exec{Mode: ModeLease, ModeEpoch: 7}); ReasonOf(err) != RefuseStaleMode {
@@ -245,7 +245,7 @@ func TestLeaseModeUnsupportedRefused(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("a refused lease Exec restored %d VMs", n)
 	}
-	if err := p.SetMode("k", ModeLease, 1); ReasonOf(err) != RefuseLeaseUnsupported {
+	if _, err := p.SetMode("k", ModeLease, 1); ReasonOf(err) != RefuseLeaseUnsupported {
 		t.Fatalf("SetMode(lease) without lease-v1 = %v, want %s", err, RefuseLeaseUnsupported)
 	}
 }

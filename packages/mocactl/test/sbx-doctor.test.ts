@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ExecMachineryError,
+  leaseNotice,
   type Exec,
   type ExecConnOptions,
   type ExecResult,
@@ -27,9 +28,11 @@ import {
   URL_,
   cleanupTmp,
   controlPlane,
+  leaseEnd,
   repo,
   sandbox,
   setup,
+  withLeaseEvents,
 } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
@@ -250,6 +253,32 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(after.fix).toContain('mocactl sbx up');
     // Without the record (no login), any mode's block is taken as up to date.
     expect(checkAgentConfig(w.r)).toEqual([]);
+  });
+
+  it('fails the agent-config check when a lease block stays after an upgrade to lease+processes (plan 5)', async () => {
+    const w = world({ box: { mode: 'lease+processes', modeEpoch: 2 } });
+    writeAgentConfig(w.r, { mode: 'lease' });
+    const c = byName(
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      'agent config',
+    );
+    expect(c.ok).toBe(false);
+    expect(c.detail).toContain(
+      'CLAUDE.md: has the sandbox rules block for lease mode, but the sandbox is in lease+processes mode',
+    );
+    writeAgentConfig(w.r, { mode: 'lease+processes' });
+    const ok = byName(
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      'agent config',
+    );
+    expect(ok.ok, ok.detail).toBe(true);
+  });
+
+  it('doctor says the lease events its Execs carried, on stderr (plan-4 M2)', async () => {
+    const w = world();
+    const end = leaseEnd({ reason: 'idle' });
+    await runDoctor(w.ctx(), w.r, SBX, withLeaseEvents(fakeExec().factory, [[end]]), CURRENT);
+    expect(w.io.errs).toContain(leaseNotice(end, Date.now()));
   });
 
   it('fails the agent-config check in a repository sbx up never configured', async () => {

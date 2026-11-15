@@ -551,9 +551,13 @@ func TestPoolConfigLeaseEnv(t *testing.T) {
 		"SH_LEASE_HEADROOM":          "1.5",
 		"SH_LEASE_PAGECACHE_MB":      "512",
 		"SH_LEASE_RECLAIM_FREE_MB":   "4096",
+		"SH_LEASE_MAX_PROCESSES":     "3",
 	}))
 	if err != nil {
 		t.Fatalf("poolConfig: %v", err)
+	}
+	if cfg.LeaseMaxProcesses != 3 {
+		t.Errorf("LeaseMaxProcesses = %d, want 3", cfg.LeaseMaxProcesses)
 	}
 	for _, tc := range []struct {
 		name      string
@@ -596,6 +600,7 @@ func TestPoolConfigLeaseEnv(t *testing.T) {
 		"SH_LEASE_HEADROOM":          "0.9",
 		"SH_LEASE_PAGECACHE_MB":      "lots",
 		"SH_LEASE_RECLAIM_FREE_MB":   "-5",
+		"SH_LEASE_MAX_PROCESSES":     "5",
 	} {
 		_, err := poolConfig(baseEnv(map[string]string{k: bad}))
 		if err == nil {

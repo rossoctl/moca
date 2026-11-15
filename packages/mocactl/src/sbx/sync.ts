@@ -27,6 +27,7 @@ import {
   type ExecFactory,
   type OpenedExec,
 } from './exec.js';
+import { noticingExec } from './notices.js';
 import {
   PushError,
   advanceBaseline,
@@ -76,7 +77,8 @@ async function withExec(
     return execFailed(c, err);
   }
   try {
-    return await fn(x);
+    // Each Exec's lease events are said as they come (plan-4 M2).
+    return await fn({ ...x, exec: noticingExec(c, id, x.exec) });
   } catch (err) {
     if (err instanceof PushError) {
       say(c, err.message);

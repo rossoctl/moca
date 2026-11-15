@@ -148,6 +148,22 @@ func TestBalloonFeatureConstant(t *testing.T) {
 	}
 }
 
+// lease-processes-v1 is the name build-snapshot.sh writes, beside lease-v1, on a Firecracker
+// snapshot whose image carries the tracked-process identities; the worker refuses a process
+// kind without it.
+func TestLeaseProcessesFeatureConstant(t *testing.T) {
+	if FeatureLeaseProcessesV1 != "lease-processes-v1" {
+		t.Fatalf("FeatureLeaseProcessesV1 = %q, want lease-processes-v1", FeatureLeaseProcessesV1)
+	}
+	var m Manifest
+	if err := json.Unmarshal([]byte(`{"features":["lease-v1","lease-processes-v1","balloon-fpr-v1"]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasFeature(FeatureLeaseProcessesV1) {
+		t.Fatalf("Features = %v, HasFeature(lease-processes-v1) = false", m.Features)
+	}
+}
+
 // Features is outside the hash in both hash versions: a snapshot that predates the
 // field still verifies.
 func TestManifestHashIgnoresFeatures(t *testing.T) {

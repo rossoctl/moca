@@ -83,6 +83,11 @@ func (w *WorkspaceRunner) now() time.Time {
 }
 
 func (w *WorkspaceRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, error) {
+	// BashRunner refuses a non-command kind too; refusing here first means a refused Exec
+	// does not create its workspace either.
+	if err := refuseKind(s); err != nil {
+		return -1, err
+	}
 	if s.WorkspaceKey == "" {
 		return w.Inner.Run(ctx, s, sink)
 	}

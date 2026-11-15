@@ -7,8 +7,9 @@
 # run the selected steps only; print `ok N` / `not ok N` and exit 1 on a failure; delete every
 # sandbox it created, as its owner, even on failure, and nothing else; never print a token.
 # Step 7 (egress credentials) runs against a fake curl, git and gh as well, and the PAT, a canary in a
-# file, must appear in no output line and no logged argv. Step 8 (lease mode) runs against a fake
-# script (util-linux's and the BSD one) and the fake mocactl's leases.
+# file, must appear in no output line and no logged argv. Steps 8 and 9 (lease mode, levels 1 and 2)
+# run against a fake script (util-linux's and the BSD one) and the fake mocactl's leases, whose
+# tracked processes and guest loopback the fake plays too.
 # SMOKE_SH overrides the script under test.
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -84,7 +85,13 @@ bound() { sed -n 's/.*"id": *"\(sbx-[0-9a-f]*\)".*/\1/p' .sbx/sandbox.json 2>/de
 # lease, whose guest /tmp is $L/<id>.tmp; $L/<id>.ended an end not yet shown ("reason HH:MM").
 # MOCK_LEASE_NO_IDLE=1: the idle timeout never ends the lease. MOCK_LEASE_PER_EXEC=1: every
 # command gets a new guest (a worker that never kept the VM). MOCK_SET_MODE_PENDING=1: the create's
-# set_mode cannot reach the worker. MOCK_MODE_NOT_ALLOWED=1: the deployment lists no lease mode.
+# set_mode cannot reach the worker. MOCK_MODE_NOT_ALLOWED=1: the deployment lists no lease mode;
+# MOCK_MODES_ALLOWED=<list>: it lists only these (per-exec is always allowed).
+# Level 2 (step 9): $L/<id>.procs holds the lease's tracked processes, "id name pid state" each. The
+# guest's loopback answers http://127.0.0.1:8080/ while one runs (guest_curl). MOCK_PROC_DIES=1: a
+# started process exits at once. MOCK_PROC_SLOW=N: the first N reaches are refused (still binding).
+# MOCK_PROC_NO_STOP=1: a downgrade from lease+processes stops nothing and says nothing.
+# MOCK_PROC_STOP_KEEPS=1: it says it stopped them, but they keep running.
 L="$MOCK_DIR/lease"
 mkdir -p "$L"
 hhmm() { "$REAL_DATE" +%H:%M; }
@@ -95,8 +102,16 @@ idle_check() { # idle_check ID: a lease idle past its timeout (default 300 s) en
   ((idle > 0)) || idle=300
   last="$(cat "$L/$1.guest")"
   (($(now) - last > idle)) || return 0
-  rm -rf "$L/$1.guest" "$L/$1.tmp"
+  rm -rf "$L/$1.guest" "$L/$1.tmp" "$L/$1.procs"
   echo "idle $(hhmm)" >"$L/$1.ended"
+}
+rank() { case "$1" in lease) echo 1 ;; lease+processes) echo 2 ;; *) echo 0 ;; esac; }
+guest_curl() { # guest_curl ID: the guest's loopback on :8080, a running tracked server's listing, else curl's 7
+  local n
+  n=$(($(cat "$L/$1.reach" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$L/$1.reach"
+  ((n > ${MOCK_PROC_SLOW:-0})) && grep -q ' running$' "$L/$1.procs" 2>/dev/null || return 7
+  printf '<!DOCTYPE HTML>\n<html lang="en">\n<head>\n<title>Directory listing for /</title>\n</head>\n</html>\n'
 }
 take_end() { # take_end ID: the unseen end's notice, on stderr; 0 if there was one
   local why at
@@ -172,6 +187,7 @@ create)
   if [[ -n "$MODE" && "$MODE" != per-exec ]]; then
     [[ "${MOCK_TTY:-}" == 1 ]] || { echo 'sbx: an upgrade needs a terminal: run it yourself' >&2; exit 2; }
     [[ "${MOCK_MODE_NOT_ALLOWED:-}" != 1 ]] || { echo "sbx: mode '$MODE' is not allowed on this deployment" >&2; exit 1; }
+    [[ -z "${MOCK_MODES_ALLOWED:-}" || ",$MOCK_MODES_ALLOWED," == *",$MODE,"* ]] || { echo "sbx: mode '$MODE' is not allowed on this deployment" >&2; exit 1; }
   fi
   nid="$(new)"
   mkdir -p "$MOCK_DIR/names"; printf '%s' "$CREATE_NAME" >"$MOCK_DIR/names/$nid"
@@ -203,17 +219,50 @@ get)
   echo "{\"sandbox\":{\"id\":\"${args[0]}\",\"mode\":\"$m\",\"modeEpoch\":$e,\"idleTimeoutS\":$i},\"lease\":$lease}" ;;
 reset)
   live "${args[0]}"; readmode "${args[0]}"; idle_check "${args[0]}"; take_end "${args[0]}" || true
-  if [[ -f "$L/${args[0]}.guest" ]]; then rm -rf "$L/${args[0]}.guest" "$L/${args[0]}.tmp"; echo 'lease ended (reset)'; else echo 'no lease'; fi ;;
+  if [[ -f "$L/${args[0]}.guest" ]]; then rm -rf "$L/${args[0]}.guest" "$L/${args[0]}.tmp" "$L/${args[0]}.procs"; echo 'lease ended (reset)'; else echo 'no lease'; fi ;;
 mode)
-  # mode MODE ID: an upgrade only from a terminal; a downgrade to per-exec ends a live lease.
+  # mode MODE ID: an upgrade only from a terminal; a downgrade to per-exec ends a live lease, and
+  # one from lease+processes to lease keeps it and stops the tracked processes, said on stdout.
   live "${args[1]}"; readmode "${args[1]}"; idle_check "${args[1]}"; take_end "${args[1]}" || true
-  [[ "${args[0]}" == per-exec || "${MOCK_TTY:-}" == 1 ]] || { echo 'sbx: an upgrade needs a terminal: run it yourself' >&2; exit 2; }
+  (($(rank "${args[0]}") <= $(rank "$m"))) || [[ "${MOCK_TTY:-}" == 1 ]] || { echo 'sbx: an upgrade needs a terminal: run it yourself' >&2; exit 2; }
   e=$((e + 1))
   echo "${args[0]} $e $i" >"$L/${args[1]}.mode"
   echo "mode ${args[0]} (epoch $e)"
+  P="$L/${args[1]}.procs"
   if [[ "${args[0]}" == per-exec && -f "$L/${args[1]}.guest" ]]; then
-    rm -rf "$L/${args[1]}.guest" "$L/${args[1]}.tmp"; echo 'lease ended (mode_change)'
+    rm -rf "$L/${args[1]}.guest" "$L/${args[1]}.tmp" "$P"; echo 'lease ended (mode_change)'
+  elif [[ "$m" == lease+processes && "${args[0]}" == lease && -f "$P" && "${MOCK_PROC_NO_STOP:-}" != 1 ]]; then
+    shown='' n=0
+    while read -r pi pn pp ps; do
+      [[ "$ps" == running ]] || continue
+      shown+="${shown:+, }$pn (pid $pp)"; n=$((n + 1))
+    done <"$P"
+    if [[ "${MOCK_PROC_STOP_KEEPS:-}" != 1 ]]; then sed 's/ running$/ killed(15)/' "$P" >"$P.new" && mv -f "$P.new" "$P"; fi
+    ((n == 0)) || { w=processes; ((n > 1)) || w=process; echo "stopped $n tracked $w: $shown"; }
   fi ;;
+proc)
+  # proc start [--name N] ID -- CMD... / proc ls ID: at lease+processes only; a start starts the
+  # lease when there is none.
+  sub="${args[0]:-}" id="${args[1]:-}"
+  live "$id"; readmode "$id"; idle_check "$id"; take_end "$id" || true
+  [[ "$m" == lease+processes ]] || { echo "sbx: processes not enabled for this sandbox; run: mocactl sbx mode $id lease+processes" >&2; exit 1; }
+  P="$L/$id.procs"
+  case "$sub" in
+  start)
+    [[ -f "$L/$id.guest" ]] || { rm -rf "$L/$id.tmp"; mkdir -p "$L/$id.tmp"; }
+    now >"$L/$id.guest"
+    n=$(($(wc -l 2>/dev/null <"$P" || echo 0) + 1)) st=running
+    [[ "${MOCK_PROC_DIES:-}" != 1 ]] || st='exited(1)'
+    echo "$n ${CREATE_NAME:-p$n} $((4200 + n)) $st" >>"$P"
+    echo "p$n ${CREATE_NAME:-p$n} pid $((4200 + n))" ;;
+  ls)
+    [[ -s "$P" ]] || { echo 'no tracked processes'; exit 0; }
+    # An exited row has no age, as processRow shows it.
+    while read -r pi pn pp ps; do
+      if [[ "$ps" == running ]]; then echo "p$pi $pn (pid $pp): $ps, 0s, 12.0 MiB"; else echo "p$pi $pn (pid $pp): $ps, 12.0 MiB"; fi
+    done <"$P" ;;
+  *) echo "mock mocactl: unexpected: proc ${args[*]}" >&2; exit 99 ;;
+  esac ;;
 token) live "${args[0]}"; echo "tok.$user.${args[0]}.$(($(now) + ${MOCK_TTL:-900}))" ;;
 env)
   live "${args[0]}"
@@ -236,7 +285,9 @@ run)
   fi
   g=() T="$L/$id.tmp"
   for a in "${args[@]}"; do g+=("${a//\/tmp\//$T/}"); done
-  rc=0; (cd "$(ws "$id")" && "${g[@]}") || rc=$?
+  rc=0
+  if [[ "${args[0]}" == curl && " ${args[*]} " == *' http://127.0.0.1:8080/ '* ]]; then guest_curl "$id" || rc=$?
+  else (cd "$(ws "$id")" && "${g[@]}") || rc=$?; fi
   now >"$L/$id.guest"
   cat "$L/$id.notice" >&2; rm -f "$L/$id.notice"
   exit "$rc" ;;
@@ -495,6 +546,8 @@ smoke() {
 has() { grep -qxF -- "$1" "$TMP/out" || fail "no line '$1'"; }
 STEP8='lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease'
 STEP8_OK="ok 8 - $STEP8"
+STEP9='lease+processes: a tracked process serves later commands; a downgrade to lease stops it'
+STEP9_OK="ok 9 - $STEP9"
 hasnt() { ! grep -qF -- "$1" "$TMP/out" || fail "a line has '$1'"; }
 created() { sed -n 's/^mocactl user=\(.\) .* sbx create .*/\1/p; s/^mocactl user=\(.\) .* sbx up .*/\1/p' "$MOCK_LOG" | wc -l | tr -d ' '; }
 # Every sandbox the run created is deleted by its owner, and the one it did not is never named in an rm.
@@ -538,7 +591,7 @@ reject 'a URL with a path' 'SBX_API_URL must be https://<api host>' SBX_API_URL=
 reject 'no home B' 'set SBX_SMOKE_HOME_B to a HOME already logged in' -u SBX_SMOKE_HOME_B
 reject 'a home that is no directory' "SBX_SMOKE_HOME_A='$TMP/nope' is not a directory" SBX_SMOKE_HOME_A="$TMP/nope"
 reject 'one home for both users' 'are the same directory' SBX_SMOKE_HOME_B="$TMP/home-a/."
-reject 'a step out of range' "SBX_SMOKE_STEPS: '9' is not a step" SBX_SMOKE_STEPS=1,9
+reject 'a step out of range' "SBX_SMOKE_STEPS: '10' is not a step" SBX_SMOKE_STEPS=1,10
 reject 'a step that is no number' "SBX_SMOKE_STEPS: 'x' is not a step" SBX_SMOKE_STEPS=x
 reject 'empty steps' 'SBX_SMOKE_STEPS is empty' SBX_SMOKE_STEPS=
 reject 'an unknown agent' "SBX_SMOKE_AGENTS: 'cursor' is not claude or opencode" SBX_SMOKE_AGENTS=claude,cursor
@@ -566,12 +619,13 @@ has 'ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is
 has "ok 6 - the janitor frees a deleted sandbox's directory"
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes # SKIP SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO not both set'
 has "$STEP8_OK"
-has '# 7 ok, 0 not ok, 2 skipped'
-[[ "$(grep -o '^ok [0-9]' "$TMP/out" | tr -d '\n')" == 'ok 1ok 2ok 3ok 4ok 5ok 5ok 6ok 7ok 8' ]] || fail 'the steps did not run in order'
+has "$STEP9_OK"
+has '# 8 ok, 0 not ok, 2 skipped'
+[[ "$(grep -o '^ok [0-9]' "$TMP/out" | tr -d '\n')" == 'ok 1ok 2ok 3ok 4ok 5ok 5ok 6ok 7ok 8ok 9' ]] || fail 'the steps did not run in order'
 ! grep -q '^not ok' "$TMP/out" || fail 'a step is not ok'
 all_cleaned
-[[ "$(created)" == 7 ]] || fail "created $(created) sandboxes, not 7 (steps 1, 2 x2, 3, 4, 5, 8)"
-pass 'a full run: ok 1-6 and 8 in order, step 7 a SKIP without its inputs, an agent not installed is a SKIP, and every sandbox it made is deleted by its owner'
+[[ "$(created)" == 8 ]] || fail "created $(created) sandboxes, not 8 (steps 1, 2 x2, 3, 4, 5, 8, 9)"
+pass 'a full run: ok 1-6, 8 and 9 in order, step 7 a SKIP without its inputs, an agent not installed is a SKIP, and every sandbox it made is deleted by its owner'
 
 # What the full run sent: every mocactl as one of the two homes, with the URL, no XDG overrides.
 ! grep '^mocactl ' "$MOCK_LOG" | grep -qv "^mocactl user=[ab] url=https://api.sbx.example xdg= " || fail 'a mocactl ran without the HOME, URL or XDG settings'
@@ -608,7 +662,7 @@ pass 'never prints a sandbox, login or janitor token'
 reset_state
 smoke SBX_SMOKE_STEPS=1,6 -u SBX_SMOKE_HOST >"$TMP/out" 2>&1 || fail "steps 1,6 exited $?"
 has 'ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository'
-for n in 2 3 4 5 7 8; do grep -q "^ok $n - .* # SKIP not in SBX_SMOKE_STEPS\$" "$TMP/out" || fail "step $n not skipped"; done
+for n in 2 3 4 5 7 8 9; do grep -q "^ok $n - .* # SKIP not in SBX_SMOKE_STEPS\$" "$TMP/out" || fail "step $n not skipped"; done
 has "ok 6 - the janitor frees a deleted sandbox's directory # SKIP SBX_SMOKE_HOST not set"
 ! grep -q ' sbx --sandbox\| --timeout 400\|^client\|^claude\|^ssh' "$MOCK_LOG" || fail 'a skipped step ran'
 [[ "$(created)" == 1 ]] || fail "created $(created) sandboxes for step 1 alone"
@@ -770,7 +824,7 @@ credrun >"$TMP/out" 2>&1 || fail "step 7 exited $?"
 has '# step 7: second-user check skipped (no second user)'
 ! grep -q "ok 7 - B's sandbox" "$TMP/out" || fail 'the second-user sub-step printed its own ok line'
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes'
-has '# 1 ok, 0 not ok, 7 skipped'
+has '# 1 ok, 0 not ok, 8 skipped'
 all_cleaned
 [[ "$(created)" == 1 ]] || fail "step 7 created $(created) sandboxes, not 1"
 grep -qE '^mocactl user=a url=https://api\.sbx\.example xdg= sbx credentials add smoke-[0-9]+-[0-9]+-gh --preset github$' "$MOCK_LOG" || fail 'no credentials add with the github preset as A'
@@ -967,7 +1021,7 @@ for flavor in bsd util-linux; do
   reset_state
   leaserun MOCK_SCRIPT_FLAVOR="$flavor" >"$TMP/out" 2>&1 || fail "step 8 ($flavor script) exited $?"
   has "$STEP8_OK"
-  has '# 1 ok, 0 not ok, 7 skipped'
+  has '# 1 ok, 0 not ok, 8 skipped'
   all_cleaned
   [[ "$(created)" == 1 ]] || fail "step 8 created $(created) sandboxes, not 1"
   # The create: as user A, under the script of the host's flavor, a lease with a 30 s idle timeout.
@@ -997,7 +1051,7 @@ pass 'step 8: a lease create under script (BSD and util-linux), get, one guest f
 reset_state
 leaserun MOCK_MODE_NOT_ALLOWED=1 >"$TMP/out" 2>&1 || fail "step 8 on a deployment without lease exited $?"
 has "$STEP8_OK # SKIP lease not allowed"
-has '# 0 ok, 0 not ok, 8 skipped'
+has '# 0 ok, 0 not ok, 9 skipped'
 ! grep -qE ' sbx (get|run|reset|mode) ' "$MOCK_LOG" || fail 'step 8 went on after a refused lease create'
 all_cleaned
 pass 'step 8 is a SKIP when the deployment does not allow lease mode'
@@ -1017,3 +1071,85 @@ leasefail 'not the same guest' MOCK_LEASE_PER_EXEC=1
 leasefail 'outlived 45 s idle' MOCK_LEASE_NO_IDLE=1
 leasefail 'set_mode was pending (unavailable)' MOCK_SET_MODE_PENDING=1
 pass 'a guest not kept, a lease that never idles out, a pending set_mode: each `not ok 8`, and the trap deletes the sandbox'
+
+# --- Step 9: lease mode, level 2 -----------------------------------------------------------------
+# The fake mocactl keeps a lease+processes lease's tracked processes, and its guest loopback answers
+# a curl of the tracked server while that runs. Step 9 needs user A only.
+procsrun() { smoke SBX_SMOKE_STEPS=9 -u SBX_SMOKE_HOME_B "$@"; }
+# procs_calls: step 9's sandbox calls after the create, the sandbox id as ID.
+procs_calls() {
+  local id
+  id="$(sed -nE 's/^mocactl user=a [^ ]+ xdg= sbx proc start --name web (sbx-[0-9a-f]+) -- .*$/\1/p' "$MOCK_LOG" | head -n 1)"
+  [[ -n "$id" ]] || fail 'no sbx proc start --name web of the lease+processes sandbox'
+  sed -nE 's/^mocactl user=a [^ ]+ xdg= sbx ((get|run|reset|mode|proc|rm) .*)$/\1/p' "$MOCK_LOG" | sed "s/$id/ID/g"
+}
+REACH='run --sandbox ID -- curl -s --max-time 5 http://127.0.0.1:8080/'
+for flavor in bsd util-linux; do
+  reset_state
+  procsrun MOCK_SCRIPT_FLAVOR="$flavor" >"$TMP/out" 2>&1 || fail "step 9 ($flavor script) exited $?"
+  has "$STEP9_OK"
+  has '# 1 ok, 0 not ok, 8 skipped'
+  all_cleaned
+  [[ "$(created)" == 1 ]] || fail "step 9 created $(created) sandboxes, not 1"
+  # The create: as user A, under the script of the host's flavor, at lease+processes.
+  grep -qE '^mocactl user=a [^ ]+ xdg= sbx create --template default --name smoke-[0-9]+-[0-9]+-1-procs --mode lease\+processes --json$' "$MOCK_LOG" ||
+    fail 'no lease create as user A with --mode lease+processes --json'
+  case "$flavor" in
+  bsd) grep -qE '^script -q /dev/null [^ ]+/bin-a/mocactl sbx create .* --mode lease\+processes ' "$MOCK_LOG" ;;
+  *) grep -qE '^script -qec [^ ]+/bin-a/mocactl sbx create .* --mode lease\+processes .* /dev/null$' "$MOCK_LOG" ;;
+  esac || fail "the lease+processes create did not run under the $flavor script"
+  calls="$(procs_calls)"
+  [[ "$calls" == "proc start --name web ID -- python3 -m http.server 8080 --bind 127.0.0.1
+$REACH
+proc ls ID
+mode lease ID
+$REACH
+rm --force ID" ]] || fail "step 9's calls, in order, were: $(printf '%s' "$calls" | tr '\n' '|')"
+  # Only `script` gives a terminal: every call after the create runs without one.
+  ! grep -qE '^script .* sbx (proc|run|mode) ' "$MOCK_LOG" || fail 'a call after the create ran under script'
+  for secret in tok. api-secret; do hasnt "$secret"; done
+done
+pass 'step 9: a lease+processes create under script (BSD and util-linux), proc start, a later command reaches the server, proc ls, the downgrade stops it, the next reach fails, rm'
+
+# A server still binding: the reach is polled, one second apart, until it answers.
+reset_state
+procsrun MOCK_PROC_SLOW=3 >"$TMP/out" 2>&1 || fail "step 9 with a slow server exited $?"
+has "$STEP9_OK"
+[[ "$(procs_calls | grep -cxF "$REACH")" == 5 ]] || fail "not 4 reaches before the downgrade and 1 after: $(procs_calls | tr '\n' '|')"
+all_cleaned
+pass 'step 9 polls a tracked server that is still binding until it answers'
+
+# A deployment that allows lease but not lease+processes: step 8 runs, step 9 is a SKIP; and with
+# no lease mode at all, both are.
+reset_state
+smoke SBX_SMOKE_STEPS=8,9 -u SBX_SMOKE_HOME_B MOCK_MODES_ALLOWED=per-exec,lease >"$TMP/out" 2>&1 || fail "steps 8,9 without lease+processes exited $?"
+has "$STEP8_OK"
+has "$STEP9_OK # SKIP lease+processes not allowed"
+has '# 1 ok, 0 not ok, 8 skipped'
+! grep -qE ' sbx proc ' "$MOCK_LOG" || fail 'step 9 went on after a refused lease+processes create'
+all_cleaned
+reset_state
+procsrun MOCK_MODE_NOT_ALLOWED=1 >"$TMP/out" 2>&1 || fail "step 9 on a deployment without lease exited $?"
+has "$STEP9_OK # SKIP lease+processes not allowed"
+has '# 0 ok, 0 not ok, 9 skipped'
+! grep -qE ' sbx (get|run|reset|mode|proc) ' "$MOCK_LOG" || fail 'step 9 went on after a refused lease create'
+all_cleaned
+pass 'step 9 is a SKIP when the deployment does not allow lease+processes, with or without lease'
+
+# Failures: each `not ok 9`, exit 1, and the trap deletes the sandbox.
+procsfail() { # procsfail WHY ENV...
+  local why="$1" rc=0
+  shift
+  reset_state
+  procsrun "$@" >"$TMP/out" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "$why: exit $rc, not 1"
+  grep -q "^not ok 9 - .*: .*$why" "$TMP/out" || fail "no 'not ok 9 - ...: ...$why'"
+  grep -q '^# cleanup: deleted sbx-[0-9a-f]* (user A)$' "$TMP/out" || fail "$why: the trap did not delete the sandbox"
+  all_cleaned
+}
+procsfail 'did not reach the tracked server' MOCK_PROC_DIES=1
+procsfail 'did not reach the tracked server' MOCK_PROC_SLOW=10
+procsfail "did not print 'stopped 1 tracked process: web (pid 4201)'" MOCK_PROC_NO_STOP=1
+procsfail 'still answered after the downgrade' MOCK_PROC_STOP_KEEPS=1
+procsfail 'set_mode was pending (unavailable)' MOCK_SET_MODE_PENDING=1
+pass 'a process that dies, a server that never binds, a downgrade that stops nothing or leaves it serving, a pending set_mode: each `not ok 9`, and the trap deletes the sandbox'

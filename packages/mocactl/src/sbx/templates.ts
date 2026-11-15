@@ -15,6 +15,7 @@ import type {
 import { failed, refusalText, SBX_EXIT, type SbxCtx } from './commands.js';
 import { dryRun } from './dry-run.js';
 import { openExec, type ExecFactory } from './exec.js';
+import { noticingExec } from './notices.js';
 import { baselineAtHead } from './push.js';
 
 /**
@@ -656,24 +657,24 @@ export async function seedSandbox(
   if (seed === undefined) return `the build of ${sanitizeRemote(id)} names no seed`;
   if (seed === '') return { seed, exitCode: 0, clean: null, head: null };
   const x = await openExec(c.api, sandbox.id, factory);
+  // Each Exec's lease events are said as they come (plan-4 M2).
+  const exec = noticingExec(c, sandbox.id, x.exec);
   try {
     const timeoutS = x.lifetimeS - TOKEN_MARGIN_S > 0 ? x.lifetimeS - TOKEN_MARGIN_S : undefined;
-    const r = await x.exec(seed, {
+    const r = await exec(seed, {
       ...(timeoutS !== undefined ? { timeoutS } : {}),
       signal: c.signal,
     });
     if (r.exitCode !== 0)
       return `the seed exited ${r.exitCode}: ${sanitizeRemote(r.stderr.toString().trim().slice(-400)) || 'no stderr'}`;
-    const w = (
-      await x.exec(WORKSPACE_CHECK, { timeoutS: 120, signal: c.signal })
-    ).stdout.toString();
+    const w = (await exec(WORKSPACE_CHECK, { timeoutS: 120, signal: c.signal })).stdout.toString();
     const git = !/^nogit$/m.test(w);
     const dirty = Number(/^dirty=(\d+)$/m.exec(w)?.[1] ?? '0');
     const head = /^head=([0-9a-f]{40,64})$/m.exec(w)?.[1] ?? null;
     if (git && dirty > 0)
       return `after the seed, /workspace has ${dirty} changed or untracked paths: not a clean tree`;
     // The seed's clean tree is the template's: the baseline `pull` and `rm` measure changes from.
-    if (git && head !== null) await baselineAtHead(x.exec, WORKSPACE, { signal: c.signal });
+    if (git && head !== null) await baselineAtHead(exec, WORKSPACE, { signal: c.signal });
     return { seed, exitCode: 0, clean: git ? dirty === 0 : null, head };
   } finally {
     x.close();

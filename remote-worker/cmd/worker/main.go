@@ -82,6 +82,14 @@ func capabilities() []string {
 	return out
 }
 
+// helloCapabilities is this worker's Hello.capabilities: the PATH probe, plus the one
+// behaviour the harness keys on, the per-session workspace directory
+// (wexec.WorkspaceCapability). Never the reserved sbx:lease-processes-v1 (ruling P5-R37):
+// the container tier has no lease mode and refuses every process kind.
+func helloCapabilities() []string {
+	return append(capabilities(), wexec.WorkspaceCapability)
+}
+
 // workspaceRunner builds the per-key workspace layer over BashRunner (#408).
 // SH_WORKSPACE_ROOT must equal the harness's KAGENTI_SANDBOX_CWD: the harness sends
 // <that>/<session id> as every absolute path, and this is where the directory is made.
@@ -269,12 +277,10 @@ func main() {
 	}
 
 	cfg := session.Config{
-		SandboxID: env("SANDBOX_ID", "sbx-laptop-1"),
-		Image:     env("SANDBOX_IMAGE", ""),
-		Trust:     env("SANDBOX_TRUST", "untrusted"),
-		// The PATH probe, plus the one behaviour the harness keys on: the per-session
-		// workspace directory (wexec.WorkspaceCapability).
-		Capabilities:  append(capabilities(), wexec.WorkspaceCapability),
+		SandboxID:     env("SANDBOX_ID", "sbx-laptop-1"),
+		Image:         env("SANDBOX_IMAGE", ""),
+		Trust:         env("SANDBOX_TRUST", "untrusted"),
+		Capabilities:  helloCapabilities(),
 		MaxConcurrent: envInt("WORKER_MAX_CONCURRENT", session.DefaultConcurrency),
 		Labels:        session.Labels(os.LookupEnv, "container"),
 	}

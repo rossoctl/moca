@@ -34,6 +34,23 @@ type leaseLauncher struct {
 	// lease takes. normaliseFn, when set, answers it; otherwise it succeeds.
 	normalises  []Command
 	normaliseFn func(Command) (Result, error)
+	// syncs is every lease end's sync step (destroyLeaseVictim), recorded as "sync <id>".
+	// syncFn, when set, answers it; otherwise it succeeds with the tracked table the VM's
+	// last successful Run reported, as a guest whose table has not changed since would.
+	syncs  []Command
+	syncFn func(Command) (Result, error)
+}
+
+func (l *leaseLauncher) setSyncFn(f func(Command) (Result, error)) {
+	l.rec.Lock()
+	l.syncFn = f
+	l.rec.Unlock()
+}
+
+func (l *leaseLauncher) syncCommands() []Command {
+	l.rec.Lock()
+	defer l.rec.Unlock()
+	return slices.Clone(l.syncs)
 }
 
 func (l *leaseLauncher) normaliseCommands() []Command {
@@ -94,6 +111,9 @@ func (l *leaseLauncher) Restore(ctx context.Context, req RestoreRequest) (VM, er
 type leaseFakeVM struct {
 	*fakeVM
 	l *leaseLauncher
+	// lastTracked is the tracked table of this VM's last successful Run, under l.rec: the
+	// default sync step's answer.
+	lastTracked []TrackedProcess
 }
 
 func (v *leaseFakeVM) LeaseCgroup(maxBytes int64) error {
@@ -137,11 +157,32 @@ func (v *leaseFakeVM) Run(ctx context.Context, c Command, out Sink) (Result, err
 		}
 		return Result{}, nil
 	}
+	if c.Kind == ExecKindCommand && c.Command == leaseEndSyncCommand {
+		// A lease end's sync step (destroyLeaseVictim), recorded as "sync <id>" rather
+		// than in cmds and "run <id>", as the normalise step is, so that a suite counting
+		// an Exec's Runs is not thrown by the step a level-2 lease's end takes.
+		v.l.rec.Lock()
+		v.l.syncs = append(v.l.syncs, c)
+		fn, tracked := v.l.syncFn, slices.Clone(v.lastTracked)
+		v.l.rec.Unlock()
+		v.l.record("sync " + v.id)
+		if fn != nil {
+			c.ctxDone = ctx.Done()
+			return fn(c)
+		}
+		return Result{Tracked: tracked}, nil
+	}
 	v.l.rec.Lock()
 	v.l.cmds = append(v.l.cmds, c)
 	v.l.rec.Unlock()
 	v.l.record("run " + v.id)
-	return v.fakeVM.Run(ctx, c, out)
+	res, err := v.fakeVM.Run(ctx, c, out)
+	if err == nil {
+		v.l.rec.Lock()
+		v.lastTracked = slices.Clone(res.Tracked)
+		v.l.rec.Unlock()
+	}
+	return res, err
 }
 
 func (v *leaseFakeVM) Destroy() error {
@@ -196,9 +237,15 @@ func mustExec(t *testing.T, p *pool, key string, e Exec) Result {
 
 func mustSetMode(t *testing.T, p *pool, key string, m Mode, epoch uint64) {
 	t.Helper()
-	if err := p.SetMode(key, m, epoch); err != nil {
+	if err := setModeErr(p, key, m, epoch); err != nil {
 		t.Fatalf("SetMode(%s, %d): %v", m, epoch, err)
 	}
+}
+
+// setModeErr is SetMode's error alone, for a caller with no use for the stopped list.
+func setModeErr(p *pool, key string, m Mode, epoch uint64) error {
+	_, err := p.SetMode(key, m, epoch)
+	return err
 }
 
 func liveLease(p *pool, key string) *vmLease {
@@ -636,7 +683,7 @@ func TestFirstExecOnANewKeyCountsFirstExec(t *testing.T) {
 		setup func(*pool)
 		e     Exec
 	}{
-		{"lease", func(p *pool) { _ = p.SetMode("k", ModeLease, 1) }, leaseExec("one", 1)},
+		{"lease", func(p *pool) { _ = setModeErr(p, "k", ModeLease, 1) }, leaseExec("one", 1)},
 		{"per-exec with epoch", nil, Exec{Command: "one", TimeoutS: 30, Mode: ModePerExec, ModeEpoch: 1}},
 		{"per-exec epoch 0", nil, Exec{Command: "one", TimeoutS: 30}},
 	} {

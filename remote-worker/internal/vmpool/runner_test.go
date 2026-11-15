@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 	"github.com/rossoctl/moca/remote-worker/internal/session"
@@ -192,7 +194,7 @@ func TestRunnerLogsTheWorkspaceKeyAndVMOfEveryExec(t *testing.T) {
 		t.Fatalf("got %d exec log lines, want exactly 1: %q", len(lines), lines)
 	}
 	l := lines[0]
-	for _, want := range []string{`req=9`, `workspace_key="sess-abc"`, "vm=" + restoredID, "exit=3", "err=<nil>"} {
+	for _, want := range []string{`req=9`, `workspace_key="sess-abc"`, "kind=command", "vm=" + restoredID, "exit=3", "err=<nil>"} {
 		if !strings.Contains(l, want) {
 			t.Fatalf("exec log %q lacks %q", l, want)
 		}
@@ -564,49 +566,81 @@ func TestPerExecExecCarriesNoLeaseEvents(t *testing.T) {
 
 // The expiring notice names its reason and its deadline (plan 4): at_unix_ms is when the
 // lease passed its maximum duration, and ends_by_unix_ms is that plus LeaseGraceLimit, the
-// hard end a client counts its "restarts within <N> min" down to.
+// hard end a client counts its "restarts within <N> min" down to. age_ms is the lease's age
+// when the Exec's response is built, exactly, on the fake clock. Each level expires at its
+// own maximum duration (LeaseMaxDuration, LeaseMaxDurationProcesses), and the other one is
+// set far off, so a level reading the wrong one would not expire at all.
 func TestExpiringEventCarriesDeadline(t *testing.T) {
-	p, _, clk := leasePool(t, func(c *Config) {
-		c.LeaseMaxDuration = 10 * time.Second
-		c.LeaseGraceLimit = 60 * time.Second
-	})
-	r := Runner{Pool: p}
-	mustSetMode(t, p, "k", ModeLease, 1)
-	first := runLease(t, r, leaseSpec(1, 1))
-	if len(first) != 1 || first[0].GetState() != "start" {
-		t.Fatalf("first Exec's events = %v, want one lease start", first)
-	}
-	started := first[0].GetAtUnixMs()
+	for _, tc := range []struct {
+		mode  Mode
+		proto pb.SandboxMode
+		tweak func(*Config)
+	}{
+		{ModeLease, pb.SandboxMode_SANDBOX_MODE_LEASE, func(c *Config) {
+			c.LeaseMaxDuration, c.LeaseMaxDurationProcesses = 10*time.Second, time.Hour
+		}},
+		{ModeLeaseProcesses, pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, func(c *Config) {
+			c.LeaseMaxDuration, c.LeaseMaxDurationProcesses = time.Hour, 10*time.Second
+			c.ManifestFeatures = processFeatures
+		}},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			p, _, clk := leasePool(t, func(c *Config) {
+				tc.tweak(c)
+				c.LeaseGraceLimit = 60 * time.Second
+			})
+			r := Runner{Pool: p}
+			spec := func(reqID uint64) wexec.Spec {
+				s := leaseSpec(reqID, 1)
+				s.Mode = tc.mode.String()
+				return s
+			}
+			mustSetMode(t, p, "k", tc.mode, 1)
+			first := runLease(t, r, spec(1))
+			if len(first) != 1 || first[0].GetState() != "start" || first[0].GetMode() != tc.proto {
+				t.Fatalf("first Exec's events = %v, want one lease start in mode %s", first, tc.mode)
+			}
+			started := first[0].GetAtUnixMs()
 
-	clk.Advance(10 * time.Second)
-	evs := runLease(t, r, leaseSpec(2, 1))
-	if len(evs) != 1 {
-		t.Fatalf("events after 10 s = %v, want exactly the expiring notice", evs)
-	}
-	ev := evs[0]
-	if ev.GetState() != "expiring" || ev.GetReason() != "max_duration" {
-		t.Fatalf("event = %v, want expiring/max_duration", ev)
-	}
-	if ev.GetMode() != pb.SandboxMode_SANDBOX_MODE_LEASE {
-		t.Errorf("mode = %v, want lease", ev.GetMode())
-	}
-	if ev.GetAgeMs() < 10_000 {
-		t.Errorf("age_ms = %d, want the lease's age (>= 10 000)", ev.GetAgeMs())
-	}
-	if want := started + 10_000; ev.GetAtUnixMs() != want {
-		t.Errorf("at_unix_ms = %d, want %d: when the lease passed its maximum duration", ev.GetAtUnixMs(), want)
-	}
-	if d := ev.GetEndsByUnixMs() - ev.GetAtUnixMs(); d != 60_000 {
-		t.Errorf("ends_by - at = %d ms, want 60 000 (the grace limit)", d)
-	}
+			clk.Advance(9 * time.Second)
+			if evs := runLease(t, r, spec(2)); len(evs) != 0 {
+				t.Fatalf("events after 9 s = %v, want none: the lease is not yet expiring", evs)
+			}
 
-	// Not acknowledged: the next lease Exec carries the same notice, at the same at_unix_ms,
-	// so a client deduping on it shows it once.
-	clk.Advance(time.Second)
-	again := runLease(t, r, leaseSpec(3, 1))
-	if len(again) != 1 || again[0].GetState() != "expiring" || again[0].GetAtUnixMs() != ev.GetAtUnixMs() ||
-		again[0].GetEndsByUnixMs() != ev.GetEndsByUnixMs() {
-		t.Fatalf("next Exec's events = %v, want the same expiring notice (%v)", again, ev)
+			clk.Advance(time.Second)
+			evs := runLease(t, r, spec(3))
+			if len(evs) != 1 {
+				t.Fatalf("events after 10 s = %v, want exactly the expiring notice", evs)
+			}
+			ev := evs[0]
+			if ev.GetState() != "expiring" || ev.GetReason() != "max_duration" {
+				t.Fatalf("event = %v, want expiring/max_duration", ev)
+			}
+			if ev.GetMode() != tc.proto {
+				t.Errorf("mode = %v, want %v", ev.GetMode(), tc.proto)
+			}
+			if ev.GetAgeMs() != 10_000 {
+				t.Errorf("age_ms = %d, want 10 000: the lease's age when the Exec answered", ev.GetAgeMs())
+			}
+			if want := started + 10_000; ev.GetAtUnixMs() != want {
+				t.Errorf("at_unix_ms = %d, want %d: when the lease passed its maximum duration", ev.GetAtUnixMs(), want)
+			}
+			if d := ev.GetEndsByUnixMs() - ev.GetAtUnixMs(); d != 60_000 {
+				t.Errorf("ends_by - at = %d ms, want 60 000 (the grace limit)", d)
+			}
+
+			// Not acknowledged: the next lease Exec carries the same notice, at the same
+			// at_unix_ms, so a client deduping on it shows it once. Its age_ms has moved on.
+			clk.Advance(1500 * time.Millisecond)
+			again := runLease(t, r, spec(4))
+			if len(again) != 1 || again[0].GetState() != "expiring" || again[0].GetAtUnixMs() != ev.GetAtUnixMs() ||
+				again[0].GetEndsByUnixMs() != ev.GetEndsByUnixMs() || again[0].GetMode() != tc.proto {
+				t.Fatalf("next Exec's events = %v, want the same expiring notice (%v)", again, ev)
+			}
+			if got := again[0].GetAgeMs(); got != 11_500 {
+				t.Errorf("the next notice's age_ms = %d, want 11 500: the age when that Exec answered", got)
+			}
+		})
 	}
 }
 
@@ -634,5 +668,144 @@ func TestRunnerLeaseControlSandboxDeleted(t *testing.T) {
 	// Without a live lease it is a no-op that still answers the status.
 	if st, err := r.LeaseControl(t.Context(), "never", pb.LeaseOp_LEASE_OP_SANDBOX_DELETED, 0, 0); err != nil || st.GetState() != "none" {
 		t.Fatalf("sandbox_deleted without a lease = %v, %v; want status none, no error", st, err)
+	}
+}
+
+// The Spec's kind and process args reach the pool's Exec, every kind in its guest spelling,
+// Tail as a count. A command stays the zero kind.
+func TestRunnerForwardsKindAndProcessArgs(t *testing.T) {
+	p, lc, _ := processPool(t)
+	reportTable(lc, &fakeTable{})
+	spy := &spyPool{Pool: p}
+	r := Runner{Pool: spy}
+	mustSetMode(t, p, "k", ModeLeaseProcesses, 1)
+
+	args := wexec.ProcessArgs{Name: "web", ID: "3", Cwd: "/workspace/app", Tail: 50, Signal: "KILL"}
+	want := map[string]ExecKind{
+		wexec.KindCommand:      ExecKindCommand,
+		wexec.KindProcessStart: ExecKindProcessStart,
+		wexec.KindProcessList:  ExecKindProcessList,
+		wexec.KindProcessLogs:  ExecKindProcessLogs,
+		wexec.KindProcessStop:  ExecKindProcessStop,
+	}
+	order := []string{wexec.KindCommand, wexec.KindProcessStart, wexec.KindProcessList, wexec.KindProcessLogs, wexec.KindProcessStop}
+	for i, kind := range order {
+		s := leaseSpec(uint64(i+1), 1)
+		s.Mode, s.Kind, s.Process = "lease+processes", kind, args
+		if _, err := r.Run(t.Context(), s, newLeaseSink()); err != nil {
+			t.Fatalf("Run(%q): %v", kind, err)
+		}
+	}
+	spy.mu.Lock()
+	got := slices.Clone(spy.got)
+	spy.mu.Unlock()
+	if len(got) != len(order) {
+		t.Fatalf("pool saw %d Execs, want %d", len(got), len(order))
+	}
+	wantArgs := ProcessArgs{Name: "web", ID: "3", Cwd: "/workspace/app", Tail: 50, Signal: "KILL"}
+	for i, kind := range order {
+		if got[i].Kind != want[kind] || got[i].Process != wantArgs || got[i].Mode != ModeLeaseProcesses {
+			t.Errorf("Exec for %q = {Kind:%q Process:%+v Mode:%s}, want {Kind:%q Process:%+v Mode:lease+processes}",
+				kind, got[i].Kind, got[i].Process, got[i].Mode, want[kind], wantArgs)
+		}
+	}
+}
+
+// Ruling P5-R22: a kind the session could not name ("unknown(<n>)") and a name that maps to
+// no kind -- the host-only process_stop_all above all -- are refused lease_unsupported
+// before the pool sees the Exec: no VM, no lease, never a command.
+func TestRunnerRefusesAnUnknownKind(t *testing.T) {
+	for kind, want := range map[string]string{
+		"unknown(9)":       "lease_unsupported: unknown exec kind 9",
+		"process_stop_all": `lease_unsupported: unknown exec kind "process_stop_all"`,
+		"command":          `lease_unsupported: unknown exec kind "command"`,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			for _, mode := range []string{"", "lease", "lease+processes"} {
+				p, lc, _ := processPool(t)
+				spy := &spyPool{Pool: p}
+				s := leaseSpec(1, 1)
+				s.Mode, s.Kind = mode, kind
+				_, err := Runner{Pool: spy}.Run(t.Context(), s, newLeaseSink())
+				if err == nil || err.Error() != want {
+					t.Fatalf("mode %q: err = %v, want %q", mode, err, want)
+				}
+				spy.mu.Lock()
+				n := len(spy.got)
+				spy.mu.Unlock()
+				if n != 0 || lc.createdCount() != 0 || liveLease(p, "k") != nil {
+					t.Fatalf("mode %q: the pool saw %d Execs, restored %d VMs and holds lease %v for an unknown kind",
+						mode, n, lc.createdCount(), liveLease(p, "k"))
+				}
+			}
+		})
+	}
+
+	// Nor is a pending lease event delivered (or acknowledged) on the refusal: it stays for
+	// the next Exec.
+	p, _, _ := processPool(t)
+	mustSetMode(t, p, "k", ModeLeaseProcesses, 1)
+	s := leaseSpec(1, 1)
+	s.Mode = "lease+processes"
+	runLease(t, Runner{Pool: p}, s)
+	if err := p.EndLease("k", LeaseEndReset); err != nil {
+		t.Fatalf("EndLease: %v", err)
+	}
+	sink := newLeaseSink()
+	s.ReqID, s.Kind = 2, "unknown(9)"
+	if _, err := (Runner{Pool: p}).Run(t.Context(), s, sink); err == nil {
+		t.Fatal("an unknown kind ran")
+	}
+	if evs := sink.got(); len(evs) != 0 {
+		t.Fatalf("the refusal carried %d lease events, want none", len(evs))
+	}
+	if p.LeaseStatus("k").Pending == nil {
+		t.Fatal("the refusal acknowledged the pending end")
+	}
+}
+
+// The tracked processes' mapping to proto (ruling P5-R1: Task 5's, pinned here at the
+// runner's edge): every field of TrackedProcess on LeaseEvent.tracked, LeaseStatus.processes
+// and, through the same trackedProto, LeaseStatus.stopped. An unnamed process shows as
+// p<id>, ages count to the event's or the status's time, and a start after it, a negative
+// pid or a negative memory reading clamp to 0.
+func TestRunnerMapsTrackedToProto(t *testing.T) {
+	at := time.UnixMilli(1_800_000_000_000)
+	ps := []TrackedProcess{
+		{ID: "1", Name: "web", PID: 412, State: "running", Started: at.Add(-90 * time.Second), MemoryBytes: 4 << 20},
+		{ID: "2", PID: 413, State: "killed", Code: 15, Started: at.Add(-time.Second)},
+		{ID: "3", Name: "build", PID: -1, State: "exited", Code: 2, Started: at.Add(time.Second), MemoryBytes: -5},
+	}
+	want := []*pb.TrackedProcess{
+		{Id: "1", Name: "web", Pid: 412, State: "running", AgeMs: 90_000, MemoryBytes: 4 << 20},
+		{Id: "2", Name: "p2", Pid: 413, State: "killed", Code: 15, AgeMs: 1000},
+		{Id: "3", Name: "build", Pid: 0, State: "exited", Code: 2, AgeMs: 0, MemoryBytes: 0},
+	}
+	check := func(where string, got []*pb.TrackedProcess) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s = %+v, want %d entries", where, got, len(want))
+		}
+		for i := range want {
+			if !proto.Equal(got[i], want[i]) {
+				t.Errorf("%s[%d] = %+v, want %+v", where, i, got[i], want[i])
+			}
+		}
+	}
+
+	ev := leaseEventProto(&LeaseEvent{State: "ended", Reason: LeaseEndReset, At: at, Mode: ModeLeaseProcesses,
+		Processes: []string{"web (pid 412)"}, Tracked: ps})
+	check("LeaseEvent.tracked", ev.GetTracked())
+	if !slices.Equal(ev.GetProcesses(), []string{"web (pid 412)"}) {
+		t.Errorf("LeaseEvent.processes = %q, want the display strings unchanged", ev.GetProcesses())
+	}
+	st := leaseStatusProto(LeaseInfo{Mode: ModeLeaseProcesses, State: LeaseActive, Tracked: ps, At: at})
+	check("LeaseStatus.processes", st.GetProcesses())
+	if len(st.GetStopped()) != 0 {
+		t.Errorf("LeaseStatus.stopped = %+v, want empty outside a set_mode", st.GetStopped())
+	}
+	check("LeaseStatus.stopped (trackedProto)", trackedProto(ps, at))
+	if trackedProto(nil, at) != nil {
+		t.Error("no tracked processes map to a non-nil list")
 	}
 }

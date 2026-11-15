@@ -311,6 +311,13 @@ func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	mib("SH_LEASE_START_MB", &cfg.LeaseStartBytes)
 	mib("SH_LEASE_PAGECACHE_MB", &cfg.LeasePageCacheBytes)
 	mib("SH_LEASE_RECLAIM_FREE_MB", &cfg.LeaseReclaimFreeBytes)
+	if get("SH_LEASE_MAX_PROCESSES") != "" {
+		// Level 2's cap on running tracked processes (spec §7), at most the tracked uids
+		// a level-2 image has.
+		if v, ok := read("SH_LEASE_MAX_PROCESSES", vmpool.MaxLeaseProcesses); ok {
+			cfg.LeaseMaxProcesses = int(v)
+		}
+	}
 	if v := get("SH_LEASE_HEADROOM"); v != "" {
 		h, e := strconv.ParseFloat(v, 64)
 		// !(h >= 1) rather than h < 1: it also refuses NaN, which compares false to everything.
@@ -943,7 +950,9 @@ func main() {
 	// a guest, so the worker's PATH says nothing about what an Exec can use. They come
 	// from the golden snapshot's manifest loaded above instead, which the build script
 	// fills by probing INSIDE the guest before snapshotting; an empty manifest field
-	// advertises nothing rather than lying.
+	// advertises nothing rather than lying. HelloCapabilities adds the reserved
+	// sbx:lease-processes-v1 when this worker serves the process kinds (ruling P5-R37), so
+	// the relay never forwards one to a worker that cannot.
 	// moca.dev/build: the manifest hash verified above, so a session pinned to a build runs only here
 	// (combined control plane spec §3.4).
 	labels := session.WithBuild(session.Labels(os.LookupEnv, "microvm"), man.Hash)
@@ -951,7 +960,7 @@ func main() {
 		SandboxID:     env(get, "SANDBOX_ID", "sbx-microvm-1"),
 		Image:         env(get, "SANDBOX_IMAGE", ""),
 		Trust:         env(get, "SANDBOX_TRUST", "untrusted"),
-		Capabilities:  man.Capabilities,
+		Capabilities:  vmpool.HelloCapabilities(cfg, man.Capabilities),
 		MaxConcurrent: maxConcurrent,
 		Labels:        labels,
 	}, vmpool.Runner{Pool: pool,

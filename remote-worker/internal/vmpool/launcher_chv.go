@@ -1335,7 +1335,8 @@ func (s *chvMountFailSink) Stderr(b []byte) {
 }
 
 // Run sends exactly one command over a fresh vsock connection: chvWrapCommand's
-// mount-then-run script, never c.Command unwrapped. See chvWrapCommand's doc
+// mount-then-run script, never a command kind's c.Command unwrapped (a process kind,
+// which this arm never serves, is sent as given: wrapForGuest). See chvWrapCommand's doc
 // comment for why the mount lives here rather than in Resume, and why there is
 // still no sync — the one deliberate asymmetry with the Firecracker arm's
 // Run/wrapCommand, load-bearing per spec §4.3 (the host filesystem, not a guest
@@ -1355,8 +1356,7 @@ func (v *chvVM) Run(ctx context.Context, c Command, out Sink) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("cloud-hypervisor: run %s: dial vsock: %w", v.id, err)
 	}
-	wrapped := c
-	wrapped.Command = chvWrapCommand(c.Command)
+	wrapped := wrapForGuest(c, chvWrapCommand) // a process kind is never wrapped (P5-R34)
 	sink := &chvMountFailSink{out: out}
 	res, err := runOverConn(ctx, conn, wrapped, sink, time.Now())
 	if err != nil {

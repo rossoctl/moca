@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { Exec } from '@moca/k8s-sandbox';
-import { createRelay } from '../src/relay.js';
+import { Exec, ExecKind } from '@moca/k8s-sandbox';
+import { createRelay, LEASE_PROCESSES_CAPABILITY, WORKER_WITHOUT_PROCESSES } from '../src/relay.js';
 import type { RecordStore } from '@moca/harness';
 
 const records: RecordStore = { put: async () => {}, remove: async () => {}, list: async () => [] };
@@ -257,5 +257,68 @@ describe('relay Exec/Abort routing', () => {
     );
     s.emitData({ end: { reqId: 11, exitCode: 0, truncated: false } });
     await vi.waitFor(() => expect(events.at(-1)?.end?.exitCode).toBe(0));
+  });
+});
+
+// P5-R37: routeExec itself never writes a process kind to a worker whose Hello lacks the
+// capability -- the backstop for a worker that attached after the sandbox caller looked, so
+// the check and the write see the same worker.
+describe('relay routeExec and the lease-processes capability', () => {
+  const hello = (capabilities: string[]) => ({
+    hello: {
+      sandboxId: 'sbx-1',
+      labels: {},
+      capabilities,
+      image: '',
+      arch: 'amd64',
+      capacityMax: 1,
+      trust: 'trusted',
+    },
+  });
+  const start = Exec.fromPartial({
+    reqId: 1,
+    command: 'npm run dev',
+    stdin: new Uint8Array(),
+    streaming: true,
+    kind: ExecKind.EXEC_KIND_PROCESS_START,
+  });
+  const drain = async (it: AsyncIterable<unknown>) => {
+    for await (const _ of it) void _;
+  };
+
+  it('refuses a process kind FAILED_PRECONDITION before writing it to a worker without it', async () => {
+    const relay = createRelay({ records, validateToken: () => true } as never);
+    const s = fakeAttach();
+    relay.onAttach(s as never);
+    s.emitData(hello(['bash']));
+    await expect(drain(relay.routeExec('sbx-1', start))).rejects.toMatchObject({
+      code: 9,
+      details: WORKER_WITHOUT_PROCESSES,
+    });
+    expect(s.written.filter((f) => f.exec)).toEqual([]);
+    expect(relay.workerCapabilities('sbx-1')).toEqual(['bash']);
+    expect(relay.workerCapabilities('sbx-none')).toBeUndefined();
+  });
+
+  it('writes a process kind to a worker that advertises it, and a command to any worker', async () => {
+    const relay = createRelay({ records, validateToken: () => true } as never);
+    const s = fakeAttach();
+    relay.onAttach(s as never);
+    s.emitData(hello([LEASE_PROCESSES_CAPABILITY]));
+    const pump = drain(relay.routeExec('sbx-1', start));
+    await vi.waitFor(() =>
+      expect(s.written.at(-1)?.exec?.kind).toBe(ExecKind.EXEC_KIND_PROCESS_START),
+    );
+    s.emitData({ end: { reqId: 1, exitCode: 0 } });
+    await pump;
+
+    const t = createRelay({ records, validateToken: () => true } as never);
+    const u = fakeAttach();
+    t.onAttach(u as never);
+    u.emitData(hello([]));
+    const cmd = drain(t.routeExec('sbx-1', Exec.fromPartial({ reqId: 2, command: 'true' })));
+    await vi.waitFor(() => expect(u.written.at(-1)?.exec?.reqId).toBe(2));
+    u.emitData({ end: { reqId: 2, exitCode: 0 } });
+    await cmd;
   });
 });

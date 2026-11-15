@@ -8,29 +8,45 @@ import {
   type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import { ExecAbortedError, ExecMachineryError, ExecRefusedError, type Exec } from './exec-conn.js';
+import {
+  ExecMachineryError,
+  ExecRefusedError,
+  leaseEventsOf,
+  ProcessError,
+  type Exec,
+  type ProcessCall,
+} from './exec-conn.js';
 import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
 import {
+  ageText,
   hhmm,
   LeaseControlError,
   noticeLines,
   NoticeDedupe,
+  processRow,
+  shownProcessId,
   type SandboxModeName,
 } from './lease.js';
 import {
+  LEASE_PROCESSES_RULE,
   LEASE_RULE,
+  PROCESS_RULE,
+  PROCESS_TOOL_NAMES,
   sandboxTools,
   ToolInputError,
   WORKSPACE,
   type LeaseCall,
+  type SandboxTool,
   type ToolResult,
 } from './tools.js';
 
 /**
  * The sandbox MCP server (SBX0 spec §6.4): the tools over one sandbox's Exec, and its lease (plan
  * 4): each result is prefixed with the notices of the lease events its Execs carried, `reset` ends
- * the lease and `sandbox_info` shows it. Transport-free: `mocactl sbx mcp` connects it to stdio,
- * the tests to an in-memory pair.
+ * the lease and `sandbox_info` shows it. At lease+processes (plan 5) it also serves the process
+ * tools; the tool list follows the latest token's mode, and the client is told when it changes
+ * (`tokenMinted`). Transport-free: `mocactl sbx mcp` connects it to stdio, the tests to an
+ * in-memory pair.
  */
 
 /** One line per tool call for the flight recorder. Never command output. */
@@ -56,6 +72,10 @@ export interface SandboxInfo {
 
 export interface SandboxMcpOptions {
   exec: Exec;
+  /** The sandbox's process calls (plan 5): the process tools' one Exec each. */
+  process?: ProcessCall;
+  /** The sandbox id the texts name (the §7 refusal's `mocactl sbx mode <id>`). */
+  sandboxId?: string;
   /**
    * `sandbox_info`'s text, before the lease fields, and the record's current mode, which every
    * lease field follows; a bare string means the mode at start. Costs no Exec, and is never queued.
@@ -69,9 +89,17 @@ export interface SandboxMcpOptions {
    * The mode claim of the latest sandbox token minted, undefined before the first mint. When set it
    * decides, over the record, whether `reset` and `sandbox_info` ask the lease at all: the record
    * read at start may be stale, a token is minted from the record as it is now. Before the first
-   * mint both re-read the record through `info`.
+   * mint both re-read the record through `info`. It also picks the tools listed and the process
+   * tools' gate, as `tokenMinted` does; before any mint, `mode` does.
    */
   leaseMode?: () => SandboxModeName | undefined;
+  /**
+   * Mints a fresh sandbox token and answers its mode (P5-R29): the gate asks it once when a
+   * process tool is called below lease+processes, since the user may have upgraded since the held
+   * token. A caller with no token yet mints its first one. Without it, the gate decides from the
+   * held token's mode alone.
+   */
+  refreshMode?: (signal: AbortSignal) => Promise<SandboxModeName | undefined>;
   /** Called once per call. A recorder that throws never fails the call. */
   record?: (r: CallRecord) => void;
   /** How long a call may wait behind this server's running one before it is refused as busy. */
@@ -96,13 +124,16 @@ export const DEFAULT_BUSY_WAIT_MS = 30_000;
  */
 export const sandboxRules = (ws: string, mode: SandboxModeName = 'per-exec'): string => {
   const noBackground =
-    'Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.';
+    mode === 'lease+processes'
+      ? `${PROCESS_RULE} Start servers and watchers that must keep running with \`process_start\`; \`process_list\`, \`process_logs\` and \`process_stop\` manage them.`
+      : 'Never start background jobs, servers or watchers expecting them to keep running; chain the work into one command instead.';
   const leased = mode !== 'per-exec';
+  const leaseRule = mode === 'lease+processes' ? LEASE_PROCESSES_RULE : LEASE_RULE;
   return [
     `The code lives in a remote sandbox at \`${ws}\`: use the \`sandbox\` MCP tools for everything.`,
     '',
     leased
-      ? `- Lease mode: ${LEASE_RULE}. ${noBackground}`
+      ? `- Lease mode: ${leaseRule}. ${noBackground}`
       : `- Every tool call runs in a fresh VM, and no process survives it. ${noBackground}`,
     leased
       ? `- Files under \`${ws}\` persist between calls; anything else lasts at most until the guest restarts.`
@@ -125,6 +156,9 @@ export const TOKEN_EXPIRED_TEXT =
   'the sandbox token expired during the command, so the relay cancelled it; this is not your ' +
   `command's output, and ${MAY_HAVE_RUN}. Retry it, split into shorter steps ` +
   'if it is long.';
+/** The §7 refusal of a process tool below lease+processes, as the model is told it. */
+export const processesNotEnabledText = (sandboxId: string): string =>
+  `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode ${sandboxId} lease+processes`;
 const CANCELLED = 'cancelled by the client';
 const UP = 'run `mocactl sbx up` for a new one';
 
@@ -156,8 +190,9 @@ function terminated(err: unknown): 'deleted' | 'expired' | undefined {
  */
 export function execFailureText(
   err: unknown,
-  o: { audience?: 'model' | 'cli' } = {},
+  o: { audience?: 'model' | 'cli'; sandboxId?: string } = {},
 ): string | undefined {
+  if (err instanceof ProcessError) return processFailureText(err, o);
   if (err instanceof ExecMachineryError) {
     switch (err.kind) {
       case 'busy':
@@ -182,12 +217,63 @@ export function execFailureText(
   return undefined;
 }
 
+/**
+ * The relay's `lease_unsupported:` detail when the sandbox's worker does not advertise the
+ * sbx:lease-processes-v1 capability (ruling P5-R37; packages/sandbox-relay WORKER_WITHOUT_PROCESSES,
+ * the same text): the worker predates level 2, so the relay sent nothing.
+ */
+const WORKER_WITHOUT_PROCESSES_DETAIL = "this sandbox's worker does not support tracked processes";
+
+/**
+ * The text for a process call's wire refusal (spec §7): nothing ran. `processes_not_enabled`
+ * is the §7 refusal, naming the sandbox (`<id>` when it is not known).
+ */
+function processFailureText(
+  err: ProcessError,
+  o: { audience?: 'model' | 'cli'; sandboxId?: string },
+): string {
+  const d = err.detail;
+  switch (err.code) {
+    case 'processes_not_enabled': {
+      const id = o.sandboxId ?? '<id>';
+      return o.audience === 'cli'
+        ? `processes not enabled for this sandbox; run: mocactl sbx mode ${id} lease+processes`
+        : processesNotEnabledText(id);
+    }
+    // A person at a terminal has the sbx proc commands, not the model's tools.
+    case 'process_not_found': {
+      // The guest names an id bare; no name is shaped like one (P5-R33), so a decimal detail is
+      // an id, shown as the rows show it (final review M2).
+      const who = /^\d+$/.test(d) ? shownProcessId(d) : d;
+      return `no tracked process ${who}; ${o.audience === 'cli' ? 'mocactl sbx proc ls' : 'process_list'} shows them`;
+    }
+    case 'process_limit':
+      return `too many tracked processes: ${d}; stop one with ${o.audience === 'cli' ? 'mocactl sbx proc stop' : 'process_stop'} first`;
+    case 'process_name_taken':
+      return `a running process is already named ${d}; choose another name, or stop it first`;
+    case 'process_cwd':
+      return `invalid cwd: ${d}`;
+    case 'process_name_invalid':
+      return `invalid name: ${d}`;
+    case 'process_signal':
+      return `invalid signal: ${d}`;
+    case 'lease_unsupported':
+      // Not something the user can change with a mode: the deployment's worker is too old.
+      if (d === WORKER_WITHOUT_PROCESSES_DETAIL) {
+        return `tracked processes are not available on this sandbox's worker yet (${o.audience === 'cli' ? 'ask the operator' : 'ask the user to tell the operator'})`;
+      }
+      return `this sandbox's guest cannot run tracked processes: ${d}`;
+    default:
+      return `the sandbox refused the process call (${err.message})`;
+  }
+}
+
 /** The tool error for anything a tool threw: never shown as the command's output. */
-function describe(err: unknown, expiresAt?: number): string {
+function describe(err: unknown, expiresAt?: number, sandboxId?: string): string {
   if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
   if (err instanceof LeaseControlError)
     return `the lease call failed (${err.code}): ${err.message}`;
-  const exec = execFailureText(err);
+  const exec = execFailureText(err, sandboxId !== undefined ? { sandboxId } : {});
   if (exec !== undefined) return exec;
   const gone = terminated(err);
   if (gone === 'deleted') return `sandbox was deleted; ${UP}`;
@@ -200,15 +286,13 @@ function describe(err: unknown, expiresAt?: number): string {
 
 /** What a call acts on, one line, at most 80 characters: the busy message names it. */
 function detailOf(tool: string, args: Record<string, unknown>): string {
-  const target = tool === 'bash' ? args.command : (args.path ?? args.pattern);
+  const target =
+    tool === 'bash'
+      ? args.command
+      : (args.path ?? args.pattern ?? args.command ?? args.id ?? args.name);
   const raw = tool === 'bash' ? String(target ?? '') : `${tool} ${String(target ?? '')}`;
   const line = oneLine(raw);
   return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-}
-
-function elapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
 }
 
 type Turn = 'go' | 'busy' | 'cancelled';
@@ -261,15 +345,33 @@ export function line(waitMs: number, now: () => number) {
   const busy = (): string => {
     const r = running;
     const what = r?.detail || 'a call';
-    return `sandbox busy: \`${what}\` has been running for ${elapsed(r ? now() - r.since : 0)}; retry later or wait for it`;
+    return `sandbox busy: \`${what}\` has been running for ${ageText(r ? now() - r.since : 0)}; retry later or wait for it`;
   };
   return { acquire, release, busy };
 }
 
-export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
+/**
+ * The server, and `tokenMinted`: the caller tells it the mode of each sandbox token minted. The
+ * tool list follows that mode (plan 5): when a mint's mode differs from the one the client last
+ * listed the tools under, it is sent `notifications/tools/list_changed`, once until it lists again
+ * (P5-R27). The instructions stay those of the mode at start: MCP sends them once, on connecting.
+ */
+export type SandboxMcpServer = Server & { tokenMinted(mode: SandboxModeName): void };
+
+export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
   const ws = o.workspace ?? WORKSPACE;
   const mode = o.mode ?? 'per-exec';
   const now = o.now ?? Date.now;
+  /** The mode `tokenMinted` was last told; undefined before the first mint. */
+  let mintedMode: SandboxModeName | undefined;
+  /** The mode the last tools/list answered under; undefined before the first. */
+  let listedMode: SandboxModeName | undefined;
+  /** list_changed was sent since the last tools/list: the client will list again anyway. */
+  let changeSent = false;
+  /** The latest minted token's mode, undefined before the first mint. */
+  const tokenMode = (): SandboxModeName | undefined => o.leaseMode?.() ?? mintedMode;
+  /** The mode the tools follow: the latest token's, else the record's at start. */
+  const toolMode = (): SandboxModeName => tokenMode() ?? mode;
   // One deduper per server: an event repeated on a later result is shown once (spec §5).
   const dedupe = new NoticeDedupe();
   let lastEnd: LeaseEvent | undefined;
@@ -297,6 +399,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
    */
   const leaseInfo = async (current: SandboxModeName): Promise<string[]> => {
     const lines = [`mode: ${current}`];
+    let tracked = ['tracked processes: none'];
     if (current === 'per-exec') {
       lines.push('lease: none (per-exec)');
     } else {
@@ -308,14 +411,23 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
           `age: ${Math.floor(v.ageMs / 1000)}s`,
           `idle timeout: ${idle}`,
         );
+        // The full table (plan 5), exited entries included, so the agent can read why one died.
+        if (v.processes?.length) {
+          // The worker's mirror, refreshed by each call (P5-R38): a status touches no guest,
+          // so it cannot touch the lease's idle clock either.
+          tracked = [
+            'tracked processes (as of the last call):',
+            ...v.processes.map((p) => `  ${processRow(p)}`),
+          ];
+        }
       } catch (err) {
         const code = err instanceof LeaseControlError ? err.code : 'unavailable';
         lines.push(`lease: unknown (${code})`);
+        tracked = ['tracked processes: unknown'];
       }
     }
     const end = lastEnd ? `${lastEnd.reason}, ${hhmm(lastEnd.atUnixMs)}` : 'none';
-    // Plan 5 tracks processes; until then there are none to show.
-    lines.push(`last end: ${end}`, 'tracked processes: none');
+    lines.push(`last end: ${end}`, ...tracked);
     return lines;
   };
   /** The record as `o.info` reads it now; a bare string means the mode at start. */
@@ -327,7 +439,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     const cur = await current();
     // A held end is this result's notice: `last end` names it too.
     noteEnds(held);
-    return [cur.text, ...(await leaseInfo(o.leaseMode?.() ?? cur.mode))].join('\n');
+    return [cur.text, ...(await leaseInfo(tokenMode() ?? cur.mode))].join('\n');
   };
   /**
    * The notice lines for one result's lease events: a start only when no end is shown, and only
@@ -339,13 +451,12 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     return noticeLines(fresh, now());
   };
 
-  const tools = sandboxTools({
+  const toolOptions: Parameters<typeof sandboxTools>[0] = {
     info,
     workspace: ws,
-    mode,
     lease: o.lease,
     // Before the first mint the record read at start may be stale: read it again (one GET).
-    currentMode: async () => o.leaseMode?.() ?? (await current()).mode,
+    currentMode: async () => tokenMode() ?? (await current()).mode,
     // The reset's own end, newer than anything seen: `reset`'s text says it, so the next
     // result's notices do not repeat it (as mocactl's P4-R17), and `last end` names it. It is
     // claimed only once the call's result is sent (`run`): a reply that lands as the call is
@@ -355,20 +466,38 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
       ownEnd = p;
       return true;
     },
-  });
-  const byName = new Map(tools.map((t) => [t.name, t]));
+  };
+  /** Each mode's tools, with its texts (the process tools at lease+processes only), built once. */
+  const sets = new Map<SandboxModeName, { byName: Map<string, SandboxTool>; listed: Tool[] }>();
+  const toolsFor = (m: SandboxModeName) => {
+    let set = sets.get(m);
+    if (!set) {
+      const tools = sandboxTools({ ...toolOptions, mode: m });
+      set = {
+        byName: new Map(tools.map((t) => [t.name, t])),
+        listed: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema as Tool['inputSchema'],
+        })),
+      };
+      sets.set(m, set);
+    }
+    return set;
+  };
+  const isProcessTool = (name: string) => (PROCESS_TOOL_NAMES as readonly string[]).includes(name);
   const queue = line(o.busyWaitMs ?? DEFAULT_BUSY_WAIT_MS, now);
   const server = new Server(
     { name: o.name ?? 'moca-sandbox', version: o.version ?? '0.0.0' },
-    { capabilities: { tools: {} }, instructions: sandboxRules(ws, mode) },
+    { capabilities: { tools: { listChanged: true } }, instructions: sandboxRules(ws, mode) },
   );
-  const listed: Tool[] = tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.inputSchema as Tool['inputSchema'],
-  }));
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listed }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const m = toolMode();
+    listedMode = m;
+    changeSent = false;
+    return { tools: toolsFor(m).listed };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra): Promise<CallToolResult> => {
     const name = req.params.name;
@@ -395,10 +524,30 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
       return fail(text);
     };
 
-    const tool = byName.get(name);
+    let m = toolMode();
+    if (isProcessTool(name) && m !== 'lease+processes' && o.refreshMode) {
+      // The held token may predate the user's upgrade (P5-R29): one fresh mint reads the record
+      // as it is now. One per call, and none when the call's own mint is the first.
+      try {
+        m = (await o.refreshMode(extra.signal)) ?? toolMode();
+      } catch (err) {
+        if (extra.signal.aborted) return refuse(CANCELLED);
+        return refuse(oneLine(describe(err, o.expiresAt, o.sandboxId)));
+      }
+    }
+    // Below lease+processes a process tool is refused unsent (spec §7), whatever list the client
+    // holds: one listed under an earlier mode may still offer it (P5-R27).
+    if (isProcessTool(name) && m !== 'lease+processes') {
+      return refuse(processesNotEnabledText(o.sandboxId ?? '<id>'));
+    }
+    const tool = toolsFor(m).byName.get(name);
     if (!tool) return refuse(`unknown tool: ${name}`);
     // Every lease event this call's Execs carried, a failed Exec's included (P4-R5).
     const events: LeaseEvent[] = [];
+    /** A failed, refused or aborted Exec still carried its events: the worker acked them. */
+    const keepEvents = (err: unknown) => {
+      events.push(...leaseEventsOf(err));
+    };
     const counted: Exec = async (command, opts) => {
       execs++;
       try {
@@ -406,17 +555,24 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
         events.push(...(r.lease ?? []));
         return r;
       } catch (err) {
-        // A failed, refused or aborted Exec still carried its events: the worker acked them.
-        if (
-          err instanceof ExecMachineryError ||
-          err instanceof ExecRefusedError ||
-          err instanceof ExecAbortedError
-        ) {
-          events.push(...err.lease);
-        }
+        keepEvents(err);
         throw err;
       }
     };
+    const processCall = o.process;
+    const countedProcess: ProcessCall | undefined = processCall
+      ? async (op, a, opts) => {
+          execs++;
+          try {
+            const r = await processCall(op, a, opts);
+            events.push(...r.lease);
+            return r;
+          } catch (err) {
+            keepEvents(err);
+            throw err;
+          }
+        }
+      : undefined;
     /** The result with its notice lines first, before the output or the error text. */
     const noticed = (r: CallToolResult): CallToolResult => {
       const lines = notices([...held.splice(0), ...events]);
@@ -434,7 +590,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
       // Only the reset sets or reads `ownEnd`: sandbox_info is never queued, and may run beside it.
       const resets = tool.name === 'reset';
       try {
-        const r: ToolResult = await tool.run(args, counted, extra.signal);
+        const r: ToolResult = await tool.run(args, counted, extra.signal, countedProcess);
         const own = resets ? ownEnd : undefined;
         if (resets) ownEnd = undefined;
         if (extra.signal.aborted) {
@@ -454,7 +610,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
           held.push(...events);
           return refuse(CANCELLED);
         }
-        return noticed(refuse(oneLine(describe(err, o.expiresAt))));
+        return noticed(refuse(oneLine(describe(err, o.expiresAt, o.sandboxId))));
       }
     };
 
@@ -472,5 +628,15 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): Server {
     }
   });
 
-  return server;
+  const tokenMinted = (minted: SandboxModeName) => {
+    mintedMode = minted;
+    // Against the mode the client listed the tools under, the one source (Minor 4): none if it
+    // never listed (its first list will be right), and one notice until it lists again.
+    if (listedMode !== undefined && minted !== listedMode && !changeSent) {
+      changeSent = true;
+      // A client gone or not yet connected has no list to refresh.
+      server.sendToolListChanged().catch(() => {});
+    }
+  };
+  return Object.assign(server, { tokenMinted });
 }

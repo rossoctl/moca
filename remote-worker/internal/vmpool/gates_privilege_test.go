@@ -69,6 +69,7 @@ var scannedPackages = map[string]map[string]string{
 		"agent.go":            "runs inside the guest VM, not on the host — spawning the guest shell is the tier's purpose (§3.5 constrains the host worker)",
 		"lease_shim_linux.go": "runs inside the guest VM: the lease shim drops to the exec uid, then execs the Exec's argv (§3.5 constrains the host worker)",
 		"lease_linux.go":      "runs inside the guest VM: the lease exec path forks the shim into the Exec's cgroup (§3.5 constrains the host worker)",
+		"tracked_linux.go":    "runs inside the guest VM: process_start forks the shim into the tracked process's cgroup (§3.5 constrains the host worker)",
 	},
 	"../session": {}, // internal/session — nothing here may spawn
 }

@@ -524,6 +524,60 @@ func TestSpecCarriesLeaseFields(t *testing.T) {
 	}
 }
 
+// The Exec kind reaches the runner in the guest protocol's spelling, "" for a command, and
+// the process args field by field. A kind this worker does not know arrives as
+// "unknown(<n>)", never as a command: the runner refuses it (lease_unsupported).
+func TestSpecCarriesKindAndProcessArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		kind pb.ExecKind
+		want string
+	}{
+		{"command", pb.ExecKind_EXEC_KIND_COMMAND, wexec.KindCommand},
+		{"process_start", pb.ExecKind_EXEC_KIND_PROCESS_START, "process_start"},
+		{"process_list", pb.ExecKind_EXEC_KIND_PROCESS_LIST, "process_list"},
+		{"process_logs", pb.ExecKind_EXEC_KIND_PROCESS_LOGS, "process_logs"},
+		{"process_stop", pb.ExecKind_EXEC_KIND_PROCESS_STOP, "process_stop"},
+		{"unknown", pb.ExecKind(42), "unknown(42)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStream()
+			r := &scriptedRunner{}
+			s := session.New(testConfig(), r)
+			serve(t, s, st)
+			waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+
+			st.exec(&pb.Exec{
+				ReqId: 1, Command: "npm run dev", WorkspaceKey: "leaf-a",
+				Mode: pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES, ModeEpoch: 7, Kind: tc.kind,
+				Process: &pb.ProcessArgs{Name: "web", Id: "3", Cwd: "/workspace/app", Tail: 50, Signal: "KILL"},
+			})
+			waitFor(t, "terminal frame", func() bool { return terminalFor(st.sent(), 1) != nil })
+			if r.count() != 1 {
+				t.Fatalf("runner ran %d times, want 1", r.count())
+			}
+			got := r.specs[0]
+			want := wexec.ProcessArgs{Name: "web", ID: "3", Cwd: "/workspace/app", Tail: 50, Signal: "KILL"}
+			if got.Kind != tc.want || got.Process != want || got.Command != "npm run dev" {
+				t.Errorf("Spec = {Kind:%q Process:%+v Command:%q}, want {Kind:%q Process:%+v Command:%q}",
+					got.Kind, got.Process, got.Command, tc.want, want, "npm run dev")
+			}
+		})
+	}
+
+	// No process message is the zero args, not a nil dereference.
+	st := newFakeStream()
+	r := &scriptedRunner{}
+	serve(t, session.New(testConfig(), r), st)
+	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
+	st.exec(&pb.Exec{ReqId: 2, WorkspaceKey: "leaf-a", Kind: pb.ExecKind_EXEC_KIND_PROCESS_LIST})
+	waitFor(t, "terminal frame", func() bool { return terminalFor(st.sent(), 2) != nil })
+	if got := r.specs[0]; got.Kind != "process_list" || got.Process != (wexec.ProcessArgs{}) {
+		t.Errorf("Spec without process args = {Kind:%q Process:%+v}, want process_list and zero args", got.Kind, got.Process)
+	}
+}
+
 // leaseEventRunner emits one lease event through the sink's optional LeaseSink, then ends.
 type leaseEventRunner struct {
 	mu  sync.Mutex

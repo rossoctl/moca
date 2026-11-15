@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { q, type SandboxModeName } from '@moca/sandbox-client';
+import { q, type Exec, type SandboxModeName } from '@moca/sandbox-client';
 import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
@@ -17,6 +17,7 @@ import {
 import { notEnrolledMessage, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, sandboxFailureText, type ExecFactory, type OpenedExec } from './exec.js';
 import { PushError, sandboxState } from './push.js';
+import { noticingExec } from './notices.js';
 import { readRecords } from './recorder.js';
 
 /**
@@ -263,11 +264,14 @@ async function execChecks(
 ): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
   let x: OpenedExec | undefined;
+  let exec: Exec | undefined;
   try {
     // Short, so a hung relay stalls doctor for about 30 s at most, not the 90 s default backstop.
     x = await openExec(c.api, id, factory, { backstopMarginS: EXEC_BACKSTOP_S });
+    // Each Exec's lease events are said as they come, on stderr (plan-4 M2).
+    exec = noticingExec(c, id, x.exec);
     const t0 = c.rt.now();
-    const r = await x.exec('true', {
+    const r = await exec('true', {
       timeoutS: EXEC_TIMEOUT_S,
       ...(c.signal ? { signal: c.signal } : {}),
     });
@@ -293,7 +297,7 @@ async function execChecks(
     return out;
   }
   try {
-    const s = await sandboxState(x.exec, undefined, {
+    const s = await sandboxState(exec!, undefined, {
       timeoutS: EXEC_TIMEOUT_S,
       ...(c.signal ? { signal: c.signal } : {}),
     });

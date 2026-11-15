@@ -13,10 +13,12 @@
 #                           Every mocactl here runs with HOME set to one of them and
 #                           XDG_CONFIG_HOME / XDG_STATE_HOME unset. The smoke never logs in.
 #   SBX_SMOKE_TEMPLATE      the template to create sandboxes from (default: default)
-#   SBX_SMOKE_STEPS         the steps to run, e.g. 1,2,5 (default: all of 1-8; 3 takes ~5 min, 4
+#   SBX_SMOKE_STEPS         the steps to run, e.g. 1,2,5 (default: all of 1-9; 3 takes ~5 min, 4
 #                           waits for a token's exp, one token lifetime: ~16 min by default; 7 is a
 #                           SKIP unless its inputs below are set; 8 takes ~1 min, and is a SKIP on a
-#                           deployment that allows no lease mode). `7` or `8` alone needs only HOME_A.
+#                           deployment that allows no lease mode; 9 takes seconds, and is a SKIP on
+#                           one that does not allow lease+processes). `7`, `8` or `9` alone needs
+#                           only HOME_A.
 #   SBX_SMOKE_AGENTS        the agents step 5 runs, among claude,opencode (default both); one not on
 #                           PATH is a SKIP. Each needs its own login and model already configured.
 #   SBX_SMOKE_HOST          an ssh target ([user@]host) for step 6, the KVM host running the
@@ -48,7 +50,7 @@
 #                           generated in docs/api/examples (steps 2 and 4; default python3). It also
 #                           runs the sample repository's tests locally.
 #
-# Steps (spec §10.6; 7 is SBX0.2b's, 8 SBX0.3's), each printing `ok N - ...`, `ok N - ... # SKIP why` or `not ok N - ...: why`:
+# Steps (spec §10.6; 7 is SBX0.2b's, 8 and 9 SBX0.3's), each printing `ok N - ...`, `ok N - ... # SKIP why` or `not ok N - ...: why`:
 #   1. round trip: in a sample repository (one failing test), sbx up; sbx run fails the suite;
 #      sbx put the fix; the suite passes in the sandbox; the local tree is unchanged until
 #      sbx pull --apply, after which the suite passes locally.
@@ -83,6 +85,14 @@
 #      `sbx reset` prints `lease ended (reset)`; after one more command, `sbx mode per-exec` prints
 #      `lease ended (mode_change)`. A create refused as `... is not allowed on this deployment` (403
 #      mode_not_allowed: lease is off, the default) is a SKIP. Needs `script` on PATH.
+#   9. lease mode, level 2 (the lease-mode spec §7, §8.2): `sbx create --mode lease+processes` on a
+#      pseudo-terminal, its set_mode applied; `sbx proc start --name web -- python3 -m http.server
+#      8080 --bind 127.0.0.1` prints `p<id> web pid <n>`; a later `sbx run -- curl` of
+#      http://127.0.0.1:8080/ gets the directory listing (10 tries, 1 s apart (each try up to 5 s),
+#      while it binds);
+#      `sbx proc ls` shows web running with that pid; `sbx mode lease` prints
+#      `stopped 1 tracked process: web (pid <n>)`; the same curl then fails. A create refused as not
+#      allowed (403 mode_not_allowed: lease+processes is off, the default) is a SKIP. Needs `script`.
 #
 # What it creates: temp directories (sample repositories, a mocactl install, token files) and
 # credentials (smoke-<ts>-<pid>-gh and -gh-mcp, named per run so two runs as the same user cannot
@@ -134,16 +144,16 @@ TEMPLATE="${SBX_SMOKE_TEMPLATE:-default}"
 [[ "$TEMPLATE" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "SBX_SMOKE_TEMPLATE='$TEMPLATE' is not a template id"
 
 STEPS=' '
-IFS=, read -ra raw <<<"${SBX_SMOKE_STEPS-1,2,3,4,5,6,7,8}"
-((${#raw[@]})) || die 'SBX_SMOKE_STEPS is empty: list steps 1-8, e.g. 1,2,5'
+IFS=, read -ra raw <<<"${SBX_SMOKE_STEPS-1,2,3,4,5,6,7,8,9}"
+((${#raw[@]})) || die 'SBX_SMOKE_STEPS is empty: list steps 1-9, e.g. 1,2,5'
 for s in "${raw[@]}"; do
-  [[ "$s" =~ ^[1-8]$ ]] || die "SBX_SMOKE_STEPS: '$s' is not a step (1-8, comma-separated)"
+  [[ "$s" =~ ^[1-9]$ ]] || die "SBX_SMOKE_STEPS: '$s' is not a step (1-9, comma-separated)"
   STEPS+="$s "
 done
 want() { [[ "$STEPS" == *" $1 "* ]]; }
 
 # Step 7's inputs. Both set: it runs; else it is a SKIP. User B is needed by steps 1-6 (as ever), never by
-# step 8, and by step 7 only when it is asked for twice over (SBX_SMOKE_CRED_TWO_USERS=1 and a HOME_B).
+# steps 8 and 9, and by step 7 only when it is asked for twice over (SBX_SMOKE_CRED_TWO_USERS=1 and a HOME_B).
 CRED_FILE="${SBX_SMOKE_GITHUB_TOKEN_FILE:-}" CRED_REPO="${SBX_SMOKE_GITHUB_REPO:-}"
 CRED_TTL="${SBX_SMOKE_CRED_TTL:-60}"
 CRED_ON=0 CRED_B=0 NEED_B=0
@@ -813,7 +823,7 @@ step7() {
   release a "$id"
 }
 
-# Step 8. A lease create is an upgrade, which mocactl takes only from a terminal (the user's own act,
+# Steps 8 and 9. A lease create is an upgrade, which mocactl takes only from a terminal (the user's own act,
 # never an agent's: spec §8.1), so it runs on a pseudo-terminal through `script`. util-linux's (Linux:
 # the KVM host, the runners) takes the command as one string, run by $SHELL, and needs -e for the
 # command's exit code; the BSD one (macOS) takes the words and returns the command's code. On the pty
@@ -907,6 +917,58 @@ step8() {
   release a "$id"
 }
 
+# Step 9: level 2. A process started with `sbx proc start` outlives the command that started it, and a
+# later command reaches it on the guest's loopback; a downgrade to lease keeps the lease and stops it
+# (spec §7, §8.2). The server binds 127.0.0.1 and the check dials it, as the level-2 KVM gate does:
+# the guest has a loopback only, and no /etc/hosts entry for localhost is assumed. The downgrade
+# needs no terminal; only the create does.
+PROCS_URL='http://127.0.0.1:8080/'
+procs_reach() { # procs_reach NAME ID: one curl of the tracked server, through sbx run
+  x "$1" as a run --sandbox "$2" -- curl -s --max-time 5 "$PROCS_URL"
+}
+listed() { [[ "$RC" == 0 ]] && grep -q 'Directory listing for' "$LOGS/$1.out"; }
+step9() {
+  local id mode setmode code f pid i
+  command -v script >/dev/null || fail 'step 9 needs script on PATH (a pseudo-terminal for the lease create)' || return 1
+  N=$((N + 1))
+  ttyx "create-procs-$N" "$WORK/bin-a/mocactl" sbx create --template "$TEMPLATE" --name "$RUN-$N-procs" --mode lease+processes --json
+  f="$LOGS/create-procs-$N.out"
+  # 403 mode_not_allowed, as in step 8: level 2 is off by default, and stays off until its section
+  # of docs/sbx/security-review.md is signed off.
+  if [[ "$RC" != 0 ]] && grep -q 'is not allowed on this deployment' "$f"; then WHY='lease+processes not allowed'; return 3; fi
+  read -r id mode setmode code <<<"$(lease_created "$f")"
+  [[ "${id:-}" =~ $ID_RE ]] && record a "$id" ||
+    fail "user A cannot create a lease+processes sandbox from '$TEMPLATE' (exit $RC): $(lastline "$f")" || return 1
+  [[ "$RC" == 0 ]] || fail "sbx create --mode lease+processes exited $RC: $(lastline "$f")" || return 1
+  [[ "$mode" == lease+processes ]] || fail "the sandbox is $mode, not lease+processes: the control plane did not take the mode" || return 1
+  [[ "$setmode" == applied ]] || fail "the create's set_mode was $setmode ($code), not applied" || return 1
+  # proc start prints `p<id> <name> pid <n>` on stdout.
+  x procs-start as a proc start --name web "$id" -- python3 -m http.server 8080 --bind 127.0.0.1
+  [[ "$RC" == 0 ]] || fail "sbx proc start: exit $RC: $(lastline "$LOGS/procs-start.err")" || return 1
+  pid="$(sed -nE 's/^p[0-9]+ web pid ([0-9]+)$/\1/p' "$LOGS/procs-start.out" | tail -n 1)"
+  [[ -n "$pid" ]] || fail "sbx proc start printed '$(lastline "$LOGS/procs-start.out")', not 'p<id> web pid <n>'" || return 1
+  # A later command reaches it: 10 tries, 1 s apart (each try up to 5 s), since the server may still
+  # be binding.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    procs_reach procs-reach "$id"
+    if listed procs-reach || ((i == 10)); then break; fi
+    job sleep 1
+  done
+  listed procs-reach ||
+    fail "a later command did not reach the tracked server on $PROCS_URL in 10 tries (exit $RC, stdout '$(lastline "$LOGS/procs-reach.out")', stderr '$(lastline "$LOGS/procs-reach.err")')" || return 1
+  x procs-ls as a proc ls "$id"
+  [[ "$RC" == 0 ]] && grep -qE "^p[0-9]+ web \(pid $pid\): running, " "$LOGS/procs-ls.out" ||
+    fail "sbx proc ls (exit $RC) does not show web (pid $pid) running: $(lastline "$LOGS/procs-ls.out") $(lastline "$LOGS/procs-ls.err")" || return 1
+  # The downgrade keeps the lease and stops the tracked processes; mode says which, on stdout.
+  x procs-down as a mode lease "$id"
+  [[ "$RC" == 0 ]] && grep -qxF "stopped 1 tracked process: web (pid $pid)" "$LOGS/procs-down.out" ||
+    fail "sbx mode lease (exit $RC) did not print 'stopped 1 tracked process: web (pid $pid)': $(lastline "$LOGS/procs-down.out") $(lastline "$LOGS/procs-down.err")" || return 1
+  procs_reach procs-gone "$id"
+  ! listed procs-gone ||
+    fail "the tracked server still answered after the downgrade (exit $RC): it was not stopped" || return 1
+  release a "$id"
+}
+
 run_step() { # run_step N TITLE FN [ARG]
   local n="$1" title="$2" rc=0
   shift 2
@@ -939,6 +1001,7 @@ run_step 6 "the janitor frees a deleted sandbox's directory" step6
 
 run_step 7 'egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes' step7
 run_step 8 'lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease' step8
+run_step 9 'lease+processes: a tracked process serves later commands; a downgrade to lease stops it' step9
 
 echo "# $PASSES ok, $FAILS not ok, $SKIPS skipped"
 ((FAILS == 0)) || exit 1

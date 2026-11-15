@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -89,6 +90,59 @@ func TestExitZero(t *testing.T) {
 	}, &r)
 	if err != nil || code != 0 {
 		t.Fatalf("got code=%d err=%v, want 0/nil", code, err)
+	}
+}
+
+// Review Focus 5: the container tier has no lease mode, so it refuses every non-command
+// kind, lease_unsupported, and never runs the command -- an Exec that asks for a tracked
+// process must not quietly run as a one-shot bash. A kind the worker does not know, or a
+// name that maps to no kind, is refused the same way, with its own detail. Through the
+// container worker's WorkspaceRunner too, which must not even create the workspace.
+func TestBashRunnerRefusesProcessKinds(t *testing.T) {
+	cases := []struct{ kind, want string }{
+		{wexec.KindProcessStart, "lease_unsupported: this worker has no lease mode"},
+		{wexec.KindProcessList, "lease_unsupported: this worker has no lease mode"},
+		{wexec.KindProcessLogs, "lease_unsupported: this worker has no lease mode"},
+		{wexec.KindProcessStop, "lease_unsupported: this worker has no lease mode"},
+		{"unknown(9)", "lease_unsupported: unknown exec kind 9"},
+		{"process_stop_all", `lease_unsupported: unknown exec kind "process_stop_all"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			cmd := "touch " + marker + "; echo ran"
+			for name, r := range map[string]wexec.Runner{
+				"BashRunner":      wexec.BashRunner{Timing: true},
+				"WorkspaceRunner": &wexec.WorkspaceRunner{Root: t.TempDir(), Idle: time.Hour, Inner: wexec.BashRunner{}},
+			} {
+				var rec recorder
+				spec := wexec.Spec{
+					ReqID: 1, Command: cmd, TimeoutS: 10, Streaming: true, WorkspaceKey: "leaf-a",
+					Mode: "lease+processes", ModeEpoch: 1, Kind: tc.kind,
+					Process: wexec.ProcessArgs{Name: "web"},
+				}
+				code, err := r.Run(context.Background(), spec, &rec)
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("%s: err = %v, want %q", name, err, tc.want)
+				}
+				if code != -1 || rec.calls != 0 {
+					t.Fatalf("%s: code = %d, %d chunks, want -1 and no output", name, code, rec.calls)
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s: the command ran (stat %s: %v)", name, marker, err)
+				}
+				if w, ok := r.(*wexec.WorkspaceRunner); ok {
+					if _, err := os.Stat(filepath.Join(w.Root, "leaf-a")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("%s: a refused Exec created its workspace (stat: %v)", name, err)
+					}
+				}
+			}
+		})
+	}
+	// A command is still a command.
+	var rec recorder
+	if code, err := (wexec.BashRunner{}).Run(context.Background(), wexec.Spec{Command: "echo ok", Kind: wexec.KindCommand}, &rec); err != nil || code != 0 || string(rec.stdout) != "ok\n" {
+		t.Fatalf("command kind: code=%d err=%v stdout=%q, want 0, nil, ok", code, err, rec.stdout)
 	}
 }
 

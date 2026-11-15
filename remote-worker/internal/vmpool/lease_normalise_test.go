@@ -235,7 +235,7 @@ func TestLeaseEndDuringTheNormaliseStepCancelsIt(t *testing.T) {
 	recvWithin(t, inStep, "the normalise step")
 	setc := make(chan error, 1)
 	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
-	go func() { setc <- p.SetMode("k", ModePerExec, 2) }()
+	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
 	waitFor(t, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
 	if err := recvWithin(t, setc, "the SetMode"); err != nil {

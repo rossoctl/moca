@@ -123,6 +123,25 @@ describe('relay routeLeaseControl bookkeeping', () => {
   });
 });
 
+/**
+ * sbx-1's keepalive coalescing map (Parked.keepaliveAtMs), caught as the Map that a first, written
+ * keepalive for key sets the key on: routeKeepalive's only Map writes are to that map, so the relay
+ * needs no test hook for it to be watched.
+ */
+function keepaliveMap(relay: ReturnType<typeof createRelay>, key: string): Map<string, number> {
+  const set = vi.spyOn(Map.prototype, 'set');
+  let map: Map<string, number> | undefined;
+  try {
+    relay.routeKeepalive('sbx-1', key);
+    const i = set.mock.calls.findIndex(([k]) => k === key);
+    map = set.mock.contexts[i] as unknown as Map<string, number> | undefined;
+  } finally {
+    set.mockRestore();
+  }
+  if (!map) throw new Error(`routeKeepalive set no Map entry for ${key}`);
+  return map;
+}
+
 describe('relay routeKeepalive', () => {
   it('a failed write opens no coalescing window: the next keepalive within 1 s is written (review #4569829045)', () => {
     let t = 10_000;
@@ -151,6 +170,54 @@ describe('relay routeKeepalive', () => {
       t += 1_000;
       relay.routeKeepalive('sbx-1', 'wsk'); // its window is over
       expect(keepalives()).toBe(3);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('the coalescing map prunes: a written keepalive drops every entry past its window', () => {
+    let t = 10_000;
+    const { relay } = parked(undefined, () => t);
+    const map = keepaliveMap(relay, 'ws-a');
+    expect([...map]).toEqual([['ws-a', 10_000]]);
+
+    t += 500;
+    relay.routeKeepalive('sbx-1', 'ws-b');
+    expect([...map.keys()]).toEqual(['ws-a', 'ws-b']); // ws-a is 500 ms old: inside its window
+    t += 200;
+    relay.routeKeepalive('sbx-1', 'ws-a'); // coalesced: nothing written, so nothing pruned or moved
+    expect([...map]).toEqual([
+      ['ws-a', 10_000],
+      ['ws-b', 10_500],
+    ]);
+    t += 300;
+    relay.routeKeepalive('sbx-1', 'ws-c'); // ws-a is 1 000 ms old, past its window; ws-b is not
+    expect([...map]).toEqual([
+      ['ws-b', 10_500],
+      ['ws-c', 11_000],
+    ]);
+    t += 5_000;
+    relay.routeKeepalive('sbx-1', 'ws-d'); // both left long ago: the map holds only the last
+    expect([...map]).toEqual([['ws-d', 16_000]]);
+  });
+
+  it('a failed write puts no entry in the coalescing map: it opens no window', () => {
+    let t = 10_000;
+    let fail = false;
+    const { relay } = parked(
+      (f) => {
+        if (f.keepalive && fail) throw new Error('write after end');
+      },
+      () => t,
+    );
+    const map = keepaliveMap(relay, 'ws-a');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      fail = true;
+      t += 2_000;
+      relay.routeKeepalive('sbx-1', 'ws-b'); // tried, and failed
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(map.has('ws-b')).toBe(false);
     } finally {
       err.mockRestore();
     }

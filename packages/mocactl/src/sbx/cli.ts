@@ -77,6 +77,7 @@ import {
 import { cortexMode } from './agent-config.js';
 import { isModeName, MODE_NAMES, modeRank, UPGRADE_NEEDS_TTY } from './mode.js';
 import { cmdGet, cmdMode, cmdReset } from './lease-commands.js';
+import { cmdProc, parseProcArgs, PROC_FLAG_OWNER, type ProcArgs } from './proc.js';
 
 export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx login [--control-plane-url URL] [--no-browser]
@@ -177,10 +178,30 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  change the sandbox's mode (an upgrade only from a
                                                  terminal; the idle timeout is kept unless given); a
                                                  worker that cannot be reached takes it at the next
-                                                 command; a downgrade ends the lease
+                                                 command; a downgrade to per-exec ends the lease;
+                                                 lease+processes to lease keeps it and stops the
+                                                 tracked processes (it prints those it stopped)
   mocactl sbx reset [ID]                         end the sandbox's lease: the next command starts a
                                                  new guest (/tmp, installs outside /workspace and
                                                  background processes are gone)
+  mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...
+                                                 start CMD as a tracked process, which outlives the
+                                                 command (lease+processes only; CMD quoted as run's;
+                                                 D inside /workspace; N unique among the running
+                                                 ones); prints its id, name and pid
+  mocactl sbx proc ls [ID] [--json]              the tracked processes: id, name, pid, state
+                                                 (running, exited(code) or killed(signal)), age and
+                                                 memory; an exited one stays until the lease ends
+  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]
+                                                 the last N lines (default 200) of a tracked
+                                                 process's stdout and stderr; on a terminal its
+                                                 control sequences are removed (--raw keeps them;
+                                                 piped output is always as written)
+  mocactl sbx proc stop (NAME|ID) [--signal S] [ID]
+                                                 send S (default TERM), then kill what is left
+                                                 after 10 s; prints its final state
+                                                 (the process: its name, or its id, p<n> or n; the
+                                                 last ID is the sandbox's)
   mocactl sbx rm [ID] [--keep-config] [--force] [--json]
                                                  delete a sandbox (its lease ended first); for the
                                                  bound one, also take back the agent configuration
@@ -275,6 +296,8 @@ export interface SbxDeps {
   cwd?: string;
   /** Whether stdin is a terminal: `run` with no command then refuses rather than wait on it. */
   stdinIsTTY?: boolean;
+  /** Whether stdout is a terminal: `proc logs` then removes control sequences (unless --raw). */
+  stdoutIsTTY?: boolean;
   /** All of stdin as text: `run`'s script. */
   readStdin?: () => Promise<string>;
   /** All of stdin, byte for byte: `put`'s content. */
@@ -493,6 +516,7 @@ const TAKES_SANDBOX_FLAG = new Set([
   'pull',
   'doctor',
   'mode',
+  'proc',
   ...TAKES_ID_ARG,
 ]);
 /** The commands that work on the git repository around the current directory. */
@@ -600,6 +624,8 @@ async function sbxMainWith(
       args: argv,
       allowPositionals: true,
       strict: true,
+      // `proc start [ID] -- CMD`: where `--` was tells the ID from the command.
+      tokens: true,
       options: {
         'control-plane-url': { type: 'string' },
         template: { type: 'string' },
@@ -610,6 +636,10 @@ async function sbxMainWith(
         mode: { type: 'string' },
         'idle-timeout': { type: 'string' },
         name: { type: 'string' },
+        cwd: { type: 'string' },
+        tail: { type: 'string' },
+        raw: { type: 'boolean' },
+        signal: { type: 'string' },
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
         json: { type: 'boolean' },
@@ -650,6 +680,9 @@ async function sbxMainWith(
     return SBX_EXIT.usage;
   }
   const { values, positionals } = parsed;
+  // The positionals after `--` (undefined without one): they are the tail of `positionals`.
+  const dash = parsed.tokens.find((t) => t.kind === 'option-terminator');
+  const afterDash = dash ? argv.slice(dash.index + 1) : undefined;
   const [command, arg, ...extra] = positionals;
   if (values.help) {
     io.out(SBX_USAGE + '\n');
@@ -686,6 +719,7 @@ async function sbxMainWith(
     'get',
     'mode',
     'reset',
+    'proc',
   ];
   if (!known.includes(command)) {
     io.err(`sbx: unknown command '${command}'\n${SBX_USAGE}`);
@@ -814,10 +848,15 @@ async function sbxMainWith(
     return SBX_EXIT.usage;
   }
   if (
-    (values.template !== undefined || values.name !== undefined) &&
+    (values.template !== undefined || (values.name !== undefined && command !== 'proc')) &&
     !['create', 'up'].includes(command)
   ) {
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  const procFlag = (['cwd', 'tail', 'raw', 'signal'] as const).find((f) => values[f] !== undefined);
+  if (procFlag && command !== 'proc') {
+    io.err(`sbx: --${procFlag} only applies to proc ${PROC_FLAG_OWNER[procFlag]}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
   // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2,
@@ -918,6 +957,8 @@ async function sbxMainWith(
   const argsOk =
     // run quotes its CMD; claude and codex forward their own flags and prompt to the child.
     command === 'run' ||
+    // proc's arguments are its subcommand's: parseProcArgs checks them.
+    command === 'proc' ||
     (command === 'templates' && arg !== undefined) ||
     command === 'claude' ||
     command === 'codex' ||
@@ -989,8 +1030,28 @@ async function sbxMainWith(
       return SBX_EXIT.usage;
     }
   }
-  // `[ID]` as an argument: the one after the command, or after `mode`'s MODE.
-  const idArg = command === 'mode' ? extra[0] : TAKES_ID_ARG.has(command) ? arg : undefined;
+  // `proc SUB ...`: its arguments, the sandbox among them, before anything else is looked at.
+  let proc: ProcArgs | undefined;
+  let procId: string | undefined;
+  if (command === 'proc') {
+    const head = positionals.slice(0, positionals.length - (afterDash?.length ?? 0));
+    const r = parseProcArgs(head[1], head.slice(2), afterDash, values);
+    if (typeof r === 'string') {
+      io.err(`sbx: ${r}\n${SBX_USAGE}`);
+      return SBX_EXIT.usage;
+    }
+    proc = r.args;
+    procId = r.sandbox;
+  }
+  // `[ID]` as an argument: the one after the command, after `mode`'s MODE, or proc's.
+  const idArg =
+    command === 'mode'
+      ? extra[0]
+      : command === 'proc'
+        ? procId
+        : TAKES_ID_ARG.has(command)
+          ? arg
+          : undefined;
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = idArg ?? values.sandbox;
     if (id === undefined) {
@@ -1001,7 +1062,7 @@ async function sbxMainWith(
     // No sandbox is one of doctor's failed checks (it says how to bind one), not a usage error.
     if (!id && command !== 'doctor') {
       io.err(
-        TAKES_ID_ARG.has(command) || command === 'mode'
+        TAKES_ID_ARG.has(command) || command === 'mode' || command === 'proc'
           ? `sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`
           : `sbx: ${command} needs --sandbox ID (or a .sbx/sandbox.json in this repository)`,
       );
@@ -1249,6 +1310,8 @@ async function sbxMainWith(
       });
     case 'reset':
       return cmdReset(ctx, id!, deps.execFactory);
+    case 'proc':
+      return cmdProc(ctx, id!, proc!, deps.execFactory, { stdoutIsTTY: deps.stdoutIsTTY === true });
     case 'rm': {
       // The bound sandbox gone, its configuration goes too: `sbx rm` takes back what `up` added.
       const f = findSandboxFile(deps.cwd ?? process.cwd());

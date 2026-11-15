@@ -125,6 +125,9 @@ func TestLeaseDefaults(t *testing.T) {
 	if c.LeasePageCacheBytes != 256<<20 {
 		t.Errorf("LeasePageCacheBytes = %d, want 256 MiB", c.LeasePageCacheBytes)
 	}
+	if c.LeaseMaxProcesses != 4 {
+		t.Errorf("LeaseMaxProcesses = %d, want 4", c.LeaseMaxProcesses)
+	}
 	if c.LeaseEnabled {
 		t.Error("Normalize set LeaseEnabled: only New may, from VMM and the manifest")
 	}
@@ -198,5 +201,22 @@ func TestLeaseTimingCrossChecks(t *testing.T) {
 	c.LeaseScanInterval = time.Hour
 	if err := c.Normalize(); err != nil {
 		t.Errorf("scan interval 1 h with LeaseIdleMin 4 h: Normalize = %v, want accepted", err)
+	}
+}
+
+// SH_LEASE_MAX_PROCESSES is bounded by the tracked uids the image has (Task 4's sbxp0..3):
+// a higher cap could only fail later, at the guest's uid allocator.
+func TestLeaseMaxProcessesBounds(t *testing.T) {
+	for _, n := range []int{-1, 5} {
+		c := good()
+		c.LeaseMaxProcesses = n
+		if err := c.Normalize(); err == nil || !strings.Contains(err.Error(), "LeaseMaxProcesses") {
+			t.Errorf("LeaseMaxProcesses %d: err = %v, want a refusal naming it", n, err)
+		}
+	}
+	c := good()
+	c.LeaseMaxProcesses = 2
+	if err := c.Normalize(); err != nil || c.LeaseMaxProcesses != 2 {
+		t.Errorf("LeaseMaxProcesses 2: %d, %v", c.LeaseMaxProcesses, err)
 	}
 }

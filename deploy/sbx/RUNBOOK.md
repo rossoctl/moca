@@ -813,6 +813,7 @@ ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unch
 ok 6 - the janitor frees a deleted sandbox's directory
 ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes # SKIP SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO not both set
 ok 8 - lease mode: one guest across commands; an idle restart is noticed; reset and a downgrade end the lease # SKIP lease not allowed
+ok 9 - lease+processes: a tracked process serves later commands; a downgrade to lease stops it # SKIP lease+processes not allowed
 ```
 
 It exits 0 when every step is `ok` or skipped, 1 when any step is `not ok` (the line gives the
@@ -820,7 +821,8 @@ reason), and 2 on a usage or settings error, before any sandbox is touched. On a
 step 6: step 3 runs a command that is silent for 5 minutes, and step 4 waits for a token to expire
 (one token lifetime plus the 30 s leeway). With step 6 it is closer to 70–90 minutes, because step 6
 waits out the host's own janitor wait (`setup.sh` keeps it at `max(60, SBX_TOKEN_TTL_MINUTES + 5)`
-minutes, so 65 min with 60-minute tokens). Step 8 adds about a minute where lease mode is allowed.
+minutes, so 65 min with 60-minute tokens). Step 8 adds about a minute where lease mode is allowed,
+and step 9 a few seconds where `lease+processes` is.
 
 | Variable                                                                 | Default                                      | What it is                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -831,7 +833,7 @@ minutes, so 65 min with 60-minute tokens). Step 8 adds about a minute where leas
 | `SBX_SMOKE_GITHUB_MCP`                                                   | (unset)                                      | `1`: step 7 also checks the `github-mcp` preset (`api.githubcopilot.com` must be in the host's egress allowlist)                                                                                                                                                                                                                                                       |
 | `SBX_SMOKE_CRED_TWO_USERS`                                               | (unset)                                      | `1`, with `SBX_SMOKE_HOME_B`: step 7 also checks that user B's sandbox gets a 401 and a public clone works; otherwise that check is a SKIP                                                                                                                                                                                                                             |
 | `SBX_SMOKE_TEMPLATE`                                                     | `default`                                    | the template every sandbox is created from                                                                                                                                                                                                                                                                                                                             |
-| `SBX_SMOKE_STEPS`                                                        | `1,2,3,4,5,6,7,8`                            | the steps to run; `1,2,5` leaves out the slow ones                                                                                                                                                                                                                                                                                                                     |
+| `SBX_SMOKE_STEPS`                                                        | `1,2,3,4,5,6,7,8,9`                          | the steps to run; `1,2,5` leaves out the slow ones                                                                                                                                                                                                                                                                                                                     |
 | `SBX_SMOKE_AGENTS`                                                       | `claude,opencode`                            | the agents step 5 runs, headless; one not on `PATH` is a SKIP. Each needs its own login and model configured                                                                                                                                                                                                                                                           |
 | `SBX_SMOKE_HOST`                                                         | (unset: step 6 is a SKIP)                    | an ssh target (`[user@]host`) for the template's KVM host, with passwordless `sudo`                                                                                                                                                                                                                                                                                    |
 | `SBX_SMOKE_HOST_ENV_DIR`, `SBX_SMOKE_HOST_SRV`, `SBX_SMOKE_HOST_LIBEXEC` | `/etc/sbx`, `/srv/sbx`, `/usr/local/libexec` | that host's `SBX_ENV_DIR`, `SBX_SRV` and `SBX_LIBEXEC_DIR`, if `install-host.sh` was given others                                                                                                                                                                                                                                                                      |
@@ -867,6 +869,24 @@ deployment, or list `lease` for the run only and set `SBX_MODES_ALLOWED` back af
 re-run of `setup.sh`; the next token mint then moves any lease sandbox left to `per-exec`). The
 create is an upgrade, which `mocactl` takes only from a terminal, so the step runs it under `script`
 (util-linux `script -qec` on Linux, the BSD `script -q` on macOS), which must be on `PATH`.
+
+Step 9 (lease mode, level 2: tracked processes, [lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md)
+§7) also runs alone with only user A's login. It needs a deployment that allows `lease+processes`,
+and a template whose worker runs the level-2 code on a snapshot that advertises `lease-v1` and
+`lease-processes-v1` and has `python3` and `curl`. A worker without it (no `sbx:lease-processes-v1`
+in its Hello) makes `proc start` fail ("tracked processes are not available on this sandbox's worker
+yet"), a `not ok 9`. Where `lease+processes` is not allowed (the
+default) the create is refused with 403 `mode_not_allowed`, and the step is a SKIP
+(`# SKIP lease+processes not allowed`):
+
+```bash
+SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMOKE_STEPS=9 \
+  deploy/sbx/smoke.sh
+```
+
+Until `docs/sbx/security-review.md` §7 (level 2, a draft) is signed off, run step 9 as step 8: on a
+test deployment, or with `lease+processes` listed for the run only and `SBX_MODES_ALLOWED` set back
+afterwards. Its create runs under `script` too; the rest of the step needs no terminal.
 
 What each step does:
 
@@ -910,6 +930,14 @@ What each step does:
    (exit 1), with `[sandbox] guest restarted (idle, <HH:MM>): ...` on stderr. `sbx reset` must print
    `lease ended (reset)`, and after one more command `sbx mode per-exec` must print
    `lease ended (mode_change)`, both on stdout. Then it deletes the sandbox.
+9. Creates a sandbox with `sbx create --mode lease+processes --json` under `script`, and checks
+   that its `set_mode` was applied. `sbx proc start --name web` of
+   `python3 -m http.server 8080 --bind 127.0.0.1` must print `p<id> web pid <n>`. A later `sbx run`
+   of `curl -s --max-time 5 http://127.0.0.1:8080/` must get the directory listing: the tracked
+   process outlived the command that started it (10 tries, 1 s apart (each try up to 5 s), while
+   the server binds). `sbx proc ls` must show `web` running with that pid, and `sbx mode lease`
+   must print `stopped 1 tracked process: web (pid <n>)` on stdout. The same `curl` must then
+   fail. Then it deletes the sandbox.
 
 What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
 fixed the test by the shortest route, or tried its local tools first and was denied. The

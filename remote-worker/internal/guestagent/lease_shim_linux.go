@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -20,12 +21,34 @@ import (
 // ShimArg is the argv[1] that makes the guest-agent binary act as the lease shim.
 const ShimArg = "lease-shim"
 
+// ShimExecBarrierFD is the descriptor the shim marks close-on-exec just before it execs
+// the command, so a starter that passed a pipe's write end there learns that the exec
+// has happened (or that the shim died) from EOF on the read end.
+const ShimExecBarrierFD = 3
+
+// ShimCwdFD is the workspace root's directory descriptor, an O_PATH one the starter opened
+// (process_start), when the shim's <cwd> argument is ShimCwdFromFD followed by a relative
+// path. After its privilege drop the shim resolves that path from this descriptor and
+// changes into the result, so every directory on the way is searched as the dropped
+// identity, and no root chdir follows a path anyone else could rewrite. The shim closes it.
+const ShimCwdFD = 4
+
+// The shim's <cwd> argument: ShimCwdInherited stays in the directory the starter gave the
+// shim; ShimCwdFromFD + <rel> changes, after the drop, into <rel> (a local path, "." for the
+// root itself) resolved beneath ShimCwdFD.
+const (
+	ShimCwdInherited = "-"
+	ShimCwdFromFD    = "fd:"
+)
+
 // ShimMain is the lease shim: it turns the root process it starts as into the
 // unprivileged exec identity, then execs the Exec's argv. In lease mode one VM serves
 // many Execs, so an Exec must not be able to defeat its own teardown (escape its cgroup,
 // trace the agent, regain root through a setuid binary).
 //
-// args are `<uid> <gid> <home> -- <argv...>`. It never returns: on a setup failure it
+// args are `<uid> <gid> <home> <user> <cwd> -- <argv...>`; user is the identity's
+// passwd name (sbx for an Exec, sbxp<n> for a tracked process), and cwd is
+// ShimCwdInherited or ShimCwdFromFD<rel>. It never returns: on a setup failure it
 // writes `guest-agent: lease-shim: <step>: <err>` to stderr and exits 127.
 //
 // The capability bounding set and no_new_privs are per-thread, and so is a seccomp
@@ -34,7 +57,7 @@ const ShimArg = "lease-shim"
 func ShimMain(args []string) {
 	runtime.LockOSThread()
 
-	uid, gid, home, argv, err := parseShimArgs(args)
+	sa, err := parseShimArgs(args)
 	if err != nil {
 		shimFail("args", err)
 	}
@@ -72,14 +95,35 @@ func ShimMain(args []string) {
 		shimFail("capset inheritable", err)
 	}
 	// Go applies these three to every thread of the process (AllThreadsSyscall).
-	if err := syscall.Setgroups([]int{gid}); err != nil {
+	if err := syscall.Setgroups([]int{sa.gid}); err != nil {
 		shimFail("setgroups", err)
 	}
-	if err := syscall.Setresgid(gid, gid, gid); err != nil {
+	if err := syscall.Setresgid(sa.gid, sa.gid, sa.gid); err != nil {
 		shimFail("setresgid", err)
 	}
-	if err := syscall.Setresuid(uid, uid, uid); err != nil {
+	if err := syscall.Setresuid(sa.uid, sa.uid, sa.uid); err != nil {
 		shimFail("setresuid", err)
+	}
+	// After the drop, so the walk is the dropped identity's: the path is resolved from
+	// the workspace root's descriptor, and the kernel checks search permission on every
+	// directory along it, the parents included, as this uid (PR #814 review: a cwd the
+	// root starter opened would have had its parents searched as root). Beneath the
+	// root, with no symlink and no other mount on the way, as the starter's own check.
+	// A cwd this uid cannot reach fails here, exit 127 (ruling P5-R14).
+	if sa.cwdFromFD {
+		fd, err := unix.Openat2(ShimCwdFD, sa.cwdRel, &unix.OpenHow{
+			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
+		})
+		if err != nil {
+			shimFail("cwd", err)
+		}
+		if err := unix.Fchdir(fd); err != nil {
+			shimFail("cwd", err)
+		}
+		if err := errors.Join(unix.Close(fd), unix.Close(ShimCwdFD)); err != nil {
+			shimFail("cwd", err)
+		}
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		shimFail("no_new_privs", err)
@@ -101,11 +145,53 @@ func ShimMain(args []string) {
 
 	// After the uid drop, so the lookup sees what the exec identity may run. Only
 	// HOME, USER and LOGNAME change, so PATH is this process's.
-	path, err := exec.LookPath(argv[0])
+	path, err := exec.LookPath(sa.argv[0])
 	if err != nil {
 		shimFail("lookpath", err)
 	}
-	shimFail("exec", syscall.Exec(path, argv, shimEnv(os.Environ(), home)))
+	// An ignored disposition survives fork and execve, so a command started by a
+	// parent that ignores a signal would ignore it too, and process_stop's TERM (or an
+	// Exec's kill -INT) would do nothing. Go keeps an inherited SIG_IGN for HUP and INT
+	// rather than handle them; execve resets only handled signals. Last before the
+	// exec: a signal arriving after it takes its default action, as in the command.
+	if err := resetIgnoredSignals(); err != nil {
+		shimFail("signals", err)
+	}
+	// fd 3, when the starter passes one, is its exec barrier (process_start): close-on-
+	// exec, so the starter's read end sees EOF once the command has replaced the shim,
+	// or the shim has exited. Never inherited by the command either way.
+	syscall.CloseOnExec(ShimExecBarrierFD)
+	shimFail("exec", syscall.Exec(path, sa.argv, shimEnv(os.Environ(), sa.home, sa.user)))
+}
+
+// kernelSigaction is the kernel's struct sigaction on amd64 and arm64, both of which
+// have sa_restorer (as Go's runtime sigactiont).
+type kernelSigaction struct {
+	handler, flags, restorer uintptr
+	mask                     uint64
+}
+
+// resetIgnoredSignals sets every signal this process inherited as ignored (SIG_IGN) to
+// its default action (SIG_DFL). Handled signals are left alone: execve resets them.
+func resetIgnoredSignals() error {
+	const sigIgn = 1
+	for sig := uintptr(1); sig <= 64; sig++ {
+		if sig == uintptr(unix.SIGKILL) || sig == uintptr(unix.SIGSTOP) {
+			continue
+		}
+		var old kernelSigaction
+		if _, _, errno := unix.RawSyscall6(unix.SYS_RT_SIGACTION, sig, 0, uintptr(unsafe.Pointer(&old)), 8, 0, 0); errno != 0 {
+			return fmt.Errorf("rt_sigaction %d: %w", sig, errno)
+		}
+		if old.handler != sigIgn {
+			continue
+		}
+		var dfl kernelSigaction // SIG_DFL is 0
+		if _, _, errno := unix.RawSyscall6(unix.SYS_RT_SIGACTION, sig, uintptr(unsafe.Pointer(&dfl)), 0, 8, 0, 0); errno != 0 {
+			return fmt.Errorf("rt_sigaction %d: %w", sig, errno)
+		}
+	}
+	return nil
 }
 
 func shimFail(step string, err error) {
@@ -113,30 +199,49 @@ func shimFail(step string, err error) {
 	os.Exit(127)
 }
 
-func parseShimArgs(args []string) (uid, gid int, home string, argv []string, err error) {
-	if len(args) < 5 || args[3] != "--" {
-		return 0, 0, "", nil, fmt.Errorf("want <uid> <gid> <home> -- <argv...>, got %q", args)
-	}
-	if uid, err = strconv.Atoi(args[0]); err != nil || uid <= 0 {
-		return 0, 0, "", nil, fmt.Errorf("uid %q: must be a positive integer", args[0])
-	}
-	if gid, err = strconv.Atoi(args[1]); err != nil || gid <= 0 {
-		return 0, 0, "", nil, fmt.Errorf("gid %q: must be a positive integer", args[1])
-	}
-	if args[2] == "" {
-		return 0, 0, "", nil, errors.New("home is empty")
-	}
-	if args[4] == "" {
-		return 0, 0, "", nil, errors.New("argv[0] is empty")
-	}
-	return uid, gid, args[2], args[4:], nil
+// shimArgs is the identity the shim drops to and the argv it then execs.
+type shimArgs struct {
+	uid, gid   int
+	home, user string
+	cwdFromFD  bool
+	cwdRel     string // with cwdFromFD: the path to resolve beneath ShimCwdFD
+	argv       []string
 }
 
-// shimEnv is env with HOME, USER and LOGNAME replaced by the exec identity's.
-func shimEnv(env []string, home string) []string {
+func parseShimArgs(args []string) (shimArgs, error) {
+	if len(args) < 7 || args[5] != "--" {
+		return shimArgs{}, fmt.Errorf("want <uid> <gid> <home> <user> <cwd> -- <argv...>, got %q", args)
+	}
+	uid, err := strconv.Atoi(args[0])
+	if err != nil || uid <= 0 {
+		return shimArgs{}, fmt.Errorf("uid %q: must be a positive integer", args[0])
+	}
+	gid, err := strconv.Atoi(args[1])
+	if err != nil || gid <= 0 {
+		return shimArgs{}, fmt.Errorf("gid %q: must be a positive integer", args[1])
+	}
+	if args[2] == "" {
+		return shimArgs{}, errors.New("home is empty")
+	}
+	if args[3] == "" {
+		return shimArgs{}, errors.New("user is empty")
+	}
+	rel, fromFD := strings.CutPrefix(args[4], ShimCwdFromFD)
+	if args[4] != ShimCwdInherited && (!fromFD || !filepath.IsLocal(rel)) {
+		return shimArgs{}, fmt.Errorf("cwd %q: want %s or %s<a local path>", args[4], ShimCwdInherited, ShimCwdFromFD)
+	}
+	if args[6] == "" {
+		return shimArgs{}, errors.New("argv[0] is empty")
+	}
+	return shimArgs{uid: uid, gid: gid, home: args[2], user: args[3], cwdFromFD: fromFD, cwdRel: rel, argv: args[6:]}, nil
+}
+
+// shimEnv is env with HOME, USER and LOGNAME replaced by the identity's: home, and
+// user for both names.
+func shimEnv(env []string, home, user string) []string {
 	out := slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
 		k, _, _ := strings.Cut(kv, "=")
 		return k == "HOME" || k == "USER" || k == "LOGNAME"
 	})
-	return append(out, "HOME="+home, "USER=sbx", "LOGNAME=sbx")
+	return append(out, "HOME="+home, "USER="+user, "LOGNAME="+user)
 }

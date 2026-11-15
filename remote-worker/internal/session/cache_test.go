@@ -1,6 +1,9 @@
 package session_test
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -156,6 +159,84 @@ func TestFingerprintSeparatesWorkspaceKey(t *testing.T) {
 	d := &pb.Exec{Command: "cat", Stdin: []byte("a"), WorkspaceKey: "bc"}
 	if session.Fingerprint(c) == session.Fingerprint(d) {
 		t.Error("fingerprint aliases stdin and workspace_key: the encoding is not injective")
+	}
+}
+
+// preKindFingerprint is the fingerprint as it was before plan 5 added the Exec kind, encoded
+// by hand from the fields it covered: command, stdin and workspace_key length-prefixed,
+// timeout_s, mode and mode_epoch as 8 bytes, streaming as one.
+func preKindFingerprint(e *pb.Exec) [32]byte {
+	h := sha256.New()
+	u64 := func(v uint64) { h.Write(binary.BigEndian.AppendUint64(nil, v)) }
+	u64(uint64(len(e.GetCommand())))
+	h.Write([]byte(e.GetCommand()))
+	u64(uint64(len(e.GetStdin())))
+	h.Write(e.GetStdin())
+	u64(uint64(e.GetTimeoutS()))
+	if e.GetStreaming() {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
+	u64(uint64(len(e.GetWorkspaceKey())))
+	h.Write([]byte(e.GetWorkspaceKey()))
+	u64(uint64(uint32(e.GetMode())))
+	u64(e.GetModeEpoch())
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// The kind and the process args are in scope (plan 5): a process_list and a process_stop on
+// one req_id are different Execs, and so are two stops of different processes. A command
+// Exec's fingerprint is byte-identical to the one before the kind existed, so a redelivery
+// across a worker upgrade still matches its cached entry; the process args are hashed only
+// for a process kind.
+func TestFingerprintSeparatesKind(t *testing.T) {
+	lp := pb.SandboxMode_SANDBOX_MODE_LEASE_PROCESSES
+	cmd := &pb.Exec{
+		Command: "echo hi", Stdin: []byte("in"), TimeoutS: 30, Streaming: true,
+		WorkspaceKey: "leaf-a", Mode: lp, ModeEpoch: 7,
+	}
+	// Computed by the code before the kind existed (HEAD e186d433) for this Exec.
+	const golden = "438197fad88fb2cbda0665281a967f9bbb9e9232b32d160dc52465213d251375"
+	if got := session.Fingerprint(cmd); hex.EncodeToString(got[:]) != golden || got != preKindFingerprint(cmd) {
+		t.Fatalf("command fingerprint = %x, want the pre-kind %s", got, golden)
+	}
+	withArgs := proto.Clone(cmd).(*pb.Exec)
+	withArgs.Kind = pb.ExecKind_EXEC_KIND_COMMAND
+	withArgs.Process = &pb.ProcessArgs{Name: "web", Tail: 5}
+	if session.Fingerprint(withArgs) != session.Fingerprint(cmd) {
+		t.Error("a command's fingerprint depends on process args it never uses")
+	}
+
+	proc := func(kind pb.ExecKind, args *pb.ProcessArgs) *pb.Exec {
+		return &pb.Exec{TimeoutS: 30, WorkspaceKey: "leaf-a", Mode: lp, ModeEpoch: 7, Kind: kind, Process: args}
+	}
+	seen := map[[32]byte]string{session.Fingerprint(proc(pb.ExecKind_EXEC_KIND_COMMAND, nil)): "command"}
+	for name, e := range map[string]*pb.Exec{
+		"process_start":    proc(pb.ExecKind_EXEC_KIND_PROCESS_START, nil),
+		"process_list":     proc(pb.ExecKind_EXEC_KIND_PROCESS_LIST, nil),
+		"process_logs":     proc(pb.ExecKind_EXEC_KIND_PROCESS_LOGS, nil),
+		"process_stop":     proc(pb.ExecKind_EXEC_KIND_PROCESS_STOP, nil),
+		"unknown kind":     proc(pb.ExecKind(9), nil),
+		"stop name":        proc(pb.ExecKind_EXEC_KIND_PROCESS_STOP, &pb.ProcessArgs{Name: "web"}),
+		"stop id":          proc(pb.ExecKind_EXEC_KIND_PROCESS_STOP, &pb.ProcessArgs{Id: "web"}),
+		"stop signal":      proc(pb.ExecKind_EXEC_KIND_PROCESS_STOP, &pb.ProcessArgs{Name: "web", Signal: "KILL"}),
+		"start cwd":        proc(pb.ExecKind_EXEC_KIND_PROCESS_START, &pb.ProcessArgs{Cwd: "/workspace/app"}),
+		"logs tail":        proc(pb.ExecKind_EXEC_KIND_PROCESS_LOGS, &pb.ProcessArgs{Tail: 50}),
+		"name/cwd split a": proc(pb.ExecKind_EXEC_KIND_PROCESS_START, &pb.ProcessArgs{Name: "web/", Cwd: "a"}),
+		"name/cwd split b": proc(pb.ExecKind_EXEC_KIND_PROCESS_START, &pb.ProcessArgs{Name: "web", Cwd: "/a"}),
+	} {
+		f := session.Fingerprint(e)
+		if prev, dup := seen[f]; dup {
+			t.Errorf("fingerprint of %s equals %s's", name, prev)
+		}
+		seen[f] = name
+	}
+	stop := proc(pb.ExecKind_EXEC_KIND_PROCESS_STOP, &pb.ProcessArgs{Name: "web", Signal: "TERM"})
+	if session.Fingerprint(stop) != session.Fingerprint(proto.Clone(stop).(*pb.Exec)) {
+		t.Error("a genuine redelivery's fingerprint differs")
 	}
 }
 

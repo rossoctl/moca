@@ -108,13 +108,21 @@ const (
 )
 
 // LeaseEvent is one lease start or end, as the worker reports it until acknowledged
-// (spec §5). State is "start" or "end"; Reason is set only for an end.
+// (spec §5). State is "start" or "end"; Reason is set only for an end. An Exec's
+// processes_stopped notice (plan 5, Result.ProcessesStopped) has this shape too, with
+// Reason mode_change, and is never acknowledged.
+//
+// Processes and Tracked are set on a level-2 end (plan 5): the tracked processes running
+// when the lease ended, from its mirror, as display strings ("<name> (pid <n>)") and in
+// their structured form.
 type LeaseEvent struct {
-	State  string
-	Reason LeaseEndReason
-	At     time.Time
-	Mode   Mode
-	Age    time.Duration
+	State     string
+	Reason    LeaseEndReason
+	At        time.Time
+	Mode      Mode
+	Age       time.Duration
+	Processes []string
+	Tracked   []TrackedProcess
 }
 
 // leaseEventAt is the At of an event minted at now: now to the millisecond (PR #763
@@ -124,15 +132,18 @@ func leaseEventAt(now time.Time) time.Time { return now.Truncate(time.Millisecon
 
 // leaseEventJSON is LeaseEvent's on-disk shape: Age in whole milliseconds as age_ms.
 type leaseEventJSON struct {
-	State  string         `json:"state"`
-	Reason LeaseEndReason `json:"reason,omitempty"`
-	At     time.Time      `json:"at"`
-	Mode   Mode           `json:"mode"`
-	AgeMS  int64          `json:"age_ms"`
+	State     string           `json:"state"`
+	Reason    LeaseEndReason   `json:"reason,omitempty"`
+	At        time.Time        `json:"at"`
+	Mode      Mode             `json:"mode"`
+	AgeMS     int64            `json:"age_ms"`
+	Processes []string         `json:"processes,omitempty"`
+	Tracked   []TrackedProcess `json:"tracked,omitempty"`
 }
 
 func (e LeaseEvent) MarshalJSON() ([]byte, error) {
-	return json.Marshal(leaseEventJSON{State: e.State, Reason: e.Reason, At: e.At, Mode: e.Mode, AgeMS: e.Age.Milliseconds()})
+	return json.Marshal(leaseEventJSON{State: e.State, Reason: e.Reason, At: e.At, Mode: e.Mode, AgeMS: e.Age.Milliseconds(),
+		Processes: e.Processes, Tracked: e.Tracked})
 }
 
 func (e *LeaseEvent) UnmarshalJSON(b []byte) error {
@@ -140,7 +151,8 @@ func (e *LeaseEvent) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &j); err != nil {
 		return err
 	}
-	*e = LeaseEvent{State: j.State, Reason: j.Reason, At: j.At, Mode: j.Mode, Age: time.Duration(j.AgeMS) * time.Millisecond}
+	*e = LeaseEvent{State: j.State, Reason: j.Reason, At: j.At, Mode: j.Mode, Age: time.Duration(j.AgeMS) * time.Millisecond,
+		Processes: j.Processes, Tracked: j.Tracked}
 	return nil
 }
 
@@ -149,6 +161,38 @@ func (e *LeaseEvent) UnmarshalJSON(b []byte) error {
 // Config.LeaseEnabled from it; the worker banner prints it from the same function.
 func LeaseSupported(cfg Config) bool {
 	return cfg.VMM == Firecracker && slices.Contains(cfg.ManifestFeatures, FeatureLeaseV1)
+}
+
+// LeaseProcessesSupported is the same rule for lease level 2's process kinds: lease mode,
+// and a snapshot advertising lease-processes-v1 (plan 5). An agent without it would run a
+// process kind as a plain command, so the pool refuses one before anything reaches it.
+func LeaseProcessesSupported(cfg Config) bool {
+	return LeaseSupported(cfg) && slices.Contains(cfg.ManifestFeatures, FeatureLeaseProcessesV1)
+}
+
+// CapabilityLeaseProcessesV1 is the reserved Hello capability of a worker that serves
+// lease level 2's process kinds (ruling P5-R37). The relay refuses a process kind with
+// lease_unsupported, before forwarding anything, to a worker that does not advertise it:
+// a worker from before plan 5 decodes Exec.kind as an unknown field and would run a
+// process_start's command as a plain Exec. The relay matches this exact string
+// (packages/sandbox-relay, LEASE_PROCESSES_CAPABILITY).
+const CapabilityLeaseProcessesV1 = "sbx:lease-processes-v1"
+
+// HelloCapabilities is what a microVM worker advertises in Hello: the snapshot manifest's
+// probed capabilities, in order, with CapabilityLeaseProcessesV1 added when, and only
+// when, LeaseProcessesSupported(cfg). The manifest's own copy of the reserved name, if it
+// has one, is never passed on: only this rule advertises it.
+func HelloCapabilities(cfg Config, manifest []string) []string {
+	out := make([]string, 0, len(manifest)+1)
+	for _, c := range manifest {
+		if c != CapabilityLeaseProcessesV1 {
+			out = append(out, c)
+		}
+	}
+	if LeaseProcessesSupported(cfg) {
+		out = append(out, CapabilityLeaseProcessesV1)
+	}
+	return out
 }
 
 // leaseIdle resolves an Exec's idle timeout: 0 takes LeaseIdleDefault, and an owner's
@@ -219,35 +263,44 @@ func (p *pool) leaseStateLocked(rp *runPool) leaseState {
 // keep the old mode (execLease): below the new epoch it is refused stale-mode, and at the
 // same epoch it is served at the lower of its mode and the new one -- per-Exec after a
 // downgrade to per-exec, which ends the lease if that Exec gets the gate first. From
-// lease+processes to lease the lease is kept, at level 1 from now on; stopping its
-// tracked processes is plan 5's. An upgrade applies from the next Exec that carries the
-// new epoch.
-func (p *pool) SetMode(key string, m Mode, epoch uint64) error {
+// lease+processes to lease the lease is kept, at level 1 from now on, and its tracked
+// processes stop under the gate, after the Exec in flight and bounded by LeaseGraceLimit
+// as above (stopTrackedWaiting): SetMode returns what the stop stopped, or nil when a
+// lease Exec got the gate first and stopped them (its response carries the notice). A
+// snapshot without lease-processes-v1 has no tracked processes, and SetMode does not wait.
+// An upgrade applies from the next Exec that carries the new epoch.
+func (p *pool) SetMode(key string, m Mode, epoch uint64) ([]TrackedProcess, error) {
 	// Refusals here are returned, not counted: Stats' refusal counts are Exec errors by
 	// cause, and a LeaseControl call is not an Exec.
 	if err := checkKey(key); err != nil {
-		return err
+		return nil, err
 	}
 	if m > ModeLeaseProcesses {
-		return fmt.Errorf("vmpool: SetMode: unknown mode %s", m)
+		return nil, fmt.Errorf("vmpool: SetMode: unknown mode %s", m)
 	}
 	if m != ModePerExec && !p.cfg.LeaseEnabled {
-		return refusal(RefuseLeaseUnsupported, "SetMode %s for %q: %s", m, key, leaseUnsupportedDetail)
+		return nil, refusal(RefuseLeaseUnsupported, "SetMode %s for %q: %s", m, key, leaseUnsupportedDetail)
 	}
 	p.mu.Lock()
-	endLease, err := p.setModeLocked(key, m, epoch)
+	endLease, stopTracked, err := p.setModeLocked(key, m, epoch)
 	p.mu.Unlock()
-	if err != nil || !endLease {
-		return err
+	switch {
+	case err != nil:
+		return nil, err
+	case endLease:
+		return nil, p.endLeaseWaiting(key, LeaseEndModeChange, true)
+	case stopTracked:
+		return p.stopTrackedWaiting(key)
 	}
-	return p.endLeaseWaiting(key, LeaseEndModeChange, true)
+	return nil, nil
 }
 
 // setModeLocked is SetMode under p.mu: it stores the mode and reports whether a lease
-// must end (mode_change) because of it. Caller holds p.mu.
-func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, err error) {
+// must end (mode_change) because of it, or have its tracked processes stopped. Caller
+// holds p.mu.
+func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease, stopTracked bool, err error) {
 	if p.closed {
-		return false, ErrClosed
+		return false, false, ErrClosed
 	}
 	rp := p.runs[key]
 	var s leaseState
@@ -259,8 +312,9 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 		s = loadLeaseState(p.cfg.WorkspaceRoot, key)
 	}
 	if s.Known && epoch < s.Epoch {
-		return false, refusal(RefuseStaleMode, "SetMode for %q: epoch %d is below the stored %d", key, epoch, s.Epoch)
+		return false, false, refusal(RefuseStaleMode, "SetMode for %q: epoch %d is below the stored %d", key, epoch, s.Epoch)
 	}
+	wasLevel2 := s.Known && s.Mode == ModeLeaseProcesses
 	if !s.Known {
 		// No readable state means an unknown history (ruling R7): unversioned per-Exec
 		// Execs record nothing, so any of them may have written the workspace as root.
@@ -277,17 +331,25 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 		s = withOpenMode(s, m)
 	}
 	if err := saveLeaseState(p.cfg.WorkspaceRoot, key, s); err != nil {
-		return false, fmt.Errorf("vmpool: SetMode for %q: %w", key, err)
+		return false, false, fmt.Errorf("vmpool: SetMode for %q: %w", key, err)
 	}
 	if rp == nil {
-		return false, nil
+		return false, false, nil
 	}
 	rp.state = s
 	if toLevel1 {
-		p.setLeaseLevelLocked(rp, l, m) // level 1's maximum duration from now on
+		p.setLeaseLevelLocked(rp, l, m) // level 1's maximum duration from now on; marks l.stopTracked
 	}
-	// A pin without a lease may be a lease Exec about to install one.
-	return m == ModePerExec && (l != nil || rp.pinned > 0), nil
+	switch m {
+	case ModePerExec:
+		// A pin without a lease may be a lease Exec about to install one.
+		return l != nil || rp.pinned > 0, false, nil
+	case ModeLease:
+		// The same holds for a lease at level 2, when the mode was level 2 until now.
+		starting := wasLevel2 && rp.pinned > 0 && (l == nil || l.started.IsZero())
+		return false, (l != nil && l.stopTracked) || (starting && LeaseProcessesSupported(p.cfg)), nil
+	}
+	return false, false, nil
 }
 
 // relevelLeaseForExecLocked applies a lease level change that reached the worker on the
@@ -301,6 +363,9 @@ func (p *pool) setModeLocked(key string, m Mode, epoch uint64) (endLease bool, e
 // runs at m. m is never per-exec: a newer epoch at per-exec goes down the per-Exec path
 // in routeExec, and a per-exec served under the gate ends the lease (mode_change) in
 // execLease instead. Caller holds p.mu and rp's gate, with l live and started.
+//
+// stopTrackedWaiting calls it too, for a lease a pinned Exec installed at level 2 after a
+// set_mode downgrade to lease was stored.
 func (p *pool) relevelLeaseForExecLocked(rp *runPool, l *vmLease, m Mode) {
 	if l.mode == m {
 		return
@@ -319,11 +384,16 @@ func (p *pool) relevelLeaseForExecLocked(rp *runPool, l *vmLease, m Mode) {
 
 // setLeaseLevelLocked moves the live lease l to lease level m. Its maximum duration is
 // m's from now on, counted from the lease's original start (ruling R11): a lease already
-// past it is expiring at once, and one that is not is no longer expiring. Stopping a
-// level-2 lease's tracked processes on a downgrade is plan 5's. Caller holds p.mu.
+// past it is expiring at once, and one that is not is no longer expiring. A lease leaving
+// level 2 is marked to have its tracked processes stopped by the next holder of the gate
+// (l.stopTracked), on a snapshot with lease-processes-v1 only: without it there are none,
+// and its agent knows no process_stop_all. Caller holds p.mu.
 func (p *pool) setLeaseLevelLocked(rp *runPool, l *vmLease, m Mode) {
 	was := l.mode
 	l.mode = m
+	if was == ModeLeaseProcesses && m != ModeLeaseProcesses && LeaseProcessesSupported(p.cfg) {
+		l.stopTracked = true
+	}
 	l.expiring = !p.clk.Now().Before(l.started.Add(p.cfg.leaseMaxDuration(m)))
 	log.Printf("vmpool: lease level workspace_key=%q vm=%s mode=%s was=%s expiring=%t",
 		rp.key, vmID(l.vm), m, was, l.expiring)

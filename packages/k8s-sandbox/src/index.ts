@@ -26,6 +26,8 @@ export {
   AbortResponse,
   Stream,
   SandboxMode,
+  ExecKind,
+  ProcessArgs,
   LeaseEvent,
   LeaseOp,
   LeaseControlFrame,

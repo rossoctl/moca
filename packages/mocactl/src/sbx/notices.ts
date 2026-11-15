@@ -1,6 +1,13 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { noticeLines, type LeaseEvent } from '@moca/sandbox-client';
+import {
+  ExecAbortedError,
+  ExecMachineryError,
+  ExecRefusedError,
+  noticeLines,
+  type Exec,
+  type LeaseEvent,
+} from '@moca/sandbox-client';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { SbxCtx } from './commands.js';
 
@@ -97,6 +104,31 @@ export function printNotices(
   const { lines, fresh } = unseenNotices(c.rt.paths.stateDir, id, known, Date.now(), reportedAt);
   for (const l of lines) c.io.err(sanitizeRemote(l));
   return fresh;
+}
+
+/**
+ * `exec`, saying the lease events each Exec carried (spec §5): on its result, or on its failure
+ * before the failure is reported (the worker acked them, so nothing else will say them). For the
+ * commands whose Execs are not the user's command: put, push, pull, up, `--seed` and doctor
+ * (plan-4 M2). `run` says its own, around the command's output.
+ */
+export function noticingExec(c: SbxCtx, id: string, exec: Exec): Exec {
+  return async (command, opts) => {
+    try {
+      const r = await exec(command, opts);
+      printNotices(c, id, r.lease);
+      return r;
+    } catch (err) {
+      if (
+        err instanceof ExecMachineryError ||
+        err instanceof ExecRefusedError ||
+        err instanceof ExecAbortedError
+      ) {
+        printNotices(c, id, err.lease);
+      }
+      throw err;
+    }
+  };
 }
 
 /** Forgets sandbox `id` (it was deleted): the store does not grow with every sandbox ever made. */

@@ -1,6 +1,6 @@
 import { Metadata, credentials, status } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SandboxExecClient, Stream } from '@moca/k8s-sandbox';
+import { Exec, SandboxExecClient, Stream } from '@moca/k8s-sandbox';
 import { makeExecAuth, startRelay } from '../src/main.js';
 import { commandPreview, type AuditLine } from '../src/sandbox-caller.js';
 import {
@@ -59,6 +59,7 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
         wrk: 'sbx_default',
         // The CALLER's req_id, never the worker's.
         req_id: 7,
+        kind: 'command',
         ms: expect.any(Number),
         outcome: 'end',
         exit_code: 3,
@@ -76,6 +77,7 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
       'sbx',
       'wrk',
       'req_id',
+      'kind',
       'ms',
       'outcome',
       'exit_code',
@@ -473,7 +475,7 @@ describe('the audit line for a req_id the worker id cannot be derived from', () 
     const call = Object.assign(new EventEmitter(), {
       request: {
         sandboxId: 'sbx_default',
-        exec: { reqId: -1, command: 'true', workspaceKey: 'sbx-aaaa' },
+        exec: Exec.fromPartial({ reqId: -1, command: 'true', workspaceKey: 'sbx-aaaa' }),
       },
       metadata: { get: () => ['Bearer x'] },
       write() {},

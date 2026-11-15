@@ -90,6 +90,8 @@ export interface PumpResult {
   execError?: string;
   /** The client cancelled the call. */
   cancelled: boolean;
+  /** What routing threw, when it did (no live worker, a collision, a refused kind). */
+  thrown?: Error;
 }
 
 export function newPumpResult(): PumpResult {
@@ -164,6 +166,7 @@ export async function pumpExec(
     }
     call.end();
   } catch (err) {
+    result.thrown = err as Error;
     if (over()) return result;
     // Reached by every throw out of routeExec -- including `no live worker for sandbox`
     // (an ordinary state: the worker died, or has not attached yet) and the reqId

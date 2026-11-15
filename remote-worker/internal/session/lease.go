@@ -81,6 +81,34 @@ func specMode(m pb.SandboxMode) string {
 	return fmt.Sprintf("unknown(%d)", int32(m))
 }
 
+// specKind maps the wire's ExecKind to wexec.Spec.Kind (plan 5): the guest protocol's names,
+// "" for a command. A value this worker does not know maps to "unknown(<n>)", which both
+// tiers refuse (lease_unsupported, ruling P5-R22): reading it as a command would run what a
+// process kind's caller never meant to run as one.
+func specKind(k pb.ExecKind) string {
+	switch k {
+	case pb.ExecKind_EXEC_KIND_COMMAND:
+		return wexec.KindCommand
+	case pb.ExecKind_EXEC_KIND_PROCESS_START:
+		return wexec.KindProcessStart
+	case pb.ExecKind_EXEC_KIND_PROCESS_LIST:
+		return wexec.KindProcessList
+	case pb.ExecKind_EXEC_KIND_PROCESS_LOGS:
+		return wexec.KindProcessLogs
+	case pb.ExecKind_EXEC_KIND_PROCESS_STOP:
+		return wexec.KindProcessStop
+	}
+	return fmt.Sprintf("unknown(%d)", int32(k))
+}
+
+// specProcess is the wire's ProcessArgs as wexec.Spec.Process; an unset message is the zero
+// value.
+func specProcess(a *pb.ProcessArgs) wexec.ProcessArgs {
+	return wexec.ProcessArgs{
+		Name: a.GetName(), ID: a.GetId(), Cwd: a.GetCwd(), Tail: a.GetTail(), Signal: a.GetSignal(),
+	}
+}
+
 // Lease makes frameSink a wexec.LeaseSink: the event goes out as WorkerFrame{lease} under
 // this Exec's req_id, through the same blocking enqueue as its chunks, so it rides ahead of
 // the terminal frame runOne sends after Run returns. The event is cloned before the req_id

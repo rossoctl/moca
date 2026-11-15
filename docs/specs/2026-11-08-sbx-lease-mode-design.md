@@ -1,10 +1,11 @@
 # SBX0.3 — Lease mode for `mocactl sbx` sandboxes — Design
 
-Version: 0.4 — November 13, 2026 (draft for review)
+Version: 0.5 — November 14, 2026 (draft for review)
 Status: Design. Not approved. Built: plan 1 (guest agent and image, #706), plan 2 (the worker's
-leases, #763), plan 3 (the wire: the control plane, the relay and the worker's frames, #802) and
-plan 4 (the clients: `mocactl sbx`, the MCP server and the static `sbx` client). Lease mode stays
-off by default (`SH_SANDBOX_MODES_ALLOWED=per-exec`, §8.1). Level 2 (plan 5) is not built.
+leases, #763), plan 3 (the wire: the control plane, the relay and the worker's frames, #802), plan 4
+(the clients: `mocactl sbx`, the MCP server and the static `sbx` client, #808) and plan 5 (level 2,
+tracked processes). Lease mode stays off by default (`SH_SANDBOX_MODES_ALLOWED=per-exec`, §8.1), and
+level 2 stays off until its section of the security review is signed off (§11).
 v0.2 folds in E17a's calibration (§1.1, §17): level 1 is re-scoped (§2), free-page reporting moves
 into v1 (§6, §14), lease VMs get page-cache headroom in their cgroup (§6), and the idle timeout and
 the memory model are set together (§4).
@@ -15,6 +16,10 @@ status codes for the new calls (§8.3).
 v0.4 records what plan 4 built in the clients: the notice copy and where each client shows it (§5),
 the mode commands and the deploy inputs (§8.2), and `sandbox_deleted`, keepalive coalescing and the
 worker's status cap (§8.3).
+v0.5 records what plan 5 built for level 2: the `processes_stopped` notice (§5), the tracked
+processes in the guest and on the host (§7), the level 2→1 downgrade and `mocactl sbx proc` (§8.2),
+the Exec kinds on the wire and their refusals (§8.3), the level-2 gates (§9) and the draft
+security-review section (§11).
 Milestone: **SBX0.3**, an increment of [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md),
 registered in [the milestone registry](README.md).
 Decision record: [ADR-0048](../adrs/0048-sbx-lease-mode.md), which revises
@@ -415,6 +420,28 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
   `lease ended (reset)`; each marks that event seen without a notice line (P4-R17), so it is said
   once.
 
+**As built (plan 5).**
+
+- **An `end` names the tracked processes it stopped:** the ones still running when the lease
+  ended, as the end's `sync` found them (§7, P5-R38). `processes` holds their display strings,
+  `<name> (pid <n>)`, with an unnamed process shown by its id, `p<id>` (ruling P5-R6). The new `LeaseEvent.tracked = 9` holds the same
+  processes as `TrackedProcess` rows (§8.3). The `end` line adds `; stopped: <name> (pid <n>)` for
+  each.
+- **A new state, `processes_stopped`,** reports a level 2→1 downgrade (§8.2) that stopped the
+  tracked processes while the lease goes on. Its `reason` is `mode_change`. The line is
+  `[sandbox] tracked processes stopped (mode_change, <HH:MM>): <name> (pid <n>), …`, in
+  `leaseNotice` and, identically, in `remote-worker/cmd/sbx/notice.go`. Only the lease Exec that
+  did the stop carries it: the event is never kept as pending and never acknowledged (P5-R19).
+  When the `set_mode` call does the stop itself, its answer's `LeaseStatus.stopped` lists the
+  processes, and no event is made (§8.2).
+- **`sandbox_info`** shows the full tracked table, exited entries included (P5-R16), one row per
+  process: `tracked processes (as of the last call):`, then
+  `p<id> <name> (pid <n>): <state>, <age>, <memory> MiB`, where an exited or killed row has no age
+  (it would count from the start). The rows are the worker's mirror (§7), so an exit since the
+  last call is not shown yet: a status sends nothing to the guest, which would touch the lease's
+  idle clock (P5-R38). With none it shows `tracked processes: none`, and when the status call
+  fails, `tracked processes: unknown`.
+
 ## 6. Admission and reclaim
 
 - **A third accounting class.** A lease VM is neither a standby nor an `inFlight` per-`Exec` VM. It
@@ -509,6 +536,108 @@ New MCP tools, offered only when the mode is `lease+processes` (at other modes a
 - The `bash` tool description says that `&`, `nohup` and `setsid` do not survive the call, and that
   `process_start` does when the sandbox allows it.
 - Audit: one record each for start, stop and exit, with id, name and the mode. No command text.
+
+**As built (plan 5).**
+
+- **The tools follow the token's mode.** The MCP server lists the four process tools only while
+  its current sandbox token's `mode` claim is `lease+processes`. When a newly minted token's mode
+  differs from the one the tools were last listed under, it sends
+  `notifications/tools/list_changed` (P5-R27). A call below that level answers the text above
+  without sending anything. The held token may predate the user's upgrade, so the call first mints
+  one fresh token and reads its mode, and a relay `processes_not_enabled:` is retried once after a
+  forced re-mint (P5-R29): once the user has run the `mode` command, the next call works. At
+  `lease+processes` the `bash` description carries the rule above in those words, and points to
+  `process_start` for a server or watcher that must keep running (`PROCESS_RULE`,
+  `packages/sandbox-client/src/tools.ts`).
+- **Ids and names.** An id is a decimal string, shown as `p<id>` by every client (P5-R6). The MCP
+  tools and `mocactl sbx proc` read a process argument through one `processSelector`: `p<n>` or
+  `n` is the id, anything else a name, and an id wins over an equal name. A name is 1 to 64
+  characters of `[A-Za-z0-9._-]`. A name shaped like an id (`^p?[0-9]+$`) is refused, since an id
+  wins in every lookup (P5-R8, P5-R33): the guest answers `process_name_invalid: <detail>`, and the
+  clients refuse it with the same text before sending. A name held only by an exited entry can be
+  started again, and the new process replaces that entry. Leading zeros name the same id (`p007`
+  is `7`). A refusal names an id as the rows do: `no tracked process p3`. `process_start` answers
+  `started p<id> <name> (pid <n>)`, or `started p<id> (pid <n>)` for an unnamed process. A process
+  call queues on the lease's one run gate behind a running command, and that wait counts against
+  its 60 s timeout, so a timeout says `timed out waiting for the sandbox (another command may still
+be running)`.
+- **The process is the command.** The guest runs `process_start`'s command as `bash -c CMD`. The
+  host sends the process kinds unwrapped: its per-`Exec` template (`cd /workspace`, then `sync` at
+  the end) wraps commands only (P5-R34). So the pid reported is the command's, an OOM kill reads
+  `killed(9)`, and the process runs in the `cwd` it asked for. The guest resolves `cwd` beneath the
+  workspace with `openat2` (no symlinks, no magic links, no mount crossing), and after the
+  privilege drop the shim resolves it again the same way, from a descriptor of the workspace root,
+  and changes into the result with `fchdir`. So a running tracked process, which can write the
+  group-writable workspace, cannot swap the directory for a symlink between the check and the
+  start, and every directory on the way, the parents included, is searched as the tracked uid. A
+  `cwd` the tracked uid cannot reach (a group-searchable directory under a `0700` one included)
+  fails after `process_start` has answered: the process shows `exited(127)`, and its log says
+  `cwd: permission denied` (P5-R14). Every refusal the root-side check gives reads
+  `process_cwd: <cwd>: not a directory inside the workspace`, whatever the cause, so it never says
+  which paths exist.
+  `process_start` answers once the command has replaced the shim, so a `process_stop` right after
+  it reaches the command (P5-R10).
+- **Identity.** Each process runs in its own cgroup, `tracked/p<id>` under the agent's cgroup root,
+  root-owned, not delegated, capped like an Exec's and outside every Exec's teardown. It runs
+  through the same shim as an Exec (no capabilities, `no_new_privs`, the seccomp filter; §3.3),
+  under a fresh uid from 20000 to 20003, in group `sbx-ws` (7000), with umask `0002`. A uid is not
+  reused while any cgroup it was given still holds a process (P5-R9). Its HOME is
+  `/tmp/sbx-proc/<uid>`, made afresh at each start (0700, owned by that uid), under a root-owned
+  `/tmp/sbx-proc` (0711) that the agent makes when the lease starts, so no other uid can create
+  or squat a tracked HOME (P5-R12). A Firecracker image gets the passwd lines
+  `sbxp<n>:x:<uid>:7000::/tmp/sbx-proc/<uid>:/bin/bash`, `sbxp0` to `sbxp3`; a Cloud Hypervisor
+  image is unchanged, since level 2 is Firecracker-only (P5-R15).
+- **Limits.** `SH_LEASE_MAX_PROCESSES` defaults to 4 and counts running processes only. The worker
+  refuses to boot with a value above 4, the tracked uids an image has (P5-R17). Each ring log holds
+  the last 4 MiB of a process's stdout and stderr together, in the agent's memory. At exit a ring is
+  trimmed to its last 64 KiB, and the table keeps at most 8 exited entries, dropping the one that
+  exited first (P5-R5; by exit order, never the process whose exit it is recording). When the table drops an entry, whatever is still in its cgroup is killed (P5-R11).
+  `process_stop` sends the signal (a name, with or without `SIG`, or a number; default `TERM`) to
+  every process in the cgroup, and kills the cgroup 10 s later. A process kind runs with a timeout
+  of at least 30 s, counted from when it reaches the guest, so a wait for the sandbox's gate does
+  not eat into it. A level-2 lease's `max_duration` is 4 h.
+- **Without a lease** (none started, or it ended), `process_list`, `process_logs` and
+  `process_stop` answer as for an empty table, an empty list or `process_not_found:`, and start no
+  lease. Only `process_start` starts one.
+- **The worker keeps a mirror** of the guest's table, refreshed from every lease `End` and saved
+  with the open lease. A worker restart's `worker_restart` end therefore lists the processes that
+  were running. Between calls the mirror does not change, so a status (`sandbox_info`,
+  `mocactl sbx get`) shows the table as of the last call.
+- **A level-2 lease's end syncs the guest first.** Tracked processes write to the workspace between
+  Execs, and no command wrapper syncs those writes. So the end of a `lease+processes` lease, or of
+  any lease with tracked processes, runs `sync` in the guest before the VM is destroyed, bounded
+  by 30 s. With a vsock connect of up to 10 s, an end can wait about 40 s on a wedged guest. An
+  `agent_dead` end syncs too, since it also covers the host's own deadline and an abort, where the
+  guest lives on (P5-R36), and so does `memory_reclaim`: losing a tracked process's writes is worse
+  than a reclaim that waits on a wedged guest. `teardown_failed` skips the sync, and so does
+  `sandbox_deleted`, whose workspace is going away (P5-R39). Ends that come together do not queue
+  behind one another: a sweep's victims (`idle`, `memory_reclaim`, …) sync in parallel, each
+  releasing its sandbox once its own VM is gone, so a wedged guest delays only its own sandbox. A
+  worker stopping (`worker_restart`) syncs every level-2 lease at once under one bound of 20 s,
+  below the worker units' `TimeoutStopSec=30`, then destroys them all; a guest that has not
+  answered by then loses its unsynced writes, rather than systemd killing the worker before the
+  later leases are synced.
+- **The end's sync refreshes the end** (P5-R38). The sync's `End` carries the guest's whole table,
+  like every lease `End`. A process that exited since the last call is then dropped from the end's
+  stopped list (the pending event and its copy on disk, or, for a closed pool's detach, the open
+  record a `worker_restart` end is built from), and gets its `lease_process` exit line. An end a
+  client acknowledged meanwhile is not brought back. After a failed sync, and for the ends that do
+  not sync, the end lists what the mirror showed running.
+- **Audit.** The worker writes a `lease_process` line for each start, stop and exit (the
+  workspace key, the mode, id, name, pid, state and code), and a lease end's line lists its tracked
+  processes as the mirror showed them when the end began: it is written before the end's sync, so a
+  process that exited since the last call is listed there as running and its `exit` line follows. A
+  stop line may come before the exit line of the same process (P5-R18). The worker does not trust
+  the guest's rows: one whose id, name or state breaks the guest's own rules (decimal id, P5-R8's
+  name rule, the three states) is dropped with a quoted `guest tracked row refused` line, and the
+  `lease_process` line quotes the id and the name, so no guest can write a line of its own into the
+  host's audit. The relay's
+  `sandbox_exec` line gains `kind` and `process` (`p<id>` when an id was given, else the name; a
+  `process_start` always shows its name, since the guest ignores a caller's id there). The relay
+  clears any command sent with `process_list`, `process_logs` or `process_stop` before forwarding
+  it.
+  None of them has command text. A `process_start`'s command shows only in the `cmd` prefix that
+  the operator's `SH_SANDBOX_AUDIT_COMMANDS=1` adds to every Exec's line.
 
 ## 8. Control plane, tokens, relay and worker
 
@@ -671,6 +800,54 @@ plus the ceiling: a token minted just before a delete reaches the sandbox that l
 Execs restarts the idle clock, so the sandbox's last lease ends before the janitor frees its
 workspace.
 
+**As built (plan 5), the level 2→1 downgrade.**
+
+- **`lease+processes` to `lease` keeps the lease and stops every tracked process,** under the
+  lease's run gate. The worker sends the guest `process_stop_all`, a host-only kind that no Exec
+  may carry (the worker refuses it on an Exec as `lease_unsupported`). It stops every running
+  tracked process (`TERM`, then the cgroup killed 10 s later), kills whatever exited ones left
+  behind, and answers the final rows. Each stopped process gets a `lease_process` stop line. The
+  call is sent even when the mirror shows nothing running (P5-R19). If the stop fails, the lease
+  ends instead, `teardown_failed`, and a guest that refuses it ends the lease `mode_change`
+  (P5-R20): a level-1 lease never goes on with tracked processes alive. An Exec in flight finishes
+  first, bounded by `grace_limit`.
+- **Whoever takes the run gate first does the stop** (P5-R21). If a lease Exec carrying the new
+  epoch gets there first, the stop happens there, that Exec's response carries the
+  `processes_stopped` notice (§5), and the `set_mode` answer lists nothing. Otherwise the
+  `set_mode` answer's `LeaseStatus.stopped` lists the stopped processes. It is in that answer only:
+  never stored and never acknowledged (P5-R19).
+- **`mocactl sbx mode lease`** prints `mode lease (epoch <n>)`, then, when `stopped` is not empty,
+  `stopped <n> tracked process: <name> (pid <n>)`: "process" for one, "processes" for more, with
+  the processes joined by `, `. After a racing Exec did the stop, it prints no such line (P5-R30).
+- **`lease+processes` to `per-exec`** ends the lease (`mode_change`), and the end lists the
+  processes that were running (§5). An upgrade to `lease+processes` needs a terminal, as every
+  upgrade does.
+
+**As built (plan 5), `mocactl sbx proc`.** The tracked processes from a terminal, as the MCP tools
+give them to an agent (§7). Results go to stdout, and notices and diagnostics to stderr. It exits
+0, 1 on a refusal or a failure, and 130 on Ctrl-C. No subcommand changes the mode, so none needs a
+terminal. The sandbox ID is optional: without it, the sandbox the repository is bound to
+(`.sbx/sandbox.json`) is used, or it fails (P5-R31).
+
+- **`proc start [--name N] [--cwd D] [ID] -- CMD…`** prints `p<id> <name> pid <n>`, or
+  `p<id> pid <n>` for an unnamed process. CMD's words are quoted as `run` quotes them.
+- **`proc ls [ID] [--json]`** prints one row per process, exited ones included,
+  `p<id> <name> (pid <n>): <state>, <age>, <memory> MiB` (no age on an exited or killed row), or
+  `no tracked processes`. `--json`
+  prints the rows as JSON, with each `id` as the bare decimal string.
+- **`proc logs (NAME|ID) [--tail N] [--raw] [ID]`** prints the process's last N lines (default
+  200, at most 4294967295). Unlike `run`'s output, which the user just asked for, this replays
+  later, out of band, what a process the agent started wrote: on a terminal its control sequences
+  (OSC 52 clipboard writes, OSC 8 links, titles) are removed, newlines and tabs kept. Piped, or
+  with `--raw`, the output is passed through as written.
+- **`proc stop (NAME|ID) [--signal S] [ID]`** prints the process's final row.
+- **Below `lease+processes`** the call is refused before sending, from the fresh token's `mode`
+  claim: `sbx: processes not enabled for this sandbox; run: mocactl sbx mode <id> lease+processes`
+  (P5-R32). The relay and the worker refuse it as well.
+- **`mocactl sbx get`** adds a `processes` row at `lease+processes`, or whenever the worker
+  reports processes: the full tracked table, one process per line, then `(as of the last call)`:
+  the worker's mirror, which a status does not refresh (§7, P5-R38).
+
 ### 8.3 New calls on `sandbox/v1` (additive)
 
 | Call                                                                                     | Sent by                                                                                                               | Purpose                                      |
@@ -765,6 +942,63 @@ for a refusal at the worker's own cap.
   refusal: nothing ran, and the fresh token carries the new epoch. A second `stale_mode:` is
   surfaced. `lease_unsupported:` is never retried.
 
+**As built (plan 5).**
+
+- **The kind.** `Exec.kind = 11` is an `ExecKind`: `EXEC_KIND_COMMAND` (0, the default, so an Exec
+  from a client that predates the field is a command), `EXEC_KIND_PROCESS_START` (1), `_LIST` (2),
+  `_LOGS` (3) and `_STOP` (4). `Exec.process = 12` is a `ProcessArgs {name, id, cwd, tail, signal}`,
+  each field read only by the kinds it applies to. A `process_start` carries its command in
+  `Exec.command`; the other process kinds leave it empty.
+- **The answers.** A process call answers like an Exec, with exit 0 and its result on stdout:
+  `process_start` a JSON `{"id", "name", "pid"}`, `process_list` a JSON array of rows
+  `{id, name, pid, state, code, started_unix_ms, memory_bytes}`, `process_logs` the log text, and
+  `process_stop` the stopped process's row. A refusal is an `error` event whose message is a wire
+  string (below); nothing ran.
+- **`TrackedProcess {id, name, pid, state, code, age_ms, memory_bytes}`**: `state` is `running`,
+  `exited` or `killed`, and `code` the exit code or the signal. It travels in `LeaseEvent.tracked`
+  (9; the processes running at an end, or those a downgrade stopped), `LeaseStatus.processes` (7;
+  the full table, exited entries included, P5-R16) and `LeaseStatus.stopped` (8; a `set_mode`
+  answer only, §8.2).
+- **Compat first: every refusal is up front, and none runs the command.**
+
+  | Where              | When                                                                                                                                   | Answer                                                                                                       |
+  | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+  | relay              | a kind it does not know                                                                                                                | `INVALID_ARGUMENT` `unknown exec kind <n>`                                                                   |
+  | relay              | a process kind on a token whose `mode` claim is not `lease+processes`, before any forwarding                                           | `FAILED_PRECONDITION` `processes_not_enabled: this sandbox's mode is <m>`, audited                           |
+  | relay              | a process kind for a worker whose Hello lacks `sbx:lease-processes-v1`, before any slot or forwarding, and again at the write (P5-R37) | `FAILED_PRECONDITION` `lease_unsupported: this sandbox's worker does not support tracked processes`, audited |
+  | relay              | the harness exec token                                                                                                                 | the kind forced to `EXEC_KIND_COMMAND` and `process` dropped, with the lease fields                          |
+  | worker, both tiers | a kind it does not know, before any VM or lease work                                                                                   | `lease_unsupported: unknown exec kind <n>` (P5-R22)                                                          |
+  | container worker   | any kind but a command                                                                                                                 | `lease_unsupported: <detail>`                                                                                |
+  | microVM worker     | a process kind without the Firecracker arm and a snapshot advertising `lease-processes-v1`                                             | `lease_unsupported: process kinds need the Firecracker arm and a snapshot with ...`                          |
+  | microVM worker     | a process kind served below `lease+processes` (checked again under the run gate)                                                       | `processes_not_enabled: <kind> for "<key>": this sandbox's mode is <m>`                                      |
+  | guest agent        | a kind it does not know                                                                                                                | `lease_unsupported: unknown kind <k>`                                                                        |
+
+- **The worker capability (P5-R37).** A worker that predates level 2 decodes `Exec.kind` as an
+  unknown field and would run a `process_start`'s command as a plain Exec, so the far end must say
+  it understands the kinds. A microVM worker adds `sbx:lease-processes-v1` to its Hello
+  capabilities exactly when it serves them (`vmpool.HelloCapabilities`: the Firecracker arm and a
+  snapshot advertising `lease-v1` and `lease-processes-v1`); the container worker never does. The
+  relay keeps each worker's Hello capabilities and gates on them as the table says. The clients
+  show the refusal as `tracked processes are not available on this sandbox's worker yet`, with
+  `(ask the operator)` at a terminal, and never retry it. A relay older than level 2 would drop the
+  kind itself; it ships in one image with the control plane whose policy enables
+  `lease+processes`, so a supported rollout cannot pair them.
+- **The guest's process wire strings:** `process_not_found: <id or name>`,
+  `process_limit: <n> running (SH_LEASE_MAX_PROCESSES)` (when leftovers of exited processes hold
+  tracked uids, it reads
+  `process_limit: <n> running, <m> uids held by leftover children of exited processes (process_stop them)`),
+  `process_name_taken: <name>`,
+  `process_name_invalid: <detail>`, `process_cwd: <detail>` and `process_signal: <detail>`. A
+  process kind's refusal with one of them, or with `processes_not_enabled:`, keeps the lease; a
+  command's guest error never does.
+- **Dedup.** A command Exec's fingerprint is unchanged, so a worker upgrade keeps its cached
+  results; the kind and the process arguments fold into it only for the other kinds (P5-R22).
+- **The TS exec client** retries a `processes_not_enabled:` refusal once, under a forced fresh
+  token, as it retries `stale_mode:` (P5-R29); a second one is surfaced. Its `process(op, args)`
+  call returns the parsed result and the lease events, and throws a `ProcessError` with the bare
+  wire string on a refusal. The static `sbx` client sends no process kinds; it shows the
+  `processes_stopped` notice (§5).
+
 ### 8.4 Worker
 
 - A **lease** is a new state of a run, beside standbys: `RunActive` with a held VM. The idle sweep
@@ -803,6 +1037,22 @@ mode gets its own gates, real-launcher halves on KVM, fake-launcher halves in CI
 | `TestGateLeaseReclaim`            | Under a budget squeeze the idle-longest lease goes first, and busy leases are never reclaimed for memory. When a new lease VM does not fit, the worker reclaims idle-longest leases, then refuses with `memory-budget`                                                                                                                                                                                                                                                           |
 | `TestGateLeaseSecrets`            | Nothing secret is written into a lease guest (the lease variant of `TestGateSnapshotHoldsNoSecrets`: the snapshot gate assumed per-call teardown)                                                                                                                                                                                                                                                                                                                                |
 
+**As built (plan 5).** The level-2 halves are subtests of the gates above:
+`TestGateLeaseExecKillsProcesses` (a `process_start` process and its child are the only
+survivors), `TestGateLeaseStaleEpoch` (a downgrade to `lease` stops the tracked processes and keeps
+the lease), `TestGateLeasePrivilege` (the tracked half) and `TestGateLeaseNotice` (every end lists
+the tracked processes it stopped). A new gate, `TestGateLeaseProcessLifecycle`, covers start, list,
+logs and stop, a later Exec reaching the process on `127.0.0.1`, the refusals, `TERM` then the kill
+after 10 s, the 4 MiB ring, `SH_LEASE_MAX_PROCESSES` counting running processes only, the 8 exited
+entries kept, uid reuse, and an OOM in a tracked cgroup shown as `killed(9)` with the lease kept.
+The level-2 parts skip, NOT RUN, without a snapshot that advertises `lease-processes-v1`, and the
+gate inventory lists them as manual-only. On 2026-11-14 they ran on a KVM rig against a snapshot
+built from the plan-5 branch, with `lease-v1` and `lease-processes-v1`: the guest agent's root
+tests passed, and the whole `-run TestGate` suite passed, 76 of 76, none skipped, with no
+Firecracker process left behind. That was the second run. The first found two defects, both fixed
+before it: the agent's PID 1 exited on an interrupted vsock accept, and the host wrapped the
+process kinds in its command template (`docs/sbx/security-review.md` §7.3).
+
 ## 10. Validation: E17
 
 E17 is a separate spec in moca-experiments (`e17/SPEC.md`). In summary:
@@ -840,6 +1090,13 @@ What changes against per-`Exec`, and what bounds it:
 
 The security review of SBX0 (`docs/sbx/security-review.md`) gets a lease section before level 1
 reaches the cohort, and a level-2 section before level 2 is allowed by policy.
+
+**As built (plan 5).** The level-2 section is `docs/sbx/security-review.md` §7, a **draft** that
+needs the security owner's sign-off. Until then `lease+processes` stays out of
+`SH_SANDBOX_MODES_ALLOWED`, and plan 5 changes no default. Beside the bounds above, the relay
+checks ahead of the worker: it refuses a process kind on a token whose `mode` claim is not
+`lease+processes`, or for a worker that does not advertise `sbx:lease-processes-v1`, before
+forwarding anything, and the worker refuses it again (§8.3).
 
 ## 12. ADR
 

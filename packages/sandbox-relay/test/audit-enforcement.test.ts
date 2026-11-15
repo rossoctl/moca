@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { status } from '@grpc/grpc-js';
 import type { SandboxTokenClaims } from '@moca/control-plane';
+import { Exec } from '@moca/k8s-sandbox';
 import { describe, expect, it, vi } from 'vitest';
 import type { Relay, RelayTimers } from '../src/relay.js';
 import { makeAudit, makeSandboxCaller } from '../src/sandbox-caller.js';
@@ -64,7 +65,7 @@ const brokenClaims = (): SandboxTokenClaims =>
   }) as unknown as SandboxTokenClaims;
 
 const exec = (reqId: number) =>
-  ({ reqId, command: 'sleep 600', workspaceKey: 'sbx-aaaa', timeoutS: 600 }) as never;
+  Exec.fromPartial({ reqId, command: 'sleep 600', workspaceKey: 'sbx-aaaa', timeoutS: 600 });
 
 describe('a throwing audit-line builder never skips enforcement (review #554)', () => {
   it('the expiry still aborts the worker and ends the call; the drain grace still frees the slot', async () => {

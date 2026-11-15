@@ -1,5 +1,10 @@
 import { status } from '@grpc/grpc-js';
-import { SandboxMode, type LeaseEvent, type LeaseStatus } from './gen/sandbox/v1/sandbox.js';
+import {
+  SandboxMode,
+  type LeaseEvent,
+  type LeaseStatus,
+  type TrackedProcess,
+} from './gen/sandbox/v1/sandbox.js';
 
 /**
  * Lease mode for SBX clients (spec §5, §8.3): the mode names, the lease status as a client reads
@@ -36,6 +41,79 @@ export interface LeaseStatusView {
   idleTimeoutS: number;
   /** The last undelivered lease event (a start or an end), kept until acknowledged. */
   pending?: LeaseEvent;
+  /** The full tracked-process table, exited entries included (plan 5); absent when empty. */
+  processes?: TrackedProcessView[];
+  /**
+   * The processes this set_mode call's downgrade stopped (plan 5): only in that call's own answer
+   * (P5-R19), and empty when a racing lease Exec did the stop (P5-R21); absent when empty.
+   */
+  stopped?: TrackedProcessView[];
+}
+
+/**
+ * One tracked process (spec §7), as `process_list`, `process_stop` and `LeaseStatus.processes`
+ * give it. `state` is `running`, `exited` or `killed`; `code` is the exit code of an exited one
+ * and the signal number of a killed one. `name` is the display name (`p<id>` when unnamed).
+ */
+export interface TrackedProcessView {
+  id: string;
+  name: string;
+  pid: number;
+  state: string;
+  code: number;
+  ageMs: number;
+  memoryBytes: number;
+}
+
+export function trackedProcessView(p: TrackedProcess): TrackedProcessView {
+  return {
+    id: p.id,
+    name: p.name,
+    pid: p.pid,
+    state: p.state,
+    code: p.code,
+    ageMs: p.ageMs,
+    memoryBytes: p.memoryBytes,
+  };
+}
+
+/** `running`, `exited(<code>)` or `killed(<signal>)`; a state this client does not know as is. */
+export function processStateText(v: TrackedProcessView): string {
+  return v.state === 'exited' || v.state === 'killed' ? `${v.state}(${v.code})` : v.state;
+}
+
+/** A duration in whole seconds, as `42s` or `2m10s`. */
+export function ageText(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
+}
+
+const MIB = 1024 * 1024;
+
+/** How a process id is shown (P5-R6): `p<id>`; `processSelector` reads it back. */
+export const shownProcessId = (id: string): string => `p${id}`;
+
+/**
+ * One process as a client lists it (P5-R27): `p<id> name (pid n): state, age, memory`, the id alone
+ * for an unnamed one (P5-R40), whose name is its id. An exited
+ * or killed row has no age: it counts from the start, so it would read as a runtime (final review
+ * M6). The name is the worker's text: a client sanitizes the row before a terminal shows it.
+ */
+export function processRow(v: TrackedProcessView): string {
+  const age = v.state === 'running' ? `${ageText(v.ageMs)}, ` : '';
+  return (
+    `${startedProcessText(v)} (pid ${v.pid}): ${processStateText(v)}, ${age}` +
+    `${(v.memoryBytes / MIB).toFixed(1)} MiB`
+  );
+}
+
+/**
+ * A started process as its start reports it (final review M3): `p<id> name`, or just `p<id>` for
+ * an unnamed one, which the guest names `p<id>` and which would read twice. Not sanitized.
+ */
+export function startedProcessText(p: { id: string; name: string }): string {
+  const id = shownProcessId(p.id);
+  return p.name && p.name !== id ? `${id} ${p.name}` : id;
 }
 
 /** A missing status reads as no lease; a state this client does not know reads as none. */
@@ -48,6 +126,8 @@ export function leaseStatusView(s: LeaseStatus | undefined): LeaseStatusView {
     ageMs: s?.ageMs ?? 0,
     idleTimeoutS: s?.idleTimeoutS ?? 0,
     ...(s?.pending ? { pending: s.pending } : {}),
+    ...(s?.processes.length ? { processes: s.processes.map(trackedProcessView) } : {}),
+    ...(s?.stopped.length ? { stopped: s.stopped.map(trackedProcessView) } : {}),
   };
 }
 
@@ -125,6 +205,11 @@ export function leaseNotice(ev: LeaseEvent, nowMs: number): string | undefined {
     }
     case 'start':
       return `[sandbox] new guest (${modeName(ev.mode)}, ${hhmm(ev.atUnixMs)})`;
+    case 'processes_stopped': {
+      // A downgrade from lease+processes stopped them (plan 5); the lease itself goes on.
+      const who = ev.processes.length > 0 ? `: ${ev.processes.join(', ')}` : '';
+      return `[sandbox] tracked processes stopped (${ev.reason}, ${hhmm(ev.atUnixMs)})${who}`;
+    }
     default:
       return undefined;
   }

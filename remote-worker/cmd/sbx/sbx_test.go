@@ -727,6 +727,12 @@ func TestNoticeCopyMatchesTS(t *testing.T) {
 			"[sandbox] new guest (lease, 09:05)"},
 		{"start at 23:59", &pb.LeaseEvent{State: "start", Mode: pb.SandboxMode_SANDBOX_MODE_LEASE, AtUnixMs: time.Date(2026, 11, 13, 23, 59, 0, 0, time.UTC).UnixMilli()}, at,
 			"[sandbox] new guest (lease, 23:59)"},
+		{"processes_stopped with two processes", &pb.LeaseEvent{State: "processes_stopped", Reason: "mode_change", AtUnixMs: at, Processes: []string{"web (pid 412)", "p2 (pid 518)"}}, at,
+			"[sandbox] tracked processes stopped (mode_change, 14:02): web (pid 412), p2 (pid 518)"},
+		{"processes_stopped with one process", &pb.LeaseEvent{State: "processes_stopped", Reason: "mode_change", AtUnixMs: at, Processes: []string{"web (pid 412)"}}, at,
+			"[sandbox] tracked processes stopped (mode_change, 14:02): web (pid 412)"},
+		{"processes_stopped with none", &pb.LeaseEvent{State: "processes_stopped", Reason: "mode_change", AtUnixMs: at}, at,
+			"[sandbox] tracked processes stopped (mode_change, 14:02)"},
 		{"resumed is unknown", &pb.LeaseEvent{State: "resumed", AtUnixMs: at}, at, ""},
 		{"an empty state is unknown", &pb.LeaseEvent{AtUnixMs: at}, at, ""},
 	} {

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { Server, ServerCredentials, status, type ServerWritableStream } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ExecKind,
   LeaseEvent,
   LeaseOp,
   LeaseStatus,
@@ -24,6 +25,7 @@ import {
   ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
+  ProcessError,
   SandboxExecConn,
   caBundle,
   newReqId,
@@ -31,6 +33,7 @@ import {
   type TokenRequest,
 } from '../src/exec-conn.js';
 import { LeaseControlError } from '../src/lease.js';
+import { execFailureText } from '../src/mcp-server.js';
 
 type Behaviour = (call: ServerWritableStream<ExecRequest, ExecEvent>, n: number) => void;
 const closers: Array<() => unknown> = [];
@@ -1205,5 +1208,382 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     await expect(c.leaseKeepalive()).rejects.toBe(boom);
     expect(r.controls).toHaveLength(0);
     expect(r.keepalives).toHaveLength(0);
+  });
+});
+
+describe('SandboxExecConn process calls (plan 5, spec §7)', () => {
+  const T = 1_800_000_000_000;
+  const end = LeaseEvent.fromPartial({
+    state: 'end',
+    reason: 'idle',
+    atUnixMs: T,
+    mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+  });
+  const start = LeaseEvent.fromPartial({
+    state: 'start',
+    atUnixMs: T + 1,
+    mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+  });
+  /** The guest's answer on stdout, as the worker passes it through, then an End. */
+  const answers =
+    (stdout: string, lease: LeaseEvent[] = []): Behaviour =>
+    (call) => {
+      for (const ev of lease) call.write({ lease: ev } as ExecEvent);
+      if (stdout) call.write(chunk(stdout));
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      call.end();
+    };
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: '3',
+    name: 'web',
+    pid: 412,
+    state: 'running',
+    code: 0,
+    started_unix_ms: NOW_S * 1000 - 130_000,
+    memory_bytes: 4096,
+    ...over,
+  });
+
+  it('start sends a PROCESS_START Exec with the command and its args, and reads {id, name, pid}', async () => {
+    const r = await fakeRelay(answers('{"id":"3","name":"web","pid":412}', [end]));
+    const { c } = conn(r.addr);
+    const got = await c.process('start', {
+      command: 'python3 -m http.server 8080',
+      name: 'web',
+      cwd: 'app',
+    });
+    expect(got).toEqual({ result: { id: '3', name: 'web', pid: 412 }, lease: [end] });
+    const e = r.seen[0]!.req.exec!;
+    expect(e).toMatchObject({
+      kind: ExecKind.EXEC_KIND_PROCESS_START,
+      command: 'python3 -m http.server 8080',
+      process: { name: 'web', cwd: 'app', id: '', tail: 0, signal: '' },
+      workspaceKey: 'sbx-aaaa',
+      streaming: true,
+    });
+    // A short timeout of its own, so it fits the held token rather than minting a fresh one.
+    expect(e.timeoutS).toBe(60);
+    expect(r.seen[0]!.req.sandboxId).toBe('sbx_default');
+  });
+
+  it('list sends PROCESS_LIST with no command and reads the table, oldest first, ages by this clock', async () => {
+    const r = await fakeRelay(
+      answers(
+        JSON.stringify([
+          row(),
+          row({ id: '4', name: 'p4', pid: 9, state: 'exited', code: 1, memory_bytes: 0 }),
+        ]),
+      ),
+    );
+    const { c } = conn(r.addr);
+    const got = await c.process('list', {});
+    expect(got.result).toEqual([
+      {
+        id: '3',
+        name: 'web',
+        pid: 412,
+        state: 'running',
+        code: 0,
+        ageMs: 130_000,
+        memoryBytes: 4096,
+      },
+      { id: '4', name: 'p4', pid: 9, state: 'exited', code: 1, ageMs: 130_000, memoryBytes: 0 },
+    ]);
+    expect(r.seen[0]!.req.exec).toMatchObject({
+      kind: ExecKind.EXEC_KIND_PROCESS_LIST,
+      command: '',
+    });
+    // An empty table is an empty array; a started time ahead of this clock is age 0.
+    const none = await fakeRelay(answers('[]'));
+    expect((await conn(none.addr).c.process('list', {})).result).toEqual([]);
+    const ahead = await fakeRelay(
+      answers(JSON.stringify([row({ started_unix_ms: NOW_S * 1000 + 5_000 })])),
+    );
+    expect((await conn(ahead.addr).c.process('list', {})).result[0]!.ageMs).toBe(0);
+  });
+
+  it('logs sends PROCESS_LOGS with the id or name and the tail, and returns stdout as text', async () => {
+    const r = await fakeRelay(answers('line 1\nline 2\n'));
+    const { c } = conn(r.addr);
+    expect((await c.process('logs', { name: 'web', tail: 50 })).result).toBe('line 1\nline 2\n');
+    expect(r.seen[0]!.req.exec).toMatchObject({
+      kind: ExecKind.EXEC_KIND_PROCESS_LOGS,
+      command: '',
+      process: { name: 'web', id: '', tail: 50 },
+    });
+    // No output is an empty log, not an error.
+    const quiet = await fakeRelay(answers(''));
+    expect((await conn(quiet.addr).c.process('logs', { id: '3' })).result).toBe('');
+  });
+
+  it('stop sends PROCESS_STOP with the id or name and the signal, and reads the final state', async () => {
+    const r = await fakeRelay(answers(JSON.stringify(row({ state: 'killed', code: 15 }))));
+    const { c } = conn(r.addr);
+    const got = await c.process('stop', { id: '3', signal: 'INT' });
+    expect(got.result).toMatchObject({ id: '3', state: 'killed', code: 15, ageMs: 130_000 });
+    expect(r.seen[0]!.req.exec).toMatchObject({
+      kind: ExecKind.EXEC_KIND_PROCESS_STOP,
+      process: { id: '3', name: '', signal: 'INT' },
+    });
+  });
+
+  it('retries a token refusal once under a fresh token, as exec does', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? fail(status.UNAUTHENTICATED, 'token rejected')(call, n) : answers('[]')(call, n),
+    );
+    const { c } = conn(r.addr);
+    expect((await c.process('list', {})).result).toEqual([]);
+    expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+    expect(r.seen[1]!.req.exec!.reqId).toBe(r.seen[0]!.req.exec!.reqId);
+  });
+
+  it('re-mints on a stale_mode refusal under a new req_id, carrying its events, as exec does', async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1) return answers('[]', [start])(call, n);
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const { c } = conn(r.addr);
+    expect(await c.process('list', {})).toEqual({ result: [], lease: [end, start] });
+    expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+    expect(r.seen[1]!.req.exec!.reqId).not.toBe(r.seen[0]!.req.exec!.reqId);
+    expect(r.seen[1]!.req.exec!.kind).toBe(ExecKind.EXEC_KIND_PROCESS_LIST);
+  });
+
+  it("maps the worker's process wire errors to a ProcessError carrying the code, detail and events", async () => {
+    for (const [wire, code, detail] of [
+      ['process_not_found: web', 'process_not_found', 'web'],
+      [
+        'process_limit: 4 running (SH_LEASE_MAX_PROCESSES)',
+        'process_limit',
+        '4 running (SH_LEASE_MAX_PROCESSES)',
+      ],
+      ['process_name_taken: web', 'process_name_taken', 'web'],
+      ['process_cwd: ../x: outside the workspace', 'process_cwd', '../x: outside the workspace'],
+      [
+        'process_name_invalid: "a b": want 1-64 characters of [A-Za-z0-9._-]',
+        'process_name_invalid',
+        '"a b": want 1-64 characters of [A-Za-z0-9._-]',
+      ],
+      ['process_signal: unknown signal FOO', 'process_signal', 'unknown signal FOO'],
+      [
+        'processes_not_enabled: the lease is at lease',
+        'processes_not_enabled',
+        'the lease is at lease',
+      ],
+      [
+        'lease_unsupported: the snapshot has no lease-processes-v1',
+        'lease_unsupported',
+        'the snapshot has no lease-processes-v1',
+      ],
+    ] as const) {
+      const r = await fakeRelay((call, n) => {
+        call.write({ lease: end } as ExecEvent);
+        execError(wire)(call, n);
+      });
+      const e = await conn(r.addr)
+        .c.process('logs', { name: 'web' })
+        .catch((x: unknown) => x);
+      expect(e, wire).toBeInstanceOf(ProcessError);
+      expect(e, wire).toMatchObject({ code, detail, wire, lease: [end] });
+      expect(r.seen, wire).toHaveLength(1); // a refusal is never retried
+    }
+  });
+
+  it("maps the relay's processes_not_enabled refusal (FAILED_PRECONDITION, no event), refused again after the re-mint, to a ProcessError", async () => {
+    const r = await fakeRelay(
+      fail(status.FAILED_PRECONDITION, "processes_not_enabled: this sandbox's mode is lease"),
+    );
+    const { c, asks } = conn(r.addr);
+    const e = await c.process('start', { command: 'sleep 9' }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ProcessError);
+    expect(e).toMatchObject({
+      code: 'processes_not_enabled',
+      detail: "this sandbox's mode is lease",
+      lease: [],
+    });
+    // One forced re-mint and one retry (P5-R29), then the refusal is surfaced.
+    expect(r.seen).toHaveLength(2);
+    expect(asks.map((a) => a.force)).toEqual([false, true]);
+  });
+
+  it("maps the relay's worker-capability refusal (FAILED_PRECONDITION lease_unsupported, P5-R37) to a ProcessError, never retried", async () => {
+    const r = await fakeRelay(
+      fail(
+        status.FAILED_PRECONDITION,
+        "lease_unsupported: this sandbox's worker does not support tracked processes",
+      ),
+    );
+    const { c, asks } = conn(r.addr);
+    const e = await c.process('start', { command: 'sleep 9' }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ProcessError);
+    expect(e).toMatchObject({
+      code: 'lease_unsupported',
+      detail: "this sandbox's worker does not support tracked processes",
+      lease: [],
+    });
+    // Nothing ran, and a fresh token would not change the worker: one Exec, no re-mint.
+    expect(r.seen).toHaveLength(1);
+    expect(asks.map((a) => a.force)).toEqual([false]);
+  });
+
+  it("re-mints once on the relay's processes_not_enabled and retries under a new req_id: an upgrade since the held token (P5-R29)", async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1
+        ? fail(status.FAILED_PRECONDITION, "processes_not_enabled: this sandbox's mode is lease")(
+            call,
+            n,
+          )
+        : answers('{"id":"1","name":"web","pid":7}', [start])(call, n),
+    );
+    const { c, asks } = conn(r.addr);
+    expect(await c.process('start', { command: 'serve', name: 'web' })).toEqual({
+      result: { id: '1', name: 'web', pid: 7 },
+      lease: [start],
+    });
+    expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
+    expect(asks.map((a) => a.force)).toEqual([false, true]);
+    expect(r.seen[1]!.req.exec!.reqId).not.toBe(r.seen[0]!.req.exec!.reqId);
+    expect(r.seen[1]!.req.exec).toMatchObject({
+      kind: ExecKind.EXEC_KIND_PROCESS_START,
+      command: 'serve',
+    });
+  });
+
+  it('a stale_mode first attempt keeps its events on a ProcessError retry (the M3 follow-up)', async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1)
+        return fail(
+          status.FAILED_PRECONDITION,
+          "processes_not_enabled: this sandbox's mode is lease",
+        )(call, n);
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const e = await conn(r.addr)
+      .c.process('list', {})
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ProcessError);
+    expect(e).toMatchObject({ code: 'processes_not_enabled', lease: [end] });
+  });
+
+  it('reads an answer that is not the expected JSON as a machinery failure, never as a result', async () => {
+    for (const [op, out] of [
+      ['list', 'not json'],
+      ['list', '{"id":"3"}'],
+      ['start', '[]'],
+      ['stop', ''],
+    ] as const) {
+      const r = await fakeRelay(answers(out));
+      const e = await conn(r.addr)
+        .c.process(op as 'list', op === 'start' ? ({ command: 'x' } as never) : {})
+        .catch((x: unknown) => x);
+      expect(e, `${op} ${out}`).toBeInstanceOf(ExecMachineryError);
+      expect((e as Error).message, `${op} ${out}`).toMatch(
+        new RegExp(`^sandbox failure: unreadable process_${op} answer`),
+      );
+    }
+  });
+
+  // Final review M4: a process call queues on the sandbox's one run gate, so its timeout means
+  // another command held the sandbox all along, and the text says so.
+  it('a process call that timed out says it waited for the sandbox', async () => {
+    const r = await fakeRelay(execError('timeout:60'));
+    const e = await conn(r.addr)
+      .c.process('stop', { name: 'web' })
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect((e as Error).message).toBe(
+      'sandbox failure: process_stop timed out waiting for the sandbox (another command may still be running)',
+    );
+    expect(execFailureText(e, { audience: 'cli' })).toBe(
+      'sandbox failure: process_stop timed out waiting for the sandbox (another command may still be running); the command may have partly run',
+    );
+  });
+
+  it('sends nothing for a signal that is already aborted', async () => {
+    const r = await fakeRelay(answers('[]'));
+    const ac = new AbortController();
+    ac.abort();
+    await expect(conn(r.addr).c.process('list', {}, { signal: ac.signal })).rejects.toBeInstanceOf(
+      ExecAbortedError,
+    );
+    expect(r.seen).toHaveLength(0);
+  });
+});
+
+describe('SandboxExecConn: a refused first attempt keeps its events on a failed retry (the M3 follow-up)', () => {
+  const end = LeaseEvent.fromPartial({
+    state: 'end',
+    reason: 'idle',
+    atUnixMs: 1_800_000_000_000,
+    mode: SandboxMode.SANDBOX_MODE_LEASE,
+  });
+
+  it('a stale_mode refusal, then a retry refused PERMISSION_DENIED', async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1) return fail(status.PERMISSION_DENIED, 'exec not permitted')(call, n);
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const e = await conn(r.addr)
+      .c.exec('x')
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecRefusedError);
+    expect(e).toMatchObject({ grpcCode: status.PERMISSION_DENIED, lease: [end] });
+  });
+
+  it('a stale_mode refusal, then a retry that fails as machinery', async () => {
+    const r = await fakeRelay((call, n) => {
+      if (n > 1) return fail(status.UNAVAILABLE, 'worker gone')(call, n);
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const e = await conn(r.addr)
+      .c.exec('x')
+      .catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ExecMachineryError);
+    expect(e).toMatchObject({ lease: [end] });
+  });
+});
+
+describe("SandboxExecConn: a failed re-mint keeps the first attempt's events (fix round 1, Minor 1)", () => {
+  const end = LeaseEvent.fromPartial({
+    state: 'end',
+    reason: 'idle',
+    atUnixMs: 1_800_000_000_000,
+    mode: SandboxMode.SANDBOX_MODE_LEASE,
+  });
+
+  it('attaches them to the token source error, which is thrown unchanged otherwise', async () => {
+    const r = await fakeRelay((call, n) => {
+      call.write({ lease: end } as ExecEvent);
+      execError('stale_mode: Exec mode_epoch 3 is below the stored 4')(call, n);
+    });
+    const boom = new Error('control plane unreachable');
+    const { c } = conn(r.addr, {
+      token: async (o) => {
+        if (o.force) throw boom;
+        return { token: 'stale', expiresAt: NOW_S + 900, lifetimeS: 900 };
+      },
+    });
+    const e = await c.exec('x').catch((x: unknown) => x);
+    expect(e).toBe(boom);
+    expect(e).toMatchObject({ lease: [end] });
+    expect(r.seen).toHaveLength(1);
+  });
+
+  it('leaves a token source error with nothing carried as it was', async () => {
+    const r = await fakeRelay(fail(status.UNAUTHENTICATED, 'token rejected'));
+    const boom = new Error('control plane unreachable');
+    const { c } = conn(r.addr, {
+      token: async (o) => {
+        if (o.force) throw boom;
+        return { token: 'stale', expiresAt: NOW_S + 900, lifetimeS: 900 };
+      },
+    });
+    const e = await c.exec('x').catch((x: unknown) => x);
+    expect(e).toBe(boom);
+    expect(e).not.toHaveProperty('lease');
   });
 });

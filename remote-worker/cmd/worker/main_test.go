@@ -344,3 +344,25 @@ func TestRotateWhenIdleStreamFollowsItsParent(t *testing.T) {
 		t.Fatal("cancelling the parent did not end the stream")
 	}
 }
+
+// Ruling P5-R37: the container tier has no lease mode, so its Hello never advertises the
+// reserved sbx:lease-processes-v1 capability (the relay refuses a process kind before it
+// reaches a worker without it), whatever tools are on PATH.
+func TestContainerHelloNeverAdvertisesLeaseProcesses(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range probed {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	got := helloCapabilities()
+	for _, c := range got {
+		if c == "sbx:lease-processes-v1" || strings.HasPrefix(c, "sbx:") {
+			t.Fatalf("helloCapabilities() = %v: the container worker advertised %q", got, c)
+		}
+	}
+	if len(got) != len(probed)+1 || got[len(got)-1] != wexec.WorkspaceCapability {
+		t.Fatalf("helloCapabilities() = %v, want every probed tool and then %s", got, wexec.WorkspaceCapability)
+	}
+}

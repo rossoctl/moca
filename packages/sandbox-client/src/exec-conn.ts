@@ -3,16 +3,23 @@ import * as tls from 'node:tls';
 import { credentials, Metadata, status, type ServiceError } from '@grpc/grpc-js';
 import {
   Exec as ExecMessage,
+  ExecKind,
   LeaseControlRequest,
   LeaseKeepaliveRequest,
   LeaseOp,
+  ProcessArgs,
   SandboxExecClient,
   Stream,
   type ExecEvent,
   type LeaseControlResponse,
   type LeaseEvent,
 } from './gen/sandbox/v1/sandbox.js';
-import { LeaseControlError, leaseStatusView, type LeaseStatusView } from './lease.js';
+import {
+  LeaseControlError,
+  leaseStatusView,
+  type LeaseStatusView,
+  type TrackedProcessView,
+} from './lease.js';
 
 /**
  * The sandbox/v1 exec client for SBX0's clients (spec §6.5, §7): TLS to the exec Route, keepalive
@@ -22,11 +29,14 @@ import { LeaseControlError, leaseStatusView, type LeaseStatusView } from './leas
  * ONLY if no event arrived. A command that started is never run twice: any failure after the first
  * event -- a dropped connection included -- is surfaced as an error. The worker's `stale_mode:`
  * refusal (the token predates a mode change) is retried the same way, once, under a new req_id
- * (ruling P4-R21): the worker refuses it before the start, so nothing ran. The lease calls follow
+ * (ruling P4-R21): the worker refuses it before the start, so nothing ran. So is the relay's
+ * `processes_not_enabled:` refusal of a process kind (P5-R29): the held token may predate an
+ * upgrade to lease+processes, and the fresh one reads the record as it is now. The lease calls follow
  * the token rule (ruling P4-R7): `leaseControl`, every op, and `leaseKeepalive` retry a token
  * refusal once with a forced fresh token, and a second refusal is a LeaseControlError
  * `unauthenticated`. The relay refuses the bearer before routing, so `set_mode` resends the same
- * set-mode token, never used yet.
+ * set-mode token, never used yet. The process calls (plan 5, `process`) are Execs of a process
+ * kind, under the same retries as `exec`.
  */
 export interface ExecResult {
   stdout: Buffer;
@@ -81,6 +91,8 @@ export class ExecMachineryError extends Error {
     readonly grpcCode?: number,
     readonly kind: ExecFailureKind = 'machinery',
     readonly mayHaveRun = false,
+    /** The relay's or worker's own text, when the failure carried one: what wire strings match. */
+    readonly wire?: string,
   ) {
     super(message);
     this.name = 'ExecMachineryError';
@@ -116,6 +128,169 @@ export class ExecAbortedError extends Error {
     super('the Exec was aborted', { cause: signal.reason });
     this.name = 'AbortError';
   }
+}
+
+/**
+ * A process call the relay or the worker refused with one of its wire strings (spec §7): nothing
+ * ran. `code` is the wire prefix: `processes_not_enabled` (the sandbox's mode is below
+ * lease+processes), `process_not_found`, `process_limit`, `process_name_taken`, `process_cwd`,
+ * `process_name_invalid`, `process_signal`, or `lease_unsupported` (the guest has no level 2).
+ * `lease` holds the events the response carried, as ExecMachineryError's does.
+ */
+export class ProcessError extends Error {
+  constructor(
+    readonly code: string,
+    readonly detail: string,
+    readonly wire: string,
+    public lease: LeaseEvent[] = [],
+  ) {
+    super(wire || `${code}: ${detail}`);
+    this.name = 'ProcessError';
+  }
+}
+
+/** A process wire string: its code, then its detail. */
+const PROCESS_WIRE = /^(process_[a-z_]+|processes_not_enabled|lease_unsupported):\s*([\s\S]*)$/;
+
+export type ProcessOp = 'start' | 'list' | 'logs' | 'stop';
+/** A process selected by id or by name; an id wins over an equal name (the guest's rule). */
+export interface ProcessSelector {
+  id?: string;
+  name?: string;
+}
+
+/**
+ * A process as a client is given it (P5-R6): `p<n>` (an id as clients show it) or a decimal `n` is
+ * the id; anything else a name. No name is shaped like an id (P5-R33), so an id-shaped name can
+ * only mean the id. Leading zeros are dropped (`p007` is id `7`): the guest compares id strings.
+ * The MCP tools and `mocactl sbx proc` both read their selector through this.
+ */
+export function processSelector(given: string): ProcessSelector {
+  const m = /^p?(\d+)$/.exec(given);
+  return m ? { id: m[1]!.replace(/^0+(?=\d)/, '') } : { name: given };
+}
+
+const PROCESS_NAME_WANT = 'want 1-64 characters of [A-Za-z0-9._-], not shaped like an id (p<n>)';
+
+/**
+ * Why `name` is refused as a process name, as the guest's `process_name_invalid:` detail says it
+ * (rulings P5-R8, P5-R33; guestagent validateProcessName): undefined when it is allowed. Clients
+ * check it before sending, with the same text.
+ */
+export function processNameProblem(name: string): string | undefined {
+  if (/^[A-Za-z0-9._-]{1,64}$/.test(name) && !/^p?[0-9]+$/.test(name)) return undefined;
+  const bytes = Buffer.byteLength(name);
+  return bytes > 64
+    ? `a name of ${bytes} bytes: ${PROCESS_NAME_WANT}`
+    : `${JSON.stringify(name)}: ${PROCESS_NAME_WANT}`;
+}
+
+/** A process name refused before sending, as the guest would have refused it. */
+export function processNameError(name: string): ProcessError | undefined {
+  const d = processNameProblem(name);
+  return d === undefined
+    ? undefined
+    : new ProcessError('process_name_invalid', d, `process_name_invalid: ${d}`);
+}
+export interface ProcessArgsByOp {
+  /** `cwd` is inside the workspace (default /workspace); `name` is unique among running ones. */
+  start: { command: string; name?: string; cwd?: string };
+  list: Record<string, never>;
+  /** `tail`: the last lines (default 200). */
+  logs: ProcessSelector & { tail?: number };
+  /** `signal`: default TERM; the cgroup is killed 10 s later. */
+  stop: ProcessSelector & { signal?: string };
+}
+export interface ProcessStarted {
+  id: string;
+  name: string;
+  pid: number;
+}
+export interface ProcessResultByOp {
+  start: ProcessStarted;
+  /** The table, oldest first, exited entries included. */
+  list: TrackedProcessView[];
+  /** The last lines of combined stdout and stderr. */
+  logs: string;
+  /** The final state. */
+  stop: TrackedProcessView;
+}
+/** A process call's answer, and the lease events its response carried (spec §5). */
+export interface ProcessOutcome<T> {
+  result: T;
+  lease: LeaseEvent[];
+}
+export interface ProcessCallOptions {
+  signal?: AbortSignal;
+  /** Seconds (default 60): short, so the call fits the token already held. */
+  timeoutS?: number;
+}
+export type ProcessCall = <O extends ProcessOp>(
+  op: O,
+  args: ProcessArgsByOp[O],
+  opts?: ProcessCallOptions,
+) => Promise<ProcessOutcome<ProcessResultByOp[O]>>;
+
+/** A process call's default timeout; the worker raises it to its own floor (30 s) if need be. */
+export const PROCESS_TIMEOUT_S = 60;
+const PROCESS_KINDS: Record<ProcessOp, ExecKind> = {
+  start: ExecKind.EXEC_KIND_PROCESS_START,
+  list: ExecKind.EXEC_KIND_PROCESS_LIST,
+  logs: ExecKind.EXEC_KIND_PROCESS_LOGS,
+  stop: ExecKind.EXEC_KIND_PROCESS_STOP,
+};
+
+/** What an Exec asks of the worker beyond its command: its kind and process arguments. */
+interface ExecKindArgs {
+  kind: ExecKind;
+  process?: ProcessArgs;
+}
+const COMMAND: ExecKindArgs = { kind: ExecKind.EXEC_KIND_COMMAND };
+
+/** One row of the guest's tracked table, as its JSON has it (guestagent.TrackedProcess). */
+function rowView(x: unknown, nowMs: number): TrackedProcessView | undefined {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return undefined;
+  const r = x as Record<string, unknown>;
+  const { id, name, pid, state, code } = r;
+  const started = r.started_unix_ms;
+  const memory = r.memory_bytes;
+  if (
+    typeof id !== 'string' ||
+    typeof name !== 'string' ||
+    typeof pid !== 'number' ||
+    typeof state !== 'string' ||
+    typeof code !== 'number' ||
+    typeof started !== 'number' ||
+    typeof memory !== 'number'
+  ) {
+    return undefined;
+  }
+  // Ages by this clock: the guest's is set from the host's at each Exec.
+  return { id, name, pid, state, code, ageMs: Math.max(0, nowMs - started), memoryBytes: memory };
+}
+
+/** The guest's answer to `op`, from its stdout; undefined when it is not what `op` answers. */
+function parseProcessAnswer(op: ProcessOp, stdout: string, nowMs: number): unknown {
+  if (op === 'logs') return stdout;
+  let v: unknown;
+  try {
+    v = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (op === 'list') {
+    if (!Array.isArray(v)) return undefined;
+    const rows = v.map((x) => rowView(x, nowMs));
+    return rows.every((x) => x !== undefined) ? rows : undefined;
+  }
+  if (op === 'stop') return rowView(v, nowMs);
+  const r = (typeof v === 'object' && v !== null && !Array.isArray(v) ? v : {}) as Record<
+    string,
+    unknown
+  >;
+  return typeof r.id === 'string' && typeof r.name === 'string' && typeof r.pid === 'number'
+    ? { id: r.id, name: r.name, pid: r.pid }
+    : undefined;
 }
 
 /** What the connection asks of its token source before an Exec. */
@@ -240,14 +415,32 @@ export function newReqId(): number {
 
 /** The worker's refusal of an Exec whose token's mode epoch is below the stored one (spec §8.2). */
 const STALE_MODE = /^stale_mode:/;
+/** The relay's refusal of a process kind under a token whose mode is below lease+processes. */
+const PROCESSES_NOT_ENABLED = /^processes_not_enabled:/;
 
 class NotStarted extends Error {}
 
-/** A `stale_mode:` refusal: nothing ran. `surfaced` is the error a second one is reported as. */
-class StaleMode extends Error {
-  constructor(readonly surfaced: ExecMachineryError) {
+/**
+ * A refusal that a token minted now may not get: the worker's `stale_mode:` or the relay's
+ * `processes_not_enabled:`. Nothing ran. `surfaced` is the error a second one is reported as.
+ */
+class Remint extends Error {
+  constructor(
+    readonly surfaced: ExecMachineryError,
+    readonly refusal: 'stale_mode' | 'processes_not_enabled',
+  ) {
     super(surfaced.message);
   }
+}
+
+/**
+ * The lease events an Exec's failure carries (spec §5): its `lease` array, whichever error it is.
+ * The connection attaches the events of a refused first attempt even to a token source's own
+ * error when the re-mint fails, as the worker acked them.
+ */
+export function leaseEventsOf(err: unknown): LeaseEvent[] {
+  const lease = typeof err === 'object' && err !== null ? (err as { lease?: unknown }).lease : [];
+  return Array.isArray(lease) ? (lease as LeaseEvent[]) : [];
 }
 
 /** Where the trusted roots come from: `node:tls`, or a fake in tests. */
@@ -288,7 +481,74 @@ export class SandboxExecConn {
     this.now = o.now ?? Date.now;
   }
 
-  exec: Exec = async (command, opts = {}) => {
+  exec: Exec = (command, opts = {}) => this.send(command, opts, COMMAND);
+
+  /**
+   * One process call (spec §7): an Exec of the op's kind, under `exec`'s retries (the token
+   * refusal, the stale_mode re-mint). It answers the guest's result, parsed, with the lease events
+   * its response carried. A refusal with a process wire string is a ProcessError; an answer that
+   * is not what the op answers, a timeout or a non-zero exit is an ExecMachineryError.
+   */
+  process: ProcessCall = async (op, args, opts = {}) => {
+    const a = args as ProcessSelector & {
+      command?: string;
+      cwd?: string;
+      tail?: number;
+      signal?: string;
+    };
+    const kind: ExecKindArgs = {
+      kind: PROCESS_KINDS[op],
+      process: ProcessArgs.fromPartial({
+        name: a.name ?? '',
+        id: a.id ?? '',
+        cwd: a.cwd ?? '',
+        tail: a.tail ?? 0,
+        signal: a.signal ?? '',
+      }),
+    };
+    let r: ExecResult;
+    try {
+      r = await this.send(
+        op === 'start' ? (a.command ?? '') : '',
+        { timeoutS: opts.timeoutS ?? PROCESS_TIMEOUT_S, signal: opts.signal },
+        kind,
+      );
+    } catch (err) {
+      const wire = err instanceof ExecMachineryError ? err.wire : undefined;
+      const m = wire === undefined ? null : PROCESS_WIRE.exec(wire);
+      if (m) throw new ProcessError(m[1]!, m[2]!, wire!, (err as ExecMachineryError).lease);
+      throw err;
+    }
+    const what = `process_${op}`;
+    // start and stop act on the guest: a bad answer does not mean nothing happened.
+    const acted = op === 'start' || op === 'stop';
+    const bad = (why: string) => {
+      const e = new ExecMachineryError(`sandbox failure: ${why}`, undefined, 'machinery', acted);
+      e.lease = r.lease;
+      return e;
+    };
+    // A process kind is quick in the guest (a stop takes ~10 s at most, well inside the budget),
+    // but it queues on the sandbox's one run gate, and the wait counts: a timeout means another
+    // command held the sandbox (final review M4).
+    if (r.timedOutS !== undefined) {
+      throw bad(`${what} timed out waiting for the sandbox (another command may still be running)`);
+    }
+    if (r.exitCode !== 0) throw bad(`${what} answered exit ${r.exitCode}`);
+    const out = r.stdout.toString();
+    const result = parseProcessAnswer(op, out, this.now());
+    if (result === undefined) {
+      const shown = out.length > 200 ? `${out.slice(0, 200)}…` : out;
+      throw bad(`unreadable ${what} answer: ${JSON.stringify(shown)}`);
+    }
+    return { result: result as ProcessResultByOp[typeof op], lease: r.lease };
+  };
+
+  /** An Exec of `kind` under the retry rules (see the top of the file). */
+  private send = async (
+    command: string,
+    opts: ExecOptions,
+    kind: ExecKindArgs,
+  ): Promise<ExecResult> => {
     const requested = opts.timeoutS;
     if (requested !== undefined && !(Number.isFinite(requested) && requested > 0)) {
       throw new RangeError(`timeoutS must be a positive number of seconds, got ${requested}`);
@@ -299,21 +559,21 @@ export class SandboxExecConn {
     let reqId = newReqId();
     const attempt = async (force: boolean) => {
       const { grant, timeoutS, capped } = await this.prepare(want, force);
-      const r = await this.once(command, opts, reqId, timeoutS, grant.token);
+      const r = await this.once(command, opts, reqId, timeoutS, grant.token, kind);
       return capped ? { ...r, capped: true } : r;
     };
     /** The lease events of a stale_mode refusal, which ride before the retry's own. */
     let carried: LeaseEvent[] = [];
-    let staleFirst = false;
+    let reminted: Remint['refusal'] | undefined;
     try {
       return await attempt(false);
     } catch (err) {
-      if (err instanceof StaleMode) {
-        // The token predates a mode change (P4-R21): the worker refused before the start. The
+      if (err instanceof Remint) {
+        // The token predates a mode change (P4-R21, P5-R29): refused before the start. The
         // retry's token carries the new epoch, which the worker's req_id cache fingerprints, so
         // the same id would read there as a collision: it is a different Exec, under a new id.
         carried = err.surfaced.lease;
-        staleFirst = true;
+        reminted = err.refusal;
         reqId = newReqId();
       } else if (!(err instanceof NotStarted)) throw err;
     }
@@ -326,14 +586,27 @@ export class SandboxExecConn {
     } catch (err) {
       if (err instanceof NotStarted) {
         // The retry after a stale_mode refusal was a re-mint for the new epoch, not a refresh.
-        const after = staleFirst
-          ? 'after a stale_mode refusal and a fresh token'
+        const after = reminted
+          ? `after a ${reminted} refusal and a fresh token`
           : 'after one token refresh';
         throw new ExecRefusedError(`${err.message} (${after})`, status.UNAUTHENTICATED, carried);
       }
-      const e = err instanceof StaleMode ? err.surfaced : err;
-      if (e instanceof ExecMachineryError || e instanceof ExecAbortedError) {
+      const e = err instanceof Remint ? err.surfaced : err;
+      // The first attempt's events ride whatever the retry failed with: the worker acked them.
+      if (
+        e instanceof ExecMachineryError ||
+        e instanceof ExecAbortedError ||
+        e instanceof ExecRefusedError
+      ) {
         e.lease = [...carried, ...e.lease];
+      } else if (carried.length > 0 && typeof e === 'object' && e !== null) {
+        // The re-mint itself failed (the token source's error): it still carries them, unchanged
+        // otherwise, so its callers read it as before (Minor 1).
+        try {
+          Object.assign(e, { lease: [...carried, ...leaseEventsOf(e)] });
+        } catch {
+          // A frozen error cannot carry them: nothing else to do.
+        }
       }
       throw e;
     }
@@ -520,6 +793,7 @@ export class SandboxExecConn {
     reqId: number,
     timeoutS: number,
     token: string,
+    kind: ExecKindArgs,
   ): Promise<ExecResult> {
     const signal = opts.signal;
     if (signal?.aborted) return Promise.reject(new ExecAbortedError(signal));
@@ -542,6 +816,8 @@ export class SandboxExecConn {
             typeof this.o.keepalive === 'function'
               ? this.o.keepalive()
               : (this.o.keepalive ?? false),
+          kind: kind.kind,
+          ...(kind.process ? { process: kind.process } : {}),
         }),
       },
       md,
@@ -572,8 +848,13 @@ export class SandboxExecConn {
       });
       /** Rejects with `e`, carrying the lease events that arrived before the failure. */
       const fail = (e: Error) => {
-        if (e instanceof ExecMachineryError || e instanceof ExecAbortedError) e.lease = lease;
-        else if (e instanceof StaleMode) e.surfaced.lease = lease;
+        if (
+          e instanceof ExecMachineryError ||
+          e instanceof ExecAbortedError ||
+          e instanceof ExecRefusedError
+        ) {
+          e.lease = lease;
+        } else if (e instanceof Remint) e.surfaced.lease = lease;
         reject(e);
       };
       const onAbort = () => {
@@ -605,17 +886,24 @@ export class SandboxExecConn {
        */
       const workerFailure = (message: string, code?: number, inStream = false) =>
         TEMPLATE_BUSY.test(message)
-          ? new ExecMachineryError(`template busy: ${message}`, code, 'template_busy')
+          ? new ExecMachineryError(
+              `template busy: ${message}`,
+              code,
+              'template_busy',
+              false,
+              message,
+            )
           : new ExecMachineryError(
               `sandbox failure: ${message || 'exec failed'}`,
               code,
               'machinery',
               output || (inStream && !NOT_STARTED.test(message)),
+              message,
             );
       /** The worker's in-stream ExecError: a stale_mode refusal before any output is retried. */
       const inStreamFailure = (message: string, code?: number): Error => {
         const e = workerFailure(message, code, true);
-        return !output && STALE_MODE.test(message) ? new StaleMode(e) : e;
+        return !output && STALE_MODE.test(message) ? new Remint(e, 'stale_mode') : e;
       };
 
       call.on('data', (ev: ExecEvent) => {
@@ -643,6 +931,21 @@ export class SandboxExecConn {
         if (!started && e.code === status.UNAUTHENTICATED) return fail(new NotStarted(details));
         if (!started && e.code === status.PERMISSION_DENIED) {
           return fail(new ExecRefusedError(details, e.code));
+        }
+        if (
+          !started &&
+          e.code === status.FAILED_PRECONDITION &&
+          PROCESSES_NOT_ENABLED.test(details)
+        ) {
+          // The relay read the held token's mode claim before routing: nothing ran (P5-R29).
+          const refused = new ExecMachineryError(
+            `sandbox failure: ${status[e.code]}: ${details}`,
+            e.code,
+            'machinery',
+            false,
+            details,
+          );
+          return fail(new Remint(refused, 'processes_not_enabled'));
         }
         // Only the relay's "sandbox busy" is busy: grpc-js message-size limits are RESOURCE_EXHAUSTED too.
         if (e.code === status.RESOURCE_EXHAUSTED && details.startsWith('sandbox busy')) {
@@ -679,6 +982,7 @@ export class SandboxExecConn {
             e.code,
             'machinery',
             output || e.code === status.UNAVAILABLE, // UNAVAILABLE: the connection was lost
+            details, // the relay's refusal, e.g. FAILED_PRECONDITION processes_not_enabled: …
           ),
         );
       });

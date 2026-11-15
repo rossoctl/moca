@@ -3,7 +3,9 @@
 package guestagent
 
 import (
+	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -240,5 +242,36 @@ func TestDialedVsockCloseUnblocksAPendingRead(t *testing.T) {
 	case <-peerClosed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the peer never saw EOF: Close did not release the dialled fd")
+	}
+}
+
+// TestVsockListenerCloseEndsAcceptWithErrClosed: Close unblocks a pending Accept, and it
+// and every later Accept report net.ErrClosed -- the one error Agent.Serve returns on
+// rather than retrying (Task 11 fix round 1, item 1).
+func TestVsockListenerCloseEndsAcceptWithErrClosed(t *testing.T) {
+	requireVsockLoopback(t)
+	ln, err := Listen("vsock:9997")
+	if err != nil {
+		t.Fatalf("Listen(vsock:9997): %v", err)
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := ln.Accept()
+		errc <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // let Accept park on the poller
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("pending Accept after Close: %v, want net.ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not unblock a pending Accept")
+	}
+	if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept on a closed listener: %v, want net.ErrClosed", err)
 	}
 }

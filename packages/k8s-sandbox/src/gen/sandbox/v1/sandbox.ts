@@ -26,6 +26,62 @@ import {
 export const protobufPackage = "sandbox.v1";
 
 /**
+ * What an Exec asks the worker to do. COMMAND (0) is the default, so an Exec from a client
+ * that predates the field is a plain command.
+ * buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+ */
+export enum ExecKind {
+  EXEC_KIND_COMMAND = 0,
+  EXEC_KIND_PROCESS_START = 1,
+  EXEC_KIND_PROCESS_LIST = 2,
+  EXEC_KIND_PROCESS_LOGS = 3,
+  EXEC_KIND_PROCESS_STOP = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function execKindFromJSON(object: any): ExecKind {
+  switch (object) {
+    case 0:
+    case "EXEC_KIND_COMMAND":
+      return ExecKind.EXEC_KIND_COMMAND;
+    case 1:
+    case "EXEC_KIND_PROCESS_START":
+      return ExecKind.EXEC_KIND_PROCESS_START;
+    case 2:
+    case "EXEC_KIND_PROCESS_LIST":
+      return ExecKind.EXEC_KIND_PROCESS_LIST;
+    case 3:
+    case "EXEC_KIND_PROCESS_LOGS":
+      return ExecKind.EXEC_KIND_PROCESS_LOGS;
+    case 4:
+    case "EXEC_KIND_PROCESS_STOP":
+      return ExecKind.EXEC_KIND_PROCESS_STOP;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ExecKind.UNRECOGNIZED;
+  }
+}
+
+export function execKindToJSON(object: ExecKind): string {
+  switch (object) {
+    case ExecKind.EXEC_KIND_COMMAND:
+      return "EXEC_KIND_COMMAND";
+    case ExecKind.EXEC_KIND_PROCESS_START:
+      return "EXEC_KIND_PROCESS_START";
+    case ExecKind.EXEC_KIND_PROCESS_LIST:
+      return "EXEC_KIND_PROCESS_LIST";
+    case ExecKind.EXEC_KIND_PROCESS_LOGS:
+      return "EXEC_KIND_PROCESS_LOGS";
+    case ExecKind.EXEC_KIND_PROCESS_STOP:
+      return "EXEC_KIND_PROCESS_STOP";
+    case ExecKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+/**
  * Which output stream a Chunk carries. Default (0) is treated as stdout so a
  * worker that does not set the field still collects output into stdout.
  */
@@ -283,6 +339,34 @@ export interface Exec {
   idleTimeoutS: number;
   /** opts the lease into the keepalive-loss rule (spec §4) */
   keepalive: boolean;
+  /**
+   * Level 2 (SBX0.3 plan 5), ADDITIVE. What the Exec asks for. A worker refuses a kind other
+   * than EXEC_KIND_COMMAND unless the snapshot advertises lease-processes-v1; the container
+   * tier refuses every non-command kind. Neither ever runs the command on a refusal.
+   */
+  kind: ExecKind;
+  /**
+   * The arguments of a process kind. For EXEC_KIND_PROCESS_START the command stays in
+   * Exec.command; the other process kinds leave it empty.
+   */
+  process: ProcessArgs | undefined;
+}
+
+/**
+ * Arguments of the process kinds. Each kind reads only the fields it names: name and id
+ * select a process (id or name), cwd and name apply to start, tail to logs, signal to stop.
+ */
+export interface ProcessArgs {
+  /** start: the optional unique name among running processes; logs/stop: a name */
+  name: string;
+  /** logs/stop: the process id, instead of name */
+  id: string;
+  /** start: inside the workspace; empty = /workspace */
+  cwd: string;
+  /** logs: the last n lines; 0 = the default (200) */
+  tail: number;
+  /** stop: "TERM" (default), then the cgroup is killed after 10 s */
+  signal: string;
 }
 
 export interface Abort {
@@ -363,7 +447,10 @@ export interface AbortResponse {
  */
 export interface LeaseEvent {
   reqId: number;
-  /** "start" | "end" | "expiring" */
+  /**
+   * "start" | "end" | "expiring" | "processes_stopped" (plan 5: a set_mode downgrade
+   * stopped the tracked processes; the lease itself continues).
+   */
   state: string;
   /**
    * On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
@@ -375,13 +462,29 @@ export interface LeaseEvent {
   mode: SandboxMode;
   /** the lease's age at the event */
   ageMs: number;
-  /** processes that were running; filled from plan 5 on */
+  /** Display strings ("<name> (pid <n>)") of the processes that were running. */
   processes: string[];
   /**
    * On "expiring" only: the hard end, i.e. when the lease became expiring plus grace_limit
    * (unix ms). Zero on every other state.
    */
   endsByUnixMs: number;
+  /** The structured form of processes (plan 5). Set on the same events as processes. */
+  tracked: TrackedProcess[];
+}
+
+/**
+ * One tracked process of a lease. state is "running", "exited" or "killed". code is the
+ * exit code for exited, or the signal number for killed; zero while running.
+ */
+export interface TrackedProcess {
+  id: string;
+  name: string;
+  pid: number;
+  state: string;
+  code: number;
+  ageMs: number;
+  memoryBytes: number;
 }
 
 /**
@@ -413,7 +516,16 @@ export interface LeaseStatus {
   ageMs: number;
   idleTimeoutS: number;
   /** the last undelivered lease event (a start or an end), kept until acknowledged */
-  pending: LeaseEvent | undefined;
+  pending:
+    | LeaseEvent
+    | undefined;
+  /** the full tracked table, exited entries included (plan 5) */
+  processes: TrackedProcess[];
+  /**
+   * The processes this set_mode call's downgrade stopped (plan 5), carried in that call's
+   * answer only: never stored, never acknowledged, empty on every other status.
+   */
+  stopped: TrackedProcess[];
 }
 
 /**
@@ -1037,6 +1149,8 @@ function createBaseExec(): Exec {
     modeEpoch: 0,
     idleTimeoutS: 0,
     keepalive: false,
+    kind: 0,
+    process: undefined,
   };
 }
 
@@ -1071,6 +1185,12 @@ export const Exec: MessageFns<Exec> = {
     }
     if (message.keepalive !== false) {
       writer.uint32(80).bool(message.keepalive);
+    }
+    if (message.kind !== 0) {
+      writer.uint32(88).int32(message.kind);
+    }
+    if (message.process !== undefined) {
+      ProcessArgs.encode(message.process, writer.uint32(98).fork()).join();
     }
     return writer;
   },
@@ -1162,6 +1282,22 @@ export const Exec: MessageFns<Exec> = {
           message.keepalive = reader.bool();
           continue;
         }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.kind = reader.int32() as any;
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.process = ProcessArgs.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1183,6 +1319,8 @@ export const Exec: MessageFns<Exec> = {
       modeEpoch: isSet(object.modeEpoch) ? globalThis.Number(object.modeEpoch) : 0,
       idleTimeoutS: isSet(object.idleTimeoutS) ? globalThis.Number(object.idleTimeoutS) : 0,
       keepalive: isSet(object.keepalive) ? globalThis.Boolean(object.keepalive) : false,
+      kind: isSet(object.kind) ? execKindFromJSON(object.kind) : 0,
+      process: isSet(object.process) ? ProcessArgs.fromJSON(object.process) : undefined,
     };
   },
 
@@ -1218,6 +1356,12 @@ export const Exec: MessageFns<Exec> = {
     if (message.keepalive !== false) {
       obj.keepalive = message.keepalive;
     }
+    if (message.kind !== 0) {
+      obj.kind = execKindToJSON(message.kind);
+    }
+    if (message.process !== undefined) {
+      obj.process = ProcessArgs.toJSON(message.process);
+    }
     return obj;
   },
 
@@ -1236,6 +1380,134 @@ export const Exec: MessageFns<Exec> = {
     message.modeEpoch = object.modeEpoch ?? 0;
     message.idleTimeoutS = object.idleTimeoutS ?? 0;
     message.keepalive = object.keepalive ?? false;
+    message.kind = object.kind ?? 0;
+    message.process = (object.process !== undefined && object.process !== null)
+      ? ProcessArgs.fromPartial(object.process)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseProcessArgs(): ProcessArgs {
+  return { name: "", id: "", cwd: "", tail: 0, signal: "" };
+}
+
+export const ProcessArgs: MessageFns<ProcessArgs> = {
+  encode(message: ProcessArgs, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.id !== "") {
+      writer.uint32(18).string(message.id);
+    }
+    if (message.cwd !== "") {
+      writer.uint32(26).string(message.cwd);
+    }
+    if (message.tail !== 0) {
+      writer.uint32(32).uint32(message.tail);
+    }
+    if (message.signal !== "") {
+      writer.uint32(42).string(message.signal);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProcessArgs {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProcessArgs();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.cwd = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.tail = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.signal = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProcessArgs {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
+      tail: isSet(object.tail) ? globalThis.Number(object.tail) : 0,
+      signal: isSet(object.signal) ? globalThis.String(object.signal) : "",
+    };
+  },
+
+  toJSON(message: ProcessArgs): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.cwd !== "") {
+      obj.cwd = message.cwd;
+    }
+    if (message.tail !== 0) {
+      obj.tail = Math.round(message.tail);
+    }
+    if (message.signal !== "") {
+      obj.signal = message.signal;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ProcessArgs>, I>>(base?: I): ProcessArgs {
+    return ProcessArgs.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ProcessArgs>, I>>(object: I): ProcessArgs {
+    const message = createBaseProcessArgs();
+    message.name = object.name ?? "";
+    message.id = object.id ?? "";
+    message.cwd = object.cwd ?? "";
+    message.tail = object.tail ?? 0;
+    message.signal = object.signal ?? "";
     return message;
   },
 };
@@ -1882,7 +2154,17 @@ export const AbortResponse: MessageFns<AbortResponse> = {
 };
 
 function createBaseLeaseEvent(): LeaseEvent {
-  return { reqId: 0, state: "", reason: "", atUnixMs: 0, mode: 0, ageMs: 0, processes: [], endsByUnixMs: 0 };
+  return {
+    reqId: 0,
+    state: "",
+    reason: "",
+    atUnixMs: 0,
+    mode: 0,
+    ageMs: 0,
+    processes: [],
+    endsByUnixMs: 0,
+    tracked: [],
+  };
 }
 
 export const LeaseEvent: MessageFns<LeaseEvent> = {
@@ -1910,6 +2192,9 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     }
     if (message.endsByUnixMs !== 0) {
       writer.uint32(64).int64(message.endsByUnixMs);
+    }
+    for (const v of message.tracked) {
+      TrackedProcess.encode(v!, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -1985,6 +2270,14 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
           message.endsByUnixMs = longToNumber(reader.int64());
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.tracked.push(TrackedProcess.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2006,6 +2299,9 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
         ? object.processes.map((e: any) => globalThis.String(e))
         : [],
       endsByUnixMs: isSet(object.endsByUnixMs) ? globalThis.Number(object.endsByUnixMs) : 0,
+      tracked: globalThis.Array.isArray(object?.tracked)
+        ? object.tracked.map((e: any) => TrackedProcess.fromJSON(e))
+        : [],
     };
   },
 
@@ -2035,6 +2331,9 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     if (message.endsByUnixMs !== 0) {
       obj.endsByUnixMs = Math.round(message.endsByUnixMs);
     }
+    if (message.tracked?.length) {
+      obj.tracked = message.tracked.map((e) => TrackedProcess.toJSON(e));
+    }
     return obj;
   },
 
@@ -2051,6 +2350,163 @@ export const LeaseEvent: MessageFns<LeaseEvent> = {
     message.ageMs = object.ageMs ?? 0;
     message.processes = object.processes?.map((e) => e) || [];
     message.endsByUnixMs = object.endsByUnixMs ?? 0;
+    message.tracked = object.tracked?.map((e) => TrackedProcess.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseTrackedProcess(): TrackedProcess {
+  return { id: "", name: "", pid: 0, state: "", code: 0, ageMs: 0, memoryBytes: 0 };
+}
+
+export const TrackedProcess: MessageFns<TrackedProcess> = {
+  encode(message: TrackedProcess, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.name !== "") {
+      writer.uint32(18).string(message.name);
+    }
+    if (message.pid !== 0) {
+      writer.uint32(24).uint32(message.pid);
+    }
+    if (message.state !== "") {
+      writer.uint32(34).string(message.state);
+    }
+    if (message.code !== 0) {
+      writer.uint32(40).int32(message.code);
+    }
+    if (message.ageMs !== 0) {
+      writer.uint32(48).uint64(message.ageMs);
+    }
+    if (message.memoryBytes !== 0) {
+      writer.uint32(56).uint64(message.memoryBytes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TrackedProcess {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTrackedProcess();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.pid = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.state = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.code = reader.int32();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.ageMs = longToNumber(reader.uint64());
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.memoryBytes = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): TrackedProcess {
+    return {
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      pid: isSet(object.pid) ? globalThis.Number(object.pid) : 0,
+      state: isSet(object.state) ? globalThis.String(object.state) : "",
+      code: isSet(object.code) ? globalThis.Number(object.code) : 0,
+      ageMs: isSet(object.ageMs) ? globalThis.Number(object.ageMs) : 0,
+      memoryBytes: isSet(object.memoryBytes) ? globalThis.Number(object.memoryBytes) : 0,
+    };
+  },
+
+  toJSON(message: TrackedProcess): unknown {
+    const obj: any = {};
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.pid !== 0) {
+      obj.pid = Math.round(message.pid);
+    }
+    if (message.state !== "") {
+      obj.state = message.state;
+    }
+    if (message.code !== 0) {
+      obj.code = Math.round(message.code);
+    }
+    if (message.ageMs !== 0) {
+      obj.ageMs = Math.round(message.ageMs);
+    }
+    if (message.memoryBytes !== 0) {
+      obj.memoryBytes = Math.round(message.memoryBytes);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<TrackedProcess>, I>>(base?: I): TrackedProcess {
+    return TrackedProcess.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TrackedProcess>, I>>(object: I): TrackedProcess {
+    const message = createBaseTrackedProcess();
+    message.id = object.id ?? "";
+    message.name = object.name ?? "";
+    message.pid = object.pid ?? 0;
+    message.state = object.state ?? "";
+    message.code = object.code ?? 0;
+    message.ageMs = object.ageMs ?? 0;
+    message.memoryBytes = object.memoryBytes ?? 0;
     return message;
   },
 };
@@ -2238,7 +2694,16 @@ export const LeaseKeepaliveFrame: MessageFns<LeaseKeepaliveFrame> = {
 };
 
 function createBaseLeaseStatus(): LeaseStatus {
-  return { mode: 0, epochKnown: false, state: "", ageMs: 0, idleTimeoutS: 0, pending: undefined };
+  return {
+    mode: 0,
+    epochKnown: false,
+    state: "",
+    ageMs: 0,
+    idleTimeoutS: 0,
+    pending: undefined,
+    processes: [],
+    stopped: [],
+  };
 }
 
 export const LeaseStatus: MessageFns<LeaseStatus> = {
@@ -2260,6 +2725,12 @@ export const LeaseStatus: MessageFns<LeaseStatus> = {
     }
     if (message.pending !== undefined) {
       LeaseEvent.encode(message.pending, writer.uint32(50).fork()).join();
+    }
+    for (const v of message.processes) {
+      TrackedProcess.encode(v!, writer.uint32(58).fork()).join();
+    }
+    for (const v of message.stopped) {
+      TrackedProcess.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -2319,6 +2790,22 @@ export const LeaseStatus: MessageFns<LeaseStatus> = {
           message.pending = LeaseEvent.decode(reader, reader.uint32());
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.processes.push(TrackedProcess.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.stopped.push(TrackedProcess.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2336,6 +2823,12 @@ export const LeaseStatus: MessageFns<LeaseStatus> = {
       ageMs: isSet(object.ageMs) ? globalThis.Number(object.ageMs) : 0,
       idleTimeoutS: isSet(object.idleTimeoutS) ? globalThis.Number(object.idleTimeoutS) : 0,
       pending: isSet(object.pending) ? LeaseEvent.fromJSON(object.pending) : undefined,
+      processes: globalThis.Array.isArray(object?.processes)
+        ? object.processes.map((e: any) => TrackedProcess.fromJSON(e))
+        : [],
+      stopped: globalThis.Array.isArray(object?.stopped)
+        ? object.stopped.map((e: any) => TrackedProcess.fromJSON(e))
+        : [],
     };
   },
 
@@ -2359,6 +2852,12 @@ export const LeaseStatus: MessageFns<LeaseStatus> = {
     if (message.pending !== undefined) {
       obj.pending = LeaseEvent.toJSON(message.pending);
     }
+    if (message.processes?.length) {
+      obj.processes = message.processes.map((e) => TrackedProcess.toJSON(e));
+    }
+    if (message.stopped?.length) {
+      obj.stopped = message.stopped.map((e) => TrackedProcess.toJSON(e));
+    }
     return obj;
   },
 
@@ -2375,6 +2874,8 @@ export const LeaseStatus: MessageFns<LeaseStatus> = {
     message.pending = (object.pending !== undefined && object.pending !== null)
       ? LeaseEvent.fromPartial(object.pending)
       : undefined;
+    message.processes = object.processes?.map((e) => TrackedProcess.fromPartial(e)) || [];
+    message.stopped = object.stopped?.map((e) => TrackedProcess.fromPartial(e)) || [];
     return message;
   },
 };

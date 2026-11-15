@@ -14,12 +14,14 @@ import {
   LeaseControlError,
   type Exec,
   type ExecConnOptions,
+  type LeaseEvent,
   type LeaseOpName,
   type LeaseStatusView,
 } from '@moca/sandbox-client';
 import { resolvePaths, saveAuth } from '../../src/config.js';
 import { sbxMain, sbxPaths } from '../../src/sbx/cli.js';
 import type { AgentopExec } from '../../src/sbx/agentop.js';
+import type { ExecFactory } from '../../src/sbx/exec.js';
 
 /** The fakes `mocactl sbx`'s tests share: a scripted control plane, a login, a sandbox, a token. */
 
@@ -419,4 +421,35 @@ export function harness(
   };
   const err = () => s.io.errs.join('\n');
   return { ...s, cp, ws, r, run, err };
+}
+
+/** A lease end as the worker sends it on an Exec's response (spec §5). */
+export const leaseEnd = (over: Partial<LeaseEvent> = {}): LeaseEvent => ({
+  reqId: 0,
+  state: 'end',
+  reason: 'idle',
+  atUnixMs: 1_800_000_100_000,
+  mode: 2, // SANDBOX_MODE_LEASE
+  ageMs: 60_000,
+  processes: [],
+  endsByUnixMs: 0,
+  tracked: [],
+  ...over,
+});
+
+/**
+ * `factory`'s connections, each Exec's result carrying the next entry of `queue` as its lease
+ * events (none once it is empty), as a lease worker's responses do (spec §5).
+ */
+export function withLeaseEvents(factory: ExecFactory, queue: LeaseEvent[][]): ExecFactory {
+  return (o) => {
+    const c = factory(o);
+    return {
+      ...c,
+      exec: async (command, opts) => {
+        const r = await c.exec(command, opts);
+        return { ...r, lease: queue.shift() ?? r.lease };
+      },
+    };
+  };
 }

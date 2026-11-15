@@ -243,7 +243,7 @@ func downgradedWhileQueued(t *testing.T) (lc *leaseLauncher, clk *fakeClock, rel
 	queued = execAsync(p, "k", e)
 	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
 	sm := make(chan error, 1)
-	go func() { sm <- p.SetMode("k", ModePerExec, 3) }()
+	go func() { sm <- setModeErr(p, "k", ModePerExec, 3) }()
 	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
 	return lc, clk, release, first, queued, sm
 }

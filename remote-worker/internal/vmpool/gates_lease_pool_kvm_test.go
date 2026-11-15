@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -17,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // The worker's lease gates (spec §9; plan 2, Task 9). Plan 1's lease gates
@@ -41,6 +44,9 @@ type leaseGate struct {
 	p   *pool
 	lc  Launcher
 	cfg Config // as given to New, so a restart builds the next pool from the same one
+	// mode is the lease mode the end drivers (leaseEndDrivers) start and run their Execs at:
+	// lease, or lease+processes for a gate's level-2 half.
+	mode Mode
 }
 
 // leaseGateSeq makes each gate's cgroup parent name unique within the process.
@@ -95,7 +101,7 @@ func newLeaseGateWith(t *testing.T, tweak func(*Config), wrap func(*firecrackerL
 		}
 		lc = wrap(fl)
 	}
-	g := &leaseGate{lc: lc, cfg: cfg}
+	g := &leaseGate{lc: lc, cfg: cfg, mode: ModeLease}
 	g.p = g.newPool(t)
 	if !g.p.cfg.LeaseEnabled {
 		t.Fatalf("LeaseEnabled is false with VMM %s and features %v", cfg.VMM, cfg.ManifestFeatures)
@@ -183,6 +189,26 @@ func removeLeaseGateCgroup(t *testing.T, dir string) {
 // gateLease is a lease Exec at epoch, with a timeout comfortably above any command here.
 func gateLease(cmd string, epoch uint64) Exec {
 	return Exec{Command: cmd, TimeoutS: 60, Mode: ModeLease, ModeEpoch: epoch}
+}
+
+// lease is gateLease at g's mode.
+func (g *leaseGate) lease(cmd string, epoch uint64) Exec {
+	e := gateLease(cmd, epoch)
+	e.Mode = g.mode
+	return e
+}
+
+// gateLevel2 is gateLease at lease+processes: a command in a level-2 lease.
+func gateLevel2(cmd string, epoch uint64) Exec {
+	e := gateLease(cmd, epoch)
+	e.Mode = ModeLeaseProcesses
+	return e
+}
+
+// gateProcess is a process kind at lease+processes and epoch (plan 5), with the same timeout
+// as gateLease (above the kinds' 30 s floor, ProcessKindMinTimeoutS).
+func gateProcess(kind ExecKind, args ProcessArgs, cmd string, epoch uint64) Exec {
+	return Exec{Kind: kind, Process: args, Command: cmd, TimeoutS: 60, Mode: ModeLeaseProcesses, ModeEpoch: epoch}
 }
 
 // exec runs e on key and returns its result, stdout and stderr.
@@ -376,7 +402,7 @@ func leaseEndDrivers() []leaseEndDriver {
 			// timeout fires first and keeps the lease, TestGateLeaseTimeoutKeepsTheLease.)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			if _, err := g.p.Exec(ctx, key, gateLease("sleep 30", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
+			if _, err := g.p.Exec(ctx, key, g.lease("sleep 30", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
 				t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
 			}
 			return g
@@ -390,12 +416,16 @@ func leaseEndDrivers() []leaseEndDriver {
 				return g
 			}},
 		{reason: LeaseEndGraceLimit,
-			tweak: func(c *Config) { c.LeaseMaxDuration, c.LeaseGraceLimit = 2*time.Second, 3*time.Second },
+			// A 10 s grace, so that level 2's extra start steps (TestGateLeaseNotice/level2's
+			// process_start) fit before the cut; sleep 30 still outlasts it.
+			tweak: func(c *Config) {
+				c.LeaseMaxDuration, c.LeaseMaxDurationProcesses, c.LeaseGraceLimit = 2*time.Second, 2*time.Second, 10*time.Second
+			},
 			end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 				t.Helper()
 				// Running when the grace limit passes: the sweep cuts it, and it fails
 				// lease_ended(grace_limit), not a generic error (spec §4).
-				_, _, _, err := g.exec(key, gateLease("sleep 30", 1))
+				_, _, _, err := g.exec(key, g.lease("sleep 30", 1))
 				var ended *LeaseEndedError
 				if !errors.As(err, &ended) || ended.Reason != LeaseEndGraceLimit {
 					t.Fatalf("an Exec past the grace limit: err = %v, want lease_ended(%s)", err, LeaseEndGraceLimit)
@@ -413,7 +443,7 @@ func leaseEndDrivers() []leaseEndDriver {
 				return g
 			}},
 		{reason: LeaseEndMaxDuration, first: Exec{IdleTimeout: time.Second},
-			tweak: func(c *Config) { c.LeaseMaxDuration = 2 * time.Second },
+			tweak: func(c *Config) { c.LeaseMaxDuration, c.LeaseMaxDurationProcesses = 2*time.Second, 2*time.Second },
 			end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 				t.Helper()
 				// Expiring after 2 s, it ends at its next idle (LeaseIdleMin) as max_duration.
@@ -423,13 +453,23 @@ func leaseEndDrivers() []leaseEndDriver {
 	}
 }
 
-// startLease sets key's mode to lease (epoch 1) and runs d's first Exec there.
+// startLease sets key's mode to g's (epoch 1) and runs d's first Exec there.
 func (d leaseEndDriver) startLease(t *testing.T, g *leaseGate, key string) {
 	t.Helper()
-	mustSetMode(t, g.p, key, ModeLease, 1)
+	mustSetMode(t, g.p, key, g.mode, 1)
 	e := d.first
-	e.Command, e.Mode, e.ModeEpoch, e.TimeoutS = "true", ModeLease, 1, 60
+	e.Command, e.Mode, e.ModeEpoch, e.TimeoutS = "true", g.mode, 1, 60
 	g.run(t, key, e)
+}
+
+// startTracked starts the tracked process web on key's level-2 lease, with the idle timeout
+// and keepalive of d's first Exec so that it changes neither, and returns it.
+func (d leaseEndDriver) startTracked(t *testing.T, g *leaseGate, key string) gateTracked {
+	t.Helper()
+	e := d.first
+	e.Kind, e.Process, e.Command = ExecKindProcessStart, ProcessArgs{Name: "web"}, "exec sleep 600"
+	e.Mode, e.ModeEpoch, e.TimeoutS = g.mode, 1, 60
+	return parseTrackedStart(t, g.run(t, key, e))
 }
 
 // TestGateLeaseOneSandbox: a lease VM serves one key and never becomes a standby, and two
@@ -524,34 +564,72 @@ func TestGateLeaseTeardown(t *testing.T) {
 func TestGateLeaseNotice(t *testing.T) {
 	requireKVM(t)
 	requireLeaseSnapshot(t)
-	for _, d := range leaseEndDrivers() {
-		t.Run(string(d.reason), func(t *testing.T) {
-			const key = "lease-notice"
-			g := newLeaseGate(t, d.tweak)
-			d.startLease(t, g, key)
-			if ev := g.p.LeaseStatus(key).Pending; ev == nil || ev.State != leaseEventStart {
-				t.Fatalf("pending after the lease's first Exec = %+v, want the start", ev)
-			}
-			after := d.end(t, g, key)
+	// Each level a subtest of its own, so that a level-1 failure cannot hide the level-2
+	// half's result, and -run .../level2 runs that half alone.
+	t.Run("level1", func(t *testing.T) {
+		for _, d := range leaseEndDrivers() {
+			t.Run(string(d.reason), func(t *testing.T) {
+				const key = "lease-notice"
+				g := newLeaseGate(t, d.tweak)
+				d.startLease(t, g, key)
+				if ev := g.p.LeaseStatus(key).Pending; ev == nil || ev.State != leaseEventStart {
+					t.Fatalf("pending after the lease's first Exec = %+v, want the start", ev)
+				}
+				after := d.end(t, g, key)
 
-			info := after.p.LeaseStatus(key)
-			ev := info.Pending
-			if ev == nil || ev.State != leaseEventEnd || ev.Reason != d.reason || ev.Mode != ModeLease {
-				t.Fatalf("pending after the end = %+v, want end %s in mode lease", ev, d.reason)
-			}
-			if s := loadLeaseState(after.cfg.WorkspaceRoot, key); s.Pending == nil || !s.Pending.At.Equal(ev.At) ||
-				s.Pending.Reason != d.reason || s.Open != nil {
-				t.Fatalf("state file = %+v, want the pending end the status reports and no open lease", s)
-			}
-			if s := after.p.Stats(); leaseEndTotal(s) != 1 || s.LeaseEnds[d.reason] != 1 {
-				t.Fatalf("LeaseEnds = %v, want exactly one, %s", s.LeaseEnds, d.reason)
-			}
-			after.p.AckLeaseEvent(key, ev.At)
-			if got := after.p.LeaseStatus(key).Pending; got != nil {
-				t.Fatalf("pending after the acknowledgement = %+v, want none", got)
-			}
-		})
-	}
+				info := after.p.LeaseStatus(key)
+				ev := info.Pending
+				if ev == nil || ev.State != leaseEventEnd || ev.Reason != d.reason || ev.Mode != ModeLease {
+					t.Fatalf("pending after the end = %+v, want end %s in mode lease", ev, d.reason)
+				}
+				if s := loadLeaseState(after.cfg.WorkspaceRoot, key); s.Pending == nil || !s.Pending.At.Equal(ev.At) ||
+					s.Pending.Reason != d.reason || s.Open != nil {
+					t.Fatalf("state file = %+v, want the pending end the status reports and no open lease", s)
+				}
+				if s := after.p.Stats(); leaseEndTotal(s) != 1 || s.LeaseEnds[d.reason] != 1 {
+					t.Fatalf("LeaseEnds = %v, want exactly one, %s", s.LeaseEnds, d.reason)
+				}
+				after.p.AckLeaseEvent(key, ev.At)
+				if got := after.p.LeaseStatus(key).Pending; got != nil {
+					t.Fatalf("pending after the acknowledgement = %+v, want none", got)
+				}
+			})
+		}
+	})
+
+	// Level 2 (plan 5, spec §4.1): every end of a lease+processes lease lists the tracked
+	// processes it stopped -- here web, running when the lease ended -- in the event and in
+	// the state file, as "<name> (pid <n>)" and as rows.
+	t.Run("level2", func(t *testing.T) {
+		requireLeaseProcessesSnapshot(t)
+		for _, d := range leaseEndDrivers() {
+			t.Run(string(d.reason), func(t *testing.T) {
+				const key = "lease-notice2"
+				g := newLeaseGate(t, d.tweak)
+				g.mode = ModeLeaseProcesses
+				d.startLease(t, g, key)
+				web := d.startTracked(t, g, key)
+				after := d.end(t, g, key)
+
+				ev := after.p.LeaseStatus(key).Pending
+				if ev == nil || ev.State != leaseEventEnd || ev.Reason != d.reason || ev.Mode != ModeLeaseProcesses {
+					t.Fatalf("pending after the end = %+v, want end %s in mode lease+processes", ev, d.reason)
+				}
+				want := []string{fmt.Sprintf("web (pid %d)", web.PID)}
+				if !slices.Equal(ev.Processes, want) || len(ev.Tracked) != 1 || ev.Tracked[0].ID != web.ID ||
+					ev.Tracked[0].PID != web.PID || !ev.Tracked[0].running() {
+					t.Fatalf("the end lists processes %q and rows %+v, want %q: web, running when it ended", ev.Processes, ev.Tracked, want)
+				}
+				if s := loadLeaseState(after.cfg.WorkspaceRoot, key); s.Pending == nil || !slices.Equal(s.Pending.Processes, want) ||
+					len(s.Pending.Tracked) != 1 || s.Pending.Tracked[0].ID != web.ID {
+					t.Fatalf("state file pending = %+v, want the end with web listed", s.Pending)
+				}
+				if s := after.p.Stats(); leaseEndTotal(s) != 1 || s.LeaseEnds[d.reason] != 1 {
+					t.Fatalf("LeaseEnds = %v, want exactly one, %s", s.LeaseEnds, d.reason)
+				}
+			})
+		}
+	})
 }
 
 // TestGateLeaseStaleEpoch is the worker half of spec §8.2: an Exec with an older epoch is
@@ -559,6 +637,14 @@ func TestGateLeaseNotice(t *testing.T) {
 // a lease Exec runs per-Exec -- as root, in a fresh VM -- until SetMode restores the mode.
 func TestGateLeaseStaleEpoch(t *testing.T) {
 	requireKVM(t)
+	t.Run("level1", testLeaseStaleEpochLevel1)
+	t.Run("level2", testLeaseStaleEpochLevel2)
+}
+
+// testLeaseStaleEpochLevel1 is TestGateLeaseStaleEpoch's level-1 half. Each half is a
+// subtest, so a level-1 failure cannot hide the level-2 result, and -run .../level2
+// runs level 2 alone.
+func testLeaseStaleEpochLevel1(t *testing.T) {
 	g := newLeaseGate(t, nil)
 	const key = "lease-epoch"
 	mustSetMode(t, g.p, key, ModeLease, 5)
@@ -600,6 +686,120 @@ func TestGateLeaseStaleEpoch(t *testing.T) {
 	if s := g.p.Stats(); s.LeaseVMs != 1 {
 		t.Fatalf("LeaseVMs = %d after SetMode and a lease Exec, want 1", s.LeaseVMs)
 	}
+
+}
+
+// testLeaseStaleEpochLevel2 is TestGateLeaseStaleEpoch's level-2 half (spec §8.2, §9): a
+// process kind on an older epoch is refused stale_mode and leaves the tracked process
+// running; a downgrade to lease stops the tracked processes, keeps the lease and returns
+// what it stopped; a process kind is then refused processes_not_enabled until an upgrade.
+// With the state file lost, a stale lease+processes token's command runs per-Exec and its
+// process_start is refused processes_not_enabled, until a signed set_mode restores the mode.
+func testLeaseStaleEpochLevel2(t *testing.T) {
+	requireLeaseProcessesSnapshot(t)
+	g := newLeaseGate(t, nil)
+	const key = "lease-epoch2"
+	mustSetMode(t, g.p, key, ModeLeaseProcesses, 5)
+	web := g.startTracked(t, key, "web", "exec sleep 600", 5)
+	v := g.leaseVM(t, key)
+	if _, _, _, err := g.exec(key, gateProcess(ExecKindProcessList, ProcessArgs{}, "", 4)); ReasonOf(err) != RefuseStaleMode {
+		t.Fatalf("process_list at epoch 4 under a stored 5: err = %v, want %s", err, RefuseStaleMode)
+	}
+	if tp, ok := trackedByID(g.listTracked(t, key, 5), web.ID); !ok || !tp.running() || g.leaseVM(t, key) != v {
+		t.Fatalf("after the refused process_list: web %+v (found %v), same VM %v; want web running in the same lease",
+			tp, ok, g.leaseVM(t, key) == v)
+	}
+
+	stopped, err := g.p.SetMode(key, ModeLease, 6)
+	if err != nil {
+		t.Fatalf("SetMode lease at epoch 6: %v", err)
+	}
+	if len(stopped) != 1 || stopped[0].ID != web.ID || stopped[0].PID != web.PID || stopped[0].stateText() != "killed(15)" {
+		t.Fatalf("the downgrade stopped %+v, want web (pid %d) killed(15): sleep dies of the TERM", stopped, web.PID)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("the downgrade to lease ended the lease: it must keep it and stop only the tracked processes")
+	}
+	info := g.p.LeaseStatus(key)
+	if info.Mode != ModeLease || info.State != LeaseActive || runningTracked(info.Tracked) != nil {
+		t.Fatalf("status after the downgrade = %+v, want lease, active, nothing running", info)
+	}
+	if got := g.run(t, key, gateLease(leftoverProcs(`[s]leep 600`), 6)); got != "none\n" {
+		t.Fatalf("after the downgrade the tracked process is still alive in the guest:\n%s", got)
+	}
+	_, _, _, err = g.exec(key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: "again"}, "exec sleep 600", 6))
+	if !strings.HasPrefix(wire(err), "processes_not_enabled: ") {
+		t.Fatalf("process_start on a lease+processes token after the downgrade: err = %v, want processes_not_enabled", err)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("the refused process_start ended the lease")
+	}
+
+	// Up again (a signed set_mode), in the same lease.
+	mustSetMode(t, g.p, key, ModeLeaseProcesses, 7)
+	g.startTracked(t, key, "again", "exec sleep 600", 7)
+	if g.leaseVM(t, key) != v {
+		t.Fatal("the upgrade to lease+processes restarted the lease")
+	}
+	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none: neither the downgrade to lease nor the upgrade ends the lease", s.LeaseEnds)
+	}
+
+	root := g.cfg.WorkspaceRoot
+	g = g.restart(t, func() {
+		if err := os.Remove(leaseStatePath(root, key)); err != nil {
+			t.Fatalf("delete the state file: %v", err)
+		}
+	})
+	_, _, _, err = g.exec(key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: "web"}, "exec sleep 600", 7))
+	if !strings.HasPrefix(wire(err), "processes_not_enabled: ") {
+		t.Fatalf("process_start with the epoch unknown: err = %v, want processes_not_enabled (it runs per-Exec)", err)
+	}
+	if got := g.run(t, key, gateLevel2("id -u", 7)); got != "0\n" {
+		t.Fatalf("a lease+processes command with the epoch unknown ran as %q, want root (0): it must run per-Exec", got)
+	}
+	if s := g.p.Stats(); s.LeaseVMs != 0 {
+		t.Fatalf("LeaseVMs = %d with the epoch unknown, want 0", s.LeaseVMs)
+	}
+	mustSetMode(t, g.p, key, ModeLeaseProcesses, 7)
+	restored := g.startTracked(t, key, "web", "exec sleep 600", 7)
+	if u := g.uidOf(t, key, restored.PID, 7); u < 20000 || u >= 20000+DefaultLeaseMaxProcesses {
+		t.Fatalf("after SetMode the tracked process runs as uid %d, want one in the tracked range", u)
+	}
+}
+
+// startTracked starts a tracked process on key's level-2 lease at epoch.
+func (g *leaseGate) startTracked(t *testing.T, key, name, cmd string, epoch uint64) gateTracked {
+	t.Helper()
+	return parseTrackedStart(t, g.run(t, key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: name}, cmd, epoch)))
+}
+
+// listTracked is key's process_list at epoch.
+func (g *leaseGate) listTracked(t *testing.T, key string, epoch uint64) []TrackedProcess {
+	t.Helper()
+	return parseTrackedList(t, g.run(t, key, gateProcess(ExecKindProcessList, ProcessArgs{}, "", epoch)))
+}
+
+// uidOf is the real uid of guest process pid, read from /proc by a level-2 lease Exec.
+func (g *leaseGate) uidOf(t *testing.T, key string, pid int, epoch uint64) int {
+	t.Helper()
+	out := g.run(t, key, gateLevel2(fmt.Sprintf(`awk '/^Uid:/ {print $2}' /proc/%d/status`, pid), epoch))
+	u, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("uid of pid %d: %q: %v", pid, out, err)
+	}
+	return u
+}
+
+// processRefusal runs e on key and returns its refusal's wire string, failing if it was
+// not refused.
+func (g *leaseGate) processRefusal(t *testing.T, key string, e Exec) string {
+	t.Helper()
+	_, stdout, _, err := g.exec(key, e)
+	if err == nil {
+		t.Fatalf("%s %+v answered %q, want a refusal", e.Kind, e.Process, stdout)
+	}
+	return wire(err)
 }
 
 // leaseCmdRecorder is the Firecracker launcher with every Run's lease flags recorded.
@@ -1156,4 +1356,372 @@ while True: b.append(b"x" * (16 << 20))'`, 1))
 	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
 		t.Fatalf("LeaseEnds = %v, want none: the caps end the Exec, not the lease", s.LeaseEnds)
 	}
+}
+
+// leaseRingScript writes argv[1] bytes of numbered 13-byte lines ("line 0000000\n" up), then
+// ring-done, and sleeps so its ring is not trimmed at exit (ruling P5-R5).
+const leaseRingScript = `
+import sys, time
+n = int(sys.argv[1]) // 13
+out = sys.stdout
+for i in range(n):
+    out.write("line %07d\n" % i)
+out.write("ring-done\n")
+out.flush()
+time.sleep(600)
+`
+
+// leaseReachScript polls http://127.0.0.1:8080/ for up to 10 s and prints reached, or
+// refused once the time is up.
+const leaseReachScript = `
+import time, urllib.request
+for _ in range(100):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8080/", timeout=1).read()
+        print("reached")
+        break
+    except Exception:
+        time.sleep(0.1)
+else:
+    print("refused")
+`
+
+// TestGateLeaseProcessLifecycle is level 2 end to end on a real guest (spec §7; plan 5): start,
+// list, logs and stop, and a later Exec reaching the process over localhost; the refusals;
+// TERM then KILL after 10 s; the 4 MiB ring; SH_LEASE_MAX_PROCESSES counting running processes
+// only; the 8 exited entries kept; a uid never reused while its old tracked/p<id> cgroup is
+// populated; and an OOM shown as killed(9), with the lease kept. Each part runs in a lease of
+// its own (its own key), so one part's table cannot satisfy or fail another's.
+func TestGateLeaseProcessLifecycle(t *testing.T) {
+	requireKVM(t)
+	requireLeaseProcessesSnapshot(t)
+	g := newLeaseGate(t, nil)
+	if g.p.cfg.LeaseMaxProcesses != DefaultLeaseMaxProcesses {
+		t.Fatalf("LeaseMaxProcesses = %d, want the default %d the parts below are sized for",
+			g.p.cfg.LeaseMaxProcesses, DefaultLeaseMaxProcesses)
+	}
+	const epoch = 1
+	lease := func(t *testing.T, key string) *firecrackerVM {
+		t.Helper()
+		mustSetMode(t, g.p, key, ModeLeaseProcesses, epoch)
+		g.run(t, key, gateLevel2("true", epoch))
+		t.Cleanup(func() { _ = g.p.EndLease(key, LeaseEndReset) })
+		return g.leaseVM(t, key)
+	}
+	row := func(t *testing.T, key, id string) TrackedProcess {
+		t.Helper()
+		tp, ok := trackedByID(g.listTracked(t, key, epoch), id)
+		if !ok {
+			t.Fatalf("process_list has no row %s", id)
+		}
+		return tp
+	}
+	waitExited := func(t *testing.T, key, id string, within time.Duration) TrackedProcess {
+		t.Helper()
+		var tp TrackedProcess
+		waitGate(t, within, "process "+id+" to leave running", func() bool {
+			tp = row(t, key, id)
+			return !tp.running()
+		})
+		return tp
+	}
+	logs := func(t *testing.T, key string, args ProcessArgs) string {
+		t.Helper()
+		return g.run(t, key, gateProcess(ExecKindProcessLogs, args, "", epoch))
+	}
+	stop := func(t *testing.T, key string, args ProcessArgs) TrackedProcess {
+		t.Helper()
+		var rows []ga.TrackedProcess
+		out := g.run(t, key, gateProcess(ExecKindProcessStop, args, "", epoch))
+		if err := json.Unmarshal([]byte("["+out+"]"), &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("process_stop %+v answered %q (%v), want the final state", args, out, err)
+		}
+		return trackedFromGuest(rows)[0]
+	}
+	kept := func(t *testing.T, key string, v *firecrackerVM) {
+		t.Helper()
+		if g.leaseVM(t, key) != v {
+			t.Fatalf("%s's lease runs in another VM: it was not kept", key)
+		}
+		if got := g.run(t, key, gateLevel2("cat /proc/1/comm", epoch)); got != "agent\n" {
+			t.Fatalf("PID 1 is %q, want the agent", got)
+		}
+	}
+
+	t.Run("start_list_logs_stop", func(t *testing.T) {
+		const key = "lease-proc-life"
+		v := lease(t, key)
+		web := g.startTracked(t, key, "web", `echo started-web; echo to-stderr >&2
+exec python3 -m http.server 8080 --bind 127.0.0.1`, epoch)
+		if web.Name != "web" {
+			t.Fatalf("process_start named it %q, want web", web.Name)
+		}
+		if tp := row(t, key, web.ID); !tp.running() || tp.PID != web.PID || tp.DisplayName() != "web" || tp.MemoryBytes <= 0 {
+			t.Fatalf("process_list row = %+v, want web running as pid %d with its memory", tp, web.PID)
+		}
+		if got := g.run(t, key, gateLevel2("python3 -c "+shQuote(leaseReachScript), epoch)); got != "reached\n" {
+			t.Fatalf("a later Exec reaching the tracked server on localhost printed %q, want reached", got)
+		}
+		leaseWaitPoolLogs(t, g, key, ProcessArgs{Name: "web"}, "started-web\n", "to-stderr\n", `"GET / HTTP/1.1" 200`)
+		if got := logs(t, key, ProcessArgs{ID: web.ID, Tail: 1}); strings.Count(got, "\n") != 1 || !strings.Contains(got, "GET /") {
+			t.Fatalf("process_logs tail 1 by id = %q, want the one newest line", got)
+		}
+		if g.p.LeaseStatus(key).Tracked == nil {
+			t.Fatal("LeaseStatus carries no tracked table with web running")
+		}
+
+		// The command runs as given, in the cwd asked for (ruling P5-R34: no per-Exec
+		// wrapper, whose `cd /workspace` overrode it), and in /workspace by default.
+		g.run(t, key, gateLevel2("mkdir -p sub", epoch))
+		where := parseTrackedStart(t, g.run(t, key, gateProcess(ExecKindProcessStart,
+			ProcessArgs{Name: "where", Cwd: "sub"}, "pwd; exec sleep 600", epoch)))
+		here := g.startTracked(t, key, "here", "pwd; exec sleep 600", epoch)
+		leaseWaitPoolLogs(t, g, key, ProcessArgs{Name: "where"}, "/workspace/sub\n")
+		leaseWaitPoolLogs(t, g, key, ProcessArgs{Name: "here"}, "/workspace\n")
+		for _, p := range []gateTracked{where, here} {
+			if got := stop(t, key, ProcessArgs{ID: p.ID}); got.stateText() != "killed(15)" {
+				t.Fatalf("process_stop %s = %+v, want killed(15): the stop's TERM is what ended it", p.Name, got)
+			}
+		}
+
+		for _, c := range []struct {
+			e    Exec
+			want string
+		}{
+			{gateProcess(ExecKindProcessStart, ProcessArgs{Name: "web"}, "exec sleep 600", epoch), "process_name_taken: web"},
+			{gateProcess(ExecKindProcessStart, ProcessArgs{Name: "p3"}, "exec sleep 600", epoch), "process_name_invalid: "},
+			{gateProcess(ExecKindProcessStart, ProcessArgs{Name: "esc", Cwd: "../.."}, "exec sleep 600", epoch), "process_cwd: "},
+			{gateProcess(ExecKindProcessLogs, ProcessArgs{Name: "nope"}, "", epoch), "process_not_found: nope"},
+			{gateProcess(ExecKindProcessStop, ProcessArgs{Name: "web", Signal: "BOGUS"}, "", epoch), "process_signal: "},
+		} {
+			if got := g.processRefusal(t, key, c.e); !strings.HasPrefix(got, c.want) {
+				t.Errorf("%s %+v: refusal %q, want %q", c.e.Kind, c.e.Process, got, c.want)
+			}
+		}
+		kept(t, key, v)
+
+		start := time.Now()
+		final := stop(t, key, ProcessArgs{Name: "web"})
+		if final.ID != web.ID || final.stateText() != "killed(15)" {
+			t.Fatalf("process_stop web = %+v, want it killed(15) by the TERM", final)
+		}
+		if took := time.Since(start); took > 8*time.Second {
+			t.Errorf("stopping a process that honours TERM took %s: it waited out the grace", took)
+		}
+		if tp := row(t, key, web.ID); tp.stateText() != "killed(15)" {
+			t.Fatalf("after the stop, process_list row = %+v, want web kept, killed(15)", tp)
+		}
+		if tp, ok := trackedByID(g.p.LeaseStatus(key).Tracked, web.ID); !ok || tp.stateText() != "killed(15)" {
+			t.Fatalf("LeaseStatus row = %+v (found %v), want the full table, web killed(15) included", tp, ok)
+		}
+		if got := g.run(t, key, gateLevel2("python3 -c "+shQuote(leaseReachScript), epoch)); got != "refused\n" {
+			t.Fatalf("after the stop, an Exec reaching localhost:8080 printed %q, want refused", got)
+		}
+
+		// A name only an exited entry holds is free: a start replaces that entry.
+		again := g.startTracked(t, key, "web", "exec sleep 600", epoch)
+		if again.ID == web.ID {
+			t.Fatalf("the second web reused id %s", web.ID)
+		}
+		var named []TrackedProcess
+		for _, tp := range g.listTracked(t, key, epoch) {
+			if tp.DisplayName() == "web" {
+				named = append(named, tp)
+			}
+		}
+		if len(named) != 1 || named[0].ID != again.ID || !named[0].running() {
+			t.Fatalf("rows named web = %+v, want only the new one, running", named)
+		}
+		kept(t, key, v)
+	})
+
+	t.Run("term_then_kill", func(t *testing.T) {
+		const key = "lease-proc-term"
+		v := lease(t, key)
+		deaf := g.startTracked(t, key, "deaf", `trap '' TERM; exec sleep 600`, epoch)
+		start := time.Now()
+		final := stop(t, key, ProcessArgs{ID: deaf.ID})
+		took := time.Since(start)
+		if final.stateText() != "killed(9)" {
+			t.Fatalf("process_stop of a process that ignores TERM = %+v, want killed(9) by the cgroup kill", final)
+		}
+		if took < 9*time.Second || took > 25*time.Second {
+			t.Fatalf("the stop took %s, want TERM, then the cgroup killed after 10 s", took)
+		}
+		kept(t, key, v)
+	})
+
+	t.Run("ring_cap", func(t *testing.T) {
+		const key = "lease-proc-ring"
+		v := lease(t, key)
+		const ringCap = 4 << 20 // global constraints: 4 MiB per process, stdout and stderr together
+		chatty := g.startTracked(t, key, "chatty", "exec python3 -c "+shQuote(leaseRingScript)+" "+strconv.Itoa(6<<20), epoch)
+		leaseWaitPoolLogs(t, g, key, ProcessArgs{ID: chatty.ID, Tail: 1}, "ring-done\n")
+		all := logs(t, key, ProcessArgs{ID: chatty.ID, Tail: 1 << 20})
+		if len(all) != ringCap {
+			t.Fatalf("process_logs of 6 MiB written returned %d bytes, want the ring's %d", len(all), ringCap)
+		}
+		if !strings.HasSuffix(all, "ring-done\n") || strings.Contains(all, "line 0000000\n") {
+			t.Fatalf("the ring holds %q ... %q, want the newest bytes: ring-done last, the first lines gone",
+				all[:min(40, len(all))], all[max(0, len(all)-40):])
+		}
+		kept(t, key, v)
+	})
+
+	t.Run("max_counts_running", func(t *testing.T) {
+		const key = "lease-proc-max"
+		v := lease(t, key)
+		var ps []gateTracked
+		uids := map[int]bool{}
+		for i := range DefaultLeaseMaxProcesses {
+			p := g.startTracked(t, key, fmt.Sprintf("a%d", i), "exec sleep 600", epoch)
+			ps = append(ps, p)
+			uids[g.uidOf(t, key, p.PID, epoch)] = true
+		}
+		if len(uids) != DefaultLeaseMaxProcesses {
+			t.Fatalf("%d running tracked processes hold uids %v, want each its own", DefaultLeaseMaxProcesses, uids)
+		}
+		for u := range uids {
+			if u < 20000 || u >= 20000+DefaultLeaseMaxProcesses {
+				t.Fatalf("tracked uid %d is outside 20000..%d", u, 20000+DefaultLeaseMaxProcesses-1)
+			}
+		}
+		want := fmt.Sprintf("process_limit: %d running (SH_LEASE_MAX_PROCESSES)", DefaultLeaseMaxProcesses)
+		if got := g.processRefusal(t, key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: "over"}, "exec sleep 600", epoch)); got != want {
+			t.Fatalf("a fifth start: refusal %q, want %q", got, want)
+		}
+		kept(t, key, v)
+		stop(t, key, ProcessArgs{ID: ps[0].ID})
+		next := g.startTracked(t, key, "a4", "exec sleep 600", epoch)
+		if tp := row(t, key, ps[0].ID); tp.running() {
+			t.Fatalf("a0's row after its stop = %+v, want it exited, still listed", tp)
+		}
+		if tp := row(t, key, next.ID); !tp.running() {
+			t.Fatalf("a4's row = %+v, want running: an exited entry does not count", tp)
+		}
+	})
+
+	t.Run("exited_entries_kept", func(t *testing.T) {
+		const key = "lease-proc-exited"
+		v := lease(t, key)
+		const keep, n = 8, 10 // ruling P5-R5: 8 exited entries kept, oldest evicted first
+		var ps []gateTracked
+		for i := range n {
+			p := g.startTracked(t, key, fmt.Sprintf("x%d", i), fmt.Sprintf("echo bye-%d; exit %d", i, 10+i), epoch)
+			waitExited(t, key, p.ID, 15*time.Second)
+			ps = append(ps, p)
+		}
+		rows := g.listTracked(t, key, epoch)
+		if len(rows) != keep {
+			t.Fatalf("process_list after %d exits has %d rows %+v, want the %d newest", n, len(rows), rows, keep)
+		}
+		for i, p := range ps {
+			tp, ok := trackedByID(rows, p.ID)
+			if i < n-keep {
+				if ok {
+					t.Errorf("x%d (%s) is still listed, want it evicted, oldest first", i, p.ID)
+				}
+				continue
+			}
+			if !ok || tp.stateText() != fmt.Sprintf("exited(%d)", 10+i) {
+				t.Errorf("x%d's row = %+v (found %v), want exited(%d)", i, tp, ok, 10+i)
+			}
+		}
+		if got := logs(t, key, ProcessArgs{Name: "x9"}); got != "bye-9\n" {
+			t.Errorf("an exited process's logs = %q, want bye-9: they stay readable so the agent can see why it died", got)
+		}
+		if got := g.processRefusal(t, key, gateProcess(ExecKindProcessLogs, ProcessArgs{Name: "x0"}, "", epoch)); got != "process_not_found: x0" {
+			t.Errorf("an evicted entry's logs: refusal %q, want process_not_found: x0", got)
+		}
+		kept(t, key, v)
+	})
+
+	t.Run("uid_not_reused_while_populated", func(t *testing.T) {
+		const key = "lease-proc-uid"
+		v := lease(t, key)
+		const leftPattern = `[l]ease-left-marker`
+		// The process exits at once and leaves a child in its cgroup.
+		leaver := g.startTracked(t, key, "leaver", `m=lease-left
+setsid python3 -c 'import time; time.sleep(600)' "$m-marker" >/dev/null 2>&1 &
+exit 0`, epoch)
+		if tp := waitExited(t, key, leaver.ID, 15*time.Second); tp.stateText() != "exited(0)" {
+			t.Fatalf("leaver's row = %+v, want exited(0)", tp)
+		}
+		var left []int
+		waitGate(t, 10*time.Second, "leaver's child", func() bool {
+			left = trackedPIDs(t, g.run(t, key, gateLevel2(leftoverProcs(leftPattern), epoch)))
+			return len(left) == 1
+		})
+		heldUID := g.uidOf(t, key, left[0], epoch)
+		if cg := strings.TrimSpace(g.run(t, key, gateLevel2(fmt.Sprintf("cat /proc/%d/cgroup", left[0]), epoch))); !strings.HasSuffix(cg, "/tracked/p"+leaver.ID) {
+			t.Fatalf("leaver's child is in cgroup %q, want leaver's tracked/p%s", cg, leaver.ID)
+		}
+		if tp := row(t, key, leaver.ID); tp.stateText() != "exited(0)" || tp.MemoryBytes <= 0 {
+			t.Fatalf("leaver's row with its child alive = %+v, want exited(0) with the child's memory (ruling P5-R13)", tp)
+		}
+
+		// Three more run, each on a fresh uid: none takes the one the child holds.
+		for i := range DefaultLeaseMaxProcesses - 1 {
+			p := g.startTracked(t, key, fmt.Sprintf("r%d", i), "exec sleep 600", epoch)
+			if u := g.uidOf(t, key, p.PID, epoch); u == heldUID {
+				t.Fatalf("r%d took uid %d while leaver's cgroup tracked/p%s still holds a process of it", i, u, leaver.ID)
+			}
+		}
+		// Three running is below the limit, but the last uid is still populated: refused, and the
+		// refusal says that leftover children hold it (PR #814 review).
+		want := fmt.Sprintf("process_limit: %d running, 1 uids held by leftover children of exited processes (process_stop them)",
+			DefaultLeaseMaxProcesses-1)
+		if got := g.processRefusal(t, key, gateProcess(ExecKindProcessStart, ProcessArgs{Name: "r3"}, "exec sleep 600", epoch)); got != want {
+			t.Fatalf("a start with every free uid taken and one held by a populated cgroup: refusal %q, want %q", got, want)
+		}
+
+		// Stopping the exited entry kills what its cgroup holds; then its uid is free again.
+		stop(t, key, ProcessArgs{Name: "leaver"})
+		if got := g.run(t, key, gateLevel2(leftoverProcs(leftPattern), epoch)); got != "none\n" {
+			t.Fatalf("after process_stop of the exited leaver, its child is still alive:\n%s", got)
+		}
+		r3 := g.startTracked(t, key, "r3", "exec sleep 600", epoch)
+		if u := g.uidOf(t, key, r3.PID, epoch); u != heldUID {
+			t.Fatalf("r3 runs as uid %d, want %d: the only uid left, free once leaver's cgroup emptied", u, heldUID)
+		}
+		kept(t, key, v)
+	})
+
+	t.Run("oom_keeps_the_lease", func(t *testing.T) {
+		const key = "lease-proc-oom"
+		v := lease(t, key)
+		// The earlier parts' resets are counted too; only this part's ends matter.
+		endsBefore := leaseEndTotal(g.p.Stats())
+		hog := g.startTracked(t, key, "hog", `exec python3 -c 'b = []
+while True: b.append(b"x" * (16 << 20))'`, epoch)
+		if tp := waitExited(t, key, hog.ID, 60*time.Second); tp.stateText() != "killed(9)" {
+			t.Fatalf("the allocating process's row = %+v, want killed(9): OOM-killed in its own cgroup", tp)
+		}
+		kept(t, key, v)
+		after := g.startTracked(t, key, "after", "exec sleep 600", epoch)
+		if tp := row(t, key, after.ID); !tp.running() {
+			t.Fatalf("a start after the OOM: row %+v, want running", tp)
+		}
+		if s := g.p.Stats(); leaseEndTotal(s) != endsBefore {
+			t.Fatalf("LeaseEnds = %v (%d before the OOM), want no new end: a tracked OOM ends the process, not the lease",
+				s.LeaseEnds, endsBefore)
+		}
+	})
+}
+
+// leaseWaitPoolLogs polls key's process_logs of args until they contain every want, and
+// returns them.
+func leaseWaitPoolLogs(t *testing.T, g *leaseGate, key string, args ProcessArgs, wants ...string) string {
+	t.Helper()
+	var logs string
+	waitGate(t, 20*time.Second, fmt.Sprintf("process_logs %+v holding %q", args, wants), func() bool {
+		logs = g.run(t, key, gateProcess(ExecKindProcessLogs, args, "", 1))
+		for _, w := range wants {
+			if !strings.Contains(logs, w) {
+				return false
+			}
+		}
+		return true
+	})
+	return logs
 }

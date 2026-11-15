@@ -2,6 +2,7 @@ import { status } from '@grpc/grpc-js';
 import { OWNER_LABEL, TEMPLATE_LABEL, TIER_LABEL, WORKLOAD_LABEL } from '@moca/harness';
 import type { RecordStore, SandboxRecord } from '@moca/harness';
 import {
+  ExecKind,
   LeaseControlFrame,
   LeaseKeepaliveFrame,
   type Exec,
@@ -10,6 +11,17 @@ import {
   type ServerFrame,
   type WorkerFrame,
 } from '@moca/k8s-sandbox';
+
+/**
+ * The reserved Hello capability of a worker that serves lease level 2's process kinds (ruling
+ * P5-R37; remote-worker vmpool.CapabilityLeaseProcessesV1, the same string). A worker from before
+ * plan 5 decodes Exec.kind as an unknown field and would run a process_start's command as a plain
+ * Exec, so no process kind is forwarded to a worker whose Hello lacks it.
+ */
+export const LEASE_PROCESSES_CAPABILITY = 'sbx:lease-processes-v1';
+/** The refusal, FAILED_PRECONDITION, of a process kind for a worker without the capability. */
+export const WORKER_WITHOUT_PROCESSES =
+  "lease_unsupported: this sandbox's worker does not support tracked processes";
 
 export interface AttachStream {
   metadata?: { get: (k: string) => string[] };
@@ -91,6 +103,8 @@ export const LEASE_KEEPALIVE_COALESCE_MS = 1_000;
 
 interface Parked {
   stream: AttachStream;
+  /** The worker's Hello.capabilities, as sent. */
+  capabilities: readonly string[];
   /** The trusted workload key, from a verified attach token; undefined for a shared-pool sandbox. */
   workload?: string;
   // per-reqId sinks for in-flight execs, populated by routeExec
@@ -198,6 +212,12 @@ export interface Relay {
    */
   routeExec(sandboxId: string, exec: Exec, opts?: { workload?: string }): AsyncIterable<ExecEvent>;
   routeAbort(sandboxId: string, reqId: number): void;
+  /**
+   * The live worker's Hello.capabilities for `sandboxId`, or undefined when none is attached. The
+   * sandbox caller reads it to refuse a process kind before taking a slot (P5-R37); routeExec
+   * checks it again at the write.
+   */
+  workerCapabilities(sandboxId: string): readonly string[] | undefined;
   /**
    * Send one lease operation to the parked worker (lease-mode §8.2) under a fresh `ctlId`, and
    * resolve with the worker's LeaseControlResult for that id. Every call ends: it rejects
@@ -366,6 +386,7 @@ export function createRelay(deps: RelayDeps): Relay {
         sandboxId = id;
         const session: Parked = {
           stream,
+          capabilities: [...frame.hello.capabilities],
           sinks: new Map(),
           controls: new Map(),
           keepaliveAtMs: new Map(),
@@ -501,6 +522,17 @@ export function createRelay(deps: RelayDeps): Relay {
           `sandbox '${sandboxId}' belongs to no workload; this Exec names one`,
         );
       }
+    }
+
+    // P5-R37: checked against the worker this Exec is written to, so a worker that attached after
+    // the sandbox caller's own check cannot be handed a kind it would run as a command. An unset
+    // kind goes out as 0, a command, so it is one here too.
+    const kind = exec.kind ?? ExecKind.EXEC_KIND_COMMAND;
+    if (
+      kind !== ExecKind.EXEC_KIND_COMMAND &&
+      !parked.capabilities.includes(LEASE_PROCESSES_CAPABILITY)
+    ) {
+      throw statusError(status.FAILED_PRECONDITION, WORKER_WITHOUT_PROCESSES);
     }
 
     if (parked.sinks.has(reqId))
@@ -665,6 +697,7 @@ export function createRelay(deps: RelayDeps): Relay {
     parked: () => [...sessions.keys()],
     routeExec,
     routeAbort,
+    workerCapabilities: (id) => sessions.get(id)?.capabilities,
     routeLeaseControl,
     routeKeepalive,
     drain,

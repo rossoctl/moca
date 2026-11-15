@@ -1,5 +1,6 @@
 import { status, type ServerWritableStream } from '@grpc/grpc-js';
 import {
+  ExecKind,
   LeaseOp,
   SandboxMode,
   type Exec,
@@ -8,9 +9,15 @@ import {
   type LeaseControlRequest,
   type LeaseControlResponse,
   type LeaseKeepaliveRequest,
+  type ProcessArgs,
 } from '@moca/k8s-sandbox';
 import type { SandboxModeName, SandboxTokenClaims, SetModeClaims } from '@moca/control-plane';
-import type { Relay, RelayTimers } from './relay.js';
+import {
+  LEASE_PROCESSES_CAPABILITY,
+  WORKER_WITHOUT_PROCESSES,
+  type Relay,
+  type RelayTimers,
+} from './relay.js';
 import { workerReqId, type SetModeVerifier } from './sandbox-auth.js';
 import {
   failExecStream,
@@ -43,12 +50,33 @@ export function claimsToExecMode(
   };
 }
 
+/** An Exec kind as the wire, the worker and the audit line name it (lease-mode spec §7). */
+export type ExecKindName =
+  'command' | 'process_start' | 'process_list' | 'process_logs' | 'process_stop';
+
+const EXEC_KIND_NAME: Readonly<Partial<Record<number, ExecKindName>>> = {
+  [ExecKind.EXEC_KIND_COMMAND]: 'command',
+  [ExecKind.EXEC_KIND_PROCESS_START]: 'process_start',
+  [ExecKind.EXEC_KIND_PROCESS_LIST]: 'process_list',
+  [ExecKind.EXEC_KIND_PROCESS_LOGS]: 'process_logs',
+  [ExecKind.EXEC_KIND_PROCESS_STOP]: 'process_stop',
+};
+
+/**
+ * The kind's name, or undefined for a value this relay does not know. ts-proto decodes an enum
+ * value outside the proto's as the raw number (UNRECOGNIZED, -1, included), so anything but 0..4.
+ */
+export function execKindName(kind: ExecKind): ExecKindName | undefined {
+  return EXEC_KIND_NAME[kind];
+}
+
 /**
  * One audit line per sandbox Exec (SBX0 §3.5), on the relay's refusal channel. Who (`sub`, `sbx`,
  * only from a token that VERIFIED), where (`wrk`, the sandbox_id asked for), which (`req_id`, the
- * caller's), how long, how it ended and how much stdout. Never the output, never the token, and the
- * command only as `cmd`, its first 200 bytes, with the operator's SH_SANDBOX_AUDIT_COMMANDS=1.
- * `audit` is the marker a log reader selects on (deploy/sbx/status.sh).
+ * caller's), what (`kind`, and for a process kind `process`: `p<id>`, else the name), how long,
+ * how it ended and how much stdout. Never the output, never the token, and the command (a
+ * process_start's too) only as `cmd`, its first 200 bytes, with the operator's
+ * SH_SANDBOX_AUDIT_COMMANDS=1. `audit` is the marker a log reader selects on (deploy/sbx/status.sh).
  */
 export interface AuditLine {
   audit: 'sandbox_exec';
@@ -58,6 +86,9 @@ export interface AuditLine {
   sbx?: string;
   wrk: string;
   req_id: number;
+  /** `unknown(<n>)` for a kind this relay does not know (the worker's form, ruling P5-R22). */
+  kind?: ExecKindName | `unknown(${number})`;
+  process?: string;
   ms: number;
   outcome: AuditOutcome;
   exit_code?: number;
@@ -74,7 +105,8 @@ export interface AuditLine {
  * - `busy`: the sandbox's in-flight cap refused it;
  * - `error`: any other ExecError, or routing failed (no live worker, a disconnect);
  * - `cancelled`: the client cancelled the call, or Aborted it;
- * - `refused`: UNAUTHENTICATED, PERMISSION_DENIED, ALREADY_EXISTS or INVALID_ARGUMENT, with `reason`.
+ * - `refused`: UNAUTHENTICATED, PERMISSION_DENIED, ALREADY_EXISTS, INVALID_ARGUMENT or
+ *   FAILED_PRECONDITION (a process kind below lease+processes), with `reason`.
  */
 export type AuditOutcome =
   'end' | 'timeout' | 'expired' | 'busy' | 'error' | 'cancelled' | 'refused';
@@ -139,6 +171,8 @@ const WORKER_TIMEOUT_RE = /^timeout:\d+$/;
 export const AUDIT_COMMAND_BYTES = 200;
 /** The most of a caller-chosen sandbox_id an audit line carries: one request, one bounded line. */
 const AUDIT_WRK_BYTES = 128;
+/** The most of a caller-chosen process id or name an audit line carries, for the same reason. */
+const AUDIT_PROCESS_BYTES = 128;
 
 /** The first `max` bytes of `s` in UTF-8, cut back to a character boundary. */
 function utf8Prefix(s: string, max: number): string {
@@ -153,6 +187,26 @@ function utf8Prefix(s: string, max: number): string {
 /** A command's first 200 bytes, cut on a character boundary. */
 export function commandPreview(command: string): string {
   return utf8Prefix(command, AUDIT_COMMAND_BYTES);
+}
+
+/**
+ * Which process an audit line names: `p<id>` when an id is given, else the name, else nothing (a
+ * process_list, an unnamed process_start). A process_start names only its name: the guest ignores
+ * a caller-supplied id there and assigns its own, so `p<id>` would hide the real name (PR #814
+ * review). Never the process's command; for process kinds only.
+ */
+function auditProcess(kind: ExecKindName | undefined, p: ProcessArgs | undefined) {
+  if (kind === undefined || kind === 'command' || !p) return undefined;
+  const which = kind !== 'process_start' && p.id ? `p${p.id}` : p.name;
+  return which ? utf8Prefix(which, AUDIT_PROCESS_BYTES) : undefined;
+}
+
+/**
+ * The kinds that carry no command: process_list, process_logs and process_stop. The guest
+ * ignores one sent with them, so the relay clears it before forwarding, and never audits it.
+ */
+export function kindCarriesNoCommand(kind: ExecKindName | undefined): boolean {
+  return kind === 'process_list' || kind === 'process_logs' || kind === 'process_stop';
 }
 
 /** Writes the audit lines. Built only on a relay with sandbox keys; `write` absent writes nothing. */
@@ -177,28 +231,39 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
      */
     exec(
       t0: number,
-      l: Omit<AuditLine, 'audit' | 'ts' | 'ms' | 'cmd' | 'sub' | 'sbx' | 'wrk'> & {
+      l: Omit<
+        AuditLine,
+        'audit' | 'ts' | 'ms' | 'cmd' | 'sub' | 'sbx' | 'wrk' | 'kind' | 'process'
+      > & {
         wrk: string;
         claims?: SandboxTokenClaims;
         command?: string;
+        kind?: ExecKind;
+        process?: ProcessArgs;
       },
     ): void {
       // A fixed key order (SBX0 §3.5), whatever order the caller built `l` in; absent, never null.
       emit(() => {
         const { claims, command } = l;
+        const kind = l.kind === undefined ? undefined : execKindName(l.kind);
+        const proc = auditProcess(kind, l.process);
         return {
           audit: 'sandbox_exec',
           ts: new Date(t0).toISOString(),
           ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
           wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
           req_id: l.req_id,
+          ...(l.kind !== undefined ? { kind: kind ?? `unknown(${l.kind})` } : {}),
+          ...(proc !== undefined ? { process: proc } : {}),
           ms: Math.max(0, Date.now() - t0),
           outcome: l.outcome,
           ...(l.exit_code !== undefined ? { exit_code: l.exit_code } : {}),
           ...(l.truncated !== undefined ? { truncated: l.truncated } : {}),
           out_bytes: l.out_bytes,
           ...(l.reason !== undefined ? { reason: l.reason } : {}),
-          ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
+          ...(withCommands && command !== undefined && !kindCarriesNoCommand(kind)
+            ? { cmd: commandPreview(command) }
+            : {}),
         };
       });
     },
@@ -257,12 +322,19 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
 }
 export type Audit = ReturnType<typeof makeAudit>;
 
-/** The outcome of an Exec that ran to its end (not expired, not cancelled at the call). */
+/**
+ * The outcome of an Exec that ran to its end (not expired, not cancelled at the call). routeExec's
+ * own capability check (P5-R37's backstop, for a worker that re-attached without it after the
+ * check above) is a refusal like that check's, with the same reason (final review P4).
+ */
 function finished(
   r: PumpResult,
   aborted: boolean,
-): Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated'> {
+): Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated' | 'reason'> {
   if (r.cancelled || aborted) return { outcome: 'cancelled' };
+  const thrown = r.thrown as { code?: unknown; message?: unknown } | undefined;
+  if (thrown?.code === status.FAILED_PRECONDITION && thrown.message === WORKER_WITHOUT_PROCESSES)
+    return { outcome: 'refused', reason: WORKER_WITHOUT_PROCESSES };
   if (r.end) return { outcome: 'end', exit_code: r.end.exitCode, truncated: r.end.truncated };
   if (r.execError !== undefined)
     return { outcome: WORKER_TIMEOUT_RE.test(r.execError) ? 'timeout' : 'error' };
@@ -378,6 +450,8 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         req_id: e.reqId,
         claims,
         command: e.command,
+        kind: e.kind,
+        process: e.process,
         out_bytes: outBytes,
         ...l,
       });
@@ -398,6 +472,32 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     if (denied) {
       log({ outcome: 'refused', reason: denied });
       failExecStream(call, grpcError(status.PERMISSION_DENIED, denied));
+      return;
+    }
+    // The kind gate (plan 5), from the token alone, before anything is forwarded: a process kind
+    // runs only on a token whose mode claim is lease+processes. The worker refuses it below that
+    // level too; this is the first line of defence, never the only one.
+    const kind = execKindName(e.kind);
+    if (kind === undefined) {
+      const why = `unknown exec kind ${e.kind}`;
+      log({ outcome: 'refused', reason: why });
+      failExecStream(call, grpcError(status.INVALID_ARGUMENT, why));
+      return;
+    }
+    if (kind !== 'command' && claims.mode !== 'lease+processes') {
+      const why = `processes_not_enabled: this sandbox's mode is ${claims.mode}`;
+      log({ outcome: 'refused', reason: why });
+      failExecStream(call, grpcError(status.FAILED_PRECONDITION, why));
+      return;
+    }
+    // The worker gate (P5-R37), before any slot: a process kind goes only to a worker whose Hello
+    // advertises the capability, since one from before plan 5 would run it as a command. With no
+    // worker attached the Exec goes on to routeExec's own `no live worker`, and routeExec checks
+    // the capability again against the worker it writes to.
+    const caps = kind === 'command' ? undefined : relay.workerCapabilities(sandboxId);
+    if (caps !== undefined && !caps.includes(LEASE_PROCESSES_CAPABILITY)) {
+      log({ outcome: 'refused', reason: WORKER_WITHOUT_PROCESSES });
+      failExecStream(call, grpcError(status.FAILED_PRECONDITION, WORKER_WITHOUT_PROCESSES));
       return;
     }
     const key = ownKey(claims.sbx, e.reqId);
@@ -481,8 +581,15 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         call,
         relay,
         sandboxId,
-        // keepalive is the client's opt-in (spec §4); the mode fields are only ever the token's.
-        { ...e, reqId: wid, ...claimsToExecMode(claims) },
+        // keepalive, kind and process are the client's (spec §4, §7; the kind gated above); the
+        // mode fields are only ever the token's. A kind that carries no command has any the
+        // caller sent cleared: the guest ignores it, and nothing need carry it on.
+        {
+          ...e,
+          reqId: wid,
+          ...(kindCarriesNoCommand(kind) ? { command: '' } : {}),
+          ...claimsToExecMode(claims),
+        },
         {
           // Never let the worker's id reach the caller: every frame carries the caller's own.
           toCaller: (ev) => withReqId(ev, e.reqId),

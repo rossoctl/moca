@@ -764,3 +764,25 @@ func TestFrameWriterNoticeIsNotCappedAndNotAfterTheSeal(t *testing.T) {
 		t.Fatalf("droppedStderr = %d, want 2: the notice is not counted against the cap", w.droppedStderr)
 	}
 }
+
+// Ruling P5-R6: a kind this agent does not know, or a process kind outside a lease, is
+// refused and never runs as a command, here on the parked shell.
+func TestAgentRefusesAnUnknownKindWithoutRunningIt(t *testing.T) {
+	a := newTestAgent(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	for _, tc := range []struct{ kind, want string }{
+		{"bogus", "lease_unsupported: unknown kind bogus"},
+		{RequestKindProcessStart, "lease_unsupported: process_start needs a lease request"},
+	} {
+		_, _, _, errMsg := drive(t, a, Request{Command: "touch " + marker, Kind: tc.kind, CapBytes: 1 << 20}, nil)
+		if errMsg != tc.want {
+			t.Errorf("kind %s: error %q, want %q", tc.kind, errMsg, tc.want)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("kind %s ran as a command", tc.kind)
+		}
+	}
+	if out, _, end, errMsg := drive(t, a, Request{Command: "echo ok", Kind: RequestKindCommand, CapBytes: 1 << 20}, nil); errMsg != "" || end.ExitCode != 0 || out != "ok\n" {
+		t.Fatalf("kind command: stdout %q, end %+v, err %q", out, end, errMsg)
+	}
+}

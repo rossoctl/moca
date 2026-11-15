@@ -142,6 +142,8 @@ export async function worker(
   reply?: (e: Exec) => Reply,
   attachToken?: string,
   lease?: LeaseReply,
+  /** Hello.capabilities; a level-2 microVM worker adds LEASE_PROCESSES_CAPABILITY (P5-R37). */
+  capabilities: string[] = [],
 ) {
   const execs: Exec[] = [];
   const aborts: number[] = [];
@@ -210,7 +212,7 @@ export async function worker(
     hello: {
       sandboxId,
       labels: {},
-      capabilities: [],
+      capabilities,
       image: '',
       arch: 'amd64',
       capacityMax: 4,

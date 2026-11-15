@@ -23,7 +23,7 @@ import {
   type ExecFactory,
 } from './exec.js';
 import { serveSbxMcp, stdioTransport } from './mcp.js';
-import { printNotices } from './notices.js';
+import { noticingExec, printNotices } from './notices.js';
 
 /** `put`'s timeout: a write of at most 14 MiB, well inside any token's life (no extra mint). */
 export const PUT_TIMEOUT_S = 120;
@@ -252,7 +252,7 @@ export async function cmdPut(
   try {
     const r = await execRetrying(
       c,
-      x,
+      { exec: noticingExec(c, id, x.exec) },
       writeFileCommand(target),
       { stdin: content, timeoutS: PUT_TIMEOUT_S, signal: c.signal },
       retry,

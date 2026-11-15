@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -35,7 +37,19 @@ type LeaseOptions struct {
 	UID, GID   int    // the exec identity the shim drops to
 	Home       string // the exec identity's HOME
 	ShimPath   string // the binary that acts as the lease shim; default /proc/self/exe
+	// Tracked processes (level 2) each run under their own uid, from TrackedUIDBase up to
+	// TrackedUIDBase+MaxTrackedUIDs-1 (spec §3.3). Zero means the default, so the range
+	// cannot be turned off here: level 2 is gated on the host, not by an empty range.
+	TrackedUIDBase int // default DefaultTrackedUIDBase
+	MaxTrackedUIDs int // default DefaultMaxTrackedUIDs
 }
+
+// The tracked uid range's defaults (global constraints): uids 20000 to 20003, the
+// image's sbxp0 to sbxp3.
+const (
+	DefaultTrackedUIDBase = 20000
+	DefaultMaxTrackedUIDs = 4
+)
 
 // Agent serves one command per connection out of a bash that was forked BEFORE the
 // snapshot was taken and has been blocked on a pipe ever since.
@@ -82,6 +96,12 @@ func NewAgent(opts AgentOptions) (*Agent, error) {
 	}
 	if opts.ScratchDir == "" {
 		opts.ScratchDir = os.TempDir()
+	}
+	if opts.Lease.TrackedUIDBase == 0 {
+		opts.Lease.TrackedUIDBase = DefaultTrackedUIDBase
+	}
+	if opts.Lease.MaxTrackedUIDs == 0 {
+		opts.Lease.MaxTrackedUIDs = DefaultMaxTrackedUIDs
 	}
 	a := &Agent{opts: opts}
 	if opts.Lease.CgroupRoot != "" {
@@ -188,14 +208,40 @@ func (a *Agent) killShell() {
 // Firecracker documents that listening vsock sockets survive restore with the CID
 // updated, so the parked accept() is documented behaviour rather than a trick
 // (spec §2.4, §5.1).
+//
+// Only a closed listener ends Serve (net.ErrClosed). The agent is PID 1, and main exits
+// when Serve returns, which panics the guest kernel ("Attempted to kill init!"); so any
+// other accept error -- EMFILE from a command exhausting fds, or an accept interrupted
+// by a signal (Task 11's rig run: the SIGCHLD of a tracked process's exit) -- is logged
+// and retried with a backoff, as net/http.Server and EgressForwarder.Serve do.
 func (a *Agent) Serve(ln net.Listener) error {
+	var delay time.Duration
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			return err
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else if delay *= 2; delay > time.Second {
+				delay = time.Second
+			}
+			log.Printf("guest-agent: accept: %v; retrying in %v", err, delay)
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go func() { _ = a.ServeConn(c) }()
 	}
+}
+
+// acceptRetryable reports whether an accept(2) error is one to retry at once: the call
+// was interrupted by a signal (EINTR), or the connection it would have returned was
+// aborted before it was accepted (ECONNABORTED, which net's own accept loop retries). An
+// EAGAIN is not: nothing is pending, so the caller waits for readability instead.
+func acceptRetryable(err error) bool {
+	return errors.Is(err, syscall.EINTR) || errors.Is(err, syscall.ECONNABORTED)
 }
 
 // ServeConn handles exactly one request on rw.
@@ -276,6 +322,12 @@ func (a *Agent) ServeConn(rw io.ReadWriteCloser) error {
 		return WriteFrame(rw, KindError, []byte(msg))
 	}
 
+	// Before any dispatch: a kind this agent does not serve must never run as a command
+	// (ruling P5-R6).
+	if err := checkRequestKind(req); err != nil {
+		return WriteFrame(rw, KindError, []byte(err.Error()))
+	}
+
 	capBytes := req.CapBytes
 	if capBytes <= 0 {
 		capBytes = MaxFrame
@@ -284,6 +336,7 @@ func (a *Agent) ServeConn(rw io.ReadWriteCloser) error {
 
 	var end End
 	if req.Lease {
+		// Every lease kind, the process kinds included (lease_linux.go).
 		end, err = a.runLease(req, stdin, w, rw)
 	} else if a.leaseOn.Load() {
 		// The latch. A per-Exec request runs as root on the parked shell, which a lease
@@ -624,6 +677,16 @@ func (w *frameWriter) notice(msg string) {
 		return
 	}
 	_ = WriteFrame(w.rw, KindStderr, []byte(msg))
+}
+
+// dropStdout counts n stdout bytes the agent cut before emitting, as dropped.
+func (w *frameWriter) dropStdout(n int64) {
+	if n <= 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.droppedStdout += n
 }
 
 func (w *frameWriter) stdoutWriter() io.Writer { return writerFunc(w.stdout) }

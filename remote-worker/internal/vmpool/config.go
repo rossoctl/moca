@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // VMMKind selects the hypervisor. It is a seam rather than a build choice because
@@ -71,6 +73,13 @@ const (
 	DefaultLeaseHeadroom             = 1.25
 	DefaultLeasePageCacheBytes       = 256 << 20
 	DefaultLeaseScanInterval         = 5 * time.Second
+	// DefaultLeaseMaxProcesses is SH_LEASE_MAX_PROCESSES' default (spec §7): the running
+	// tracked processes one lease may hold.
+	DefaultLeaseMaxProcesses = 4
+	// MaxLeaseProcesses is the highest LeaseMaxProcesses: the tracked uids a level-2 image
+	// has (the guest agent's default range, Task 4's sbxp0..3 passwd lines). A higher cap
+	// could only fail later, at the guest's uid allocator.
+	MaxLeaseProcesses = ga.DefaultMaxTrackedUIDs
 	// mcpKeepalivePeriod is how often the MCP server sends a lease keepalive (spec §8.3).
 	// LeaseKeepaliveLoss may not be shorter than two of them (minLeaseKeepaliveLoss).
 	mcpKeepalivePeriod    = 30 * time.Second
@@ -151,6 +160,9 @@ type Config struct {
 	// LeaseHeadroom x (PerVMBytes + LeasePageCacheBytes) is a lease VM's highest charge.
 	LeaseReclaimFreeBytes int64
 	LeaseScanInterval     time.Duration // the lease ticker's period
+	// LeaseMaxProcesses caps a level-2 lease's running tracked processes
+	// (SH_LEASE_MAX_PROCESSES), sent to the guest on every process_start.
+	LeaseMaxProcesses int
 }
 
 // Normalize fills defaults and then validates, returning the first violation.
@@ -268,6 +280,13 @@ func (c *Config) normalizeLease() error {
 	}
 	if c.LeasePageCacheBytes <= 0 {
 		c.LeasePageCacheBytes = DefaultLeasePageCacheBytes
+	}
+	switch {
+	case c.LeaseMaxProcesses == 0:
+		c.LeaseMaxProcesses = DefaultLeaseMaxProcesses
+	case c.LeaseMaxProcesses < 0 || c.LeaseMaxProcesses > MaxLeaseProcesses:
+		return fmt.Errorf("vmpool: LeaseMaxProcesses (%d) must lie within [1, %d], the tracked uids a level-2 image has",
+			c.LeaseMaxProcesses, MaxLeaseProcesses)
 	}
 	switch {
 	case c.LeaseHeadroom == 0:

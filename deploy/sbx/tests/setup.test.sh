@@ -531,6 +531,36 @@ render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
 pass 'SBX_MODES_ALLOWED and SBX_IDLE_CEILING_S reach sbx-settings and move the hash; the ceiling reaches every worker bundle'
 
+# 4c''. A running worker keeps the SH_LEASE_IDLE_CEILING_S it was installed with until install-host.sh
+# is re-run on its host, so a ceiling change names the hosts to reinstall. A warning, not a refusal:
+# a worker on its old ceiling only clamps an owner's idle timeout differently (plan-4 triage, Task 10).
+run_setup export SBX_IDLE_CEILING_S=3600 || fail 'a ceiling change was refused'
+grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changes from 1800 to 3600' "$TMP/out" ||
+  fail 'a ceiling change does not warn, naming SH_LEASE_IDLE_CEILING_S and both values'
+grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
+  fail 'a ceiling change does not end by naming the hosts to reinstall'
+! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'a ceiling change alone warns about SH_WORKSPACE_IDLE'
+grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$GEN/workers/sbx_default/worker.env" || fail 'the warned run did not write the new ceiling'
+run_setup export SBX_IDLE_CEILING_S=3600 || fail 'a re-run with the same ceiling failed'
+! grep -q 'SH_LEASE_IDLE_CEILING_S' "$TMP/out" || fail 'an unchanged ceiling still warns'
+! grep -q 're-run deploy/sbx/install-host.sh now' "$TMP/out" || fail 'an unchanged ceiling still names hosts to reinstall'
+# A ceiling change with a lifetime change: both settings, each host once.
+run_setup export SBX_LIFETIME_DAYS=10 SBX_ACK_HOSTS=1 || fail 'a ceiling and lifetime change with SBX_ACK_HOSTS=1 failed'
+grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changes from 3600 to 1800' "$TMP/out" || fail 'the ceiling back to 1800 does not warn'
+grep -q 'WARNING: SH_WORKSPACE_IDLE and SH_LEASE_IDLE_CEILING_S changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312$' "$TMP/out" ||
+  fail 'both changes do not end with one line naming both settings and each host once'
+# A bundle from before the ceiling existed: install-host.sh gives such a worker 1800, so only a ceiling
+# other than 1800 is a change.
+grep -v '^SH_LEASE_IDLE_CEILING_S=' "$GEN/workers/sbx_py312/worker.env" >"$TMP/worker.env.nocap"
+cp "$TMP/worker.env.nocap" "$GEN/workers/sbx_py312/worker.env"
+run_setup export SBX_LIFETIME_DAYS=10 || fail 'a re-run over a bundle without a ceiling failed'
+! grep -q 'SH_LEASE_IDLE_CEILING_S' "$TMP/out" || fail 'a bundle without a ceiling, at the default 1800, warns'
+cp "$TMP/worker.env.nocap" "$GEN/workers/sbx_py312/worker.env"
+run_setup export SBX_LIFETIME_DAYS=10 SBX_IDLE_CEILING_S=600 || fail 'a ceiling change over a bundle without one failed'
+grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changes from 1800 to 600' "$TMP/out" || fail 'the change from a bundle without a ceiling does not warn from 1800'
+run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
+pass 'a ceiling change warns and names the hosts to reinstall (with a lifetime change, one line, each host once)'
+
 # 4d. The janitor's wait (spec §8.1, §8.3): default max(60, TTL + 5) minutes, so the default at the
 # longest token lifetime (60 min) is 65 min, not the refused 60; an explicit one must exceed TTL + 30 s.
 run_setup export SBX_TOKEN_TTL_MINUTES=60 || fail 'the default janitor wait was refused at a 60 min token lifetime'

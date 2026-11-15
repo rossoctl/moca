@@ -88,6 +88,35 @@ message Exec {
   uint64      mode_epoch     = 8;    // the mode's version; the worker refuses one below the stored epoch
   uint32      idle_timeout_s = 9;    // the owner's idle timeout; 0 = the worker's default (worker-clamped)
   bool        keepalive      = 10;   // opts the lease into the keepalive-loss rule (spec §4)
+
+  // Level 2 (SBX0.3 plan 5), ADDITIVE. What the Exec asks for. A worker refuses a kind other
+  // than EXEC_KIND_COMMAND unless the snapshot advertises lease-processes-v1; the container
+  // tier refuses every non-command kind. Neither ever runs the command on a refusal.
+  ExecKind    kind           = 11;
+  // The arguments of a process kind. For EXEC_KIND_PROCESS_START the command stays in
+  // Exec.command; the other process kinds leave it empty.
+  ProcessArgs process        = 12;
+}
+
+// What an Exec asks the worker to do. COMMAND (0) is the default, so an Exec from a client
+// that predates the field is a plain command.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+enum ExecKind {
+  EXEC_KIND_COMMAND       = 0;
+  EXEC_KIND_PROCESS_START = 1;
+  EXEC_KIND_PROCESS_LIST  = 2;
+  EXEC_KIND_PROCESS_LOGS  = 3;
+  EXEC_KIND_PROCESS_STOP  = 4;
+}
+
+// Arguments of the process kinds. Each kind reads only the fields it names: name and id
+// select a process (id or name), cwd and name apply to start, tail to logs, signal to stop.
+message ProcessArgs {
+  string name   = 1;   // start: the optional unique name among running processes; logs/stop: a name
+  string id     = 2;   // logs/stop: the process id, instead of name
+  string cwd    = 3;   // start: inside the workspace; empty = /workspace
+  uint32 tail   = 4;   // logs: the last n lines; 0 = the default (200)
+  string signal = 5;   // stop: "TERM" (default), then the cgroup is killed after 10 s
 }
 message Abort     { uint64 req_id = 1; }
 
@@ -153,17 +182,34 @@ enum SandboxMode {
 // sees one.
 message LeaseEvent {
   uint64      req_id     = 1;
-  string      state      = 2;   // "start" | "end" | "expiring"
+  // "start" | "end" | "expiring" | "processes_stopped" (plan 5: a set_mode downgrade
+  // stopped the tracked processes; the lease itself continues).
+  string      state      = 2;
   // On "end", why it ended (spec §4.1: "idle", "reset", ...); on "expiring", "max_duration"
   // (spec §5). Empty on "start".
   string      reason     = 3;
   int64       at_unix_ms = 4;   // when it happened; also the key the event is acknowledged by
   SandboxMode mode       = 5;
   uint64      age_ms     = 6;   // the lease's age at the event
-  repeated string processes = 7;   // processes that were running; filled from plan 5 on
+  // Display strings ("<name> (pid <n>)") of the processes that were running.
+  repeated string processes = 7;
   // On "expiring" only: the hard end, i.e. when the lease became expiring plus grace_limit
   // (unix ms). Zero on every other state.
   int64       ends_by_unix_ms = 8;
+  // The structured form of processes (plan 5). Set on the same events as processes.
+  repeated TrackedProcess tracked = 9;
+}
+
+// One tracked process of a lease. state is "running", "exited" or "killed". code is the
+// exit code for exited, or the signal number for killed; zero while running.
+message TrackedProcess {
+  string id           = 1;
+  string name         = 2;
+  uint32 pid          = 3;
+  string state        = 4;
+  int32  code         = 5;
+  uint64 age_ms       = 6;
+  uint64 memory_bytes = 7;
 }
 
 enum LeaseOp {
@@ -196,6 +242,10 @@ message LeaseStatus {
   uint64      age_ms         = 4;
   uint32      idle_timeout_s = 5;
   LeaseEvent  pending        = 6;   // the last undelivered lease event (a start or an end), kept until acknowledged
+  repeated TrackedProcess processes = 7;   // the full tracked table, exited entries included (plan 5)
+  // The processes this set_mode call's downgrade stopped (plan 5), carried in that call's
+  // answer only: never stored, never acknowledged, empty on every other status.
+  repeated TrackedProcess stopped   = 8;
 }
 
 // worker → relay: the answer to a LeaseControlFrame. An empty error means OK; otherwise

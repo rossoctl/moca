@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { leaseNotice } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ApiError, errorFromResponse } from '../src/api/errors.js';
 import { openSbxRuntime, sbxMain } from '../src/sbx/cli.js';
@@ -16,6 +17,8 @@ import {
 import {
   cleanupTmp,
   fakeCp,
+  leaseEnd,
+  withLeaseEvents,
   policyView,
   sandbox,
   SBX,
@@ -276,6 +279,17 @@ describe('create --template id@build, --seed', () => {
   const GIT_SEED =
     'git init -q /workspace && cd /workspace && echo hi > a && git add a && ' +
     'git -c user.email=t@example.invalid -c user.name=t -c commit.gpgSign=false commit -qm base';
+
+  it('--seed says the lease events its Execs carried (plan-4 M2)', async () => {
+    const s = seeded(GIT_SEED);
+    const end = leaseEnd({ reason: 'idle' });
+    expect(
+      await s.w.run(['create', '--template', 'my-python', '--seed'], {
+        execFactory: withLeaseEvents(s.ws.factory, [[end]]),
+      }),
+    ).toBe(0);
+    expect(s.w.io.errs).toContain(leaseNotice(end, Date.now()));
+  });
 
   it('--seed: runs the seed first, then finds a clean tree and its HEAD', async () => {
     const s = seeded(GIT_SEED);

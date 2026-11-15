@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { Hello, Exec, End, ExecRequest } from '../src/gen/sandbox/v1/sandbox';
+import {
+  Hello,
+  Exec,
+  End,
+  ExecRequest,
+  ExecKind,
+  ProcessArgs,
+  TrackedProcess,
+} from '../src/gen/sandbox/v1/sandbox';
 import { Chunk, Stream } from '../src/gen/sandbox/v1/sandbox.js';
 import {
   ExecEvent,
@@ -164,14 +172,14 @@ describe('sandbox/v1 lease wire (additive)', () => {
     ageMs: 42_000,
     processes: ['p1', 'p2'],
   });
-  const status: LeaseStatus = {
+  const status = LeaseStatus.fromPartial({
     mode: SandboxMode.SANDBOX_MODE_LEASE,
     epochKnown: true,
     state: 'active',
     ageMs: 1500,
     idleTimeoutS: 300,
     pending: event,
-  };
+  });
 
   it('decodes an Exec written before the change as per-exec, epoch 0, no keepalive', () => {
     // The bytes the pre-change stubs (HEAD 3299cc98) write for
@@ -265,5 +273,100 @@ describe('sandbox/v1 lease wire (additive)', () => {
     expect(ServerFrame.decode(ServerFrame.encode(sc).finish())).toEqual(sc);
     const sk = ServerFrame.fromPartial({ keepalive: { workspaceKey: 'k' } });
     expect(ServerFrame.decode(ServerFrame.encode(sk).finish())).toEqual(sk);
+  });
+});
+
+// SBX0.3 plan 5 (level 2): process kinds and tracked processes, additive. An Exec from a
+// client that predates them carries no field 11 or 12 and decodes as a plain command.
+describe('sandbox/v1 process wire (additive)', () => {
+  it('pins the ExecKind numbers', () => {
+    expect(ExecKind.EXEC_KIND_COMMAND).toBe(0);
+    expect(ExecKind.EXEC_KIND_PROCESS_START).toBe(1);
+    expect(ExecKind.EXEC_KIND_PROCESS_LIST).toBe(2);
+    expect(ExecKind.EXEC_KIND_PROCESS_LOGS).toBe(3);
+    expect(ExecKind.EXEC_KIND_PROCESS_STOP).toBe(4);
+  });
+
+  it('decodes an Exec written before the change as a command', () => {
+    const old = Exec.decode(Uint8Array.from([0x08, 0x02, 0x12, 0x04, 0x74, 0x72, 0x75, 0x65]));
+    expect(old.kind).toBe(ExecKind.EXEC_KIND_COMMAND);
+    expect(old.process).toBeUndefined();
+  });
+
+  it('pins Exec.kind as field 11 and Exec.process as field 12', () => {
+    const k = Exec.encode(Exec.fromPartial({ kind: ExecKind.EXEC_KIND_PROCESS_STOP })).finish();
+    expect(Array.from(k)).toEqual([0x58, 0x04]);
+    const p = Exec.encode(Exec.fromPartial({ process: { name: 'x' } })).finish();
+    expect(p[0]).toBe(0x62);
+  });
+
+  it('round-trips a process_start Exec with its ProcessArgs', () => {
+    const e = Exec.fromPartial({
+      reqId: 3,
+      command: 'sleep 100',
+      kind: ExecKind.EXEC_KIND_PROCESS_START,
+      process: ProcessArgs.fromPartial({
+        name: 'srv',
+        id: 'p1',
+        cwd: '/workspace',
+        tail: 200,
+        signal: 'TERM',
+      }),
+    });
+    expect(Exec.decode(Exec.encode(e).finish())).toEqual(e);
+  });
+
+  it('round-trips TrackedProcess with its fields', () => {
+    const t = TrackedProcess.fromPartial({
+      id: 'p1',
+      name: 'srv',
+      pid: 4242,
+      state: 'killed',
+      code: 15,
+      ageMs: 9000,
+      memoryBytes: 1048576,
+    });
+    expect(TrackedProcess.decode(TrackedProcess.encode(t).finish())).toEqual(t);
+  });
+
+  it('carries LeaseEvent.tracked (field 9) next to processes (field 7)', () => {
+    const ev = LeaseEvent.fromPartial({
+      reqId: 9,
+      state: 'processes_stopped',
+      reason: 'mode_change',
+      processes: ['srv (pid 4242)'],
+      tracked: [TrackedProcess.fromPartial({ id: 'p1', name: 'srv', pid: 4242, state: 'running' })],
+    });
+    expect(LeaseEvent.decode(LeaseEvent.encode(ev).finish())).toEqual(ev);
+    // tag (9 << 3) | 2 = 0x4a leads a LeaseEvent that carries only tracked.
+    expect(LeaseEvent.encode(LeaseEvent.fromPartial({ tracked: [{ id: 'p' }] })).finish()[0]).toBe(
+      0x4a,
+    );
+  });
+
+  it('carries LeaseStatus.processes (field 7) and LeaseStatus.stopped (field 8)', () => {
+    const st = LeaseStatus.fromPartial({
+      mode: SandboxMode.SANDBOX_MODE_LEASE_PROCESSES,
+      state: 'active',
+      processes: [
+        TrackedProcess.fromPartial({
+          id: 'p1',
+          name: 'srv',
+          pid: 7,
+          state: 'running',
+          memoryBytes: 5,
+        }),
+      ],
+      stopped: [
+        TrackedProcess.fromPartial({ id: 'p2', name: 'old', pid: 8, state: 'exited', code: 0 }),
+      ],
+    });
+    expect(LeaseStatus.decode(LeaseStatus.encode(st).finish())).toEqual(st);
+    expect(
+      LeaseStatus.encode(LeaseStatus.fromPartial({ processes: [{ id: 'p' }] })).finish()[0],
+    ).toBe(0x3a);
+    expect(
+      LeaseStatus.encode(LeaseStatus.fromPartial({ stopped: [{ id: 'p' }] })).finish()[0],
+    ).toBe(0x42);
   });
 });

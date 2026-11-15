@@ -34,6 +34,9 @@ type openLease struct {
 	VMID    string    `json:"vm_id"`
 	Mode    Mode      `json:"mode"`
 	Started time.Time `json:"started"`
+	// Tracked is the lease's tracked mirror as last saved (runLease saves it when a process
+	// starts, stops or exits), so a worker_restart end can list what was running.
+	Tracked []TrackedProcess `json:"tracked,omitempty"`
 }
 
 func leaseStatePath(root, key string) string {

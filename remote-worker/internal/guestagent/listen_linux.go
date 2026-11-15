@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -97,16 +98,22 @@ func (a vsockAddr) Network() string { return "vsock" }
 func (a vsockAddr) String() string  { return fmt.Sprintf("vsock:%d:%d", a.cid, a.port) }
 
 // vsockListener is a net.Listener over a raw, non-blocking AF_VSOCK socket. f is the
-// sole owner of the underlying fd (see listenVsock).
+// sole owner of the underlying fd (see listenVsock). closed is set by Close, so an Accept
+// on (or blocked in) a closed listener reports net.ErrClosed, as net's listeners do:
+// Agent.Serve ends on that alone and retries every other error.
 type vsockListener struct {
-	f    *os.File
-	addr vsockAddr
+	f      *os.File
+	addr   vsockAddr
+	closed atomic.Bool
 }
 
 // Accept blocks until a peer connects, using f's SyscallConn to wait for readability
 // on the runtime poller (the same mechanism net's own listeners use) rather than
 // blocking an OS thread in the accept(2) syscall.
 func (l *vsockListener) Accept() (net.Conn, error) {
+	if l.closed.Load() {
+		return nil, fmt.Errorf("guestagent: vsock accept: %w", net.ErrClosed)
+	}
 	rc, err := l.f.SyscallConn()
 	if err != nil {
 		return nil, fmt.Errorf("guestagent: vsock accept: %w", err)
@@ -117,11 +124,22 @@ func (l *vsockListener) Accept() (net.Conn, error) {
 		acceptErr error
 	)
 	if err := rc.Read(func(fd uintptr) bool {
-		nfd, peer, acceptErr = unix.Accept4(int(fd), unix.SOCK_CLOEXEC)
+		for {
+			nfd, peer, acceptErr = unix.Accept4(int(fd), unix.SOCK_CLOEXEC)
+			// An interrupted or aborted accept is retried at once (acceptRetryable): the
+			// poller is edge-triggered, so waiting for readability could miss a
+			// connection already queued.
+			if !acceptRetryable(acceptErr) {
+				break
+			}
+		}
 		// Returning false tells RawConn.Read to wait for readability and retry;
 		// any outcome other than EAGAIN (success or a real error) is final.
 		return acceptErr != unix.EAGAIN
 	}); err != nil {
+		if l.closed.Load() {
+			return nil, fmt.Errorf("guestagent: vsock accept: %w", net.ErrClosed)
+		}
 		return nil, fmt.Errorf("guestagent: vsock accept: %w", err)
 	}
 	if acceptErr != nil {
@@ -147,7 +165,11 @@ func (l *vsockListener) Accept() (net.Conn, error) {
 	return &vsockConn{File: cf, local: local, remote: remote}, nil
 }
 
-func (l *vsockListener) Close() error   { return l.f.Close() }
+func (l *vsockListener) Close() error {
+	l.closed.Store(true)
+	return l.f.Close()
+}
+
 func (l *vsockListener) Addr() net.Addr { return l.addr }
 
 // localSockaddrVM reports fd's local vsock address, if the kernel can give one.

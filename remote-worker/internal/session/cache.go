@@ -12,8 +12,9 @@ import (
 const CacheSize = 256
 
 // Fingerprint hashes what makes an exec the same exec: command, stdin, timeout_s,
-// streaming, workspace_key, mode and mode_epoch, each LENGTH-PREFIXED (command, stdin and
-// workspace_key) or fixed-width (the rest). A bare separator byte is not injective — with only
+// streaming, workspace_key, mode and mode_epoch, and for a process kind the kind and its
+// process args, each LENGTH-PREFIXED (command, stdin, workspace_key and the string args) or
+// fixed-width (the rest). A bare separator byte is not injective — with only
 // a NUL between two string fields, ("a\x00b", nil) and ("a", "b\x00") hash alike. That is not
 // exploitable here (a NUL-bearing command cannot survive cmd.Start(), so it can never be the
 // source of a cached entry), but this scheme is the reference other language ports will copy,
@@ -38,6 +39,14 @@ const CacheSize = 256
 // delivery. The mode is hashed as the wire's enum value (UNSPECIFIED and PER_EXEC differ,
 // which costs nothing: a redelivery carries the same value), mode_epoch as a full 8 bytes.
 //
+// kind and the process args are in scope (plan 5) for the same reason: a process_list and a
+// process_stop, or two stops of different processes, on one req_id are different Execs.
+// They are hashed only for a kind other than command, after every field above, the kind as
+// its enum value and each arg length-prefixed or fixed-width. A command Exec's fingerprint is
+// therefore byte-identical to the one before the kind existed, so a redelivery across a
+// worker upgrade still matches its cached entry; a command's process args change nothing it
+// does and are not hashed.
+//
 // idle_timeout_s and keepalive are deliberately OUT of scope, though they ride on the same
 // Exec. Neither changes the Exec's result -- they set how the lease ends later -- and both can
 // differ between a genuine retry and its original: the relay stamps idle_timeout_s from the
@@ -49,6 +58,10 @@ func Fingerprint(e *pb.Exec) [32]byte {
 	putLen := func(v uint64) {
 		binary.BigEndian.PutUint64(n[:], v)
 		h.Write(n[:])
+	}
+	putStr := func(v string) {
+		putLen(uint64(len(v)))
+		h.Write([]byte(v))
 	}
 	putBool := func(b bool) {
 		if b {
@@ -67,6 +80,17 @@ func Fingerprint(e *pb.Exec) [32]byte {
 	h.Write([]byte(e.GetWorkspaceKey()))
 	putLen(uint64(uint32(e.GetMode())))
 	putLen(e.GetModeEpoch())
+	if k := e.GetKind(); k != pb.ExecKind_EXEC_KIND_COMMAND {
+		// After every field above, and only for a process kind, so a command's encoding is
+		// the one it had before the kind existed.
+		a := e.GetProcess()
+		putLen(uint64(uint32(k)))
+		putStr(a.GetName())
+		putStr(a.GetId())
+		putStr(a.GetCwd())
+		putLen(uint64(a.GetTail()))
+		putStr(a.GetSignal())
+	}
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out

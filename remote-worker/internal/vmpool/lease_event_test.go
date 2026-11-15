@@ -374,7 +374,7 @@ func TestDowngradeToPerExecWaitsForTheInFlightExec(t *testing.T) {
 	recvWithin(t, entered, "the Exec's Run")
 
 	setc := make(chan error, 1)
-	go func() { setc <- p.SetMode("k", ModePerExec, 2) }()
+	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
 	time.Sleep(50 * time.Millisecond) // SetMode must be waiting for the Exec
 	select {
 	case err := <-setc:
@@ -403,7 +403,7 @@ func TestEndingALeaseIsBoundedByTheGraceLimit(t *testing.T) {
 		end    func(p *pool) error
 	}{
 		{LeaseEndReset, func(p *pool) error { return p.EndLease("k", LeaseEndReset) }},
-		{LeaseEndModeChange, func(p *pool) error { return p.SetMode("k", ModePerExec, 2) }},
+		{LeaseEndModeChange, func(p *pool) error { return setModeErr(p, "k", ModePerExec, 2) }},
 	} {
 		t.Run(string(tc.reason), func(t *testing.T) {
 			p, lc, clk := leasePool(t, nil)
@@ -501,7 +501,7 @@ func TestDowngradeRefusesALeaseExecQueuedBehindIt(t *testing.T) {
 	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // b is past routeExec
 
 	setc := make(chan error, 1)
-	go func() { setc <- p.SetMode("k", ModePerExec, 2) }()
+	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
 	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 }) // SetMode waits on the gate
 	close(release)
 
@@ -930,7 +930,7 @@ func TestCutDuringLeaseStartNeverRuns(t *testing.T) {
 
 	setc := make(chan error, 1)
 	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
-	go func() { setc <- p.SetMode("k", ModePerExec, 2) }()
+	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
 	waitFor(t, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
 	waitFor(t, func() bool { l := liveLease(p, "k"); return l != nil && leaseCut(p, l) == LeaseEndModeChange })
@@ -1067,7 +1067,7 @@ func TestSameEpochDowngradeWhileQueued(t *testing.T) {
 		queued := execAsync(p, "k", e)
 		waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
 		setMode := make(chan error, 1)
-		go func() { setMode <- p.SetMode("k", ModePerExec, 3) }() // waits for the gate
+		go func() { setMode <- setModeErr(p, "k", ModePerExec, 3) }() // waits for the gate
 		waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
 		close(release)
 		for _, errc := range []<-chan error{first, queued, setMode} {

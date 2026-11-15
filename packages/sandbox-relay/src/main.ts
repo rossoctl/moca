@@ -28,6 +28,7 @@ import {
   type LeaseKeepaliveResponse,
   MAX_EXEC_MESSAGE_BYTES,
   SandboxMode,
+  ExecKind,
 } from '@moca/k8s-sandbox';
 import { RedisRecordStore, affinityTimings } from '@moca/harness';
 import {
@@ -329,13 +330,16 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         await sandbox.exec(call, caller.claims, req.sandboxId, e, t0);
         return;
       }
-      // The harness never uses leases: whatever it sent, its Execs run per-exec, unversioned.
+      // The harness never uses leases: whatever it sent, its Execs run per-exec, unversioned, and
+      // as plain commands (no tracked processes, plan 5).
       const harnessExec = {
         ...e,
         mode: SandboxMode.SANDBOX_MODE_UNSPECIFIED,
         modeEpoch: 0,
         idleTimeoutS: 0,
         keepalive: false,
+        kind: ExecKind.EXEC_KIND_COMMAND,
+        process: undefined,
       };
       await pumpExec(call, relay, req.sandboxId, harnessExec, { workload: req.workload });
     },

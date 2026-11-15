@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	ga "github.com/rossoctl/moca/remote-worker/internal/guestagent"
 )
 
 // Exec is one command as the pool sees it: pb.Exec minus the wire types.
@@ -33,7 +35,64 @@ type Exec struct {
 	ModeEpoch   uint64
 	IdleTimeout time.Duration
 	Keepalive   bool
+
+	// Kind is what the Exec asks for (plan 5): a command (the zero value) or one of the
+	// tracked-process kinds, which need lease+processes and a snapshot with
+	// lease-processes-v1 (checkProcessKind, execLease). Process carries a process kind's arguments;
+	// for process_start the command stays in Command.
+	Kind    ExecKind
+	Process ProcessArgs
 }
+
+// ExecKind is an Exec's kind, in the guest protocol's spelling (guestagent.RequestKind*).
+// The zero value is a command, so every Exec that names no kind is today's.
+type ExecKind string
+
+const (
+	ExecKindCommand      ExecKind = ""
+	ExecKindProcessStart ExecKind = ga.RequestKindProcessStart
+	ExecKindProcessList  ExecKind = ga.RequestKindProcessList
+	ExecKindProcessLogs  ExecKind = ga.RequestKindProcessLogs
+	ExecKindProcessStop  ExecKind = ga.RequestKindProcessStop
+
+	// execKindProcessStopAll is host-only: the pool sends it when a lease leaves level 2
+	// (stopTrackedUnderGate), and no Exec carries it. Not a process kind (isProcess).
+	execKindProcessStopAll ExecKind = ga.RequestKindProcessStopAll
+)
+
+// String is the kind as the audit lines spell it: the zero value is "command".
+func (k ExecKind) String() string {
+	if k == ExecKindCommand {
+		return ga.RequestKindCommand
+	}
+	return string(k)
+}
+
+// isProcess reports whether k is one of the tracked-process kinds.
+func (k ExecKind) isProcess() bool {
+	switch k {
+	case ExecKindProcessStart, ExecKindProcessList, ExecKindProcessLogs, ExecKindProcessStop:
+		return true
+	}
+	return false
+}
+
+// ProcessArgs are a process kind's arguments (spec §7): Name and Cwd for process_start,
+// ID or Name for logs and stop, Tail for logs, Signal for stop.
+type ProcessArgs struct {
+	Name   string
+	ID     string
+	Cwd    string
+	Tail   int
+	Signal string
+}
+
+// ProcessKindMinTimeoutS is the least timeout_s a process kind runs with: process_stop
+// may take about 20 s in the guest (TERM, 10 s, cgroup.kill, then the teardown bound), and
+// a host that gave up first would end the lease agent_dead under a guest doing its job.
+// It applies to the budget at arrival and again from Run (runLease), since the guest's work
+// starts only once the Exec holds the gate.
+const ProcessKindMinTimeoutS uint32 = 30
 
 // Bounds on Exec.TimeoutS. Every Exec is bounded; there is no unbounded form.
 //
@@ -108,8 +167,9 @@ type Pool interface {
 	//
 	// A downgrade to per-exec ends a live lease (mode_change) before SetMode returns, so
 	// it BLOCKS for the Exec in flight: up to LeaseGraceLimit (30 min by default), after
-	// which that Exec is cut, plus its unwind. lease+processes -> lease keeps the lease.
-	SetMode(key string, m Mode, epoch uint64) error
+	// which that Exec is cut, plus its unwind. lease+processes -> lease keeps the lease and
+	// stops its tracked processes under the same wait, returning what it stopped (plan 5).
+	SetMode(key string, m Mode, epoch uint64) (stopped []TrackedProcess, err error)
 	// Keepalive records a keepalive for key's live lease: the keepalive-loss rule then
 	// applies until the lease ends. It never resets the idle clock, and without a live
 	// lease it is a no-op. Spec §4.
@@ -143,7 +203,16 @@ type pool struct {
 	mu     sync.Mutex
 	runs   map[string]*runPool
 	closed bool
-	seq    uint64
+	// closeSyncBound is Close's one bound on syncing the leases it detaches
+	// (LeaseCloseSyncTimeout); a field so a test need not wait it out.
+	closeSyncBound time.Duration
+	// syncCtx is the parent of every lease-end sync, the sweep's queued batches included.
+	// Close cancels it once closeSyncBound has passed since it began, so a batch still queued
+	// when Close starts shares Close's bound instead of adding a LeaseEndSyncTimeout after it
+	// (PR #814 follow-up review).
+	syncCtx    context.Context
+	syncCancel context.CancelFunc
+	seq        uint64
 
 	counters *counters
 
@@ -211,7 +280,9 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	if err := markLeaseBoot(cfg.WorkspaceRoot, cfg.LeaseEnabled); err != nil {
 		return nil, err
 	}
-	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters()}
+	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters(),
+		closeSyncBound: LeaseCloseSyncTimeout}
+	p.syncCtx, p.syncCancel = context.WithCancel(context.Background())
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
 	p.reaper = newReaper(cfg.DeferReapWorkers)
@@ -316,6 +387,14 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	if err := checkKey(key); err != nil {
 		return Result{}, p.countRefusal(err)
 	}
+	if e.Kind != ExecKindCommand {
+		// Before the lease guard: a process kind on a snapshot without
+		// lease-processes-v1 is lease_unsupported whatever its mode, and nothing of it
+		// reaches the guest (Review Focus 5).
+		if err := p.checkProcessKind(key, e); err != nil {
+			return Result{}, err
+		}
+	}
 	if e.Mode != ModePerExec && !p.cfg.LeaseEnabled {
 		return Result{}, p.refuse(RefuseLeaseUnsupported, "%s Exec for %q: %s", e.Mode, key, leaseUnsupportedDetail)
 	}
@@ -330,6 +409,9 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	// timeout_s is a plain proto3 field, so an Exec that simply omitted it was
 	// bounded by nothing on either side — see clampTimeoutS.
 	timeoutS, clamped := clampTimeoutS(e.TimeoutS)
+	if e.Kind.isProcess() && timeoutS < ProcessKindMinTimeoutS {
+		timeoutS = ProcessKindMinTimeoutS // not a clamp: the floor is the kind's, not the caller's mistake
+	}
 	if clamped {
 		p.counters.timeoutClamped()
 		p.clampLogged.Do(func() {
@@ -356,19 +438,28 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 		if err != nil {
 			return Result{}, err
 		}
+		if e.Kind.isProcess() && mode == ModePerExec {
+			// Served per-exec (an unknown epoch, or a same-epoch downgrade): a process kind
+			// has no per-Exec form, and a lease it would end is not this refusal's to end.
+			if endFirst {
+				p.unpinKey(key)
+			}
+			return Result{}, p.processesNotEnabled(key, e.Kind, mode)
+		}
 		switch {
 		case mode != ModePerExec:
 			// The host's timer stays at the budget's end through the gate wait, the
 			// acquire, Resume and the normalise step. runLease calls extend immediately
-			// before Run, which moves it LeaseTimeoutSlack past the budget, so the guest's
-			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). extend
+			// before Run, which moves it LeaseTimeoutSlack past the run's deadline (the
+			// budget's end, or a process kind's floor from Run), so the guest's own timeout
+			// fires first and the lease survives it (LeaseTimeoutSlack). extend
 			// reports false when the timer has already fired: the Exec is timed out, and
 			// runLease does not run it (PR #763 second review, G1).
-			extend := func() bool {
+			extend := func(runDeadline time.Time) bool {
 				if !tm.Stop() {
 					return false
 				}
-				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
+				tm = p.clk.AfterFunc(runDeadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
 				return true
 			}
 			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline, extend)
@@ -902,6 +993,10 @@ func (p *pool) Close() error {
 		return nil
 	}
 	p.closed = true
+	// One bound for every sync Close and the already queued sweep batches still have to do.
+	boundTimer := time.AfterFunc(p.closeSyncBound, p.syncCancel)
+	defer boundTimer.Stop()
+	defer p.syncCancel()
 	if p.ticker != nil {
 		p.ticker.Stop()
 	}
@@ -954,10 +1049,16 @@ func (p *pool) Close() error {
 			}
 		}
 	}
+	// The detached leases: synced concurrently under one bound (LeaseCloseSyncTimeout,
+	// below the units' TimeoutStopSec), then destroyed, each gate released after its VM.
+	waitSyncs := p.syncLeaseVictimsWithin(leases, p.closeSyncBound)
 	for _, v := range leases {
 		if err := p.destroyLeaseVM(v.key, v.vm); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	waitSyncs()
+	for _, v := range leases {
 		<-v.gate
 	}
 

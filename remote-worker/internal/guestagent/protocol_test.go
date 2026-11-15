@@ -3,6 +3,7 @@ package guestagent
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -140,5 +141,92 @@ func TestTimeoutMessage(t *testing.T) {
 		if IsTimeoutMessage(msg) {
 			t.Errorf("IsTimeoutMessage(%q) = true, want false", msg)
 		}
+	}
+}
+
+// An old host sends no kind, process or max_processes. Its request must encode exactly
+// as before those fields existed, and a request without a kind decodes as a command.
+func TestProtocolRequestWithoutKindIsByteIdenticalToToday(t *testing.T) {
+	b, err := json.Marshal(Request{Command: "true", TimeoutS: 5, CapBytes: 1, Lease: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"command":"true","timeout_s":5,"streaming":false,"cap_bytes":1,"has_stdin":false,"host_unix_nanos":0,"lease":true}`
+	if string(b) != want {
+		t.Fatalf("request JSON\n got %s\nwant %s", b, want)
+	}
+	var req Request
+	if err := DecodeJSON([]byte(want), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Kind != "" || req.Process != nil || req.MaxProcesses != 0 {
+		t.Fatalf("req = %+v, want no kind, process or max", req)
+	}
+}
+
+func TestProtocolProcessRequestRoundTrip(t *testing.T) {
+	in := Request{
+		Command: "npm run dev", Lease: true, Kind: RequestKindProcessStart, MaxProcesses: 4,
+		Process: &ProcessArgs{Name: "web", ID: "3", Cwd: "/workspace/app", Tail: 50, Signal: "INT"},
+	}
+	var buf bytes.Buffer
+	if err := WriteJSON(&buf, KindRequest, in); err != nil {
+		t.Fatal(err)
+	}
+	_, p, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"kind":"process_start"`, `"max_processes":4`, `"process":{`, `"name":"web"`, `"id":"3"`, `"cwd":"/workspace/app"`, `"tail":50`, `"signal":"INT"`} {
+		if !strings.Contains(string(p), key) {
+			t.Errorf("request JSON %s lacks %s", p, key)
+		}
+	}
+	var out Request
+	if err := DecodeJSON(p, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Kind != in.Kind || out.MaxProcesses != 4 || out.Process == nil || *out.Process != *in.Process {
+		t.Fatalf("round trip = %+v (process %+v)", out, out.Process)
+	}
+}
+
+func TestProtocolRequestKinds(t *testing.T) {
+	got := []string{RequestKindCommand, RequestKindProcessStart, RequestKindProcessList, RequestKindProcessLogs, RequestKindProcessStop, RequestKindProcessStopAll}
+	want := []string{"command", "process_start", "process_list", "process_logs", "process_stop", "process_stop_all"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	if TrackedRunning != "running" || TrackedExited != "exited" || TrackedKilled != "killed" {
+		t.Fatalf("states = %q %q %q", TrackedRunning, TrackedExited, TrackedKilled)
+	}
+}
+
+func TestProtocolEndTrackedRoundTrip(t *testing.T) {
+	b, err := json.Marshal(End{ExitCode: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "tracked") {
+		t.Fatalf("an End with no table carries a tracked key: %s", b)
+	}
+	in := End{Tracked: []TrackedProcess{
+		{ID: "1", Name: "web", PID: 42, State: TrackedRunning, StartedUnixMs: 1763000000000, MemoryBytes: 1 << 20},
+		{ID: "2", PID: 43, State: TrackedKilled, Code: 9, StartedUnixMs: 1763000000001},
+	}}
+	if b, err = json.Marshal(in); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"tracked":[`, `"id":"1"`, `"name":"web"`, `"pid":42`, `"state":"running"`, `"code":9`, `"started_unix_ms":1763000000000`, `"memory_bytes":1048576`} {
+		if !strings.Contains(string(b), key) {
+			t.Errorf("End JSON %s lacks %s", b, key)
+		}
+	}
+	var out End
+	if err := DecodeJSON(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Tracked) != 2 || out.Tracked[0] != in.Tracked[0] || out.Tracked[1] != in.Tracked[1] {
+		t.Fatalf("round trip = %+v", out.Tracked)
 	}
 }
