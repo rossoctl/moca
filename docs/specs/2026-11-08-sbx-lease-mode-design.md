@@ -835,8 +835,11 @@ terminal. The sandbox ID is optional: without it, the sandbox the repository is 
   `p<id> <name> (pid <n>): <state>, <age>, <memory> MiB` (no age on an exited or killed row), or
   `no tracked processes`. `--json`
   prints the rows as JSON, with each `id` as the bare decimal string.
-- **`proc logs (NAME|ID) [--tail N] [ID]`** prints the process's last N lines (default 200) as
-  they are.
+- **`proc logs (NAME|ID) [--tail N] [--raw] [ID]`** prints the process's last N lines (default
+  200, at most 4294967295). Unlike `run`'s output, which the user just asked for, this replays
+  later, out of band, what a process the agent started wrote: on a terminal its control sequences
+  (OSC 52 clipboard writes, OSC 8 links, titles) are removed, newlines and tabs kept. Piped, or
+  with `--raw`, the output is passed through as written.
 - **`proc stop (NAME|ID) [--signal S] [ID]`** prints the process's final row.
 - **Below `lease+processes`** the call is refused before sending, from the fresh token's `mode`
   claim: `sbx: processes not enabled for this sandbox; run: mocactl sbx mode <id> lease+processes`

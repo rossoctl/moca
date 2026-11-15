@@ -39,7 +39,7 @@ export type ProcSub = (typeof PROC_SUBS)[number];
 export type ProcArgs =
   | { sub: 'start'; command: string; name?: string; cwd?: string }
   | { sub: 'ls' }
-  | { sub: 'logs'; process: ProcessSelector; tail?: number }
+  | { sub: 'logs'; process: ProcessSelector; tail?: number; raw?: boolean }
   | { sub: 'stop'; process: ProcessSelector; signal?: string };
 
 /** The flags that belong to one proc subcommand each (`--name` also to create and up). */
@@ -47,8 +47,12 @@ export const PROC_FLAG_OWNER = {
   name: 'start',
   cwd: 'start',
   tail: 'logs',
+  raw: 'logs',
   signal: 'stop',
 } as const satisfies Record<string, ProcSub>;
+
+/** ProcessArgs.tail is a uint32: the most lines `--tail` may ask for (PR #814 review). */
+export const MAX_TAIL = 0xffffffff;
 
 /** One process as `proc ls`, `proc stop` and `get` show it: `processRow`, sanitized. */
 export const processRowText = (v: TrackedProcessView): string => sanitizeRemote(processRow(v));
@@ -69,7 +73,14 @@ export function parseProcArgs(
   sub: string | undefined,
   rest: string[],
   command: string[] | undefined,
-  v: { name?: string; cwd?: string; tail?: string; signal?: string; json?: boolean },
+  v: {
+    name?: string;
+    cwd?: string;
+    tail?: string;
+    raw?: boolean;
+    signal?: string;
+    json?: boolean;
+  },
 ): { args: ProcArgs; sandbox?: string } | string {
   if (sub === undefined)
     return `proc needs a subcommand: ${PROC_SUBS.slice(0, -1).join(', ')} or stop`;
@@ -123,12 +134,17 @@ export function parseProcArgs(
       let tail: number | undefined;
       if (v.tail !== undefined) {
         tail = /^\d+$/.test(v.tail.trim()) ? Number(v.tail.trim()) : Number.NaN;
-        if (!Number.isSafeInteger(tail) || tail < 1) {
-          return `--tail must be a whole number of lines, at least 1 (got '${sanitizeRemote(v.tail)}')`;
+        if (!Number.isSafeInteger(tail) || tail < 1 || tail > MAX_TAIL) {
+          return `--tail must be a whole number of lines, from 1 to ${MAX_TAIL} (got '${sanitizeRemote(v.tail)}')`;
         }
       }
       return {
-        args: { sub: 'logs', process, ...(tail !== undefined ? { tail } : {}) },
+        args: {
+          sub: 'logs',
+          process,
+          ...(tail !== undefined ? { tail } : {}),
+          ...(v.raw === true ? { raw: true } : {}),
+        },
         ...one(sandbox),
       };
     }
@@ -185,6 +201,7 @@ export async function cmdProc(
   id: string,
   a: ProcArgs,
   factory?: ExecFactory,
+  o: { stdoutIsTTY?: boolean } = {},
 ): Promise<number> {
   let x: OpenedExec;
   try {
@@ -232,8 +249,12 @@ export async function cmdProc(
           opts,
         );
         printNotices(c, id, r.lease);
-        // The process's own output, as `run` passes a command's through.
-        if (r.result) c.io.out(r.result);
+        // Unlike `run`'s output, which the user just asked for, this replays later, out of
+        // band, what a process the agent started wrote: on a terminal its control sequences
+        // (an OSC 52 clipboard write, OSC 8 links, a title) are removed, `\n` and `\t` kept.
+        // Piped, or with --raw, it is the process's bytes as they are (PR #814 review).
+        const text = o.stdoutIsTTY === true && a.raw !== true ? sanitizeRemote(r.result) : r.result;
+        if (text) c.io.out(text);
         return SBX_EXIT.ok;
       }
       case 'stop': {

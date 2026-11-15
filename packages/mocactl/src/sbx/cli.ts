@@ -178,9 +178,11 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
   mocactl sbx proc ls [ID] [--json]              the tracked processes: id, name, pid, state
                                                  (running, exited(code) or killed(signal)), age and
                                                  memory; an exited one stays until the lease ends
-  mocactl sbx proc logs (NAME|ID) [--tail N] [ID]
+  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]
                                                  the last N lines (default 200) of a tracked
-                                                 process's stdout and stderr
+                                                 process's stdout and stderr; on a terminal its
+                                                 control sequences are removed (--raw keeps them;
+                                                 piped output is always as written)
   mocactl sbx proc stop (NAME|ID) [--signal S] [ID]
                                                  send S (default TERM), then kill what is left
                                                  after 10 s; prints its final state
@@ -280,6 +282,8 @@ export interface SbxDeps {
   cwd?: string;
   /** Whether stdin is a terminal: `run` with no command then refuses rather than wait on it. */
   stdinIsTTY?: boolean;
+  /** Whether stdout is a terminal: `proc logs` then removes control sequences (unless --raw). */
+  stdoutIsTTY?: boolean;
   /** All of stdin as text: `run`'s script. */
   readStdin?: () => Promise<string>;
   /** All of stdin, byte for byte: `put`'s content. */
@@ -620,6 +624,7 @@ async function sbxMainWith(
         name: { type: 'string' },
         cwd: { type: 'string' },
         tail: { type: 'string' },
+        raw: { type: 'boolean' },
         signal: { type: 'string' },
         label: { type: 'string', multiple: true },
         all: { type: 'boolean' },
@@ -833,7 +838,7 @@ async function sbxMainWith(
     io.err(`sbx: --template and --name only apply to create and up\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
   }
-  const procFlag = (['cwd', 'tail', 'signal'] as const).find((f) => values[f] !== undefined);
+  const procFlag = (['cwd', 'tail', 'raw', 'signal'] as const).find((f) => values[f] !== undefined);
   if (procFlag && command !== 'proc') {
     io.err(`sbx: --${procFlag} only applies to proc ${PROC_FLAG_OWNER[procFlag]}\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -1262,7 +1267,7 @@ async function sbxMainWith(
     case 'reset':
       return cmdReset(ctx, id!, deps.execFactory);
     case 'proc':
-      return cmdProc(ctx, id!, proc!, deps.execFactory);
+      return cmdProc(ctx, id!, proc!, deps.execFactory, { stdoutIsTTY: deps.stdoutIsTTY === true });
     case 'rm': {
       // The bound sandbox gone, its configuration goes too: `sbx rm` takes back what `up` added.
       const f = findSandboxFile(deps.cwd ?? process.cwd());

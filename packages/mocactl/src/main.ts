@@ -32,6 +32,7 @@ const code = await main(
   {
     signal: ac.signal,
     stdinIsTTY: process.stdin.isTTY === true,
+    stdoutIsTTY: process.stdout.isTTY === true,
     readStdin: async () => (await readStdinBytes()).toString('utf8'),
     readStdinBytes,
     loginHelpers: helpers,

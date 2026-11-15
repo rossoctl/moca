@@ -117,6 +117,8 @@ export interface MainDeps {
    * and `credentials add` wants its secret piped.
    */
   stdinIsTTY?: boolean;
+  /** Whether stdout is a terminal: `sbx proc logs` then removes control sequences. */
+  stdoutIsTTY?: boolean;
   /** All of stdin; `credentials add` reads its secret from it, `sbx run` its script. */
   readStdin?: () => Promise<string>;
   /** All of stdin, byte for byte (at least `limit` bytes when given): `sbx put`'s content. */
@@ -154,6 +156,7 @@ async function mainWith(
     return sbxMain(argv.slice(1), env, io, {
       signal: deps.signal,
       stdinIsTTY: deps.stdinIsTTY,
+      stdoutIsTTY: deps.stdoutIsTTY,
       readStdin: deps.readStdin,
       readStdinBytes: deps.readStdinBytes,
       loginHelpers: deps.loginHelpers,

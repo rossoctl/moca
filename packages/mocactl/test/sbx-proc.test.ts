@@ -61,7 +61,15 @@ type Answer = (op: ProcessOp, args: unknown, signal?: AbortSignal) => unknown;
  * connection whose process calls are recorded and answered by `answer` (a value is the result,
  * with `lease` events; an Error is thrown).
  */
-function world(o: { mode?: string; answer?: Answer; lease?: LeaseEvent[]; cwd?: string } = {}) {
+function world(
+  o: {
+    mode?: string;
+    answer?: Answer;
+    lease?: LeaseEvent[];
+    cwd?: string;
+    stdoutIsTTY?: boolean;
+  } = {},
+) {
   const s = setup();
   const mode = o.mode ?? 'lease+processes';
   const cp = fakeCp({
@@ -106,6 +114,7 @@ function world(o: { mode?: string; answer?: Answer; lease?: LeaseEvent[]; cwd?: 
       execFactory: factory,
       signal: ac.signal,
       cwd: o.cwd ?? tmp('sbx-proc-cwd-'),
+      ...(o.stdoutIsTTY !== undefined ? { stdoutIsTTY: o.stdoutIsTTY } : {}),
     });
   };
   return {
@@ -246,9 +255,41 @@ describe('mocactl sbx proc logs and stop (P5-R6, P5-R31)', () => {
     expect(w.out()).toBe('listening on 8080\n');
     for (const bad of ['0', '-1', '2.5', 'lots']) {
       expect(await w.run(['proc', 'logs', 'web', `--tail=${bad}`, SBX])).toBe(2);
-      expect(w.err()).toContain('--tail must be a whole number of lines, at least 1');
+      expect(w.err()).toContain('--tail must be a whole number of lines, from 1 to 4294967295');
     }
     expect(w.calls).toHaveLength(1);
+  });
+
+  // PR #814 review: --tail is a uint32 on the wire; above 2^32-1 it would wrap (4294967296 sent
+  // as 0, the guest's default), so it is a usage error.
+  it('--tail above 4294967295 is a usage error, nothing sent', async () => {
+    const w = world();
+    for (const bad of ['4294967296', '4294967297', '99999999999999999999']) {
+      expect(await w.run(['proc', 'logs', 'web', `--tail=${bad}`, SBX])).toBe(2);
+      expect(w.err()).toContain('--tail must be a whole number of lines, from 1 to 4294967295');
+    }
+    expect(w.calls).toHaveLength(0);
+    expect(await w.run(['proc', 'logs', 'web', '--tail=4294967295', SBX])).toBe(0);
+    expect(w.calls).toEqual([
+      { op: 'logs', args: { name: 'web', tail: 4294967295 }, signal: true },
+    ]);
+  });
+
+  // PR #814 review: logs replays, later and out of band, output of a process the agent started;
+  // on a terminal its control sequences (OSC 52 clipboard writes, OSC 8 links, titles) are
+  // removed. Piped, or with --raw, it is passed through byte for byte.
+  it('logs sanitizes on a terminal; piped or with --raw it is raw', async () => {
+    const hostile = 'ok\n\x1b]52;c;cHduZWQ=\x07\x1b]0;title\x07\x1b[31mred\x1b[0m\tdone\n';
+    const tty = world({ stdoutIsTTY: true, answer: () => hostile });
+    expect(await tty.run(['proc', 'logs', 'web', SBX])).toBe(0);
+    expect(tty.out()).toBe('ok\nred\tdone\n');
+    expect(await tty.run(['proc', 'logs', 'web', '--raw', SBX])).toBe(0);
+    expect(tty.out()).toBe(hostile);
+    const piped = world({ stdoutIsTTY: false, answer: () => hostile });
+    expect(await piped.run(['proc', 'logs', 'web', SBX])).toBe(0);
+    expect(piped.out()).toBe(hostile);
+    expect(await piped.run(['proc', 'ls', '--raw', SBX])).toBe(2);
+    expect(piped.err()).toContain('--raw only applies to proc logs');
   });
 
   it('stop sends --signal and prints the final state', async () => {
@@ -292,6 +333,7 @@ describe('mocactl sbx proc: usage', () => {
       [['ls', '--cwd', 'x'], '--cwd only applies to proc start'],
       [['run', '--signal', 'INT', '--', 'true'], '--signal only applies to proc stop'],
       [['get', SBX, '--tail', '5'], '--tail only applies to proc logs'],
+      [['run', '--raw', '--', 'true'], '--raw only applies to proc logs'],
     ] as const) {
       expect(await w.run([...argv]), argv.join(' ')).toBe(2);
       expect(w.err()).toContain(text);
@@ -304,7 +346,8 @@ describe('mocactl sbx proc: usage', () => {
     expect(await w.run(['--help'])).toBe(0);
     expect(w.out()).toContain('mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...');
     expect(w.out()).toContain('mocactl sbx proc ls [ID] [--json]');
-    expect(w.out()).toContain('mocactl sbx proc logs (NAME|ID) [--tail N] [ID]');
+    expect(w.out()).toContain('mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]');
+    expect(w.out()).toContain('control sequences are removed (--raw keeps them;');
     expect(w.out()).toContain('mocactl sbx proc stop (NAME|ID) [--signal S] [ID]');
     // A downgrade to lease keeps the lease (plan 5): the mode line no longer says it ends.
     expect(w.out()).not.toContain('command; a downgrade ends the lease');
