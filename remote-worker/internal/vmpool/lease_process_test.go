@@ -458,10 +458,10 @@ func TestProcessExitAudited(t *testing.T) {
 		}
 	}
 	want := [][]string{
-		{"event=start", `workspace_key="k"`, "mode=lease+processes", "id=1", `name="web"`, "pid=412"},
-		{"event=start", "id=2", `name="api"`},
-		{"event=exit", "id=1", `name="web"`, "state=exited", "code=3"},
-		{"event=stop", "id=2", `name="api"`, "state=killed", "code=15"},
+		{"event=start", `workspace_key="k"`, "mode=lease+processes", `id="1"`, `name="web"`, "pid=412"},
+		{"event=start", `id="2"`, `name="api"`},
+		{"event=exit", `id="1"`, `name="web"`, "state=exited", "code=3"},
+		{"event=stop", `id="2"`, `name="api"`, "state=killed", "code=15"},
 	}
 	if len(recs) != len(want) {
 		t.Fatalf("lease_process records = %d, want %d:\n%s", len(recs), len(want), strings.Join(recs, "\n"))
@@ -793,8 +793,8 @@ func TestDowngradeStopsTrackedKeepsLease(t *testing.T) {
 		t.Fatalf("stop records = %q, want one each for web and p2", stops)
 	}
 	for i, ws := range [][]string{
-		{"id=1", `name="web"`, "pid=412", "state=killed", "code=15", "mode=lease+processes", `workspace_key="k"`},
-		{"id=2", `name="p2"`, "state=killed"},
+		{`id="1"`, `name="web"`, "pid=412", "state=killed", "code=15", "mode=lease+processes", `workspace_key="k"`},
+		{`id="2"`, `name="p2"`, "state=killed"},
 	} {
 		for _, w := range ws {
 			if !strings.Contains(stops[i], w) {
@@ -999,7 +999,7 @@ func testExecRelevelStopsAndNotifies(t *testing.T) {
 	if got := vmID(l.vm); got != vm || l.mode != ModeLease {
 		t.Fatalf("lease = %s at %s, want %s kept at lease", got, l.mode, vm)
 	}
-	if stops := auditRecords(logs, "stop"); len(stops) != 1 || !strings.Contains(stops[0], "id=1") {
+	if stops := auditRecords(logs, "stop"); len(stops) != 1 || !strings.Contains(stops[0], `id="1"`) {
 		t.Fatalf("stop records = %q, want one for web", stops)
 	}
 
@@ -1406,7 +1406,7 @@ func TestLeaseEndSyncRefreshesTheMirror(t *testing.T) {
 			t.Fatalf("state file pending = %+v, want the refreshed end persisted", s.Pending)
 		}
 		exits := auditRecords(logs, "exit")
-		if len(exits) != 1 || !strings.Contains(exits[0], "id=1") || !strings.Contains(exits[0], "code=3") {
+		if len(exits) != 1 || !strings.Contains(exits[0], `id="1"`) || !strings.Contains(exits[0], "code=3") {
 			t.Fatalf("exit records %q, want one for web, exited(3)", exits)
 		}
 		// The next lease's first Exec delivers it; nothing writes the record again.

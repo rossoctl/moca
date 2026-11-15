@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -166,17 +168,52 @@ func guestRequest(c Command, capBytes int64, now time.Time) ga.Request {
 	return req
 }
 
-// trackedFromGuest is an End's tracked table as the pool keeps it, nil for none.
-func trackedFromGuest(ps []ga.TrackedProcess) []TrackedProcess {
-	if len(ps) == 0 {
-		return nil
+// The guest's own rules for a tracked row (guestagent: ids 1, 2, 3, … as decimal strings;
+// ruling P5-R8's name rule, an unnamed process reported as p<id>; the three states).
+var (
+	guestTrackedIDRE   = regexp.MustCompile(`^[0-9]{1,20}$`)
+	guestTrackedNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
+// guestTrackedRowProblem says how a guest's tracked row breaks the guest's own rules, or ""
+// when it keeps them.
+func guestTrackedRowProblem(p ga.TrackedProcess) string {
+	switch {
+	case !guestTrackedIDRE.MatchString(p.ID):
+		return "id"
+	case p.Name != "" && !guestTrackedNameRE.MatchString(p.Name):
+		return "name"
+	case p.State != ga.TrackedRunning && p.State != ga.TrackedExited && p.State != ga.TrackedKilled:
+		return "state"
 	}
-	out := make([]TrackedProcess, len(ps))
-	for i, p := range ps {
-		out[i] = TrackedProcess{ID: p.ID, Name: p.Name, PID: p.PID, State: p.State, Code: p.Code,
-			Started: time.UnixMilli(p.StartedUnixMs), MemoryBytes: p.MemoryBytes}
+	return ""
+}
+
+// trackedFromGuest is an End's tracked table as the pool keeps it, nil for none. The rows
+// come from the guest, which the host does not trust (PR #814 review): their ids, names
+// and states reach the host's audit lines, so a row breaking the guest's own rules is
+// dropped and flagged, quoted, never kept.
+func trackedFromGuest(ps []ga.TrackedProcess) []TrackedProcess {
+	var out []TrackedProcess
+	for _, p := range ps {
+		if why := guestTrackedRowProblem(p); why != "" {
+			log.Printf("vmpool: guest tracked row refused: bad %s: id=%q name=%q state=%q pid=%d",
+				why, clipForLog(p.ID), clipForLog(p.Name), clipForLog(p.State), p.PID)
+			continue
+		}
+		out = append(out, TrackedProcess{ID: p.ID, Name: p.Name, PID: p.PID, State: p.State, Code: p.Code,
+			Started: time.UnixMilli(p.StartedUnixMs), MemoryBytes: p.MemoryBytes})
 	}
 	return out
+}
+
+// clipForLog bounds a guest-supplied string a log line quotes.
+func clipForLog(s string) string {
+	const n = 80
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // guestKeepsLease reports whether err is a guest refusal that leaves the VM as fit for

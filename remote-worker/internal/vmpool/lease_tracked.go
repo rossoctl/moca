@@ -128,7 +128,7 @@ func (p *pool) replaceTrackedLocked(rp *runPool, l *vmLease, mode Mode, next []T
 // record carries the id, name, mode and workspace key, never the command text.
 func auditTracked(key string, mode Mode, stopped map[string]bool, prev, next []TrackedProcess) bool {
 	rec := func(event string, tp TrackedProcess, state string) {
-		log.Printf("vmpool: lease_process event=%s workspace_key=%q mode=%s id=%s name=%q pid=%d state=%s code=%d",
+		log.Printf("vmpool: lease_process event=%s workspace_key=%q mode=%s id=%q name=%q pid=%d state=%s code=%d",
 			event, key, mode, tp.ID, tp.DisplayName(), tp.PID, state, tp.Code)
 	}
 	old := make(map[string]TrackedProcess, len(prev))
@@ -193,7 +193,9 @@ func findTracked(ps []TrackedProcess, args ProcessArgs) int {
 }
 
 // trackedAuditField is a lease end's audit field for its tracked processes (spec §4.1:
-// id, name and exit state), " processes=[<id>:<name>:<state> ...]", or "" for none.
+// id, name and exit state), " processes=[<id>:<name>:<state> ...]", or "" for none. Its
+// parts are safe unquoted: every row came through trackedFromGuest, which keeps only ids
+// of digits, names of [A-Za-z0-9._-] and the three states.
 func trackedAuditField(ps []TrackedProcess) string {
 	if len(ps) == 0 {
 		return ""

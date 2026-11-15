@@ -627,7 +627,11 @@ be running)`.
   workspace key, the mode, id, name, pid, state and code), and a lease end's line lists its tracked
   processes as the mirror showed them when the end began: it is written before the end's sync, so a
   process that exited since the last call is listed there as running and its `exit` line follows. A
-  stop line may come before the exit line of the same process (P5-R18). The relay's
+  stop line may come before the exit line of the same process (P5-R18). The worker does not trust
+  the guest's rows: one whose id, name or state breaks the guest's own rules (decimal id, P5-R8's
+  name rule, the three states) is dropped with a quoted `guest tracked row refused` line, and the
+  `lease_process` line quotes the id and the name, so no guest can write a line of its own into the
+  host's audit. The relay's
   `sandbox_exec` line gains `kind` and `process` (`p<id>` when an id was given, else the name).
   None of them has command text. A `process_start`'s command shows only in the `cmd` prefix that
   the operator's `SH_SANDBOX_AUDIT_COMMANDS=1` adds to every Exec's line.

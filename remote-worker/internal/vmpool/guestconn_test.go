@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -423,5 +425,71 @@ func TestRunOverConnReturnsTheTrackedTable(t *testing.T) {
 		if g != w || !res.Tracked[i].Started.Equal(want[i].Started) {
 			t.Fatalf("tracked[%d] = %+v, want %+v", i, res.Tracked[i], want[i])
 		}
+	}
+}
+
+// PR #814 review: the host takes ids, names and states from the guest's End, and logs them in
+// its audit lines. A row breaking the guest's own rules (id: decimal digits; name: 1-64 of
+// [A-Za-z0-9._-], or none; state: running, exited or killed) is dropped and flagged, quoted,
+// so a compromised agent cannot write a line of its own into the host's audit.
+func TestTrackedFromGuestDropsRowsBreakingTheGuestRules(t *testing.T) {
+	logs := captureLog(t)
+	ok := []ga.TrackedProcess{
+		{ID: "1", Name: "web", PID: 412, State: ga.TrackedRunning},
+		{ID: "2", Name: "p2", PID: 413, State: ga.TrackedKilled, Code: 9},
+		{ID: "3", PID: 414, State: ga.TrackedExited, Code: 1},
+		{ID: "4", Name: strings.Repeat("a", 64), PID: 415, State: ga.TrackedRunning},
+	}
+	bad := []ga.TrackedProcess{
+		{ID: "5", Name: "web\nvmpool: lease end workspace_key=\"other\" reason=reset", PID: 1, State: ga.TrackedRunning},
+		{ID: "6\nx", Name: "web", PID: 1, State: ga.TrackedRunning},
+		{ID: "", Name: "web", PID: 1, State: ga.TrackedRunning},
+		{ID: "p7", Name: "web", PID: 1, State: ga.TrackedRunning},
+		{ID: "8", Name: strings.Repeat("a", 65), PID: 1, State: ga.TrackedRunning},
+		{ID: "9", Name: "a b", PID: 1, State: ga.TrackedRunning},
+		{ID: "10", Name: "web", PID: 1, State: "running\nforged"},
+		{ID: "11", Name: "web", PID: 1, State: "zombie"},
+	}
+	got := trackedFromGuest(append(slices.Clone(ok[:2]), append(slices.Clone(bad), ok[2:]...)...))
+	var ids []string
+	for _, tp := range got {
+		ids = append(ids, tp.ID)
+	}
+	if !slices.Equal(ids, []string{"1", "2", "3", "4"}) {
+		t.Fatalf("kept ids %q, want only the rows within the guest's rules", ids)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "vmpool: guest tracked row refused"); n != len(bad) {
+		t.Fatalf("%d refused-row lines, want %d:\n%s", n, len(bad), out)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if !strings.Contains(line, "vmpool: ") {
+			t.Fatalf("a log line the host did not write: %q", line)
+		}
+	}
+}
+
+// End to end: a row with a newline in its name, from the guest's End, never reaches the
+// lease_process audit or a lease end's processes field; the ids those lines carry are quoted.
+func TestGuestTrackedRowWithANewlineNeverReachesAnAuditLine(t *testing.T) {
+	logs := captureLog(t)
+	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{Tracked: []ga.TrackedProcess{
+			{ID: "1", Name: "web", PID: 412, State: ga.TrackedRunning},
+			{ID: "2", Name: "x\nvmpool: lease end forged", PID: 413, State: ga.TrackedRunning},
+		}})
+	})
+	res, err := runOverConn(context.Background(), conn, Command{Command: "true", Lease: true, CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
+	if err != nil {
+		t.Fatalf("runOverConn: %v", err)
+	}
+	auditTracked("k", ModeLeaseProcesses, nil, nil, res.Tracked)
+	log.Printf("vmpool: lease end test%s", trackedAuditField(res.Tracked))
+	out := logs.String()
+	if strings.Contains(out, "\nvmpool: lease end forged") || strings.Contains(out, "\nforged") {
+		t.Fatalf("the forged line reached the log:\n%s", out)
+	}
+	if !strings.Contains(out, `event=start workspace_key="k" mode=lease+processes id="1" name="web"`) {
+		t.Fatalf("want web's start record with its id quoted:\n%s", out)
 	}
 }
