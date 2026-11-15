@@ -360,22 +360,50 @@ func newUIDAllocator(base, n int) *uidAllocator {
 	return &uidAllocator{base: base, n: n, inUse: map[int]bool{}}
 }
 
-// take returns a free uid whose cgroup populated does not report populated, or an error
-// when there is none. populated is called with the allocator's lock held.
+// uidsExhausted is take's refusal: each of the n uids is held, by a running process
+// (inUse) or by what an exited one left in its cgroup (leftover).
+type uidsExhausted struct{ n, base, inUse, leftover int }
+
+func (e *uidsExhausted) Error() string {
+	return fmt.Sprintf("guest-agent: no free tracked uid: all %d from %d are in use (%d) or still populated (%d)",
+		e.n, e.base, e.inUse, e.leftover)
+}
+
+// take returns a free uid whose cgroup populated does not report populated, or a
+// *uidsExhausted when there is none. populated is called with the allocator's lock held.
 func (a *uidAllocator) take(populated func(uid int) bool) (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	ex := &uidsExhausted{n: a.n, base: a.base}
 	for i := 0; i < a.n; i++ {
 		idx := (a.next + i) % a.n
 		uid := a.base + idx
-		if a.inUse[uid] || populated(uid) {
+		if a.inUse[uid] {
+			ex.inUse++
+			continue
+		}
+		if populated(uid) {
+			ex.leftover++
 			continue
 		}
 		a.inUse[uid] = true
 		a.next = (idx + 1) % a.n
 		return uid, nil
 	}
-	return 0, fmt.Errorf("guest-agent: no free tracked uid: all %d from %d are in use or still populated", a.n, a.base)
+	return 0, ex
+}
+
+// processLimitError is take's refusal as the host sees it (ruling P5-R6): process_limit,
+// worded by what holds the uids. When running processes hold them all it is the running
+// cap's text; when leftover children of exited processes hold some, it says so, since
+// stopping those entries frees their uids (PR #814 review).
+func processLimitError(maxRunning int, err error) error {
+	var ex *uidsExhausted
+	if errors.As(err, &ex) && ex.leftover > 0 {
+		return fmt.Errorf("process_limit: %d running, %d uids held by leftover children of exited processes (process_stop them)",
+			ex.inUse, ex.leftover)
+	}
+	return fmt.Errorf("process_limit: %d running (SH_LEASE_MAX_PROCESSES)", maxRunning)
 }
 
 // release returns uid to the pool. A uid outside the range, or not held, is ignored.

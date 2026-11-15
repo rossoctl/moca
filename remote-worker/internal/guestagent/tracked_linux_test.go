@@ -465,9 +465,10 @@ func TestTrackedUIDNotReusedWhilePopulated(t *testing.T) {
 	if uid := procUID(fmt.Sprintf("/proc/%d", waitPidOf(t, regexp.MustCompile(`^sleep 3021$`), -1))); uid != trackedUID1 {
 		t.Fatalf("second process runs as %d, want 20001: 20000 is still populated", uid)
 	}
-	// One running of four allowed, but no uid is free: 20000 still holds the leftover.
-	if _, errMsg := tryStartProc(t, a, ProcessArgs{}, `exec sleep 3022`, 0); errMsg != "process_limit: 4 running (SH_LEASE_MAX_PROCESSES)" {
-		t.Fatalf("third start: %q, want the process_limit refusal", errMsg)
+	// One running of four allowed, but no uid is free: 20000 still holds the leftover, and
+	// the refusal says so (PR #814 review).
+	if _, errMsg := tryStartProc(t, a, ProcessArgs{}, `exec sleep 3022`, 0); errMsg != "process_limit: 1 running, 1 uids held by leftover children of exited processes (process_stop them)" {
+		t.Fatalf("third start: %q, want the process_limit refusal naming the leftover", errMsg)
 	}
 	stopProc(t, a, ProcessArgs{ID: p2.ID})
 	startProc(t, a, "", `exec sleep 3023`, 0)

@@ -385,6 +385,38 @@ func TestUIDAllocatorSkipsPopulatedUIDs(t *testing.T) {
 	}
 }
 
+// PR #814 review nit: the uid allocator's refusal says what holds the uids, so a user with
+// one running process and leftovers holding the rest is not told "4 running".
+func TestUIDAllocatorRefusalCountsRunningAndLeftovers(t *testing.T) {
+	a := newUIDAllocator(20000, 4)
+	none := func(int) bool { return false }
+	if _, err := a.take(none); err != nil {
+		t.Fatal(err)
+	}
+	leftovers := func(uid int) bool { return uid != 20000 }
+	_, err := a.take(leftovers)
+	var ex *uidsExhausted
+	if !errors.As(err, &ex) || ex.inUse != 1 || ex.leftover != 3 {
+		t.Fatalf("take = %v (%+v), want 1 in use and 3 held by leftovers", err, ex)
+	}
+	got := processLimitError(4, err).Error()
+	if want := "process_limit: 1 running, 3 uids held by leftover children of exited processes (process_stop them)"; got != want {
+		t.Fatalf("refusal %q, want %q", got, want)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := a.take(none); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = a.take(none)
+	if got, want := processLimitError(4, err).Error(), "process_limit: 4 running (SH_LEASE_MAX_PROCESSES)"; got != want {
+		t.Fatalf("every uid held by a running process: %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(processLimitError(4, errors.New("other")).Error(), "process_limit: ") {
+		t.Fatal("any refusal of take keeps the process_limit: prefix")
+	}
+}
+
 // Fresh: a released uid is not the next one handed out while another is free.
 func TestUIDAllocatorRotates(t *testing.T) {
 	a := newUIDAllocator(20000, 3)

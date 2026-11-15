@@ -962,7 +962,10 @@ for a refusal at the worker's own cap.
   kind itself; it ships in one image with the control plane whose policy enables
   `lease+processes`, so a supported rollout cannot pair them.
 - **The guest's process wire strings:** `process_not_found: <id or name>`,
-  `process_limit: <n> running (SH_LEASE_MAX_PROCESSES)`, `process_name_taken: <name>`,
+  `process_limit: <n> running (SH_LEASE_MAX_PROCESSES)` (when leftovers of exited processes hold
+  tracked uids, it reads
+  `process_limit: <n> running, <m> uids held by leftover children of exited processes (process_stop them)`),
+  `process_name_taken: <name>`,
   `process_name_invalid: <detail>`, `process_cwd: <detail>` and `process_signal: <detail>`. A
   process kind's refusal with one of them, or with `processes_not_enabled:`, keeps the lease; a
   command's guest error never does.

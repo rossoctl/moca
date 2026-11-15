@@ -167,8 +167,8 @@ func (a *Agent) launchTracked(id string, log *ring, command string, cwdDir *os.F
 	uid, err := l.uids.take(l.cgroups.populated)
 	if err != nil {
 		// Every uid is held or still populated: the same limit, as the host sees it
-		// (ruling P5-R6).
-		return 0, 0, fmt.Errorf("process_limit: %d running (SH_LEASE_MAX_PROCESSES)", maxRunning)
+		// (ruling P5-R6), naming the leftovers when they hold some.
+		return 0, 0, processLimitError(maxRunning, err)
 	}
 	launched := false
 	defer func() {
