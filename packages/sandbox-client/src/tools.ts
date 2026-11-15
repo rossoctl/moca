@@ -221,14 +221,28 @@ function optStr(a: Record<string, unknown>, k: string): string | undefined {
   }
   return noNul(k, v);
 }
-function optInt(a: Record<string, unknown>, k: string, min: number): number | undefined {
+function optInt(
+  a: Record<string, unknown>,
+  k: string,
+  min: number,
+  max?: number,
+): number | undefined {
   const v = a[k];
   if (v === undefined) return undefined;
+  if (max !== undefined) {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
+      throw new ToolInputError(`${k} must be a whole number from ${min} to ${max}`);
+    }
+    return v;
+  }
   if (typeof v !== 'number' || !Number.isInteger(v) || v < min) {
     throw new ToolInputError(`${k} must be a whole number of at least ${min}`);
   }
   return v;
 }
+
+/** The most a uint32 proto field holds: ProcessArgs.tail's cap (PR #814 review). */
+export const MAX_UINT32 = 0xffffffff;
 const optBool = (a: Record<string, unknown>, k: string): boolean => a[k] === true;
 
 /** Pi's formatSize. */
@@ -830,12 +844,17 @@ function processTools(ws: string): SandboxTool[] {
       type: 'object',
       properties: {
         ...PROCESS_SELECTOR,
-        tail: { type: 'integer', minimum: 1, description: 'Lines to show (default 200)' },
+        tail: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MAX_UINT32,
+          description: 'Lines to show (default 200)',
+        },
       },
     },
     async run(a, _exec, signal, process) {
       const sel = selector(a);
-      const n = optInt(a, 'tail', 1);
+      const n = optInt(a, 'tail', 1, MAX_UINT32);
       const r = await need(process)(
         'logs',
         { ...sel, ...(n !== undefined ? { tail: n } : {}) },

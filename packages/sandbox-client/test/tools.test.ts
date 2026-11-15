@@ -1121,6 +1121,25 @@ describe('process tools (plan 5, spec §7)', () => {
     expect(p.sent).toEqual([]);
   });
 
+  // PR #814 review: tail is a uint32 on the wire; above 2^32-1 the writer throws, which would
+  // surface as an internal serialization failure. It is invalid input instead.
+  it('process_logs caps tail at 4294967295, a ToolInputError above it', async () => {
+    const p = procs(() => 'a\n');
+    for (const tail of [4294967296, 5e9]) {
+      await expect(
+        t(l2(), 'process_logs').run({ id: '3', tail }, noExec, undefined, p.process),
+        `tail ${tail}`,
+      ).rejects.toThrow(new ToolInputError('tail must be a whole number from 1 to 4294967295'));
+    }
+    expect(p.sent).toEqual([]);
+    await t(l2(), 'process_logs').run({ id: '3', tail: 4294967295 }, noExec, undefined, p.process);
+    expect(p.sent).toHaveLength(1);
+    const schema = t(l2(), 'process_logs').inputSchema as {
+      properties: { tail: { maximum?: number } };
+    };
+    expect(schema.properties.tail.maximum).toBe(4294967295);
+  });
+
   it("rethrows the process call's own errors unchanged", async () => {
     const boom = new ExecMachineryError('sandbox failure: worker gone');
     const p = procs(() => boom);
