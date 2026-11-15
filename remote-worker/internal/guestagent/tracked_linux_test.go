@@ -642,6 +642,52 @@ func TestProcessCwdMustStayInWorkspace(t *testing.T) {
 	}
 }
 
+// PR #814 review: the cwd's parents are checked as the tracked uid, not as root. The shim
+// re-resolves the cwd from the workspace root after its privilege drop, so a group-searchable
+// directory beneath a 0700 one the tracked uid cannot search is refused: the process shows
+// exited(127), its log `cwd: permission denied` (ruling P5-R14), and never runs there.
+func TestProcessCwdParentPermissionsAreEnforced(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	lo := a.opts.Lease
+	priv := filepath.Join(a.WorkDir(), "private")
+	sub := filepath.Join(priv, "sub")
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{{priv, 0o700}, {sub, 0o775}} {
+		if err := os.Mkdir(d.path, d.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(d.path, lo.UID, lo.GID); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d.path, d.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused, errMsg := tryStartProc(t, a, ProcessArgs{Cwd: "private/sub"}, `pwd -P; echo ran`, 0)
+	if errMsg != "" {
+		t.Fatalf("process_start in private/sub: %q, want it started and failing as the tracked uid", errMsg)
+	}
+	st := waitProcExit(t, a, refused.ID)
+	out, _ := procLogs(t, a, ProcessArgs{ID: refused.ID})
+	if st.State != TrackedExited || st.Code != 127 || !strings.Contains(out, "cwd: permission denied") || strings.Contains(out, "ran") {
+		t.Fatalf("process in private/sub: %+v, log %q; want exited(127) with cwd: permission denied, never run", st, out)
+	}
+	// Searchable all the way down, the same directory works.
+	if err := os.Chmod(priv, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ok2, errMsg := tryStartProc(t, a, ProcessArgs{Cwd: "private/sub"}, `pwd -P`, 0)
+	if errMsg != "" {
+		t.Fatalf("process_start in a searchable private/sub: %s", errMsg)
+	}
+	waitProcExit(t, a, ok2.ID)
+	if out, _ := procLogs(t, a, ProcessArgs{ID: ok2.ID}); out != sub+"\n" {
+		t.Fatalf("pwd in a searchable private/sub = %q, want %q", out, sub+"\n")
+	}
+}
+
 // Spec §3.3: the sbx-ws group and umask 0002 let a later Exec edit what a tracked
 // process wrote in the (setgid, group-writable) workspace.
 func TestTrackedFileEditableByLaterExec(t *testing.T) {

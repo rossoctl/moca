@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -25,17 +26,19 @@ const ShimArg = "lease-shim"
 // has happened (or that the shim died) from EOF on the read end.
 const ShimExecBarrierFD = 3
 
-// ShimCwdFD is the directory descriptor the shim changes into, after its privilege drop,
-// when its <cwd> argument is ShimCwdFromFD: an O_PATH descriptor the starter opened
-// beneath the workspace (process_start). The change happens as the dropped identity,
-// so no root chdir follows a path anyone else could rewrite. The shim closes it.
+// ShimCwdFD is the workspace root's directory descriptor, an O_PATH one the starter opened
+// (process_start), when the shim's <cwd> argument is ShimCwdFromFD followed by a relative
+// path. After its privilege drop the shim resolves that path from this descriptor and
+// changes into the result, so every directory on the way is searched as the dropped
+// identity, and no root chdir follows a path anyone else could rewrite. The shim closes it.
 const ShimCwdFD = 4
 
-// The shim's <cwd> argument: stay in the directory the starter gave the shim, or change
-// into ShimCwdFD after the drop.
+// The shim's <cwd> argument: ShimCwdInherited stays in the directory the starter gave the
+// shim; ShimCwdFromFD + <rel> changes, after the drop, into <rel> (a local path, "." for the
+// root itself) resolved beneath ShimCwdFD.
 const (
 	ShimCwdInherited = "-"
-	ShimCwdFromFD    = "fd"
+	ShimCwdFromFD    = "fd:"
 )
 
 // ShimMain is the lease shim: it turns the root process it starts as into the
@@ -45,7 +48,7 @@ const (
 //
 // args are `<uid> <gid> <home> <user> <cwd> -- <argv...>`; user is the identity's
 // passwd name (sbx for an Exec, sbxp<n> for a tracked process), and cwd is
-// ShimCwdInherited or ShimCwdFromFD. It never returns: on a setup failure it
+// ShimCwdInherited or ShimCwdFromFD<rel>. It never returns: on a setup failure it
 // writes `guest-agent: lease-shim: <step>: <err>` to stderr and exits 127.
 //
 // The capability bounding set and no_new_privs are per-thread, and so is a seccomp
@@ -101,13 +104,24 @@ func ShimMain(args []string) {
 	if err := syscall.Setresuid(sa.uid, sa.uid, sa.uid); err != nil {
 		shimFail("setresuid", err)
 	}
-	// After the drop: the kernel checks the directory against the dropped identity,
-	// and the descriptor, not a path, names it.
+	// After the drop, so the walk is the dropped identity's: the path is resolved from
+	// the workspace root's descriptor, and the kernel checks search permission on every
+	// directory along it, the parents included, as this uid (PR #814 review: a cwd the
+	// root starter opened would have had its parents searched as root). Beneath the
+	// root, with no symlink and no other mount on the way, as the starter's own check.
+	// A cwd this uid cannot reach fails here, exit 127 (ruling P5-R14).
 	if sa.cwdFromFD {
-		if err := unix.Fchdir(ShimCwdFD); err != nil {
+		fd, err := unix.Openat2(ShimCwdFD, sa.cwdRel, &unix.OpenHow{
+			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
+		})
+		if err != nil {
 			shimFail("cwd", err)
 		}
-		if err := unix.Close(ShimCwdFD); err != nil {
+		if err := unix.Fchdir(fd); err != nil {
+			shimFail("cwd", err)
+		}
+		if err := errors.Join(unix.Close(fd), unix.Close(ShimCwdFD)); err != nil {
 			shimFail("cwd", err)
 		}
 	}
@@ -190,6 +204,7 @@ type shimArgs struct {
 	uid, gid   int
 	home, user string
 	cwdFromFD  bool
+	cwdRel     string // with cwdFromFD: the path to resolve beneath ShimCwdFD
 	argv       []string
 }
 
@@ -211,13 +226,14 @@ func parseShimArgs(args []string) (shimArgs, error) {
 	if args[3] == "" {
 		return shimArgs{}, errors.New("user is empty")
 	}
-	if args[4] != ShimCwdInherited && args[4] != ShimCwdFromFD {
-		return shimArgs{}, fmt.Errorf("cwd %q: want %s or %s", args[4], ShimCwdInherited, ShimCwdFromFD)
+	rel, fromFD := strings.CutPrefix(args[4], ShimCwdFromFD)
+	if args[4] != ShimCwdInherited && (!fromFD || !filepath.IsLocal(rel)) {
+		return shimArgs{}, fmt.Errorf("cwd %q: want %s or %s<a local path>", args[4], ShimCwdInherited, ShimCwdFromFD)
 	}
 	if args[6] == "" {
 		return shimArgs{}, errors.New("argv[0] is empty")
 	}
-	return shimArgs{uid: uid, gid: gid, home: args[2], user: args[3], cwdFromFD: args[4] == ShimCwdFromFD, argv: args[6:]}, nil
+	return shimArgs{uid: uid, gid: gid, home: args[2], user: args[3], cwdFromFD: fromFD, cwdRel: rel, argv: args[6:]}, nil
 }
 
 // shimEnv is env with HOME, USER and LOGNAME replaced by the identity's: home, and

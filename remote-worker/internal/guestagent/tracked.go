@@ -481,16 +481,23 @@ func displayName(p TrackedProcess) string {
 	return p.Name
 }
 
+// processCwdRefused is every process_cwd refusal's reason. It resolves as root, so it
+// must not tell the caller which paths exist, or what lies beneath a directory the
+// caller's uid could not search (PR #814 review): one text, whatever the cause.
+const processCwdRefused = "not a directory inside the workspace"
+
 // resolveProcessCwd is process_start's cwd: the workspace when cwd is empty, relative
 // paths taken from the workspace. It resolves every symlink and refuses, with
 // process_cwd, anything that does not then lie inside the workspace or is not a
-// directory. The result is symlink-free. This is the tool's contract, not a boundary:
-// the process runs unprivileged and may cd anywhere its uid can reach.
+// directory. The result is symlink-free. This is the tool's contract, checked as root;
+// the boundary is the shim's resolution of the same path as the tracked uid
+// (ShimCwdFromFD), which also enforces the parents' permissions.
 func resolveProcessCwd(workDir, cwd string) (string, error) {
 	root, err := filepath.EvalSymlinks(workDir)
 	if err != nil {
 		return "", fmt.Errorf("process_cwd: the workspace: %v", err)
 	}
+	refused := fmt.Errorf("process_cwd: %s: %s", clip(cwd), processCwdRefused)
 	p := cwd
 	switch {
 	case p == "":
@@ -500,32 +507,15 @@ func resolveProcessCwd(workDir, cwd string) (string, error) {
 	}
 	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("process_cwd: %s: no such directory", clip(cwd))
-		}
-		return "", fmt.Errorf("process_cwd: %s: %v", clip(cwd), pathErrCause(err))
+		return "", refused
 	}
 	if real != root && !strings.HasPrefix(real, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("process_cwd: %s: outside the workspace", clip(cwd))
+		return "", refused
 	}
-	fi, err := os.Stat(real)
-	if err != nil {
-		return "", fmt.Errorf("process_cwd: %s: %v", clip(cwd), pathErrCause(err))
-	}
-	if !fi.IsDir() {
-		return "", fmt.Errorf("process_cwd: %s: not a directory", clip(cwd))
+	if fi, err := os.Stat(real); err != nil || !fi.IsDir() {
+		return "", refused
 	}
 	return real, nil
-}
-
-// pathErrCause is err without the path a *fs.PathError carries, which may be as long as
-// the request allowed: the caller names the path, clipped, itself.
-func pathErrCause(err error) error {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		return pe.Err
-	}
-	return err
 }
 
 // newestWithin keeps the newest bytes of b that fit in max and returns them with the

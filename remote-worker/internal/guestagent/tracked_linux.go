@@ -91,14 +91,15 @@ func (a *Agent) processStart(req Request, w *frameWriter, r *reaper, shim string
 	if trackedAfterCwdCheck != nil {
 		trackedAfterCwdCheck()
 	}
-	// The process changes into this descriptor after its privilege drop (the shim's
-	// ShimCwdFD), never into a path: a running tracked process can rewrite the
-	// group-writable workspace, and a root chdir would follow whatever it put there.
-	cwdDir, err := openCwdBeneath(a.opts.WorkDir, cwd, args.Cwd)
+	// The shim resolves the cwd again after its privilege drop, from this descriptor of
+	// the workspace root (ShimCwdFD), and changes into it as the tracked uid: a running
+	// tracked process can rewrite the group-writable workspace, and a root chdir would
+	// follow whatever it put there, past parents the tracked uid cannot search.
+	rootDir, rel, err := openCwdBeneath(a.opts.WorkDir, cwd, args.Cwd)
 	if err != nil {
 		return End{}, err
 	}
-	defer cwdDir.Close()
+	defer rootDir.Close()
 	if err := a.ensureTrackedRoot(); err != nil {
 		return End{}, err
 	}
@@ -107,7 +108,7 @@ func (a *Agent) processStart(req Request, w *frameWriter, r *reaper, shim string
 		maxRunning = defaultMaxProcesses
 	}
 	p, err := a.lease.procs.start(args.Name, maxRunning, func(id string, log *ring) (int, int, error) {
-		return a.launchTracked(id, log, req.Command, cwdDir, maxRunning, r, shim)
+		return a.launchTracked(id, log, req.Command, rootDir, rel, maxRunning, r, shim)
 	})
 	if err != nil {
 		return End{}, err
@@ -126,42 +127,42 @@ func (a *Agent) processStart(req Request, w *frameWriter, r *reaper, shim string
 	return End{}, nil
 }
 
-// openCwdBeneath opens cwd, which resolveProcessCwd has checked, as an O_PATH directory
-// descriptor resolved beneath the workspace: no symlink, no other mount, nothing above
-// it. A directory swapped for a symlink since the check is refused here; once open, the
-// descriptor names the directory itself, which cannot leave the workspace's mount.
-func openCwdBeneath(workDir, cwd, given string) (*os.File, error) {
-	fail := func(err error) (*os.File, error) {
-		return nil, fmt.Errorf("process_cwd: %s: changed while starting: %v", clip(given), err)
-	}
+// openCwdBeneath checks cwd, which resolveProcessCwd has resolved, once more beneath the
+// workspace (no symlink, no other mount, nothing above it), so a directory swapped for a
+// symlink since that check is refused up front. It returns an O_PATH descriptor of the
+// workspace root and cwd relative to it, which the shim resolves again, the same way, as
+// the tracked uid (ShimCwdFromFD). Its refusal is resolveProcessCwd's one text.
+func openCwdBeneath(workDir, cwd, given string) (*os.File, string, error) {
+	refused := fmt.Errorf("process_cwd: %s: %s", clip(given), processCwdRefused)
 	root, err := filepath.EvalSymlinks(workDir)
 	if err != nil {
-		return fail(err)
+		return nil, "", refused
 	}
 	rel, err := filepath.Rel(root, cwd)
-	if err != nil {
-		return fail(err)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, "", refused
 	}
 	rfd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return fail(err)
+		return nil, "", refused
 	}
-	defer unix.Close(rfd)
 	fd, err := unix.Openat2(rfd, rel, &unix.OpenHow{
 		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
 	})
 	if err != nil {
-		return fail(err)
+		unix.Close(rfd)
+		return nil, "", refused
 	}
-	return os.NewFile(uintptr(fd), cwd), nil
+	unix.Close(fd)
+	return os.NewFile(uintptr(rfd), root), rel, nil
 }
 
 // launchTracked is trackedTable.start's launch for process id: it takes a uid, makes the
-// process's cgroup and HOME, and forks the shim into the cgroup, with cwdDir as the
-// directory it changes into after its drop. On an error nothing is left: the uid is
-// released and the cgroup removed.
-func (a *Agent) launchTracked(id string, log *ring, command string, cwdDir *os.File, maxRunning int, r *reaper, shim string) (int, int, error) {
+// process's cgroup and HOME, and forks the shim into the cgroup, with rootDir, the
+// workspace root, and rel, the cwd beneath it, which the shim resolves and changes into
+// after its drop. On an error nothing is left: the uid is released and the cgroup removed.
+func (a *Agent) launchTracked(id string, log *ring, command string, rootDir *os.File, rel string, maxRunning int, r *reaper, shim string) (int, int, error) {
 	l := &a.lease
 	lo := a.opts.Lease
 	uid, err := l.uids.take(l.cgroups.populated)
@@ -208,16 +209,16 @@ func (a *Agent) launchTracked(id string, log *ring, command string, cwdDir *os.F
 	defer barR.Close()
 	l.exits.add(id)
 
-	argv := []string{shim, ShimArg, strconv.Itoa(uid), strconv.Itoa(lo.GID), home, l.uids.user(uid), ShimCwdFromFD, "--", a.opts.Shell, "-c", command}
+	argv := []string{shim, ShimArg, strconv.Itoa(uid), strconv.Itoa(lo.GID), home, l.uids.user(uid), ShimCwdFromFD + rel, "--", a.opts.Shell, "-c", command}
 	// As runLeaseCommand's fork: the agent's environment, CLONE_INTO_CGROUP so there is
 	// no moment outside the cgroup, and a session of its own. stdout and stderr share
 	// one pipe, so the ring keeps them in the order they were written. The shim's exec
-	// barrier is fd 3 and its cwd fd 4. No Dir: the agent's root never changes into
-	// the cwd; the shim does, as the tracked uid.
+	// barrier is fd 3 and the workspace root fd 4. No Dir: the agent's root never
+	// changes into the cwd; the shim resolves and changes into it, as the tracked uid.
 	r.expect()
 	pid, err := syscall.ForkExec(shim, argv, &syscall.ProcAttr{
 		Env:   os.Environ(),
-		Files: []uintptr{devNull.Fd(), logW.Fd(), logW.Fd(), barW.Fd(), cwdDir.Fd()},
+		Files: []uintptr{devNull.Fd(), logW.Fd(), logW.Fd(), barW.Fd(), rootDir.Fd()},
 		Sys:   &syscall.SysProcAttr{Setsid: true, UseCgroupFD: true, CgroupFD: c.fd()},
 	})
 	_ = logW.Close()

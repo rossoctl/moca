@@ -1068,6 +1068,26 @@ func TestResolveProcessCwdErrorsAreBounded(t *testing.T) {
 	}
 }
 
+// PR #814 review: process_cwd's root-side resolution must not tell a caller which paths
+// exist. Every refusal has one text, whatever the cause: missing, outside the workspace,
+// not a directory, or beneath a directory the caller could not search.
+func TestResolveProcessCwdErrorsRevealNothing(t *testing.T) {
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "file"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/", filepath.Join(work, "esc")); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{"nope", "nope/deeper", "/", "/nope", "esc", "file", "file/x", ".."} {
+		_, err := resolveProcessCwd(work, cwd)
+		want := "process_cwd: " + cwd + ": " + processCwdRefused
+		if err == nil || err.Error() != want {
+			t.Errorf("resolveProcessCwd(%q) = %v; want %q", cwd, err, want)
+		}
+	}
+}
+
 func TestFrameWriterDropStdoutCountsTheCut(t *testing.T) {
 	var buf bytes.Buffer
 	w := &frameWriter{rw: &buf, cap: 1 << 20}

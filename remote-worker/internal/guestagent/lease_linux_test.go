@@ -288,6 +288,10 @@ func TestShimArgsRejectAnEmptyHomeOrCommand(t *testing.T) {
 		{"no user", []string{"7000", "7000", "/tmp/sbx-home", "-", "--", "true"}},
 		{"no cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "--", "true"}},
 		{"bad cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "/etc", "--", "true"}},
+		{"bare fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd", "--", "true"}},
+		{"absolute fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:/etc", "--", "true"}},
+		{"escaping fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:../x", "--", "true"}},
+		{"empty fd cwd", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "fd:", "--", "true"}},
 		{"empty argv[0]", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--", ""}},
 		{"no argv", []string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--"}},
 		{"root uid", []string{"0", "7000", "/tmp/sbx-home", "sbx", "-", "--", "true"}},
@@ -297,12 +301,15 @@ func TestShimArgsRejectAnEmptyHomeOrCommand(t *testing.T) {
 			t.Errorf("%s: parseShimArgs(%q) accepted it", tc.name, tc.args)
 		}
 	}
-	got, err := parseShimArgs([]string{"20001", "7000", "/tmp/sbx-proc/20001", "sbxp1", "fd", "--", "true", "x"})
+	got, err := parseShimArgs([]string{"20001", "7000", "/tmp/sbx-proc/20001", "sbxp1", "fd:sub/deep", "--", "true", "x"})
 	if err != nil {
 		t.Errorf("valid args rejected: %v", err)
 	}
-	if got.uid != 20001 || got.gid != 7000 || got.home != "/tmp/sbx-proc/20001" || got.user != "sbxp1" || !got.cwdFromFD || !slices.Equal(got.argv, []string{"true", "x"}) {
+	if got.uid != 20001 || got.gid != 7000 || got.home != "/tmp/sbx-proc/20001" || got.user != "sbxp1" || !got.cwdFromFD || got.cwdRel != "sub/deep" || !slices.Equal(got.argv, []string{"true", "x"}) {
 		t.Errorf("parseShimArgs = %+v", got)
+	}
+	if got, err := parseShimArgs([]string{"20001", "7000", "/tmp/sbx-proc/20001", "sbxp1", "fd:.", "--", "true"}); err != nil || !got.cwdFromFD || got.cwdRel != "." {
+		t.Errorf("cwd fd:.: %+v, %v; want the workspace root itself", got, err)
 	}
 	if got, err := parseShimArgs([]string{"7000", "7000", "/tmp/sbx-home", "sbx", "-", "--", "true"}); err != nil || got.cwdFromFD {
 		t.Errorf("cwd -: %+v, %v; want the inherited cwd", got, err)

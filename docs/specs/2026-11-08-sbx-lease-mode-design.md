@@ -565,11 +565,16 @@ be running)`.
   host sends the process kinds unwrapped: its per-`Exec` template (`cd /workspace`, then `sync` at
   the end) wraps commands only (P5-R34). So the pid reported is the command's, an OOM kill reads
   `killed(9)`, and the process runs in the `cwd` it asked for. The guest resolves `cwd` beneath the
-  workspace with `openat2` (no symlinks, no magic links, no mount crossing), and the shim changes
-  into that directory with `fchdir` after the privilege drop. So a running tracked process, which
-  can write the group-writable workspace, cannot swap the directory for a symlink between the check
-  and the start. A `cwd` the tracked uid cannot search fails after `process_start` has answered:
-  the process shows `exited(127)`, and its log says `cwd: permission denied` (P5-R14).
+  workspace with `openat2` (no symlinks, no magic links, no mount crossing), and after the
+  privilege drop the shim resolves it again the same way, from a descriptor of the workspace root,
+  and changes into the result with `fchdir`. So a running tracked process, which can write the
+  group-writable workspace, cannot swap the directory for a symlink between the check and the
+  start, and every directory on the way, the parents included, is searched as the tracked uid. A
+  `cwd` the tracked uid cannot reach (a group-searchable directory under a `0700` one included)
+  fails after `process_start` has answered: the process shows `exited(127)`, and its log says
+  `cwd: permission denied` (P5-R14). Every refusal the root-side check gives reads
+  `process_cwd: <cwd>: not a directory inside the workspace`, whatever the cause, so it never says
+  which paths exist.
   `process_start` answers once the command has replaced the shim, so a `process_stop` right after
   it reaches the command (P5-R10).
 - **Identity.** Each process runs in its own cgroup, `tracked/p<id>` under the agent's cgroup root,
