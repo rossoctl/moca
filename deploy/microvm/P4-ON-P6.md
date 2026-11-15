@@ -143,6 +143,11 @@ start's read.
 A snapshot built before version 2 (no `hash_version`) still verifies under its old rule, a hash over
 kernel, rootfs and agent only, until it is rebuilt.
 
+The steps below build one snapshot by hand. To turn a container image into a **sandbox template**
+(a snapshot checked in a microVM, a worker for it, and the id clients and sessions ask for), follow
+the [template onboarding guide](../sbx/template-onboarding/GUIDE.md) instead: its tools run these
+same scripts, and it covers images that are not Moca's own (a SWE-bench instance image, for example).
+
 **1. A guest kernel.** Firecracker's CI publishes one. This is its `getting-started.md` recipe,
 kernel only:
 
