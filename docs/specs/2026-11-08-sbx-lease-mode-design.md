@@ -594,7 +594,8 @@ be running)`.
   exited first (P5-R5; by exit order, never the process whose exit it is recording). When the table drops an entry, whatever is still in its cgroup is killed (P5-R11).
   `process_stop` sends the signal (a name, with or without `SIG`, or a number; default `TERM`) to
   every process in the cgroup, and kills the cgroup 10 s later. A process kind runs with a timeout
-  of at least 30 s. A level-2 lease's `max_duration` is 4 h.
+  of at least 30 s, counted from when it reaches the guest, so a wait for the sandbox's gate does
+  not eat into it. A level-2 lease's `max_duration` is 4 h.
 - **Without a lease** (none started, or it ended), `process_list`, `process_logs` and
   `process_stop` answer as for an empty table, an empty list or `process_not_found:`, and start no
   lease. Only `process_start` starts one.

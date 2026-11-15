@@ -611,6 +611,65 @@ func TestProcessKindTimeoutFloor(t *testing.T) {
 	}
 }
 
+// PR #814 review: the floor protects the guest's work, which starts only at Run. A
+// process_stop that queued 25 s behind another Exec still gets ProcessKindMinTimeoutS from
+// its Run: the guest is told the floor, and the host waits the floor plus the slack from
+// Run, so a guest taking ~20 s (TERM grace, cgroup.kill) does not end the lease agent_dead.
+func TestProcessKindFloorCountsFromRun(t *testing.T) {
+	p, lc, clk := processPool(t)
+	mustSetMode(t, p, "k", ModeLeaseProcesses, 1)
+	mustExec(t, p, "k", level2Exec("one", 1))
+	entered := make(chan Command, 2)
+	release := make(chan struct{})
+	stopDone := make(chan struct{})
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		entered <- c
+		var wait <-chan struct{} = release
+		if c.Kind == ExecKindProcessStop {
+			wait = stopDone
+		}
+		select {
+		case <-wait:
+			return Result{}, nil
+		case <-c.ctxDone:
+			return Result{}, ErrAborted
+		}
+	})
+	long := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLeaseProcesses, ModeEpoch: 1})
+	recvWithin(t, entered, "the long Exec's Run")
+	stop := execAsync(p, "k", processExec(ExecKindProcessStop, ProcessArgs{Name: "web"}, 1))
+	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	clk.Advance(25 * time.Second) // the stop's 30 s budget is nearly spent at the gate
+	close(release)
+	if err := recvWithin(t, long, "the long Exec"); err != nil {
+		t.Fatalf("the long Exec: %v", err)
+	}
+	if c := recvWithin(t, entered, "the stop's Run"); c.TimeoutS < ProcessKindMinTimeoutS {
+		t.Fatalf("the stop's guest timeout_s = %d after 25 s at the gate, want at least %d from Run", c.TimeoutS, ProcessKindMinTimeoutS)
+	}
+	// The guest takes ~20 s (TERM, the 10 s grace, cgroup.kill, the teardown bound): past the
+	// budget's end plus the slack (13 s from Run), well inside the floor.
+	clk.Advance(20 * time.Second)
+	select {
+	case err := <-stop:
+		t.Fatalf("the stop ended 20 s into its Run: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(stopDone)
+	if err := recvWithin(t, stop, "the stop"); err != nil {
+		t.Fatalf("the stop: %v", err)
+	}
+	leaseAlive(t, p, "after a stop that ran past its arrival budget")
+	// The host still gives up at the floor plus the slack from Run.
+	entered2, _ := blockRuns(lc)
+	late := execAsync(p, "k", processExec(ExecKindProcessStop, ProcessArgs{Name: "web"}, 1))
+	<-entered2
+	clk.Advance(time.Duration(ProcessKindMinTimeoutS)*time.Second + LeaseTimeoutSlack)
+	if err := recvWithin(t, late, "a stop whose guest never answers"); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("a stop whose guest never answers: %v, want ErrTimeout", err)
+	}
+}
+
 // Task 6: a downgrade from lease+processes stops the tracked processes.
 
 // stopAllGuest makes the fake VM play a level-2 guest: every lease End reports tab, and

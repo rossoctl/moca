@@ -338,7 +338,7 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // when the stop ends the lease (teardown_failed), it starts a fresh one, as after a
 // grace-limit end.
 func (p *pool) execLease(ctx, runCtx context.Context, key string, e Exec, mode Mode, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func(time.Time) bool) (Result, error) {
 	p.mu.Lock()
 	rp := p.runs[key] // pinned by routeExec, so neither the sweep nor Reclaim removed it
 	p.mu.Unlock()
@@ -667,7 +667,11 @@ func (p *pool) normaliseLease(ctx context.Context, rp *runPool, vm VM, ph *Phase
 
 // runLease runs one command in rp's lease VM. Caller holds rp's gate. deadline is when
 // the Exec's budget ends, and the host's timer (runCtx) fires there until extend, called
-// just before Run, moves it LeaseTimeoutSlack later.
+// just before Run, moves it to the run's deadline plus LeaseTimeoutSlack. The run's
+// deadline is the budget's end, except for a process kind, which gets at least
+// ProcessKindMinTimeoutS from Run (PR #814 review): the guest work the floor covers
+// (process_stop's TERM grace, cgroup.kill, the teardown bound) starts only at Run, after
+// whatever the gate wait spent.
 //
 // The guest's report that its own timeout fired (guestTimedOut) keeps the lease (ruling
 // R8b): the guest killed the Exec's cgroup and emptied it before answering, as after an
@@ -679,7 +683,7 @@ func (p *pool) normaliseLease(ctx context.Context, rp *runPool, vm VM, ph *Phase
 // ends the lease is a guest that did not answer by the host's deadline, a transport
 // error, teardown_failed, or an abort (agent_dead in v1).
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
-	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func() bool) (Result, error) {
+	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func(time.Time) bool) (Result, error) {
 	p.mu.Lock()
 	l := rp.lease
 	if cut := l.cut; cut != "" {
@@ -702,9 +706,14 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	// Exec with the usual timeout; an abort before Run fails it ErrAborted. Nothing reaches
 	// the guest, so the lease is kept. Only here does the host's timer move to the budget
 	// plus LeaseTimeoutSlack.
+	atGate := p.clk.Now()
+	runDeadline := deadline
+	if floor := atGate.Add(time.Duration(ProcessKindMinTimeoutS) * time.Second); e.Kind.isProcess() && floor.After(runDeadline) {
+		runDeadline = floor
+	}
 	var notRun error
 	switch {
-	case !p.clk.Now().Before(deadline), !extend():
+	case !atGate.Before(deadline), !extend(runDeadline):
 		notRun = fmt.Errorf("%w:%d", ErrTimeout, timeoutS)
 	case runCtx.Err() != nil:
 		notRun = p.cancelled(ctx, timedOut, timeoutS)
@@ -737,7 +746,7 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	c := Command{
 		Command:   e.Command,
 		Stdin:     e.Stdin,
-		TimeoutS:  leaseGuestTimeoutS(deadline, t0),
+		TimeoutS:  leaseGuestTimeoutS(runDeadline, t0),
 		Streaming: e.Streaming,
 		CapBytes:  OutputCapBytes,
 		Lease:     true, // never NormaliseWorkspace: the lease's start took that step

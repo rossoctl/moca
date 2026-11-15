@@ -90,6 +90,8 @@ type ProcessArgs struct {
 // ProcessKindMinTimeoutS is the least timeout_s a process kind runs with: process_stop
 // may take about 20 s in the guest (TERM, 10 s, cgroup.kill, then the teardown bound), and
 // a host that gave up first would end the lease agent_dead under a guest doing its job.
+// It applies to the budget at arrival and again from Run (runLease), since the guest's work
+// starts only once the Exec holds the gate.
 const ProcessKindMinTimeoutS uint32 = 30
 
 // Bounds on Exec.TimeoutS. Every Exec is bounded; there is no unbounded form.
@@ -437,15 +439,16 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 		case mode != ModePerExec:
 			// The host's timer stays at the budget's end through the gate wait, the
 			// acquire, Resume and the normalise step. runLease calls extend immediately
-			// before Run, which moves it LeaseTimeoutSlack past the budget, so the guest's
-			// own timeout fires first and the lease survives it (LeaseTimeoutSlack). extend
+			// before Run, which moves it LeaseTimeoutSlack past the run's deadline (the
+			// budget's end, or a process kind's floor from Run), so the guest's own timeout
+			// fires first and the lease survives it (LeaseTimeoutSlack). extend
 			// reports false when the timer has already fired: the Exec is timed out, and
 			// runLease does not run it (PR #763 second review, G1).
-			extend := func() bool {
+			extend := func(runDeadline time.Time) bool {
 				if !tm.Stop() {
 					return false
 				}
-				tm = p.clk.AfterFunc(deadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
+				tm = p.clk.AfterFunc(runDeadline.Add(LeaseTimeoutSlack).Sub(p.clk.Now()), fire)
 				return true
 			}
 			res, err := p.execLease(ctx, runCtx, key, e, mode, out, ph, &timedOut, timeoutS, deadline, extend)
