@@ -255,10 +255,10 @@ func (a *Agent) onTrackedExit(id string, uid int) func(syscall.WaitStatus) {
 		if ws.Signaled() {
 			code, sig = 0, int(ws.Signal())
 		}
-		evicted := a.lease.procs.markExit(id, code, sig)
+		final, marked, evicted := a.lease.procs.markExit(id, code, sig)
 		// The uid stays unusable while its cgroup holds children (trackedCgroups).
 		a.lease.uids.release(uid)
-		a.lease.exits.fire(id)
+		a.lease.exits.fire(id, final, marked)
 		// An evicted entry is no longer visible, so nothing of it may run on: kill what
 		// its cgroup holds. The next prune removes the emptied directory.
 		for _, e := range evicted {
@@ -420,19 +420,10 @@ func (a *Agent) processStopAll(w *frameWriter) (End, error) {
 }
 
 // awaitFinal waits, bounded, for the reaper to record p's exit once its cgroup is
-// empty, and returns its row as shown, with its final state.
+// empty, and returns its row as shown, with its final state: the table's, or the one the
+// reaper recorded when the table has evicted the entry since (finalRow).
 func (a *Agent) awaitFinal(p TrackedProcess) TrackedProcess {
-	if p.State == TrackedRunning {
-		if ch := a.lease.exits.get(p.ID); ch != nil {
-			select {
-			case <-ch:
-			case <-time.After(trackedExitWait):
-			}
-		}
-	}
-	if e, ok := a.lease.procs.lookup(p.ID); ok && e.ID == p.ID {
-		p = e.TrackedProcess
-	}
+	p = finalRow(&a.lease.procs, &a.lease.exits, p, trackedExitWait)
 	p.Name = displayName(p)
 	p.MemoryBytes = cgroupMemoryCurrent(a.trackedCgroup(p.ID))
 	return p

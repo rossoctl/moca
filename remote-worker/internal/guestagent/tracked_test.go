@@ -458,6 +458,131 @@ func TestTrackedNinthExitEvictsTheOldestExited(t *testing.T) {
 	}
 }
 
+// PR #814 review (must-fix): eviction goes by exit order, not start order. A long-lived
+// p1 that exits after p2..p9 have finished is the newest exited entry, so its own exit
+// evicts p2, never p1: p1 stays so the agent can read why it died (spec §7).
+func TestTrackedExitsOutOfStartOrderEvictTheOldestExited(t *testing.T) {
+	var tt trackedTable
+	p1 := mustStart(t, &tt, "server", 100, 1000)
+	var short []string
+	for i := 0; i < trackedExitedKeep; i++ {
+		p := mustStart(t, &tt, fmt.Sprintf("job%d", i), 100, 2000+i)
+		short = append(short, p.ID)
+		if _, _, ev := tt.markExit(p.ID, 0, 0); len(ev) != 0 {
+			t.Fatalf("job %d's exit evicted %+v, under the cap", i, ev)
+		}
+	}
+	final, marked, ev := tt.markExit(p1.ID, 0, 9)
+	if !marked || final.ID != p1.ID || final.State != TrackedKilled || final.Code != 9 || final.PID != 1000 {
+		t.Fatalf("markExit(p1) = %+v, %t; want p1's final row, killed(9)", final, marked)
+	}
+	if len(ev) != 1 || ev[0].ID != short[0] {
+		t.Fatalf("p1's exit evicted %+v, want only the first job to exit (%s)", ev, short[0])
+	}
+	if e, ok := tt.lookup(p1.ID); !ok || e.State != TrackedKilled || e.Code != 9 {
+		t.Fatalf("p1 after its own exit: %+v, %t; want it kept, killed(9)", e, ok)
+	}
+	// The next exit evicts the oldest EXITED, job 1, not p1, which started first.
+	p := mustStart(t, &tt, "late", 100, 3000)
+	if _, _, ev := tt.markExit(p.ID, 0, 0); len(ev) != 1 || ev[0].ID != short[1] {
+		t.Fatalf("the next exit evicted %+v, want job 1 (%s)", ev, short[1])
+	}
+	if _, ok := tt.lookup(p1.ID); !ok {
+		t.Fatal("p1 was evicted before older exits")
+	}
+}
+
+// The entry an exit marks is never the one that exit evicts, even when every other exited
+// entry exited earlier and the order of exits is scrambled.
+func TestTrackedExitNeverEvictsTheEntryItMarks(t *testing.T) {
+	var tt trackedTable
+	var ids []string
+	for i := 0; i < 3*trackedExitedKeep; i++ {
+		ids = append(ids, mustStart(t, &tt, fmt.Sprintf("p%dx", i), 100, 1000+i).ID)
+	}
+	rng := rand.New(rand.NewSource(1))
+	rng.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+	for n, id := range ids {
+		_, marked, ev := tt.markExit(id, n, 0)
+		if !marked {
+			t.Fatalf("exit %d (%s) not marked", n, id)
+		}
+		for _, e := range ev {
+			if e.ID == id {
+				t.Fatalf("exit %d evicted the entry it marked, %s", n, id)
+			}
+		}
+		// The kept exited entries are exactly the last trackedExitedKeep to exit.
+		want := ids[max(0, n+1-trackedExitedKeep) : n+1]
+		var got []string
+		for _, p := range tt.list() {
+			if p.State != TrackedRunning {
+				got = append(got, p.ID)
+			}
+		}
+		if !sameSet(got, want) {
+			t.Fatalf("after exit %d: exited %v, want the last to exit %v", n, got, want)
+		}
+	}
+}
+
+func sameSet(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
+}
+
+// process_stop's answer (awaitFinal) after the exit it waited for: the table's row while the
+// entry is there, else the final row the reaper recorded with the exit signal, never the
+// row taken before the stop (PR #814 review must-fix).
+func TestTrackedFinalRowAfterTheExit(t *testing.T) {
+	t.Run("the entry is still in the table", func(t *testing.T) {
+		var tt trackedTable
+		var s exitSignals
+		p := mustStart(t, &tt, "web", 100, 412)
+		s.add(p.ID)
+		go func() {
+			final, ok, _ := tt.markExit(p.ID, 0, 15)
+			s.fire(p.ID, final, ok)
+		}()
+		got := finalRow(&tt, &s, p, 5*time.Second)
+		if got.State != TrackedKilled || got.Code != 15 {
+			t.Fatalf("final row %+v, want killed(15)", got)
+		}
+	})
+	t.Run("the entry was evicted after its exit", func(t *testing.T) {
+		var tt trackedTable
+		var s exitSignals
+		p1 := mustStart(t, &tt, "server", 100, 1000)
+		s.add(p1.ID)
+		final, ok, _ := tt.markExit(p1.ID, 0, 15)
+		s.fire(p1.ID, final, ok)
+		// Eight later exits push p1 out of the table.
+		for i := 0; i < trackedExitedKeep; i++ {
+			p := mustStart(t, &tt, fmt.Sprintf("job%d", i), 100, 2000+i)
+			tt.markExit(p.ID, 0, 0)
+		}
+		if _, ok := tt.lookup(p1.ID); ok {
+			t.Fatal("test setup: p1 should have been evicted")
+		}
+		got := finalRow(&tt, &s, p1, 5*time.Second)
+		if got.ID != p1.ID || got.State != TrackedKilled || got.Code != 15 || got.PID != 1000 {
+			t.Fatalf("final row %+v, want p1's recorded exit, killed(15), not the pre-stop row", got)
+		}
+	})
+	t.Run("an exit wait that times out shows the table as it is", func(t *testing.T) {
+		var tt trackedTable
+		var s exitSignals
+		p := mustStart(t, &tt, "stuck", 100, 7)
+		s.add(p.ID)
+		got := finalRow(&tt, &s, p, 10*time.Millisecond)
+		if got.State != TrackedRunning || got.ID != p.ID {
+			t.Fatalf("final row %+v, want the table's running row", got)
+		}
+	})
+}
+
 // Ruling P5-R5: at exit the ring is trimmed to its last 64 KiB, and stays bounded by
 // that for what the process's leftovers still write.
 func TestTrackedExitTrimsTheRingToItsTail(t *testing.T) {
@@ -574,7 +699,7 @@ func TestTrackedMarkExitReturnsTheEvictedEntries(t *testing.T) {
 	for i := 0; i < trackedExitedKeep; i++ {
 		p := mustStart(t, &tt, fmt.Sprintf("e%d", i), 100, 2000+i)
 		ids = append(ids, p.ID)
-		if ev := tt.markExit(p.ID, 0, 0); len(ev) != 0 {
+		if _, _, ev := tt.markExit(p.ID, 0, 0); len(ev) != 0 {
 			t.Fatalf("exit %d evicted %+v, under the cap", i, ev)
 		}
 	}
@@ -582,14 +707,14 @@ func TestTrackedMarkExitReturnsTheEvictedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := tt.markExit(p.ID, 0, 9)
+	_, _, ev := tt.markExit(p.ID, 0, 9)
 	if len(ev) != 1 || ev[0].ID != ids[0] || ev[0].PID != 2000 || ev[0].UID != 20000 || ev[0].State != TrackedExited {
 		t.Fatalf("evicted = %+v, want the oldest exited entry, with its pid and uid", ev)
 	}
-	if ev := tt.markExit(p.ID, 0, 0); len(ev) != 0 {
-		t.Fatalf("a repeated markExit evicted %+v", ev)
+	if final, marked, ev := tt.markExit(p.ID, 0, 0); marked || len(ev) != 0 || final != (TrackedProcess{}) {
+		t.Fatalf("a repeated markExit marked %t, evicted %+v, final %+v", marked, ev, final)
 	}
-	if ev := tt.markExit("999", 0, 0); len(ev) != 0 {
+	if _, _, ev := tt.markExit("999", 0, 0); len(ev) != 0 {
 		t.Fatalf("an unknown id evicted %+v", ev)
 	}
 }
@@ -814,13 +939,28 @@ func TestTrackedExitSignals(t *testing.T) {
 		t.Fatal("fired before the exit")
 	default:
 	}
-	s.fire("1")
-	s.fire("1") // a second report is harmless
-	s.fire("9") // so is an unknown id
+	if _, ok := s.final("1"); ok {
+		t.Fatal("a final row before the exit")
+	}
+	row := TrackedProcess{ID: "1", Name: "web", PID: 412, State: TrackedExited, Code: 3}
+	s.fire("1", row, true)
+	s.fire("1", TrackedProcess{ID: "1", State: TrackedKilled}, true) // a second report is harmless
+	s.fire("9", row, true)                                           // so is an unknown id
 	select {
 	case <-ch:
 	default:
 		t.Fatal("not fired after the exit")
+	}
+	if got, ok := s.final("1"); !ok || got != row {
+		t.Fatalf("final row %+v, %t; want the first report's %+v", got, ok, row)
+	}
+	if _, ok := s.final("9"); ok {
+		t.Fatal("an unknown id has a final row")
+	}
+	s.add("3")
+	s.fire("3", TrackedProcess{}, false) // reaped, but the table had no running entry
+	if _, ok := s.final("3"); ok {
+		t.Fatal("an exit the table did not mark recorded a final row")
 	}
 	if s.get("1") != ch || s.get("2") != nil {
 		t.Error("get returns the wrong channel")
@@ -848,8 +988,9 @@ func TestTrackedCgroupsAndExitSignalsUnderRace(t *testing.T) {
 			_ = c.populated(20000 + i%4)
 			_ = c.paths()
 			s.add(id)
-			s.fire(id)
+			s.fire(id, TrackedProcess{ID: id}, true)
 			_ = s.get(id)
+			_, _ = s.final(id)
 		}()
 	}
 	wg.Wait()

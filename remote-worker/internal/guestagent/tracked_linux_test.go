@@ -502,6 +502,35 @@ func TestProcessLimitCountsRunningOnly(t *testing.T) {
 	}
 }
 
+// PR #814 review (must-fix), the reviewer's scenario: a long-lived p1, then eight short
+// jobs that finish (eight exited entries kept), then p1 is stopped. Its exit must not evict
+// p1 itself: process_stop answers its true final state, killed(15), never the running row
+// it took before the stop, and process_list keeps it, exited entries evicted by exit order.
+func TestProcessStopAfterOtherExitsAnswersTheFinalState(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	p1 := startProc(t, a, "server", `exec sleep 3050`, 0)
+	var jobs []string
+	for i := 0; i < trackedExitedKeep; i++ {
+		j := startProc(t, a, fmt.Sprintf("job%d", i), `exit 0`, 0)
+		waitProcExit(t, a, j.ID)
+		jobs = append(jobs, j.ID)
+	}
+	final := stopProc(t, a, ProcessArgs{ID: p1.ID})
+	if final.ID != p1.ID || final.State != TrackedKilled || final.Code != int(syscall.SIGTERM) {
+		t.Fatalf("process_stop of p1 answered %+v, want its final state killed(15)", final)
+	}
+	ps := listProcs(t, a)
+	if got, ok := procByID(ps, p1.ID); !ok || got.State != TrackedKilled {
+		t.Fatalf("process_list %+v: want p1 kept, killed(15)", ps)
+	}
+	if _, ok := procByID(ps, jobs[0]); ok {
+		t.Fatalf("process_list %+v: the first job to exit should be the one evicted", ps)
+	}
+	if len(ps) != trackedExitedKeep {
+		t.Fatalf("process_list has %d entries, want %d exited ones", len(ps), trackedExitedKeep)
+	}
+}
+
 // process_stop sends the signal (TERM by default) to the process's cgroup, waits out
 // the grace, then kills the cgroup.
 func TestProcessStopTermThenKill(t *testing.T) {

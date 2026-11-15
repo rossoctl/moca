@@ -2,12 +2,14 @@ package guestagent
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -160,17 +162,21 @@ type trackedEntry struct {
 	TrackedProcess
 	UID int   // the tracked uid it runs as; the uidAllocator's to release
 	Log *ring // its combined stdout and stderr
+	// exitSeq orders the exited entries by when they exited (markExit), 1, 2, 3, …; 0
+	// while running. Eviction goes by it, not by start order.
+	exitSeq uint64
 }
 
 // trackedTable is the agent's table of tracked processes, oldest first. A running
 // process's name is unique among the running ones; starting a name that only an exited
 // entry holds replaces that entry. An exited entry otherwise stays, so the agent can
-// read why it died (spec §7), until the lease ends or it is the oldest of more than
-// trackedExitedKeep exited entries (ruling P5-R5, markExit). Ids are 1, 2, 3, … in
-// start order, never reused within the agent's life.
+// read why it died (spec §7), until the lease ends or it is the first to have exited of
+// more than trackedExitedKeep exited entries (ruling P5-R5, markExit). Ids are 1, 2, 3, …
+// in start order, never reused within the agent's life.
 type trackedTable struct {
 	mu      sync.Mutex
 	seq     uint64
+	exitSeq uint64
 	entries []*trackedEntry
 }
 
@@ -279,14 +285,18 @@ func (t *trackedTable) list() []TrackedProcess {
 // markExit records that the process id exited: killed(signal) when signal > 0, else
 // exited(code). Only a running entry changes, so a second report is ignored; so is an
 // unknown id. Ruling P5-R5: the exited process's ring is trimmed to its last
-// trackedExitedLogCap bytes, and past trackedExitedKeep exited entries the oldest
-// exited one is evicted, ring and all. A running entry is never evicted.
+// trackedExitedLogCap bytes, and past trackedExitedKeep exited entries the one that
+// exited first is evicted, ring and all. That goes by the order of exits, not of starts,
+// and never takes the entry this call marked: a long-lived process that dies after many
+// short ones stays, so the agent can read why it died (PR #814 review). A running entry
+// is never evicted.
 //
-// It returns copies of the evicted entries (ruling P5-R9). Eviction forgets a process
+// It returns the marked entry's final row and whether it marked one, and copies of the
+// evicted entries (ruling P5-R9). Eviction forgets a process
 // whose cgroup may still hold its children, so the caller must keep that cgroup, and
 // the uid's hold on it, until it is empty: the uidAllocator's populated is answered
 // from the cgroup of every uid ever handed out, never from this table.
-func (t *trackedTable) markExit(id string, code, signal int) []trackedEntry {
+func (t *trackedTable) markExit(id string, code, signal int) (TrackedProcess, bool, []trackedEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, e := range t.entries {
@@ -298,30 +308,36 @@ func (t *trackedTable) markExit(id string, code, signal int) []trackedEntry {
 		} else {
 			e.State, e.Code = TrackedExited, code
 		}
+		t.exitSeq++
+		e.exitSeq = t.exitSeq
 		e.Log.shrink(trackedExitedLogCap)
-		return t.evictExited()
+		return e.TrackedProcess, true, t.evictExited(e)
 	}
-	return nil
+	return TrackedProcess{}, false, nil
 }
 
-// evictExited drops the oldest exited entries past trackedExitedKeep and returns copies
-// of them. The caller holds mu.
-func (t *trackedTable) evictExited() []trackedEntry {
-	excess := -trackedExitedKeep
+// evictExited drops the exited entries that exited first, past trackedExitedKeep, never
+// keep, and returns copies of them. The caller holds mu.
+func (t *trackedTable) evictExited(keep *trackedEntry) []trackedEntry {
+	var exited []*trackedEntry
 	for _, e := range t.entries {
-		if e.State != TrackedRunning {
-			excess++
+		if e.State != TrackedRunning && e != keep {
+			exited = append(exited, e)
 		}
 	}
+	// keep is exited too, and counts towards the cap.
+	excess := len(exited) + 1 - trackedExitedKeep
+	if excess <= 0 {
+		return nil
+	}
+	slices.SortFunc(exited, func(a, b *trackedEntry) int { return cmp.Compare(a.exitSeq, b.exitSeq) })
+	drop := make(map[*trackedEntry]bool, excess)
 	var evicted []trackedEntry
-	t.entries = removeEntries(t.entries, func(e *trackedEntry) bool {
-		if excess <= 0 || e.State == TrackedRunning {
-			return false
-		}
-		excess--
+	for _, e := range exited[:min(excess, len(exited))] {
+		drop[e] = true
 		evicted = append(evicted, *e)
-		return true
-	})
+	}
+	t.entries = removeEntries(t.entries, func(e *trackedEntry) bool { return drop[e] })
 	return evicted
 }
 
@@ -572,35 +588,44 @@ func (c *trackedCgroups) paths() []string {
 }
 
 // exitSignals holds, per tracked id, a channel closed once its process has been reaped,
-// so process_stop can wait for the exit status the reaper records.
+// and the final row the reaper recorded then, so process_stop can answer the exit status
+// even when the table has already evicted the entry (ruling P5-R5).
 type exitSignals struct {
 	mu sync.Mutex
-	ch map[string]chan struct{}
+	m  map[string]*exitSignal
+}
+
+type exitSignal struct {
+	ch       chan struct{}
+	final    TrackedProcess
+	recorded bool
 }
 
 func (s *exitSignals) add(id string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ch == nil {
-		s.ch = map[string]chan struct{}{}
+	if s.m == nil {
+		s.m = map[string]*exitSignal{}
 	}
-	ch := make(chan struct{})
-	s.ch[id] = ch
-	return ch
+	sig := &exitSignal{ch: make(chan struct{})}
+	s.m[id] = sig
+	return sig.ch
 }
 
-// fire closes id's channel; a second call, or an unknown id, does nothing.
-func (s *exitSignals) fire(id string) {
+// fire records final, the row markExit returned (when marked, it changed a running entry),
+// and closes id's channel. A second call, or an unknown id, does nothing.
+func (s *exitSignals) fire(id string, final TrackedProcess, marked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ch, ok := s.ch[id]
+	sig, ok := s.m[id]
 	if !ok {
 		return
 	}
 	select {
-	case <-ch:
+	case <-sig.ch:
 	default:
-		close(ch)
+		sig.final, sig.recorded = final, marked
+		close(sig.ch)
 	}
 }
 
@@ -608,16 +633,52 @@ func (s *exitSignals) fire(id string) {
 func (s *exitSignals) get(id string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ch[id]
+	if sig, ok := s.m[id]; ok {
+		return sig.ch
+	}
+	return nil
+}
+
+// final returns the row the reaper recorded at id's exit, if it recorded one.
+func (s *exitSignals) final(id string) (TrackedProcess, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sig, ok := s.m[id]; ok && sig.recorded {
+		return sig.final, true
+	}
+	return TrackedProcess{}, false
 }
 
 // retain forgets every id not in keep.
 func (s *exitSignals) retain(keep map[string]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id := range s.ch {
+	for id := range s.m {
 		if !keep[id] {
-			delete(s.ch, id)
+			delete(s.m, id)
 		}
 	}
+}
+
+// finalRow is p's row once its exit has been waited for, at most wait: the table's row
+// while the entry is there, else (the table evicted it, P5-R5) the row the reaper
+// recorded at its exit, never the row taken before a stop. p itself is left only when
+// neither exists, which no caller reaches: a running entry stays in the table until its
+// exit is recorded, and its signal is kept until the next prune.
+func finalRow(t *trackedTable, s *exitSignals, p TrackedProcess, wait time.Duration) TrackedProcess {
+	if p.State == TrackedRunning {
+		if ch := s.get(p.ID); ch != nil {
+			select {
+			case <-ch:
+			case <-time.After(wait):
+			}
+		}
+	}
+	if e, ok := t.lookup(p.ID); ok && e.ID == p.ID {
+		return e.TrackedProcess
+	}
+	if final, ok := s.final(p.ID); ok {
+		return final
+	}
+	return p
 }

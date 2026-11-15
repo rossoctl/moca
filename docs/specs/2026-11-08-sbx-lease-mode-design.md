@@ -585,8 +585,8 @@ be running)`.
 - **Limits.** `SH_LEASE_MAX_PROCESSES` defaults to 4 and counts running processes only. The worker
   refuses to boot with a value above 4, the tracked uids an image has (P5-R17). Each ring log holds
   the last 4 MiB of a process's stdout and stderr together, in the agent's memory. At exit a ring is
-  trimmed to its last 64 KiB, and the table keeps at most 8 exited entries, dropping the oldest
-  first (P5-R5). When the table drops an entry, whatever is still in its cgroup is killed (P5-R11).
+  trimmed to its last 64 KiB, and the table keeps at most 8 exited entries, dropping the one that
+  exited first (P5-R5; by exit order, never the process whose exit it is recording). When the table drops an entry, whatever is still in its cgroup is killed (P5-R11).
   `process_stop` sends the signal (a name, with or without `SIG`, or a number; default `TERM`) to
   every process in the cgroup, and kills the cgroup 10 s later. A process kind runs with a timeout
   of at least 30 s. A level-2 lease's `max_duration` is 4 h.
