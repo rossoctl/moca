@@ -84,6 +84,9 @@ export interface SbxDiscovery {
   profile?: string;
 }
 
+/** A template quota (openapi Quota, template lifecycle spec §6.2); owned is optional. */
+export type SbxQuota = { templates: number; buildsQueued: number; active: number; owned?: number };
+
 /** A subject as `GET /v1/subjects` lists it (enrollment and roles through the API). */
 export interface SbxSubject {
   subject: string;
@@ -144,8 +147,9 @@ export interface SbxBuild {
    */
   heldBy?: string[] | null;
   /**
-   * A retired build whose snapshot or worker a build that is not retired shares: its worker is kept
-   * for that build, never stopped for the retire. Absent from an older control plane.
+   * A retired build whose snapshot or worker a build neither retired nor rejected shares: its
+   * worker is kept for that build, never stopped for the retire. Absent from an older control
+   * plane.
    */
   shared?: boolean;
   tags: string[];
@@ -272,6 +276,9 @@ export interface SbxQuotaView {
   templates: SbxLimitUse;
   buildsQueued: SbxLimitUse;
   active: SbxLimitUse;
+  /** Template ids owned in any status (a lifetime cap); absent from an older control plane. */
+  owned?: SbxLimitUse;
+  ownedSource?: 'subject' | 'default';
   sandboxes?: SbxLimitUse;
 }
 
@@ -286,7 +293,7 @@ export interface SbxProfile {
   };
 }
 
-/** `GET /v1/policy` (openapi PolicyView). */
+/** `GET /v1/policy` (openapi PolicyView): profiles for a dry run, quotas for a quota write. */
 export interface SbxPolicyView {
   policy: {
     schema: string;
@@ -294,7 +301,9 @@ export interface SbxPolicyView {
     defaultProfile: string;
     allowedRegistries: string[];
     trustedGateRecords: string[];
-    quota: { templates: number; buildsQueued: number; active: number };
+    quota: SbxQuota;
+    /** The per-subject overrides (a quota write reads them, §5.2). */
+    quotaBySubject?: Record<string, SbxQuota>;
   };
   digest: string;
   record: string;
@@ -427,6 +436,30 @@ export class SandboxApiClient extends ControlPlaneClient {
   /** The deployment's template policy (§8): profiles, registries, quotas, and its digest. */
   getPolicy(): Promise<SbxPolicyView> {
     return this.json('GET', '/v1/policy');
+  }
+
+  /**
+   * Set a subject's quota, or the default; null removes a subject's override (§5.2; admins).
+   * `expect`, when given, is the value read before: the control plane writes only if the target's
+   * quota is that now, else `409 quota_changed` with nothing written. It goes as `?expect=` its
+   * JSON (`null` for no override), percent-encoded by the URL's searchParams.
+   */
+  putQuota(
+    target: string,
+    quota: SbxQuota | null,
+    expect?: SbxQuota | null,
+  ): Promise<{
+    target: string;
+    subject: string;
+    quota: SbxQuota | null;
+    before: SbxQuota | null;
+    policy: string;
+    record: string;
+  }> {
+    return this.json('PUT', `/v1/quota/${encodeURIComponent(target)}`, {
+      body: quota,
+      query: { expect: expect === undefined ? undefined : JSON.stringify(expect) },
+    });
   }
 
   async createSandbox(body: SbxSandboxCreate): Promise<SbxCreated> {

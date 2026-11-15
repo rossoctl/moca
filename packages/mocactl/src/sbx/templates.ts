@@ -107,6 +107,7 @@ export async function cmdQuota(c: SbxCtx): Promise<number> {
           limitLine('templates', q.templates) +
           limitLine('buildsQueued', q.buildsQueued) +
           limitLine('active', q.active) +
+          limitLine('owned', q.owned) +
           limitLine('sandboxes', q.sandboxes),
       );
     return SBX_EXIT.ok;
@@ -135,9 +136,16 @@ export async function cmdPolicy(c: SbxCtx): Promise<number> {
       );
     }
     c.io.out(`registries ${p.allowedRegistries.map(sanitizeRemote).join(', ') || 'none'}\n`);
+    // A policy that sets no owned still has one in force (the control plane's built-in default,
+    // where it has the counter); this names no number for it, as an older control plane has none,
+    // and points to `sbx quota`, which shows the limit that applies.
     c.io.out(
       `trusted gate records ${p.trustedGateRecords.length}; quota templates ${p.quota.templates}, ` +
-        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}\n`,
+        `builds queued ${p.quota.buildsQueued}, active ${p.quota.active}, ` +
+        (p.quota.owned !== undefined
+          ? `owned ${p.quota.owned}`
+          : 'owned not set (sbx quota shows the limit in force)') +
+        '\n',
     );
     c.io.out(`policy ${sanitizeRemote(v.digest)} (record ${sanitizeRemote(v.record)})\n`);
     return SBX_EXIT.ok;
@@ -827,8 +835,8 @@ export async function cmdDeactivate(c: SbxCtx, id: string, stopNow = false): Pro
  * absent, from an older control plane), or empty from the first read (no host holds it, such as an
  * imported template whose worker an operator runs). Then a worker that still runs is said to be not
  * host-managed, to be stopped where it runs. A wait past --timeout (default RETIRE_TIMEOUT_S) exits
- * 5. Nor does a `shared` build (its snapshot or worker serves a build that is not retired): its
- * worker is kept running for that build and never removed, and that is said at once.
+ * 5. Nor does a `shared` build (its snapshot or worker serves a build neither retired nor
+ * rejected): its worker is kept running for that build and never removed, and that is said at once.
  */
 export async function cmdRetire(
   c: SbxCtx,
@@ -863,11 +871,12 @@ export async function cmdRetire(
         }
         const held = b?.heldBy ?? [];
         if (held.length > 0) wasHeld = true;
-        // Its worker serves a build that is not retired too: kept running for it, never stopped.
+        // Its worker also serves a build neither retired nor rejected: kept running for it, never
+        // stopped.
         if (b && b.status === 'retired' && b.shared === true) {
           c.io.err(
             `${sanitizeRemote(r.templateId)} ${sanitizeRemote(build)}: retired; its worker also ` +
-              'serves a build that is not retired, so it keeps running for that build',
+              'serves a build neither retired nor rejected, so it keeps running for that build',
           );
           break;
         }

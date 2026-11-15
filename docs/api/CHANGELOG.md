@@ -3,6 +3,50 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.21.0
+
+Admins set template quotas per subject, and reject a registered build after the fact
+([#748](https://github.com/rossoctl/moca/issues/748)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.2. Every
+change is additive; the routes mount on both route profiles and need `SH_PROVENANCE_DIR` (else
+`400 invalid_request`).
+
+- New PUT /v1/quota/{subject} (admin): `subject` is `default` (the deployment default) or a subject,
+  `github:<numeric id>` or `oidc:<provider sub>` (never `test:<n>`), for an override; the body is a
+  Quota, or `null` to remove a subject's override (the default is never removed). Each change is a
+  new `policy` record naming the admin. Answers `{target, subject, quota, before, policy, record}`:
+  the quota now and before (null: no override), the new policy's digest and the record's. Enforced
+  at once on creates, queued builds and activations. A quota holds `templates`, `buildsQueued` and
+  `active`, and optionally `owned` (another key is `400 invalid_request`); a body without `owned`
+  leaves the target's `owned` as it is. An optional `?expect=` (JSON: the quota the client read,
+  `null` for no override) makes the write a compare-and-set on all four counters (an unset `owned`
+  matches only an unset one): when the target's quota is not that value now, nothing is written and
+  the answer is the new code `409 quota_changed`.
+- Policy gains `quotaBySubject`, the per-subject overrides of `quota`, keyed by subject; a key that
+  is not a subject, or a malformed quota, is `400 invalid_request`. An override's `owned` is
+  optional: without it, the subject's `owned` is the default's (else 200).
+- PUT /v1/policy gains an optional `?expect=`, the `digest` GET /v1/policy answered: the write is
+  made only if the policy's digest is that value now, else nothing is written or recorded and the
+  answer is the new code `409 policy_changed`, whose `digest` is the policy's now. So a policy
+  written from an older read never drops a quota (or policy) another admin wrote since. An `expect`
+  that is not `sha256:` and 64 lowercase hex digits is `400 invalid_request`. Without it, the
+  policy is stored as sent, as before.
+- GET /v1/quota answers the limits that apply to the caller (its override, else the default) and
+  gains `quotaSource`, `subject` or `default`, and `ownedSource`, the same for `owned` alone (an
+  override may leave `owned` to the default).
+- New POST /v1/templates/{id}/builds/{build}/reject `{reason}` (admin; the reason is required): a
+  registered build becomes `rejected` with `reason.rule` `admin`, its activation leases go, a host
+  holding it finds it in the wanted state's `stop` (as a retired build, but never in `remove`: its
+  worker is stopped, not removed, and no `removed` report is taken for it) and its `detached`
+  report is taken, and a sandbox create naming it answers `400 unknown_template`. A `reject` record
+  names the admin, `from`, the reason and `buildRecord` (the digest of the build's `build` record).
+  Answers `{templateId, subject, build, buildId, record, status: rejected}`; idempotent
+  (`record: null`). Refused `409 build_in_use` while a live sandbox runs on the build; any status
+  but `registered` is `400 invalid_request`. Not reversible.
+- A rejected build (by policy or by an admin) keeps no snapshot or worker for a retired build that
+  shares it: the retired build is stopped and removed as any retired build is (no longer `shared`),
+  while the rejected build itself is only stopped.
+
 ## 1.20.0
 
 Enrollment and the admin role through the API

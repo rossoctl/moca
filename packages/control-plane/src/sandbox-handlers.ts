@@ -25,6 +25,7 @@ import {
   liveLeases,
   place,
   readinessOf,
+  rejectedByAdmin,
   readinessReasonOf,
   startQueue,
   startRetryAfterS,
@@ -39,9 +40,11 @@ import {
   checkCreate,
   DEFAULT_GATE_RECORD_SCHEMA,
   normalizeSpec,
-  ownedLimit,
+  ownedSource,
   policyDigest,
   policyProblems,
+  QUOTA_KEYS,
+  quotaFor,
   TEMPLATE_ID_RE,
   type Policy,
   type PolicyStore,
@@ -552,7 +555,10 @@ interface ReadinessFacts {
    * stop a retired build once it reports again). Null without host agents.
    */
   holders: HostView[] | null;
-  /** Whether a build's snapshot or worker a build that is not retired shares (liveSnapshots). */
+  /**
+   * Whether a build's snapshot or worker a build neither retired nor rejected shares
+   * (liveSnapshots).
+   */
   shared: (b: TemplateBuild) => boolean;
   nowS: number;
   /** The current policy's trusted gate records (self-attestation: attestation and visibility in effect). */
@@ -624,7 +630,7 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
  * a retired build (§5.1); null for any other build that is not registered.
  */
 function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: boolean) {
-  const shared = b.status === 'retired' && f.shared(b);
+  const shared = (b.status === 'retired' || rejectedByAdmin(b)) && f.shared(b);
   const readiness =
     b.status === 'retired'
       ? 'retired'
@@ -650,8 +656,8 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // presence cannot be read, `running: null`: not known to be stopped, so null capacity means
     // only "read, and not attached". A build retired before it registered has no worker
     // (`worker` empty), so nothing to stop: null capacity, presence read or not. Nor does one
-    // whose snapshot or worker a build that is not retired shares (`shared`): its worker is left
-    // running for that build, never stopped for the retire.
+    // whose snapshot or worker a build neither retired nor rejected shares (`shared`): its worker
+    // is left running for that build, never stopped for the retire.
     capacity:
       readiness === 'active' ||
       (b.status === 'retired' &&
@@ -663,8 +669,8 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
           }
         : null,
-    // A retired build whose snapshot or worker a build that is not retired shares: its worker is
-    // kept for that build. False for every other build.
+    // A retired build whose snapshot or worker a build neither retired nor rejected shares: its
+    // worker is kept for that build. False for every other build.
     shared,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
     // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past
@@ -847,7 +853,9 @@ function quotaLock(cat: TemplateCatalog): SubjectQueue {
 /**
  * One PUT /v1/policy at a time per policy store, within this process: its read, its widening check
  * and its write run as one step, so two PUTs never both start from the same policy. The store
- * serializes each call, not a read and a later write; a deployment runs one control plane.
+ * serializes each call, not a read and a later write; a deployment runs one control plane. A quota
+ * write (PUT /v1/quota/{subject}) takes the same lock, so it never lands between a PUT's read and
+ * its write.
  */
 const policyLocks = new WeakMap<PolicyStore, SubjectQueue>();
 function policyLock(store: PolicyStore): SubjectQueue {
@@ -1008,7 +1016,6 @@ async function admitBuild(
     );
   const now = seconds(deps);
   const handle = buildHandle(deps.newId());
-  const quota = pol.quota;
   const built = normalizeSpec(spec);
   const want = reuseKey(b.image as string, built, result.profile, result.gateRecordSha256);
   let reused: TemplateBuild | undefined;
@@ -1021,6 +1028,8 @@ async function admitBuild(
   let doc: TemplateDoc | undefined;
   for (let attempt = 1; !doc; attempt++) {
     const charged = (await cat.get(id))?.owner ?? p.sub;
+    // The owner's quota: its admin-set override, else the deployment default (quotaFor).
+    const quota = quotaFor(pol, charged);
     try {
       doc = await quotaLock(cat).run(charged, () =>
         cat.update(id, async (cur) => {
@@ -1068,11 +1077,12 @@ async function admitBuild(
             );
           }
           // A new id is one more document and stream for good: a create-then-cancel loop frees
-          // its templates and buildsQueued slots, never this one.
-          if (!cur && u.owned >= ownedLimit(quota)) {
+          // its templates and buildsQueued slots, never this one. The owner's: its override's, else
+          // the default's (quotaFor).
+          if (!cur && u.owned >= quota.owned) {
             throw new CpError(
               'quota_exceeded',
-              `at most ${ownedLimit(quota)} template ids owned per subject, in any status`,
+              `at most ${quota.owned} template ids owned per subject, in any status`,
               undefined,
               { quota: 'owned' },
             );
@@ -1367,7 +1377,11 @@ function hostsBlock(deps: CpDeps, f: ReadinessFacts) {
 const leasedBy = (docs: TemplateDoc[], subject: string, nowS: number): TemplateBuild[] =>
   docs
     .flatMap((d) => d.builds)
-    .filter((x) => liveLeases(x, nowS).some((l) => l.subject === subject));
+    // Only a registered build's lease counts: a retire or a reject drops its leases, and none is
+    // written after (takeLeaseLocked), but a lease on an ended build never holds a quota slot.
+    .filter(
+      (x) => x.status === 'registered' && liveLeases(x, nowS).some((l) => l.subject === subject),
+    );
 
 /**
  * Activate (§6.3): take or renew this subject's lease on a registered build, by `tag` (default
@@ -1414,6 +1428,21 @@ const deploymentRun = (id: string) =>
     'invalid_request',
     `template '${id}' is run by the deployment (SH_SANDBOX_TEMPLATES); it takes no activation lease`,
   );
+
+/**
+ * The per-template use lock, keyed by template id: a sandbox create's last status read and its
+ * store write (createUnlessEnded) against a retire's or a reject's in-use check and catalog write
+ * (retireBuilds), on that template only, so creates on different templates never wait on each
+ * other. A retire or reject takes it inside the activation lock, always in that order (activation,
+ * then template); a create takes only this one, and holds no other lock while it does, so no cycle.
+ * Process-local, as the activation lock is.
+ */
+const TEMPLATE_USE_LOCKS = new WeakMap<TemplateCatalog, SubjectQueue>();
+function templateUseLock(cat: TemplateCatalog): SubjectQueue {
+  let q = TEMPLATE_USE_LOCKS.get(cat);
+  if (!q) TEMPLATE_USE_LOCKS.set(cat, (q = new SubjectQueue()));
+  return q;
+}
 
 /**
  * Takes or renews `p`'s lease on `target` (§6.3) and records it, or refuses with no lease kept:
@@ -1470,9 +1499,10 @@ async function takeLeaseLocked(
   }
   const { policy: pol } = await policy.current();
   const docs = await cat.list();
-  // `target` was resolved before the lock; a retire takes the lock too, so this read is current. A
-  // build retired since is refused here, so no lease (none counting against the quota) is written
-  // onto it.
+  // `target` was resolved before the lock; a retire, and an admin's reject after the fact, take the
+  // lock too, so this read is current. A build retired or rejected since is refused here (retired:
+  // template_retired; rejected, as any build no longer registered: template_unavailable), so no
+  // lease (none counting against the quota) is written onto it.
   const fresh = docs.find((d) => d.id === d0.id)?.builds.find((x) => x.buildId === target.buildId);
   if (fresh?.status === 'retired')
     throw new CpError('template_retired', `template '${d0.id}' build ${target.buildId} is retired`);
@@ -1482,10 +1512,11 @@ async function takeLeaseLocked(
     });
   // A renewal does not count against itself.
   const held = leasedBy(docs, p.sub, nowS).filter((x) => x.buildId !== target.buildId);
-  if (held.length >= pol.quota.active) {
+  const activeLimit = quotaFor(pol, p.sub).active;
+  if (held.length >= activeLimit) {
     throw new CpError(
       'quota_exceeded',
-      `at most ${pol.quota.active} active templates per subject`,
+      `at most ${activeLimit} active templates per subject`,
       undefined,
       { quota: 'active' },
     );
@@ -1682,6 +1713,24 @@ interface RetiredBuild {
 }
 
 /**
+ * The admin's actions on a template (§5.2), such as a reject after the fact: an admin only, on a
+ * template it can see (404 otherwise, as on the reads). An admin's right does not depend on the
+ * template's owner, so `own` under the lock checks only that the template still exists.
+ */
+async function adminTemplate(ctx: RequestCtx, deps: CpDeps) {
+  const p = requireEnrolled(ctx, deps);
+  const w = writable(deps);
+  const d0 = await visibleTemplate(deps, p, ctx.params.id ?? '');
+  if (!isAdmin(p))
+    throw new CpError('forbidden', 'rejecting a build after the fact requires the admin role');
+  const own = (d: TemplateDoc | null): TemplateDoc => {
+    if (!d) throw new CpError('template_not_found', 'no such template');
+    return d;
+  };
+  return { p, ...w, d0, own };
+}
+
+/**
  * Retire (§5.1): the owner, or an admin, retires a whole template (every build not yet retired) or
  * one build. A retired build is never used again (a sandbox or an activation naming it answers
  * `410 template_retired`) and its leases go, so it is no longer wanted: a host holding it is told
@@ -1689,73 +1738,106 @@ interface RetiredBuild {
  * a build it names (`409 build_in_use`). Its records stay, and each build retired writes a
  * `retire` record naming the caller, the status before (`from`) and the build's `build` record
  * (`buildRecord`). Idempotent: an already retired build is answered with `record: null`.
+ *
+ * Reject after the fact (§5.2, `mode: 'reject'`) takes the same path: an admin only, with a
+ * reason, on a registered build. The build becomes `rejected` (`reason.rule: admin`) rather than
+ * `retired`, and the record is a `reject` one; the rest (leases, the host's stop, the refusal under
+ * live use, idempotence) is retire's.
  */
 async function retireBuilds(
   ctx: RequestCtx,
   deps: CpDeps,
   which: (b: TemplateBuild) => boolean,
+  mode: 'retire' | 'reject' = 'retire',
 ): Promise<{ templateId: string; subject: string; builds: RetiredBuild[] }> {
-  // The owner's check is made on the template as read and again under its lock (ownerCheck), so a
-  // retire by an owner it was transferred away from meanwhile is refused.
-  const { p, cat, prov, d0, own } = await ownTemplate(ctx, deps, 'retires it');
+  // Retire: the owner, or an admin; the owner's check is made on the template as read and again
+  // under its lock (ownerCheck), so a retire by an owner it was transferred away from meanwhile is
+  // refused. Reject: an admin only, whoever owns the template (adminTemplate).
+  const { p, cat, prov, d0, own } =
+    mode === 'reject' ? await adminTemplate(ctx, deps) : await ownTemplate(ctx, deps, 'retires it');
   const reason = asRecord(ctx.body).reason;
+  if (mode === 'reject' && (typeof reason !== 'string' || !reason.trim()))
+    throw new CpError('invalid_request', 'a reject needs a reason: the rule found broken, and why');
   if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1024))
     throw new CpError('invalid_request', 'reason must be a string of at most 1024 characters');
+  // Already in the end state this call asks for: answered, with no second record. A retired
+  // build is not rejected (it is not registered), and a rejected one may still be retired.
+  const ended = (x: TemplateBuild): boolean =>
+    mode === 'reject' ? rejectedByAdmin(x) : x.status === 'retired';
   const done: TemplateBuild[] = [];
   const records = new Map<string, string>();
-  // Under the activation lock, so an activation never writes a lease onto a build retired after
-  // it resolved the build: it re-reads the build's status under the same lock (takeLeaseLocked).
-  await activationLock(cat).run('activation', async () => {
-    // The template is read again under the lock: the request's read (d0) may be older than a
-    // build registered, or a sandbox created on one, since. Read before the catalog update, so no
-    // sandbox-store lookup runs inside it.
-    const d1 = (await cat.get(d0.id)) ?? d0;
-    const inUse = await buildsInUse(deps, d1.builds.filter(which), seconds(deps));
-    await cat.update(d0.id, async (c) => {
-      const cur = own(c);
-      done.length = 0;
-      records.clear();
-      const targets = cur.builds.filter(which);
-      if (targets.length === 0)
-        throw new CpError('template_not_found', 'no such build of this template');
-      const busy = targets.find((x) => x.status !== 'retired' && inUse.has(x.buildId));
-      if (busy)
-        throw new CpError(
-          'build_in_use',
-          `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then retire`,
-        );
-      done.push(...targets.filter((x) => x.status !== 'retired'));
-      // Each `retire` record is written inside the update, as a host's build report writes its
-      // own: a record that cannot be written leaves the build as it was, so a retry retires it
-      // with its record, and no build is retired without one.
-      for (const x of done) {
-        const rec = await prov.append({
-          stream: `template/${d0.id}`,
-          kind: 'retire',
-          subject: p.sub,
-          body: {
-            build: x.handle ?? x.buildId,
-            ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
-            buildRecord: await buildRecordOf(prov, d0.id, x),
-            from: x.status,
-            ...(typeof reason === 'string' ? { reason } : {}),
-          },
-        });
-        records.set(x.handle ?? x.buildId, rec.digest);
-      }
-      return {
-        ...cur,
-        builds: cur.builds.map((x) =>
-          done.includes(x) ? { ...x, status: 'retired' as const, leases: [] } : x,
-        ),
-      };
-    });
-  });
-  if (done.length > 0)
-    await auditBestEffort(deps, 'template_retired', d0.id, {
-      subject: p.sub,
-      decision: 'template_retired',
-    });
+  // Under the activation lock, so an activation never writes a lease onto a build retired or
+  // rejected after it resolved the build: it re-reads the build's status under the same lock
+  // (takeLeaseLocked).
+  // And under this template's use lock, inside it (activation, then template), so a sandbox create
+  // on this template either is stored before the in-use check or sees the build ended
+  // (createUnlessEnded).
+  await activationLock(cat).run('activation', () =>
+    templateUseLock(cat).run(d0.id, async () => {
+      // Read before the catalog update, so no store lookup runs inside it, and from the template
+      // as it is now, under the use lock: d0 was read before the locks, and a build it saw still
+      // building may have registered (taking its buildId, then a sandbox) while this waited. A
+      // build that registers after this read has no sandbox, and gets none while the lock is held.
+      const now = await cat.get(d0.id);
+      if (!now) throw new CpError('template_not_found', 'no such template');
+      const inUse = await buildsInUse(deps, now.builds.filter(which), seconds(deps));
+      await cat.update(d0.id, async (c) => {
+        const cur = own(c);
+        done.length = 0;
+        records.clear();
+        const targets = cur.builds.filter(which);
+        if (targets.length === 0)
+          throw new CpError('template_not_found', 'no such build of this template');
+        if (mode === 'reject' && targets.some((x) => x.status !== 'registered' && !ended(x)))
+          throw new CpError(
+            'invalid_request',
+            'only a registered build is rejected after the fact',
+          );
+        const busy = targets.find((x) => !ended(x) && inUse.has(x.buildId));
+        if (busy)
+          throw new CpError(
+            'build_in_use',
+            `build ${busy.handle ?? busy.buildId} ${inUse.get(busy.buildId)}: delete it, then ${mode}`,
+          );
+        done.push(...targets.filter((x) => !ended(x)));
+        // Each record is written inside the update, as a host's build report writes its own: a
+        // record that cannot be written leaves the build as it was, so a retry ends it with its
+        // record, and no build is retired or rejected without one.
+        for (const x of done) {
+          const rec = await prov.append({
+            stream: `template/${d0.id}`,
+            kind: mode,
+            subject: p.sub,
+            body: {
+              build: x.handle ?? x.buildId,
+              ...(x.status === 'registered' ? { buildId: x.buildId } : {}),
+              buildRecord: await buildRecordOf(prov, d0.id, x),
+              from: x.status,
+              ...(typeof reason === 'string' ? { reason } : {}),
+            },
+          });
+          records.set(x.handle ?? x.buildId, rec.digest);
+        }
+        return {
+          ...cur,
+          builds: cur.builds.map((x) =>
+            done.includes(x)
+              ? mode === 'reject'
+                ? {
+                    ...x,
+                    status: 'rejected' as const,
+                    leases: [],
+                    reason: { message: String(reason), rule: 'admin', step: 'rejected' },
+                  }
+                : { ...x, status: 'retired' as const, leases: [] }
+              : x,
+          ),
+        };
+      });
+    }),
+  );
+  const decision = mode === 'reject' ? 'template_build_rejected' : 'template_retired';
+  if (done.length > 0) await auditBestEffort(deps, decision, d0.id, { subject: p.sub, decision });
   // Each build, its id, its readiness and the record written now (null for one already retired),
   // so a client can tie the answer to the template's chain.
   const after = (await cat.get(d0.id))!;
@@ -1763,7 +1845,7 @@ async function retireBuilds(
     templateId: d0.id,
     subject: p.sub,
     builds: after.builds
-      .filter((x) => x.status === 'retired' && which(x))
+      .filter((x) => (mode === 'reject' ? rejectedByAdmin(x) : x.status === 'retired') && which(x))
       .map((x) => ({
         build: x.handle ?? x.buildId,
         // A build retired before it registered has only its handle.
@@ -1773,6 +1855,41 @@ async function retireBuilds(
       })),
   };
 }
+
+/**
+ * A quota write's body (§5.2): exactly `templates`, `buildsQueued` and `active`, and `owned` when
+ * given, returned as a new object of those, so nothing else the request carried reaches the
+ * policy. Their values are policyProblems' to judge.
+ */
+function quotaBody(v: unknown): Policy['quota'] {
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new CpError(
+      'invalid_request',
+      'a quota is an object: templates, buildsQueued, active, optionally owned',
+    );
+  const extra = Object.keys(v).filter((k) => !(QUOTA_KEYS as readonly string[]).includes(k));
+  if (extra.length > 0)
+    throw new CpError(
+      'invalid_request',
+      `a quota holds only templates, buildsQueued, active, owned (not ${extra.join(', ')})`,
+    );
+  const o = v as Record<string, unknown>;
+  return {
+    templates: o.templates,
+    buildsQueued: o.buildsQueued,
+    active: o.active,
+    ...(o.owned !== undefined ? { owned: o.owned } : {}),
+  } as Policy['quota'];
+}
+
+/** Whether two quotas (or two absent overrides, null) hold the same four counters, owned unset alike. */
+const sameQuota = (a: Policy['quota'] | null, b: Policy['quota'] | null): boolean =>
+  a === null || b === null
+    ? a === b
+    : a.templates === b.templates &&
+      a.buildsQueued === b.buildsQueued &&
+      a.active === b.active &&
+      a.owned === b.owned;
 
 /** POST /v1/templates/{id}/retire (§5.1): every build of the template not yet retired. */
 async function retireTemplate(ctx: RequestCtx, deps: CpDeps) {
@@ -1791,25 +1908,25 @@ async function retireTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /**
- * A sandbox record's write (§5.1), run under the activation lock after re-reading its build's
- * status. A retire judges use and retires under the same lock, so a create racing it either writes
- * first, and the retire sees its sandbox and is refused `409 build_in_use`, or finds the build
- * retired, and is refused `410 template_retired` with no record written. Without a template store
- * nothing can be retired, so no lock is taken.
+ * POST /v1/templates/{id}/builds/{build}/reject (§5.2): an admin rejects a registered build after
+ * the fact (a rule found broken), with the reason, on retire's path. A create naming it then
+ * answers `400 unknown_template`, as for a build policy rejected at registration.
  */
-async function notRetired<T>(
-  deps: CpDeps,
-  t: { id: string; buildId: string },
-  write: () => Promise<T>,
-): Promise<T> {
-  const cat = deps.templates;
-  if (!cat?.update || !deps.provenance) return write();
-  return activationLock(cat).run('activation', async () => {
-    const cur = (await cat.get(t.id))?.builds.find((x) => x.buildId === t.buildId);
-    if (cur?.status === 'retired')
-      throw new CpError('template_retired', `template '${t.id}' build ${t.buildId} is retired`);
-    return write();
-  });
+async function rejectTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
+  const ref = ctx.params.build ?? '';
+  const r = await retireBuilds(ctx, deps, (x) => x.handle === ref || x.buildId === ref, 'reject');
+  const b = r.builds[0];
+  return {
+    status: 200,
+    body: {
+      templateId: r.templateId,
+      subject: r.subject,
+      build: b?.build ?? ref,
+      buildId: b?.buildId ?? null,
+      record: b?.record ?? null,
+      status: 'rejected',
+    },
+  };
 }
 
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
@@ -1902,6 +2019,33 @@ export async function requireActive(
     },
     estimate ?? FIRST_USE_RETRY_S,
   );
+}
+
+/**
+ * Stores a new sandbox (`create`) unless its build was retired (§5.1) or rejected after the fact
+ * (§5.2) since resolveForUse read it: the build's status is re-read and the sandbox stored under
+ * the template's use lock (templateUseLock), which a retire and a reject hold around their in-use
+ * check and their write. Keyed by template id, so creates on other templates run meanwhile.
+ * So either the sandbox is stored first, and the retire or reject sees it live (`409
+ * build_in_use`), or the build has ended first, and the create is refused with nothing stored
+ * (`410 template_retired`, or `400 unknown_template` for a rejected build, as resolveForUse
+ * answers). A deployment whose catalog takes no writes (no retire, no reject) needs no lock.
+ */
+async function createUnlessEnded<T>(
+  deps: CpDeps,
+  t: { id: string; buildId: string },
+  create: () => Promise<T>,
+): Promise<T> {
+  const cat = deps.templates;
+  if (!cat?.update) return create();
+  return templateUseLock(cat).run(t.id, async () => {
+    const b = (await cat.get(t.id))?.builds.find((x) => x.buildId === t.buildId);
+    if (b?.status === 'retired')
+      throw new CpError('template_retired', `template '${t.id}' build ${t.buildId} is retired`);
+    if (b?.status !== 'registered')
+      throw new CpError('unknown_template', 'no such template (GET /v1/templates lists them)');
+    return create();
+  });
 }
 
 /**
@@ -2332,6 +2476,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   cancelTemplateBuild: cancelBuild,
   retireTemplate,
   retireTemplateBuild,
+  rejectTemplateBuild,
 
   // The owner's and the admin's actions (§5.1-§5.2): tags, edits and owner transfer.
   moveTemplateTags,
@@ -2363,11 +2508,26 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const store = policyStore(deps);
     const bad = policyProblems(ctx.body);
     if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+    // A compare-and-set (`?expect=`, the `digest` GET /v1/policy answered): the policy is written
+    // only if it is still the one the client read, else 409 policy_changed with nothing written or
+    // recorded, so a quota or policy another admin wrote meanwhile is never replaced unseen.
+    // Without it, the policy is stored as sent.
+    const expectRaw = ctx.query.get('expect');
+    if (expectRaw !== null && !/^sha256:[0-9a-f]{64}$/.test(expectRaw))
+      throw new CpError('invalid_request', "expect must be a policy digest, 'sha256:<64 hex>'");
     // The check and the write are one step (policyLock): a PUT built from an older policy can't
     // pass the widening check against it and then land after a settings admin's narrowing,
     // re-adding the trust that removed.
     const { policy, record, narrowed } = await policyLock(store).run('policy', async () => {
       const before = (await store.current()).policy;
+      const now = policyDigest(before);
+      if (expectRaw !== null && expectRaw !== now)
+        throw new CpError(
+          'policy_changed',
+          'the policy changed since it was read: nothing written; read it again, then write',
+          undefined,
+          { digest: now },
+        );
       // Widening what the policy trusts is the same kind of act as widening access (enrollment and
       // roles spec, decision 1): an admin by an API grant may narrow the policy and change its
       // quotas, but adding a trusted gate record, a registry or a repository needs an admin named
@@ -2413,10 +2573,105 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     };
   },
 
+  /**
+   * Admin quotas (§5.2): `PUT /v1/quota/default` sets the deployment default, `PUT
+   * /v1/quota/{subject}` one subject's override; a body of `null` for a subject removes its
+   * override. Each is a policy change: a new `policy` record (the whole policy, as `PUT /v1/policy`
+   * writes), so the chain shows who set which quota when. Enforced at once.
+   */
+  putQuota: async (ctx, deps) => {
+    const p = requireEnrolled(ctx, deps);
+    if (!isAdmin(p)) throw new CpError('forbidden', 'setting quotas requires the admin role');
+    const store = policyStore(deps);
+    const subject = ctx.params.subject ?? '';
+    const isDefault = subject === 'default';
+    if (!isDefault && !MEMBER_SUBJECT_RE.test(subject))
+      throw new CpError(
+        'invalid_request',
+        `the quota's target is 'default' or a subject, ${MEMBER_SUBJECT_FORMS}`,
+      );
+    if (isDefault && ctx.body === null)
+      throw new CpError('invalid_request', 'the default quota is set, never removed');
+    // Stored as the four counters alone: a key beyond them is refused, never kept in the policy.
+    // A body without owned leaves the target's owned as it is.
+    const body = ctx.body === null ? null : quotaBody(ctx.body);
+    // A compare-and-set (`?expect=`, JSON: the quota the client read, null for no override): the
+    // write is made only if the target's quota is that value now, else 409 quota_changed with
+    // nothing written, so another admin's change in between is never overwritten unseen.
+    const expectRaw = ctx.query.get('expect');
+    let expected: Policy['quota'] | null | undefined;
+    if (expectRaw !== null) {
+      let v: unknown;
+      try {
+        v = JSON.parse(expectRaw);
+      } catch {
+        throw new CpError('invalid_request', 'expect must be a quota, or null, as JSON');
+      }
+      expected = v === null ? null : quotaBody(v);
+      if (
+        expected !== null &&
+        (![expected.templates, expected.buildsQueued, expected.active].every(
+          (n) => Number.isSafeInteger(n) && n >= 0,
+        ) ||
+          (expected.owned !== undefined &&
+            !(Number.isSafeInteger(expected.owned) && expected.owned >= 0)))
+      )
+        throw new CpError('invalid_request', 'expect must hold whole numbers, as a quota does');
+    }
+    // The read, the change and the write are one step of the policy store (update), so a quota or
+    // policy another admin writes meanwhile is never dropped by this write.
+    let before: unknown;
+    let next!: Policy;
+    const change = (cur: Policy): Policy => {
+      next = { ...cur, quotaBySubject: { ...(cur.quotaBySubject ?? {}) } };
+      // A body without owned keeps the target's owned, if it has one.
+      const keepOwned = (q: Policy['quota'], old: Policy['quota'] | undefined): Policy['quota'] =>
+        q.owned === undefined && old?.owned !== undefined ? { ...q, owned: old.owned } : q;
+      if (isDefault) {
+        before = cur.quota;
+        next.quota = keepOwned(body as Policy['quota'], cur.quota);
+      } else {
+        before = cur.quotaBySubject?.[subject] ?? null;
+        if (body === null) delete next.quotaBySubject![subject];
+        else
+          next.quotaBySubject![subject] = keepOwned(
+            body as Policy['quota'],
+            cur.quotaBySubject?.[subject],
+          );
+      }
+      if (expected !== undefined && !sameQuota(before as Policy['quota'] | null, expected))
+        throw new CpError(
+          'quota_changed',
+          `${subject}'s quota changed since it was read: nothing written; read it again, then write`,
+        );
+      if (Object.keys(next.quotaBySubject!).length === 0) delete next.quotaBySubject;
+      const bad = policyProblems(next);
+      if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+      return next;
+    };
+    // It also takes PUT /v1/policy's lock (policyLock): that PUT reads, checks and writes as
+    // separate store calls, and a quota written between its read and its write would be replaced,
+    // unseen, by the policy it sends.
+    const { record } = await policyLock(store).run('policy', () => store.update(change, p.sub));
+    await auditBestEffort(deps, 'quota_set', subject, { subject: p.sub, decision: 'quota_set' });
+    return {
+      status: 200,
+      body: {
+        target: subject,
+        subject: p.sub,
+        quota: isDefault ? next.quota : (next.quotaBySubject?.[subject] ?? null),
+        before,
+        policy: policyDigest(next),
+        record,
+      },
+    };
+  },
+
   getQuota: async (ctx, deps) => {
     const p = requireReader(ctx, deps.config);
     const { cat, policy } = writable(deps);
     const { policy: pol } = await policy.current();
+    const quota = quotaFor(pol, p.sub);
     const u = await usage(cat, p.sub);
     const nowS = seconds(deps);
     // The builds this subject holds a live lease on (§6.3), as activate counts them.
@@ -2432,10 +2687,14 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       status: 200,
       body: {
         subject: p.sub,
-        templates: { limit: pol.quota.templates, used: u.templates },
-        buildsQueued: { limit: pol.quota.buildsQueued, used: u.buildsQueued },
-        active: { limit: pol.quota.active, used: active },
-        owned: { limit: ownedLimit(pol.quota), used: u.owned },
+        templates: { limit: quota.templates, used: u.templates },
+        buildsQueued: { limit: quota.buildsQueued, used: u.buildsQueued },
+        active: { limit: quota.active, used: active },
+        owned: { limit: quota.owned, used: u.owned },
+        // Whether this subject has an admin-set quota (§5.2) or the deployment default; owned has
+        // its own, as an override may leave it to the default.
+        quotaSource: pol.quotaBySubject?.[p.sub] ? 'subject' : 'default',
+        ownedSource: ownedSource(pol, p.sub),
         ...(sandboxes ? { sandboxes } : {}),
       },
     };
@@ -2481,7 +2740,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       // the workspace's epoch known (spec §8.2), which the client sends right after create.
       modeEpoch: mode === 'per-exec' ? 0 : 1,
     };
-    const outcome = await notRetired(deps, template, () =>
+    const outcome = await createUnlessEnded(deps, template, () =>
       store.create(
         rec,
         { perSubject: cfg.maxPerSubject, total: cfg.maxTotal, retentionS: cfg.retentionS },

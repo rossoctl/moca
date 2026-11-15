@@ -799,7 +799,7 @@ describe('sbx templates retire (§5.1)', () => {
     );
   });
 
-  it('--wait: done at once for a shared build, its worker kept for a build not retired', async () => {
+  it('--wait: done at once for a shared build, its worker kept for a build neither retired nor rejected', async () => {
     // Two builds of one template from one image share a worker id; the other is still wanted.
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
@@ -809,7 +809,7 @@ describe('sbx templates retire (§5.1)', () => {
     expect(w.slept).toEqual([]);
     const errs = w.io.errs.join('');
     expect(errs).toContain(
-      `my-python ${HANDLE}: retired; its worker also serves a build that is not retired`,
+      `my-python ${HANDLE}: retired; its worker also serves a build neither retired nor rejected`,
     );
     expect(errs).not.toContain('its worker stopped');
   });
@@ -1018,6 +1018,8 @@ describe('sbx quota, policy', () => {
       templates: { limit: 100, used: 3 },
       buildsQueued: { limit: 10, used: 1 },
       active: { limit: 8, used: 0 },
+      owned: { limit: 200, used: 4 },
+      ownedSource: 'default',
       sandboxes: { limit: 3, used: 1 },
     };
     const w = world({ 'GET /v1/quota': () => ({ status: 200, body: q }) });
@@ -1027,6 +1029,7 @@ describe('sbx quota, policy', () => {
         'templates      3 of 100\n' +
         'buildsQueued   1 of 10\n' +
         'active         0 of 8\n' +
+        'owned          4 of 200\n' +
         'sandboxes      1 of 3\n',
     );
     expect(await w.run(['quota', '--json'])).toBe(0);
@@ -1044,7 +1047,16 @@ describe('sbx quota, policy', () => {
     );
     expect(w.out()).toContain('registries <default>\n');
     expect(w.out()).toContain(
-      'trusted gate records 0; quota templates 100, builds queued 10, active 8\n',
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, ' +
+        'owned not set (sbx quota shows the limit in force)\n',
+    );
+    const q = { templates: 100, buildsQueued: 10, active: 8, owned: 200 };
+    const w2 = world({
+      'GET /v1/policy': () => ({ status: 200, body: policyView({ quota: q }) }),
+    });
+    expect(await w2.run(['policy'])).toBe(0);
+    expect(w2.out()).toContain(
+      'trusted gate records 0; quota templates 100, builds queued 10, active 8, owned 200\n',
     );
     expect(w.out()).toContain(`policy sha256:${'d'.repeat(64)} (record sha256:${'e'.repeat(64)})`);
     expect(await w.run(['policy', '--json'])).toBe(0);

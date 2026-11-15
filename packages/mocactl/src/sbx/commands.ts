@@ -13,6 +13,7 @@ import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
 import type {
   SandboxApiClient,
   SbxDiscovery,
+  SbxQuota,
   SbxSandbox,
   SbxSandboxCreate,
   SbxSubject,
@@ -809,6 +810,74 @@ export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
   if (want !== undefined && iss !== want)
     return `the login was issued by '${sanitizeRemote(iss)}', but ${sanitizeRemote(c.url)} (profile ${sanitizeRemote(d.profile ?? 'harness')}) issues '${want}': it is another deployment's login`;
   return undefined;
+}
+
+const quotaText = (q: SbxQuota | null | undefined) =>
+  q
+    ? `templates ${q.templates}, builds queued ${q.buildsQueued}, active ${q.active}` +
+      (q.owned !== undefined ? `, owned ${q.owned}` : '')
+    : 'the default';
+
+/**
+ * The counters of a quota, and nothing else: what a quota write sends as `?expect=`. The control
+ * plane refuses an expect with another key, and a deployment-wide quota stored through
+ * `PUT /v1/policy` (or by an older control plane) may carry one.
+ */
+const quotaCounters = (q: SbxQuota | null): SbxQuota | null =>
+  q && {
+    templates: q.templates,
+    buildsQueued: q.buildsQueued,
+    active: q.active,
+    ...(q.owned !== undefined ? { owned: q.owned } : {}),
+  };
+
+/**
+ * `sbx templates quota TARGET (--templates N --builds-queued N --active N [--owned N] | --clear)` (template
+ * lifecycle spec §5.2; admins). Names the control plane it writes to and refuses a login issued for
+ * another deployment; reads the current value first (`GET /v1/policy`), then writes it as a
+ * compare-and-set (`?expect=`, the counters read as percent-encoded JSON, `null` for no override):
+ * if another admin changed the quota in between, the control plane writes nothing (`409 quota_changed`), and this reports the value now (exit 1).
+ * Prints old -> new (new as the control plane stored it: without --owned, the target keeps its
+ * owned) and the new policy's digest and record.
+ */
+export async function cmdSetQuota(
+  c: SbxCtx,
+  target: string,
+  quota: SbxQuota | null,
+): Promise<number> {
+  try {
+    const mismatch = await loginMismatch(c);
+    if (mismatch) {
+      c.io.err(`sbx: refused: ${mismatch}`);
+      return SBX_EXIT.failed;
+    }
+    c.io.err(`sbx: admin write to ${sanitizeRemote(c.url)}`);
+    const pol = (await c.api.getPolicy()).policy;
+    const read = target === 'default' ? pol.quota : (pol.quotaBySubject?.[target] ?? null);
+    let r: Awaited<ReturnType<typeof c.api.putQuota>>;
+    try {
+      r = await c.api.putQuota(target, quota, quotaCounters(read));
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.code !== 'quota_changed') throw err;
+      const p2 = (await c.api.getPolicy()).policy;
+      const now = target === 'default' ? p2.quota : (p2.quotaBySubject?.[target] ?? null);
+      c.io.err(
+        `sbx: nothing written: ${sanitizeRemote(target)}'s quota was changed by someone else after ` +
+          `this command read it (read ${quotaText(read)}, now ${quotaText(now)}): check it, then run ` +
+          'the command again',
+      );
+      return SBX_EXIT.failed;
+    }
+    if (c.json) c.io.out(JSON.stringify({ ...r, read }) + '\n');
+    else
+      c.io.out(
+        `${sanitizeRemote(r.target)}: ${quotaText(read)} -> ${quota === null ? 'the default' : quotaText(r.quota ?? quota)}` +
+          ` (policy ${sanitizeRemote(r.policy)}, record ${sanitizeRemote(r.record)})\n`,
+      );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    return failed(c, err);
+  }
 }
 
 /** The loud failure of an admin write: the value changed between this command's read and its write. */

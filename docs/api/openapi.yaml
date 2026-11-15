@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.20.0
+  version: 1.21.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -125,6 +125,8 @@ components:
             - template_not_active
             - template_retired
             - build_in_use
+            - quota_changed
+            - policy_changed
             - mode_not_allowed
             - self_attested
             - bootstrap_subject
@@ -644,7 +646,7 @@ components:
             (its host has not stopped it yet), or whose presence cannot be read (`running` null);
             null otherwise, so for a retired build null means its worker is known to be stopped,
             that it never had one (retired before it registered), or that it is `shared` (kept
-            running for a build that is not retired)
+            running for a build neither retired nor rejected)
           required: [running, inUse]
           properties:
             running:
@@ -660,7 +662,7 @@ components:
         shared:
           type: boolean
           description: |
-            true for a retired build whose snapshot or worker a build that is not retired also
+            true for a retired build whose snapshot or worker a build neither retired nor rejected also
             uses (the same snapshot in another template, or one worker id that two builds from one
             image share): its worker is not stopped for the retire, since that build's own state
             decides whether it runs, and its `capacity` is null. False for every other build
@@ -696,7 +698,9 @@ components:
           properties:
             message: { type: string }
             step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
-            rule: { type: string, description: the gating rule, on a rejection }
+            rule:
+              type: string
+              description: the gating rule, on a rejection; `admin` for a reject after the fact (§5.2)
         attestation:
           type: string
           enum: [deployment, self]
@@ -878,6 +882,15 @@ components:
           items: { type: string }
           description: sha256 digests of the gate records the benchmark profile trusts
         quota: { $ref: '#/components/schemas/Quota' }
+        quotaBySubject:
+          type: object
+          description: |
+            per-subject overrides of `quota`, keyed by subject (`github:<numeric id>` or
+            `oidc:<provider sub>`); an admin's, `PUT /v1/quota/{subject}`. A `PUT /v1/policy`
+            stores the whole policy, this map too: one that sends `?expect=` is refused (`409
+            policy_changed`) if a quota changed since its read, and one without it replaces the
+            overrides with the ones it sends
+          additionalProperties: { $ref: '#/components/schemas/Quota' }
     Quota:
       type: object
       required: [templates, buildsQueued, active]
@@ -901,7 +914,8 @@ components:
           minimum: 0
           description: >-
             template ids a subject owns in any status (a failed or cancelled-only template too),
-            checked for a new id only; 200 when the policy does not set it
+            checked for a new id only; optional: a default without it is 200, an override without it
+            has the default's
     PolicyView:
       type: object
       required: [policy, digest, record]
@@ -2576,6 +2590,76 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/templates/{id}/builds/{build}/reject:
+    post:
+      operationId: rejectTemplateBuild
+      summary: Reject a registered build after the fact (an admin)
+      description: |
+        Template lifecycle spec §5.2: an admin rejects a registered build, named by its build id or
+        its handle, when a rule is found broken after registration, with the reason. The build
+        becomes `rejected` (`reason.rule` `admin`), its activation leases go, a host holding it
+        stops its worker (`GET /v1/hosts/{host}/wanted` `stop`, as for a retired build), and a
+        create naming it answers `400 unknown_template`, as for a build policy rejected at
+        registration. A `reject` record names the admin, `from` (the status before),
+        `buildRecord` (the digest of the build's `build` record) and the reason. Refused
+        `409 build_in_use` while a live sandbox runs on it. Idempotent: an already rejected build
+        is answered with `record: null`. Not reversible: a new build is the way back. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: build, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                  description: the rule found broken, and why; kept in the reject record
+      responses:
+        '200':
+          description: rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templateId, subject, build, buildId, record, status]
+                properties:
+                  templateId: { type: string }
+                  subject: { type: string, description: the admin }
+                  build: { type: string, description: the build's handle }
+                  buildId: { type: [string, 'null'] }
+                  record:
+                    type: [string, 'null']
+                    description: the reject record written; null if the build was already rejected
+                  status: { type: string, enum: [rejected] }
+        '400':
+          description: '`invalid_request`: no reason, a build that is not registered, or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`not_enrolled`, or `forbidden`: not an admin'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`template_not_found`: no such template, or no such build of it'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`build_in_use`: a live sandbox runs on the build'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/templates/{id}/builds/{build}/cancel:
     post:
       operationId: cancelTemplateBuild
@@ -3066,7 +3150,23 @@ paths:
         defaultProfile to one that accepts more) needs an admin named in SH_ADMIN_SUBJECTS
         where a members store is kept: an admin by an API grant is refused `403 forbidden`, and may
         still narrow it and change its quotas.
+        With `?expect=` (the `digest` GET /v1/policy answered) the write is a compare-and-set: it is
+        made only if the policy is still the one read; if anything changed since (another admin's
+        policy or quota write, `PUT /v1/quota/{subject}` included), nothing is written or recorded
+        and the answer is `409 policy_changed`, whose `digest` is the policy's now, so the client
+        reads again. Without `expect`, the policy is stored as sent and replaces whatever was set
+        meanwhile.
       security: [{ sessionToken: [] }]
+      parameters:
+        - name: expect
+          in: query
+          required: false
+          description: >-
+            A compare-and-set: the policy digest the client read (GET /v1/policy's `digest`,
+            `sha256:` and 64 lowercase hex digits); another form is `400 invalid_request`. The
+            write is made only if the policy's digest is that value now; else `409
+            policy_changed`, with nothing written.
+          schema: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
       requestBody:
         required: true
         content:
@@ -3091,7 +3191,7 @@ paths:
                             template: { type: string }
                             buildId: { type: string }
         '400':
-          description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
+          description: '`invalid_request`: the policy or `expect` is malformed, or this deployment stores no templates'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -3101,12 +3201,27 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: >-
+            `policy_changed`: `expect` is not the policy's digest now; nothing written. The body's
+            `digest` is the policy's now
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Error' }
+                  - type: object
+                    required: [digest]
+                    properties:
+                      digest: { type: string, description: the policy's digest now }
   /v1/quota:
     get:
       operationId: getQuota
       summary: The caller's template quotas and use (§6.2), and the live-sandbox cap
       description: |
-        The policy's quotas and the caller's use: templates owned (with a build registered or on its
+        The quotas that apply to the caller (its admin-set override, else the deployment default;
+        `quotaSource` says which, and `ownedSource` for `owned`, which an override may leave to the
+        default) and its use: templates owned (with a build registered or on its
         way there), builds queued, building or probing, builds the caller holds a live activation
         lease on (§6.3), and template ids owned in any status (`owned`). On the sandbox profile,
         `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
@@ -3119,7 +3234,8 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [subject, templates, buildsQueued, active, owned]
+                required:
+                  [subject, templates, buildsQueued, active, owned, quotaSource, ownedSource]
                 properties:
                   subject: { type: string }
                   templates: { $ref: '#/components/schemas/LimitUse' }
@@ -3127,6 +3243,16 @@ paths:
                   active: { $ref: '#/components/schemas/LimitUse' }
                   owned: { $ref: '#/components/schemas/LimitUse' }
                   sandboxes: { $ref: '#/components/schemas/LimitUse' }
+                  quotaSource:
+                    type: string
+                    enum: [subject, default]
+                    description: an admin-set quota for this subject, or the deployment default
+                  ownedSource:
+                    type: string
+                    enum: [subject, default]
+                    description: >-
+                      `owned` alone: the subject's override sets it, or it is the deployment
+                      default's (200 when the default does not set it)
         '400':
           description: '`invalid_request`: this deployment stores no templates'
           content:
@@ -3134,6 +3260,75 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/NotEnrolled' }
+  /v1/quota/{subject}:
+    put:
+      operationId: putQuota
+      summary: Set the deployment's default quota, or one subject's (an admin); recorded
+      description: |
+        Template lifecycle spec §5.2. `subject` is `default` (the deployment default) or a subject
+        (`github:<numeric id>` or `oidc:<provider sub>`, an override); a body of `null` removes a
+        subject's override, returning it to the default (the default itself is never removed). A
+        quota holds `templates`, `buildsQueued` and `active`, and optionally `owned`: another key is
+        refused, so nothing else is kept in the policy. A body without `owned` keeps the target's
+        `owned` as it is; an override without one has the default's. Each change is a policy change: a new `policy` record (the whole policy, `quotaBySubject`
+        in it) naming the admin, whose digest is answered, so the chain shows who set which quota
+        when. Enforced at once, on the next create, queued build and activation. Needs
+        SH_PROVENANCE_DIR.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - { name: subject, in: path, required: true, schema: { type: string } }
+        - name: expect
+          in: query
+          required: false
+          description: >-
+            A compare-and-set: the target's quota the client read, as JSON (a Quota, or `null` for
+            a subject with no override), percent-encoded as a query value, e.g.
+            `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D` or
+            `?expect=null`. Key order and spacing do not matter; the four counters are compared (an
+            unset `owned` matches only an unset one), and another key is refused (`400
+            invalid_request`), so a client sends the counters alone. The write is made only if the quota is that value now; else `409 quota_changed`, with
+            nothing written.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/Quota'
+                - type: 'null'
+      responses:
+        '200':
+          description: set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [target, subject, quota, before, policy, record]
+                properties:
+                  target:
+                    { type: string, description: '`default` or the subject whose quota changed' }
+                  subject: { type: string, description: the admin }
+                  quota: { oneOf: [{ $ref: '#/components/schemas/Quota' }, { type: 'null' }] }
+                  before: { description: 'the quota before (null: the subject had no override)' }
+                  policy: { type: string, description: the new policy's digest }
+                  record: { type: string, description: the policy record written }
+        '400':
+          description: '`invalid_request`: a bad target or quota (also one with a key beyond the four), or this deployment stores no templates'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: '`forbidden` (not an admin) or `not_enrolled`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`quota_changed`: `expect` is not the quota now; nothing written'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/hosts/{host}/inventory:
     post:
       operationId: hostInventory
@@ -3406,20 +3601,21 @@ paths:
         activation is judged by; a build already running on a holder stays there). `stop`: the
         ones it holds with no live lease and no idle grace, and a leased one it runs while placement
         keeps it on another host, each with no live sandbox on its worker, and the retired ones it
-        holds (§5.1) with no live sandbox; a worker with a live
-        sandbox is in no list (it drains first, and counts against the host's `activeLimit`
-        meanwhile). So is a worker a session pinned to its build had a turn on within the hold, when
-        the session's subject is enrolled for sandboxes (combined control plane spec §3.4: the hosts'
-        idle limit from that turn's credential exchange). `remove` (since 1.19.0; §6.1 step 7): the
-        retired builds it holds with no live sandbox and no such hold, each listed in `stop` too, so
-        the agent stops a running worker first (one whose sandbox ended less than 600 s ago, still in
-        `egressSids`, is in `stop` only until then: the removal ends the host's hold on the build,
-        and with it the egress events it may ship for that sandbox); it then uninstalls the worker and deletes the
-        snapshot and its template record, and reports `removed`. The agent starts only workers
-        already installed on the host. A build imported from SH_SANDBOX_TEMPLATES is in no list,
-        retired or not: the deployment runs its worker. Nor is a retired build whose build id or
-        worker a build that is not retired shares (in any template): its snapshot or worker is still
-        needed.
+        holds (§5.1), or ones an admin rejected after the fact (§5.2), with no live sandbox; a
+        worker with a live sandbox is in no list (it drains first, and counts against the host's
+        `activeLimit` meanwhile). So is a worker a session pinned to its build had a turn on within
+        the hold, when the session's subject is enrolled for sandboxes (combined control plane spec
+        §3.4: the hosts' idle limit from that turn's credential exchange). `remove` (since 1.19.0;
+        §6.1 step 7): the retired builds it holds with no live sandbox and no such hold, each listed
+        in `stop` too, so the agent stops a running worker first (one whose sandbox ended less than
+        600 s ago, still in `egressSids`, is in `stop` only until then: the removal ends the host's
+        hold on the build, and with it the egress events it may ship for that sandbox); it then
+        uninstalls the worker and deletes the snapshot and its template record, and reports
+        `removed`. A build an admin rejected is in `stop` only, never in `remove`. The agent starts
+        only workers already installed on the host. A build imported from SH_SANDBOX_TEMPLATES is in
+        no list, retired, rejected or not: the deployment runs its worker. Nor is a retired build
+        whose build id or worker a build that is neither retired nor rejected shares (in any
+        template): its snapshot or worker is still needed.
 
         `run` is in the wanted order, first leased first (1.13.0, §6.5: the order the agent starts
         them in, at most its start limit at once). On a host with an idle grace the graced builds
@@ -3484,16 +3680,18 @@ paths:
       description: |
         Template lifecycle spec §6.3. For a registered build this host holds: `attached` (its
         worker unit started) and `refused` (not started, with why: not installed, or the start
-        failed) write an `activate` record, `detached` (stopped; also for a retired build, whose
-        worker `stop` lists) a `deactivate` record, each with the subject `host:<host>`. A
-        `refused` that repeats this host's last one for the build (the same reason) while the build
-        stays in the host's `run` is not recorded again (`recorded: null`): the agent retries every
-        15 s, and the stream is append-only. For a retired build this host holds, `removed` (since
-        1.19.0; its worker uninstalled, its snapshot and template record deleted, §6.1 step 7)
-        writes a `retire` record by `host:<host>` with `event: removed` and `buildRecord`, the
-        digest of the build's `build` record, and the host no longer holds the build (`heldBy`
-        drops it); refused `409 build_in_use` for a build the wanted state leaves out because a
-        build not retired shares its build id or worker. Readiness never comes from a report: `active` is the relay's attached record.
+        failed) write an `activate` record, `detached` (stopped; also for a retired build, or one
+        an admin rejected after the fact, whose worker `stop` lists) a `deactivate` record, each
+        with the subject `host:<host>`. A `refused` that repeats this host's last one for the build
+        (the same reason) while the build stays in the host's `run` is not recorded again
+        (`recorded: null`): the agent retries every 15 s, and the stream is append-only. For a
+        retired build this host holds, `removed` (since 1.19.0; its worker uninstalled, its snapshot
+        and template record deleted, §6.1 step 7) writes a `retire` record by `host:<host>` with
+        `event: removed` and `buildRecord`, the digest of the build's `build` record, and the host
+        no longer holds the build (`heldBy` drops it); refused `409 build_in_use` for a build the
+        wanted state leaves out because a build neither retired nor rejected shares its build id or
+        worker. An admin-rejected build takes no `removed`. Readiness never comes from a report:
+        `active` is the relay's attached record.
       security: [{ hostToken: [] }]
       parameters:
         - { name: host, in: path, required: true, schema: { type: string } }
@@ -3531,7 +3729,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`build_in_use`: a `removed` for a retired build whose build id or worker a build that is not retired shares (the wanted state never lists it)'
+          description: '`build_in_use`: a `removed` for a retired build whose build id or worker a build neither retired nor rejected shares (the wanted state never lists it)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

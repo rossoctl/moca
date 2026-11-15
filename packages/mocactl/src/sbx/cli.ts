@@ -14,7 +14,7 @@ import {
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io, LoginHelpers } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
-import { SandboxApiClient, type SbxSandboxCreate } from './api.js';
+import { SandboxApiClient, type SbxQuota, type SbxSandboxCreate } from './api.js';
 import {
   cmdCreate,
   cmdEditTemplate,
@@ -24,6 +24,7 @@ import {
   cmdLogout,
   cmdLs,
   cmdRm,
+  cmdSetQuota,
   cmdSubjectChange,
   cmdSubjects,
   cmdTagTemplate,
@@ -143,8 +144,21 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  --build). --wait: until its worker has stopped
                                                  and every host has removed it (default 900 s;
                                                  exit 5 on a timeout), at once for a build no
-                                                 host holds, or one whose worker a build not
-                                                 retired uses
+                                                 host holds, or one whose worker a build neither
+                                                 retired nor rejected uses
+  mocactl sbx templates quota TARGET --templates N --builds-queued N --active N [--owned N] [--json]
+  mocactl sbx templates quota TARGET --clear [--json]
+                                                 set a subject's template quotas (TARGET
+                                                 github:<numeric id> or oidc:<provider sub>) or the
+                                                 default (TARGET default); --clear removes a
+                                                 subject's override (admins only). --owned: the
+                                                 template ids it may own in any status (without
+                                                 it, the target keeps its current owned: to
+                                                 return one subject's owned to the default,
+                                                 --clear, then set the quota again). Reads, then
+                                                 writes only if unchanged since the read: prints
+                                                 old -> new; exit 1, nothing written, if another
+                                                 admin changed it in between
   mocactl sbx hosts [--json]                     per KVM host: active slots, start line, memory
                                                  headroom and floor, idle grace, disk
   mocactl sbx admin subjects [--json]            every enrolled subject and its roles (admins only)
@@ -476,7 +490,8 @@ const OWN_LOGIN = new Set(['login', 'logout', 'doctor']);
 const NO_RECORD = new Set(['token', 'login', 'logout', 'credentials']);
 /** The `templates` owner's and admin's subcommands (lifecycle spec §5.1-§5.2). */
 const TEMPLATE_ADMIN_SUBS = ['tag', 'untag', 'edit', 'transfer'];
-/** The `templates` subcommands; their arguments are checked one by one in sbxMain. */
+/** The `templates` subcommands; their arguments are checked one by one in sbxMain (`quota`: one
+ * TARGET). */
 const TEMPLATE_SUBS = [
   'create',
   'build',
@@ -487,8 +502,9 @@ const TEMPLATE_SUBS = [
   'activate',
   'deactivate',
   'retire',
+  'quota',
 ];
-/** The `templates` subcommands that take one template ID. */
+/** The `templates` subcommands that take one template ID (`quota`: one TARGET). */
 const TEMPLATE_ONE_ID = [
   'build',
   'show',
@@ -498,6 +514,7 @@ const TEMPLATE_ONE_ID = [
   'activate',
   'deactivate',
   'retire',
+  'quota',
 ];
 /** The `templates` subcommands that take --build, and those that take --timeout (a wait; activate's
  * and retire's only with --wait). */
@@ -650,6 +667,11 @@ async function sbxMainWith(
         lease: { type: 'string' },
         wait: { type: 'boolean' },
         reason: { type: 'string' },
+        templates: { type: 'string' },
+        'builds-queued': { type: 'string' },
+        active: { type: 'string' },
+        owned: { type: 'string' },
+        clear: { type: 'boolean' },
         'stop-now': { type: 'boolean' },
         force: { type: 'boolean' },
         'include-secrets': { type: 'boolean' },
@@ -806,6 +828,48 @@ async function sbxMainWith(
     );
     return SBX_EXIT.usage;
   }
+  // `templates quota TARGET` (§5.2): the three limits, all of them, and owned if given, or --clear.
+  const quotaFlags = (['templates', 'builds-queued', 'active', 'owned', 'clear'] as const).filter(
+    (f) => values[f] !== undefined,
+  );
+  const settingQuota = command === 'templates' && arg === 'quota';
+  if (quotaFlags.length > 0 && !settingQuota) {
+    io.err(`sbx: --${quotaFlags[0]} only applies to templates quota\n${SBX_USAGE}`);
+    return SBX_EXIT.usage;
+  }
+  let quotaBody: SbxQuota | null | undefined;
+  if (settingQuota) {
+    if (values.clear) {
+      if (quotaFlags.length > 1) {
+        io.err(`sbx: --clear takes no other quota flag\n${SBX_USAGE}`);
+        return SBX_EXIT.usage;
+      }
+      if (extra[0] === 'default') {
+        io.err(`sbx: the default quota is set, never cleared\n${SBX_USAGE}`);
+        return SBX_EXIT.usage;
+      }
+      quotaBody = null;
+    } else {
+      const n = (v: string | undefined) => (v !== undefined && /^\d+$/.test(v) ? Number(v) : NaN);
+      const q = {
+        templates: n(values.templates),
+        buildsQueued: n(values['builds-queued']),
+        active: n(values.active),
+      };
+      if (![q.templates, q.buildsQueued, q.active].every(Number.isSafeInteger)) {
+        io.err(
+          `sbx: templates quota needs --templates, --builds-queued and --active (whole numbers), or --clear\n${SBX_USAGE}`,
+        );
+        return SBX_EXIT.usage;
+      }
+      const owned = values.owned === undefined ? undefined : n(values.owned);
+      if (owned !== undefined && !Number.isSafeInteger(owned)) {
+        io.err(`sbx: --owned must be a whole number\n${SBX_USAGE}`);
+        return SBX_EXIT.usage;
+      }
+      quotaBody = owned === undefined ? q : { ...q, owned };
+    }
+  }
   if (values['stop-now'] !== undefined && !(command === 'templates' && arg === 'deactivate')) {
     io.err(`sbx: --stop-now only applies to templates deactivate\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -860,7 +924,8 @@ async function sbxMainWith(
     return SBX_EXIT.usage;
   }
   // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2,
-  // retire among them), and activate and deactivate (§6.3); bare `templates` lists them.
+  // retire among them; quota TARGET: §5.2), and activate and deactivate (§6.3); bare `templates`
+  // lists them.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${SBX_USAGE}`);
     return SBX_EXIT.usage;
@@ -878,7 +943,9 @@ async function sbxMainWith(
     TEMPLATE_ONE_ID.includes(sub) &&
     (extra.length !== 1 || !extra[0]!.trim())
   ) {
-    io.err(`sbx: templates ${sub} takes one template ID\n${SBX_USAGE}`);
+    io.err(
+      `sbx: templates ${sub} takes one ${sub === 'quota' ? 'TARGET (default or a subject)' : 'template ID'}\n${SBX_USAGE}`,
+    );
     return SBX_EXIT.usage;
   }
   if ((sub === 'untag' || sub === 'transfer') && extra.length !== 2) {
@@ -1274,6 +1341,7 @@ async function sbxMainWith(
           ...(timeout !== undefined ? { timeoutS: timeout } : {}),
         });
       if (arg === 'deactivate') return cmdDeactivate(ctx, extra[0]!, values['stop-now'] === true);
+      if (arg === 'quota') return cmdSetQuota(ctx, extra[0]!, quotaBody!);
       if (arg === 'retire')
         return cmdRetire(ctx, extra[0]!, {
           ...(values.build !== undefined ? { build: values.build } : {}),

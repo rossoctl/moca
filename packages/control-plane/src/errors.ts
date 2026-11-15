@@ -40,6 +40,8 @@ export const CP_ERROR_CODES = [
   'template_not_active',
   'template_retired',
   'build_in_use',
+  'quota_changed',
+  'policy_changed',
   'mode_not_allowed',
   'self_attested',
   'bootstrap_subject',
@@ -128,6 +130,13 @@ const STATUS: Record<CpErrorCode, number> = {
   template_retired: 410,
   // 409: a live sandbox still runs on the build; delete it (or let it end), then retry (§5.1).
   build_in_use: 409,
+  // 409: a quota write's `expect` is not the target's quota now (§5.2): another admin changed it
+  // since the client read it, and nothing was written. Read again, then write.
+  quota_changed: 409,
+  // 409: a PUT /v1/policy's `expect` is not the policy's digest now (§5.2): another admin changed
+  // the policy (a quota too) since the client read it, and nothing was written. The body's `digest`
+  // is the policy's now; read again, then write.
+  policy_changed: 409,
   // 403: SH_SANDBOX_MODES_ALLOWED does not list the sandbox mode asked for (lease-mode spec §8.1).
   // The caller is authenticated and owns the sandbox; the operator's policy refuses the mode.
   mode_not_allowed: 403,

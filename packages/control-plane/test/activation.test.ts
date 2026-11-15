@@ -113,7 +113,18 @@ async function registered(
       d,
     );
   const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
-  const build = c.builds[0].build;
+  await reportBuilt(d, c.builds[0].build, id, h, worker, opts);
+}
+
+/** host-1's `built` report for its claimed build `build` of template `id` (manifest hash `h`). */
+async function reportBuilt(
+  d: TestDeps,
+  build: string,
+  id: string,
+  h: string,
+  worker: string,
+  opts: { vcpus?: number; sourceDigest?: string; status?: string } = {},
+): Promise<void> {
   const r = (
     await HANDLERS.hostBuildReport!(
       asHost(
@@ -1549,7 +1560,7 @@ describe('retire (§5.1)', () => {
     expect((await wanted(d, 'host-1')).remove).toEqual([]);
   });
 
-  it('never stops or removes a retired build whose snapshot or worker a build not retired shares', async () => {
+  it('never stops or removes a retired build whose snapshot or worker a build neither retired nor rejected shares', async () => {
     const d = await setup();
     attachedNow = [];
     const report = (buildId: string, event: string) =>
@@ -2046,6 +2057,668 @@ describe('retire (§5.1)', () => {
   });
 });
 
+describe('reject after the fact (§5.2)', () => {
+  const refusal = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+    return 'none';
+  };
+  const admin = { ...bob, roles: ['admin'] };
+  const reject = (d: TestDeps, id: string, build: string, body: unknown, principal = admin) =>
+    HANDLERS.rejectTemplateBuild!(ctx({ principal, params: { id, build }, body }), d);
+  const sandbox = (d: TestDeps, template: string) =>
+    HANDLERS.createSandbox!(ctx({ principal: alice, body: { template } }), d);
+  const wanted = async (d: TestDeps, host: string) =>
+    (await HANDLERS.hostWanted!(asHost(host), d)).body as Body;
+
+  it('rejects a registered build: rejected by rule admin, leases gone, 400 on use, a reject record', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    expect((await wanted(d, 'host-1')).run).toHaveLength(1);
+    const r = await reject(d, 't1', hash('1'), { reason: 'rule M1 found broken' });
+    expect(r.status).toBe(200);
+    const body = r.body as Body;
+    expect(body).toMatchObject({
+      templateId: 't1',
+      subject: admin.sub,
+      build: expect.stringMatching(/^b-[0-9a-f]{26}$/),
+      buildId: hash('1'),
+      status: 'rejected',
+    });
+    expect(body.record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'rejected',
+      leases: [],
+      reason: { message: 'rule M1 found broken', rule: 'admin' },
+    });
+    // The record names the admin, the reason and the build record it ends, by digest.
+    const chain = await d.provenance!.chain('template/t1');
+    const rec = chain.at(-1)!;
+    expect(recordDigestOf(rec)).toBe(body.record);
+    const buildRec = chain.find((x) => x.kind === 'build' && (x.body as Body).outcome === 'built')!;
+    expect(rec).toMatchObject({
+      kind: 'reject',
+      subject: admin.sub,
+      body: {
+        build: body.build,
+        buildId: hash('1'),
+        buildRecord: recordDigestOf(buildRec),
+        from: 'registered',
+        reason: 'rule M1 found broken',
+      },
+    });
+    // Its use is refused as for a build policy rejected at registration; an activation too.
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('unknown_template');
+    expect(await refusal(() => sandbox(d, `t1@${hash('1')}`))).toBe('unknown_template');
+    expect(await refusal(() => activate(d, 't1'))).toBe('template_unavailable');
+    // A host holding it stops its worker, as for a retired build, and its stop is taken; unlike a
+    // retired build's, the worker and snapshot are not removed (never in `remove`, no `removed`).
+    const entry = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    expect(await wanted(d, 'host-1')).toEqual({
+      run: [],
+      starting: [],
+      stop: [entry],
+      remove: [],
+      egressSids: [],
+    });
+    expect(
+      await refusal(() =>
+        HANDLERS.hostWorkerReport!(
+          asHost('host-1', {}, { buildId: hash('1'), event: 'removed' }),
+          d,
+        ),
+      ),
+    ).toBe('not_found');
+    await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'detached' }),
+      d,
+    );
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'deactivate',
+      subject: 'host:host-1',
+    });
+    // Idempotent: a second reject answers rejected, with no second record.
+    const n = (await d.provenance!.chain('template/t1')).length;
+    expect((await reject(d, 't1', hash('1'), { reason: 'again' })).body).toMatchObject({
+      status: 'rejected',
+      record: null,
+    });
+    expect((await d.provenance!.chain('template/t1')).length).toBe(n);
+  });
+
+  it('removes a retired build whose snapshot only an admin-rejected build shares; that one is only stopped', async () => {
+    const d = await setup();
+    attachedNow = [];
+    // One snapshot (manifest hash) in two templates: t1's build is retired, t2's rejected by an
+    // admin. A rejected build needs the snapshot no more than a retired one (liveSnapshots), so it
+    // keeps neither from being stopped, nor t1's from being removed; t2's itself is never removed.
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('1'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await HANDLERS.retireTemplate!(ctx({ principal: alice, params: { id: 't1' }, body: {} }), d);
+    await reject(d, 't2', hash('1'), { reason: 'broken' });
+    const e1 = { template: 't1', buildId: hash('1'), worker: 'sbx_t1' };
+    const e2 = { template: 't2', buildId: hash('1'), worker: 'sbx_t2' };
+    const w = await wanted(d, 'host-1');
+    expect(w.stop).toHaveLength(2);
+    expect(w.stop).toEqual(expect.arrayContaining([e1, e2]));
+    expect(w.remove).toEqual([e1]);
+    // The removal is t1's, and the host no longer holds the snapshot, for either build.
+    const r = await HANDLERS.hostWorkerReport!(
+      asHost('host-1', {}, { buildId: hash('1'), event: 'removed' }),
+      d,
+    );
+    expect((r.body as Body).recorded).toBe('removed');
+    expect((await d.provenance!.chain('template/t1')).at(-1)).toMatchObject({
+      kind: 'retire',
+      body: { event: 'removed' },
+    });
+    expect((await d.provenance!.chain('template/t2')).at(-1)).toMatchObject({ kind: 'reject' });
+    const held = async (id: string) =>
+      (
+        (
+          await HANDLERS.getTemplateBuild!(
+            ctx({ principal: alice, params: { id, build: hash('1') } }),
+            d,
+          )
+        ).body as Body
+      ).heldBy;
+    expect(await held('t1')).toEqual([]);
+    expect(await held('t2')).toEqual([]);
+  });
+
+  it('never rejects under a live sandbox (409 build_in_use)', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    const sb = (await sandbox(d, 't1')).body as Body;
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'broken' }))).toBe(
+      'build_in_use',
+    );
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
+  });
+
+  it('a reject waits for an activation taking its lease, then drops that lease', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    // A reject arrives while the activation is between its checks and its lease write: under the
+    // activation lock it waits for the lease, then drops it.
+    const prov = d.provenance!;
+    const append = prov.append.bind(prov);
+    let rejecting: Promise<unknown> | null = null;
+    prov.append = async (input) => {
+      const rec = await append(input);
+      if (input.kind === 'activate' && !rejecting) {
+        rejecting = reject(d, 't1', hash('1'), { reason: 'broken' });
+        await Promise.race([rejecting, new Promise((r) => setTimeout(r, 200))]);
+      }
+      return rec;
+    };
+    expect((await activate(d, 't1')).status).toBe(200);
+    await rejecting;
+    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+      status: 'rejected',
+      leases: [],
+    });
+    expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
+      active: { used: 0 },
+    });
+  });
+
+  for (const how of ['reject', 'retire'] as const) {
+    it(`a ${how} judges live use on the template as it is under its locks, not as first read`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await HANDLERS.createTemplate!(
+        ctx({
+          principal: alice,
+          body: { id: 't1', image: IMAGE, spec: BASE_SPEC, profile: 'base' },
+        }),
+        d,
+      );
+      const c = (await HANDLERS.hostClaimBuilds!(asHost('host-1', {}, { max: 1 }), d)).body as Body;
+      const cat = d.templates!;
+      const handle = (await cat.get('t1'))!.builds[0].handle!;
+      // The call's first read sees the build still building. Before it takes its locks, the build
+      // registers (taking its buildId) and a sandbox is created on it.
+      const get = cat.get.bind(cat);
+      let armed = true;
+      cat.get = async (id) => {
+        const doc = await get(id);
+        if (armed) {
+          armed = false;
+          expect(doc!.builds[0].status).not.toBe('registered');
+          await reportBuilt(d, c.builds[0].build, 't1', hash('1'), 'sbx_t1');
+          await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+          await activate(d, 't1');
+          expect((await sandbox(d, 't1')).status).toBe(201);
+        }
+        return doc;
+      };
+      const end = () =>
+        how === 'reject'
+          ? reject(d, 't1', handle, { reason: 'broken' })
+          : HANDLERS.retireTemplateBuild!(
+              ctx({ principal: alice, params: { id: 't1', build: handle } }),
+              d,
+            );
+      expect(await refusal(end)).toBe('build_in_use');
+      expect((await get('t1'))!.builds[0]).toMatchObject({
+        status: 'registered',
+        buildId: hash('1'),
+      });
+      expect(await d.sandboxes!.listAll(NOW_MS / 1000)).toHaveLength(1);
+    });
+  }
+
+  for (const [how, code] of [
+    ['reject', 'unknown_template'],
+    ['retire', 'template_retired'],
+  ] as const) {
+    it(`a sandbox create that resolved the build before a ${how} stores nothing (${code})`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      await activate(d, 't1');
+      // The create reads the build (registered); the build then ends, before the create stores
+      // its sandbox. Its last read, under the activation lock, sees that and stores nothing.
+      const cat = d.templates!;
+      const get = cat.get.bind(cat);
+      let armed = true;
+      cat.get = async (id) => {
+        const doc = await get(id);
+        if (armed) {
+          armed = false;
+          if (how === 'reject') await reject(d, 't1', hash('1'), { reason: 'broken' });
+          else
+            await HANDLERS.retireTemplateBuild!(
+              ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+              d,
+            );
+        }
+        return doc;
+      };
+      expect(await refusal(() => sandbox(d, 't1'))).toBe(code);
+      expect(await d.sandboxes!.listAll(NOW_MS / 1000)).toEqual([]);
+    });
+  }
+
+  it('creates on two templates do not wait on each other (the use lock is per template)', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1', 'sbx_t2'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4);
+    await activate(d, 't1');
+    await activate(d, 't2');
+    // t1's create is held inside its store write, under t1's use lock; t2's runs meanwhile.
+    const store = d.sandboxes!;
+    const create = store.create.bind(store);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => (entered = r));
+    store.create = async (rec, ...rest) => {
+      if (rec.template === 't1') {
+        entered();
+        await held;
+      }
+      return create(rec, ...rest);
+    };
+    const first = sandbox(d, 't1');
+    await inside;
+    const second = await Promise.race([
+      sandbox(d, 't2').then((r) => r.status),
+      new Promise((r) => setTimeout(() => r('waited'), 1000)),
+    ]);
+    expect(second).toBe(201);
+    // A retire of t1 waits for t1's create, then sees its sandbox live.
+    const retiring = refusal(() =>
+      HANDLERS.retireTemplateBuild!(
+        ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+        d,
+      ),
+    );
+    release();
+    expect((await first).status).toBe(201);
+    expect(await retiring).toBe('build_in_use');
+  });
+
+  it('refuses a non-admin (the owner too), no reason, an unknown build and one not registered', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x' }, alice))).toBe(
+      'forbidden',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), {}))).toBe('invalid_request');
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: '  ' }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x'.repeat(1025) }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => reject(d, 't1', hash('9'), { reason: 'x' }))).toBe(
+      'template_not_found',
+    );
+    // A queued build is cancelled, a registered one retired: neither is rejected.
+    const q = (
+      await HANDLERS.createTemplateBuild!(
+        ctx({
+          principal: alice,
+          params: { id: 't1' },
+          body: { image: IMAGE, spec: { ...BASE_SPEC, vcpus: 4 }, profile: 'base' },
+        }),
+        d,
+      )
+    ).body as Body;
+    const handle = String(q.build).split('/').at(-1)!;
+    expect(await refusal(() => reject(d, 't1', handle, { reason: 'x' }))).toBe('invalid_request');
+    await HANDLERS.retireTemplateBuild!(
+      ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+      d,
+    );
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'x' }))).toBe(
+      'invalid_request',
+    );
+  });
+});
+
+describe('admin quotas (§5.2)', () => {
+  const refusal = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+    return 'none';
+  };
+  const admin = { ...bob, roles: ['admin'] };
+  const putQuota = (d: TestDeps, subject: string, body: unknown, principal = admin) =>
+    HANDLERS.putQuota!(ctx({ principal, params: { subject }, body }), d);
+  const quotaOf = async (d: TestDeps, principal = alice) =>
+    (await HANDLERS.getQuota!(ctx({ principal }), d)).body as Body;
+
+  it("an admin sets one subject's quota and the default; each is a policy record; it is enforced", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't2', hash('2'), 'sbx_t2');
+    await inventory(d, 'host-1', { [hash('1')]: 't1', [hash('2')]: 't2' }, 4);
+    expect((await quotaOf(d)).quotaSource).toBe('default');
+    const before = (await d.provenance!.chain('policy')).length;
+    const r = (await putQuota(d, alice.sub, { templates: 5, buildsQueued: 2, active: 1 }))
+      .body as Body;
+    expect(r).toMatchObject({
+      target: alice.sub,
+      subject: admin.sub,
+      quota: { active: 1 },
+      before: null,
+    });
+    expect(r.record).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(r.policy).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect((await d.provenance!.chain('policy')).length).toBe(before + 1);
+    expect((await d.provenance!.chain('policy')).at(-1)).toMatchObject({ subject: admin.sub });
+    expect(await quotaOf(d)).toMatchObject({
+      quotaSource: 'subject',
+      active: { limit: 1 },
+      templates: { limit: 5 },
+    });
+    // Another subject still has the default.
+    expect(await quotaOf(d, bob)).toMatchObject({ quotaSource: 'default', active: { limit: 8 } });
+    // Enforced at once: alice holds one active, so a second activation is over her quota.
+    await activate(d, 't1');
+    expect(await refusal(() => activate(d, 't2'))).toBe('quota_exceeded');
+    // The default too; removing alice's override returns her to it.
+    const def = (await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 3 }))
+      .body as Body;
+    expect(def).toMatchObject({ target: 'default', before: { active: 8 }, quota: { active: 3 } });
+    expect((await quotaOf(d, bob)).active.limit).toBe(3);
+    const rm = (await putQuota(d, alice.sub, null)).body as Body;
+    expect(rm).toMatchObject({ quota: null, before: { active: 1 } });
+    expect(await quotaOf(d)).toMatchObject({ quotaSource: 'default', active: { limit: 3 } });
+    expect((await activate(d, 't2')).status).toBe(200);
+    // No override left: the policy holds no empty quotaBySubject.
+    expect((await d.policy!.current()).policy.quotaBySubject).toBeUndefined();
+  });
+
+  it('keeps both of two quota writes made together, for different subjects', async () => {
+    const d = await setup();
+    const erin = 'oidc:erin@example.test';
+    const [a, e] = await Promise.all([
+      putQuota(d, alice.sub, { templates: 5, buildsQueued: 2, active: 1 }),
+      putQuota(d, erin, { templates: 2, buildsQueued: 1, active: 1 }),
+    ]);
+    expect((a.body as Body).before).toBeNull();
+    expect((e.body as Body).before).toBeNull();
+    // Neither write started from a policy the other had not yet changed.
+    expect((await d.policy!.current()).policy.quotaBySubject).toEqual({
+      [alice.sub]: { templates: 5, buildsQueued: 2, active: 1 },
+      [erin]: { templates: 2, buildsQueued: 1, active: 1 },
+    });
+  });
+
+  it('writes with ?expect= only when the quota is the value expected (409 quota_changed, nothing written)', async () => {
+    const d = await setup();
+    const q = { templates: 5, buildsQueued: 2, active: 1 };
+    const putIf = (subject: string, body: unknown, expect: string) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject },
+          body,
+          query: new URLSearchParams({ expect }),
+        }),
+        d,
+      );
+    // No override yet: `null` is the value expected.
+    expect((await putIf(alice.sub, q, 'null')).status).toBe(200);
+    const n = (await d.provenance!.chain('policy')).length;
+    // Another admin's write came in between: this one still expects no override.
+    expect(await refusal(() => putIf(alice.sub, { ...q, active: 2 }, 'null'))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf(alice.sub, null, JSON.stringify({ ...q, active: 9 })))).toBe(
+      'quota_changed',
+    );
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    expect((await d.policy!.current()).policy.quotaBySubject![alice.sub]).toEqual(q);
+    // The value now, in any key order, is taken; so is the default's.
+    const now = JSON.stringify({ active: 1, buildsQueued: 2, templates: 5 });
+    expect((await putIf(alice.sub, null, now)).body).toMatchObject({ quota: null, before: q });
+    const def = JSON.stringify((await d.policy!.current()).policy.quota);
+    expect((await putIf('default', q, def)).status).toBe(200);
+    expect(await refusal(() => putIf('default', q, def))).toBe('quota_changed');
+    // As a raw query string: the JSON percent-encoded, as a client sends it.
+    const raw = (body: unknown, query: string) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject: alice.sub },
+          body,
+          query: new URLSearchParams(query),
+        }),
+        d,
+      );
+    expect((await raw(q, 'expect=null')).status).toBe(200);
+    const enc = 'expect=%7B%22templates%22%3A5%2C%22buildsQueued%22%3A2%2C%22active%22%3A1%7D';
+    expect((await raw(null, enc)).body).toMatchObject({ quota: null, before: q });
+    // An expect that is no quota is refused before any read.
+    expect(await refusal(() => putIf(alice.sub, q, '{'))).toBe('invalid_request');
+    expect(await refusal(() => putIf(alice.sub, q, '{"templates":1}'))).toBe('invalid_request');
+  });
+
+  it("enforces a subject's templates quota on create", async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await putQuota(d, alice.sub, { templates: 1, buildsQueued: 10, active: 8 });
+    const e = await HANDLERS.createTemplate!(
+      ctx({ principal: alice, body: { id: 't2', image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+      d,
+    ).then(
+      () => null,
+      (x: { code: string; details?: unknown }) => x,
+    );
+    expect(e).toMatchObject({ code: 'quota_exceeded' });
+  });
+
+  it('refuses a non-admin, a bad target and a bad quota', async () => {
+    const d = await setup();
+    const q = { templates: 1, buildsQueued: 1, active: 1 };
+    expect(await refusal(() => putQuota(d, alice.sub, q, alice))).toBe('forbidden');
+    expect(await refusal(() => putQuota(d, 'alice', q))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, 'test:1', q))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, alice.sub, { ...q, templates: -1 }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => putQuota(d, alice.sub, { templates: 1 }))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, 'default', null))).toBe('invalid_request');
+    expect(await refusal(() => putQuota(d, alice.sub, [1, 1, 1]))).toBe('invalid_request');
+  });
+
+  it('keeps only the three counters: a quota with another key is refused, by both routes', async () => {
+    const d = await setup();
+    const q = { templates: 1, buildsQueued: 1, active: 1 };
+    const n = (await d.provenance!.chain('policy')).length;
+    expect(await refusal(() => putQuota(d, alice.sub, { ...q, note: 'x' }))).toBe(
+      'invalid_request',
+    );
+    expect(await refusal(() => putQuota(d, 'default', { ...q, note: 'x' }))).toBe(
+      'invalid_request',
+    );
+    const bad = { ...DEFAULT_POLICY, quotaBySubject: { [alice.sub]: { ...q, note: 'x' } } };
+    expect(await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: bad }), d))).toBe(
+      'invalid_request',
+    );
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    // What is stored is a fresh object of the three, whatever key order the request used.
+    await putQuota(d, alice.sub, { active: 1, buildsQueued: 1, templates: 1 });
+    expect(Object.keys((await d.policy!.current()).policy.quotaBySubject![alice.sub]!)).toEqual([
+      'templates',
+      'buildsQueued',
+      'active',
+    ]);
+  });
+
+  it('takes owned as a fourth counter: per subject, else the default, kept by a write without it, in ?expect=', async () => {
+    const d = await setup();
+    const q = { templates: 5, buildsQueued: 10, active: 1 };
+    const create = (id: string) =>
+      HANDLERS.createTemplate!(
+        ctx({ principal: alice, body: { id, image: IMAGE, spec: BASE_SPEC, profile: 'base' } }),
+        d,
+      ).then(
+        (r) => r.status,
+        (x: { code: string; extra?: unknown }) => x,
+      );
+    // An override without owned: owned is the default's.
+    await putQuota(d, alice.sub, q);
+    expect(await quotaOf(d)).toMatchObject({
+      quotaSource: 'subject',
+      ownedSource: 'default',
+      owned: { limit: DEFAULT_POLICY.quota.owned, used: 0 },
+    });
+    await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 8, owned: 50 });
+    expect((await quotaOf(d)).owned.limit).toBe(50);
+    // alice's own owned: enforced on her new ids, while bob keeps the default's.
+    const r = (await putQuota(d, alice.sub, { ...q, owned: 1 })).body as Body;
+    expect(r).toMatchObject({ quota: { ...q, owned: 1 }, before: q });
+    expect(await quotaOf(d)).toMatchObject({ ownedSource: 'subject', owned: { limit: 1 } });
+    expect(await quotaOf(d, bob)).toMatchObject({ ownedSource: 'default', owned: { limit: 50 } });
+    expect(await create('own-a')).toBe(202);
+    expect(await create('own-b')).toMatchObject({
+      code: 'quota_exceeded',
+      extra: { quota: 'owned' },
+    });
+    // A write without owned keeps the target's: alice's, and the default's.
+    expect(((await putQuota(d, alice.sub, { ...q, active: 2 })).body as Body).quota).toEqual({
+      ...q,
+      active: 2,
+      owned: 1,
+    });
+    expect(
+      ((await putQuota(d, 'default', { templates: 100, buildsQueued: 10, active: 3 })).body as Body)
+        .quota,
+    ).toEqual({ templates: 100, buildsQueued: 10, active: 3, owned: 50 });
+    // ?expect= compares owned too: an expect without it is not the quota now.
+    const putIf = (body: unknown, expect: unknown) =>
+      HANDLERS.putQuota!(
+        ctx({
+          principal: admin,
+          params: { subject: alice.sub },
+          body,
+          query: new URLSearchParams({ expect: JSON.stringify(expect) }),
+        }),
+        d,
+      );
+    const stored = { ...q, active: 2, owned: 1 };
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...q, active: 2 }))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...stored, owned: 2 }))).toBe(
+      'quota_changed',
+    );
+    expect(await refusal(() => putIf({ ...q, owned: 3 }, { ...stored, owned: -1 }))).toBe(
+      'invalid_request',
+    );
+    expect(((await putIf({ ...q, owned: 3 }, stored)).body as Body).quota.owned).toBe(3);
+    // A bad owned is refused, by both routes; a good one in an override is kept by PUT /v1/policy.
+    for (const owned of [-1, 1.5, '3', null])
+      expect(await refusal(() => putQuota(d, alice.sub, { ...q, owned }))).toBe('invalid_request');
+    const over = (owned: unknown) => ({
+      ...DEFAULT_POLICY,
+      quotaBySubject: { [alice.sub]: { ...q, owned } },
+    });
+    expect(
+      await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: over(-1) }), d)),
+    ).toBe('invalid_request');
+    expect((await HANDLERS.putPolicy!(ctx({ principal: admin, body: over(7) }), d)).status).toBe(
+      200,
+    );
+    expect(await quotaOf(d)).toMatchObject({ ownedSource: 'subject', owned: { limit: 7 } });
+  });
+
+  it("takes an oidc subject's override as a github one's (#701)", async () => {
+    const d = await setup();
+    const erin = 'oidc:erin@example.test';
+    const r = (await putQuota(d, erin, { templates: 2, buildsQueued: 1, active: 1 })).body as Body;
+    expect(r).toMatchObject({ target: erin, quota: { templates: 2 }, before: null });
+    expect((await putQuota(d, erin, null)).body).toMatchObject({ quota: null });
+  });
+
+  it('refuses a policy whose quotaBySubject names a non-subject', async () => {
+    const d = await setup();
+    const bad = {
+      ...DEFAULT_POLICY,
+      quotaBySubject: { 'test:1': { templates: 1, buildsQueued: 1, active: 1 } },
+    };
+    expect(await refusal(() => HANDLERS.putPolicy!(ctx({ principal: admin, body: bad }), d))).toBe(
+      'invalid_request',
+    );
+  });
+
+  it('refuses a PUT /v1/policy whose ?expect= is not the policy now (409 policy_changed), so a quota written meanwhile survives', async () => {
+    const d = await setup();
+    const putPolicy = (body: unknown, expect?: string) =>
+      HANDLERS.putPolicy!(
+        ctx({
+          principal: admin,
+          body,
+          ...(expect !== undefined ? { query: new URLSearchParams({ expect }) } : {}),
+        }),
+        d,
+      );
+    const read = async () =>
+      (await HANDLERS.getPolicy!(ctx({ principal: admin }), d)).body as {
+        policy: typeof DEFAULT_POLICY;
+        digest: string;
+      };
+    const q = { templates: 5, buildsQueued: 2, active: 1 };
+    // Admin A reads the policy and its digest.
+    const a = await read();
+    // Admin B then writes a quota override.
+    expect((await putQuota(d, alice.sub, q)).status).toBe(200);
+    const n = (await d.provenance!.chain('policy')).length;
+    // A's PUT of what it read, expecting the old digest, is refused: nothing written or recorded,
+    // and the refusal names the digest now.
+    let err: { code?: string; extra?: Record<string, string> } = {};
+    try {
+      await putPolicy(a.policy, a.digest);
+    } catch (e) {
+      err = e as typeof err;
+    }
+    const b = await read();
+    expect(b.digest).not.toBe(a.digest);
+    expect(err).toMatchObject({ code: 'policy_changed', extra: { digest: b.digest } });
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    expect((await d.policy!.current()).policy.quotaBySubject).toEqual({ [alice.sub]: q });
+    // A reads again; its PUT with the new digest is taken, and keeps B's override.
+    const ok = await putPolicy(b.policy, b.digest);
+    expect(ok.status).toBe(200);
+    expect((await d.policy!.current()).policy.quotaBySubject).toEqual({ [alice.sub]: q });
+    // Without expect, the policy is stored as sent (backward compatible).
+    expect((await putPolicy(DEFAULT_POLICY)).status).toBe(200);
+    expect((await d.policy!.current()).policy).toEqual(DEFAULT_POLICY);
+    // An expect that is no policy digest is refused before any read.
+    for (const bad of ['', 'null', 'sha256:abc', b.digest.toUpperCase(), `${b.digest} `])
+      expect(await refusal(() => putPolicy(DEFAULT_POLICY, bad))).toBe('invalid_request');
+  });
+});
+
 describe('place, alone', () => {
   const doc = (id: string, h: string, sinceS: number, until = 10_000): TemplateDoc => ({
     schema: 'moca-template/1',
@@ -2103,6 +2776,35 @@ describe('place, alone', () => {
     // Once the sandbox ends, the slot is free.
     const ended = place(docs, hosts, 0, new Set());
     expect(ended.placed.get(hash('a'))).toBe('h1');
+  });
+  it("counts an admin-rejected build's worker draining a live sandbox, as a retired one's", () => {
+    const r = doc('r', hash('r'), 0);
+    const rejected = (rule: string): TemplateDoc => ({
+      ...r,
+      builds: [
+        {
+          ...r.builds[0]!,
+          status: 'rejected',
+          leases: [],
+          reason: { message: 'broken', rule, step: 'rejected' },
+        },
+      ],
+    });
+    const hosts = [
+      {
+        id: 'h1',
+        holds: { [hash('r')]: 'r', [hash('a')]: 'a' },
+        activeLimit: 1,
+        running: [hash('r')],
+      },
+    ];
+    const busy = new Set(['w_r']);
+    const draining = place([rejected('admin'), doc('a', hash('a'), 1)], hosts, 0, busy);
+    expect(draining.used.get('h1')).toBe(1);
+    expect(draining.unplaced.get(hash('a'))).toBe('no_slot');
+    expect(place([rejected('admin'), doc('a', hash('a'), 1)], hosts, 0).placed.get(hash('a'))).toBe(
+      'h1',
+    );
   });
   it("counts a retired build's draining worker that only the memory report's runningWorkers names", () => {
     const r = doc('r', hash('r'), 0);

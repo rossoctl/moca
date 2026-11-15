@@ -212,6 +212,13 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     reads: ['subject', 'templates', 'buildsQueued', 'active', 'sandboxes'],
   },
   { method: 'get', path: '/v1/policy', reads: ['policy', 'digest', 'record'] },
+  // `sbx templates quota` (template lifecycle spec §5.2): read the policy (above), then write it as
+  // a compare-and-set (`?expect=`), refused 409 quota_changed if it changed in between.
+  {
+    method: 'put',
+    path: '/v1/quota/{subject}',
+    reads: ['target', 'quota', 'before', 'policy', 'record'],
+  },
   // `sbx admin subjects`: the change routes answer a Subject plus its record (allOf).
   { method: 'get', path: '/v1/subjects', reads: ['subjects'] },
   { method: 'put', path: '/v1/subjects/{subject}', sends: ['enrolled'] },
@@ -255,6 +262,8 @@ const CODES_USED = [
   'quota_exceeded',
   'async_quota_exhausted',
   'turn_not_cancellable',
+  // `sbx templates quota`: the write's compare-and-set found the quota changed (sbx/commands.ts).
+  'quota_changed',
 ];
 
 function responseSchema(op: any): any {
@@ -441,7 +450,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
 
   it('covers every call SandboxApiClient adds', async () => {
     const reply = () => json({ templates: [], sandboxes: [], sandbox: {} });
-    const { fetch, calls } = scriptedFetch(...Array.from({ length: 32 }, () => reply));
+    const { fetch, calls } = scriptedFetch(...Array.from({ length: 33 }, () => reply));
     const c = new SandboxApiClient('http://cp', () => 't', fetch);
     await c.sandboxDiscovery();
     await c.listTemplates();
@@ -470,6 +479,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
     await c.cancelTemplateBuild('TID', 'BID');
     await c.getQuota();
     await c.getPolicy();
+    await c.putQuota('SUBJ', null);
     await c.listSubjects();
     await c.enrollSubject('SUBJ');
     await c.unenrollSubject('SUBJ');
@@ -517,6 +527,7 @@ describe('sandbox-service contract (docs/api/openapi.yaml, SBX0 §5.1)', () => {
         'cancelTemplateBuild',
         'getQuota',
         'getPolicy',
+        'putQuota',
         'listSubjects',
         'enrollSubject',
         'unenrollSubject',

@@ -87,4 +87,19 @@ export class FilePolicyStore implements PolicyStore {
     if (bad.length) return Promise.reject(new Error(bad.join('; ')));
     return this.serial(() => this.write(policy, subject, extra));
   }
+
+  update(
+    mutate: (cur: Policy, record: string) => Policy,
+    subject: string,
+  ): Promise<{ policy: Policy; record: string }> {
+    // The read, the change and the write in one serial step: two updates (or an update and a set)
+    // never start from the same policy, so neither drops the other's change.
+    return this.serial(async () => {
+      const cur = (await this.read()) ?? (await this.write(DEFAULT_POLICY, 'deployment'));
+      const next = mutate(cur.policy, cur.record);
+      const bad = policyProblems(next);
+      if (bad.length) throw new Error(bad.join('; '));
+      return this.write(next, subject);
+    });
+  }
 }

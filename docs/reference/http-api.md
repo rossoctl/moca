@@ -197,6 +197,7 @@ The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.
 | Egress records | `GET /v1/sandboxes/{id}/egress` (the owner or an admin; sandbox profile); `POST /v1/hosts/{host}/egress` (a host's own bearer) (API 1.14.0)                                                             |
 | Retire         | `POST /v1/templates/{id}/retire`, `DELETE /v1/templates/{id}/builds/{build}`: both route profiles (API 1.18.0)                                                                                          |
 | Subjects       | `GET /v1/subjects`; `PUT`, `DELETE /v1/subjects/{subject}[/roles/admin]` (enroll, unenroll; grant with an optional `until`, revoke): both route profiles (API 1.20.0)                                   |
+| Admin          | `PUT /v1/quota/{subject\|default}`, `POST /v1/templates/{id}/builds/{build}/reject`: admins, both route profiles (API 1.21.0)                                                                           |
 
 `POST /v1/sessions` takes an optional `model`, and `PATCH /v1/sessions/{id}` with `{"model": ID}` switches it (`null`
 returns the session to the deployment default). A turn already running keeps its model; the next turn uses the new one.
@@ -260,7 +261,7 @@ build reports `capacity` while its worker still runs (null once its host has sto
 snapshot (the wanted state's `remove`) and reports it, a `retire` record by `host:<id>` with `event: removed`, and
 `heldBy` drops the host. `mocactl sbx templates retire --wait` waits for the stop and for `heldBy` to empty, and
 returns at once for a build no host holds (`heldBy` null or empty: no host agent stops its worker) and for a `shared`
-one (its snapshot or worker serves a build that is not retired, so its worker is kept running for that build).
+one (its snapshot or worker serves a build neither retired nor rejected, so its worker is kept running for that build).
 
 Who is enrolled and who is an admin (API 1.20.0, with a template store): the deployment's settings
 (`SH_ALLOWED_SUBJECTS`, `SH_ADMIN_SUBJECTS`) are the bootstrap, and admins add to them through `/v1/subjects`: any admin
@@ -269,11 +270,30 @@ a grant, a revoke or a lapsed `until` takes effect at the subject's next request
 held when it was minted. A subject is `github:<numeric id>` or `oidc:<provider sub>`, never `test:<n>`. See the
 [enrollment and roles spec](../specs/2026-11-08-enrollment-and-roles-api-design.md).
 
+The admin routes came with API 1.21.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one
+subject's override (`PUT /v1/quota/{subject}`, `github:<numeric id>` or `oidc:<provider sub>`; a body of `null` removes
+it). A quota holds `templates`, `buildsQueued`, `active` and, optionally, `owned` (a write without `owned` keeps the
+target's; a subject whose override has none has the default's). Overrides live in the policy (`quotaBySubject`), so each
+change is a `policy` record naming the admin, enforced at once; `?expect=` (the value read, as JSON percent-encoded into the query, e.g.
+`?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D`, or `?expect=null` for no override)
+makes it a compare-and-set on the four counters, 409 `quota_changed` with nothing written when the quota is no longer
+that value. A `PUT /v1/policy` stores the whole policy, overrides included: with `?expect=` (the `digest` that
+`GET /v1/policy` answered) it is refused 409 `policy_changed`, nothing written and the body's `digest` the policy's now,
+if anything changed since that read; without it, it replaces the policy as sent. `GET /v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
+`ownedSource`, the same for `owned` alone. An admin also
+rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{build}/reject {reason}`): it becomes
+`rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire (but not to remove it), and a
+sandbox create naming it is 400 `unknown_template`. A `reject` record names the admin, the reason and the build's `build`
+record; a reject is refused 409 `build_in_use` under a live sandbox, is idempotent, and cannot be undone.
+`mocactl sbx templates quota TARGET` sets a quota from the terminal (`--owned N` for `owned`). A quota write without
+`owned` keeps the target's current `owned`, so to return one subject's `owned` to the default, remove its override
+(`--clear`, or a body of `null`) and then set its quota again.
+
 Another user's session returns 404, not 403. Control-plane error codes and statuses: 400
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
-`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `bootstrap_subject`, `self_revoke`, `admin_granted`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
+`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `bootstrap_subject`, `self_revoke`, `admin_granted`, `quota_changed`, `policy_changed`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
 (`quota_exceeded`, `bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
 (`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in

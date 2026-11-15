@@ -551,6 +551,15 @@ export const ROUTES: readonly RouteSpec[] = [
     bodyRequired: false,
     operationId: 'retireTemplateBuild',
   },
+  // Template lifecycle spec §5.2: an admin rejects a registered build after the fact.
+  {
+    method: 'POST',
+    path: '/v1/templates/{id}/builds/{build}/reject',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'rejectTemplateBuild',
+  },
   // Template lifecycle spec §6.3: take, renew or release the caller's activation lease.
   {
     method: 'POST',
@@ -593,6 +602,15 @@ export const ROUTES: readonly RouteSpec[] = [
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'getQuota',
+  },
+  // Template lifecycle spec §5.2: an admin sets the default quota, or one subject's override.
+  {
+    method: 'PUT',
+    path: '/v1/quota/{subject}',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: BOTH,
+    operationId: 'putQuota',
   },
   // Template lifecycle spec §6.1: a KVM host's sbx-host-agent, with its own bearer, for itself only.
   {

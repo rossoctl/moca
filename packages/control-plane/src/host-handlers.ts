@@ -8,6 +8,7 @@ import {
   hostManaged,
   liveLeases,
   place,
+  rejectedByAdmin,
   unattachedPlaced,
   wantedBuilds,
   type HostMemory,
@@ -475,19 +476,22 @@ function registrationResults(
 const REPORTABLE = new Set<TemplateBuild['status']>(['building', 'probing', 'built']);
 
 /**
- * The build ids and workers of every build that is not retired, in every template. A retired build
- * that shares either with one (the same snapshot built again, a twin in another template, a worker
- * id reused, or one worker id two builds from one image share) names a snapshot or worker still
- * needed: it is never stopped or removed for the retire (that build's own entries decide whether
- * the worker runs), its `removed` is refused, and it reports no capacity to wait out
- * (sandbox-handlers.ts buildBody).
+ * The build ids and workers of every build that is neither retired nor rejected, in every template.
+ * A retired or admin-rejected build that shares either with one (the same snapshot built again, a
+ * twin in another template, a worker id reused, or one worker id two builds from one image share)
+ * names a snapshot or worker still needed: it is never stopped or removed for the retire or the
+ * reject (that build's own entries decide whether the worker runs), a retired one's `removed` is
+ * refused, and it reports no capacity to wait out (sandbox-handlers.ts buildBody). A rejected build
+ * (by policy or by an admin) keeps nothing: a retired build that shares its snapshot only with one
+ * is removed as any retired build is, though the rejected build itself is never in `remove`.
  */
 export function liveSnapshots(docs: { builds: TemplateBuild[] }[]): (b: TemplateBuild) => boolean {
   const ids = new Set<string>();
   const workers = new Set<string>();
   for (const d of docs)
     for (const b of d.builds) {
-      if (b.status === 'retired') continue;
+      // A rejected build (by policy or by an admin) needs its snapshot no more than a retired one.
+      if (b.status === 'retired' || b.status === 'rejected') continue;
       ids.add(b.buildId);
       if (b.worker) workers.add(b.worker);
     }
@@ -600,14 +604,15 @@ export const HOST_HANDLERS: Record<string, Handler> = {
    * holds with no live lease and no idle grace, or that it runs while placement keeps them on
    * another host; `starting`, those placed but not yet attached; and `graced`, those kept running
    * through their idle grace (see wantedAnswer). `stop` also lists the retired builds it holds
-   * (§5.1: no longer wanted, never run again), except one whose snapshot or worker a build that is
-   * not retired shares (liveSnapshots): that build's entries decide. A worker in `run` for one build
-   * is never in `stop` for another that shares its worker id. A worker is never stopped under a
-   * live sandbox: it drains first, so a build with one is in no stop list. `remove` (§6.1 step 7):
-   * the retired builds it holds with no live sandbox, listed in `stop` too, so the agent stops a
-   * running worker before it uninstalls it and deletes the snapshot. A build imported from
-   * SH_SANDBOX_TEMPLATES (not hostManaged) is in no list, retired or not: the deployment runs its
-   * worker.
+   * (§5.1: no longer wanted, never run again), and the ones an admin rejected after the fact
+   * (§5.2), which are stopped as retired ones are, except one whose snapshot or worker a build that
+   * is neither retired nor rejected shares (liveSnapshots): that build's entries decide. A worker in
+   * `run` for one build is never in `stop` for another that shares its worker id. A worker is never
+   * stopped under a live sandbox: it drains first, so a build with one is in no stop list. `remove`
+   * (§6.1 step 7): the retired builds it holds with no live sandbox, listed in `stop` too, so the
+   * agent stops a running worker before it uninstalls it and deletes the snapshot. A build an admin
+   * rejected is in `stop` only, never in `remove`. A build imported from SH_SANDBOX_TEMPLATES (not
+   * hostManaged) is in no list, retired, rejected or not: the deployment runs its worker.
    * `egressSids`: the workspace keys of the sandboxes whose egress events the agent ships
    * (hostSandboxes), and no others.
    */
@@ -625,12 +630,13 @@ export const HOST_HANDLERS: Record<string, Handler> = {
   /**
    * A worker started (`attached`: its unit is running), not started (`refused`, with why: not
    * installed, or the start failed) or stopped (`detached`), for a registered build this host
-   * holds (`detached` also for a retired one, whose worker `stop` lists): an `activate` or
-   * `deactivate` record by the host, except a refusal repeating the host's last one for a build
-   * still in its `run` (answered `recorded: null`). Or a retired build's worker and snapshot removed
-   * from the host (`removed`, §6.1 step 7): a `retire` record by the host citing the build record,
-   * and the host no longer holds it (its `heldBy` drops the host at once; the next inventory says
-   * the same). Readiness still comes from the relay.
+   * holds (`detached` also for a retired or admin-rejected one, whose worker `stop` lists): an
+   * `activate` or `deactivate` record by the host, except a refusal repeating the host's last one
+   * for a build still in its `run` (answered `recorded: null`). Or a retired build's worker and
+   * snapshot removed from the host (`removed`, §6.1 step 7; not taken for an admin-rejected build,
+   * which `remove` never lists): a `retire` record by the host citing the build record, and the
+   * host no longer holds it (its `heldBy` drops the host at once; the next inventory says the
+   * same). Readiness still comes from the relay.
    */
   hostWorkerReport: async (ctx, deps) => {
     const host = hostOf(ctx);
@@ -646,12 +652,14 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       throw new CpError('invalid_request', 'event must be attached, refused, detached or removed');
     }
     const buildId = typeof b.buildId === 'string' ? b.buildId : '';
-    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too; `removed` is
-    // taken for a retired build only.
-    const ok = (x: { status: string }) =>
+    // A retired build's worker is stopped (§5.1), so `detached` is taken for one too, and for a
+    // build an admin rejected after the fact (§5.2), whose worker is stopped as a retired one's.
+    // `removed` is taken for a retired build only: an admin-rejected build is never in `remove`.
+    const ok = (x: TemplateBuild) =>
       event === 'removed'
         ? x.status === 'retired'
-        : x.status === 'registered' || (event === 'detached' && x.status === 'retired');
+        : x.status === 'registered' ||
+          (event === 'detached' && (x.status === 'retired' || rejectedByAdmin(x)));
     const docs = await cat.list();
     const doc = docs.find((d) => d.builds.some((x) => x.buildId === buildId && ok(x)));
     if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
@@ -660,7 +668,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         event === 'removed'
           ? 'no retired build this host holds'
           : event === 'detached'
-            ? 'no registered or retired build this host holds'
+            ? 'no registered, retired or rejected build this host holds'
             : 'no registered build this host holds',
       );
     }
@@ -670,7 +678,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     if (event === 'removed' && liveSnapshots(docs)(target)) {
       throw new CpError(
         'build_in_use',
-        'a build that is not retired shares this snapshot or worker; it is not removed',
+        'a build neither retired nor rejected shares this snapshot or worker; it is not removed',
       );
     }
     const reason = typeof b.reason === 'string' ? b.reason.slice(0, 1024) : undefined;
@@ -1042,15 +1050,16 @@ async function wantedAnswer(
       const entry = { template: d.id, buildId: b.buildId, worker: b.worker };
       // A retired build has no lease and is never placed or graced: once its worker is idle (no
       // live sandbox, no pinned session's hold) it is stopped, then removed from the host with its
-      // snapshot.
-      if (b.status === 'retired') {
-        // Its snapshot or worker serves a build that is not retired: left alone (that build's
-        // own entries decide whether its worker runs).
+      // snapshot. A build an admin rejected after the fact (§5.2) is stopped as a retired one is,
+      // but is never removed: it is in `stop` only.
+      if (b.status === 'retired' || rejectedByAdmin(b)) {
+        // Its snapshot or worker serves a build that is not ended: left alone (that build's own
+        // entries decide whether its worker runs).
         if (shared(b)) continue;
         if (mine.refused) delete mine.refused[b.buildId];
         if (b.worker && !busy.has(b.worker)) {
           stop.push(entry);
-          if (!egressOpen.has(b.worker)) remove.push(entry);
+          if (b.status === 'retired' && !egressOpen.has(b.worker)) remove.push(entry);
         }
         continue;
       }

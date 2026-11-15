@@ -319,7 +319,7 @@ record). What an operator sets there:
   trusts in `trustedGateRecords`), and the self-attested `benchmark-self` (offline) and
   `general-self` (the KVM host's allowlisted egress), which trust a subject's own gate record for its
   own templates only. A new image's default policy gains new profiles, but a stored policy does not:
-  add them with one `PUT /v1/policy`, the whole policy as read plus the change.
+  add them with one `PUT /v1/policy`, the whole policy as read plus the change (below).
 - **Images:** `allowedRegistries` (`<default>` is the KVM host's own `SBX_REGISTRY`) and, per
   registry, `allowedRepositories`. Docker Hub is `docker.io`. **On a rollback to an image older than
   the repository allowlist, take `docker.io` out of `allowedRegistries` first:** an older image
@@ -328,6 +328,25 @@ record). What an operator sets there:
 - **What clients see of it:** `mocactl sbx policy`, `mocactl sbx quota` and `mocactl sbx hosts`;
   they create, follow and activate their templates with `mocactl sbx templates`
   ([the user guide](../../docs/sbx/user-guide.md), §8).
+
+**Writing the policy.** A `PUT /v1/policy` stores the whole policy, quota overrides included, so
+send it as a compare-and-set: `?expect=` the `digest` of the `GET /v1/policy` it was built from.
+If another admin changed anything since (a quota too), nothing is written and the answer is
+`409 policy_changed`: read the policy again, redo the change on it, and write with the new digest.
+A write without `expect` replaces whatever was set meanwhile. Quotas alone are simpler to set with
+`mocactl sbx templates quota`, which does the same.
+
+```bash
+# CP: the control plane's URL; HDR: a 0600 file with one line,
+# "Authorization: Bearer <an admin's session token>" (never the token in argv).
+curl -fsS -H @"$HDR" "$CP/v1/policy" > policy.json
+digest="$(jq -r .digest policy.json)"
+jq .policy policy.json > new-policy.json   # then make the change in new-policy.json
+curl -sS -o put.json -w '%{http_code}\n' -X PUT -H @"$HDR" -H 'Content-Type: application/json' \
+  --data @new-policy.json "$CP/v1/policy?expect=$digest"
+# 200: put.json is the policy as set (its new digest, its record, any `narrowed` builds).
+# 409 policy_changed: nothing written; put.json's `digest` is the policy's now. Read again, then write.
+```
 
 ## 6. Rotating the signing key
 

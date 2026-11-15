@@ -453,6 +453,40 @@ describe('the admin role (spec §3, §6)', () => {
     }
   });
 
+  it("never loses a quota write to a PUT /v1/policy whose read came before it, or the PUT's change", async () => {
+    const d = setup();
+    const policy = new FilePolicyStore({
+      dir: mkdtempSync(join(tmpdir(), 'cp-pol-')),
+      provenance: d.provenance,
+    });
+    const G = `sha256:${'a'.repeat(64)}`;
+    const base: Policy = { ...DEFAULT_POLICY, trustedGateRecords: [G] };
+    await policy.set(base, ENV_ADMIN);
+    // The settings admin's PUT is slow to write: without one lock for both, CAROL's quota write
+    // lands between that PUT's read and its write, and the PUT's policy replaces it unseen.
+    const set = policy.set.bind(policy);
+    policy.set = (async (pol: Policy, subject: string, extra?: Record<string, unknown>) => {
+      if (subject === ENV_ADMIN) await new Promise((r) => setTimeout(r, 50));
+      return set(pol, subject, extra);
+    }) as typeof policy.set;
+    (d as { policy?: FilePolicyStore }).policy = policy;
+    await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, {});
+    const quota = { templates: 2, buildsQueued: 1, active: 1 };
+    const [put, q] = await Promise.all([
+      call(d, 'putPolicy', who(ENV_ADMIN), {}, { ...base, trustedGateRecords: [] }),
+      call(d, 'putQuota', who(CAROL), { subject: DAVE }, quota),
+    ]);
+    expect(put.status).toBe(200);
+    expect(q.status).toBe(200);
+    // Both changes stand: the quota write ran after the PUT, on the policy it wrote.
+    const now = (await policy.current()).policy;
+    expect(now.trustedGateRecords).toEqual([]);
+    expect(now.quotaBySubject).toEqual({ [DAVE]: quota });
+    expect((q.body as { before: unknown }).before).toBeNull();
+    const by = (await d.provenance.chain('policy')).map((r) => r.subject);
+    expect(by.slice(-2)).toEqual([ENV_ADMIN, CAROL]);
+  });
+
   it('revokes at the next request, and refuses a non-admin', async () => {
     const d = setup();
     await call(d, 'grantAdmin', who(ENV_ADMIN), { subject: CAROL }, {});

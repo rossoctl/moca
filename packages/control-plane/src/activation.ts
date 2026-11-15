@@ -199,6 +199,18 @@ export function graceUntil(b: TemplateBuild, graceS: number, nowS: number): numb
  */
 export const hostManaged = (b: TemplateBuild): boolean => b.buildId.startsWith('sha256:');
 
+/** A build an admin rejected after the fact (§5.2), as against one policy rejected at registration. */
+export const rejectedByAdmin = (b: TemplateBuild): boolean =>
+  b.status === 'rejected' && b.reason?.rule === 'admin';
+
+/**
+ * A build whose use has ended while its worker may still run (draining a live sandbox until its
+ * host stops it): a retired one (§5.1), or one an admin rejected after the fact (§5.2). One
+ * rejected at registration never had a worker.
+ */
+export const endedWithWorker = (b: TemplateBuild): boolean =>
+  (b.status === 'retired' || rejectedByAdmin(b)) && b.worker !== '';
+
 /** The wanted builds, their leases' earliest start breaking ties: first leased, first placed. */
 export function wantedBuilds(
   docs: TemplateDoc[],
@@ -268,13 +280,14 @@ export function place(
   const wanted = wantedBuilds(docs, nowS);
   const wantedIds = new Set(wanted.map((w) => w.build.buildId));
   const workerOf = new Map<string, string>();
-  // A retired build's worker still draining a live sandbox keeps running too (§5.1), so it counts.
+  // A retired build's worker still draining a live sandbox keeps running too (§5.1), and so does
+  // one an admin rejected after the fact (§5.2), so it counts.
   const buildOfWorker = new Map<string, string>();
   for (const d of docs)
     for (const b of d.builds)
-      if (b.status === 'registered' || (b.status === 'retired' && b.worker !== '')) {
+      if (b.status === 'registered' || endedWithWorker(b)) {
         workerOf.set(b.buildId, b.worker);
-        // A worker a registered build shares is that build's; a retired one's own is its own.
+        // A worker a registered build shares is that build's; an ended one's own is its own.
         if (b.worker && (b.status === 'registered' || !buildOfWorker.has(b.worker)))
           buildOfWorker.set(b.worker, b.buildId);
       }

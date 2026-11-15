@@ -3,10 +3,11 @@
 Version: 0.2 (draft for review) — November 2026
 Status: Proposed. This file holds §1-§4, the template store and its read API (#736) and the
 self-serve create (#737), §5.1-§5.2, the owner's and the admin's actions as built so far (#737,
-#747) and retire (#749), §6.1, the host agent's builds (#741), §6.2-§6.4, activation (#742) and
-placement by host memory (#744), §6.5, the pacing of cold starts (#745), §7, provenance (#730), and
-§8, policy (#737); the rest of §5, and §9-§12 (tracing, validation, order of work, decisions) come
-with the issues that build them, and keep their numbers so a reference to a section stays valid.
+#747), retire (#749), and the quotas and reject after the fact (#748), §6.1, the host agent's builds
+(#741), §6.2-§6.4, activation (#742) and placement by host memory (#744), §6.5, the pacing of cold
+starts (#745), §7, provenance (#730), and §8, policy (#737); the rest of §5, and §9-§12 (tracing,
+validation, order of work, decisions) come with the issues that build them, and keep their numbers
+so a reference to a section stays valid.
 Builds on: [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md) (templates on the sandbox
 profile, the host janitor).
 
@@ -359,7 +360,7 @@ from other subjects (a 404, as for an id that does not exist) and refuses their 
   to wait for: without host agents (`heldBy` null), or with none holding it from the start
   (`heldBy` empty, such as an imported template whose worker an operator runs), `--wait` returns
   at once and says that a worker still running is not host-managed, to be stopped where it runs.
-  A retired build whose snapshot or worker a build that is not retired shares (two builds of one
+  A retired build whose snapshot or worker a build neither retired nor rejected shares (two builds of one
   template from one image share a worker id) reads `shared: true` and `capacity` null: its worker
   is kept running for that build and never stopped or removed for the retire, so `--wait` returns
   at once and says so.
@@ -375,6 +376,9 @@ Known limits:
 - A retired build is removed only from hosts whose agent polls: a host that is down removes it on
   its next poll, and the build lists that host in `heldBy` until then. The removal keeps the worker's workspace data,
   as `install-host.sh --uninstall` does; freeing it is the host janitor's.
+- Holds are keyed by build id, so a retired build's `removed` report also drops the hold of a
+  rejected twin (the same manifest hash in another template) until the host's next inventory; for
+  that one poll, egress shipping for the twin's draining sandboxes is refused.
 - A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
   pinned to a build is to be checked beside them once sessions are.
 
@@ -405,6 +409,69 @@ The env list is not imported again, so a restart does not undo the transfer.
 
 Not covered here: whether a declared id should be claimable without an admin (a deployment with no
 admin cannot transfer), and per-template roles (a maintainer who may tag but not transfer).
+
+**Quotas and reject after the fact (#748):** an admin sets the quotas per subject, and withdraws a
+registered build that later turns out wrong.
+
+| Route                                                    | Does                                                                                                      |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `PUT /v1/quota/default`                                  | sets the deployment default quota (`templates`, `buildsQueued`, `active`, optionally `owned`)             |
+| `PUT /v1/quota/{subject}`                                | sets one subject's override (`github:<numeric id>` or `oidc:<provider sub>`); a body of `null` removes it |
+| `POST /v1/templates/{id}/builds/{build}/reject {reason}` | a registered build becomes `rejected` (`reason.rule: admin`)                                              |
+
+- **Quotas are policy.** An override lives in the policy (`quotaBySubject`, keyed by subject), so
+  each change is a new `policy` record (the whole policy) naming the admin, and the answer carries
+  its digest and the quota before. The read, the change and the write are one step of the policy
+  store, under the lock `PUT /v1/policy` takes, so two quota writes made together (for two
+  subjects) never drop each other's change; a quota write with `?expect=` (the value the client
+  read) is made only if the target's quota is still that value, else `409 quota_changed` with
+  nothing written. A `PUT /v1/policy` stores the whole policy, the overrides too, so one built from
+  an older read would drop a quota written since. One that sends `?expect=` (the `digest`
+  `GET /v1/policy` answered) is refused if anything changed since that read (`409 policy_changed`,
+  nothing written or recorded, the body naming the digest now, so the client reads again): a quota
+  write and a policy write that sends `expect` never drop each other's change. A policy write
+  without `expect` is last-writer-wins: it replaces the policy as sent, overrides included. The
+  precondition is opt-in, as a quota write's is; the documented path
+  ([RUNBOOK](../../deploy/sbx/RUNBOOK.md) §5, writing the policy) sends it. It is
+  enforced at once, on the next create, queued build and
+  activation: a subject's limits are its override, else the default (§6.2). A quota holds
+  `templates`, `buildsQueued` and `active`, and `owned` optionally: an override without `owned`
+  leaves it to the default's (else 200), and a write without `owned` keeps the target's, so an
+  admin who sets the other three never resets it unseen (`?expect=` compares all four). `GET
+/v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
+  `ownedSource`, the same for `owned` alone. The default is
+  set, never removed. A subject is never `test:<n>` (a synthetic test user, enrolled by the
+  deployment's settings).
+- **Reject after the fact** shares retire's handling (§5.1): an admin only, with a reason, on a
+  registered build, by its build id or handle. Its activation leases go, a host holding it is told
+  to stop its worker (§6.3 `stop`, as for a retired build), and a sandbox create naming it answers
+  `400 unknown_template`, as for a build policy rejected at registration (an activation:
+  `409 template_unavailable`). Like a retire it runs under the activation lock, so an activation
+  racing it writes no lease on the rejected build. Inside it, a retire or reject also takes the
+  template's own use lock, under which a sandbox create re-reads the build and stores its sandbox,
+  so none lands on a build retired or rejected meanwhile (the create is refused instead), while
+  creates on other templates never wait on it or on each other. A worker still draining a live
+  sandbox keeps its host slot until it stops. A `reject` record names the admin, `from`, the reason and
+  `buildRecord`, the digest of the build's `build` record. It is refused `409 build_in_use` while a
+  live sandbox runs on the build, and is idempotent (an already rejected build is answered with
+  `record: null`). Not reversible: a new build is the way back. A retired build is not rejected;
+  a rejected one may still be retired.
+- **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N
+[--owned N]`, or `--clear` for a subject's override (admins); without `--owned` the target keeps
+  its `owned`, and the new value printed is the one stored. Like every admin write it names the control
+  plane it writes to and refuses a login issued for another deployment, then reads the value
+  (`GET /v1/policy`) and writes it as a compare-and-set (`?expect=` the counters read): it prints old
+  -> new with the policy's digest and record, and when another admin changed the value after its
+  read, the control plane writes nothing (`409 quota_changed`) and the command exits 1, naming the
+  value now.
+
+Known limits:
+
+- Quotas are per subject only; there are no groups or tenants.
+- A reject does not cut off running work (`409 build_in_use` until it ends), and cannot be undone.
+- As for retire, a Moca Pi session does not yet name a build, so only live sandboxes count as use.
+- Removing a rejected build's worker and snapshot from its host comes with the host agent's
+  removal step (#743), as for a retired one.
 
 ## 6. Builds and activation on a host
 
@@ -444,7 +511,7 @@ no live sandbox on their worker and no pinned session's hold on it (either keeps
 §6.3), each also in `stop`, so a running worker is stopped first, in the
 same run. A worker whose sandbox ended less than `EGRESS_GRACE_S` (600 s) ago is in `stop` only until
 then: the host may still ship that sandbox's egress events, and the removal ends its hold on the
-build. A retired build whose build id or worker a build that is not retired shares (in any
+build. A retired build whose build id or worker a build neither retired nor rejected shares (in any
 template: the same snapshot registered again, or a worker id kept) is in neither list, and its
 `removed` is refused `409 build_in_use`: deleting it would take the snapshot or worker that build
 needs, and drop its host from that build's `heldBy`. For each, the agent finds the snapshot from its own template record whose manifest hash
@@ -506,9 +573,10 @@ a live sandbox, retired ones (§5.1) included; and its `memory` when its agent r
 whether its worker's unit is `running`; the host's `attached` and `detached` reports keep that
 current between inventories.
 
-**Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on.
-Over it, an activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the
-use.
+**Per subject:** the policy's `quota.active` caps the builds a subject holds a live lease on; an
+admin may set one subject's quota above or below the default (`quotaBySubject`, §5.2). Over it, an
+activation is refused (`429 quota_exceeded`, `quota: active`); `GET /v1/quota` shows the limits that
+apply, the use, and `quotaSource`.
 
 **Placement:** a wanted build (one with a live lease, §6.3) is placed on a host whose last inventory
 holds its snapshot (by manifest hash). Placement is sticky: a build already running on a holder stays
@@ -612,7 +680,7 @@ counts memory, on a host whose agent reports it:
   while placement keeps it on another host, so one worker id never runs on two hosts, and the
   retired builds it holds (§5.1) with no live sandbox) and `remove` (the retired ones of `stop`,
   whose worker and snapshot the agent removes after the stop, §6.1 step 7), except a retired build
-  whose snapshot or worker a build that is not retired shares, which that build's own entries
+  whose snapshot or worker a build neither retired nor rejected shares, which that build's own entries
   decide; one worker id is never in both `run` and `stop`; a build imported from
   SH_SANDBOX_TEMPLATES is in no list, retired or not. The agent stops each `stop` worker that
   runs, then starts each `run` worker that is installed and not running (`sbx-worker@<id>`), and
