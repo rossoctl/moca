@@ -277,7 +277,9 @@ target's; a subject whose override has none has the default's). Overrides live i
 change is a `policy` record naming the admin, enforced at once; `?expect=` (the value read, as JSON percent-encoded into the query, e.g.
 `?expect=%7B%22templates%22%3A3%2C%22buildsQueued%22%3A1%2C%22active%22%3A1%7D`, or `?expect=null` for no override)
 makes it a compare-and-set on the four counters, 409 `quota_changed` with nothing written when the quota is no longer
-that value; `GET /v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
+that value. A `PUT /v1/policy` stores the whole policy, overrides included: with `?expect=` (the `digest` that
+`GET /v1/policy` answered) it is refused 409 `policy_changed`, nothing written and the body's `digest` the policy's now,
+if anything changed since that read; without it, it replaces the policy as sent. `GET /v1/quota` shows the limits that apply to the caller, `quotaSource` (`subject` or `default`) and
 `ownedSource`, the same for `owned` alone. An admin also
 rejects a registered build after the fact (`POST /v1/templates/{id}/builds/{build}/reject {reason}`): it becomes
 `rejected` (`reason.rule: admin`), its leases go and its holding hosts are told to stop its worker, as for a retire (but not to remove it), and a
@@ -291,7 +293,7 @@ Another user's session returns 404, not 403. Control-plane error codes and statu
 (`invalid_json`, `invalid_request`, `invalid_grant`, `subject_conflict`, `session_mismatch`,
 `digest_mismatch`, `configRef_invalid`, `credential_required`, `credential_ambiguous`, `endpoint_unresolved`, `model_unavailable`), 401 (`token_required`,
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
-`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `bootstrap_subject`, `self_revoke`, `admin_granted`, `quota_changed`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
+`credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `bootstrap_subject`, `self_revoke`, `admin_granted`, `quota_changed`, `policy_changed`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
 (`quota_exceeded`, `bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
 (`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in

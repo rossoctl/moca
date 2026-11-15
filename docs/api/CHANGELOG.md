@@ -25,6 +25,12 @@ change is additive; the routes mount on both route profiles and need `SH_PROVENA
 - Policy gains `quotaBySubject`, the per-subject overrides of `quota`, keyed by subject; a key that
   is not a subject, or a malformed quota, is `400 invalid_request`. An override's `owned` is
   optional: without it, the subject's `owned` is the default's (else 200).
+- PUT /v1/policy gains an optional `?expect=`, the `digest` GET /v1/policy answered: the write is
+  made only if the policy's digest is that value now, else nothing is written or recorded and the
+  answer is the new code `409 policy_changed`, whose `digest` is the policy's now. So a policy
+  written from an older read never drops a quota (or policy) another admin wrote since. An `expect`
+  that is not `sha256:` and 64 lowercase hex digits is `400 invalid_request`. Without it, the
+  policy is stored as sent, as before.
 - GET /v1/quota answers the limits that apply to the caller (its override, else the default) and
   gains `quotaSource`, `subject` or `default`, and `ownedSource`, the same for `owned` alone (an
   override may leave `owned` to the default).

@@ -2505,11 +2505,26 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const store = policyStore(deps);
     const bad = policyProblems(ctx.body);
     if (bad.length) throw new CpError('invalid_request', bad.join('; '));
+    // A compare-and-set (`?expect=`, the `digest` GET /v1/policy answered): the policy is written
+    // only if it is still the one the client read, else 409 policy_changed with nothing written or
+    // recorded, so a quota or policy another admin wrote meanwhile is never replaced unseen.
+    // Without it, the policy is stored as sent.
+    const expectRaw = ctx.query.get('expect');
+    if (expectRaw !== null && !/^sha256:[0-9a-f]{64}$/.test(expectRaw))
+      throw new CpError('invalid_request', "expect must be a policy digest, 'sha256:<64 hex>'");
     // The check and the write are one step (policyLock): a PUT built from an older policy can't
     // pass the widening check against it and then land after a settings admin's narrowing,
     // re-adding the trust that removed.
     const { policy, record, narrowed } = await policyLock(store).run('policy', async () => {
       const before = (await store.current()).policy;
+      const now = policyDigest(before);
+      if (expectRaw !== null && expectRaw !== now)
+        throw new CpError(
+          'policy_changed',
+          'the policy changed since it was read: nothing written; read it again, then write',
+          undefined,
+          { digest: now },
+        );
       // Widening what the policy trusts is the same kind of act as widening access (enrollment and
       // roles spec, decision 1): an admin by an API grant may narrow the policy and change its
       // quotas, but adding a trusted gate record, a registry or a repository needs an admin named

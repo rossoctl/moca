@@ -419,9 +419,17 @@ registered build that later turns out wrong.
 - **Quotas are policy.** An override lives in the policy (`quotaBySubject`, keyed by subject), so
   each change is a new `policy` record (the whole policy) naming the admin, and the answer carries
   its digest and the quota before. The read, the change and the write are one step of the policy
-  store, so two admins' writes made together (for two subjects, or a quota and a `PUT /v1/policy`)
-  never drop each other's change; a write with `?expect=` (the value the client read) is made only
-  if the target's quota is still that value, else `409 quota_changed` with nothing written. It is
+  store, under the lock `PUT /v1/policy` takes, so two quota writes made together (for two
+  subjects) never drop each other's change; a quota write with `?expect=` (the value the client
+  read) is made only if the target's quota is still that value, else `409 quota_changed` with
+  nothing written. A `PUT /v1/policy` stores the whole policy, the overrides too, so one built from
+  an older read would drop a quota written since. One that sends `?expect=` (the `digest`
+  `GET /v1/policy` answered) is refused if anything changed since that read (`409 policy_changed`,
+  nothing written or recorded, the body naming the digest now, so the client reads again): a quota
+  write and a policy write that sends `expect` never drop each other's change. A policy write
+  without `expect` is last-writer-wins: it replaces the policy as sent, overrides included. The
+  precondition is opt-in, as a quota write's is; the documented path
+  ([RUNBOOK](../../deploy/sbx/RUNBOOK.md) §5, writing the policy) sends it. It is
   enforced at once, on the next create, queued build and
   activation: a subject's limits are its override, else the default (§6.2). A quota holds
   `templates`, `buildsQueued` and `active`, and `owned` optionally: an override without `owned`

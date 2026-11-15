@@ -126,6 +126,7 @@ components:
             - template_retired
             - build_in_use
             - quota_changed
+            - policy_changed
             - mode_not_allowed
             - self_attested
             - bootstrap_subject
@@ -885,7 +886,10 @@ components:
           type: object
           description: |
             per-subject overrides of `quota`, keyed by subject (`github:<numeric id>` or
-            `oidc:<provider sub>`); an admin's, `PUT /v1/quota/{subject}`
+            `oidc:<provider sub>`); an admin's, `PUT /v1/quota/{subject}`. A `PUT /v1/policy`
+            stores the whole policy, this map too: one that sends `?expect=` is refused (`409
+            policy_changed`) if a quota changed since its read, and one without it replaces the
+            overrides with the ones it sends
           additionalProperties: { $ref: '#/components/schemas/Quota' }
     Quota:
       type: object
@@ -3146,7 +3150,23 @@ paths:
         defaultProfile to one that accepts more) needs an admin named in SH_ADMIN_SUBJECTS
         where a members store is kept: an admin by an API grant is refused `403 forbidden`, and may
         still narrow it and change its quotas.
+        With `?expect=` (the `digest` GET /v1/policy answered) the write is a compare-and-set: it is
+        made only if the policy is still the one read; if anything changed since (another admin's
+        policy or quota write, `PUT /v1/quota/{subject}` included), nothing is written or recorded
+        and the answer is `409 policy_changed`, whose `digest` is the policy's now, so the client
+        reads again. Without `expect`, the policy is stored as sent and replaces whatever was set
+        meanwhile.
       security: [{ sessionToken: [] }]
+      parameters:
+        - name: expect
+          in: query
+          required: false
+          description: >-
+            A compare-and-set: the policy digest the client read (GET /v1/policy's `digest`,
+            `sha256:` and 64 lowercase hex digits); another form is `400 invalid_request`. The
+            write is made only if the policy's digest is that value now; else `409
+            policy_changed`, with nothing written.
+          schema: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
       requestBody:
         required: true
         content:
@@ -3171,7 +3191,7 @@ paths:
                             template: { type: string }
                             buildId: { type: string }
         '400':
-          description: '`invalid_request`: the policy is malformed, or this deployment stores no templates'
+          description: '`invalid_request`: the policy or `expect` is malformed, or this deployment stores no templates'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -3181,6 +3201,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: >-
+            `policy_changed`: `expect` is not the policy's digest now; nothing written. The body's
+            `digest` is the policy's now
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Error' }
+                  - type: object
+                    required: [digest]
+                    properties:
+                      digest: { type: string, description: the policy's digest now }
   /v1/quota:
     get:
       operationId: getQuota

@@ -2670,6 +2670,53 @@ describe('admin quotas (§5.2)', () => {
       'invalid_request',
     );
   });
+
+  it('refuses a PUT /v1/policy whose ?expect= is not the policy now (409 policy_changed), so a quota written meanwhile survives', async () => {
+    const d = await setup();
+    const putPolicy = (body: unknown, expect?: string) =>
+      HANDLERS.putPolicy!(
+        ctx({
+          principal: admin,
+          body,
+          ...(expect !== undefined ? { query: new URLSearchParams({ expect }) } : {}),
+        }),
+        d,
+      );
+    const read = async () =>
+      (await HANDLERS.getPolicy!(ctx({ principal: admin }), d)).body as {
+        policy: typeof DEFAULT_POLICY;
+        digest: string;
+      };
+    const q = { templates: 5, buildsQueued: 2, active: 1 };
+    // Admin A reads the policy and its digest.
+    const a = await read();
+    // Admin B then writes a quota override.
+    expect((await putQuota(d, alice.sub, q)).status).toBe(200);
+    const n = (await d.provenance!.chain('policy')).length;
+    // A's PUT of what it read, expecting the old digest, is refused: nothing written or recorded,
+    // and the refusal names the digest now.
+    let err: { code?: string; extra?: Record<string, string> } = {};
+    try {
+      await putPolicy(a.policy, a.digest);
+    } catch (e) {
+      err = e as typeof err;
+    }
+    const b = await read();
+    expect(b.digest).not.toBe(a.digest);
+    expect(err).toMatchObject({ code: 'policy_changed', extra: { digest: b.digest } });
+    expect((await d.provenance!.chain('policy')).length).toBe(n);
+    expect((await d.policy!.current()).policy.quotaBySubject).toEqual({ [alice.sub]: q });
+    // A reads again; its PUT with the new digest is taken, and keeps B's override.
+    const ok = await putPolicy(b.policy, b.digest);
+    expect(ok.status).toBe(200);
+    expect((await d.policy!.current()).policy.quotaBySubject).toEqual({ [alice.sub]: q });
+    // Without expect, the policy is stored as sent (backward compatible).
+    expect((await putPolicy(DEFAULT_POLICY)).status).toBe(200);
+    expect((await d.policy!.current()).policy).toEqual(DEFAULT_POLICY);
+    // An expect that is no policy digest is refused before any read.
+    for (const bad of ['', 'null', 'sha256:abc', b.digest.toUpperCase(), `${b.digest} `])
+      expect(await refusal(() => putPolicy(DEFAULT_POLICY, bad))).toBe('invalid_request');
+  });
 });
 
 describe('place, alone', () => {
