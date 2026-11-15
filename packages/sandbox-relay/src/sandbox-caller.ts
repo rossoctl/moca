@@ -191,12 +191,22 @@ export function commandPreview(command: string): string {
 
 /**
  * Which process an audit line names: `p<id>` when an id is given, else the name, else nothing (a
- * process_list, an unnamed process_start). Never the process's command; for process kinds only.
+ * process_list, an unnamed process_start). A process_start names only its name: the guest ignores
+ * a caller-supplied id there and assigns its own, so `p<id>` would hide the real name (PR #814
+ * review). Never the process's command; for process kinds only.
  */
 function auditProcess(kind: ExecKindName | undefined, p: ProcessArgs | undefined) {
   if (kind === undefined || kind === 'command' || !p) return undefined;
-  const which = p.id ? `p${p.id}` : p.name;
+  const which = kind !== 'process_start' && p.id ? `p${p.id}` : p.name;
   return which ? utf8Prefix(which, AUDIT_PROCESS_BYTES) : undefined;
+}
+
+/**
+ * The kinds that carry no command: process_list, process_logs and process_stop. The guest
+ * ignores one sent with them, so the relay clears it before forwarding, and never audits it.
+ */
+export function kindCarriesNoCommand(kind: ExecKindName | undefined): boolean {
+  return kind === 'process_list' || kind === 'process_logs' || kind === 'process_stop';
 }
 
 /** Writes the audit lines. Built only on a relay with sandbox keys; `write` absent writes nothing. */
@@ -251,7 +261,9 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
           ...(l.truncated !== undefined ? { truncated: l.truncated } : {}),
           out_bytes: l.out_bytes,
           ...(l.reason !== undefined ? { reason: l.reason } : {}),
-          ...(withCommands && command !== undefined ? { cmd: commandPreview(command) } : {}),
+          ...(withCommands && command !== undefined && !kindCarriesNoCommand(kind)
+            ? { cmd: commandPreview(command) }
+            : {}),
         };
       });
     },
@@ -570,8 +582,14 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
         relay,
         sandboxId,
         // keepalive, kind and process are the client's (spec §4, §7; the kind gated above); the
-        // mode fields are only ever the token's.
-        { ...e, reqId: wid, ...claimsToExecMode(claims) },
+        // mode fields are only ever the token's. A kind that carries no command has any the
+        // caller sent cleared: the guest ignores it, and nothing need carry it on.
+        {
+          ...e,
+          reqId: wid,
+          ...(kindCarriesNoCommand(kind) ? { command: '' } : {}),
+          ...claimsToExecMode(claims),
+        },
         {
           // Never let the worker's id reach the caller: every frame carries the caller's own.
           toCaller: (ev) => withReqId(ev, e.reqId),

@@ -632,7 +632,10 @@ be running)`.
   name rule, the three states) is dropped with a quoted `guest tracked row refused` line, and the
   `lease_process` line quotes the id and the name, so no guest can write a line of its own into the
   host's audit. The relay's
-  `sandbox_exec` line gains `kind` and `process` (`p<id>` when an id was given, else the name).
+  `sandbox_exec` line gains `kind` and `process` (`p<id>` when an id was given, else the name; a
+  `process_start` always shows its name, since the guest ignores a caller's id there). The relay
+  clears any command sent with `process_list`, `process_logs` or `process_stop` before forwarding
+  it.
   None of them has command text. A `process_start`'s command shows only in the `cmd` prefix that
   the operator's `SH_SANDBOX_AUDIT_COMMANDS=1` adds to every Exec's line.
 
