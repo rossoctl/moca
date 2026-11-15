@@ -555,7 +555,10 @@ interface ReadinessFacts {
    * stop a retired build once it reports again). Null without host agents.
    */
   holders: HostView[] | null;
-  /** Whether a build's snapshot or worker a build that is not retired shares (liveSnapshots). */
+  /**
+   * Whether a build's snapshot or worker a build neither retired nor rejected shares
+   * (liveSnapshots).
+   */
   shared: (b: TemplateBuild) => boolean;
   nowS: number;
   /** The current policy's trusted gate records (self-attestation: attestation and visibility in effect). */
@@ -653,8 +656,8 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // presence cannot be read, `running: null`: not known to be stopped, so null capacity means
     // only "read, and not attached". A build retired before it registered has no worker
     // (`worker` empty), so nothing to stop: null capacity, presence read or not. Nor does one
-    // whose snapshot or worker a build that is not retired shares (`shared`): its worker is left
-    // running for that build, never stopped for the retire.
+    // whose snapshot or worker a build neither retired nor rejected shares (`shared`): its worker
+    // is left running for that build, never stopped for the retire.
     capacity:
       readiness === 'active' ||
       (b.status === 'retired' &&
@@ -666,8 +669,8 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
             inUse: f.inUse === null ? null : (f.inUse.get(b.worker) ?? 0),
           }
         : null,
-    // A retired build whose snapshot or worker a build that is not retired shares: its worker is
-    // kept for that build. False for every other build.
+    // A retired build whose snapshot or worker a build neither retired nor rejected shares: its
+    // worker is kept for that build. False for every other build.
     shared,
     lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
     // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past

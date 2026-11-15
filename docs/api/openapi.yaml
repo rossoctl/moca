@@ -646,7 +646,7 @@ components:
             (its host has not stopped it yet), or whose presence cannot be read (`running` null);
             null otherwise, so for a retired build null means its worker is known to be stopped,
             that it never had one (retired before it registered), or that it is `shared` (kept
-            running for a build that is not retired)
+            running for a build neither retired nor rejected)
           required: [running, inUse]
           properties:
             running:
@@ -662,7 +662,7 @@ components:
         shared:
           type: boolean
           description: |
-            true for a retired build whose snapshot or worker a build that is not retired also
+            true for a retired build whose snapshot or worker a build neither retired nor rejected also
             uses (the same snapshot in another template, or one worker id that two builds from one
             image share): its worker is not stopped for the retire, since that build's own state
             decides whether it runs, and its `capacity` is null. False for every other build

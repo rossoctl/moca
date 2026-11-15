@@ -1560,7 +1560,7 @@ describe('retire (§5.1)', () => {
     expect((await wanted(d, 'host-1')).remove).toEqual([]);
   });
 
-  it('never stops or removes a retired build whose snapshot or worker a build not retired shares', async () => {
+  it('never stops or removes a retired build whose snapshot or worker a build neither retired nor rejected shares', async () => {
     const d = await setup();
     attachedNow = [];
     const report = (buildId: string, event: string) =>

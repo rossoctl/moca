@@ -143,8 +143,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  --build). --wait: until its worker has stopped
                                                  and every host has removed it (default 900 s;
                                                  exit 5 on a timeout), at once for a build no
-                                                 host holds, or one whose worker a build not
-                                                 retired uses
+                                                 host holds, or one whose worker a build neither
+                                                 retired nor rejected uses
   mocactl sbx templates quota TARGET --templates N --builds-queued N --active N [--owned N] [--json]
   mocactl sbx templates quota TARGET --clear [--json]
                                                  set a subject's template quotas (TARGET

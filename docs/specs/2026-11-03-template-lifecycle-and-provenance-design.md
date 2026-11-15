@@ -360,7 +360,7 @@ from other subjects (a 404, as for an id that does not exist) and refuses their 
   to wait for: without host agents (`heldBy` null), or with none holding it from the start
   (`heldBy` empty, such as an imported template whose worker an operator runs), `--wait` returns
   at once and says that a worker still running is not host-managed, to be stopped where it runs.
-  A retired build whose snapshot or worker a build that is not retired shares (two builds of one
+  A retired build whose snapshot or worker a build neither retired nor rejected shares (two builds of one
   template from one image share a worker id) reads `shared: true` and `capacity` null: its worker
   is kept running for that build and never stopped or removed for the retire, so `--wait` returns
   at once and says so.
@@ -376,6 +376,9 @@ Known limits:
 - A retired build is removed only from hosts whose agent polls: a host that is down removes it on
   its next poll, and the build lists that host in `heldBy` until then. The removal keeps the worker's workspace data,
   as `install-host.sh --uninstall` does; freeing it is the host janitor's.
+- Holds are keyed by build id, so a retired build's `removed` report also drops the hold of a
+  rejected twin (the same manifest hash in another template) until the host's next inventory; for
+  that one poll, egress shipping for the twin's draining sandboxes is refused.
 - A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
   pinned to a build is to be checked beside them once sessions are.
 
@@ -508,7 +511,7 @@ no live sandbox on their worker and no pinned session's hold on it (either keeps
 §6.3), each also in `stop`, so a running worker is stopped first, in the
 same run. A worker whose sandbox ended less than `EGRESS_GRACE_S` (600 s) ago is in `stop` only until
 then: the host may still ship that sandbox's egress events, and the removal ends its hold on the
-build. A retired build whose build id or worker a build that is not retired shares (in any
+build. A retired build whose build id or worker a build neither retired nor rejected shares (in any
 template: the same snapshot registered again, or a worker id kept) is in neither list, and its
 `removed` is refused `409 build_in_use`: deleting it would take the snapshot or worker that build
 needs, and drop its host from that build's `heldBy`. For each, the agent finds the snapshot from its own template record whose manifest hash
@@ -677,7 +680,7 @@ counts memory, on a host whose agent reports it:
   while placement keeps it on another host, so one worker id never runs on two hosts, and the
   retired builds it holds (§5.1) with no live sandbox) and `remove` (the retired ones of `stop`,
   whose worker and snapshot the agent removes after the stop, §6.1 step 7), except a retired build
-  whose snapshot or worker a build that is not retired shares, which that build's own entries
+  whose snapshot or worker a build neither retired nor rejected shares, which that build's own entries
   decide; one worker id is never in both `run` and `stop`; a build imported from
   SH_SANDBOX_TEMPLATES is in no list, retired or not. The agent stops each `stop` worker that
   runs, then starts each `run` worker that is installed and not running (`sbx-worker@<id>`), and

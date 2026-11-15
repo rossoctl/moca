@@ -147,8 +147,9 @@ export interface SbxBuild {
    */
   heldBy?: string[] | null;
   /**
-   * A retired build whose snapshot or worker a build that is not retired shares: its worker is kept
-   * for that build, never stopped for the retire. Absent from an older control plane.
+   * A retired build whose snapshot or worker a build neither retired nor rejected shares: its
+   * worker is kept for that build, never stopped for the retire. Absent from an older control
+   * plane.
    */
   shared?: boolean;
   tags: string[];

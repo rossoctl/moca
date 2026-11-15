@@ -261,7 +261,7 @@ build reports `capacity` while its worker still runs (null once its host has sto
 snapshot (the wanted state's `remove`) and reports it, a `retire` record by `host:<id>` with `event: removed`, and
 `heldBy` drops the host. `mocactl sbx templates retire --wait` waits for the stop and for `heldBy` to empty, and
 returns at once for a build no host holds (`heldBy` null or empty: no host agent stops its worker) and for a `shared`
-one (its snapshot or worker serves a build that is not retired, so its worker is kept running for that build).
+one (its snapshot or worker serves a build neither retired nor rejected, so its worker is kept running for that build).
 
 Who is enrolled and who is an admin (API 1.20.0, with a template store): the deployment's settings
 (`SH_ALLOWED_SUBJECTS`, `SH_ADMIN_SUBJECTS`) are the bootstrap, and admins add to them through `/v1/subjects`: any admin

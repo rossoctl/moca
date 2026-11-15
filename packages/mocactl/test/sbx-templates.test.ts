@@ -785,7 +785,7 @@ describe('sbx templates retire (§5.1)', () => {
     );
   });
 
-  it('--wait: done at once for a shared build, its worker kept for a build not retired', async () => {
+  it('--wait: done at once for a shared build, its worker kept for a build neither retired nor rejected', async () => {
     // Two builds of one template from one image share a worker id; the other is still wanted.
     const w = waiting({
       'POST /v1/templates/my-python/retire': retireRoute,
@@ -795,7 +795,7 @@ describe('sbx templates retire (§5.1)', () => {
     expect(w.slept).toEqual([]);
     const errs = w.io.errs.join('');
     expect(errs).toContain(
-      `my-python ${HANDLE}: retired; its worker also serves a build that is not retired`,
+      `my-python ${HANDLE}: retired; its worker also serves a build neither retired nor rejected`,
     );
     expect(errs).not.toContain('its worker stopped');
   });
