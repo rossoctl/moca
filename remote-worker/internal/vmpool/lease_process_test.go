@@ -1607,3 +1607,28 @@ func TestSweptLeasesSyncInParallel(t *testing.T) {
 	release()
 	waitFor(t, func() bool { return lc.liveCount() == 1 }) // the wedged one, destroyed; free's new lease
 }
+
+// PR #814 follow-up review: a sweep batch already queued when Close starts shares Close's
+// bound. Its victim's wedged sync is cancelled when the bound passes, so Close does not wait
+// a further LeaseEndSyncTimeout for it (past the units' TimeoutStopSec=30).
+func TestCloseBoundsAQueuedSweepBatchsSync(t *testing.T) {
+	p, lc, clk := processPool(t)
+	level2On(t, p, lc, "a")
+	lc.setSyncFn(func(c Command) (Result, error) {
+		<-c.ctxDone // wedged: answers nothing until its context is cancelled
+		return Result{}, ErrAborted
+	})
+	p.closeSyncBound = 300 * time.Millisecond
+	clk.Advance(p.cfg.LeaseIdleDefault) // the lease is idle: its victim is queued for the reclaim goroutine
+	waitFor(t, func() bool { return len(lc.syncCommands()) == 1 })
+	start := time.Now()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("Close took %s with a wedged queued batch, want about the %s bound", el, p.closeSyncBound)
+	}
+	if lc.liveCount() != 0 {
+		t.Fatalf("live VMs after Close = %d, want 0", lc.liveCount())
+	}
+}

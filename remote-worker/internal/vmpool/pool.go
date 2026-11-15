@@ -206,7 +206,13 @@ type pool struct {
 	// closeSyncBound is Close's one bound on syncing the leases it detaches
 	// (LeaseCloseSyncTimeout); a field so a test need not wait it out.
 	closeSyncBound time.Duration
-	seq            uint64
+	// syncCtx is the parent of every lease-end sync, the sweep's queued batches included.
+	// Close cancels it once closeSyncBound has passed since it began, so a batch still queued
+	// when Close starts shares Close's bound instead of adding a LeaseEndSyncTimeout after it
+	// (PR #814 follow-up review).
+	syncCtx    context.Context
+	syncCancel context.CancelFunc
+	seq        uint64
 
 	counters *counters
 
@@ -276,6 +282,7 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	}
 	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters(),
 		closeSyncBound: LeaseCloseSyncTimeout}
+	p.syncCtx, p.syncCancel = context.WithCancel(context.Background())
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
 	// below checks it, and reaper's methods are nil-safe.
 	p.reaper = newReaper(cfg.DeferReapWorkers)
@@ -986,6 +993,10 @@ func (p *pool) Close() error {
 		return nil
 	}
 	p.closed = true
+	// One bound for every sync Close and the already queued sweep batches still have to do.
+	boundTimer := time.AfterFunc(p.closeSyncBound, p.syncCancel)
+	defer boundTimer.Stop()
+	defer p.syncCancel()
 	if p.ticker != nil {
 		p.ticker.Stop()
 	}

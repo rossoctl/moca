@@ -956,13 +956,16 @@ const LeaseEndSyncTimeout = 30 * time.Second
 // that: it syncs its victims concurrently, waits at most this long for all of them, then
 // destroys them all. A guest that has not answered by then loses its unsynced writes,
 // rather than every lease after it in a loop losing theirs to systemd's SIGKILL.
+// The bound also covers the sweep batches already queued when Close starts: their syncs run
+// under the pool's syncCtx, which Close cancels when the bound passes, so none of them adds
+// a further LeaseEndSyncTimeout after it.
 const LeaseCloseSyncTimeout = 20 * time.Second
 
 // destroyLeaseVictim is destroyLeaseVM for an ended (or detached) lease: a victim marked
 // sync has its guest synced first (syncLeaseVictim). The destroy goes ahead whatever the
 // sync did.
 func (p *pool) destroyLeaseVictim(v *leaseVictim) error {
-	p.syncLeaseVictim(context.Background(), v)
+	p.syncLeaseVictim(p.syncCtx, v)
 	return p.destroyLeaseVM(v.key, v.vm)
 }
 
@@ -992,7 +995,7 @@ func (p *pool) syncLeaseVictim(ctx context.Context, v *leaseVictim) {
 // stuck where it cannot see the cancel (a vsock connect) ends with its VM before the
 // caller returns.
 func (p *pool) syncLeaseVictimsWithin(vs []*leaseVictim, bound time.Duration) (wait func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	ctx, cancel := context.WithTimeout(p.syncCtx, bound)
 	var wg sync.WaitGroup
 	for _, v := range vs {
 		if !v.sync {
