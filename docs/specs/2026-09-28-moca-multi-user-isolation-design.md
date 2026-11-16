@@ -22,6 +22,17 @@ Decision record: to be written with the S2 slice (§14), at the next free number
 Naming: new components and settings use the **MOCA** name from day one (`moca-egress`,
 `MOCA_*`); existing `SH_*` names are left for RA1 Phase 1's rename.
 
+> **Amendment, 2026-11-13 — §8.6's inference listener ships first in the control plane, not in
+> `moca-egress`.** §8.6 assigns the inference listener to `moca-egress`
+> (`MOCA_EGRESS_INFERENCE_ADDR`, default `127.0.0.1:3129`). The first implementation is a second HTTP
+> port in the control-plane process (`MOCA_INFERENCE_ADDR`), because the control plane already holds
+> the credential store, the KEK and the grant verification ring, while `moca-egress` holds none of
+> them and would need a `/internal/token` round trip per request to get them
+> ([#388](https://github.com/rossoctl/moca/issues/388)). The grant format, the claims and the
+> `grant_invalid` refusal are §6.1's and §6.3's unchanged, so moving the listener into `moca-egress`
+> later is a deployment change and not a protocol change. The CONNECT path and the sandbox grant's
+> redemption stay with `moca-egress` and are unbuilt.
+
 > **Amendment, 2026-11-05 — owned async dispatch is `async:true` on a session, not `/v1/runs`, and
 > `turn_exp` is unbuilt.** §6.5 and §10 describe owned asynchronous runs as `/v1/runs`;
 > [#279](https://github.com/rossoctl/moca/issues/279) resolved that there is no `run` noun and no
@@ -961,14 +972,15 @@ capabilities, not Z5's semantics, which this design keeps whole.
 
 Amendment notes, each a short dated paragraph at the head of the amended spec, pointing here:
 
-| Spec               | Amended section | What changes                                                                                                         |
-| ------------------ | --------------- | -------------------------------------------------------------------------------------------------------------------- |
-| P4.1               | §12.2           | the proxy is `moca-egress`; the caller-identity interface binds VM → session through the sandbox grant               |
-| P5                 | §3.2            | the per-request credential is a signed grant, not a subject-derived placeholder                                      |
-| MU1                | §5.3, §3.6      | `/internal/turn-grants` replaces `/internal/credentials`; direct mode only under `single` with the first-subject pin |
-| Workflow promotion | §4.4, §4.5      | in-memory loading, no harness-side unpack; per-session sandbox copy, no shared cache in `multi`                      |
-| MU1 (2026-11-05)   | §4.2, §4.3, §9  | MU2's owned `/v1/runs` is `async:true` on a session (#279); the data-plane async half stays removed                  |
-| This spec (MI1)    | §6.1, §6.5, §10 | owned async dispatch is `async:true` on a session; `turn_exp` is unbuilt; turn start = dequeue — P6AF, ADR-0047      |
+| Spec                         | Amended section | What changes                                                                                                         |
+| ---------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------- |
+| P4.1                         | §12.2           | the proxy is `moca-egress`; the caller-identity interface binds VM → session through the sandbox grant               |
+| P5                           | §3.2            | the per-request credential is a signed grant, not a subject-derived placeholder                                      |
+| MU1                          | §5.3, §3.6      | `/internal/turn-grants` replaces `/internal/credentials`; direct mode only under `single` with the first-subject pin |
+| Workflow promotion           | §4.4, §4.5      | in-memory loading, no harness-side unpack; per-session sandbox copy, no shared cache in `multi`                      |
+| MU1 (2026-11-05)             | §4.2, §4.3, §9  | MU2's owned `/v1/runs` is `async:true` on a session (#279); the data-plane async half stays removed                  |
+| This spec (MI1)              | §6.1, §6.5, §10 | owned async dispatch is `async:true` on a session; `turn_exp` is unbuilt; turn start = dequeue — P6AF, ADR-0047      |
+| This spec (MI1) (2026-11-13) | §8.6, §6.3      | the inference listener is a control-plane port in its first form; the token endpoint is still owed — #388            |
 
 **The Cortex path (S6).** cortex#905 is rescoped to the contract in §8 and the suite in §12.3. Cortex
 replaces `moca-egress` when **both** hold: it passes that suite unchanged, run against the pinned
@@ -983,36 +995,38 @@ New settings use the `MOCA_` prefix (see the header's naming note). From S2, sec
 never environment variables (§6.7); S1's one new secret, `MOCA_RELAY_EXEC_TOKEN`, is an environment
 variable until then.
 
-| Setting                                 | Read by                                | Default                    | Meaning                                                                                          |
-| --------------------------------------- | -------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `MOCA_TENANCY`                          | every component                        | `single`                   | `single` \| `multi` (§10.1)                                                                      |
-| `MOCA_GRANT_SIGNING_KEY` _(file)_       | control plane                          | —, required under `multi`  | grant key ring, newest first                                                                     |
-| `MOCA_GRANT_PUBLIC_KEYS`                | `moca-egress`, `microvm-worker`, relay | —, required under `multi`  | `kid:base64-DER`, comma-separated                                                                |
-| `MOCA_GRANT_TTL_S`                      | control plane                          | `300`                      | grant lifetime (§6.2)                                                                            |
-| `MOCA_TURN_MAX_S`                       | control plane                          | `1800`                     | `turn_exp` cap; should match the worker's own turn deadline                                      |
-| `MOCA_TOKEN_TTL_S`                      | control plane                          | `60`                       | upper bound on the token endpoint's `expires_in` (§6.3)                                          |
-| `MOCA_EGRESS_CP_TOKEN` _(file)_         | control plane, `moca-egress`           | —, required under `multi`  | `moca-egress`'s credential for `/internal/token`                                                 |
-| `MOCA_EGRESS_ALLOW`                     | `moca-egress`                          | —, required                | destination host allowlist (Z5 E4)                                                               |
-| `MOCA_EGRESS_INSPECT`                   | `moca-egress`                          | empty                      | extra hosts to intercept for audit detail (§8.5)                                                 |
-| `MOCA_EGRESS_UPSTREAM_CA` _(file)_      | `moca-egress`                          | system roots only          | additional upstream trust, e.g. an internal CA                                                   |
-| `MOCA_EGRESS_CA` _(file)_               | `moca-egress`                          | —, required                | interception CA key and certificate                                                              |
-| `MOCA_EGRESS_INFERENCE_ADDR`            | `moca-egress`                          | `127.0.0.1:3129`           | inference listener (§8.6)                                                                        |
-| `MOCA_EGRESS_MAX_CONNS_PER_VM`          | `moca-egress`                          | `32`                       | per-VM (or per-container) concurrent connections                                                 |
-| `MOCA_EGRESS_MAX_REQUESTS_PER_SESSION`  | `moca-egress`                          | `10000`                    | Z5's hard per-session cap                                                                        |
-| `MOCA_EGRESS_IDLE_TIMEOUT_S`            | `moca-egress`                          | `300`                      | idle bound on an established connection, refreshed per byte (§8.5)                               |
-| `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` | `moca-egress`                          | the idle bound             | how long a forwarded request waits for its response headers (§8.5)                               |
-| `MOCA_RELAY_EXEC_TOKEN`                 | relay, workers                         | —, required                | worker credential for `SandboxExec` (R5); an environment variable in S1, a file per §6.7 from S2 |
-| `MOCA_RELAY_EXEC_ADDR`                  | relay                                  | unset ⇒ one listener       | binds `SandboxExec` on its own listener, split from attach (R5)                                  |
-| `MOCA_RELAY_EXEC_PORT`                  | compose                                | `9444`                     | exec listener port, brain-side only                                                              |
-| `MOCA_BRAIN_SUBNET`                     | compose                                | `172.31.250.0/24`          | `moca-brain` network subnet (R8)                                                                 |
-| `MOCA_RELAY_BRAIN_IP`                   | compose                                | `172.31.250.10`            | relay's address on `moca-brain`, where `MOCA_RELAY_EXEC_ADDR` binds                              |
-| `MOCA_SANDBOX_SUBNET`                   | `deploy/vm`                            | `10.89.40.0/24`            | dedicated podman network subnet for sandbox containers (R8)                                      |
-| `MOCA_SANDBOX_GATEWAY`                  | `deploy/vm`                            | `10.89.40.1`               | gateway on that subnet; `host.containers.internal` inside a sandbox                              |
-| `MOCA_SANDBOX_BRIDGE`                   | `deploy/vm`                            | `moca-sandbox0`            | that network's bridge interface; the firewall matches sandbox traffic by it                      |
-| `MOCA_SANDBOXES_FILE`                   | relay, `moca-egress`                   | `/etc/moca/sandboxes.json` | container sandbox id → owner → address (§9.2)                                                    |
-| `MOCA_BUNDLE_MAX_BYTES`                 | control plane, worker                  | `8388608`                  | compressed bundle cap (§7.3)                                                                     |
-| `MOCA_BUNDLE_CACHE_BYTES`               | worker                                 | `134217728`                | per-worker `ResourceSet` LRU bound                                                               |
-| `SH_LOCAL_TOOLS`                        | worker                                 | unset                      | development opt-in to local tools; refused under `multi` (R3)                                    |
+| Setting                                 | Read by                                | Default                    | Meaning                                                                                             |
+| --------------------------------------- | -------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------- |
+| `MOCA_TENANCY`                          | every component                        | `single`                   | `single` \| `multi` (§10.1)                                                                         |
+| `MOCA_GRANT_SIGNING_KEY` _(file)_       | control plane                          | —, required under `multi`  | grant key ring, newest first                                                                        |
+| `MOCA_GRANT_PUBLIC_KEYS`                | `moca-egress`, `microvm-worker`, relay | —, required under `multi`  | `kid:base64-DER`, comma-separated                                                                   |
+| `MOCA_GRANT_TTL_S`                      | control plane                          | `300`                      | grant lifetime (§6.2)                                                                               |
+| `MOCA_TURN_MAX_S`                       | control plane                          | `1800`                     | `turn_exp` cap; should match the worker's own turn deadline                                         |
+| `MOCA_TOKEN_TTL_S`                      | control plane                          | `60`                       | upper bound on the token endpoint's `expires_in` (§6.3)                                             |
+| `MOCA_EGRESS_CP_TOKEN` _(file)_         | control plane, `moca-egress`           | —, required under `multi`  | `moca-egress`'s credential for `/internal/token`                                                    |
+| `MOCA_EGRESS_ALLOW`                     | `moca-egress`                          | —, required                | destination host allowlist (Z5 E4)                                                                  |
+| `MOCA_EGRESS_INSPECT`                   | `moca-egress`                          | empty                      | extra hosts to intercept for audit detail (§8.5)                                                    |
+| `MOCA_EGRESS_UPSTREAM_CA` _(file)_      | `moca-egress`                          | system roots only          | additional upstream trust, e.g. an internal CA                                                      |
+| `MOCA_EGRESS_CA` _(file)_               | `moca-egress`                          | —, required                | interception CA key and certificate                                                                 |
+| `MOCA_EGRESS_INFERENCE_ADDR`            | `moca-egress`                          | `127.0.0.1:3129`           | inference listener (§8.6), once it moves there                                                      |
+| `MOCA_INFERENCE_ADDR`                   | control plane                          | —, required under `multi`  | the inference listener in its first form: a second port in the control plane (2026-11-13 amendment) |
+| `MOCA_INFERENCE_URL`                    | control plane                          | derived from the bind      | what a worker is told to dial; required when the bind is a wildcard. An origin, no path             |
+| `MOCA_EGRESS_MAX_CONNS_PER_VM`          | `moca-egress`                          | `32`                       | per-VM (or per-container) concurrent connections                                                    |
+| `MOCA_EGRESS_MAX_REQUESTS_PER_SESSION`  | `moca-egress`                          | `10000`                    | Z5's hard per-session cap                                                                           |
+| `MOCA_EGRESS_IDLE_TIMEOUT_S`            | `moca-egress`                          | `300`                      | idle bound on an established connection, refreshed per byte (§8.5)                                  |
+| `MOCA_EGRESS_RESPONSE_HEADER_TIMEOUT_S` | `moca-egress`                          | the idle bound             | how long a forwarded request waits for its response headers (§8.5)                                  |
+| `MOCA_RELAY_EXEC_TOKEN`                 | relay, workers                         | —, required                | worker credential for `SandboxExec` (R5); an environment variable in S1, a file per §6.7 from S2    |
+| `MOCA_RELAY_EXEC_ADDR`                  | relay                                  | unset ⇒ one listener       | binds `SandboxExec` on its own listener, split from attach (R5)                                     |
+| `MOCA_RELAY_EXEC_PORT`                  | compose                                | `9444`                     | exec listener port, brain-side only                                                                 |
+| `MOCA_BRAIN_SUBNET`                     | compose                                | `172.31.250.0/24`          | `moca-brain` network subnet (R8)                                                                    |
+| `MOCA_RELAY_BRAIN_IP`                   | compose                                | `172.31.250.10`            | relay's address on `moca-brain`, where `MOCA_RELAY_EXEC_ADDR` binds                                 |
+| `MOCA_SANDBOX_SUBNET`                   | `deploy/vm`                            | `10.89.40.0/24`            | dedicated podman network subnet for sandbox containers (R8)                                         |
+| `MOCA_SANDBOX_GATEWAY`                  | `deploy/vm`                            | `10.89.40.1`               | gateway on that subnet; `host.containers.internal` inside a sandbox                                 |
+| `MOCA_SANDBOX_BRIDGE`                   | `deploy/vm`                            | `moca-sandbox0`            | that network's bridge interface; the firewall matches sandbox traffic by it                         |
+| `MOCA_SANDBOXES_FILE`                   | relay, `moca-egress`                   | `/etc/moca/sandboxes.json` | container sandbox id → owner → address (§9.2)                                                       |
+| `MOCA_BUNDLE_MAX_BYTES`                 | control plane, worker                  | `8388608`                  | compressed bundle cap (§7.3)                                                                        |
+| `MOCA_BUNDLE_CACHE_BYTES`               | worker                                 | `134217728`                | per-worker `ResourceSet` LRU bound                                                                  |
+| `SH_LOCAL_TOOLS`                        | worker                                 | unset                      | development opt-in to local tools; refused under `multi` (R3)                                       |
 
 Defaults marked as numbers are starting points; E8/E14 may move them.
 

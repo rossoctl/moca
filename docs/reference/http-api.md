@@ -167,9 +167,10 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
   queue. Its replacement is the authenticated, owner-scoped `POST /v1/sessions/{id}/turns` with
   `async: true` → `202 {sessionId, turnId}`, designed in
   [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and documented in
-  [`docs/api/openapi.yaml`](../api/openapi.yaml). **That path works**, with two conditions: each
-  worker needs `SH_ASYNC_DRAIN=1` (off by default) to drain the queue, and the deployment must be
-  `MOCA_TENANCY=single` — under `multi`, submission answers 501 `async_tenancy_unsupported`. Poll
+  [`docs/api/openapi.yaml`](../api/openapi.yaml). **That path works**, on one condition: each
+  worker needs `SH_ASYNC_DRAIN=1` (off by default) to drain the queue. Under `MOCA_TENANCY=multi` the
+  dequeue hands the worker grants instead of a key, so the control plane needs the grant ring and the
+  inference listener configured — it refuses to boot without them. Poll
   `GET /v1/sessions/{id}/turns/{turnId}` for state and result. See
   [dispatch archetypes](../concepts/dispatch-archetypes.md) for the operator steps.
 - On a saturated pool the sync path waits with backoff (up to `KAGENTI_SYNC_SATURATION_WAIT_MS`, 30 s)
@@ -295,7 +296,7 @@ Another user's session returns 404, not 403. Control-plane error codes and statu
 `token_invalid`, `token_expired`, `unauthorized`), 403 `forbidden`, 404 (`session_not_found`, `config_bundle_not_found`,
 `credential_not_found`, `template_not_found`, `turn_not_found`), 409 (`template_exists`, `turn_not_cancellable`, `turn_not_claimable`, `no_active_slot`, `template_unavailable`, `template_not_active`, `build_in_use`, `bootstrap_subject`, `self_revoke`, `admin_granted`, `quota_changed`, `policy_changed`), 410 (`device_code_expired`, `template_retired`), 422 `policy_refused`, 428 `authorization_pending`, 429
 (`quota_exceeded`, `bundle_quota_exceeded`, `async_quota_exhausted`), 500 `internal_error`, 501
-(`async_tenancy_unsupported`, `workload_runs_unavailable`), 502 `identity_provider_misconfigured`, 503
+`workload_runs_unavailable`, 502 `identity_provider_misconfigured`, 503
 (`credential_unavailable`, `redis_unavailable`, `model_catalog_unavailable`). The list may not be complete; the mapping is in
 `packages/control-plane/src/errors.ts`.
 

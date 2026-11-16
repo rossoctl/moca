@@ -1280,8 +1280,7 @@ curl -s http://127.0.0.1:18081/metrics | jq '{async_queue_depth, async_oldest_ag
 A **number** (even `0`) means worker slot 0's drain loop is running and reporting. `"NaN"` means it
 never reported — the knob is off, or a prerequisite was missing and the worker said so and stayed
 off rather than failing: `kubectl -n moca logs deploy/moca-supervisor | grep '\[async\]'`. The drain
-also refuses to arm under `MOCA_TENANCY=multi`, because the control plane answers `501
-async_tenancy_unsupported` there and a loop that claimed would only refuse forever.
+arms under either tenancy: under `multi` the dequeue hands it grants instead of a key.
 
 ### 14.2 Submit and collect
 
@@ -1336,13 +1335,18 @@ for you.
 
 ### 14.4 Limits
 
-- **`MOCA_TENANCY=single` only.** Under `multi` the control plane refuses submission with `501
-async_tenancy_unsupported` and the drain does not arm. Lifting that needs MI1 S2's grants and token
-  endpoint (ADR-0047 §9's M2).
+- **Under `multi`, inference is isolated and egress is not yet.** `multi` works: the dequeue returns
+  MI1 §6.1 grants and the worker spends the inference one at the control plane's inference listener.
+  It costs three control-plane settings — `MOCA_GRANT_SIGNING_KEY`, `MOCA_INFERENCE_ADDR`, and
+  `MOCA_INFERENCE_URL` when the bind is a wildcard — and the boot refuses without them. These
+  manifests wire none of them: no ConfigMap key and no Service port ship for the listener, so
+  turning `multi` on here is a manifest change first. The residual: the SANDBOX grant has no
+  redeemer, so an async turn gets inference isolation and not egress isolation.
 - **Two leaves per pod at the default W.** The loop is sequential; see section 4 for the width rule
   and why no autoscaler ships.
-- **Caps are not enforced yet.** A submission may carry `caps`, and they are recorded, but
-  `turn_exp` and `MOCA_TURN_MAX_S` are M2.
+- **Caps: wall clock yes, the other two no.** Under `multi`, `turn_exp` is enforced — anchored at
+  the dequeue and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)` — and bounds how long the turn's
+  grants are usable. `tokens` and `costUsd` are recorded, not enforced.
 - **The scheduled on-ramp has no equivalent.** Archetype C went with the KEDA path and has no P6
   design ([#536](https://github.com/rossoctl/moca/issues/536)).
 

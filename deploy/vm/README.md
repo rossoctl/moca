@@ -852,8 +852,16 @@ Nor does it claim, for the control plane:
   `single` serves every subject that logs in. From S2 it serves only the first and refuses the rest
   with `403 single_tenant_deployment` (MI1 §6.6). `setup-vm.sh` adds no refusal of its own, since
   it cannot tell how many people will log in. `MOCA_TENANCY=multi` serves two users honestly only
-  once S5's owner binding lands. Until then, run a two-user demo at `v0.5.1`
-  (`docs/demos/vm-two-user-acceptance.md`, #407).
+  once S5's owner binding lands — that is the real blocker. Until then, run a two-user demo at
+  `v0.5.1` (`docs/demos/vm-two-user-acceptance.md`, #407). On the credential side `multi` no longer
+  refuses async turns from this release, provided the control plane carries the grant ring and the
+  inference listener; `setup-vm.sh` configures neither, so enabling `multi` is three deliberate
+  edits to `/etc/moca/control-plane.env` and a `systemctl restart moca-control-plane`:
+  1. `MOCA_GRANT_SIGNING_KEY` — an Ed25519 PKCS#8 key, and NOT the one in
+     `SH_SESSION_TOKEN_PRIVATE_KEY` (a shared key refuses to boot).
+  2. `MOCA_INFERENCE_ADDR` — the listener's bind address, e.g. `127.0.0.1:3130` while the workers
+     are on this VM.
+  3. `MOCA_INFERENCE_URL` — only when the bind is a wildcard, since `0.0.0.0` is not dialable.
 - **Ownership against loopback access.** Session ownership is enforced at the control plane's API.
   Its index is in Redis on `127.0.0.1:6379`, unauthenticated, so anyone with a shell or an
   unrestricted SSH forward on the VM can rewrite it. Restrict non-operator SSH accounts ("Reaching

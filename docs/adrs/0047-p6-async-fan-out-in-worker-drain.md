@@ -124,7 +124,8 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   Distinct from `SH_TURNS_PER_SUBJECT` (#360), which is per worker and in-process and bounds turns
   _executing_; a per-worker in-memory counter cannot bound a queue it does not hold.
 - **Delivery in three milestones.** M1 is a working drain on `deploy/vm`/compose, gated to
-  `MOCA_TENANCY=single`. M2 implements `turn_exp`, completes grant-at-dequeue, and lifts the gate.
+  `MOCA_TENANCY=single`. M2 implemented `turn_exp`, completed grant-at-dequeue, and lifted the gate
+  ([#388](https://github.com/rossoctl/moca/issues/388)).
   M3 is `deploy/k8s` manifests and a queued-leaf smoke test.
 
 ### The M1 tenancy gate is a dated conditional refusal
@@ -134,6 +135,15 @@ condition with a lifting criterion — `turn_exp` implemented and both grant aud
 dequeue (M2) — not an omission to be discovered in production. It takes the shape ADR-0041 used for
 its own deprecation window: a floor plus a condition, rather than a state users must infer from
 absence of evidence.
+
+**Closed, 2026-11-13 (#388).** The criterion was met: `turn_exp` is implemented and both grant
+audiences are minted at the dequeue, so the dequeue exchange returns grants under `multi` instead of
+refusing. The per-request `501` is gone and so is its error code `async_tenancy_unsupported` — no
+caller can receive it any more, on any route. The condition did not disappear, it changed shape: a
+`multi` deployment now fails at BOOT when the grant ring (`MOCA_GRANT_SIGNING_KEY`) or the inference
+listener (`MOCA_INFERENCE_ADDR`) is missing. That is the same guarantee — no real key is ever handed
+to a worker under `multi` — moved from the request path to startup, where an operator meets it once
+instead of once per turn.
 
 ### The KEDA-era parity audit (#689)
 
