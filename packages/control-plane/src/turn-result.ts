@@ -34,10 +34,158 @@ export async function readLeafResult(
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return obj(parsed);
   } catch {
     return null;
   }
+}
+
+/** An object, or null for anything else (array and scalar included). */
+const obj = (v: unknown): Record<string, unknown> | null =>
+  typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+
+/**
+ * Clip to a UTF-8 byte cap, the `…[truncated]` convention of `harness/src/turn-stream.ts`'s `clip`
+ * — restated, not imported, for the layering reason this module's header gives. Bytes, not tokens:
+ * every bound in this repo is bytes, and the clip must hold whatever the model wrote.
+ *
+ * `subarray` can land mid-codepoint; `toString('utf8')` replaces the partial tail with U+FFFD
+ * rather than emitting invalid UTF-8, so the result is always a well-formed string under the cap.
+ */
+export function clip(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.byteLength <= maxBytes) return text;
+  return buf.subarray(0, maxBytes).toString('utf8') + '…[truncated]';
+}
+
+/** What `GET …/turns/{turnId}/artifacts/{kind}` can serve for this result. */
+export interface TurnArtifact {
+  kind: 'patch';
+  bytes: number;
+  sha256?: string;
+}
+
+/** The bytes of one artifact, ready to write. */
+export interface ArtifactBody {
+  bytes: Buffer;
+  contentType: string;
+}
+
+/** Unified diffs, the only artifact kind in M1. `text/x-diff` is what git's own tooling serves. */
+const PATCH_CONTENT_TYPE = 'text/x-diff';
+
+/**
+ * The status read's body (§4.4, B5): everything the stored record says ABOUT the turn, and nothing
+ * that is the turn's output in full. A 4 MiB patch rode every poll before this; now the patch and
+ * the assistant text leave the body and `artifacts` names what can be fetched instead.
+ *
+ * Read-time only. Nothing new is stored, so there is no second writer, no migration, and a record
+ * written by an older worker projects the same way as a new one.
+ */
+export function projectLeafResult(
+  raw: Record<string, unknown>,
+  summaryBytes: number,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  // Drop the two unbounded fields and keep the rest as-is: `status`, `verdict`, `gate`, `reason`,
+  // `usage`, `seed`, `sessionId` and `ts` are all bounded by construction, and a caller that reads
+  // one of them today must keep reading it.
+  for (const [k, v] of Object.entries(raw)) {
+    if (k !== 'patch' && k !== 'text' && k !== 'workspace') out[k] = v;
+  }
+  const ws = obj(raw.workspace);
+  if (ws) {
+    // The DESCRIPTOR survives (baseline, patchSha256, patchBytes, diffstat, patchRefused, error);
+    // only the bytes go. That descriptor is what makes the artifact fetch worth making.
+    const { patch: _p, patchBase64: _b, ...kept } = ws;
+    out.workspace = kept;
+  }
+  const summary = summarize(raw, ws);
+  if (summary) out.summary = clip(summary, summaryBytes);
+  const artifacts = describeArtifacts(raw, ws);
+  if (artifacts.length > 0) out.artifacts = artifacts;
+  return out;
+}
+
+/**
+ * The one line a caller reads instead of the output: the prompt leaf's text, a gate's summary, a
+ * patch's diffstat, or a failure's reason — whichever this result has, in that order. Clipped by
+ * the caller, so a leaf that answered with a megabyte of prose costs a poll the same as a terse one.
+ */
+function summarize(
+  raw: Record<string, unknown>,
+  ws: Record<string, unknown> | null,
+): string | null {
+  const text = str(raw.text);
+  if (text) return text;
+  const gate = obj(raw.gate);
+  const gateSummary = gate ? str(gate.summary) : null;
+  if (gateSummary) return gateSummary;
+  const stat = obj(ws?.diffstat);
+  if (stat) {
+    const n = (v: unknown) => (typeof v === 'number' ? v : 0);
+    return `${n(stat.files)} files, +${n(stat.insertions)} -${n(stat.deletions)}`;
+  }
+  return str(raw.reason);
+}
+
+/**
+ * `patch` when there are bytes to serve, nothing otherwise. A record whose capture was refused for
+ * size (`patchRefused`) deliberately has no artifact: the worker never carried the bytes out of the
+ * sandbox, so there is nothing to fetch and the descriptor is the whole answer.
+ */
+function describeArtifacts(
+  raw: Record<string, unknown>,
+  ws: Record<string, unknown> | null,
+): TurnArtifact[] {
+  const bytes = patchSize(raw, ws);
+  if (bytes === null) return [];
+  const sha = ws ? str(ws.patchSha256) : null;
+  return [{ kind: 'patch', bytes, ...(sha ? { sha256: sha } : {}) }];
+}
+
+/**
+ * The patch's size, without materialising it: the status read is POLLED, so it must not copy a
+ * multi-megabyte diff per call the way `patchBody` does. A base64 capture states its decoded size
+ * in the descriptor (`captureTurnPatch` measures the raw buffer); only a record without one pays
+ * for the decode.
+ */
+function patchSize(
+  raw: Record<string, unknown>,
+  ws: Record<string, unknown> | null,
+): number | null {
+  const text = str(raw.patch) ?? (ws ? str(ws.patch) : null);
+  if (text) return Buffer.byteLength(text, 'utf8');
+  const b64 = ws ? str(ws.patchBase64) : null;
+  if (!b64) return null;
+  const declared = ws && typeof ws.patchBytes === 'number' ? ws.patchBytes : null;
+  return declared ?? Buffer.from(b64, 'base64').byteLength;
+}
+
+/**
+ * The artifact the path names, or null when this result has none. `kind` is validated here rather
+ * than by the router: an unknown kind and a result without that kind are the same answer (404), so
+ * there is one place that decides it.
+ */
+export function pickArtifact(raw: Record<string, unknown>, kind: string): ArtifactBody | null {
+  if (kind !== 'patch') return null;
+  return patchBody(raw, obj(raw.workspace));
+}
+
+/**
+ * A solve leaf's patch lives in `patch` (the result IS the diff); a prompt leaf's in
+ * `workspace.patch`, or `workspace.patchBase64` when the diff was not valid UTF-8 — which is why
+ * this returns a Buffer and not a string.
+ */
+function patchBody(
+  raw: Record<string, unknown>,
+  ws: Record<string, unknown> | null,
+): ArtifactBody | null {
+  const text = str(raw.patch) ?? (ws ? str(ws.patch) : null);
+  if (text) return { bytes: Buffer.from(text, 'utf8'), contentType: PATCH_CONTENT_TYPE };
+  const b64 = ws ? str(ws.patchBase64) : null;
+  if (b64) return { bytes: Buffer.from(b64, 'base64'), contentType: PATCH_CONTENT_TYPE };
+  return null;
 }

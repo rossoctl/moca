@@ -255,6 +255,17 @@ describe('async turn settings (async fan-out spec §4.3, §5.1, §9)', () => {
     }
   });
 
+  it('defaults the status read s summary cap to 2048 bytes and reads MOCA_TURN_SUMMARY_BYTES (#390)', () => {
+    expect(configFromEnv(baseEnv).turnSummaryBytes).toBe(2048);
+    expect(configFromEnv({ ...baseEnv, MOCA_TURN_SUMMARY_BYTES: '64' }).turnSummaryBytes).toBe(64);
+    // 0 means "no summary at all", the same way the quota's 0 means "no async": a strict parse, so
+    // a typo fails the boot rather than silently restoring 2048.
+    expect(configFromEnv({ ...baseEnv, MOCA_TURN_SUMMARY_BYTES: '0' }).turnSummaryBytes).toBe(0);
+    expect(() => configFromEnv({ ...baseEnv, MOCA_TURN_SUMMARY_BYTES: '2k' })).toThrow(
+      'MOCA_TURN_SUMMARY_BYTES',
+    );
+  });
+
   it('reads MOCA_TENANCY, and refuses a near-miss NAME at boot', () => {
     expect(configFromEnv({ ...baseEnv, MOCA_TENANCY: 'multi' }).tenancy).toBe('multi');
     // readTenancy's near-miss check, now load-bearing in the control plane too: a misnamed tenancy

@@ -358,6 +358,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // contract the worker has had, and the point of the check.
     tenancy: readTenancy(env),
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
+    turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
     // Where a worker spends an inference grant (MI1 §6.3). Only the harness profile reads it: the
     // sandbox profile returns above and serves no turns.
     inferenceUrl: inferenceUrlFromEnv(env),
@@ -450,6 +451,7 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     asyncQueuedPerOwner: 0,
     tenancy: 'single',
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
+    turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
   };
   checkRefreshConfig(config);
   return config;

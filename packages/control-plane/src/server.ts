@@ -236,6 +236,18 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         );
         return;
       }
+      if (Buffer.isBuffer(body)) {
+        // Bytes, written as-is. Without this the fall-through below would JSON-encode the buffer
+        // and a patch would go out as `{"type":"Buffer","data":[...]}` (#390).
+        res
+          .writeHead(status, {
+            'Content-Type': contentType ?? 'application/octet-stream',
+            'Content-Length': String(body.byteLength),
+            ...extra,
+          })
+          .end(body);
+        return;
+      }
       if (typeof body === 'string') {
         // A string body is plain text unless the handler says otherwise -- only the oidc callback
         // page renders HTML, and it is the one route answered by a browser rather than a client.

@@ -137,11 +137,19 @@ export interface TurnStatus {
    * count, so do not compute "the server gave up" from this -- read `state: 'failed' | 'lost'`.
    */
   attempts: number;
-  /** Absent until the leaf writes one. `status: 'aborted'` has no state of its own; it reads `failed`. */
+  /**
+   * Absent until the leaf writes one. `status: 'aborted'` has no state of its own; it reads `failed`.
+   *
+   * BOUNDED (#390): the turn's output -- a patch, the assistant's text -- is NOT here, because this
+   * route is polled. `summary` describes it in one clipped line, `artifacts` says what
+   * `GET …/turns/{turnId}/artifacts/{kind}` can serve, and `workspace` carries the patch's
+   * descriptor (baseline, sha, size, diffstat) so a fetched diff can be applied.
+   */
   result?: {
     status: string;
-    patch?: string;
-    text?: string;
+    summary?: string;
+    artifacts?: { kind: string; bytes: number; sha256?: string }[];
+    workspace?: Record<string, unknown>;
     gate?: Record<string, unknown>;
     reason?: string;
   };

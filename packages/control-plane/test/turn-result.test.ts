@@ -1,0 +1,167 @@
+import { describe, expect, it } from 'vitest';
+import { clip, pickArtifact, projectLeafResult } from '../src/turn-result.js';
+
+/**
+ * The read-time projection the async status route answers with (#390, async spec §4.4). The point
+ * of every test here is one sentence: the OUTPUT leaves the body and a description of it stays.
+ */
+describe('projectLeafResult (#390)', () => {
+  const solved = {
+    status: 'solved',
+    verdict: null,
+    gate: null,
+    reason: null,
+    patch: 'diff --git a/x b/x\n@@ -1 +1,2 @@\n-a\n+b\n+c\n',
+    text: null,
+    usage: { input_tokens: 10, output_tokens: 2 },
+    sessionId: 's-1',
+    ts: '2026-11-16T00:00:00.000Z',
+    workspace: {
+      baseline: 'a'.repeat(40),
+      patchSha256: 'f'.repeat(64),
+      patchBytes: 44,
+      diffstat: { files: 1, insertions: 2, deletions: 1 },
+    },
+  };
+
+  it('strips the patch and the assistant text, keeps everything else', () => {
+    const out = projectLeafResult(solved, 2048);
+    expect(out.patch).toBeUndefined();
+    expect(out.text).toBeUndefined();
+    // Not just "some patch field is gone": no part of the diff is anywhere in the body.
+    expect(JSON.stringify(out)).not.toContain('diff --git');
+    expect(out).toMatchObject({
+      status: 'solved',
+      usage: { input_tokens: 10, output_tokens: 2 },
+      sessionId: 's-1',
+      ts: '2026-11-16T00:00:00.000Z',
+      workspace: {
+        baseline: 'a'.repeat(40),
+        patchSha256: 'f'.repeat(64),
+        patchBytes: 44,
+        diffstat: { files: 1, insertions: 2, deletions: 1 },
+      },
+    });
+  });
+
+  it('names the patch as a fetchable artifact, with its size and the capture s sha', () => {
+    expect(projectLeafResult(solved, 2048).artifacts).toEqual([
+      { kind: 'patch', bytes: Buffer.byteLength(solved.patch, 'utf8'), sha256: 'f'.repeat(64) },
+    ]);
+  });
+
+  it('summarises a solve by its diffstat, a prompt by its text, a gate by its summary, a failure by its reason', () => {
+    expect(projectLeafResult(solved, 2048).summary).toBe('1 files, +2 -1');
+    expect(projectLeafResult({ ...solved, text: 'the repo builds' }, 2048).summary).toBe(
+      'the repo builds',
+    );
+    expect(
+      projectLeafResult(
+        {
+          status: 'paused',
+          gate: { gateId: 1, summary: 'wants to push', proposed_action: 'push' },
+        },
+        2048,
+      ).summary,
+    ).toBe('wants to push');
+    expect(projectLeafResult({ status: 'failed', reason: 'leaf exited 1' }, 2048).summary).toBe(
+      'leaf exited 1',
+    );
+    // Nothing to summarise: no key at all rather than an empty string, so a client can tell
+    // "no summary" from "the leaf said nothing".
+    expect(projectLeafResult({ status: 'done', verdict: null }, 2048)).toEqual({
+      status: 'done',
+      verdict: null,
+    });
+  });
+
+  it('clips the summary at the byte cap', () => {
+    const out = projectLeafResult({ status: 'responded', text: 'x'.repeat(5000) }, 16);
+    expect(out.summary).toBe('x'.repeat(16) + '…[truncated]');
+  });
+
+  it('offers no artifact for a capture refused for size, and keeps the refusal visible', () => {
+    const out = projectLeafResult(
+      {
+        status: 'responded',
+        text: 'done',
+        workspace: {
+          patchRefused: 'too_large',
+          patchBytes: 9_000_000,
+          patchSha256: 'e'.repeat(64),
+        },
+      },
+      2048,
+    );
+    // The bytes never left the sandbox, so there is nothing to fetch -- and the descriptor is the
+    // whole answer about that patch.
+    expect(out.artifacts).toBeUndefined();
+    expect(out.workspace).toEqual({
+      patchRefused: 'too_large',
+      patchBytes: 9_000_000,
+      patchSha256: 'e'.repeat(64),
+    });
+  });
+
+  it('describes a prompt leaf s workspace patch without decoding it', () => {
+    const patch = Buffer.from('diff --git a/b b/b\n');
+    const out = projectLeafResult(
+      {
+        status: 'responded',
+        text: 'changed one file',
+        workspace: { patchBase64: patch.toString('base64'), patchBytes: patch.byteLength },
+      },
+      2048,
+    );
+    expect(out.artifacts).toEqual([{ kind: 'patch', bytes: patch.byteLength }]);
+    expect(out.workspace).toEqual({ patchBytes: patch.byteLength });
+  });
+
+  it('survives a record from an older worker, which has no workspace at all', () => {
+    expect(projectLeafResult({ status: 'solved', patch: 'diff --git a/x b/x\n' }, 2048)).toEqual({
+      status: 'solved',
+      artifacts: [{ kind: 'patch', bytes: 19 }],
+    });
+  });
+});
+
+describe('pickArtifact (#390)', () => {
+  it('serves a solve patch, a prompt workspace patch, and a base64 one decoded', () => {
+    expect(pickArtifact({ patch: 'diff a\n' }, 'patch')).toEqual({
+      bytes: Buffer.from('diff a\n'),
+      contentType: 'text/x-diff',
+    });
+    expect(pickArtifact({ workspace: { patch: 'diff b\n' } }, 'patch')?.bytes).toEqual(
+      Buffer.from('diff b\n'),
+    );
+    // The binary-safe capture: a diff that is not valid UTF-8 is stored base64, and must come back
+    // byte-exact rather than through a lossy string round trip.
+    const raw = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xff, 0xfe, 0x0a]);
+    expect(
+      pickArtifact({ workspace: { patchBase64: raw.toString('base64') } }, 'patch')?.bytes,
+    ).toEqual(raw);
+  });
+
+  it('has nothing for an unknown kind, an empty patch, or a refused capture', () => {
+    expect(pickArtifact({ patch: 'diff a\n' }, 'transcript')).toBeNull();
+    expect(pickArtifact({ patch: null, text: 'hello' }, 'patch')).toBeNull();
+    expect(pickArtifact({ workspace: { patchRefused: 'too_large' } }, 'patch')).toBeNull();
+  });
+});
+
+describe('clip (#390)', () => {
+  it('leaves a string under the cap alone', () => {
+    expect(clip('short', 16)).toBe('short');
+  });
+
+  it('counts BYTES, not characters, and never emits a half character', () => {
+    // 'é' is two bytes, so a 3-byte cap lands mid-codepoint on the second one. The replacement
+    // char is the honest answer; invalid UTF-8 on the wire is not.
+    expect(clip('éé', 4)).toBe('éé');
+    expect(clip('ééé', 3)).toBe('é�…[truncated]');
+  });
+
+  it('clips to nothing at a cap of 0, which is what an operator asking for no summary means', () => {
+    expect(clip('anything', 0)).toBe('…[truncated]');
+  });
+});
