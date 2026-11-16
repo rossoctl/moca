@@ -1253,7 +1253,7 @@ function reuseKey(
  * restart, or while every holder is briefly stale, no fresh host holds it, so a create builds
  * again: a duplicate build, never an answer that points at a missing snapshot. The rebuild
  * registers under the same manifest hash and supersedes the old build (host-handlers.ts, rule
- * T.unique) unless a fresh host holds the snapshot by then.
+ * T.unique) unless another fresh host holds the snapshot by then.
  */
 function stillHeld(deps: CpDeps, x: TemplateBuild): boolean {
   if (x.status !== 'registered' || !deps.hosts) return true;

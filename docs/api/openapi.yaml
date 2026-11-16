@@ -2314,8 +2314,8 @@ paths:
         does, the create is admitted as a new build (`202`, no `reused`), with the usual quota and
         gate checks. That build registers under the same build id and supersedes the old one,
         which becomes `retired` (`reason.step: superseded`), and the tags that named it, `default`
-        included, name the new build; unless a fresh host holds the snapshot by then, when the new
-        build is rejected, rule `T.unique`. A failed or rejected build is never reused.
+        included, name the new build; unless a fresh host other than the one that built it holds
+        the snapshot by then, when the new build is rejected, rule `T.unique`. A failed or rejected build is never reused.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

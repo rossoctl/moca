@@ -306,6 +306,13 @@ export function freshHosts(deps: CpDeps): [string, HostState][] {
 export const heldFresh = (deps: CpDeps, buildId: string): boolean =>
   freshHosts(deps).some(([, h]) => h.holds[buildId] !== undefined);
 
+/**
+ * heldFresh, leaving one host out: at registration, the host reporting `built` is expected to
+ * hold the snapshot it has just built (its inventory may list it before the report arrives).
+ */
+export const heldFreshElsewhere = (deps: CpDeps, buildId: string, host: string): boolean =>
+  freshHosts(deps).some(([id, h]) => id !== host && h.holds[buildId] !== undefined);
+
 function catalogOf(deps: CpDeps) {
   const cat = deps.templates;
   if (!cat?.update || !deps.provenance || !deps.policy) {
@@ -966,24 +973,30 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       const results = registrationResults(y, t, sm);
       // A build id names one build in use of a template: a second build of the same snapshot (the
       // same image and spec, created again with another gate record or profile, which the host
-      // finds already built) is not registered beside the first. Except a registered twin whose
-      // snapshot no fresh host holds (heldFresh): it was removed from every host, so a create built
-      // it again (a create reuses a registered build only while a host holds it), and this build
-      // supersedes it in this same update. The twin becomes retired, keeping its id; the tags
-      // naming that id (`default` among them) then resolve to this build (buildById), and a
-      // `retire` record by the policy names both builds.
+      // finds already built) is not registered beside the first while another host holds it.
+      // Except a registered twin whose snapshot no fresh host but this one holds
+      // (heldFreshElsewhere): it was removed from every other host, so a create built it again (a
+      // create reuses a registered build only while a host holds it), and this build supersedes it
+      // in this same update. This host is left out: it has just built the snapshot, and its
+      // inventory may list it before this report; when it held the snapshot all along (the "already
+      // built" short cut), the result is still one registered build of it, on a host that holds
+      // it. The twin becomes retired, keeping its id; the tags naming that id (`default` among
+      // them) then resolve to this build (buildById), and a `retire` record by the policy names
+      // both builds.
       const twin = buildById(
         c.builds.filter((x) => x !== y),
         manifestHash,
       );
       const supersedes =
-        twin?.status === 'registered' && !heldFresh(deps, manifestHash) ? twin : undefined;
+        twin?.status === 'registered' && !heldFreshElsewhere(deps, manifestHash, host)
+          ? twin
+          : undefined;
       results.push(
         supersedes
           ? {
               rule: 'T.unique',
               passed: true,
-              message: `supersedes registered build ${supersedes.handle ?? supersedes.buildId}, whose snapshot no host holds`,
+              message: `supersedes registered build ${supersedes.handle ?? supersedes.buildId}, whose snapshot no other host holds`,
             }
           : twin
             ? {
@@ -1023,7 +1036,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
               status: 'retired' as const,
               leases: [],
               reason: {
-                message: `superseded by build ${build.handle}: the same snapshot built again, after no host held it`,
+                message: `superseded by build ${build.handle}: the same snapshot built again, held by no other host`,
                 step: 'superseded',
               },
             }

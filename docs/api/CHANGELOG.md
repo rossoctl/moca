@@ -21,11 +21,12 @@ same snapshot registers as.
   refused `409 template_unavailable`. A build on its way (`queued` to `built`) is reused as before,
   and a deployment without host agents is unchanged. Right after a control-plane restart, before
   any host has reported, such a create builds again.
-- Registration: that rebuild has the old build's manifest hash. When no fresh host holds it, the
-  rebuild registers and supersedes the old build in the same update: the old build becomes
+- Registration: that rebuild has the old build's manifest hash. When no fresh host holds it but the
+  one reporting the build (which has just built it), the rebuild registers and supersedes the old
+  build in the same update: the old build becomes
   `retired` with `reason: {step: superseded}` and keeps its build id, and the tags that named it,
-  `default` included, name the new build. A `retire` record by `policy` names both builds. When a
-  fresh host does hold the hash, the rebuild is rejected, rule `T.unique`, as before.
+  `default` included, name the new build. A `retire` record by `policy` names both builds. When
+  another fresh host does hold the hash, the rebuild is rejected, rule `T.unique`, as before.
 - GET /v1/templates/{id}/builds/{build}, DELETE /v1/templates/{id}/builds/{build}, POST
   /v1/templates/{id}/builds/{build}/reject, activate `{build}`, tags and `id@<build>`: a build id
   a superseded build shares names the build that took it over; the superseded build is found by
