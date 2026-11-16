@@ -142,7 +142,7 @@ A cohort user who works in one sandbox every day would lose its workspace at the
 although the sandbox was never idle (rossoctl/moca#770). The absolute lifetime is right
 for an abandoned sandbox and wrong for one in use.
 
-**Decided** (design: [`../specs/2026-11-16-sbx-idle-lifetime-design.md`](../specs/2026-11-16-sbx-idle-lifetime-design.md)):
+**Decided** (design approved 2026-11-16: [`../specs/2026-11-16-sbx-idle-lifetime-design.md`](../specs/2026-11-16-sbx-idle-lifetime-design.md)):
 
 - A sandbox ends after its **idle lifetime** with no activity. Each sandbox-token or set-mode-token
   mint moves `expiresAt` to `max(expiresAt, now + idleLifetimeS)`, unless the client marks the mint

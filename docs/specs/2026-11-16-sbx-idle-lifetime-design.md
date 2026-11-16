@@ -1,7 +1,7 @@
 # SBX0 — A sandbox's lifetime counts idle time, not time since creation — Design
 
 Version: 0.1 — November 16, 2026 (draft for review)
-Status: Design. Not approved. Not built.
+Status: Design. Approved (2026-11-16). Not built.
 Milestone: **Idle lifetime**, an increment of
 [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md), registered in
 [the milestone registry](README.md).
@@ -125,10 +125,14 @@ So both mint routes take an optional body field, `activity` (boolean, default `t
 
 - `POST /v1/sandboxes/{id}/token` and `POST /v1/sandboxes/{id}/mode-token` with
   `{ "activity": false }` mint as today and do not touch the deadline. Anything but a boolean is
-  `400 invalid_request`. `PUT /v1/sandboxes/{id}/mode` (an owner's mode change) always counts.
+  `400 invalid_request`. `PUT /v1/sandboxes/{id}/mode` (an owner's mode change) always counts, and
+  refuses a body naming `activity` with `400 invalid_request`, so a client that sends it there
+  learns it has no effect rather than getting a silent extension.
 - **Default `true`**, so an older `mocactl` and developers' own code (SBX0 §7) still extend. An older
-  client cannot ask for more than the 7-day default (it has no `--lifetime`), so its sandboxes keep the
-  25-day margin of §7 even with its keepalive counting.
+  `mocactl` cannot ask for more than the 7-day default (it has no `--lifetime`), so its sandboxes keep
+  the 25-day margin of §7 even with its keepalive counting. Developers' own code can send
+  `idleLifetimeS` up to the maximum without ever sending the hint; its margin is then §7's, as low as
+  2 days at 30 days.
 - **`mocactl` sends `activity: false`** for the keepalive's mints and for `sbx get`'s.
 - **A no-activity token never runs a command.** The exec connection records whether its held token
   came from an activity mint. Before an Exec (`exec`, `run`, `push`, `pull`, `shell`, MCP tool
@@ -158,7 +162,7 @@ The record stores it, and `expiresAt = now + idleLifetimeS`.
 
 In `mintSandboxToken`, after `requireLive` and `underPolicy`, before the token is minted (and in
 the same place in the two set-mode token handlers, before `setModeTokenFor`), unless the body says
-`activity: false` (which `PUT …/mode` does not accept):
+`activity: false` (which `PUT …/mode` refuses, §3.1):
 
 ```
 touched = store.touch(id, now, rec.idleLifetimeS ?? cfg.lifetimeS, cfg.retentionS)
@@ -233,11 +237,15 @@ the egress expiry index; `egress-log.ts`) gets `EXPIREAT end + retention` only w
 events, from the deadline as it was then. The egress records design promises the log lives "as long
 as the sandbox record: its end plus the sandbox retention". So a touch that moves the deadline also
 moves those keys' `EXPIREAT` and their index score (`ZADD XX`), when they exist, and leaves a sealed
-log alone (a sealed log belongs to an ended sandbox, which a touch refuses). Preferably inside
-`TOUCH` (the keys passed in KEYS); a second write right after it is acceptable, since the next mint
-or append repairs a crash between the two. Liveness stays judged from
-the caller's `now` against the `live` score, so the memory and Redis stores stay in step under one
-injected clock.
+log alone (a sealed log belongs to an ended sandbox, which a touch refuses). This is done **inside
+`TOUCH`**, the stream, meta and index keys passed in KEYS: a second write after it could crash on
+the last mint before a sandbox goes idle, and nothing would repair it, so the log would expire at the
+old `end + retention` while the record lived to the new one. Every key is in one Redis (none of
+`sandbox-redis.ts`'s or `egress-log.ts`'s keys are cluster hash-tagged, and SBX0 runs no Redis
+Cluster), so one script can touch both prefixes.
+
+Liveness stays judged from the caller's `now` against the `live` score, so the memory and Redis
+stores stay in step under one injected clock.
 
 **Write cost.** One script per mint: a connection mints at most once per token lifetime (15 min by
 default), so a few writes per active sandbox per hour. No throttling is needed; the builder may skip
@@ -261,14 +269,19 @@ the write when the extension would be under 60 s.
 `SH_WORKSPACE_IDLE` becomes `SBX_MAX_LIFETIME_DAYS × 24 + 48` hours (768 h at the default), and
 `setup.sh`'s check becomes `SH_WORKSPACE_IDLE > SH_SANDBOX_MAX_LIFETIME_SECONDS`.
 
-Why the invariant still holds (SBX0 §5.4.1, restated). Both clocks are idle clocks now:
+Why the invariant still holds (SBX0 §5.4.1, restated). Both clocks are idle clocks now, though they
+do not reset on the same events:
 
-- the worker reclaims a workspace after `max + 48 h` with no Exec on it;
+- the worker reclaims a workspace after `max + 48 h` without a reset of its `lastExec`, which an
+  Exec's start sets (`acquire`, `pool.go`), as do a lease run's start and end and the lease's own
+  end (`lease.go`; lease end includes `keepalive_lost` and the lease idle timeout);
 - the control plane ends a sandbox after `L ≤ max` with no mint;
 - every Exec is preceded, within one token lifetime (≤ 1 h), by a mint.
 
-So a workspace idle at the worker for `max + 48 h` belongs to a sandbox with no mint for at least
-`max + 47 h > L`, which has already ended — except when mints went on without Execs (§7). The
+Each of the worker's resets happens during or after an Exec, so its last reset is never earlier
+than the last Exec's start; a lease end with no new mint only moves the worker's clock later, which
+makes it more conservative. So a workspace idle at the worker for `max + 48 h` belongs to a sandbox
+with no mint for at least `max + 47 h > L`, which has already ended — except when mints went on without Execs (§7). The
 janitor's unknown-directory sweep uses the same `SH_WORKSPACE_IDLE` and the same reasoning, and
 needs no change.
 
@@ -307,7 +320,10 @@ would need the relay to report Execs to the control plane, which is out of scope
 
 - `mocactl sbx create` and `mocactl sbx up` take `--lifetime DURATION` (`36h`, `14d`, or seconds),
   sent as `idleLifetimeS`. The control plane holds the range; the client checks only the syntax, as
-  `--idle-timeout` does. `up` passes it only when it creates.
+  `--idle-timeout` does: `--lifetime 30m` reaches the server and its 400 names the range (§4.1).
+  `up` sends it only when it creates. When `up` binds an existing sandbox, it warns that the lifetime
+  is set only at create and that the sandbox keeps its own (`sbx-… keeps its 7 d lifetime;
+--lifetime applies only to a new sandbox`), and goes on; it is not an error.
 - `create`, `ls`, `get`, `doctor` and the `sync.ts` binding line keep printing `expires <time>` and
   add the idle lifetime: `expires 2026-11-23T09:00:00Z (after 7 d without use)`. `--json` outputs
   carry `idleLifetimeS`.
@@ -359,7 +375,8 @@ sandbox can live" becomes "longer than the longest idle lifetime a sandbox can h
 - **`exec-conn`**: a connection whose sandbox's deadline moved keeps running Execs past the original
   `sandboxExpiresAt`; one without the field behaves as today.
 - **Hint** (handlers): `activity: false` mints a token and leaves `expiresAt`, the record's TTL and
-  the name key as they were, on both routes; a non-boolean refuses; `PUT …/mode` extends regardless;
+  the name key as they were, on both routes; a non-boolean refuses; `PUT …/mode` extends, and
+  refuses a body naming `activity` with 400;
   a no-activity mint on an expired sandbox still refuses.
 - **`mocactl`**: an MCP server left open with no tool calls on a lease sandbox mints only with
   `activity: false`; the first tool call after a keepalive mint mints again, with activity; `sbx get`
@@ -373,7 +390,8 @@ sandbox can live" becomes "longer than the longest idle lifetime a sandbox can h
 - **`setup.sh`** (bash 3.2–compatible, as the deploy tests already are): `SH_WORKSPACE_IDLE` comes
   from `SBX_MAX_LIFETIME_DAYS`; `SBX_MAX_LIFETIME_DAYS < SBX_LIFETIME_DAYS` refuses; changing only
   `SBX_LIFETIME_DAYS` no longer asks for `SBX_ACK_HOSTS`; changing the maximum does.
-- **`mocactl`**: `--lifetime` parsing and its placement (`create`, `up`), the new output lines.
+- **`mocactl`**: `--lifetime` parsing and its placement (`create`, `up`), `up`'s warning when it
+  binds an existing sandbox, the new output lines.
 
 ## 13. Calls made in this design (for review)
 
@@ -387,4 +405,6 @@ These were not discussed explicitly; each is the designer's call:
 - the 60 s write skip being optional;
 - the MCP description's wording change;
 - `sandboxExpiresAt` on the mint response, and the clients following it (§4.2);
-- the egress log's keys moving with the deadline (§5.2).
+- the egress log's keys moving with the deadline, inside `TOUCH` (§5.2);
+- `PUT …/mode` refusing `activity`, and `up` warning (not failing) on `--lifetime` for an existing
+  sandbox.
