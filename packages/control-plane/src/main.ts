@@ -53,6 +53,7 @@ import {
 import { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 import { RedisEgressStore, type EgressRedisLike } from './egress-log.js';
 import { readTenancy } from './tenancy.js';
+import { refuseMisnamedIdentityProvider } from './identity-switch.js';
 import { TurnStore } from './turn-store.js';
 import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
@@ -234,6 +235,9 @@ function grantTtlsFromEnv(env: NodeJS.ProcessEnv): Pick<CpConfig, 'grantTtlS' | 
 
 export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
+  // Before SH_IDENTITY_PROVIDER is read here or in identityProviderFromEnv: a misspelled name
+  // would otherwise leave it unset and serve github (#723).
+  refuseMisnamedIdentityProvider(env);
   // The github client id belongs to the github provider only; an oidc deployment has
   // SH_OIDC_CLIENT_ID instead, and identityProviderFromEnv enforces that one (main.ts).
   if ((env.SH_IDENTITY_PROVIDER || 'github') === 'github') {

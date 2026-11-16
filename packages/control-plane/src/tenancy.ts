@@ -21,13 +21,13 @@ const SERVICE_LINK = /_(?:SERVICE_HOST|SERVICE_PORT|PORT|PORT_\d+_(?:TCP|UDP|SCT
 const NAMED_PORT = '_SERVICE_PORT_';
 const PORT_NAME = /^[A-Z0-9_]+$/;
 
-function isServiceLink(name: string): boolean {
+export function isServiceLink(name: string): boolean {
   if (SERVICE_LINK.test(name)) return true;
   const at = name.lastIndexOf(NAMED_PORT);
   return at >= 0 && PORT_NAME.test(name.slice(at + NAMED_PORT.length));
 }
 
-function editDistanceAtMostOne(a: string, b: string): boolean {
+export function editDistanceAtMostOne(a: string, b: string): boolean {
   if (Math.abs(a.length - b.length) > 1) return false;
   let i = 0;
   let j = 0;
