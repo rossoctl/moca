@@ -128,6 +128,11 @@ held token for a call that names no timeout while the token has at least half th
 left (480 s by default), and cuts that call's timeout to what the token has left minus 60 s. A call
 that names a timeout the held token cannot cover still gets a fresh token.
 
+A mint also moves the sandbox's deadline: to at least now plus the sandbox's idle lifetime
+(`idleLifetimeS`), never backwards. Send `{"activity": false}` as the body for a mint that runs no
+command, such as a keepalive, so that it does not count. The token response's `sandboxExpiresAt` is
+the deadline after the mint; track it, since it moves.
+
 The longest single command is therefore one token lifetime. Split longer work into several calls.
 
 **Delete and de-enrollment are not immediate.** A token already issued keeps working until its

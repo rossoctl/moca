@@ -152,7 +152,11 @@ describe('§9.3 test 3 — contract drift', () => {
 
   it('documents the set-mode token response', () => {
     const post = doc().paths['/v1/sandboxes/{id}/mode-token'].post;
-    expect(post.requestBody).toBeUndefined();
+    // An optional `activity` body only (idle-lifetime spec §4.2).
+    expect(post.requestBody.required).toBe(false);
+    expect(Object.keys(post.requestBody.content['application/json'].schema.properties)).toEqual([
+      'activity',
+    ]);
     const schema = post.responses['200'].content['application/json'].schema;
     expect(schema.required).toEqual(['setModeToken']);
     expect(Object.keys(schema.properties)).toEqual(['setModeToken']);
@@ -178,7 +182,7 @@ describe('§9.3 test 3 — contract drift', () => {
     const ok = doc().paths['/v1/sandboxes/{id}/token'].post.responses['200'];
     const schema = ok.content['application/json'].schema;
     expect([...schema.required].sort()).toEqual(
-      ['execCa', 'execEndpoint', 'expiresAt', 'token', 'wrk', 'wsk'].sort(),
+      ['execCa', 'execEndpoint', 'expiresAt', 'sandboxExpiresAt', 'token', 'wrk', 'wsk'].sort(),
     );
     expect(schema.properties.execCa.type).toEqual(['string', 'null']);
   });

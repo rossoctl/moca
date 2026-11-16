@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.24.0
+  version: 1.25.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -4298,12 +4298,27 @@ paths:
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
         404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
-        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt` (§4.3). A sandbox whose lease
+        SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt`, after an activity mint moved it
+        to at least now plus the sandbox's `idleLifetimeS` (§4.3; idle-lifetime spec §4.2). A sandbox whose lease
         mode SH_SANDBOX_MODES_ALLOWED no longer lists is first set to `per-exec` at the next epoch,
         and the `idle_timeout_s` claim is clamped to SH_SANDBOX_IDLE_CEILING_S (lease-mode spec
-        §8.1). No request body.
+        §8.1). The optional body `{ "activity": false }` mints without moving the deadline; a
+        non-boolean `activity` is refused (400).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                activity:
+                  type: boolean
+                  default: true
+                  description: >-
+                    false: mint without counting as activity (the deadline does not move); for
+                    mints that run no command, e.g. a lease keepalive
       responses:
         '200':
           description: a sandbox token, and where to send Exec with it
@@ -4311,10 +4326,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [token, expiresAt, execEndpoint, wrk, wsk, execCa]
+                required: [token, expiresAt, sandboxExpiresAt, execEndpoint, wrk, wsk, execCa]
                 properties:
                   token: { type: string, description: 'JWT, typ moca-sandbox+jwt' }
                   expiresAt: { type: integer, description: epoch seconds }
+                  sandboxExpiresAt:
+                    type: integer
+                    description: the sandbox's expiresAt after this mint; track it, it moves
                   execEndpoint: { type: string, description: 'host:port of the exec Route' }
                   wrk:
                     type: string
@@ -4415,7 +4433,8 @@ paths:
         audited as `sandbox_mode_changed` (who, the old mode, the new mode, the epoch). Sandbox
         tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
         that mode and epoch for the client's `LeaseControl set_mode`, through which a downgrade takes
-        effect at once (lease-mode spec §8.2).
+        effect at once (lease-mode spec §8.2). A mode change always counts as activity and slides the
+        sandbox's deadline; a body naming `activity` is refused (400).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       requestBody:
@@ -4484,9 +4503,24 @@ paths:
         set_mode` when the worker reports the epoch unknown (lease-mode spec §8.2). The exception
         is a lease mode SH_SANDBOX_MODES_ALLOWED no longer lists: the sandbox is first set to
         `per-exec` at the next epoch, as the sandbox token mint does (§8.1). The `idle_timeout_s`
-        claim is clamped to SH_SANDBOX_IDLE_CEILING_S. No request body.
+        claim is clamped to SH_SANDBOX_IDLE_CEILING_S. Like the token mint it slides the sandbox's
+        deadline to at least now plus its `idleLifetimeS`, unless the body says `activity: false`
+        (a non-boolean `activity` is refused, 400).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                activity:
+                  type: boolean
+                  default: true
+                  description: >-
+                    false: mint without counting as activity (the deadline does not move); for
+                    mints that run no command, e.g. a lease keepalive
       responses:
         '200':
           description: a set-mode token

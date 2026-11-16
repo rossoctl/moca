@@ -292,6 +292,31 @@ async function underPolicy(
 }
 
 /**
+ * Whether a mint counts as activity (idle-lifetime spec §4.2): omitted is true, so today's clients,
+ * which send no body, keep a sandbox alive. `false` is for a mint that runs no command, such as a
+ * lease keepalive. Parsed before any write, so a refused body changes nothing.
+ */
+function parseActivity(raw: unknown): boolean {
+  if (raw === undefined) return true;
+  if (typeof raw !== 'boolean')
+    throw new CpError('invalid_request', 'activity must be true or false');
+  return raw;
+}
+
+/**
+ * Slide the sandbox's deadline to at least now plus its idle lifetime (idle-lifetime spec §3.1),
+ * atomically in the store, so a mint racing a delete or the deadline refuses rather than reviving
+ * the record. Returns the record as moved; the token is signed from it, so it is capped at the NEW
+ * deadline.
+ */
+async function extend(deps: CpDeps, rec: SandboxRecord, now: number): Promise<SandboxRecord> {
+  const { cfg, store } = service(deps);
+  const moved = await store.touch(rec.id, now, lifetimeOf(cfg, rec), cfg.retentionS);
+  if (!moved) return refuseGone(store, rec.id, now);
+  return moved;
+}
+
+/**
  * The idle timeout a token carries: the record's, clamped to the ceiling as it is NOW. Lowering
  * SH_SANDBOX_IDLE_CEILING_S changes neither the record nor the epoch: the idle timeout travels on
  * every Exec (ruling R12), so the next token is enough. 0, the worker's default, stays 0.
@@ -2939,12 +2964,19 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     };
   },
 
+  /**
+   * Mint an exec token. An activity mint (the default; `activity: false` opts out) first slides the
+   * sandbox's deadline to at least now plus its idle lifetime (idle-lifetime spec §4.2), and the
+   * token is capped at that moved deadline, which the response reports as `sandboxExpiresAt`.
+   */
   mintSandboxToken: async (ctx, deps) => {
     const read = await assertSandboxOwner(ctx, deps, { admin: false });
     const { cfg } = service(deps);
     const now = seconds(deps);
+    const activity = parseActivity(asRecord(ctx.body).activity);
     requireLive(read, now);
-    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
+    let rec = await underPolicy(deps, ctx.principal!.sub, read, now);
+    if (activity) rec = await extend(deps, rec, now);
     const { token, exp } = mintSandboxToken(deps.signer, {
       sub: rec.owner,
       tenant: rec.tenant,
@@ -2964,6 +2996,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       body: {
         token,
         expiresAt: exp,
+        sandboxExpiresAt: rec.expiresAt,
         execEndpoint: cfg.execEndpoint,
         wrk: rec.worker,
         wsk: rec.wsk,
@@ -2977,7 +3010,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
    * another user's sandbox gets the same 404 as anyone else, since a mode is what the owner's Execs
    * may do. Every accepted call raises the epoch, the same mode included, and
    * returns a set-mode token for that epoch, for the client's `LeaseControl set_mode`: a downgrade
-   * takes effect at once only through it (spec §8.2).
+   * takes effect at once only through it (spec §8.2). A mode change always counts as activity: it
+   * slides the deadline (idle-lifetime spec §4.2), and a body naming `activity` is refused.
    */
   setSandboxMode: async (ctx, deps) => {
     const rec = await assertSandboxOwner(ctx, deps, { admin: false });
@@ -2985,12 +3019,18 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const now = seconds(deps);
     requireLive(rec, now);
     const b = asRecord(ctx.body);
+    if ('activity' in b)
+      throw new CpError(
+        'invalid_request',
+        'activity is not taken here: a mode change always counts as activity',
+      );
     const mode = parseMode(b.mode, cfg);
     const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
     const changed = await store.setMode(rec.id, mode, idleTimeoutS, now);
     // Deleted, expired or past retention since the read above.
     if (!changed) return refuseGone(store, rec.id, now);
-    const next = changed.record;
+    // A mode change is activity: slide the deadline from the record the change returned.
+    const next = await extend(deps, changed.record, now);
     await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
       subject: ctx.principal!.sub,
       sandboxId: rec.id,
@@ -3012,13 +3052,17 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
   /**
    * A set-mode token for the mode and epoch the record holds now, raising nothing: what `mocactl sbx
    * get` re-sends when the worker reports the epoch unknown (spec §8.2). Owner only, as above. The
-   * one exception is a mode the policy no longer allows, downgraded first (underPolicy).
+   * one exception is a mode the policy no longer allows, downgraded first (underPolicy). Like a
+   * token mint it slides the deadline unless the body says `activity: false` (idle-lifetime spec
+   * §4.2), which a lease keepalive sends.
    */
   mintSandboxModeToken: async (ctx, deps) => {
     const read = await assertSandboxOwner(ctx, deps, { admin: false });
     const now = seconds(deps);
+    const activity = parseActivity(asRecord(ctx.body).activity);
     requireLive(read, now);
-    const rec = await underPolicy(deps, ctx.principal!.sub, read, now);
+    let rec = await underPolicy(deps, ctx.principal!.sub, read, now);
+    if (activity) rec = await extend(deps, rec, now);
     return { status: 200, body: { setModeToken: setModeTokenFor(deps, rec, now) } };
   },
 

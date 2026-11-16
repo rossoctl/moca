@@ -13,6 +13,29 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.25.0
+
+A sandbox's lifetime counts idle time ([#770](https://github.com/rossoctl/moca/issues/770)), per the
+[idle-lifetime design](../specs/2026-11-16-sbx-idle-lifetime-design.md) §3 and §4.2. Additive on the
+wire.
+
+- POST /v1/sandboxes takes `idleLifetimeS` (integer, 3600 to the deployment's maximum; omitted is
+  the default lifetime), and every `Sandbox` carries it.
+- Activity mints slide `expiresAt`: POST /v1/sandboxes/{id}/token, POST
+  /v1/sandboxes/{id}/mode-token and PUT /v1/sandboxes/{id}/mode move it to at least now plus the
+  sandbox's `idleLifetimeS` (clamped to the maximum as it is now), never backwards. Reads and lists
+  do not.
+- POST /v1/sandboxes/{id}/token and /mode-token accept an optional body `{ "activity": false }`: a
+  mint that runs no command (a lease keepalive) leaves the deadline where it is. A non-boolean
+  `activity` is `400 invalid_request`.
+- POST /v1/sandboxes/{id}/token returns `sandboxExpiresAt`, the sandbox's `expiresAt` after the
+  mint; it moves, so track it. The token's `exp` is capped at it.
+- PUT /v1/sandboxes/{id}/mode refuses a body naming `activity` (`400 invalid_request`): a mode
+  change always counts as activity.
+- Stored data: the record hash gains `idleLifetimeS`, and a touch rewrites `expiresAt`, the `live`
+  score and the TTLs. An older control plane reads the moved `expiresAt` correctly and ignores the
+  field.
+
 ## 1.24.0
 
 Grants at dequeue under `MOCA_TENANCY=multi`
