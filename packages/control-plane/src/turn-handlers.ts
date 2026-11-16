@@ -90,9 +90,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
    * POST /v1/sessions/{id}/turns (§4.1). 202 with the turn id and nothing else.
    *
    * The order below is specified, not incidental (§4.2, §4.3): ownership, then shape, then the
-   * workload refusal, then the tenancy gate, then the quota, then idempotency, then create-and-
-   * enqueue. Each later step would otherwise answer for an earlier one -- most visibly the workload
-   * 501, which must not be reported as a 429 for a request that can never be served at all.
+   * workload refusal, then the quota, then idempotency, then create-and-enqueue. Each later step
+   * would otherwise answer for an earlier one -- most visibly the workload 501, which must not be
+   * reported as a 429 for a request that can never be served at all. ADR-0047's tenancy gate used to
+   * sit between the two; #388 deleted it, because the dequeue now mints grants rather than refusing.
    */
   submitTurn: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
@@ -105,13 +106,6 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       throw new CpError(
         'workload_runs_unavailable',
         'workload runs are unavailable; submit a leaf turn without workloadId',
-      );
-    }
-    if (deps.config.tenancy === 'multi') {
-      await refusal(deps, rec, 'async_tenancy_unsupported');
-      throw new CpError(
-        'async_tenancy_unsupported',
-        'async turns require MOCA_TENANCY=single in this release (ADR-0047); the multi-tenant path is M2',
       );
     }
 

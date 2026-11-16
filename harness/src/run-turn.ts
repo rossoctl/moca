@@ -568,6 +568,10 @@ export type InferenceAuthHeader = 'authorization' | 'x-api-key';
  *                 credential from a mounted secret_dir (P5 §3.1-§3.2).
  *   direct      — the real token, resolved per subject by the control plane, with no injector in the
  *                 path. MU1's interim mode; MU3 deletes it.
+ *   grant       — an INFERENCE GRANT, not a credential (MI1 §6.1). `value` is a signed capability and
+ *                 `anthropicBaseUrl` is the control plane's own inference listener, which swaps the
+ *                 grant for the real credential and forwards upstream. The multi-tenant async mode;
+ *                 a worker in this mode holds nothing it could spend anywhere else.
  *
  * A bare string would make the two indistinguishable, and both failure directions are silent: a
  * placeholder-mode deployment with a misconfigured injector sends the placeholder upstream and gets an
@@ -577,7 +581,12 @@ export type InferenceAuthHeader = 'authorization' | 'x-api-key';
  */
 export type UpstreamCredential =
   | { mode: 'placeholder'; value: string; header?: InferenceAuthHeader }
-  | { mode: 'direct'; value: string; header?: InferenceAuthHeader };
+  | { mode: 'direct'; value: string; header?: InferenceAuthHeader }
+  // `header` is in this arm only so the three stay structurally identical, which is what lets
+  // turn-auth.ts and turn-claim.ts assign `{ mode: resolved.mode, ... }` with the mode still a
+  // union. Nothing sets it: in grant mode the header is the REDEEMER's choice, made where the
+  // credential's binding is known, so the worker always sends a Bearer.
+  | { mode: 'grant'; value: string; header?: InferenceAuthHeader };
 
 /**
  * The model a control-plane session names, with the limits its catalog reported (per-session model

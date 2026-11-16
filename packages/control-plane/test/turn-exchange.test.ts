@@ -5,8 +5,20 @@ import type { TurnRecord, TurnState } from '../src/turn-record.js';
 import { TurnStore } from '../src/turn-store.js';
 import { exchangeCredential } from '../src/exchange.js';
 import { exchangeTurnCredential } from '../src/turn-exchange.js';
-import { alice, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
-import { fakeRedis } from './helpers/fake-redis.js';
+import { INFERENCE_GRANT_AUDIENCE, SANDBOX_GRANT_AUDIENCE, verifyGrant } from '../src/grant.js';
+import {
+  alice,
+  codeOf,
+  ctx,
+  makeDeps,
+  NOW_MS,
+  seedBundle,
+  seedCredential,
+} from './helpers/deps.js';
+import { fakeBundleRedis, fakeRedis } from './helpers/fake-redis.js';
+import { grantRing } from './helpers/grants.js';
+
+const DIGEST = `sha256:${'a'.repeat(64)}`;
 
 /**
  * The DEQUEUE-time credential exchange (async fan-out spec §5.4, MI1 §6.5). The property this file
@@ -217,30 +229,6 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     // Without this check a turn record is a request for whoever's key it names.
     const turnId = await queuedTurn(d, sid, { owner: 'github:9999', tenant: 'github:9999' });
     expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('session_not_found');
-  });
-
-  it('refuses under MOCA_TENANCY=multi, by name (the M1 interim gate, §9.1)', async () => {
-    const d = exDeps({ config: { tenancy: 'multi' } });
-    const sid = await session(d);
-    const turnId = await queuedTurn(d, sid);
-
-    // MI1 §6.6: direct mode is reachable only under `single`, and "under `multi` the exchange returns
-    // grants or refuses; it never returns a real key". This slice mints no grants, so it refuses.
-    // Asserted even though submitTurn already refuses `multi`: that refusal stops NEW submissions,
-    // while a deployment flipped to `multi` with entries already on the queue would otherwise drain
-    // them down the single-tenant path this gate exists to forbid.
-    expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('async_tenancy_unsupported');
-  });
-
-  it('refuses `multi` BEFORE resolving anything, so no credential is read on that path', async () => {
-    const d = exDeps({ config: { tenancy: 'multi' } });
-    const sid = await session(d);
-    const turnId = await queuedTurn(d, sid);
-    // The order is the point, not the code: a gate that fires after resolveInference has already
-    // fetched the secret has read a credential it is forbidden to return. Proven by removing the
-    // credential -- the answer stays the tenancy refusal rather than becoming credential_required.
-    await d.credentials.delete('github:1234', 'my-anthropic');
-    expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('async_tenancy_unsupported');
   });
 
   it('propagates the credential refusals unchanged, rather than falling back to anyone s key', async () => {
@@ -605,5 +593,157 @@ describe('a queued turn is pinned to its submission (#388)', () => {
     // the deployment default through the same line -- `sessionTier`'s own suite covers it.
     const untiered = await queuedTurn(d, 'id-1', { turnId: 't-untiered', sandboxTier: '' });
     expect((await exchangeTurnCredential(untiered, d)).sandboxTier).toBe('microvm');
+  });
+});
+
+describe('under MOCA_TENANCY=multi the worker gets grants, never a key (#388, MI1 §6.6)', () => {
+  /** The deps the M1 interim gate used to refuse: multi, a grant ring, and somewhere to redeem. */
+  function multiDeps(config: Record<string, unknown> = {}) {
+    return exDeps({
+      ...grantRing(),
+      config: { tenancy: 'multi', inferenceUrl: 'http://127.0.0.1:3129', ...config },
+    });
+  }
+
+  it('returns both grants, turn_exp, and no credential value anywhere', async () => {
+    const d = multiDeps();
+    const sid = await session(d);
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid), d);
+
+    expect(res.mode).toBe('grant');
+    // The control plane's own inference listener, never a provider: in this mode the worker cannot
+    // reach one directly and is not told a provider's address.
+    expect(res.anthropicBaseUrl).toBe('http://127.0.0.1:3129');
+    // The redeemer decides the upstream header from the credential's binding, so the worker always
+    // sends a Bearer and never has to be told otherwise.
+    expect(res).not.toHaveProperty('authHeader');
+
+    const nowS = Math.floor(d.now() / 1000);
+    const inf = verifyGrant(res.anthropicAuthToken, d.grantVerifyKeys!, INFERENCE_GRANT_AUDIENCE, {
+      now: nowS,
+    });
+    expect(inf).toMatchObject({ sid, sub: 'github:1234', cred: 'my-anthropic' }); // the NAME
+    verifyGrant(res.sandboxGrant!, d.grantVerifyKeys!, SANDBOX_GRANT_AUDIENCE, { now: nowS });
+    expect(res.turnExp).toBe(nowS + 120); // the fixture's caps.wallClock
+    expect(JSON.stringify(res)).not.toContain('sk-fake'); // notsecret
+  });
+
+  it('mints NOTHING when the credential is gone -- the grant path never reads one', async () => {
+    const d = multiDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid);
+    // What the deleted gate proved by refusing: no secret is read on this path at all. Now the
+    // proof is that a turn whose named credential has been deleted still gets its grants -- the
+    // name is a capability, and resolving it is the redeemer's job (§6.3), at redemption time.
+    await d.credentials.delete('github:1234', 'my-anthropic');
+    const res = await exchangeTurnCredential(turnId, d);
+    expect(res.mode).toBe('grant');
+    expect(
+      verifyGrant(res.anthropicAuthToken, d.grantVerifyKeys!, INFERENCE_GRANT_AUDIENCE, {
+        now: Math.floor(d.now() / 1000),
+      }),
+    ).toMatchObject({ cred: 'my-anthropic' });
+  });
+
+  it('anchors turn_exp to the DEQUEUE and clamps it to caps.wallClock (async §5.4)', async () => {
+    // An async turn's exchange can be an hour after its submission, so an enqueue-anchored window
+    // would hand the worker a turn that is already most of the way to expired.
+    const atClaim = NOW_MS + 60_000;
+    const d = multiDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid, { caps: { tokens: 500, wallClock: 120 } });
+    const res = await exchangeTurnCredential(turnId, { ...d, now: () => atClaim });
+    expect(res.turnExp).toBe(Math.floor(atClaim / 1000) + 120);
+  });
+
+  it('clamps a caps.wallClock above MOCA_TURN_MAX_S rather than refusing', async () => {
+    const d = multiDeps({ turnMaxS: 600 });
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid, { caps: { tokens: 500, wallClock: 99_999 } });
+    // A caller asking for longer than the deployment allows wants the longest turn it can have.
+    expect((await exchangeTurnCredential(turnId, d)).turnExp).toBe(
+      Math.floor(d.now() / 1000) + 600,
+    );
+  });
+
+  it('falls back to MOCA_TURN_MAX_S for a turn that recorded no wallClock', async () => {
+    const d = multiDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid, { caps: { tokens: 500 } });
+    expect((await exchangeTurnCredential(turnId, d)).turnExp).toBe(
+      Math.floor(d.now() / 1000) + 1800,
+    );
+  });
+
+  it('still refuses a tombstoned session and a terminal turn before minting anything', async () => {
+    const d = multiDeps();
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid);
+    await d.index.tombstone(sid);
+    expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('session_not_found');
+
+    const cancelled = await queuedTurn(d, sid, { turnId: 't-cancelled', state: 'cancelled' });
+    expect(await codeOf(() => exchangeTurnCredential(cancelled, d))).toBe('turn_not_claimable');
+    // A refused claim mints nothing: the audit stream is the only record a grant left the control
+    // plane, so an entry here would mean a capability was handed out on a refusal.
+    expect(
+      [...d.streams.values()].flat().filter((e) => e.decision === 'grants_issued'),
+    ).toHaveLength(0);
+  });
+
+  it('refuses with internal_error, not a key, when multi is configured without a redeemer', async () => {
+    // The boot contract (`checkGrantRedemption`) makes this unreachable in a booted deployment; the
+    // assertion is that the fallback is a refusal rather than the single-tenant path.
+    const d = multiDeps({ inferenceUrl: undefined });
+    const sid = await session(d);
+    const turnId = await queuedTurn(d, sid);
+    expect(await codeOf(() => exchangeTurnCredential(turnId, d))).toBe('internal_error');
+  });
+
+  it('keeps the session s template, seed and tier on the grant path too', async () => {
+    const d = multiDeps({
+      sessionTemplates: [
+        {
+          id: 'py312',
+          worker: 'sbx_py312',
+          description: 'Python 3.12',
+          tools: [],
+          seed: 'echo hi',
+        },
+      ],
+      sandboxTiers: { names: ['container'], default: 'container' },
+    });
+    await seedCredential(d, 'github:1234', 'my-anthropic');
+    const sid = (
+      await HANDLERS.createSession!(
+        ctx({
+          principal: alice,
+          body: { credentials: { inference: 'my-anthropic' }, sandbox: { template: 'py312' } },
+        }),
+        d,
+      )
+    ).body as { sessionId: string };
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid.sessionId), d);
+    // Everything that is not the credential is identical on both paths: a grant-mode turn of a
+    // templated session must still land on that template's workers, seeded, or it runs with the
+    // wrong workspace.
+    expect(res).toMatchObject({
+      sandboxTemplate: 'py312',
+      sandboxSeed: 'echo hi',
+      sandboxSeedSource: 'declared',
+      sandboxTier: 'container',
+    });
+  });
+
+  it('refreshes the turn s bundle TTL on the grant path too', async () => {
+    const d = multiDeps();
+    const sid = await session(d);
+    seedBundle(d, DIGEST);
+    const res = await exchangeTurnCredential(await queuedTurn(d, sid, { cfg: DIGEST }), d);
+    expect(res.configRef).toBe(DIGEST);
+    // The touch is what the move above the tenancy branch bought: a bundle in daily use by async
+    // turns must not age out just because the deployment runs multi-tenant.
+    const bundles = d.bundles as ReturnType<typeof fakeBundleRedis>;
+    expect(bundles.expires.some((e) => e.key.includes(DIGEST))).toBe(true);
   });
 });

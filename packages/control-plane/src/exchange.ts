@@ -21,7 +21,13 @@ import { verifyToken } from './token.js';
  * If the credential rode inside the token instead, a client-visible bearer string would contain a
  * provider key -- landing in browser storage, proxy logs and shell history. This keeps it server-side.
  */
-export type CredentialMode = 'placeholder' | 'direct';
+/**
+ * `grant` is the multi-tenant async mode (MI1 §6.1): `anthropicAuthToken` is an INFERENCE GRANT, not
+ * a key, and `anthropicBaseUrl` is the control plane's own inference listener rather than a provider.
+ * The worker's wire shape is identical to `direct` -- `Authorization: Bearer <token>` to
+ * `anthropicBaseUrl` -- which is why `applyModelGateway` needs no new branch for it.
+ */
+export type CredentialMode = 'placeholder' | 'direct' | 'grant';
 
 export interface ExchangeResponse {
   mode: CredentialMode;
@@ -70,6 +76,19 @@ export interface ExchangeResponse {
    * §4.5). Absent when the session names none, so that response is unchanged.
    */
   model?: SessionModel;
+  /**
+   * `grant` mode only (MI1 §6.1): the sandbox half of the pair. The worker carries it to the
+   * sandbox-egress redeemer, which does not exist yet -- it is returned now because the pair is
+   * minted together and one `jti` per half is the audit record. A worker that has nowhere to spend
+   * it simply ignores it.
+   */
+  sandboxGrant?: string;
+  /**
+   * `grant` mode only. Absolute epoch SECONDS past which the turn will not be extended
+   * (async §5.4). Equal to the grants' own `exp` (decision D4), so a worker needs it only to know
+   * when to stop, never to schedule a refresh.
+   */
+  turnExp?: number;
 }
 
 /**
@@ -449,6 +468,9 @@ export async function exchangeCredential(
   // Placeholder mode WINS whenever the deployment has an injector, so adding one strictly narrows
   // what the harness may hold; direct mode is reachable only when none is configured, and MU3 deletes
   // it outright (spec §3.6).
+  // shortcut: under MOCA_TENANCY=multi this still returns a real key, which MI1 §6.6 forbids --
+  // pre-existing, since this path never held a tenancy gate, and #388 lifts only the async one.
+  // Mirror turn-exchange.ts's grant branch here when an interactive turn can reach the redeemer.
   const mode: CredentialMode = deps.config.injectorConfigured ? 'placeholder' : 'direct';
 
   // In DIRECT mode the harness sends the secret itself, in the header its binding names, so the

@@ -54,7 +54,6 @@ export const CP_ERROR_CODES = [
   'envelope_invalid',
   'async_quota_exhausted',
   'workload_runs_unavailable',
-  'async_tenancy_unsupported',
   'turn_not_cancellable',
   'turn_not_found',
   'turn_not_claimable',
@@ -169,7 +168,6 @@ const STATUS: Record<CpErrorCode, number> = {
   // 501: the M1 gate (async spec §9). Async needs the credential resolved from the turn record at
   // dequeue, which MI1 S2's interim allows under `single` only. A dated, conditional refusal rather
   // than an omission -- the shape ADR-0041 used for its own deprecation window.
-  async_tenancy_unsupported: 501,
   // 409: DELETE on a turn that is not `queued`. A running leaf finishes and writes its result; the
   // message names the state so a client need not guess why (async spec §4.5).
   turn_not_cancellable: 409,

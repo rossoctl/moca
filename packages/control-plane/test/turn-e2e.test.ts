@@ -443,28 +443,6 @@ describe('async turn, end to end (#387 acceptance)', () => {
     expect(claim.json().error).toBe('turn_not_found');
   });
 
-  it('refuses every claim under MOCA_TENANCY=multi, even for turns already queued', async () => {
-    const sid = await createSession(ALICE);
-    const { turnId } = (
-      await request('POST', `/v1/sessions/${sid}/turns`, {
-        body: { async: true, kind: 'prompt', prompt: 'go' },
-        headers: auth(ALICE),
-      })
-    ).json();
-    // Flipped AFTER the submission, which is the only way to reach this state: submitTurn refuses
-    // `multi` outright, so a deployment that switches with work already on the queue is exactly the
-    // case the second gate exists for (MI1 §6.6 -- under `multi` it never returns a real key).
-    d.config = { ...d.config, tenancy: 'multi' };
-
-    const claim = await request('POST', '/internal/turn-credentials', {
-      body: { turnId },
-      headers: { Authorization: `Bearer ${EXCHANGE_TOKEN}` },
-    });
-    expect(claim.status).toBe(501);
-    expect(claim.json().error).toBe('async_tenancy_unsupported');
-    expect(JSON.stringify(claim.json())).not.toContain('sk-fake'); // notsecret
-  });
-
   it('refuses past the quota over HTTP with 429, and the stream stops growing', async () => {
     const quota = 2;
     d.config = { ...d.config, asyncQueuedPerOwner: quota };
