@@ -42,13 +42,20 @@ describe.skipIf(NO_KUBECTL)('overlays/ocp/p4-relay (P6.2 §2.4)', () => {
       '--disable-authentication',
       '--alpn',
       'h2',
+      '--status',
+      'http://0.0.0.0:8454',
     ]);
     expect(tls.securityContext).toMatchObject({
       allowPrivilegeEscalation: false,
       readOnlyRootFilesystem: true,
       capabilities: { drop: ['ALL'] },
     });
-    expect(tls.readinessProbe.tcpSocket).toEqual({ port: 'https' });
+    // #724: probed on its own status port, never on the TLS port (a handshake error every 5 s).
+    expect(tls.readinessProbe).toEqual({
+      httpGet: { path: '/_metrics', port: 'status' },
+      periodSeconds: 5,
+    });
+    expect(tls.ports).toContainEqual({ name: 'status', containerPort: 8454 });
     const vol = podSpec(relay()).volumes.find((v: { name: string }) => v.name === 'relay-tls');
     expect(vol.secret).toEqual({ secretName: 'moca-relay-tls', defaultMode: 288 });
     // The relay itself is untouched: still one replica, Recreate, its own container intact.
