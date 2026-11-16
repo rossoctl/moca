@@ -160,8 +160,15 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// refuse writes a named refusal, emits its one event and ends the conn.
+// refuse writes a named refusal, emits its one event and ends the conn. A conn
+// Unregister aborted gets neither (#825): abort has written its one terminal
+// event and closes the conn, and a refusal reached after it is the echo of
+// abort's own cancel (an upstream request that failed because it was
+// cancelled), which the guest must not read as the proxy's answer.
 func (pc *proxyConn) refuse(e Event, host string) {
+	if pc.wasAborted() {
+		return
+	}
 	if e.Host == "" {
 		e.Host = host
 	}
