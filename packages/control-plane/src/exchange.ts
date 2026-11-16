@@ -8,6 +8,7 @@ import { holdPinnedWorker } from './host-handlers.js';
 import type { InferenceTarget } from './model-catalog.js';
 import type { SessionModel } from './models.js';
 import type { SessionRecord } from './ownership.js';
+import { buildById } from './template-catalog.js';
 import { verifyToken } from './token.js';
 
 /**
@@ -158,7 +159,7 @@ export async function sessionSeed(
       );
       throw new CpError('internal_error', "the template store could not read the session's build");
     }
-    const b = doc?.builds.find((x) => x.buildId === build);
+    const b = doc ? buildById(doc.builds, build) : undefined;
     if (b) return b.spec.seed?.trim() ? { seed: b.spec.seed, source: 'build' } : undefined;
   }
   const declared = sessionTemplate(rec, deps.config.sessionTemplates)?.seed;

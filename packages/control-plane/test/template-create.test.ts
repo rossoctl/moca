@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
+import { HostRegistry } from '../src/host-handlers.js';
 import { ProvenanceStore, sha256Hex, verifyExport } from '../src/provenance.js';
 import { FileTemplateCatalog } from '../src/template-catalog.js';
 import { FilePolicyStore } from '../src/template-policy-store.js';
@@ -293,6 +294,91 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       (await create(d, body({ spec: { ...spec, description: 'another build' } }))).body,
     ).not.toHaveProperty('reused');
     expect(await builds()).toHaveLength(2);
+  });
+
+  it('reuses a registered build only while a host holds its snapshot (lifecycle spec §4, Reuse)', async () => {
+    const d = stored();
+    const hosts = new HostRegistry();
+    d.hosts = hosts;
+    const limits = {
+      activeLimit: 4,
+      idleLimitSeconds: 3600,
+      buildConcurrency: 1,
+      diskFreeGb: 200,
+      diskFloorGb: 60,
+    };
+    const nowS = NOW_MS / 1000;
+    hosts.set('host-1', { at: nowS, holds: {}, running: [], limits });
+    await create(d);
+    // On its way, a build has no snapshot yet: it is reused although no host holds it.
+    expect((await create(d)).body).toMatchObject({ status: 'queued', reused: true });
+    const H = 'sha256:' + 'b'.repeat(64);
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'registered' as const, buildId: H })),
+    }));
+    hosts.set('host-1', { at: nowS, holds: { [H]: ID }, running: [], limits });
+    const held = await create(d);
+    expect(held.status).toBe(200);
+    expect(held.body).toMatchObject({ status: 'registered', reused: true, buildId: H });
+    // The snapshot was removed from every host: no host holds it, so the create builds again.
+    hosts.set('host-1', { at: nowS, holds: {}, running: [], limits });
+    const again = await create(d);
+    expect(again.status).toBe(202);
+    expect(again.body).toMatchObject({ status: 'queued', buildId: null });
+    expect(again.body).not.toHaveProperty('reused');
+  });
+
+  it('does not count a stale host as holding a registered build for reuse (HOST_STALE_S)', async () => {
+    const d = stored();
+    const hosts = new HostRegistry();
+    d.hosts = hosts;
+    const limits = {
+      activeLimit: 4,
+      idleLimitSeconds: 3600,
+      buildConcurrency: 1,
+      diskFreeGb: 200,
+      diskFloorGb: 60,
+    };
+    const nowS = NOW_MS / 1000;
+    await create(d);
+    const H = 'sha256:' + 'b'.repeat(64);
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'registered' as const, buildId: H })),
+    }));
+    // The host listing the snapshot last reported past HOST_STALE_S: placement leaves it out, so a
+    // sandbox create on the build would be refused. Another host reports, holding nothing of it:
+    // the create builds again.
+    hosts.set('host-1', { at: nowS - 400, holds: { [H]: ID }, running: [], limits });
+    hosts.set('host-2', { at: nowS, holds: {}, running: [], limits });
+    const stale = await create(d);
+    expect(stale.status).toBe(202);
+    expect(stale.body).not.toHaveProperty('reused');
+  });
+
+  it('reuses a registered build while no fresh host reports at all (holding unknown)', async () => {
+    const d = stored();
+    const hosts = new HostRegistry();
+    d.hosts = hosts;
+    const limits = {
+      activeLimit: 4,
+      idleLimitSeconds: 3600,
+      buildConcurrency: 1,
+      diskFreeGb: 200,
+      diskFloorGb: 60,
+    };
+    await create(d);
+    const H = 'sha256:' + 'b'.repeat(64);
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'registered' as const, buildId: H })),
+    }));
+    // No host has reported (a restart): reused.
+    expect((await create(d)).body).toMatchObject({ reused: true, buildId: H });
+    // The only host is silent past HOST_STALE_S, holding nothing at its last report: reused.
+    hosts.set('host-1', { at: NOW_MS / 1000 - 400, holds: {}, running: [], limits });
+    expect((await create(d)).body).toMatchObject({ reused: true, buildId: H });
   });
 
   it('answers a registered build 200 with its buildId, and builds again after a failure', async () => {

@@ -61,10 +61,21 @@ export interface TemplateBuild {
   provenance?: string;
   /** What a host agent needs to build it (§6.1): the image and the spec as the client sent them. */
   request?: { image: string; spec: Record<string, unknown>; gateRecordSha256?: string };
+  /**
+   * The handle of the registered build of the same inputs this build was admitted to rebuild,
+   * because no fresh host held that build's snapshot (lifecycle spec §4, Reuse): only such a
+   * rebuild supersedes it at registration (§6.1, rule `T.unique`). Internal: never on the wire.
+   */
+  rebuildOf?: string;
   /** Epoch milliseconds it was queued: the claim order (createdAt is whole seconds). */
   queuedAtMs?: number;
-  /** The host that claimed it, and when (epoch seconds). */
-  claim?: { host: string; at: number };
+  /**
+   * The host that claimed it, and when (epoch seconds). `held`: for a rebuild (rebuildOf), that
+   * host's last inventory already held the snapshot of the build it rebuilds when it claimed it
+   * (the "already built" short cut), so its report is not a rebuild and supersedes nothing.
+   * Internal: never on the wire.
+   */
+  claim?: { host: string; at: number; held?: true };
   /**
    * Created on a selfAttest profile with a gate record the policy did not trust (self-attestation):
    * a fact of its create. Whether it is self-attested NOW is recomputed from the current policy
@@ -82,7 +93,10 @@ export interface TemplateBuild {
    * `network_needed` contract, whether the offline run met it. Absent: no gate record.
    */
   gateFloor?: { checkedOffline: boolean; metOffline?: boolean };
-  /** On `failed` or `rejected`: why, and at which step or rule. */
+  /**
+   * On `failed` or `rejected`: why, and at which step or rule. On a build retired because a rebuild
+   * of its snapshot superseded it at registration: why, step `superseded`.
+   */
   reason?: { message: string; step?: string; rule?: string };
   /**
    * Activation leases (§6.3): each subject's hold on this build, until (epoch seconds). The build is
@@ -142,16 +156,38 @@ export interface TemplateCatalog {
   ): Promise<TemplateDoc>;
 }
 
+/**
+ * The build a build id names in one template. A build id names one build in use: a registered build
+ * that a rebuild of the same snapshot superseded at registration (§6.1, rule `T.unique`) keeps its
+ * id, retired, beside the build that took it over, so of the builds with this id the one not
+ * ended (neither retired nor rejected) is meant; with none, the newest.
+ */
+export function buildById(builds: readonly TemplateBuild[], id: string): TemplateBuild | undefined {
+  let ended: TemplateBuild | undefined;
+  for (const b of builds) {
+    if (b.buildId !== id) continue;
+    if (b.status !== 'retired' && b.status !== 'rejected') return b;
+    ended ??= b;
+  }
+  return ended;
+}
+
+/** The build a route's `{build}` names: its handle, else its build id (buildById). */
+export const buildByRef = (
+  builds: readonly TemplateBuild[],
+  ref: string,
+): TemplateBuild | undefined => builds.find((b) => b.handle === ref) ?? buildById(builds, ref);
+
 /** The build a reference names: `id` (tag default), `id:tag`, or `id@sha256:...` (§3.2). */
 export function resolveBuild(
   doc: TemplateDoc,
   ref: { tag?: string; build?: string },
 ): TemplateBuild | null {
-  if (ref.build !== undefined) return doc.builds.find((b) => b.buildId === ref.build) ?? null;
+  if (ref.build !== undefined) return buildById(doc.builds, ref.build) ?? null;
   const tag = ref.tag ?? 'default';
   // An own property only: `id:constructor` names no tag, not Object.prototype's constructor.
   const id = Object.hasOwn(doc.tags, tag) ? doc.tags[tag] : undefined;
-  return id === undefined ? null : (doc.builds.find((b) => b.buildId === id) ?? null);
+  return id === undefined ? null : (buildById(doc.builds, id) ?? null);
 }
 
 /** An imported build's id: stable per worker, and not the worker id (clients never see that). */

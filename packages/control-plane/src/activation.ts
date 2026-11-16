@@ -286,7 +286,10 @@ export function place(
   for (const d of docs)
     for (const b of d.builds)
       if (b.status === 'registered' || endedWithWorker(b)) {
-        workerOf.set(b.buildId, b.worker);
+        // A superseded build keeps its id, retired, beside the registered one that took it over
+        // (template-catalog.ts buildById): the registered one's worker is the id's.
+        if (b.status === 'registered' || !workerOf.has(b.buildId))
+          workerOf.set(b.buildId, b.worker);
         // A worker a registered build shares is that build's; an ended one's own is its own.
         if (b.worker && (b.status === 'registered' || !buildOfWorker.has(b.worker)))
           buildOfWorker.set(b.worker, b.buildId);
