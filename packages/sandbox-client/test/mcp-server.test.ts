@@ -251,6 +251,20 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
       );
     });
 
+    it('names the latest deadline when the sandbox turns out expired', async () => {
+      const T1 = Date.UTC(2026, 9, 17, 12, 30) / 1000;
+      const T2 = T1 + 86_400;
+      let latest = T1;
+      const { client } = await connect({
+        exec: throwing(new FakeApiError('sandbox_terminated', 'sandbox has expired')),
+        expiresAt: () => latest,
+      });
+      latest = T2;
+      expect(text(await call(client, 'read', { path: 'a' }))).toContain(
+        new Date(T2 * 1000).toISOString(),
+      );
+    });
+
     it('says the sandbox was deleted even when its expiry is known', async () => {
       const { client } = await connect({
         exec: throwing(new FakeApiError('sandbox_terminated', 'sandbox was deleted')),

@@ -107,8 +107,11 @@ export interface SandboxMcpOptions {
   /** Epoch ms; tests only. */
   now?: () => number;
   workspace?: string;
-  /** The sandbox's expiresAt (epoch s), named when the sandbox turns out to have expired. */
-  expiresAt?: number;
+  /**
+   * The sandbox's expiresAt (epoch s), named when the sandbox turns out to have expired. A function
+   * is read when the text is built: the deadline moves with activity (idle-lifetime spec §4.2).
+   */
+  expiresAt?: number | (() => number | undefined);
   name?: string;
   version?: string;
 }
@@ -269,7 +272,11 @@ function processFailureText(
 }
 
 /** The tool error for anything a tool threw: never shown as the command's output. */
-function describe(err: unknown, expiresAt?: number, sandboxId?: string): string {
+function describe(
+  err: unknown,
+  expiresAtOf?: number | (() => number | undefined),
+  sandboxId?: string,
+): string {
   if (err instanceof ToolInputError) return `invalid input: ${err.message}`;
   if (err instanceof LeaseControlError)
     return `the lease call failed (${err.code}): ${err.message}`;
@@ -278,6 +285,7 @@ function describe(err: unknown, expiresAt?: number, sandboxId?: string): string 
   const gone = terminated(err);
   if (gone === 'deleted') return `sandbox was deleted; ${UP}`;
   if (gone === 'expired') {
+    const expiresAt = typeof expiresAtOf === 'function' ? expiresAtOf() : expiresAtOf;
     const on = expiresAt ? ` on ${new Date(expiresAt * 1000).toISOString()}` : '';
     return `sandbox expired${on}; ${UP}`;
   }

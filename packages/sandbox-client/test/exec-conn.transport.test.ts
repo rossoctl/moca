@@ -212,8 +212,8 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
     const { c, asks } = conn(r.addr);
     expect((await c.exec('x', { timeoutS: 30 })).exitCode).toBe(3);
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: true, minValidS: 90 },
+      { force: false, minValidS: 60, activity: true },
+      { force: true, minValidS: 90, activity: true },
     ]);
     expect(r.seen[1]!.req.exec!.timeoutS).toBe(30);
     expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
@@ -571,7 +571,7 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     expect(r.seen[0]!.req.exec!.timeoutS).toBe(840);
     expect(res.capped).toBeUndefined();
     // The first Exec learns the lifetime from the token it gets; that token already covers 840 + 60.
-    expect(asks).toEqual([{ force: false, minValidS: 60 }]);
+    expect(asks).toEqual([{ force: false, minValidS: 60, activity: true }]);
   });
 
   it('does not ask twice on the first Exec for a token minted a fraction of a second ago', async () => {
@@ -590,9 +590,9 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     await c.exec('z');
     expect(r.seen.map((s) => s.req.exec!.timeoutS)).toEqual([100, 200, 840]);
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: false, minValidS: 260 },
-      { force: false, minValidS: 900 },
+      { force: false, minValidS: 60, activity: true },
+      { force: false, minValidS: 260, activity: true },
+      { force: false, minValidS: 900, activity: true },
     ]);
   });
 
@@ -603,8 +603,8 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     const { c, asks } = conn(r.addr, {}, { lifetimeS: 900, leftS: () => (++n === 1 ? 100 : 900) });
     const res = await c.exec('x', { timeoutS: 300 });
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: false, minValidS: 360 },
+      { force: false, minValidS: 60, activity: true },
+      { force: false, minValidS: 360, activity: true },
     ]);
     expect(r.seen[0]!.req.exec!.timeoutS).toBe(300);
     expect(res.capped).toBeUndefined();
@@ -619,8 +619,8 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     expect(res).toMatchObject({ capped: true, exitCode: 3 });
     // Never more life than a token can have: asking for 1860 s would mint on every Exec.
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: false, minValidS: 900 },
+      { force: false, minValidS: 60, activity: true },
+      { force: false, minValidS: 900, activity: true },
     ]);
   });
 
@@ -686,6 +686,47 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     await expect(unknown.c.exec('x')).rejects.toThrow(/lifetime 100s is too short/);
   });
 
+  it('asks for activity on an Exec, and not on a keepalive or a lease status', async () => {
+    const r = await fakeRelay(ok);
+    const { c, asks } = conn(r.addr);
+    await c.exec('true');
+    expect(asks.map((a) => a.activity)).toEqual([true]);
+    asks.length = 0;
+    await c.leaseKeepalive();
+    expect(asks.map((a) => a.activity)).toEqual([false]);
+    asks.length = 0;
+    await c.leaseControl('status');
+    expect(asks.map((a) => a.activity)).toEqual([false]);
+    asks.length = 0;
+    await c.leaseControl('reset');
+    expect(asks.map((a) => a.activity)).toEqual([true]);
+  });
+
+  it("runs past the sandbox's original end when each grant moves it", async () => {
+    const r = await fakeRelay(ok);
+    let nowS = NOW_S;
+    const { c } = conn(r.addr, {
+      sandboxExpiresAt: NOW_S + 100,
+      now: () => nowS * 1000,
+      token: async () => ({
+        token: 't',
+        expiresAt: nowS + 900,
+        lifetimeS: 900,
+        sandboxExpiresAt: nowS + 7 * 86_400,
+      }),
+    });
+    await c.exec('x');
+    nowS = NOW_S + 200;
+    await expect(c.exec('y')).resolves.toMatchObject({ exitCode: 3 });
+  });
+
+  it("keeps today's expiring refusal when grants carry no sandboxExpiresAt", async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr, { sandboxExpiresAt: NOW_S + 50 }, { lifetimeS: 50 });
+    await expect(c.exec('x')).rejects.toMatchObject({ kind: 'expiring' });
+    expect(r.seen).toHaveLength(0);
+  });
+
   it('keeps the learnt lifetime when a later token is capped by the sandbox expiry (final review M1)', async () => {
     const r = await fakeRelay(ok);
     let nowS = NOW_S;
@@ -721,7 +762,7 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
       expect((e as Error).message).toMatch(/^the sandbox token has \d+ s left/);
       expect(r.seen).toHaveLength(0);
       // Only after a fresh mint was asked for: one covering the timeout and its margin.
-      expect(asks.at(-1)).toEqual({ force: false, minValidS: 90 });
+      expect(asks.at(-1)).toEqual({ force: false, minValidS: 90, activity: true });
     },
   );
 
@@ -757,7 +798,7 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     expect(r.seen[1]!.req.exec!.reqId).toBe(r.seen[0]!.req.exec!.reqId);
     expect(r.seen[1]!.auth).toBe('Bearer fresh');
     expect(res.capped).toBe(true);
-    expect(asks.at(-1)).toEqual({ force: true, minValidS: 660 });
+    expect(asks.at(-1)).toEqual({ force: true, minValidS: 660, activity: true });
   });
 
   it('applies the lifetime cap of a fresh token with a shorter lifetime on the retry', async () => {
@@ -894,8 +935,8 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     const res = await c.exec('cat f', { timeoutS: 60 });
     expect(res).toMatchObject({ exitCode: 3, stdout: Buffer.from('out'), lease: [end] });
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: true, minValidS: 120 },
+      { force: false, minValidS: 60, activity: true },
+      { force: true, minValidS: 120, activity: true },
     ]);
     expect(r.seen.map((s) => s.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
     expect(r.seen.map((s) => s.req.exec!.command)).toEqual(['cat f', 'cat f']);
@@ -1005,7 +1046,7 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       idleTimeoutS: 900,
       pending: end,
     });
-    expect(asks).toEqual([{ force: false, minValidS: 60 }]);
+    expect(asks).toEqual([{ force: false, minValidS: 60, activity: false }]);
     expect(r.controls).toEqual([
       {
         req: { sandboxId: 'sbx_default', op: LeaseOp.LEASE_OP_STATUS, setModeToken: '' },
@@ -1116,8 +1157,8 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       state: 'active',
     });
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: true, minValidS: 60 },
+      { force: false, minValidS: 60, activity: true },
+      { force: true, minValidS: 60, activity: true },
     ]);
     // The same set-mode token both times: the relay refused the bearer before routing.
     expect(r.controls.map((x) => [x.auth, x.req.op, x.req.setModeToken])).toEqual([
@@ -1127,8 +1168,8 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     asks.length = 0;
     await expect(c.leaseKeepalive()).resolves.toBeUndefined();
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: true, minValidS: 60 },
+      { force: false, minValidS: 60, activity: false },
+      { force: true, minValidS: 60, activity: false },
     ]);
     expect(r.keepalives.map((x) => x.auth)).toEqual(['Bearer stale', 'Bearer fresh']);
   });
@@ -1163,8 +1204,8 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     });
     await expect(c.leaseKeepalive()).rejects.toMatchObject({ code: 'unauthenticated' });
     expect(asks).toEqual([
-      { force: false, minValidS: 60 },
-      { force: false, minValidS: 60 },
+      { force: false, minValidS: 60, activity: false },
+      { force: false, minValidS: 60, activity: false },
     ]);
     expect(r.controls).toHaveLength(0);
     expect(r.keepalives).toHaveLength(0);
@@ -1177,7 +1218,7 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
     const { c, asks } = conn(r.addr);
     await expect(c.leaseControl('set_mode', 'mode.jwt')).rejects.toMatchObject({ code: 'denied' });
     expect(r.controls).toHaveLength(1);
-    expect(asks).toEqual([{ force: false, minValidS: 60 }]);
+    expect(asks).toEqual([{ force: false, minValidS: 60, activity: true }]);
   });
 
   it('an abort cancels a lease call: LeaseControlError cancelled (P4-R12)', async () => {
