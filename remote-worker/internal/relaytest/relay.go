@@ -228,3 +228,6 @@ func (c *Conn) Collect(t *testing.T, reqID uint64) (stdout, stderr []byte, termi
 
 // Drop closes the parked stream, forcing the worker to reconnect. Idempotent.
 func (c *Conn) Drop() { c.closeOnce.Do(func() { close(c.done) }) }
+
+// Gone is closed once the stream has ended, whichever side ended it.
+func (c *Conn) Gone() <-chan struct{} { return c.stream.Context().Done() }

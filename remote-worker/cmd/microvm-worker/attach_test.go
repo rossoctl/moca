@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,5 +227,36 @@ func TestALeaseRoundTripOverTheAttachContract(t *testing.T) {
 	}
 	if st := control(4, pb.LeaseOp_LEASE_OP_STATUS, 0, 0); st.GetPending() != nil {
 		t.Fatalf("status after delivery = %v, want the event acknowledged", st)
+	}
+}
+
+// #839: a session Serve ends itself (ErrEgressWedged) leaves the stream healthy, so serveOnce
+// must cancel the stream's context before the loop re-dials; SIGTERM's ctx is left alone.
+func TestServeOnceTearsTheStreamDownWhenServeEndsItself(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var streamCtx context.Context
+	attach := func(c context.Context) (pb.SandboxWorker_AttachClient, error) {
+		streamCtx = c
+		return nil, nil
+	}
+	serve := func(c context.Context, _ pb.SandboxWorker_AttachClient) error {
+		if c != streamCtx {
+			t.Error("Serve did not get the context the stream was created from")
+		}
+		if md, _ := metadata.FromOutgoingContext(c); strings.Join(md.Get("authorization"), ",") != "Bearer tok" {
+			t.Errorf("authorization = %v, want [Bearer tok]", md.Get("authorization"))
+		}
+		return session.ErrEgressWedged
+	}
+
+	if _, err := serveOnce(ctx, "tok", attach, serve); !errors.Is(err, session.ErrEgressWedged) {
+		t.Fatalf("serveOnce = %v, want ErrEgressWedged", err)
+	}
+	if streamCtx.Err() == nil {
+		t.Error("the stream's context is live after serveOnce returned: the relay refuses the re-dial")
+	}
+	if ctx.Err() != nil {
+		t.Error("serveOnce cancelled its caller's context")
 	}
 }

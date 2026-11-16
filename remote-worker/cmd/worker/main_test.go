@@ -10,10 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
+	"github.com/rossoctl/moca/remote-worker/internal/relaytest"
+	"github.com/rossoctl/moca/remote-worker/internal/session"
 )
 
 func TestEnvIntFallsBackOnGarbage(t *testing.T) {
@@ -271,6 +275,47 @@ func TestAttachOnceServesWithTheBearer(t *testing.T) {
 	}
 	if len(auth) != 1 || auth[0] != "Bearer tok" {
 		t.Errorf("authorization = %v", auth)
+	}
+}
+
+// #839: Serve can end the session itself (ErrEgressWedged) on a healthy stream. attachOnce must
+// tear that stream down, or the relay keeps the sandbox parked on it and refuses the re-dial as a
+// duplicate sandbox_id.
+func TestAttachOnceTearsTheStreamDownWhenServeEndsItself(t *testing.T) {
+	relay := relaytest.Start(t)
+	conn, err := grpc.NewClient(relay.Addr, session.DialOptions(insecure.NewCredentials())...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := pb.NewSandboxWorkerClient(conn)
+
+	wedge := make(chan struct{})
+	serve := func(_ context.Context, st pb.SandboxWorker_AttachClient) error {
+		if err := st.Send(&pb.WorkerFrame{Msg: &pb.WorkerFrame_Hello{Hello: &pb.Hello{SandboxId: "sbx-1"}}}); err != nil {
+			return err
+		}
+		<-wedge
+		return session.ErrEgressWedged // returns without closing the stream, as Serve does
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err, _ := attachOnce(context.Background(),
+			func() (string, error) { return "t", nil },
+			func(c context.Context) (pb.SandboxWorker_AttachClient, error) { return client.Attach(c) },
+			serve)
+		done <- err
+	}()
+
+	c := relay.WaitAttach(t)
+	close(wedge)
+	if err := <-done; !errors.Is(err, session.ErrEgressWedged) {
+		t.Fatalf("attachOnce = %v, want ErrEgressWedged", err)
+	}
+	select {
+	case <-c.Gone():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the relay's stream is still open after attachOnce returned: it refuses the re-dial")
 	}
 }
 
