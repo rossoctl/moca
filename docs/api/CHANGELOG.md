@@ -1,7 +1,40 @@
-# Control-plane API changelog
+# API changelog
 
-The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
+The version is `info.version` in [openapi.yaml](openapi.yaml) for the control plane and in
+[harness-openapi.yaml](harness-openapi.yaml) for the data plane: the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
+Each section below is a control-plane version. A data-plane version is described in the section
+that shipped it ("The data plane's twin … goes to"):
+
+| `harness-openapi.yaml` | Shipped with                   |
+| ---------------------- | ------------------------------ |
+| 1.3.0                  | [1.17.0](#1170)                |
+| 1.2.0                  | [1.16.0](#1160)                |
+| 1.1.0                  | [1.15.0](#1150)                |
+| 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.24.0
+
+Grants at dequeue under `MOCA_TENANCY=multi`
+([#388](https://github.com/rossoctl/moca/issues/388)), per the
+[multi-user isolation design](../specs/2026-09-28-moca-multi-user-isolation-design.md) §6.1 and the
+[async fan-out spec](../specs/2026-11-05-p6-async-fan-out-design.md) §5.4. Additive on the wire; the
+one removal is an error code no caller can receive any more.
+
+- POST /internal/turn-credentials returns MI1 §6.1 grants under `MOCA_TENANCY=multi`: `mode: grant`,
+  the inference grant as `anthropicAuthToken`, the inference listener as `anthropicBaseUrl`, plus
+  `sandboxGrant` and `turnExp` (unix seconds, anchored at the DEQUEUE and clamped to
+  `min(caps.wallClock, MOCA_TURN_MAX_S)`). No credential value leaves the control plane under
+  `multi`. Under `single` the response is unchanged, `direct` or `placeholder`.
+- `async_tenancy_unsupported` (501) is **removed** from the error taxonomy: no caller can receive it
+  any more, on any route. Async submission and the dequeue claim both work under `multi`. The
+  refusal did not disappear, it changed shape — a `multi` deployment without
+  `MOCA_GRANT_SIGNING_KEY` and `MOCA_INFERENCE_ADDR` refuses to BOOT, so an operator meets it once
+  at startup instead of per turn.
+- The control plane listens on a SECOND port when `MOCA_INFERENCE_ADDR` is set: a transparent
+  inference proxy that accepts an inference grant as its bearer and swaps it for the session's
+  credential. Not part of the REST surface and deliberately not described in this document's paths —
+  it forwards whatever the model API sends, unchanged.
 
 ## 1.23.0
 
@@ -699,10 +732,10 @@ Async turns: the owner-scoped submission API
 - New error codes `turn_not_cancellable` (409, cancelling a turn that is not queued),
   `turn_not_claimable` (409, claiming a cancelled or terminal turn), `turn_not_found` (404),
   `async_quota_exhausted` (429, `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns already held),
-  `async_tenancy_unsupported` (501, async under `MOCA_TENANCY=multi`) and
-  `workload_runs_unavailable` (501, a submission naming a `workloadId`). Either 501 is answered
-  before the quota is touched, so a request that can never be served is never reported as a 429 and
-  leaves no record, no queue entry and no quota slot behind (§4.2).
+  `async_tenancy_unsupported` (501, async under `MOCA_TENANCY=multi`; removed in 1.24.0, see that
+  section) and `workload_runs_unavailable` (501, a submission naming a `workloadId`). Either 501 is
+  answered before the quota is touched, so a request that can never be served is never reported as a
+  429 and leaves no record, no queue entry and no quota slot behind (§4.2).
 - `async: true` on the harness's own turn route stays removed and still answers 400 `async_removed`;
   these routes are its replacement.
 

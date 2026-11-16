@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { forLog } from './audit-log.js';
 import { open, seal, type Opened } from './envelope.js';
 import { CpError } from './errors.js';
 import type { Consumer, CredentialDescriptor, StoredCredential } from './credential-store.js';
@@ -175,7 +176,7 @@ export function openOrBlameSubject(
   if (opened.keyIndex > 0) {
     console.warn(
       `[control-plane] credential opened under NON-PRIMARY KEK ring index ${opened.keyIndex}: ` +
-        `subject=${subjectHash(subject)} credential=${name} -- re-seals on its next PUT; ` +
+        `subject=${subjectHash(subject)} credential=${forLog(name)} -- re-seals on its next PUT; ` +
         `the retired key cannot be dropped yet`,
     );
   }

@@ -141,7 +141,7 @@ export async function serveSbxMcp(
       text:
         `Sandbox ${now.id}${now.name ? ` (${now.name})` : ''}: template ${now.template}, ${now.state}, expires ` +
         `${new Date(now.expiresAt * 1000).toISOString()}. Files live under /workspace and persist; ${calls}; ` +
-        'there is no network; calls run one at a time.',
+        "there is no network beyond the operator's egress allowlist; calls run one at a time.",
       mode: current,
     };
   };

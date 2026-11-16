@@ -96,12 +96,6 @@ export function shouldArmAsync(
     log(`[async] SH_ASYNC_DRAIN set but ${missing.join(', ')} unset; not draining the leaf queue`);
     return false;
   }
-  // The control plane answers async_tenancy_unsupported (501) under `multi`, so arming here would
-  // be a loop that claims and refuses forever.
-  if (env.MOCA_TENANCY === 'multi') {
-    log('[async] SH_ASYNC_DRAIN set but MOCA_TENANCY=multi; not draining the leaf queue');
-    return false;
-  }
   return true;
 }
 

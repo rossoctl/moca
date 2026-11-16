@@ -25,6 +25,7 @@ import {
 } from './credential-store.js';
 import { directModeMismatch } from './exchange.js';
 import { FileCredentialStore } from './file-store.js';
+import { startInferenceProxy } from './inference-proxy.js';
 import {
   adminSubjectsFromEnv,
   GithubOAuthProvider,
@@ -188,6 +189,86 @@ export function hostFromEnv(env: NodeJS.ProcessEnv): string | undefined {
   return env.SH_CONTROL_PLANE_HOST || undefined;
 }
 
+/** `MOCA_INFERENCE_ADDR` as `host:port`. Unset means the listener does not start at all. */
+export function inferenceAddrFromEnv(
+  env: NodeJS.ProcessEnv,
+): { host: string; port: number } | undefined {
+  const raw = env.MOCA_INFERENCE_ADDR;
+  if (!raw) return undefined;
+  const at = raw.lastIndexOf(':'); // lastIndexOf, so a bracketed IPv6 literal survives
+  const port = at === -1 ? NaN : Number(raw.slice(at + 1));
+  if (at < 1 || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`MOCA_INFERENCE_ADDR must be host:port, got "${raw}"`);
+  }
+  return { host: raw.slice(0, at), port };
+}
+
+/**
+ * What a worker dials. Derived from the bind address when that names a concrete host, which covers
+ * deploy/vm's loopback listener with no second setting; a wildcard bind cannot be dialled, so there
+ * `MOCA_INFERENCE_URL` is the only answer.
+ */
+export function inferenceUrlFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  const explicit = env.MOCA_INFERENCE_URL;
+  if (explicit) {
+    let path: string;
+    try {
+      path = new URL(explicit).pathname;
+    } catch {
+      throw new Error(`MOCA_INFERENCE_URL must be an absolute URL, got "${explicit}"`);
+    }
+    // A path here would be counted TWICE: the listener concatenates the credential's endpoint with
+    // whatever path pi appends to this URL, so a prefix on this side lands in neither the right
+    // place nor only once.
+    if (path !== '/' && path !== '') {
+      throw new Error(`MOCA_INFERENCE_URL must be an origin with no path, got "${explicit}"`);
+    }
+    return explicit;
+  }
+  const addr = inferenceAddrFromEnv(env);
+  if (!addr || addr.host === '0.0.0.0' || addr.host === '::' || addr.host === '[::]') {
+    return undefined;
+  }
+  return `http://${addr.host}:${addr.port}`;
+}
+
+/**
+ * The boot contract that REPLACES ADR-0047's per-request `async_tenancy_unsupported` refusals.
+ * Under `multi`, a real credential leaving the control plane must be structurally impossible rather
+ * than refused case by case -- so a deployment either has a grant ring and somewhere to redeem, or
+ * it does not boot. The precedent is `grantRingFromEnv` refusing a boot where the grant ring and the
+ * session ring share a key id.
+ */
+export function checkGrantRedemption(
+  config: CpConfig,
+  hasGrantRing: boolean,
+  addrSet: boolean,
+): void {
+  if (addrSet && !hasGrantRing) {
+    throw new Error(
+      'MOCA_INFERENCE_ADDR is set but MOCA_GRANT_SIGNING_KEY is not: the inference listener can ' +
+        'verify nothing, so every request to it would be refused',
+    );
+  }
+  if (config.tenancy !== 'multi') return;
+  if (!hasGrantRing) {
+    throw new Error(
+      'MOCA_TENANCY=multi requires MOCA_GRANT_SIGNING_KEY: an async turn is handed grants rather ' +
+        'than a credential (MI1 §6.6), and nothing can mint one without the ring',
+    );
+  }
+  // ADDR as well as the url, and ADDR is the one that is never optional: the listener binds only
+  // when ADDR is set, so MOCA_INFERENCE_URL alone would boot a deployment that hands every dequeue a
+  // grant aimed at a port nothing in this process serves -- the same failure the bind-error exit
+  // below refuses to run with, and nothing else implements the redeemer.
+  if (!addrSet || !config.inferenceUrl) {
+    throw new Error(
+      'MOCA_TENANCY=multi requires MOCA_INFERENCE_ADDR (plus MOCA_INFERENCE_URL when the bind ' +
+        'address is a wildcard): a worker holding a grant has nowhere to spend it',
+    );
+  }
+}
+
 /**
  * The settings that are secrets. On deploy/vm each arrives as a systemd credential
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
@@ -277,6 +358,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // contract the worker has had, and the point of the check.
     tenancy: readTenancy(env),
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
+    // Where a worker spends an inference grant (MI1 §6.3). Only the harness profile reads it: the
+    // sandbox profile returns above and serves no turns.
+    inferenceUrl: inferenceUrlFromEnv(env),
   };
   // Validated at startup even though only the provider uses it: a deployment with
   // SH_TEST_USERS set and no secret must fail to boot, not serve an unguarded login path.
@@ -640,6 +724,10 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   const signer = makeSigner(env.SH_SESSION_TOKEN_PRIVATE_KEY!);
   // Named rather than inlined below: the grant ring is checked against it for a shared key.
   const verifyKeys = verifyKeysFromEnv(env, signer.publicKeyBase64);
+  // Named for the same reason, and checked before anything connects: a deployment that cannot mint
+  // or redeem a grant must not reach the first request under `multi`.
+  const grantRing = grantRingFromEnv(env, verifyKeys);
+  checkGrantRedemption(config, grantRing !== undefined, env.MOCA_INFERENCE_ADDR !== undefined);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
   // The sandbox stores, on the sandbox profile and on combined (combined control plane spec §3.5).
@@ -726,7 +814,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     // MI1 §6.1's grant ring, or nothing when no key is configured -- and nothing is what unmounts
     // both grant routes, so this costs an existing deployment no new code path. Takes the session
     // ring to refuse a boot where the two share a key, which would collapse §6.1's separation.
-    ...grantRingFromEnv(env, verifyKeys),
+    ...grantRing,
     config,
     now: () => Date.now(),
     // A UUID, so a control-plane-minted id is always identical to its leafSessionId sanitisation
@@ -743,5 +831,29 @@ const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {
   // Resolved once, into a copy: the secrets never enter process.env, which every kubectl child inherits.
   const env = withCredentials(process.env, CONTROL_PLANE_SECRETS);
-  startControlPlane(depsFromEnv(env), portFromEnv(env), hostFromEnv(env));
+  const deps = depsFromEnv(env);
+  startControlPlane(deps, portFromEnv(env), hostFromEnv(env));
+  const addr = inferenceAddrFromEnv(env);
+  // Not started without the address, so every existing deployment still opens exactly one port.
+  if (addr) {
+    const inference = startInferenceProxy(deps, addr.port, addr.host);
+    // Exit rather than run on: a control plane in `multi` whose redeemer never bound answers every
+    // dequeue with a grant and an inferenceUrl nothing is listening on, so each turn fails at its
+    // first completion. Failing the boot is how `checkGrantRedemption` already treats a missing
+    // redeemer; a bind that cannot happen is the same deployment mistake, found a moment later.
+    // The error itself names the address and the port it could not take, and `env` here holds
+    // RESOLVED SECRETS -- nothing read out of it belongs in a log line.
+    inference.on('error', (err) => {
+      console.error('[inference] cannot bind MOCA_INFERENCE_ADDR:', err);
+      process.exit(1);
+    });
+    // Its own SIGTERM rather than a second server inside `startControlPlane`: the API listener's
+    // drain releases Redis when IT finishes, so a request in flight past that point fails on
+    // redemption. That is correct for a drain -- the turns it served are going away with the worker
+    // -- and bounded, because this listener stops accepting at the same moment.
+    process.on('SIGTERM', () => {
+      inference.close();
+      inference.closeIdleConnections();
+    });
+  }
 }

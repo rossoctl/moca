@@ -1,6 +1,6 @@
 # ADR-0040: Detachable turns — a per-turn Redis Stream log, re-attach by `Last-Event-ID`, and explicit cancel
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-10; implemented by #481) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-09
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-09-turn-reattach-design.md`](../specs/2026-10-09-turn-reattach-design.md)

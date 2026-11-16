@@ -225,6 +225,26 @@ describe('claimTurn', () => {
     expect(JSON.stringify(err)).not.toContain(SECRET);
   });
 
+  it('accepts grant mode and hands the grant to runLeaf as the upstream credential (#388)', async () => {
+    const d = deps({
+      fetchImpl: reply(
+        200,
+        ok({
+          mode: 'grant',
+          anthropicAuthToken: 'eyJ.grant.sig',
+          anthropicBaseUrl: 'http://127.0.0.1:3129',
+          sandboxGrant: 'eyJ.sandbox.sig',
+          turnExp: 1_900_000_000,
+        }),
+      ),
+    });
+    const claimed = await claimTurn(TURN, 1, d);
+    // No `header`: in grant mode the upstream header is the REDEEMER's choice, so the worker sends
+    // `Authorization: Bearer <grant>` to the listener and applyModelGateway needs no new branch.
+    expect(claimed!.config.upstreamCredential).toEqual({ mode: 'grant', value: 'eyJ.grant.sig' });
+    expect(claimed!.config.anthropicBaseUrl).toBe('http://127.0.0.1:3129');
+  });
+
   it('refuses a response with an unknown credential mode (shared validation)', async () => {
     const d = deps({ fetchImpl: reply(200, ok({ mode: 'sideways' })) });
     const err = await claimTurn(TURN, 1, d).catch((e: unknown) => e);

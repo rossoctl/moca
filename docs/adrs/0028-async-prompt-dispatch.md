@@ -1,6 +1,6 @@
 # ADR-0028: Async prompt dispatch as a `kind:"prompt"` leaf sharing the `/turn` core
 
-- **Status:** Proposed, amended 2026-09-01 (see [Amendment](#amendment-2026-09-01-prompt-leaves-lease-a-pool-sandbox)) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-09-25; implemented by #170, #201, #340), amended 2026-09-01 (see [Amendment](#amendment-2026-09-01-prompt-leaves-lease-a-pool-sandbox)); its KEDA async transport was removed by [ADR-0041](0041-deprecate-knative-keda-deployment.md), and async dispatch is now [ADR-0047](0047-p6-async-fan-out-in-worker-drain.md) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-08-25
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-08-25-async-prompt-dispatch-design.md`](../specs/2026-08-25-async-prompt-dispatch-design.md)

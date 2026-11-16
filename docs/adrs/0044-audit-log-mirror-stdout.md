@@ -1,6 +1,6 @@
 # ADR-0044: Mirror audit decisions to component stdout as structured JSON, carrying subject and sessionId
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-21; implemented by #563) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-20
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-20-audit-log-mirror-design.md`](../specs/2026-10-20-audit-log-mirror-design.md)

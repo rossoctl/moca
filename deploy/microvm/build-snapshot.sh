@@ -1265,7 +1265,7 @@ probe_guest_kernel() {
 check_lease_support() {
   local uds="$1"
   local out rc cg userns sbx kill tracked grp suid suid_line=4 err="$STAGE/lease-check.err"
-  local cmd uids want_tracked
+  local cmd uids want_tracked checks=lease-v1 t0=$SECONDS
   want_tracked="$(sbx_tracked_passwd | LC_ALL=C sort | paste -sd' ' -)"
   uids="$(sbx_tracked_passwd | cut -d: -f3 | paste -sd'|' -)"
   # stdout only is parsed, line by line; stderr goes aside so a stray diagnostic cannot
@@ -1279,6 +1279,7 @@ check_lease_support() {
     cmd="$cmd""grep -E '^sbxp|^[^:]*:[^:]*:0*($uids):' /etc/passwd | LC_ALL=C sort | tr '\n' ' '; echo; "
     cmd="$cmd""grep -E '^sbx-ws:|^[^:]*:[^:]*:0*7000:' /etc/group | tr '\n' ' '; echo; "
     suid_line=7
+    checks="lease-v1 and lease-processes-v1"
   fi
   cmd="$cmd"'find / -xdev -type f -perm /6000 2>/dev/null | head -1'
   out="$("$STAGE/guest_client" -uds "$uds" -port 1024 -timeout-s 60 -command "$cmd" \
@@ -1324,6 +1325,8 @@ check_lease_support() {
     echo "build-snapshot.sh: lease-v1: the guest rootfs still has a setuid/setgid file: $suid" >&2
     exit 1
   fi
+  # #721: say on success too, so the log shows the check ran and how close it came to -timeout-s 60.
+  log "$checks check ok in $((SECONDS - t0)) s (guest_client -timeout-s 60)"
 }
 
 # check_git_identity (#415): the P4-tier counterpart of the system gitconfig the sandbox

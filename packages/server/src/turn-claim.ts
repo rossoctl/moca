@@ -77,8 +77,8 @@ export async function claimTurn(
 
   if (res.status !== 200) {
     const code = typeof body.error === 'string' ? body.error : '';
-    // The turn itself is unrunnable: ack it. Anything else -- 500, 503, the 501 a `multi`-tenancy
-    // deployment answers -- is this CALL failing, so the entry stays pending.
+    // The turn itself is unrunnable: ack it. Anything else -- a 500 or a 503 -- is this CALL
+    // failing, so the entry stays pending.
     if (NOT_CLAIMABLE.has(code)) return null;
     throw new CpError('credential_unavailable', `control plane returned ${res.status}`);
   }

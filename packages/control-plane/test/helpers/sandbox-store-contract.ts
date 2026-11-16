@@ -247,6 +247,22 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       await done();
     });
 
+    // createSandbox's rollback (#806): a create undone leaves no record, slot or name behind.
+    it('drops a record deleted with no retention at once, freeing its slot and its name', async () => {
+      const { store, done } = await make();
+      const one = { ...LIMITS, perSubject: 1 };
+      const a = rec({ name: 'web' });
+      expect(await store.create(a, one, T0)).toBe('ok');
+      expect(await store.markDeleted(a.id, T0, 0)).toBe('deleted');
+      expect(await store.get(a.id, T0)).toBeNull();
+      expect(await store.listByOwner('github:1', T0)).toEqual([]);
+      expect(await store.listAll(T0)).toEqual([]);
+      const b = rec({ name: 'web' });
+      expect(await store.create(b, one, T0)).toBe('ok');
+      expect((await store.listByOwner('github:1', T0)).map((r) => r.id)).toEqual([b.id]);
+      await done();
+    });
+
     it("lists an owner's sandboxes newest first, terminated included, and nobody else's", async () => {
       const { store, done } = await make();
       const a = rec();

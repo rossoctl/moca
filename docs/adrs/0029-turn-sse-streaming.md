@@ -1,6 +1,6 @@
 # ADR-0029: Streaming `/turn` responses as an SSE representation via content negotiation
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-08-26; implemented by #171); [ADR-0040](0040-detachable-turns.md) lets a turn opt out of the abort on disconnect <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-08-26
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-08-26-turn-sse-streaming-design.md`](../specs/2026-08-26-turn-sse-streaming-design.md)

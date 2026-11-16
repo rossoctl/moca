@@ -62,8 +62,7 @@ which looks like a real answer. Poll the turn route, not this one.
    its total in-flight count — async plus interactive — is below `SH_TURNS_PER_WORKER`. See the
    [configuration reference](../reference/configuration.md).
 2. **Submit through the authenticated route.** `POST /v1/sessions/{id}/turns` with `async: true`
-   answers `202 {sessionId, turnId}`. Over the fan-out quota it answers 429 `async_quota_exhausted`;
-   under `MOCA_TENANCY=multi` it answers 501 `async_tenancy_unsupported` (see the limits below).
+   answers `202 {sessionId, turnId}`. Over the fan-out quota it answers 429 `async_quota_exhausted`.
 3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state` and `attempts`, plus the
    result once the turn is terminal — the record's state is the source of truth, so a result written
    by a worker that then died is withheld until the reaper has ruled on it, rather than returned as
@@ -90,13 +89,20 @@ which looks like a real answer. Poll the turn route, not this one.
 
 **Limits on the shipped path**, each tracked rather than implied:
 
-- **`MOCA_TENANCY=single` only.** Under `multi`, submission is refused by name
-  (501 `async_tenancy_unsupported`) and the drain refuses to arm. Lifting the gate needs the grant
-  and token-endpoint slice; it is M2 of the spec's §9.
-- **`deploy/k8s` is wired but unproven.** The ConfigMap, overlays and `setup.sh` validation are in;
-  the queued-leaf smoke test and the written capacity story are
-  [#688](https://github.com/rossoctl/moca/issues/688).
-- Per-turn wall-clock caps (`turn_exp`) are M2. A turn's caps are recorded, not enforced.
+- **Under `multi`, inference is isolated and egress is not yet.** `multi` works: the dequeue hands
+  the worker MI1 §6.1 grants instead of a key, and the worker spends the inference grant at the
+  control plane's inference listener. It costs three settings on the control plane —
+  `MOCA_GRANT_SIGNING_KEY`, `MOCA_INFERENCE_ADDR`, and `MOCA_INFERENCE_URL` when the bind is a
+  wildcard — and the boot refuses without them. The residual an operator must know before turning
+  `multi` on: the SANDBOX grant has no redeemer yet, so an async turn gets inference isolation and
+  not egress isolation.
+- **`deploy/k8s` is proven by its smoke test, and nothing autoscales it.** Two opt-in smoke claims
+  check that a real cluster drains queued leaves, and `deploy/k8s/README.md` §14 documents the
+  consumer and its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
+  ([#688](https://github.com/rossoctl/moca/issues/688), #765).
+- Per-turn wall-clock caps: `turn_exp` is set under `multi`, anchored at the dequeue and clamped to
+  `caps.wallClock`, and bounds how long the turn's grants are usable. `tokens` and `costUsd` are
+  recorded, not enforced.
 
 [#686](https://github.com/rossoctl/moca/issues/686) is the epic, and it closes when a fan-out
 pipeline runs end to end on `deploy/k8s` as well.

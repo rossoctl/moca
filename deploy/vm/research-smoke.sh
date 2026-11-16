@@ -205,14 +205,15 @@ code="$(curl -sS -o /dev/null -w '%{http_code}' "$CP/readyz" 2>/dev/null || true
 boxes="$(sandboxes | grep -c . || true)"
 [[ "$boxes" -ge 1 ]] && ok "$boxes running sh-sandbox-* container(s)" || ko "no running sh-sandbox-* container"
 # One tier per host (deploy/microvm/P4-ON-P6.md): with a microVM worker attached the turn may land in
-# a guest with no network (#277), and this smoke would fail for a reason that is not the one it tests.
+# a guest that reaches only moca-egress's allowlist, without credentials, and this smoke would fail for a
+# reason that is not the one it tests.
 # Read first, filtered second: a failed read must not look like an empty, all-container pool.
 if ! records="$(podman exec sh-redis redis-cli HKEYS sh:sandbox:records 2>"$OUT/redis.err")"; then
   ko "could not read the pool records from sh-redis: $(head -c 300 "$OUT/redis.err")"
 else
   others="$(grep -v '^sh-sandbox-' <<<"$records" | grep -v '^$' || true)"
   [[ -z "$others" ]] && ok "every pool record is a container sandbox" ||
-    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM worker has no network (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
+    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM guest reaches only moca-egress's allowlist (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
 fi
 if [[ "$FAIL" -ne 0 ]]; then
   printf '\n=== Results: %s passed, %s failed (preconditions; no turn run) ===\n' "$PASS" "$FAIL"

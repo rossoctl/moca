@@ -1,6 +1,6 @@
 # ADR-0045: Test-user logins, gated by a shared secret, for unattended multi-user testing
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-28; implemented by #620) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-26
 - **Deciders:** aslom
 - **Issue:** [rossoctl/moca#616](https://github.com/rossoctl/moca/issues/616)

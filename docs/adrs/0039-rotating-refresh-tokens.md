@@ -1,6 +1,6 @@
 # ADR-0039: Long-lived client authentication via rotating refresh tokens, with 15-minute stateless API tokens
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-09; implemented by #467) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-08
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-08-b14-long-lived-client-auth-design.md`](../specs/2026-10-08-b14-long-lived-client-auth-design.md)

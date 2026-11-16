@@ -221,11 +221,17 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
  * ones that keep a placeholder from being spent as a real credential, a secret from going to the
  * wrong endpoint, and a malformed configRef or model from silently running the wrong turn. Two
  * copies would be two places to forget the seventh.
+ *
+ * `grant` mode (MI1 §6.1) passes the same six: `anthropicAuthToken` is the grant and
+ * `anthropicBaseUrl` the control plane's inference listener, so the two that matter most -- a
+ * non-empty token and a resolved endpoint -- are exactly the ones already here. `sandboxGrant` and
+ * `turnExp` are deliberately NOT validated: nothing in the worker reads either yet, and a check on a
+ * field no code consumes is a check that cannot fail for a real reason.
  */
 export function validateExchangeBody(body: Record<string, unknown>): ExchangeResponse {
   // An UNKNOWN mode must not default to `direct`: that would send a placeholder upstream as though it
   // were a real credential, which is the failure the tag exists to prevent (spec §3.6).
-  if (body.mode !== 'direct' && body.mode !== 'placeholder') {
+  if (body.mode !== 'direct' && body.mode !== 'placeholder' && body.mode !== 'grant') {
     throw new CpError(
       'credential_unavailable',
       'control plane returned an unknown credential mode',

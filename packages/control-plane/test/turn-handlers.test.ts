@@ -159,13 +159,18 @@ describe('submitTurn (spec §4.1)', () => {
     expect(d.turnQueue.depth()).toBe(0);
   });
 
-  it('refuses async under MOCA_TENANCY=multi, by name (M1 gate, §9)', async () => {
+  it('ADMITS async under MOCA_TENANCY=multi, now that the dequeue mints grants (#388)', async () => {
     const d = turnDeps({ config: { tenancy: 'multi' } });
     const sid = await session(d);
-    expect(await codeOf(() => submit(d, sid, { item, async: true }))).toBe(
+    const res = await submit(d, sid, { item, async: true });
+    // ADR-0047's gate is gone from here: §6.6's "never a real key under multi" is the DEQUEUE's
+    // property, and the dequeue now has grants to return. Submission never held a credential at all.
+    expect(res.status).toBe(202);
+    expect(d.turnQueue.depth()).toBe(1);
+    // ...and with it the `turn_refused` entry it wrote, which a client polls refusals through.
+    expect([...d.streams.values()].flat().map((e) => e.reason)).not.toContain(
       'async_tenancy_unsupported',
     );
-    expect(d.turnQueue.depth()).toBe(0);
   });
 
   it('refuses past the per-owner quota with 429, enqueueing NOTHING for the refused one (§4.3)', async () => {
