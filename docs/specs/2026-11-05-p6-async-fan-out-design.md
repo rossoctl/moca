@@ -218,14 +218,36 @@ Two consequences of that default, stated because each could be read the other wa
 
 ```
 GET /v1/sessions/{sessionId}/turns/{turnId}
-  → 200 { turnId, state, attempts, result?: { status, patch? | text? | gate? | reason? } }
+  → 200 { turnId, state, attempts,
+          result?: { status, summary?, artifacts?, workspace?, gate? | reason?, usage?, seed? } }
   → 404 unknown turn
+
+GET /v1/sessions/{sessionId}/turns/{turnId}/artifacts/{kind}      # kind: patch
+  → 200 <bytes>   Content-Type: text/x-diff, ETag: "<sha256 of the bytes>"
+  → 404 unknown kind | not terminal | no result | capture refused for size
 ```
 
 Authenticated and owner-scoped, like §4.1. The turn record is the **single source of truth for
 state**; `result` is the artifact from `leaf-result-store`, present once the leaf has written one.
 Goal 4 is satisfied by N of these — one per leaf — which is also the measurement #537 needs before
 `/v1/batches` can be judged worth building.
+
+> **Amended in #390: the status read is bounded and the output has its own route.** The shape above
+> is the current one. The first cut returned the stored record verbatim, which meant a 4 MiB patch
+> on **every poll** of the one route designed to be polled. So:
+>
+> - The status body carries a **projection**: the record's own bounded fields pass through, `summary`
+>   is one clipped line (the assistant's text, a gate's summary, the patch's `diffstat`, or the
+>   failure's reason, in that order; `MOCA_TURN_SUMMARY_BYTES`, default 2048 **bytes** — bytes, not
+>   tokens, like every other bound in this repo), `workspace` keeps the patch's descriptor without
+>   its bytes, and `artifacts: [{kind, bytes, sha256?}]` names what can be fetched.
+> - `result.patch` and `result.text` are **gone** from that body. A narrowing, permitted because
+>   `/v1` is Preview, and listed in the API changelog (1.26.0) because that is what Preview requires.
+> - The artifact route serves the bytes whole — never truncated, and byte-exact for a diff that is
+>   not valid UTF-8 (stored base64 by the binary-safe capture). A capture refused for size has **no**
+>   artifact by design: those bytes never left the sandbox, so the descriptor is the whole answer.
+> - The projection is **read-time only**. Nothing extra is stored, so there is no second writer, no
+>   migration, and a record written before #390 projects exactly like one written after it.
 
 **`GET /runs/status` is deliberately left exactly as it is.** It already exists
 (`server.ts:1237-1240`) and infers status _from the result store_: no record answers
@@ -946,7 +968,8 @@ key now carries a turn id (`leaf:result:<sid>:<turnId>`), only an enumeration of
 reaches it, and the only enumeration there is — `TurnStore.deleteSessionTurns`, walking the owner's
 open set — sees **open turns only**: `toTerminal` removes a finished turn from that set to free its
 quota slot. So a finished async turn's result survives `DELETE /v1/sessions/{id}` and expires on
-`LEAF_RESULT_TTL_SECONDS` (24 h by default). This is **not new with the per-turn key**: the finished
+`LEAF_RESULT_TTL_SECONDS` (24 h by default when this was written; seven days since #390, which is
+why the note below closes it). This is **not new with the per-turn key**: the finished
 turn's RECORD — which carries the envelope, so the same class of caller content — has always
 survived that delete on the same clock, which §5.1 chose deliberately when it made the terminal TTL
 the record's only expiry. The result now expires on `resultTtl` and the record on

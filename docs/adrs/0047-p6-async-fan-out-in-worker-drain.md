@@ -86,6 +86,18 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   — no record answers `{status:'queued'}` — which conflates all three, and extending it would change
   a live route's responses on top of the admission change below. Two routes, one source of truth
   each.
+
+  **Amended by #390: that read is BOUNDED, and the output moved to its own route.** The first cut
+  handed back the stored result verbatim, so a 4 MiB patch rode every poll of a route whose whole
+  purpose is to be polled. The status body now carries a projection — the record's own fields, a
+  `summary` clipped to `MOCA_TURN_SUMMARY_BYTES`, the patch's descriptor and an `artifacts` list —
+  and `GET …/turns/{turnId}/artifacts/{kind}` serves the bytes whole. The projection is read-time
+  only: nothing extra is stored, so there is no second writer and no migration, and an older
+  worker's record projects the same way. `result.patch` and `result.text` leaving that body is a
+  NARROWING of a response, permitted because `/v1` is Preview, and recorded in the API changelog
+  because that is what Preview requires. The synchronous `/v1/runs` and `/runs/status` bodies are
+  deliberately untouched: nothing polls them.
+
 - **Cancellation covers `queued` turns only.** `DELETE` on the turn flips a queued record to
   `cancelled` and the drain loop skips it at claim; a `running` leaf runs to completion and the call
   answers `409`. Interrupting a running leaf needs a cancel signal addressed to one specific worker,
