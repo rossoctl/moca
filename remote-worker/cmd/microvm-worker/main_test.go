@@ -272,7 +272,10 @@ func TestDiagStatsMuxServesTheRealWarmAndColdCounters(t *testing.T) {
 			},
 		}
 	}
-	srv := httptest.NewServer(diagStatsMux(statsFn, 16))
+	sessionStats := func() session.Stats {
+		return session.Stats{QueueFullRefusals: 192, DeferredFrames: 112, DeferredNow: 3, WedgedConnections: 1}
+	}
+	srv := httptest.NewServer(diagStatsMux(statsFn, sessionStats, 16))
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/stats")
@@ -289,6 +292,12 @@ func TestDiagStatsMuxServesTheRealWarmAndColdCounters(t *testing.T) {
 		WarmAcquires  uint64            `json:"warmAcquires"`
 		ColdAcquires  map[string]uint64 `json:"coldAcquires"`
 		MaxConcurrent int               `json:"maxConcurrent"`
+		Session       struct {
+			QueueFullRefusals uint64 `json:"queueFullRefusals"`
+			DeferredFrames    uint64 `json:"deferredFrames"`
+			DeferredNow       int64  `json:"deferredNow"`
+			WedgedConnections uint64 `json:"wedgedConnections"`
+		} `json:"session"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -317,6 +326,11 @@ func TestDiagStatsMuxServesTheRealWarmAndColdCounters(t *testing.T) {
 	if got.MaxConcurrent != 16 {
 		t.Errorf("maxConcurrent = %d, want 16", got.MaxConcurrent)
 	}
+	// #705: the session's refusals at the admission limit, and its deferred terminal frames,
+	// are on /stats beside the pool's figures.
+	if g := got.Session; g.QueueFullRefusals != 192 || g.DeferredFrames != 112 || g.DeferredNow != 3 || g.WedgedConnections != 1 {
+		t.Errorf("session = %+v, want {192 112 3 1}", g)
+	}
 }
 
 // The stats listener must NOT be http.DefaultServeMux. This package imports
@@ -326,7 +340,8 @@ func TestDiagStatsMuxServesTheRealWarmAndColdCounters(t *testing.T) {
 // already flagged that exposure for SH_DIAG_PPROF, which is opt-in and documented for it;
 // the counters must not smuggle it in behind a different variable.
 func TestDiagStatsMuxDoesNotAlsoExposePprof(t *testing.T) {
-	srv := httptest.NewServer(diagStatsMux(func() vmpool.Stats { return vmpool.Stats{} }, 4))
+	srv := httptest.NewServer(diagStatsMux(func() vmpool.Stats { return vmpool.Stats{} },
+		func() session.Stats { return session.Stats{} }, 4))
 	defer srv.Close()
 
 	for _, path := range []string{"/debug/pprof/heap", "/debug/pprof/goroutine", "/debug/pprof/cmdline"} {

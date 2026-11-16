@@ -38,6 +38,17 @@ const (
 	// which is a WORSE failure than the dropped frame this all exists to prevent.
 	// The assertion below the const block makes that a compile error instead.
 	TerminalReserve = QueueCap / 4
+	// DeferredCap bounds terminal frames waiting behind a full reserve (#705). A burst of
+	// refusals larger than TerminalReserve is no longer a reason to end the connection: the
+	// overflow waits here, in order, and a drainer feeds it into the reserve as the sender
+	// frees it. This cap is only the backstop for a sender that is genuinely not keeping up;
+	// each entry is one small frame, and the relay would have to send this many Execs past the
+	// admission limit (MaxConcurrent + QueueCap) faster than they can be refused.
+	DeferredCap = 4096
+	// DefaultWedgeAfter is how long one Send may stay blocked, with terminal frames waiting,
+	// before the session calls egress wedged (Config.WedgeAfter). Two heartbeats: a sender that
+	// cannot place even a heartbeat in that time is not slow, it is stuck.
+	DefaultWedgeAfter = 2 * DefaultHeartbeat
 	// DefaultConcurrency is the pool size, advertised as Hello.capacity_max.
 	DefaultConcurrency = 4
 	// DefaultHeartbeat is liveness plus NAT/proxy keepalive (spec §7 item 4).
@@ -62,12 +73,17 @@ type Config struct {
 	// Labels go into Hello.labels verbatim; the relay mirrors them into the presence record.
 	// Labels builds the two the harness reads (moca.dev/tier, moca.dev/template).
 	Labels map[string]string
+	// WedgeAfter is how long one Send may stay blocked while terminal frames wait behind the
+	// reserve before the connection is given up as wedged (#705). Zero means
+	// DefaultWedgeAfter.
+	WedgeAfter time.Duration
 }
 
-// ErrEgressWedged ends a session whose terminal-frame reserve could not be
-// queued. It is not "busy": chunk producers are held to QueueCap residency, so
-// TerminalReserve slots are reachable only from the recv goroutine — failing to
-// place one means nothing is draining at all. Serve returns it so main.go
+// ErrEgressWedged ends a session whose terminal frames cannot be delivered: the
+// sender has been blocked in one Send for Config.WedgeAfter while terminal frames
+// wait, or DeferredCap of them are waiting at once (#705). It is not "busy": a
+// burst of refusals that merely outruns the sender is deferred, in order, and
+// delivered; only a sender that is not draining at all ends the connection. Serve returns it so main.go
 // re-dials; the dedup cache then answers redeliveries of anything that completed
 // (spec §5, §6.2). The alternative was to log the loss and keep serving a
 // connection whose callers each wait out DEFAULT_EXEC_TIMEOUT_S, 30 minutes since
@@ -112,6 +128,60 @@ type Session struct {
 	leaseStatusSlots chan struct{}
 	leaseMu          sync.Mutex
 	leaseByKey       map[string]int
+
+	// Counters for Stats (#705), across every connection.
+	queueFullRefusals atomic.Uint64
+	deferredFrames    atomic.Uint64
+	deferredNow       atomic.Int64
+	wedgedConns       atomic.Uint64
+	// refusalLog rate-limits the "busy: queue full" log line (see logRefusal).
+	refusalLog struct {
+		mu         sync.Mutex
+		last       time.Time
+		suppressed int
+	}
+}
+
+// Stats are the session's own counters, for the worker's diagnostics (/stats).
+type Stats struct {
+	// QueueFullRefusals counts Execs refused "busy: queue full": each arrived while
+	// MaxConcurrent were running and QueueCap were queued on its connection.
+	QueueFullRefusals uint64
+	// DeferredFrames counts terminal frames (refusals, replays) that found the reserve full
+	// and waited behind it instead of ending the connection; DeferredNow is how many wait now.
+	DeferredFrames uint64
+	DeferredNow    int64
+	// WedgedConnections counts connections ended because egress was wedged.
+	WedgedConnections uint64
+}
+
+// Stats reads the counters. Safe for concurrent use.
+func (s *Session) Stats() Stats {
+	return Stats{
+		QueueFullRefusals: s.queueFullRefusals.Load(),
+		DeferredFrames:    s.deferredFrames.Load(),
+		DeferredNow:       s.deferredNow.Load(),
+		WedgedConnections: s.wedgedConns.Load(),
+	}
+}
+
+// logRefusal logs a "busy: queue full" refusal, at most one line a second, naming how many
+// were folded into it. Before #705 a refusal left no trace in the worker log at all, so the
+// per-connection admission limit (MaxConcurrent + QueueCap) stayed invisible until
+// something else broke.
+func (s *Session) logRefusal(reqID uint64, queued int) {
+	s.queueFullRefusals.Add(1)
+	rl := &s.refusalLog
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if now := time.Now(); now.Sub(rl.last) >= time.Second {
+		log.Printf("session: refused req_id %d: busy: queue full (%d running, %d of %d queued on this "+
+			"connection; %d more refused since the last line; %d in total)", reqID, s.cfg.MaxConcurrent,
+			queued, QueueCap, rl.suppressed, s.queueFullRefusals.Load())
+		rl.last, rl.suppressed = now, 0
+		return
+	}
+	rl.suppressed++
 }
 
 // Idle reports that no admitted Exec is queued or running, and that every frame queued for the
@@ -378,6 +448,14 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// once. Whatever the chunk stream does, TerminalReserve slots stay free for the
 	// terminal frames accept must not drop.
 	chunkSlots := make(chan struct{}, QueueCap)
+	// sendingSince is when the Send in progress began (UnixNano), 0 between Sends. It is what
+	// tells a sender that is behind from one that is stuck (#705): time since the LAST Send
+	// would call a burst after an idle hour wedged at once.
+	var sendingSince atomic.Int64
+	wedgeAfter := s.cfg.WedgeAfter
+	if wedgeAfter <= 0 {
+		wedgeAfter = DefaultWedgeAfter
+	}
 	var wgSender sync.WaitGroup
 	wgSender.Add(1)
 	go func() {
@@ -399,7 +477,10 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 				s.unsent.Add(-1)
 				continue
 			}
-			if err := st.Send(of.frame); err != nil {
+			sendingSince.Store(time.Now().UnixNano())
+			err := st.Send(of.frame)
+			sendingSince.Store(0)
+			if err != nil {
 				failed = true
 				cancelConn()
 			}
@@ -470,21 +551,61 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	//
 	// It no longer competes with the chunk stream for room: chunkSlots holds
 	// chunk-class residency to QueueCap, so the last TerminalReserve slots are
-	// reachable only from here. Failure here therefore no longer means "busy" — it
-	// means the reserve ITSELF has not drained, i.e. egress is wedged rather than
-	// merely behind, which the caller handles by giving up on the connection.
+	// reachable only from here. And a full reserve no longer ends the connection
+	// (#705): nothing bounds how many refusals arrive between two drains, so a burst
+	// of them (many sessions ending at once, a mass cancel) used to overflow the 16
+	// slots and drop the connection, failing every unrelated Exec running on it. The
+	// overflow now waits in `deferred`, in arrival order, and drainDeferred feeds it
+	// into the reserve as the sender frees it. While anything waits there, later
+	// terminal frames queue behind it rather than taking a freed slot, so none
+	// overtakes another; a deferred frame only ever moves LATER, which spec §8's
+	// ordering allows (a refused exec has no chunks of its own to stay behind).
+	//
+	// What still ends the connection is a sender that is not draining at all: one Send
+	// blocked for wedgeAfter while frames wait, or DeferredCap of them waiting at once.
+	// That is ErrEgressWedged, as before, and main.go re-dials.
+	deferred := &deferQueue{wake: make(chan struct{}, 1)}
 	trySend := func(f *pb.WorkerFrame) bool {
-		s.unsent.Add(1)
-		select {
-		case outbound <- outFrame{frame: f, reserved: true}:
-			return true
-		default:
-			s.unsent.Add(-1)
-			log.Printf("session: WARNING the terminal-frame reserve (%d slots) is undrained, so the "+
-				"terminal frame for %s cannot be queued; treating egress as wedged and "+
-				"dropping the connection so the harness re-dials", TerminalReserve, frameRef(f))
+		deferred.mu.Lock()
+		defer deferred.mu.Unlock()
+		if deferred.pending == 0 {
+			s.unsent.Add(1)
+			select {
+			case outbound <- outFrame{frame: f, reserved: true}:
+				return true
+			default:
+				s.unsent.Add(-1)
+			}
+		}
+		if since := sendingSince.Load(); since != 0 && time.Since(time.Unix(0, since)) >= wedgeAfter {
+			s.wedgedConns.Add(1)
+			log.Printf("session: WARNING one Send has been blocked for over %s with %d terminal frames "+
+				"waiting behind the reserve, so the terminal frame for %s cannot be delivered; treating "+
+				"egress as wedged and dropping the connection so the harness re-dials",
+				wedgeAfter, deferred.pending, frameRef(f))
 			return false
 		}
+		if deferred.pending >= DeferredCap {
+			s.wedgedConns.Add(1)
+			log.Printf("session: WARNING %d terminal frames are waiting behind the reserve (the cap), so "+
+				"the terminal frame for %s cannot be queued; treating egress as wedged and dropping the "+
+				"connection so the harness re-dials", deferred.pending, frameRef(f))
+			return false
+		}
+		if deferred.pending == 0 {
+			log.Printf("session: the terminal-frame reserve (%d slots) is full; deferring terminal frames "+
+				"in order until the sender drains it (first: %s)", TerminalReserve, frameRef(f))
+		}
+		deferred.frames = append(deferred.frames, f)
+		deferred.pending++
+		s.unsent.Add(1)
+		s.deferredFrames.Add(1)
+		s.deferredNow.Add(1)
+		select {
+		case deferred.wake <- struct{}{}:
+		default:
+		}
+		return true
 	}
 
 	var wg sync.WaitGroup // producers: heartbeat + pool workers
@@ -501,6 +622,14 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 				enqueue(&pb.WorkerFrame{Msg: &pb.WorkerFrame_Heartbeat{Heartbeat: &pb.Heartbeat{}}})
 			}
 		}
+	}()
+
+	// The deferred terminal frames' drainer (#705). A producer like the pool: it may block on
+	// outbound, and it is joined by wg before outbound closes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.drainDeferred(connCtx, deferred, outbound)
 	}()
 
 	gate := &lateGate{}
@@ -707,6 +836,7 @@ func (s *Session) enqueueAdmitted(
 		// lock, which is the scope this branch has always had.
 		c.reg.remove(reqID)
 		cancel()
+		s.logRefusal(reqID, len(c.queue))
 		// The frame this item was filed about. The exec never ran and never will, so
 		// losing this refusal loses the caller's only answer — hence the reserve, and
 		// hence ending the connection if even the reserve cannot take it.
@@ -715,6 +845,63 @@ func (s *Session) enqueueAdmitted(
 		}
 	}
 	return nil
+}
+
+// deferQueue holds the terminal frames trySend could not place in the reserve (#705), in
+// arrival order. pending counts them plus the one drainDeferred may hold in hand, so trySend
+// sends directly only when nothing at all is waiting, and a later frame can never overtake an
+// earlier one.
+type deferQueue struct {
+	mu      sync.Mutex
+	frames  []*pb.WorkerFrame
+	pending int
+	wake    chan struct{}
+}
+
+// drainDeferred moves deferred terminal frames into outbound's reserve, oldest first, blocking
+// for room as a producer may. When the connection ends it drops what is left: the harness has
+// already failed those Execs on the disconnect (as for any frame lost then), and the unsent
+// counts are given back so Idle stays true to what is queued.
+func (s *Session) drainDeferred(ctx context.Context, q *deferQueue, outbound chan<- outFrame) {
+	dropAll := func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		n := len(q.frames)
+		s.unsent.Add(-int64(n))
+		s.deferredNow.Add(-int64(n))
+		q.pending -= n
+		q.frames = nil
+	}
+	for {
+		q.mu.Lock()
+		for len(q.frames) == 0 {
+			q.mu.Unlock()
+			select {
+			case <-q.wake:
+			case <-ctx.Done():
+				dropAll()
+				return
+			}
+			q.mu.Lock()
+		}
+		f := q.frames[0]
+		q.frames[0] = nil
+		q.frames = q.frames[1:]
+		q.mu.Unlock() // f is in hand and still counted in pending: trySend keeps deferring
+		select {
+		case outbound <- outFrame{frame: f, reserved: true}:
+		case <-ctx.Done():
+			s.unsent.Add(-1)
+		}
+		s.deferredNow.Add(-1)
+		q.mu.Lock()
+		q.pending--
+		q.mu.Unlock()
+		if ctx.Err() != nil {
+			dropAll()
+			return
+		}
+	}
 }
 
 // frameSink turns runner output into Chunk frames. It only ever enqueues: with

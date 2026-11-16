@@ -917,11 +917,13 @@ func TestBlockedSendDoesNotWedgeProducers(t *testing.T) {
 }
 
 // The reserve is a probability argument, not a proof — a burst larger than
-// terminalReserve still exhausts it. What must NOT happen then is the old
-// behaviour: log the loss and carry on serving a connection that cannot answer.
-// Exhaustion means nothing is draining at all, which is a different condition from
-// "busy", so the session gives up and lets main.go re-dial; the dedup cache is what
-// makes that safe (spec §5, §6.2).
+// terminalReserve still exhausts it, and since #705 that alone is no reason to end
+// the connection: the overflow is deferred (TestRefusalBurstBeyondTheReserveKeeps
+// TheConnection). What must NOT happen is the older behaviour either: log the loss
+// and carry on serving a connection that cannot answer. A sender that is not
+// draining at all — one Send blocked for WedgeAfter while refusals wait — is a
+// different condition from "busy", so the session gives up and lets main.go
+// re-dial; the dedup cache is what makes that safe (spec §5, §6.2).
 //
 // On promptness, honestly: Serve can only return once teardown joins the sender, so
 // a Send blocked FOREVER delays this until gRPC's own keepalive kills the stream.
@@ -934,6 +936,7 @@ func TestExhaustedReserveEndsTheSession(t *testing.T) {
 	cfg := testConfig()
 	cfg.MaxConcurrent = 1
 	cfg.Heartbeat = time.Hour
+	cfg.WedgeAfter = 100 * time.Millisecond // the parked Send outlasts this
 	s := session.New(cfg, r)
 	sv := serve(t, s, st)
 	waitFor(t, "hello", func() bool { return len(st.sent()) >= 1 })
@@ -961,8 +964,11 @@ func TestExhaustedReserveEndsTheSession(t *testing.T) {
 	// and the tail of this flood blocks forever. Driving it from the test goroutine
 	// deadlocked the test against its own fix — it never reached releaseGate, so the
 	// parked sender was never freed and teardown could not join it.
+	//
+	// Paced, and long: the refusals past the reserve are deferred now (#705), and only one
+	// that arrives after the parked Send has outlasted WedgeAfter ends the connection.
 	go func() {
-		last := uint64(session.QueueCap + 2*session.TerminalReserve + 4)
+		last := uint64(session.QueueCap + 2*session.TerminalReserve + 4 + 2000)
 		for i := uint64(2); i <= last; i++ {
 			select {
 			case st.in <- &pb.ServerFrame{Msg: &pb.ServerFrame_Exec{Exec: &pb.Exec{
@@ -970,6 +976,9 @@ func TestExhaustedReserveEndsTheSession(t *testing.T) {
 			}}}:
 			case <-st.done:
 				return // the stream is gone; stop pushing
+			}
+			if i > uint64(session.QueueCap+2*session.TerminalReserve+4) {
+				time.Sleep(time.Millisecond)
 			}
 		}
 	}()
