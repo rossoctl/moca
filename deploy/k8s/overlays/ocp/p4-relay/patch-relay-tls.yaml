@@ -28,14 +28,21 @@ spec:
             # ALPN protocol, and ghostunnel advertises none unless told to.
             - --alpn
             - h2
+            # The readiness probe's own port (#724): /_metrics answers while ghostunnel runs and dials
+            # nothing, where a tcpSocket probe of the TLS port logged a handshake error every 5 s and
+            # /_status would open a connection to the target on every probe. Default-deny ingress
+            # keeps it off the pod network; the kubelet's probes reach it as they reach the TLS port.
+            - --status
+            - http://0.0.0.0:8454
           ports:
             - { name: https, containerPort: 8444 }
+            - { name: status, containerPort: 8454 }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
           readinessProbe:
-            tcpSocket: { port: https }
+            httpGet: { path: /_metrics, port: status }
             periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 32Mi }

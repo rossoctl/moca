@@ -226,7 +226,11 @@ becomes exactly one supervisor connection. The control plane is ordinary HTTP, s
 Route; connection reuse there is harmless.
 
 The image is `docker.io/ghostunnel/ghostunnel:v1.11.3`, pinned by digest in
-`overlays/ocp/kustomization.yaml`. Docker Hub is the project's official channel; it does not
+`overlays/ocp/kustomization.yaml`. Each ghostunnel sidecar's readiness probe is `GET /_metrics` on
+its own status port (`--status`; 8453 beside the supervisor, 8454 and 8455 beside the relay's attach
+and exec sidecars), never a TCP connect to its TLS port, which logged a handshake error every 5 s.
+`/_metrics` dials nothing (`/_status` would open a connection to the target on every probe), and
+no NetworkPolicy admits the status ports, so only the kubelet's probes reach them. Docker Hub is the project's official channel; it does not
 publish to GHCR.
 
 The manifest tests fail on any `Ingress` or `serving.knative.dev` object, and on an OCP supervisor
