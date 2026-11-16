@@ -169,8 +169,9 @@ export async function issueTurnGrants(
  *   - `ttlSeconds` is `MOCA_TURN_MAX_S`, so `exp == turn_exp` and nothing refreshes mid-turn
  *     (decision D4). pi builds its model object once per turn, so a refresh loop would have to
  *     mutate live request headers, and it would buy nothing: the redeemer re-reads the session and
- *     the credential on EVERY request, so a deleted session or a rotated key takes effect at once
- *     rather than within MOCA_GRANT_TTL_S.
+ *     the credential on EVERY request, so a deleted session takes effect at once rather than within
+ *     MOCA_GRANT_TTL_S, and a key rotated on another replica within the credential store's read
+ *     window (grant-redeem.ts step 2).
  *     shortcut: a grant stolen from a worker is replayable until `turn_exp` rather than for one TTL
  *     window. Re-introduce `MOCA_GRANT_TTL_S` here plus a worker refresh loop if a redeemer ever
  *     runs somewhere the worker is not already trusted.
