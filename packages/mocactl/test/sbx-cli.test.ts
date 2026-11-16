@@ -225,6 +225,60 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-c');
   });
 
+  // #700: which control plane, and what came back, for each kind of failure.
+  it('names the control plane and the API error when a login step answers a 5xx (exit 1)', async () => {
+    const { home, env, io } = setup({ loggedIn: false });
+    const cp = fakeCp({
+      'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }),
+      'POST /v1/auth/device': () => ({
+        status: 503,
+        body: { error: 'credential_unavailable', message: 'the GitHub app is not configured' },
+      }),
+    });
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+    expect(io.errs.at(-1)).toBe(
+      `sbx: login failed: the control plane at ${URL_} is unavailable ` +
+        '(HTTP 503 credential_unavailable: the GitHub app is not configured) — try again shortly',
+    );
+  });
+
+  it('says a non-JSON 5xx is not an API answer, with the control plane tried', async () => {
+    const { home, env, io } = setup({ loggedIn: false });
+    const fetchImpl = (async () =>
+      new Response('<html>Bad Gateway</html>', { status: 502 })) as typeof fetch;
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl })).toBe(1);
+    expect(io.errs.at(-1)).toBe(
+      `sbx: login failed: the control plane at ${URL_} is unavailable ` +
+        '(HTTP 502, not an API answer: a proxy?) — try again shortly',
+    );
+  });
+
+  it('names the control plane for a failure that is not an API error: a 200 that is not JSON', async () => {
+    // A captive portal or a proxy's page answering 200: res.json() throws, no ApiError is made,
+    // and before the review fix this one printed `sbx: <message>` with no control plane named.
+    const { home, env, io } = setup({ loggedIn: false });
+    const fetchImpl = (async () =>
+      new Response('<html>Sign in to the network</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      })) as typeof fetch;
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl })).toBe(1);
+    expect(io.errs.at(-1)).toMatch(/^sbx: login failed: /);
+    expect(io.errs.at(-1)).toContain(`(from the control plane at ${URL_})`);
+  });
+
+  it('names the control plane and the network error when it cannot be reached (exit 4)', async () => {
+    const { home, env, io } = setup({ loggedIn: false });
+    const cause = Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
+    const cp = fakeCp({
+      'GET /v1/discovery': () => new TypeError('fetch failed', { cause }),
+    });
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
+    expect(io.errs.at(-1)).toBe(
+      `sbx: login failed: cannot reach the control plane at ${URL_}: fetch failed (ENOTFOUND)`,
+    );
+  });
+
   it('explains a not-enrolled login', async () => {
     const { home, env, io } = setup({ loggedIn: false });
     const cp = fakeCp({

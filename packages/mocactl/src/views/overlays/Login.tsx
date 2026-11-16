@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { DeviceStart } from '../../api/types.js';
 import type { CachedAuth } from '../../config.js';
 import { LoginCancelledError, deviceLogin, toCachedAuth, type LoginDeps } from '../../core/auth.js';
-import { describeError } from '../../core/messages.js';
+import { describeLoginError } from '../../core/messages.js';
 import { sanitizeRemote } from '../../core/sanitize.js';
 import { useTheme } from '../../theme/context.js';
 import { formatDuration } from '../format.js';
@@ -58,7 +58,8 @@ export function LoginOverlay({
         onLoggedIn(toCachedAuth(login, controlPlaneUrl));
       })
       .catch((err) => {
-        if (!(err instanceof LoginCancelledError)) setError(describeError(err));
+        if (!(err instanceof LoginCancelledError))
+          setError(describeLoginError(err, controlPlaneUrl));
       });
     return () => ac.abort();
   }, [attempt]);
