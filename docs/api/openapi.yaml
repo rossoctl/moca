@@ -469,6 +469,7 @@ components:
           mode,
           idleTimeoutS,
           modeEpoch,
+          idleLifetimeS,
         ]
       additionalProperties: false
       properties:
@@ -531,6 +532,14 @@ components:
             raised by 1 on every PUT /v1/sandboxes/{id}/mode, so a worker can refuse an Exec whose
             token carries an older mode (`stale_mode`). A sandbox created `per-exec` starts at 0, one
             created in a lease mode at 1
+        idleLifetimeS:
+          type: integer
+          minimum: 3600
+          description: |
+            how long the sandbox lives past its last activity, in seconds: each token mint that
+            counts as activity moves `expiresAt` to at least now plus this. Never above
+            SH_SANDBOX_MAX_LIFETIME_SECONDS as it is now; a sandbox made before idle lifetimes
+            shows SH_SANDBOX_LIFETIME_SECONDS
     Template:
       type: object
       description: A template (template lifecycle spec §3.2, §4)
@@ -4136,6 +4145,14 @@ paths:
                     the lease idle timeout in seconds, at most SH_SANDBOX_IDLE_CEILING_S (default
                     1800). Omit it for the worker's default (stored as 0); an explicit 0 is refused
                     (400).
+                idleLifetimeS:
+                  type: integer
+                  minimum: 3600
+                  description: |
+                    how long the sandbox lives past its last activity, in seconds, at most
+                    SH_SANDBOX_MAX_LIFETIME_SECONDS (unset: SH_SANDBOX_LIFETIME_SECONDS;
+                    deploy/sbx/setup.sh sets 30 days). Omit it for SH_SANDBOX_LIFETIME_SECONDS
+                    (default 604800). `expiresAt` starts at now plus this.
       responses:
         '201':
           description: |

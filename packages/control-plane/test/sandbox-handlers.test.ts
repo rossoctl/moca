@@ -59,6 +59,7 @@ describe('sandbox handlers (SBX0 §5)', () => {
       mode: 'per-exec',
       idleTimeoutS: 0,
       modeEpoch: 0,
+      idleLifetimeS: 7 * 86_400,
     });
     expect(b.id).toMatch(/^sbx-[0-9a-f]{26}$/);
     const rec = await d.sandboxes!.get(b.id as string, NOW);
@@ -67,6 +68,36 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(rec?.buildId).toBe(b.buildId);
     // No mode asked for: per-exec, the worker's idle default, epoch 0 (lease-mode spec §8.1).
     expect(rec).toMatchObject({ mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 0 });
+    expect(rec?.idleLifetimeS).toBe(7 * 86_400);
+  });
+
+  it('takes an idle lifetime at create, from an hour to the maximum', async () => {
+    const d = sbxDeps();
+    const b = await create(d, alice, { template: 'default', idleLifetimeS: 3600 });
+    expect(b.expiresAt).toBe(NOW + 3600);
+    expect(b.idleLifetimeS).toBe(3600);
+    const m = await create(d, alice, { template: 'default', idleLifetimeS: 30 * 86_400 });
+    expect(m.idleLifetimeS).toBe(30 * 86_400);
+    for (const bad of [3599, 30 * 86_400 + 1, 1.5, '3600', 0]) {
+      expect(
+        await codeOf(() => create(d, alice, { template: 'default', idleLifetimeS: bad })),
+      ).toBe('invalid_request');
+    }
+  });
+
+  it('views a record from before idle lifetimes at the default', async () => {
+    const d = sbxDeps();
+    const b = await create(d);
+    const rec = (await d.sandboxes!.get(b.id as string, NOW))!;
+    const { idleLifetimeS: _drop, ...old } = rec;
+    const id = 'sbx-' + 'a'.repeat(26);
+    await d.sandboxes!.create(
+      { ...old, id, wsk: id, name: '' },
+      { perSubject: 100, total: 100, retentionS: 86_400 },
+      NOW,
+    );
+    const got = await HANDLERS.getSandbox!(on(alice, id), d);
+    expect((got.body as Record<string, unknown>).idleLifetimeS).toBe(7 * 86_400);
   });
 
   it('shows an unnamed sandbox as name null', async () => {

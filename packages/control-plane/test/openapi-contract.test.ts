@@ -116,6 +116,7 @@ describe('§9.3 test 3 — contract drift', () => {
       'mode',
       'idleTimeoutS',
       'modeEpoch',
+      'idleLifetimeS',
     ];
     expect([...s.required].sort()).toEqual([...fields].sort());
     expect(Object.keys(s.properties).sort()).toEqual([...fields].sort());

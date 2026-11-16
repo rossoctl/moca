@@ -18,7 +18,12 @@ import {
   type ProvenanceStore,
 } from './provenance.js';
 import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
-import { isEnrolledForSandbox, MIN_IDLE_TIMEOUT_S, type SandboxConfig } from './sandbox-config.js';
+import {
+  isEnrolledForSandbox,
+  MIN_IDLE_TIMEOUT_S,
+  MIN_SANDBOX_LIFETIME_S,
+  type SandboxConfig,
+} from './sandbox-config.js';
 import {
   hostManaged,
   lastLeaseEnd,
@@ -147,7 +152,7 @@ async function assertSandboxOwner(
 }
 
 /** The wire `Sandbox` (spec §5.1): nulls, never absent fields, and no worker or tenant. */
-function sandboxBody(v: SandboxView) {
+function sandboxBody(v: SandboxView, cfg: SandboxConfig) {
   return {
     id: v.id,
     owner: v.owner,
@@ -166,6 +171,7 @@ function sandboxBody(v: SandboxView) {
     mode: v.mode,
     idleTimeoutS: v.idleTimeoutS,
     modeEpoch: v.modeEpoch,
+    idleLifetimeS: lifetimeOf(cfg, v),
   };
 }
 
@@ -182,6 +188,31 @@ function parseMode(raw: unknown, cfg: SandboxConfig): SandboxModeName {
     throw new CpError('mode_not_allowed', `mode '${raw}' is not allowed on this deployment`);
   }
   return raw;
+}
+
+/**
+ * The idle lifetime a sandbox slides its deadline by: its own, else the default, never more than
+ * the maximum as it is now (clamped like idleClaim clamps the lease idle timeout, so lowering the
+ * maximum never leaves a sandbox outliving the workers' SH_WORKSPACE_IDLE).
+ */
+function lifetimeOf(cfg: SandboxConfig, rec: SandboxRecord): number {
+  return Math.min(rec.idleLifetimeS ?? cfg.lifetimeS, cfg.maxLifetimeS);
+}
+
+/** The owner's idle lifetime: omitted is the default; given, an hour..the maximum. */
+function parseLifetime(raw: unknown, cfg: SandboxConfig): number {
+  if (raw === undefined) return cfg.lifetimeS;
+  if (
+    !Number.isSafeInteger(raw) ||
+    (raw as number) < MIN_SANDBOX_LIFETIME_S ||
+    (raw as number) > cfg.maxLifetimeS
+  ) {
+    throw new CpError(
+      'invalid_request',
+      `idleLifetimeS must be an integer from ${MIN_SANDBOX_LIFETIME_S} to ${cfg.maxLifetimeS}`,
+    );
+  }
+  return raw as number;
 }
 
 /** The owner's lease idle timeout: omitted is 0 (the worker's default); given, 30..the ceiling. */
@@ -2771,6 +2802,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const labels = parseLabels(b.labels);
     const mode = b.mode === undefined ? 'per-exec' : parseMode(b.mode, cfg);
     const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
+    const idleLifetimeS = parseLifetime(b.idleLifetimeS, cfg);
     await requireActive(deps, p, template, b.activate !== false);
     const now = seconds(deps);
     const id = sandboxId(deps.newId());
@@ -2787,7 +2819,8 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       wsk: id,
       labels,
       createdAt: now,
-      expiresAt: now + cfg.lifetimeS,
+      expiresAt: now + idleLifetimeS,
+      idleLifetimeS,
       mode,
       idleTimeoutS,
       // Per-exec is epoch 0, as every sandbox made before modes existed is. A lease mode starts at
@@ -2816,12 +2849,12 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     // Its lease (§7.1): the caller's live lease on the build, by the activate record that granted it.
     const lease = liveLeases(template.build, now).find((l) => l.subject === p.sub);
     await sandboxCreated(deps, rec, p.sub, lease?.record ?? null);
-    return { status: 201, body: sandboxBody(viewOf(rec, now)) };
+    return { status: 201, body: sandboxBody(viewOf(rec, now), cfg) };
   },
 
   listSandboxes: async (ctx, deps) => {
     const p = requireEnrolled(ctx, deps);
-    const { store } = service(deps);
+    const { cfg, store } = service(deps);
     // Presence, not value, is what needs the role (RouteSpec.adminOnlyQuery), as with ?owner=.
     const all = ctx.query.get('all');
     if (all !== null && !isAdmin(p))
@@ -2836,13 +2869,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const sandboxes = recs
       .map((r) => viewOf(r, now))
       .filter((v) => state === null || v.state === state)
-      .map(sandboxBody);
+      .map((v) => sandboxBody(v, cfg));
     return { status: 200, body: { sandboxes } };
   },
 
   getSandbox: async (ctx, deps) => {
     const rec = await assertSandboxOwner(ctx, deps, { admin: true });
-    return { status: 200, body: sandboxBody(viewOf(rec, seconds(deps))) };
+    return { status: 200, body: sandboxBody(viewOf(rec, seconds(deps)), service(deps).cfg) };
   },
 
   deleteSandbox: async (ctx, deps) => {
@@ -2970,7 +3003,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     return {
       status: 200,
       body: {
-        sandbox: sandboxBody(viewOf(next, now)),
+        sandbox: sandboxBody(viewOf(next, now), cfg),
         setModeToken: setModeTokenFor(deps, next, now),
       },
     };
