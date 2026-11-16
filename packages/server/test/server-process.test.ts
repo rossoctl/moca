@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -13,7 +14,11 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
 import { isTenancyNearMiss, readTenancy } from '../src/tenancy.js';
-import { prepareServerProcess, scrubAmbientCredentials } from '../src/server-process.js';
+import {
+  prepareServerProcess,
+  scrubAmbientCredentials,
+  vertexAdcFile,
+} from '../src/server-process.js';
 import { buildConfig } from '../src/server.js';
 
 const KEYS = [
@@ -26,7 +31,21 @@ const KEYS = [
   'OPENAI_API_KEY',
   'SH_SESSION_TOKEN_PUBLIC_KEYS',
   'PI_CODING_AGENT_DIR',
+  'SH_MODEL_HEADERS',
 ];
+
+/** A HOME with nothing in it, so a developer's own gcloud login cannot decide a multi-tenant test. */
+function emptyHome(): string {
+  return mkdtempSync(join(tmpdir(), 'sh-home-'));
+}
+
+/** A HOME holding a Vertex application-default credentials file where pi looks for one. */
+function homeWithAdc(): string {
+  const home = emptyHome();
+  mkdirSync(join(home, '.config', 'gcloud'), { recursive: true });
+  writeFileSync(join(home, '.config', 'gcloud', 'application_default_credentials.json'), '{}');
+  return home;
+}
 
 describe('readTenancy', () => {
   it('defaults to single and accepts the two values', () => {
@@ -170,6 +189,7 @@ describe('prepareServerProcess', () => {
     const env: NodeJS.ProcessEnv = {
       MOCA_TENANCY: 'multi',
       SH_REQUIRE_AUTH: 'true',
+      HOME: emptyHome(),
       ANTHROPIC_API_KEY: 'sk-tenant-planted', // notsecret
       ANTHROPIC_OAUTH_TOKEN: 'oauth-planted', // notsecret
       ANTHROPIC_AUTH_TOKEN: 'auth-planted', // notsecret
@@ -188,6 +208,69 @@ describe('prepareServerProcess', () => {
     expect(() =>
       prepareServerProcess({ MOCA_TENANCY: 'multi', SH_REQUIRE_AUTH: 'true', SH_LOCAL_TOOLS: '1' }),
     ).toThrow(/SH_LOCAL_TOOLS/);
+  });
+
+  it('under multi tenancy refuses SH_MODEL_HEADERS, interpolated or inline (#363)', () => {
+    // `${LITELLM_KEY}` matches none of the scrub's shapes, so it would survive into every tenant's
+    // model requests; an inline literal needs no interpolation at all. Both are refused.
+    for (const headers of ['{"Authorization":"Bearer ${LITELLM_KEY}"}', '{"X-Key":"inline"}']) {
+      const env: NodeJS.ProcessEnv = {
+        MOCA_TENANCY: 'multi',
+        SH_REQUIRE_AUTH: 'true',
+        HOME: emptyHome(),
+        SH_MODEL_HEADERS: headers,
+        LITELLM_KEY: 'sk-litellm-planted', // notsecret
+      };
+      expect(() => prepareServerProcess(env), headers).toThrow(
+        /MOCA_TENANCY=multi refuses SH_MODEL_HEADERS/,
+      );
+    }
+  });
+
+  it('under single tenancy keeps SH_MODEL_HEADERS and its interpolation source (#363)', () => {
+    const env: NodeJS.ProcessEnv = {
+      SH_MODEL_HEADERS: '{"RITS_API_KEY":"${RITS_API_KEY}"}',
+      RITS_API_KEY: 'rits-operator', // notsecret
+    };
+    expect(prepareServerProcess(env).tenancy).toBe('single');
+    expect(env.SH_MODEL_HEADERS).toBe('{"RITS_API_KEY":"${RITS_API_KEY}"}');
+    expect(env.RITS_API_KEY).toBe('rits-operator'); // notsecret
+  });
+
+  it('under multi tenancy refuses a Vertex application-default credentials file (#363)', () => {
+    // GOOGLE_APPLICATION_CREDENTIALS is planted too: the scrub deletes it, which is exactly what
+    // sends pi to the well-known file, so the scrub alone does not close this.
+    const home = homeWithAdc();
+    const env: NodeJS.ProcessEnv = {
+      MOCA_TENANCY: 'multi',
+      SH_REQUIRE_AUTH: 'true',
+      HOME: home,
+      GOOGLE_APPLICATION_CREDENTIALS: join(home, 'elsewhere.json'),
+      GOOGLE_CLOUD_PROJECT: 'p',
+      GOOGLE_CLOUD_LOCATION: 'l',
+    };
+    expect(() => prepareServerProcess(env)).toThrow(
+      /MOCA_TENANCY=multi refuses a Vertex application-default credentials file/,
+    );
+  });
+
+  it('under single tenancy boots with a Vertex application-default credentials file (#363)', () => {
+    const env: NodeJS.ProcessEnv = { HOME: homeWithAdc() };
+    expect(prepareServerProcess(env).tenancy).toBe('single');
+  });
+
+  it('vertexAdcFile is the path pi-ai falls back to (drift guard)', () => {
+    // If pi moves its fallback, this check would guard a file nobody reads.
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../pi-fork/packages/ai/src/env-api-keys.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain(
+      '_join(_homedir(), ".config", "gcloud", "application_default_credentials.json")',
+    );
+    expect(vertexAdcFile({ HOME: '/h' })).toBe(
+      '/h/.config/gcloud/application_default_credentials.json',
+    );
   });
 
   it('under multi tenancy refuses to run without SH_REQUIRE_AUTH=true', () => {
