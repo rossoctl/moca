@@ -258,5 +258,76 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       expect((await store.listAll(T0)).map((r) => r.id)).toEqual([other.id, b.id, a.id]);
       await done();
     });
+
+    it('touch moves expiresAt to now + L, and the sandbox stays live past its old deadline', async () => {
+      const { store, done } = await make();
+      const r = rec();
+      await store.create(r, LIMITS, T0);
+      expect(await store.touch(r.id, T0 + 100, 1000, LIMITS.retentionS)).toEqual({
+        ...r,
+        expiresAt: T0 + 1100,
+      });
+      expect(viewOf((await store.get(r.id, T0 + 700))!, T0 + 700).state).toBe('ready');
+      expect(viewOf((await store.get(r.id, T0 + 1100))!, T0 + 1100)).toMatchObject({
+        state: 'terminated',
+        reason: 'expired',
+      });
+      await done();
+    });
+
+    it('touch never moves expiresAt backwards', async () => {
+      const { store, done } = await make();
+      const r = rec();
+      await store.create(r, LIMITS, T0);
+      const got = await store.touch(r.id, T0 + 100, 60, LIMITS.retentionS);
+      expect(got?.expiresAt).toBe(T0 + 600);
+      expect((await store.get(r.id, T0 + 100))?.expiresAt).toBe(T0 + 600);
+      await done();
+    });
+
+    it('touch refuses a missing, deleted or expired sandbox, the boundary included', async () => {
+      const { store, done } = await make();
+      expect(await store.touch('sbx-missing', T0, 1000, LIMITS.retentionS)).toBeNull();
+      const gone = rec();
+      await store.create(gone, LIMITS, T0);
+      await store.markDeleted(gone.id, T0 + 10, LIMITS.retentionS);
+      expect(await store.touch(gone.id, T0 + 20, 1000, LIMITS.retentionS)).toBeNull();
+      expect(await store.get(gone.id, T0 + 20)).toEqual({
+        ...gone,
+        deletedAt: T0 + 10,
+      });
+      const edge = rec();
+      await store.create(edge, LIMITS, T0);
+      expect(await store.touch(edge.id, T0 + 600, 1000, LIMITS.retentionS)).toBeNull();
+      expect((await store.get(edge.id, T0 + 600))?.expiresAt).toBe(T0 + 600);
+      await done();
+    });
+
+    it('a touched sandbox counts for quotas and holds its name past the old deadline', async () => {
+      const { store, done } = await make();
+      const limits = { ...LIMITS, perSubject: 2 };
+      const keep = rec({ name: 'keep' });
+      await store.create(keep, limits, T0);
+      await store.touch(keep.id, T0 + 100, 1900, limits.retentionS);
+      expect(await store.get(keep.id, T0 + 700)).toMatchObject({ expiresAt: T0 + 2000 });
+      expect(await store.create(rec({ name: 'keep' }), limits, T0 + 700)).toBe('name_conflict');
+      expect(await store.create(rec({ name: 'two', expiresAt: T0 + 2000 }), limits, T0 + 700)).toBe(
+        'ok',
+      );
+      expect(await store.create(rec({ name: 'three' }), limits, T0 + 700)).toBe('quota_subject');
+      await done();
+    });
+
+    it('round-trips idleLifetimeS, and leaves it absent when not given', async () => {
+      const { store, done } = await make();
+      const withL = rec({ idleLifetimeS: 86_400 });
+      const without = rec();
+      await store.create(withL, LIMITS, T0);
+      await store.create(without, LIMITS, T0);
+      expect(await store.get(withL.id, T0)).toEqual(withL);
+      const got = (await store.get(without.id, T0))!;
+      expect('idleLifetimeS' in got).toBe(false);
+      await done();
+    });
   });
 }

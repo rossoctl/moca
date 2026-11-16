@@ -51,6 +51,11 @@ export interface SandboxRecord {
    * at 0, a lease create at 1.
    */
   modeEpoch: number;
+  /**
+   * The owner's idle lifetime in seconds, set at create; absent on a record from before idle
+   * lifetimes (the deployment default applies).
+   */
+  idleLifetimeS?: number;
 }
 
 export type SandboxState = 'ready' | 'terminated';
@@ -109,6 +114,17 @@ export interface SandboxStore {
     idleTimeoutS: number,
     nowS: number,
   ): Promise<SetModeResult | undefined>;
+  /**
+   * Moves a live sandbox's expiresAt to max(expiresAt, nowS + idleLifetimeS), and its retention with
+   * it. Null for a missing, deleted or expired one (nowS >= expiresAt), so an ended sandbox is never
+   * revived.
+   */
+  touch(
+    id: string,
+    nowS: number,
+    idleLifetimeS: number,
+    retentionS: number,
+  ): Promise<SandboxRecord | null>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -193,6 +209,20 @@ export class MemorySandboxStore implements SandboxStore {
     r.idleTimeoutS = idleTimeoutS;
     r.modeEpoch += 1;
     return { record: strip(r), previousMode };
+  }
+
+  // No await before the mutation, as setMode. `retentionS` is unused: retention counts from endOf,
+  // which moves with expiresAt.
+  async touch(
+    id: string,
+    nowS: number,
+    idleLifetimeS: number,
+    _retentionS: number,
+  ): Promise<SandboxRecord | null> {
+    const r = this.recs.get(id);
+    if (!r || !isLive(r, nowS)) return null;
+    r.expiresAt = Math.max(r.expiresAt, nowS + idleLifetimeS);
+    return strip(r);
   }
 }
 

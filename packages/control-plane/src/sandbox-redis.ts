@@ -248,6 +248,17 @@ export class RedisSandboxStore implements SandboxStore {
       return { record, previousMode: isSandboxModeName(prev) ? prev : 'per-exec' };
     });
   }
+
+  touch(
+    _id: string,
+    _nowS: number,
+    _idleLifetimeS: number,
+    _retentionS: number,
+  ): Promise<SandboxRecord | null> {
+    return Promise.reject(
+      new Error('RedisSandboxStore.touch: not implemented yet (idle-lifetime plan 1, task 3)'),
+    );
+  }
 }
 
 function toHash(r: SandboxRecord): Record<string, string> {
