@@ -337,8 +337,10 @@ from other subjects (a 404, as for an id that does not exist) and refuses their 
   on a build it names (the build the sandbox resolved to at creation, not its worker, which two
   builds from one image can share; a sandbox record without a build id counts for every build on
   its worker; judged on the template as read in the retire's turn, not the request's earlier read):
-  delete the sandbox (or let it end), then retire. A worker is never stopped
-  under a live sandbox either (§6.3).
+  delete the sandbox (or let it end), then retire. An active Moca Pi session pinned to a build it
+  names (the build the session resolved to at creation, kept for its life) is use too, with the
+  reason "is pinned by an active session": delete the session, then retire. A worker is never
+  stopped under a live sandbox either (§6.3).
 - **Recorded.** Each build retired writes a `retire` record naming the caller, `from` (the status
   before), `buildRecord` (the digest of its `build` record; null for a build never built) and the
   reason; its earlier records stay. The record is written within the catalog update that retires
@@ -379,8 +381,16 @@ Known limits:
 - Holds are keyed by build id, so a retired build's `removed` report also drops the hold of a
   rejected twin (the same manifest hash in another template) until the host's next inventory; for
   that one poll, egress shipping for the twin's draining sandboxes is refused.
-- A Moca Pi session does not yet name a build, so only live sandboxes count as use; a session
-  pinned to a build is to be checked beside them once sessions are.
+- A pinned session is found through a per-build index of sessions: a session created with a
+  template is added to it, and the delete cascade removes it. A member whose record is gone, not
+  active (left `deleting` by a crash mid-cascade) or pinned to another build does not count, and
+  the check removes it as it scans, so such a crash never blocks a retire for good. Sessions created
+  before the index existed are not in it, so they never block a retire. Ended members are pruned
+  only when a retire or reject checks the build, and each check reads every member's record once.
+- A session create does not share a lock with the retire: a session that resolves the build just
+  before a retire, but writes its index entry after the retire's check, is not seen.
+- An active session blocks the retire until it is deleted, however long ago its last turn was;
+  an idle session is not told apart.
 
 Follow-up, not done here: retiring the build `default` points to could move `default` to the
 newest registered build of the template, so a bare id keeps serving.
@@ -453,7 +463,8 @@ registered build that later turns out wrong.
   creates on other templates never wait on it or on each other. A worker still draining a live
   sandbox keeps its host slot until it stops. A `reject` record names the admin, `from`, the reason and
   `buildRecord`, the digest of the build's `build` record. It is refused `409 build_in_use` while a
-  live sandbox runs on the build, and is idempotent (an already rejected build is answered with
+  live sandbox runs on the build or an active Moca Pi session is pinned to it (§5.1), and is
+  idempotent (an already rejected build is answered with
   `record: null`). Not reversible: a new build is the way back. A retired build is not rejected;
   a rejected one may still be retired.
 - **From mocactl:** `mocactl sbx templates quota TARGET --templates N --builds-queued N --active N
@@ -469,7 +480,8 @@ Known limits:
 
 - Quotas are per subject only; there are no groups or tenants.
 - A reject does not cut off running work (`409 build_in_use` until it ends), and cannot be undone.
-- As for retire, a Moca Pi session does not yet name a build, so only live sandboxes count as use.
+- As for retire, an active Moca Pi session pinned to the build counts as use, with the same limits
+  (§5.1).
 - Removing a rejected build's worker and snapshot from its host comes with the host agent's
   removal step (#743), as for a retired one.
 
