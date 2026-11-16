@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.21.0
+  version: 1.22.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -798,7 +798,8 @@ components:
           description: |
             true when the create matched a build of the caller's template with the same inputs
             (image, spec, profile, gate record's sha256) that is registered or on its way there
-            (§3.2): that build is answered, and no second one is queued. Absent for a new build
+            (§3.2): that build is answered, and no second one is queued. A registered build counts
+            only while a host holds its snapshot (with host agents). Absent for a new build
     LimitUse:
       type: object
       required: [limit, used]
@@ -2292,8 +2293,10 @@ paths:
         writes `create`, `gate` (with a gate record) and `check` records and queues the build for
         a build host; follow it at `build`. A create whose inputs match a build of the caller's
         template that is registered or on its way (§3.2) queues nothing and answers that build with
-        `reused: true`: `200` when it is registered, `202` while it is not. A failed or rejected
-        build is never reused.
+        `reused: true`: `200` when it is registered, `202` while it is not. On a deployment with
+        host agents, a registered build is reused only while some host's last inventory holds its
+        snapshot; when none does, the create is admitted as a new build (`202`, no `reused`), with
+        the usual quota and gate checks. A failed or rejected build is never reused.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

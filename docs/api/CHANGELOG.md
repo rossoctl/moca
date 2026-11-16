@@ -3,6 +3,22 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
+## 1.22.0
+
+A template create reuses a registered build only while a host holds its snapshot
+([#816](https://github.com/rossoctl/moca/issues/816)), as the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §4
+(Reuse) asks. No route, field or error code changes; when a create is answered `reused: true`
+does.
+
+- POST /v1/templates and POST /v1/templates/{id}/builds: on a deployment with host agents, a
+  registered build with the same inputs is reused (`200`, `reused: true`) only while some host's
+  last inventory holds its manifest hash. When none does, the create is admitted as a new build
+  (`202`, no `reused`), with the usual quota and gate checks, instead of an answer naming a build
+  whose sandbox create is refused `409 template_unavailable`. A build on its way (`queued` to
+  `built`) is reused as before, and a deployment without host agents is unchanged. Right after a
+  control-plane restart, before any host has reported, such a create builds again.
+
 ## 1.21.0
 
 Admins set template quotas per subject, and reject a registered build after the fact

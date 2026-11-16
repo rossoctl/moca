@@ -207,8 +207,15 @@ record) and `check` records (§7.1) and queues the build for a host agent (§6.1
 (queued to built) answers `202` with that build and `reused: true`, and queues nothing. The match is
 the image, the spec as sent, the profile and the gate record's sha256 on the caller's own template;
 the builder (Moca commit, kernel) is not compared (one deployment's hosts build with one builder),
-and a failed or rejected build is never reused. With host agents (§6.1), a registered build is to be
-reused only while a host reports holding its snapshot.
+and a failed or rejected build is never reused. With host agents (§6.1), a registered build is
+reused only while some host's last inventory holds its snapshot (its manifest hash); when none does,
+the create is admitted as a new build (`202`), with the usual quota and gate checks, and registers
+under the same manifest hash. A build on its way has no snapshot yet and is reused as before, and a
+deployment without host agents reuses as before. The check is only as current as the hosts' last
+inventories: a snapshot removed since a host's last report still counts as held, and right after a
+control-plane restart, before any host has reported, a create builds again (a duplicate build,
+never an answer that names a missing snapshot). It does not repair the old build: that stays
+`registered` until it is retired.
 
 **Cancel** (built, #737): `POST /v1/templates/{id}/builds/{build}/cancel`, by the owner or an
 admin, withdraws a `queued`, `building` or `probing` build: it becomes `failed` with
