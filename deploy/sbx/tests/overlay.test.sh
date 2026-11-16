@@ -138,6 +138,9 @@ for k in SH_ALLOWED_SUBJECTS SH_SANDBOX_TEMPLATES SH_SANDBOX_EXEC_ENDPOINT SH_SA
 done
 [[ "$(cp_env SH_SANDBOX_EXEC_CA | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
   fail 'SH_SANDBOX_EXEC_CA must be optional (absent when the exec certificate is issued)'
+# The maximum lifetime is optional: a ConfigMap from an older setup.sh still starts the control plane.
+[[ "$(cp_env SH_SANDBOX_MAX_LIFETIME_SECONDS | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional)"')" == sbx-settings/SH_SANDBOX_MAX_LIFETIME_SECONDS/true ]] ||
+  fail 'SH_SANDBOX_MAX_LIFETIME_SECONDS must be read from sbx-settings, optional'
 # The lease policy keys are optional: absent, the control plane's defaults apply (per-exec, 1800 s).
 for k in SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
   [[ "$(cp_env "$k" | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
