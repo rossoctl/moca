@@ -718,6 +718,9 @@ describe('the inference listener`s env (MI1 §15, decision D1)', () => {
     expect(() => checkGrantRedemption({ ...baseConfig, tenancy: 'single' }, false, true)).toThrow(
       /MOCA_GRANT_SIGNING_KEY/,
     );
+    // A URL with no ADDR: `inferenceUrlFromEnv` is satisfied by MOCA_INFERENCE_URL alone, but the
+    // listener binds only when ADDR is set, so this would hand out grants aimed at nothing.
+    expect(() => checkGrantRedemption(multi, true, false)).toThrow(/MOCA_INFERENCE_ADDR/);
     // Today's deployments: single tenancy, no ring, no listener -- nothing refuses.
     expect(() =>
       checkGrantRedemption({ ...baseConfig, tenancy: 'single' }, false, false),

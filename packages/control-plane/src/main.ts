@@ -256,9 +256,13 @@ export function checkGrantRedemption(
         'than a credential (MI1 §6.6), and nothing can mint one without the ring',
     );
   }
-  if (!config.inferenceUrl) {
+  // ADDR as well as the url, and ADDR is the one that is never optional: the listener binds only
+  // when ADDR is set, so MOCA_INFERENCE_URL alone would boot a deployment that hands every dequeue a
+  // grant aimed at a port nothing in this process serves -- the same failure the bind-error exit
+  // below refuses to run with, and nothing else implements the redeemer.
+  if (!addrSet || !config.inferenceUrl) {
     throw new Error(
-      'MOCA_TENANCY=multi requires MOCA_INFERENCE_ADDR (or MOCA_INFERENCE_URL when the bind ' +
+      'MOCA_TENANCY=multi requires MOCA_INFERENCE_ADDR (plus MOCA_INFERENCE_URL when the bind ' +
         'address is a wildcard): a worker holding a grant has nowhere to spend it',
     );
   }
