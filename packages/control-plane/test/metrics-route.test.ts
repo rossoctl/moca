@@ -22,14 +22,35 @@ describe('GET /metrics', () => {
   it('reports zero before any refusal', async () => {
     const res = await HANDLERS.getMetrics!(ctx({ principal: admin }), makeDeps());
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ counters: { async_quota_refusals: 0 } });
+    // The WHOLE body, so a counter added to the module shows up here as a failing assertion rather
+    // than appearing on an operator's /metrics unannounced.
+    expect(res.body).toEqual({
+      counters: { async_quota_refusals: 0, credential_nonprimary_kek_reads: 0 },
+    });
   });
 
   it('reports what the quota actually refused', async () => {
     countAsync('async_quota_refusals');
     countAsync('async_quota_refusals');
     const res = await HANDLERS.getMetrics!(ctx({ principal: admin }), makeDeps());
-    expect(res.body).toEqual({ counters: { async_quota_refusals: 2 } });
+    expect(res.body).toEqual({
+      counters: { async_quota_refusals: 2, credential_nonprimary_kek_reads: 0 },
+    });
+  });
+
+  /**
+   * The KEK rotation signal (subject-document.ts, RUNBOOK). Counted here as well as logged, because
+   * the terminating condition for dropping a retired KEK is "this stopped moving" -- which an
+   * operator reads off /metrics rather than by scraping logs.
+   */
+  it('reports credentials opened under a retired KEK, apart from the quota count', async () => {
+    countAsync('credential_nonprimary_kek_reads');
+    countAsync('credential_nonprimary_kek_reads');
+    countAsync('async_quota_refusals');
+    const res = await HANDLERS.getMetrics!(ctx({ principal: admin }), makeDeps());
+    expect(res.body).toEqual({
+      counters: { async_quota_refusals: 1, credential_nonprimary_kek_reads: 2 },
+    });
   });
 
   it('refuses a non-admin with 403, not 404: the route is not a secret, the number is', async () => {
@@ -49,6 +70,8 @@ describe('GET /metrics', () => {
     };
     body.counters.async_quota_refusals = 999;
     const again = await HANDLERS.getMetrics!(ctx({ principal: admin }), makeDeps());
-    expect(again.body).toEqual({ counters: { async_quota_refusals: 1 } });
+    expect(again.body).toEqual({
+      counters: { async_quota_refusals: 1, credential_nonprimary_kek_reads: 0 },
+    });
   });
 });

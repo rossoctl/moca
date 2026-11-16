@@ -481,6 +481,99 @@ kubectl rollout restart deployment/moca-control-plane -n <namespace>
 Then re-run `install-host.sh --janitor` with the new janitor bundle on every host. Until then, each
 janitor run there logs `skipped` (refused) and removes nothing.
 
+## Rotating the credential KEK
+
+Only with egress credentials on (`SBX_EGRESS_CREDENTIALS=1`). `SH_CREDENTIAL_KEK` in the `sbx-egress`
+Secret is what opens every stored credential: the store — a PVC or Vault — holds ciphertext only, so
+this one value is the most sensitive in the deployment, and it is the same procedure for either store.
+
+**It is a ring, and re-sealing is write-driven.** `SH_CREDENTIAL_KEK` is a comma-separated list,
+**newest first**. Writes always seal under the _first_ key; reads try every key. So a credential moves
+to the new key only when it is **next written** — a credential nobody touches stays on the old key
+indefinitely. There is deliberately no bulk re-wrap: no API returns a stored secret
+(`packages/control-plane/src/envelope.ts`), so nothing — not even an admin — can export and re-seal.
+
+**Dropping the retired key too early is unrecoverable:** that credential can never be decrypted, and
+the only repair is the user entering it again. So the last step waits on evidence, not on a timer.
+
+```bash
+# 1. The new key, prepended to the ring. Read the current value first and keep it as the SECOND entry:
+#    overwriting instead of prepending is the mistake that loses every existing credential.
+old="$(kubectl get secret sbx-egress -n <namespace> -o jsonpath='{.data.SH_CREDENTIAL_KEK}' | base64 -d)"
+new="$(openssl rand -base64 32)"
+kubectl patch secret sbx-egress -n <namespace> --type=merge \
+  -p "{\"data\":{\"SH_CREDENTIAL_KEK\":\"$(printf '%s,%s' "$new" "$old" | base64 | tr -d '\n')\"}}"
+kubectl rollout restart deployment/moca-control-plane -n <namespace>
+```
+
+`setup.sh` generates the KEK once and then **keeps whatever is there**, including a ring, so a re-run
+does not undo this and does not reorder it. A ring entry that is not 32 bytes of base64 makes the next
+`setup.sh` run refuse, naming the entry rather than telling you to delete it.
+
+```bash
+# 2. Watch for reads still landing on the retired key. Both signals are the same event:
+kubectl logs deployment/moca-control-plane -n <namespace> | grep 'NON-PRIMARY KEK'
+#    -> names the subject hash and credential, i.e. WHICH credential is still stale
+curl -sS -H @"$HDR" "$CP/metrics" | jq .counters.credential_nonprimary_kek_reads
+#    -> the same signal as a number, without scraping logs: WHETHER any is
+```
+
+The counter is process-local and resets on restart, and with more than one replica a scrape hits one
+replica. Neither is deduplicated, on purpose: a once-per-process log would let a long-running pod look
+clean while credentials were still stale.
+
+```bash
+# 3. Only once nothing has opened under a non-primary key for long enough that every credential has
+#    plausibly been rewritten -- a quiet counter across a full cycle of use, not a quiet hour -- drop
+#    the retired entry, leaving the new key alone:
+kubectl patch secret sbx-egress -n <namespace> --type=merge \
+  -p "{\"data\":{\"SH_CREDENTIAL_KEK\":\"$(printf '%s' "$new" | base64 | tr -d '\n')\"}}"
+kubectl rollout restart deployment/moca-control-plane -n <namespace>
+```
+
+To force a credential forward instead of waiting, have its owner write it again
+(`mocactl sbx credentials add`, same name and value): a write re-seals under the primary key. That is
+the only way to move one on demand, and it needs the user, because the control plane cannot read the
+secret back out.
+
+If the counter will not go quiet, the stale credentials are named in the log lines from step 2; ask
+those owners to re-add, or leave the retired key in the ring. **Keeping two keys is not an emergency** —
+it costs one failed GCM verification per read of an old credential, and nothing else.
+
+## Vault instead of the PVC
+
+`SBX_CREDENTIAL_STORE=vault` with `SBX_VAULT_ADDR` points the control plane at a Vault KV v2 mount
+instead of the PVC (`deploy/k8s/overlays/ocp-sbx/egress-credentials-vault`, moca#823). The KEK above is
+unchanged and still lives in `sbx-egress` — Vault holds ciphertext, so the key that opens it must not be
+in Vault.
+
+Minimum policy, which needs no `list` (one object per subject, by hash, read by exact name) and no
+`delete` (deleting a credential rewrites the subject's document, a check-and-set `update`):
+
+```hcl
+path "secret/data/moca/credentials/*" {
+  capabilities = ["create", "read", "update"]
+}
+```
+
+Two things this deployment does not do for you:
+
+- **The token.** `VAULT_TOKEN_FILE=/run/vault/token` is read on every request, so a Vault Agent sidecar
+  can log in (AppRole) and renew without the control plane holding a long-lived token. The sidecar is
+  not in the Component: its auth method is a per-deployment decision, and a half-configured one would
+  crash-loop the pod. Until something writes that file, the store answers "not answering" (503) rather
+  than behaving like an empty store.
+- **Reaching Vault.** The control plane's NetworkPolicy allows egress to Redis and to port 443 on
+  **public** addresses only; it excepts `10/8`, `172.16/12`, `192.168/16`, `100.64/10` and `169.254/16`.
+  An internal Vault is typically in one of those ranges and on 8200, so it is unreachable until a narrow
+  egress rule for that address and port is added in the deployment's own overlay. Do not widen the
+  policy to all private addresses to make it work. A private CA on that Vault also needs
+  `NODE_EXTRA_CA_CERTS`.
+
+Switching an existing deployment does **not** migrate what the PVC store already holds: the file and
+Vault stores share the document format and the envelope, so a migration is a re-upload of the existing
+ciphertext rather than a decrypt/re-encrypt, but nothing in-tree performs it yet (moca#823).
+
 ## 7. The janitor
 
 A systemd timer on each KVM host, every 15 minutes (`sbx-janitor.timer`). Each run asks the control
