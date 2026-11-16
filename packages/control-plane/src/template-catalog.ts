@@ -69,8 +69,13 @@ export interface TemplateBuild {
   rebuildOf?: string;
   /** Epoch milliseconds it was queued: the claim order (createdAt is whole seconds). */
   queuedAtMs?: number;
-  /** The host that claimed it, and when (epoch seconds). */
-  claim?: { host: string; at: number };
+  /**
+   * The host that claimed it, and when (epoch seconds). `held`: for a rebuild (rebuildOf), that
+   * host's last inventory already held the snapshot of the build it rebuilds when it claimed it
+   * (the "already built" short cut), so its report is not a rebuild and supersedes nothing.
+   * Internal: never on the wire.
+   */
+  claim?: { host: string; at: number; held?: true };
   /**
    * Created on a selfAttest profile with a gate record the policy did not trust (self-attestation):
    * a fact of its create. Whether it is self-attested NOW is recomputed from the current policy

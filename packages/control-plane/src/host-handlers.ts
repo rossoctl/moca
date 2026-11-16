@@ -826,10 +826,22 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         const build = doc.builds.find((y) => y.handle === x.handle);
         if (!build || build.status !== 'queued') return doc; // another host took it
         got = true;
+        // A rebuild claimed by a host that already holds the snapshot it rebuilds: the host will
+        // find it already built, so this is no rebuild, and its report supersedes nothing.
+        const of = build.rebuildOf
+          ? doc.builds.find((z) => (z.handle ?? z.buildId) === build.rebuildOf)
+          : undefined;
+        const held = of !== undefined && deps.hosts?.get(host)?.holds[of.buildId] !== undefined;
         return {
           ...doc,
           builds: doc.builds.map((y) =>
-            y === build ? { ...y, status: 'building' as const, claim: { host, at: now } } : y,
+            y === build
+              ? {
+                  ...y,
+                  status: 'building' as const,
+                  claim: { host, at: now, ...(held ? { held: true as const } : {}) },
+                }
+              : y,
           ),
         };
       });
@@ -974,12 +986,14 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       // A build id names one build in use of a template: a second build of the same snapshot (the
       // same image and spec, created again with another gate record or profile, which the host
       // finds already built) is not registered beside the first. Except the rebuild of a
-      // registered twin: a create of the twin's own inputs, admitted because no fresh host held
-      // its snapshot (`rebuildOf` names the twin, sandbox-handlers.ts admitBuild). It supersedes
-      // the twin in this same update when the twin is still registered and no fresh host but this
-      // one holds the snapshot (heldFreshElsewhere). This host is left out: it has just built the
-      // snapshot, and its inventory may list it before this report. The twin becomes retired,
-      // keeping its id; the tags naming that id (`default` among them) then resolve to this build
+      // registered twin: a create of the twin's own inputs, admitted because fresh hosts reported
+      // and none held its snapshot (`rebuildOf` names the twin, sandbox-handlers.ts admitBuild).
+      // It supersedes the twin in this same update when the twin is still registered, this host
+      // did not hold the snapshot when it claimed the build (`claim.held`: the "already built"
+      // short cut is no rebuild), and no fresh host but this one holds it (heldFreshElsewhere).
+      // This host is left out then: it has just built the snapshot, and its inventory may list it
+      // before this report. The twin becomes retired, keeping its id; its live leases move to this
+      // build, the tags naming that id (`default` among them) then resolve to this build
       // (buildById), and a `retire` record by the policy names both builds.
       const twin = buildById(
         c.builds.filter((x) => x !== y),
@@ -989,6 +1003,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         twin?.status === 'registered' &&
         y.rebuildOf !== undefined &&
         y.rebuildOf === (twin.handle ?? twin.buildId) &&
+        y.claim?.held !== true &&
         !heldFreshElsewhere(deps, manifestHash, host)
           ? twin
           : undefined;
@@ -1042,6 +1057,11 @@ export const HOST_HANDLERS: Record<string, Handler> = {
               },
             }
           : undefined;
+      // The twin's live leases move to this build, as its tags do: each holder's activation (and
+      // the worker it keeps running) carries on, on the build that now has the id. Each lease keeps
+      // its `since` and the `activate` record it cites.
+      const nowS = seconds(deps);
+      const moved = superseded ? (supersedes!.leases ?? []).filter((l) => l.until > nowS) : [];
       if (superseded) {
         await prov.append({
           stream,
@@ -1055,6 +1075,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
             reason: superseded.reason.message,
             supersededBy: build.handle!,
             supersededByRecord: recordDigest(buildRec.record),
+            leasesMoved: moved.length,
             tags: Object.entries(c.tags)
               .filter(([, id]) => id === manifestHash)
               .map(([tag]) => tag)
@@ -1076,6 +1097,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
                     status: 'registered' as const,
                     buildId: manifestHash,
                     worker: String(t.worker ?? ''),
+                    ...(moved.length > 0 ? { leases: [...(x.leases ?? []), ...moved] } : {}),
                   }
                 : x === supersedes && superseded
                   ? superseded

@@ -1253,17 +1253,20 @@ function reuseKey(
 
 /**
  * Whether a registered build's snapshot still exists somewhere (lifecycle spec §4, Reuse): on a
- * deployment with host agents, a fresh host's last inventory must hold it (heldFresh: the hosts
- * placement and a sandbox create read, so a host silent past HOST_STALE_S does not count), or a
- * create would be answered with a build no sandbox can be created on (its snapshot removed from
- * every host). A build on its way has no snapshot yet and is reused as before. Right after a
- * restart, or while every holder is briefly stale, no fresh host holds it, so a create builds
- * again: a duplicate build, never an answer that points at a missing snapshot. The rebuild
- * registers under the same manifest hash and supersedes the old build (host-handlers.ts, rule
- * T.unique) unless another fresh host holds the snapshot by then.
+ * deployment with host agents, when fresh hosts report (freshHosts: the hosts placement and a
+ * sandbox create read, so a host silent past HOST_STALE_S does not count), one of them must hold
+ * it, or a create would be answered with a build no sandbox can be created on (its snapshot removed
+ * from every host). When no fresh host reports at all (right after a restart, or the only host
+ * silent), holding is unknown and the build is reused as before. A build on its way has no snapshot
+ * yet and is reused as before. A create admitted because fresh hosts hold nothing of it is its
+ * rebuild (rebuildOf), which may supersede it at registration (host-handlers.ts, rule T.unique).
  */
 function stillHeld(deps: CpDeps, x: TemplateBuild): boolean {
   if (x.status !== 'registered' || !deps.hosts) return true;
+  // No fresh host reports at all (a control-plane restart, the only host silent): whether the
+  // snapshot is held is unknown, so the build is reused as before. Only hosts that report and
+  // hold nothing of it say it is gone.
+  if (freshHosts(deps).length === 0) return true;
   return heldFresh(deps, x.buildId);
 }
 

@@ -347,12 +347,38 @@ describe('POST /v1/templates (§4, §8.1)', () => {
       ...cur!,
       builds: cur!.builds.map((x) => ({ ...x, status: 'registered' as const, buildId: H })),
     }));
-    // The only host listing the snapshot last reported past HOST_STALE_S: placement leaves it out,
-    // so a sandbox create on the build would be refused. The create builds again.
+    // The host listing the snapshot last reported past HOST_STALE_S: placement leaves it out, so a
+    // sandbox create on the build would be refused. Another host reports, holding nothing of it:
+    // the create builds again.
     hosts.set('host-1', { at: nowS - 400, holds: { [H]: ID }, running: [], limits });
+    hosts.set('host-2', { at: nowS, holds: {}, running: [], limits });
     const stale = await create(d);
     expect(stale.status).toBe(202);
     expect(stale.body).not.toHaveProperty('reused');
+  });
+
+  it('reuses a registered build while no fresh host reports at all (holding unknown)', async () => {
+    const d = stored();
+    const hosts = new HostRegistry();
+    d.hosts = hosts;
+    const limits = {
+      activeLimit: 4,
+      idleLimitSeconds: 3600,
+      buildConcurrency: 1,
+      diskFreeGb: 200,
+      diskFloorGb: 60,
+    };
+    await create(d);
+    const H = 'sha256:' + 'b'.repeat(64);
+    await d.templates!.update!(ID, async (cur) => ({
+      ...cur!,
+      builds: cur!.builds.map((x) => ({ ...x, status: 'registered' as const, buildId: H })),
+    }));
+    // No host has reported (a restart): reused.
+    expect((await create(d)).body).toMatchObject({ reused: true, buildId: H });
+    // The only host is silent past HOST_STALE_S, holding nothing at its last report: reused.
+    hosts.set('host-1', { at: NOW_MS / 1000 - 400, holds: {}, running: [], limits });
+    expect((await create(d)).body).toMatchObject({ reused: true, buildId: H });
   });
 
   it('answers a registered build 200 with its buildId, and builds again after a failure', async () => {
