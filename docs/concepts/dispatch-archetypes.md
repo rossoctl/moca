@@ -93,10 +93,12 @@ which looks like a real answer. Poll the turn route, not this one.
 - **`MOCA_TENANCY=single` only.** Under `multi`, submission is refused by name
   (501 `async_tenancy_unsupported`) and the drain refuses to arm. Lifting the gate needs the grant
   and token-endpoint slice; it is M2 of the spec's §9.
-- **`deploy/k8s` is wired but unproven.** The ConfigMap, overlays and `setup.sh` validation are in;
-  the queued-leaf smoke test and the written capacity story are
-  [#688](https://github.com/rossoctl/moca/issues/688).
-- Per-turn wall-clock caps (`turn_exp`) are M2. A turn's caps are recorded, not enforced.
+- **`deploy/k8s` is proven by its smoke test, and nothing autoscales it.** Two opt-in smoke claims
+  drain queued leaves on a real cluster, and `deploy/k8s/README.md` §14 documents the consumer and
+  its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
+  ([#688](https://github.com/rossoctl/moca/issues/688), #765).
+- Per-turn wall-clock caps (`turn_exp`) are M2. A turn's caps are recorded, not enforced
+  ([#391](https://github.com/rossoctl/moca/issues/391)).
 
 [#686](https://github.com/rossoctl/moca/issues/686) is the epic, and it closes when a fan-out
 pipeline runs end to end on `deploy/k8s` as well.

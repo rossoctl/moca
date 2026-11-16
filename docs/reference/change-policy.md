@@ -101,10 +101,11 @@ supported runtime also satisfies the first Stable criterion for the deployment p
 | 2   | Deprecation period                                                   | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                     |
 | 3   | The `/turn` and `/runs` aliases                                      | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507) |
 | 4   | `GET /runs/status`                                                   | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508) |
-| 5   | `version` in the OpenAPI files (control plane 1.23.0, harness 1.3.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | [#511](https://github.com/rossoctl/moca/issues/511) |
+| 5   | `version` in the OpenAPI files (control plane 1.23.0, harness 1.3.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | Done: [CHANGELOG.md](../api/CHANGELOG.md)           |
 | 6   | Stored-data compatibility                                            | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | [#509](https://github.com/rossoctl/moca/issues/509) |
 | 7   | Config bundle format                                                 | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | [#510](https://github.com/rossoctl/moca/issues/510) |
 | 8   | Who approves a breaking change                                       | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                     |
 
 Related, from the upgrade-order discussion: the control plane should not hand a `configRef` to a harness that cannot
-apply it ([#512](https://github.com/rossoctl/moca/issues/512)).
+apply it. Every harness since v0.5.0 applies it, so this is closed in favour of decision 7's format-version check
+([#512](https://github.com/rossoctl/moca/issues/512), [#510](https://github.com/rossoctl/moca/issues/510)).

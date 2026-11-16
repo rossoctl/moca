@@ -259,7 +259,7 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'fresh VM',
       'no process survives',
       'persist',
-      'no network',
+      "no network beyond the operator's egress allowlist",
       'one at a time',
       'batch',
     ]) {

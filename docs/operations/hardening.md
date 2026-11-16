@@ -73,7 +73,7 @@
 
 ## MicroVM tier ([`deploy/microvm`](../../deploy/microvm/P4-ON-P6.md))
 
-- [ ] **Use it where you need network isolation, not user isolation.** The guest has no network, but nothing binds a
+- [ ] **Use it where you need network isolation, not user isolation.** The guest has no network device and reaches only `moca-egress`'s allowlist, but nothing binds a
       workspace key to a user.
 - [ ] **Guard the relay exec token.** Whoever holds it can target any workspace.
 - [ ] **Never give the microVM worker the exec token.** It uses its own attach token.

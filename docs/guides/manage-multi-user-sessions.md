@@ -179,7 +179,8 @@ mocactl run --new --option sandboxTier=microvm "In your sandbox: ..."
 
 `--option` is ignored when resuming. The tier is fixed for the session's life and never crosses tiers. With several tiers
 and no choice, the server default applies. The container tier has network access and per-session directories under one `/workspace`, which are not isolated from
-each other; the microVM tier has no network ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
+each other; the microVM tier has no network device and reaches only an allowlist of hosts, through the
+host's proxy ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
 
 ## 5. Choose a model
 
@@ -232,7 +233,7 @@ file by hand.
 
 - **Ownership holds at the API only.** Redis and port 8081 are unauthenticated.
 - **Users share the container sandboxes**, their Unix user, filesystem and process list, until owner binding lands.
-  Each session has its own directory under `/workspace`, but the directories are not isolated from each other. The microVM tier has no network but also no grant binding.
+  Each session has its own directory under `/workspace`, but the directories are not isolated from each other. The microVM tier reaches only an allowlist of hosts, but has no grant binding either.
 - **A user's inference key reaches the shared harness process** for the length of a turn (direct mode). It never reaches
   the sandbox.
 - **Egress is open** from container sandboxes, including to cloud metadata (require IMDSv2 with a hop limit of 1).

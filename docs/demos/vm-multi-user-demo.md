@@ -643,6 +643,11 @@ curl: (6) Could not resolve host: nodejs.org
 The guest has no network device, no DNS and no NAT (#277). Act 2's research works only on the
 container tier, and this tier works on local content.
 
+> Since this run, P4.1's guest egress (#581–#583) reaches the hosts on `moca-egress`'s allowlist
+> through the host's proxy, without credentials. `nodejs.org` is not on the default allowlist, so
+> the call above still fails, but the proxy refuses it by name rather than DNS failing. Re-record
+> the expected output on the next run.
+
 ## Act 5 — The record
 
 The 2026-10-01 run. Copy the table, empty, into the report for a later run.
@@ -698,7 +703,8 @@ Say these in the room. They are what stops someone over-promising.
 - **Open egress.** Container sandboxes reach the whole internet, including cloud instance metadata
   unless the host enforces IMDSv2 with hop limit 1 (#357). Egress control is MI1 S5's
   `moca-egress`.
-- **P4 has no internet** (#277) **and no grant binding** (MI1 S4). Its workspaces are per session,
+- **P4 reaches only an allowlist** (P4.1's `moca-egress`, no credentials) **and has no grant
+  binding** (MI1 S4). Its workspaces are per session,
   but any holder of the relay's exec token can target any of them.
 - **A session returns to its sandbox.** Each turn goes back to the sandbox that served the previous
   one. If that sandbox is saturated, or briefly absent (a relay restart) for up to

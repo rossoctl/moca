@@ -34,8 +34,9 @@ MicroVMs inside a Kubernetes cluster are not supported; the KVM host stays outsi
 
 ### MicroVM limits
 
-From the verified install notes: the guest has no network (#277); each tool call starts a fresh VM, and
-destroying it dominates latency (#274, #307); an idle workspace is silently reset after its idle time,
+From the verified install notes: the guest has no network device, and reaches only the hosts on
+`moca-egress`'s allowlist, through the host's proxy and without credentials (P4.1, #277); each tool
+call starts a fresh VM, by design (ADR-0035), and destroying it dominates latency (#307); an idle workspace is silently reset after its idle time,
 which the turn is not told about (#338, open); and nothing binds a `workspace_key` to a user, so any holder
 of the relay exec token can target any workspace. Warm standby VMs, the design that keeps VM creation off the
 request path, are in [ADR-0035](../adrs/0035-per-exec-microvm-warm-standby.md); the install notes do not

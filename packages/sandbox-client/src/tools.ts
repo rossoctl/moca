@@ -319,11 +319,12 @@ export function sandboxTools(o: {
   const fileOpts = (signal?: AbortSignal) => ({ timeoutS: FILE_TOOL_TIMEOUT_S, signal });
   const rules = leased
     ? `It runs in a remote sandbox whose working directory is ${ws}: ` +
-      `${level2 ? LEASE_PROCESSES_RULE : LEASE_RULE}. There is no ` +
-      `network, and files under ${ws} persist. Calls run one at a time, so batch the work.`
+      `${level2 ? LEASE_PROCESSES_RULE : LEASE_RULE}. There is no network beyond the ` +
+      `operator's egress allowlist, and files under ${ws} persist. Calls run one at a time, so ` +
+      'batch the work.'
     : `It runs in a remote sandbox whose working directory is ${ws}. Every call is a fresh VM: no ` +
-      `process survives it, there is no network, and files under ${ws} persist. Calls run one at a ` +
-      'time, so batch the work.';
+      `process survives it, there is no network beyond the operator's egress allowlist, and files ` +
+      `under ${ws} persist. Calls run one at a time, so batch the work.`;
   const size = `${MAX_LINES} lines or ${MAX_BYTES / 1024}KB`;
 
   const bash: SandboxTool = {

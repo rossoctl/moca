@@ -11,8 +11,9 @@ session then runs in a fresh Firecracker microVM (#274), over a per-session work
 `setup-microvm.sh` is the sibling of `deploy/vm/setup-vm.sh`. It reads P6's installed files and
 never writes one of them.
 
-> **Read "Limits" before a demo.** A P4 guest has **no network**: `curl` and `git` to the internet
-> fail inside it (#277). There is **no grant binding** either (MI1 S4).
+> **Read "Limits" before a demo.** A P4 guest has **no network device**: `curl` and `git` reach only
+> the hosts on `moca-egress`'s allowlist, without credentials ("Guest egress", P4.1); anything else
+> fails inside it. There is **no grant binding** either (MI1 S4).
 
 ## Container sandboxes and P4 on one host
 

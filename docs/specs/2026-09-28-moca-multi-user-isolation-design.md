@@ -152,6 +152,10 @@ returning in-memory `Skill` records (name, description, `filePath`, `baseDir` â€
   SPIFFE identity; P4.1's vsock egress hop and socket-path caller identity (`remote-worker` has nothing
   on ports 1025/3128; only the E12 probe exists).
 
+> **Status 2026-11-16.** P5's scrub and sentinel shipped in S1 (#350: `scrubAmbientCredentials` in
+> `packages/server/src/server-process.ts`), and P4.1's vsock egress hop in S4's transport slice
+> (#582, #583).
+
 ### 2.3 The sandbox tiers
 
 - **Container tier.** `remote-worker` runs every command as `bash -c` in one container, under one UID,
