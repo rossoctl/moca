@@ -4299,7 +4299,9 @@ paths:
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
         404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
         SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt`, after an activity mint moved it
-        to at least now plus the sandbox's `idleLifetimeS` (§4.3; idle-lifetime spec §4.2). A sandbox whose lease
+        to at least now plus the sandbox's `idleLifetimeS` (§4.3; idle-lifetime spec §4.2); the
+        move happens only when SH_SANDBOX_MAX_LIFETIME_SECONDS is configured, else the deadline is
+        fixed at creation. A sandbox whose lease
         mode SH_SANDBOX_MODES_ALLOWED no longer lists is first set to `per-exec` at the next epoch,
         and the `idle_timeout_s` claim is clamped to SH_SANDBOX_IDLE_CEILING_S (lease-mode spec
         §8.1). The optional body `{ "activity": false }` mints without moving the deadline; a

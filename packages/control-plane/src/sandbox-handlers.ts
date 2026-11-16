@@ -313,6 +313,8 @@ function parseActivity(raw: unknown): boolean {
  */
 async function extend(deps: CpDeps, rec: SandboxRecord, now: number): Promise<SandboxRecord> {
   const { cfg, store } = service(deps);
+  // Sliding is off until the maximum is configured: only then are the workers sized for it (spec §6.1).
+  if (!cfg.slideOnActivity) return rec;
   const moved = await store.touch(rec.id, now, lifetimeOf(cfg, rec), cfg.retentionS);
   if (!moved) return refuseGone(store, rec.id, now);
   return moved;

@@ -388,6 +388,23 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect((await HANDLERS.getSandbox!(on(alice, id), end)).body).toMatchObject({ state: 'ready' });
   });
 
+  it("without a configured maximum a mint does not slide the deadline (today's absolute lifetime)", async () => {
+    const base = makeDeps();
+    const d = sbxDeps({
+      config: { sandbox: { ...base.config.sandbox!, slideOnActivity: false } },
+    });
+    const { id } = await create(d);
+    const at = { ...d, now: () => NOW_MS + 6 * DAY_MS };
+    const r = await HANDLERS.mintSandboxToken!(on(alice, id), at);
+    expect(r.body).toMatchObject({ sandboxExpiresAt: NOW + 7 * 86_400 });
+    expect((await d.sandboxes!.get(id as string, NOW + 6 * 86_400))?.expiresAt).toBe(
+      NOW + 7 * 86_400,
+    );
+    const at7 = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+    const err = await HANDLERS.mintSandboxToken!(on(alice, id), at7).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'expired' } });
+  });
+
   it('a sandbox with no activity mint for its lifetime expires, and reads and lists never extend it', async () => {
     const d = sbxDeps();
     const { id } = await create(d);
