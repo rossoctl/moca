@@ -1070,6 +1070,12 @@ async function admitBuild(
             (x) => REUSABLE.has(x.status) && buildReuseKey(x) === want && stillHeld(deps, x),
           );
           if (reused) return cur!;
+          // The registered build of the same inputs that was skipped because no fresh host holds
+          // its snapshot: this build rebuilds it, and only such a rebuild may supersede it at
+          // registration (host-handlers.ts, rule T.unique).
+          const rebuilds = cur?.builds.find(
+            (x) => x.status === 'registered' && buildReuseKey(x) === want && !stillHeld(deps, x),
+          );
           const u = await usage(cat, charged);
           // A template takes a slot when it holds none yet: a new id, or one whose builds all
           // failed, were cancelled or were retired (usage does not count it). Checking only new
@@ -1162,6 +1168,7 @@ async function admitBuild(
               ? { selfAttestProfile: true }
               : {}),
             ...(result.gateFloor ? { gateFloor: result.gateFloor } : {}),
+            ...(rebuilds ? { rebuildOf: rebuilds.handle ?? rebuilds.buildId } : {}),
           };
           const base: TemplateDoc = cur ?? {
             schema: TEMPLATE_DOC_SCHEMA,

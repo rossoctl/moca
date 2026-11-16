@@ -206,53 +206,59 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(chain.at(-1)!.body).toMatchObject({ outcome: 'rejected' });
   });
 
-  it('rejects a second build of a snapshot the template already has (one build per build id)', async () => {
-    const d = await setup();
-    const first = await claimAndBuild(d);
-    await HANDLERS.hostBuildReport!(
-      asHost('host-1', { build: first }, { event: 'built', ...records() }),
-      d,
-    );
-    // The same image and spec again under another profile and no gate record: not a reuse, so a new
-    // build; template-build.sh finds the snapshot already built and reports the same manifest hash.
-    const again = await HANDLERS.createTemplate!(
-      ctx({
-        principal: alice,
-        body: {
-          id: ID,
-          image: IMAGE,
-          spec: { ...REST, source_record_digest: undefined, skip_git_identity_check: false },
-          profile: 'base',
-        },
-      }),
-      d,
-    );
-    expect(again.status).toBe(202);
-    const second = await claimAndBuild(d);
-    expect(second).not.toBe(first);
-    // Another host still holds the snapshot (a fresh inventory says so): the first build is still
-    // usable there, so no supersede.
-    await inventory(d, 'host-2', [HASH]);
-    const r = (
+  it.each([
+    ['no host', null],
+    ['the reporting host', 'host-1'],
+    ['another host', 'host-2'],
+  ])(
+    'rejects a second build of a snapshot the template already has, %s holding it (one build per build id)',
+    async (_n, holder) => {
+      const d = await setup();
+      const first = await claimAndBuild(d);
       await HANDLERS.hostBuildReport!(
-        asHost('host-1', { build: second }, { event: 'built', ...records() }),
+        asHost('host-1', { build: first }, { event: 'built', ...records() }),
         d,
-      )
-    ).body as Body;
-    expect(r).toEqual({ status: 'rejected', rule: 'T.unique' });
-    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
-      .body as Body;
-    expect(t.builds.filter((b: Body) => b.buildId === HASH)).toHaveLength(1);
-    expect(t.tags).toEqual({ default: HASH });
-    const b = (
-      await HANDLERS.getTemplateBuild!(
-        ctx({ principal: alice, params: { id: ID, build: second } }),
+      );
+      // The same image and spec again under another profile and no gate record: not a reuse, so a new
+      // build; template-build.sh finds the snapshot already built and reports the same manifest hash.
+      const again = await HANDLERS.createTemplate!(
+        ctx({
+          principal: alice,
+          body: {
+            id: ID,
+            image: IMAGE,
+            spec: { ...REST, source_record_digest: undefined, skip_git_identity_check: false },
+            profile: 'base',
+          },
+        }),
         d,
-      )
-    ).body as Body;
-    expect(b).toMatchObject({ status: 'rejected', reason: { rule: 'T.unique' } });
-    expect(b.reason.message).toContain(first);
-  });
+      );
+      expect(again.status).toBe(202);
+      const second = await claimAndBuild(d);
+      expect(second).not.toBe(first);
+      // Not a rebuild of the first build (other inputs): never a supersede, whoever holds it.
+      if (holder) await inventory(d, holder, [HASH]);
+      const r = (
+        await HANDLERS.hostBuildReport!(
+          asHost('host-1', { build: second }, { event: 'built', ...records() }),
+          d,
+        )
+      ).body as Body;
+      expect(r).toEqual({ status: 'rejected', rule: 'T.unique' });
+      const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+        .body as Body;
+      expect(t.builds.filter((b: Body) => b.buildId === HASH)).toHaveLength(1);
+      expect(t.tags).toEqual({ default: HASH });
+      const b = (
+        await HANDLERS.getTemplateBuild!(
+          ctx({ principal: alice, params: { id: ID, build: second } }),
+          d,
+        )
+      ).body as Body;
+      expect(b).toMatchObject({ status: 'rejected', reason: { rule: 'T.unique' } });
+      expect(b.reason.message).toContain(first);
+    },
+  );
 
   it('supersedes a registered build whose snapshot no host holds when it is built again (#816)', async () => {
     const d = await setup();
@@ -373,7 +379,7 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(after.find((x) => x.handle === second)).toMatchObject({ status: 'rejected' });
   });
 
-  it('supersedes when only the reporting host lists the snapshot, and not when another host does', async () => {
+  it('supersedes when only the reporting host lists the snapshot', async () => {
     const d = await setup();
     const first = await claimAndBuild(d);
     await HANDLERS.hostBuildReport!(
@@ -394,31 +400,33 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(r).toEqual({ status: 'registered', buildId: HASH });
     const builds = (await d.templates!.get(ID))!.builds;
     expect(builds.find((x) => x.handle === first)).toMatchObject({ status: 'retired' });
-    // Another fresh host holds it while a third build is reported: T.unique, nothing superseded.
-    await inventory(d, 'host-1', []);
-    await inventory(d, 'host-2', [HASH]);
-    await HANDLERS.createTemplate!(
-      ctx({
-        principal: alice,
-        body: {
-          id: ID,
-          image: IMAGE,
-          spec: { ...REST, source_record_digest: undefined, skip_git_identity_check: false },
-          profile: 'base',
-        },
-      }),
+  });
+
+  it('rejects a rebuild when another fresh host holds the snapshot by its report', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
       d,
     );
-    const third = await claimAndBuild(d);
-    const r3 = (
+    await inventory(d, 'host-1', []);
+    await createAgain(d);
+    const second = await claimAndBuild(d);
+    expect((await d.templates!.get(ID))!.builds.find((x) => x.handle === second)).toMatchObject({
+      rebuildOf: first,
+    });
+    // Another host reports the snapshot before the rebuild's report: the first build is usable
+    // there, so T.unique, and nothing is superseded.
+    await inventory(d, 'host-2', [HASH]);
+    const r = (
       await HANDLERS.hostBuildReport!(
-        asHost('host-1', { build: third }, { event: 'built', ...records() }),
+        asHost('host-1', { build: second }, { event: 'built', ...records() }),
         d,
       )
     ).body as Body;
-    expect(r3).toEqual({ status: 'rejected', rule: 'T.unique' });
+    expect(r).toEqual({ status: 'rejected', rule: 'T.unique' });
     const after = (await d.templates!.get(ID))!.builds;
-    expect(after.find((x) => x.handle === second)).toMatchObject({ status: 'registered' });
+    expect(after.find((x) => x.handle === first)).toMatchObject({ status: 'registered' });
   });
 
   it('does not count a stale host as holding the snapshot at registration', async () => {

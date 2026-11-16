@@ -61,6 +61,12 @@ export interface TemplateBuild {
   provenance?: string;
   /** What a host agent needs to build it (§6.1): the image and the spec as the client sent them. */
   request?: { image: string; spec: Record<string, unknown>; gateRecordSha256?: string };
+  /**
+   * The handle of the registered build of the same inputs this build was admitted to rebuild,
+   * because no fresh host held that build's snapshot (lifecycle spec §4, Reuse): only such a
+   * rebuild supersedes it at registration (§6.1, rule `T.unique`). Internal: never on the wire.
+   */
+  rebuildOf?: string;
   /** Epoch milliseconds it was queued: the claim order (createdAt is whole seconds). */
   queuedAtMs?: number;
   /** The host that claimed it, and when (epoch seconds). */

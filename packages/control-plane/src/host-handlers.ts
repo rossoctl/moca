@@ -973,22 +973,23 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       const results = registrationResults(y, t, sm);
       // A build id names one build in use of a template: a second build of the same snapshot (the
       // same image and spec, created again with another gate record or profile, which the host
-      // finds already built) is not registered beside the first while another host holds it.
-      // Except a registered twin whose snapshot no fresh host but this one holds
-      // (heldFreshElsewhere): it was removed from every other host, so a create built it again (a
-      // create reuses a registered build only while a host holds it), and this build supersedes it
-      // in this same update. This host is left out: it has just built the snapshot, and its
-      // inventory may list it before this report; when it held the snapshot all along (the "already
-      // built" short cut), the result is still one registered build of it, on a host that holds
-      // it. The twin becomes retired, keeping its id; the tags naming that id (`default` among
-      // them) then resolve to this build (buildById), and a `retire` record by the policy names
-      // both builds.
+      // finds already built) is not registered beside the first. Except the rebuild of a
+      // registered twin: a create of the twin's own inputs, admitted because no fresh host held
+      // its snapshot (`rebuildOf` names the twin, sandbox-handlers.ts admitBuild). It supersedes
+      // the twin in this same update when the twin is still registered and no fresh host but this
+      // one holds the snapshot (heldFreshElsewhere). This host is left out: it has just built the
+      // snapshot, and its inventory may list it before this report. The twin becomes retired,
+      // keeping its id; the tags naming that id (`default` among them) then resolve to this build
+      // (buildById), and a `retire` record by the policy names both builds.
       const twin = buildById(
         c.builds.filter((x) => x !== y),
         manifestHash,
       );
       const supersedes =
-        twin?.status === 'registered' && !heldFreshElsewhere(deps, manifestHash, host)
+        twin?.status === 'registered' &&
+        y.rebuildOf !== undefined &&
+        y.rebuildOf === (twin.handle ?? twin.buildId) &&
+        !heldFreshElsewhere(deps, manifestHash, host)
           ? twin
           : undefined;
       results.push(

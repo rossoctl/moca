@@ -542,32 +542,34 @@ an owner's cancel that lands while a report is being written stands and no recor
 registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
 template's first registered build takes the `default` tag. A build id names one build in use of a
-template: a build whose manifest hash another build of the template already has (the same image
-and spec created again under another profile or gate record, which the build finds already built)
-is rejected, rule `T.unique`, naming that build, unless it supersedes that build (below). When that build is retired (a host's "already built"
-short cut found its snapshot still there: removal has not run, or keeps it because its worker or id is
-shared), the message says to change the spec or create again after the snapshot's removal.
+template: a build whose manifest hash another build of the template already has (the same image and
+spec created again under another profile or gate record, which the build finds already built) is
+rejected, rule `T.unique`, naming that build, unless it is that build's rebuild (below). When that
+build is retired (a host's "already built" short cut found its snapshot still there: removal has not
+run, or keeps it because its worker or id is shared), the message says to change the spec or create
+again after the snapshot's removal.
 
-**A rebuild supersedes a registered build whose snapshot is gone** (#816). When that other build is
-`registered` and no fresh host (§4, Reuse) other than the reporting one holds the manifest hash,
-its snapshot was removed from every other host, and a create built it again (§4, Reuse). The
-reporting host is left out: it has just built the snapshot, and its inventory may list it before
-its `built` report arrives. When it held the snapshot all along (the "already built" short cut),
-superseding still leaves one registered build of it, on a host that holds it. Then the new build
-registers and, in the same
-catalog update, supersedes the old one: the old build becomes `retired` (`reason.step:
-superseded`, its leases gone, as a retire's) and keeps its build id, and the tags that named that
-id, `default` included, name the new build. The registration `check` passes `T.unique` with a
-message naming the superseded build, and a `retire` record by `policy` follows it, with `from:
-registered`, the superseded build's `buildRecord`, `supersededBy` (the new build's handle),
-`supersededByRecord` (its `build` record) and `tags`. When another fresh host does hold the hash,
-the old build is still usable there and the rebuild is rejected as above; a rebuild that fails leaves the old build untouched. Two builds then
-share one build id, one retired: everywhere a build id names a build of a template (a reference
-`id@<build>`, a tag, the build routes, an activation, a lease, placement, a host's reports), it
-names the one not ended, and the superseded build is found by its handle. A sandbox or session
-recorded under the id is use of that build. The superseded build shares its snapshot with a build
-neither retired nor rejected, so its snapshot and worker are never stopped or removed for it (its
-`shared` is true), and a host's `removed` for the id is refused.
+**A rebuild supersedes a registered build whose snapshot is gone** (#816). A create of a registered
+build's own inputs, admitted because no fresh host held its snapshot (§4, Reuse), is that build's
+rebuild: the control plane notes which build it rebuilds (internal, not on the wire). When the
+rebuild reports `built` with that build's manifest hash, the build is still `registered`, and no
+fresh host other than the reporting one holds the hash, the rebuild registers and, in the same
+catalog update, supersedes the old one. The reporting host is left out: it has just built the
+snapshot, and its inventory may list it before its `built` report arrives. Any other build with the
+same hash (another profile or gate record, which the host finds already built) is rejected, rule
+`T.unique`, whoever holds the snapshot. When superseding: the old build becomes `retired`
+(`reason.step: superseded`, its leases gone, as a retire's) and keeps its build id, and the tags
+that named that id, `default` included, name the new build. The registration `check` passes
+`T.unique` with a message naming the superseded build, and a `retire` record by `policy` follows it,
+with `from: registered`, the superseded build's `buildRecord`, `supersededBy` (the new build's
+handle), `supersededByRecord` (its `build` record) and `tags`. When another fresh host does hold the
+hash, the old build is still usable there and the rebuild is rejected as above; a rebuild that fails
+leaves the old build untouched. Two builds then share one build id, one retired: everywhere a build
+id names a build of a template (a reference `id@<build>`, a tag, the build routes, an activation, a
+lease, placement, a host's reports), it names the one not ended, and the superseded build is found
+by its handle. A sandbox or session recorded under the id is use of that build. The superseded build
+shares its snapshot with a build neither retired nor rejected, so its snapshot and worker are never
+stopped or removed for it (its `shared` is true), and a host's `removed` for the id is refused.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
