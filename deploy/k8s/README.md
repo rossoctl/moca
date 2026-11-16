@@ -21,14 +21,14 @@ the Knative/KEDA deployment model that once shared this name space was removed e
 (ADR-0041). [ADR-0037](../../docs/adrs/0037-p6-on-kubernetes-substrate.md) records the
 Kubernetes-substrate distinction.
 
-| Workload                        | Namespace          | Ports                                        | Reached by                                                                     |
-| ------------------------------- | ------------------ | -------------------------------------------- | ------------------------------------------------------------------------------ |
-| Deployment `moca-supervisor`    | `moca`             | 8080 data; 8081 admin; 8443 ghostunnel (OCP) | users: `port-forward` on Kind, the passthrough Route on OCP; kubelet on 8081   |
-| Deployment `sandbox-relay`      | `moca`             | 9443 Attach; 9444 SandboxExec                | sandboxes on 9443 only; supervisor pods on 9444 only                           |
-| StatefulSet `redis`             | `moca`             | 6379                                         | supervisor, relay, control plane                                               |
-| Deployment `moca-control-plane` | `moca`             | 8080                                         | users (`port-forward` on Kind, an edge Route on OCP); the supervisor's workers |
-| StatefulSet `moca-sandbox`      | `moca-sandbox`     | none                                         | nothing: each sandbox dials out to the relay                                   |
-| per-user credentials (Secrets)  | `moca-credentials` | none                                         | the control plane, through the kube API (`K8sSecretStore`)                     |
+| Workload                        | Namespace          | Ports                                                            | Reached by                                                                                     |
+| ------------------------------- | ------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Deployment `moca-supervisor`    | `moca`             | 8080 data; 8081 admin; 8443 ghostunnel and 8453 its status (OCP) | users: `port-forward` on Kind, the passthrough Route on OCP; kubelet on 8081 (and 8453 on OCP) |
+| Deployment `sandbox-relay`      | `moca`             | 9443 Attach; 9444 SandboxExec                                    | sandboxes on 9443 only; supervisor pods on 9444 only                                           |
+| StatefulSet `redis`             | `moca`             | 6379                                                             | supervisor, relay, control plane                                                               |
+| Deployment `moca-control-plane` | `moca`             | 8080                                                             | users (`port-forward` on Kind, an edge Route on OCP); the supervisor's workers                 |
+| StatefulSet `moca-sandbox`      | `moca-sandbox`     | none                                                             | nothing: each sandbox dials out to the relay                                                   |
+| per-user credentials (Secrets)  | `moca-credentials` | none                                                             | the control plane, through the kube API (`K8sSecretStore`)                                     |
 
 The relay has two Services, `sandbox-relay-attach` (9443) and `sandbox-relay-exec` (9444), so the
 address a sandbox is given has no route to the exec port. The supervisor's Service is
@@ -226,12 +226,15 @@ becomes exactly one supervisor connection. The control plane is ordinary HTTP, s
 Route; connection reuse there is harmless.
 
 The image is `docker.io/ghostunnel/ghostunnel:v1.11.3`, pinned by digest in
-`overlays/ocp/kustomization.yaml`. Each ghostunnel sidecar's readiness probe is `GET /_metrics` on
-its own status port (`--status`; 8453 beside the supervisor, 8454 and 8455 beside the relay's attach
-and exec sidecars), never a TCP connect to its TLS port, which logged a handshake error every 5 s.
-`/_metrics` dials nothing (`/_status` would open a connection to the target on every probe), and
-no NetworkPolicy admits the status ports, so only the kubelet's probes reach them. Docker Hub is the project's official channel; it does not
+`overlays/ocp/kustomization.yaml`. Docker Hub is the project's official channel; it does not
 publish to GHCR.
+
+Each ghostunnel sidecar's readiness probe is `GET /_metrics` on its own status port (`--status`;
+8453 beside the supervisor, 8454 and 8455 beside the relay's attach and exec sidecars), never a TCP
+connect to its TLS port, which logged a handshake error every 5 s. `/_metrics` dials nothing
+(`/_status` would open a connection to the target on every probe), and no NetworkPolicy admits the
+status ports, so only the kubelet's probes reach them. A cluster that needs the node-CIDR fallback
+for probes (section 10) must admit the status ports there too.
 
 The manifest tests fail on any `Ingress` or `serving.knative.dev` object, and on an OCP supervisor
 Route that is not `passthrough` to the sidecar's port. Replacing the sidecar with an HTTP proxy
@@ -774,6 +777,12 @@ spec:
     - from: [{ ipBlock: { cidr: <node CIDR> } }]
       ports: [{ protocol: TCP, port: 8081 }, { protocol: TCP, port: 8080 }]
 ```
+
+**On OpenShift, the ghostunnel sidecars are probed too,** on their status ports: 8453 on the
+supervisor pods, 8454 and 8455 on the relay pods (section 3). A cluster that needs this fallback
+adds `sandbox-relay` to the selector's values and `{ protocol: TCP, port: 8453 }`,
+`{ protocol: TCP, port: 8454 }` and `{ protocol: TCP, port: 8455 }` to its ports, or the sidecars
+stay NotReady.
 
 **It was not needed on Kind:** kindnet accepts traffic originated by the node's root user before
 any policy, which covers the kubelet. It is still to be checked on OVN-Kubernetes (section 9.2).
