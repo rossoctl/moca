@@ -44,10 +44,12 @@ export async function redeemInferenceGrant(
   }
 
   // 2. The SESSION, which §6.3 makes authoritative: it must exist, be owned by the grant's subject,
-  //    and not be tombstoned. Checked on EVERY redemption, which is what lets a deleted session and
-  //    a rotated credential take effect at once rather than within MOCA_GRANT_TTL_S (D4). All three
-  //    answer the 404-shaped `session_not_found` the rest of the codebase gives, so a grant for a
-  //    session the caller cannot see is no existence oracle.
+  //    and not be tombstoned. Checked on EVERY redemption against Redis, so a deleted session stops
+  //    its turn's requests at once rather than within MOCA_GRANT_TTL_S (D4); a credential rotated on
+  //    ANOTHER replica takes effect within the credential store's own read window instead (3 s,
+  //    K8sSecretStore.READ_TTL_MS), and one rotated here at once. All three checks below answer the
+  //    404-shaped `session_not_found` the rest of the codebase gives, so a grant for a session the
+  //    caller cannot see is no existence oracle.
   const rec = await deps.index.get(claims.sid);
   if (!rec || rec.owner !== claims.sub || rec.tombstone) {
     throw new CpError('session_not_found', undefined, claims.sid);
@@ -57,8 +59,9 @@ export async function redeemInferenceGrant(
   //    credential name at submission, async §5.1, so a session that switched credentials mid-turn
   //    must not move an already-queued turn), resolved under the SESSION's owner and never under a
   //    subject the caller supplied. Deletion and rotation are still honoured, because the value is
-  //    re-read here on every request. `''` takes the audited operator fallback exactly as the
-  //    interactive exchange does, and refuses the same way when there is none.
+  //    re-read here on every request -- from the store, which under Kubernetes answers from its own
+  //    short read cache rather than forking kubectl per request. `''` takes the audited operator
+  //    fallback exactly as the interactive exchange does, and refuses the same way when there is none.
   const resolved = await resolveInference(
     { owner: rec.owner, credentialName: claims.cred, sessionId: rec.sessionId },
     deps,

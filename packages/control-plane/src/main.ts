@@ -827,5 +827,23 @@ if (isMainModule) {
   startControlPlane(deps, portFromEnv(env), hostFromEnv(env));
   const addr = inferenceAddrFromEnv(env);
   // Not started without the address, so every existing deployment still opens exactly one port.
-  if (addr) startInferenceProxy(deps, addr.port, addr.host);
+  if (addr) {
+    const inference = startInferenceProxy(deps, addr.port, addr.host);
+    // Exit rather than run on: a control plane in `multi` whose redeemer never bound answers every
+    // dequeue with a grant and an inferenceUrl nothing is listening on, so each turn fails at its
+    // first completion. Failing the boot is how `checkGrantRedemption` already treats a missing
+    // redeemer; a bind that cannot happen is the same deployment mistake, found a moment later.
+    inference.on('error', (err) => {
+      console.error(`[inference] cannot bind MOCA_INFERENCE_ADDR=${env.MOCA_INFERENCE_ADDR}:`, err);
+      process.exit(1);
+    });
+    // Its own SIGTERM rather than a second server inside `startControlPlane`: the API listener's
+    // drain releases Redis when IT finishes, so a request in flight past that point fails on
+    // redemption. That is correct for a drain -- the turns it served are going away with the worker
+    // -- and bounded, because this listener stops accepting at the same moment.
+    process.on('SIGTERM', () => {
+      inference.close();
+      inference.closeIdleConnections();
+    });
+  }
 }

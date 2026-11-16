@@ -374,6 +374,84 @@ describe('K8sSecretStore', () => {
     await expect(other.get(ALICE, 'a')).rejects.toThrow(/decrypt/i);
   });
 
+  describe('the read cache, which is what makes a per-request redemption affordable', () => {
+    // Every read forks kubectl. MI1 §6.3's inference listener redeems a grant on EVERY request a
+    // worker sends to the provider, so without this a few concurrent turns mean a process fork per
+    // completion.
+    const gets = () => cluster.calls.filter((c) => c[0] === 'get').length;
+    let clock: number;
+    const cached = () =>
+      new K8sSecretStore({ namespace: NS, keks: [KEK], run: cluster.run, now: () => clock });
+
+    beforeEach(() => void (clock = 1_000_000));
+
+    it('serves repeated reads of the same subject from one kubectl call', async () => {
+      await store.put(ALICE, cred('a')); // through `store`, so nothing is cached yet
+      const s = cached();
+      expect((await s.get(ALICE, 'a'))?.secret.token).toBe('ghp-fake'); // notsecret
+      const after = gets();
+      for (let i = 0; i < 20; i++) await s.get(ALICE, 'a');
+      await s.list(ALICE);
+      expect(gets()).toBe(after);
+    });
+
+    it('collapses concurrent reads into a single call, not one per caller', async () => {
+      await store.put(ALICE, cred('a'));
+      const s = cached();
+      const before = gets();
+      await Promise.all(Array.from({ length: 10 }, () => s.get(ALICE, 'a')));
+      expect(gets()).toBe(before + 1);
+    });
+
+    it('re-reads once the entry is older than the TTL', async () => {
+      await store.put(ALICE, cred('a'));
+      const s = cached();
+      await s.get(ALICE, 'a');
+      const after = gets();
+      clock += 3_001;
+      await s.get(ALICE, 'a');
+      expect(gets()).toBe(after + 1);
+    });
+
+    it('re-reads at once after a write this store made, so a re-entered key is never stale', async () => {
+      const s = cached();
+      await s.put(ALICE, cred('a'));
+      await s.get(ALICE, 'a');
+      const after = gets();
+      await s.put(ALICE, cred('a', { secret: { token: 'ghp-rotated' } })); // notsecret
+      expect((await s.get(ALICE, 'a'))?.secret.token).toBe('ghp-rotated'); // notsecret
+      expect(gets()).toBe(after + 1);
+      await s.delete(ALICE, 'a');
+      expect(await s.get(ALICE, 'a')).toBeNull();
+    });
+
+    it('does not cache a failure, so a momentary outage is not this subject`s answer for 3s', async () => {
+      let dead = true;
+      const s = new K8sSecretStore({
+        namespace: NS,
+        keks: [KEK],
+        now: () => clock,
+        run: async (args, stdin) => {
+          if (dead && args[0] === 'get') throw new Error('connection refused');
+          return cluster.run(args, stdin);
+        },
+      });
+      await store.put(ALICE, cred('a'));
+      await expect(s.get(ALICE, 'a')).rejects.toThrow();
+      dead = false;
+      expect((await s.get(ALICE, 'a'))?.secret.token).toBe('ghp-fake'); // notsecret
+    });
+
+    it('stays bounded when more subjects are read than it holds', async () => {
+      const s = cached();
+      for (let i = 0; i < 400; i++) await s.get(`github:${i}`, 'a');
+      // Nothing to assert from outside but the absence of unbounded growth; the field is private, so
+      // reach for it once rather than widening the class's surface for a test.
+      const held = (s as unknown as { reads: Map<string, unknown> }).reads;
+      expect(held.size).toBeLessThanOrEqual(256);
+    });
+  });
+
   it('ignores a data key with no descriptor annotations when listing', async () => {
     // Something else wrote a stray key into the Secret. It must not appear as a credential with an
     // invented descriptor -- list() reports only what it can describe.

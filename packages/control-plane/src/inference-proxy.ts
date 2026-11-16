@@ -119,7 +119,13 @@ async function forward(req: IncomingMessage, res: ServerResponse, deps: CpDeps):
 
   const out: Record<string, string> = {};
   upstream.headers.forEach((v, k) => {
-    if (!HOP_BY_HOP.has(k)) out[k] = v;
+    // `content-encoding` is dropped on the way BACK only, which is why it is not in HOP_BY_HOP:
+    // `fetch` advertises `accept-encoding: gzip, deflate` of its own accord and DECODES the body it
+    // gets, while leaving the header the provider sent in place. Forwarding that header with an
+    // already-decoded body makes the worker gunzip plain text, so every compressed answer -- which
+    // is every non-streamed one from a provider that honours gzip -- fails. `content-length` is in
+    // HOP_BY_HOP for the same reason: the decoded length is not the one upstream counted.
+    if (!HOP_BY_HOP.has(k) && k !== 'content-encoding') out[k] = v;
   });
   res.writeHead(upstream.status, out);
   if (!upstream.body) {
@@ -135,10 +141,8 @@ async function forward(req: IncomingMessage, res: ServerResponse, deps: CpDeps):
  * Bind the listener. Loopback on deploy/vm, where the worker shares the host; a pod or container IP
  * under compose and Kubernetes, where `MOCA_INFERENCE_URL` names the service.
  *
- * Its own SIGTERM handler rather than a second server inside `startControlPlane`: the API listener's
- * drain releases Redis when IT finishes, so a request in flight past that point fails on redemption.
- * That is correct for a drain -- the turns it served are going away with the worker -- and bounded,
- * because this listener stops accepting at the same moment.
+ * Shutting it down is the CALLER's job (see main.ts): a SIGTERM handler registered here would
+ * accumulate one listener per server, and the tests start dozens.
  */
 export function startInferenceProxy(deps: CpDeps, port: number, host?: string): Server {
   const server = createServer(buildInferenceHandler(deps));
@@ -150,10 +154,9 @@ export function startInferenceProxy(deps: CpDeps, port: number, host?: string): 
   // that are not this deployment's own workers.
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
-  server.listen(port, host);
-  process.on('SIGTERM', () => {
-    server.close();
-    server.closeIdleConnections();
-  });
+  // `listen` takes an ADDRESS, not a URL authority: given `[::1]` it resolves the brackets as a
+  // hostname and dies ENOTFOUND. `MOCA_INFERENCE_ADDR` is written the way a URL is, so strip them
+  // here -- `inferenceUrlFromEnv` keeps them, because the URL side needs them.
+  server.listen(port, host?.replace(/^\[(.*)]$/, '$1'));
   return server;
 }

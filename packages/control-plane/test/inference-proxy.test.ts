@@ -1,4 +1,5 @@
 import { createServer, request, type Server } from 'node:http';
+import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { startInferenceProxy } from '../src/inference-proxy.js';
 import { seedCredential, type TestDeps } from './helpers/deps.js';
@@ -133,6 +134,32 @@ describe('the inference listener (MI1 §6.3, §8.6; decision D1)', () => {
     expect(up.seen[0]!.auth).toBeUndefined();
   });
 
+  it('drops content-encoding, which fetch has already decoded, so no answer is gunzipped twice', async () => {
+    // A provider that honours gzip answers every non-streamed request compressed. `fetch` decodes
+    // it for us but leaves the header, so forwarding the header hands the worker plain text labelled
+    // gzip -- which is exactly what this test's own `fetch` would then fail to decode.
+    const gz = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+      res.end(gzipSync(Buffer.from('{"ok":true}')));
+    });
+    await new Promise<void>((r) => gz.listen(0, '127.0.0.1', () => r()));
+    await seedCredential(d, 'github:1234', 'my-anthropic', {
+      endpoint: `http://127.0.0.1:${(gz.address() as { port: number }).port}`,
+      destination: { hosts: ['127.0.0.1'] },
+    });
+    try {
+      const res = await fetch(`${px.url}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${mint(d).inferenceGrant}` },
+        body: '{}',
+      });
+      expect(res.headers.get('content-encoding')).toBeNull();
+      expect(await res.text()).toBe('{"ok":true}');
+    } finally {
+      await new Promise<void>((r) => gz.close(() => r()));
+    }
+  });
+
   it('keeps a path prefix on the credential endpoint instead of discarding it', async () => {
     // `new URL(path, base)` would aim the secret at the gateway root; concatenation is what makes
     // the listener transparent -- the upstream sees the path pi would have sent in direct mode.
@@ -193,6 +220,19 @@ describe('the inference listener (MI1 §6.3, §8.6; decision D1)', () => {
       body: '{}',
     });
     expect(up.seen[0]?.url ?? '/anthropic/').toMatch(/^\/anthropic\//);
+  });
+
+  it('binds a bracketed IPv6 address, which listen would otherwise resolve as a hostname', async () => {
+    // `MOCA_INFERENCE_ADDR=[::1]:9100` is the documented way to write a v6 address, and
+    // `inferenceAddrFromEnv` hands the brackets through. Not every CI box has loopback v6, so this
+    // asserts on what must NOT happen: a DNS lookup of the literal `[::1]`.
+    const s = startInferenceProxy(d, 0, '[::1]');
+    const code = await new Promise<string>((r) => {
+      s.once('listening', () => r('listening'));
+      s.once('error', (e: NodeJS.ErrnoException) => r(e.code ?? 'error'));
+    });
+    s.close();
+    expect(['listening', 'EADDRNOTAVAIL', 'EAFNOSUPPORT']).toContain(code);
   });
 
   it('answers 503 when the endpoint is unreachable, naming no secret', async () => {
