@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -680,6 +681,27 @@ type diagStats struct {
 	LeaseExecuting      int               `json:"leaseExecuting,omitempty"`
 	LeaseCommittedBytes int64             `json:"leaseCommittedBytes,omitempty"`
 	LeaseEnds           map[string]uint64 `json:"leaseEnds,omitempty"`
+	// The relay session's own counters (#705), apart from the pool's: refusals at the
+	// connection's admission limit (MaxConcurrent running + session.QueueCap queued) left no
+	// trace before, so a density run could hit that cap without any figure naming it.
+	Session diagSessionStats `json:"session"`
+}
+
+// diagSessionStats is session.Stats on the wire; see diagStats on why it is a separate shape.
+type diagSessionStats struct {
+	QueueFullRefusals uint64 `json:"queueFullRefusals"`
+	DeferredFrames    uint64 `json:"deferredFrames"`
+	DeferredNow       int64  `json:"deferredNow"`
+	WedgedConnections uint64 `json:"wedgedConnections"`
+}
+
+func toDiagSessionStats(st session.Stats) diagSessionStats {
+	return diagSessionStats{
+		QueueFullRefusals: st.QueueFullRefusals,
+		DeferredFrames:    st.DeferredFrames,
+		DeferredNow:       st.DeferredNow,
+		WedgedConnections: st.WedgedConnections,
+	}
 }
 
 func toDiagStats(st vmpool.Stats, maxConcurrent int) diagStats {
@@ -734,11 +756,13 @@ func toDiagStats(st vmpool.Stats, maxConcurrent int) diagStats {
 // serving /stats there would mean enabling counters also exposed heap contents, goroutine
 // dumps and command lines. That exposure is SH_DIAG_PPROF's documented, opt-in bargain
 // (#308) and must not arrive behind a different variable.
-func diagStatsMux(statsFn func() vmpool.Stats, maxConcurrent int) *http.ServeMux {
+func diagStatsMux(statsFn func() vmpool.Stats, sessionStatsFn func() session.Stats, maxConcurrent int) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(toDiagStats(statsFn(), maxConcurrent)); err != nil {
+		out := toDiagStats(statsFn(), maxConcurrent)
+		out.Session = toDiagSessionStats(sessionStatsFn())
+		if err := json.NewEncoder(w).Encode(out); err != nil {
 			log.Printf("microvm-worker: SH_DIAG_STATS_ADDR encode failed: %v", err)
 		}
 	})
@@ -915,10 +939,18 @@ func main() {
 	// exposing heap dumps and command lines. Bind loopback and reach it over ssh. Placed
 	// here, after maxConcurrent is resolved, because /stats reports it: the driver should
 	// record the slot count the worker is actually using, not the one it believes it set.
+	// The session is built below, after the listener starts; until then its counters read zero.
+	var sessForStats atomic.Pointer[session.Session]
+	sessionStats := func() session.Stats {
+		if s := sessForStats.Load(); s != nil {
+			return s.Stats()
+		}
+		return session.Stats{}
+	}
 	if addr := env(get, "SH_DIAG_STATS_ADDR", ""); addr != "" {
 		statsSrv := &http.Server{
 			Addr:              addr,
-			Handler:           diagStatsMux(pool.Stats, maxConcurrent),
+			Handler:           diagStatsMux(pool.Stats, sessionStats, maxConcurrent),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {
@@ -967,6 +999,7 @@ func main() {
 		// SH_EXEC_TIMING=1: one exec-timing line per Exec, the container worker's format plus the
 		// VM phases and CPU, for benchmarks comparing the tiers. Off unless exactly 1.
 		Timing: get("SH_EXEC_TIMING") == "1"})
+	sessForStats.Store(sess)
 
 	// slots is in the banner because this tier's default is 16 while the shipped unit sets
 	// no WORKER_MAX_CONCURRENT: without it an upgrade moves 4 -> 16 dispatch slots with
