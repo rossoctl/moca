@@ -10,6 +10,7 @@ import {
   convergeWorkspace,
   buildDiffCaptureScript,
   captureWorkspaceDiff,
+  splitBaseline,
 } from '../src/converge.js';
 import { buildLeafBindScript } from '../src/config-overlay.js';
 
@@ -114,26 +115,38 @@ describe('buildCleanupScript', () => {
 });
 
 describe('buildDiffCaptureScript', () => {
-  it('stages all edits then emits the cached diff, scoped to the leaf worktree', () => {
+  it('prints the baseline, stages all edits, then emits the cached diff in the leaf worktree', () => {
     const s = buildDiffCaptureScript('run-1');
     expect(s).toContain('/workspace/leaves/run-1');
     expect(s).toContain('git -C "$LEAF" add -A');
     expect(s).toContain('git -C "$LEAF" diff --cached');
+    // The baseline comes FIRST, and from rev-parse: the envelope's `ref` can be a branch name,
+    // which names a different commit by the time anyone reapplies the patch.
+    expect(s.indexOf('rev-parse HEAD')).toBeLessThan(s.indexOf('add -A'));
   });
 });
 
+/** A plausible capture: the baseline on line 1, the diff after it. */
+const BASE = 'a'.repeat(40);
+const captured = (patch: string) => Buffer.from(`${BASE}\n${patch}`);
+
 describe('captureWorkspaceDiff', () => {
-  it('returns stdout as the patch on exit 0', async () => {
+  it('splits the baseline off line 1 and the patch off the rest, on exit 0', async () => {
     const transport = {
       exec: async () => ({
-        stdout: Buffer.from('diff --git a/x b/x\n'),
+        stdout: captured('diff --git a/x b/x\n'),
         exitCode: 0,
         truncated: false,
       }),
       close: async () => {},
       fastTier: 'per-call-exec' as const,
     };
-    expect(await captureWorkspaceDiff(transport, 'run-1')).toBe('diff --git a/x b/x\n');
+    // The sha must NOT stay in the patch: `git apply` rejects a diff with a stray line before the
+    // first `diff --git`, which is the failure this capture exists to avoid.
+    expect(await captureWorkspaceDiff(transport, 'run-1')).toEqual({
+      baseline: BASE,
+      patch: 'diff --git a/x b/x\n',
+    });
   });
   it('throws on non-zero exit', async () => {
     const transport = {
@@ -143,41 +156,50 @@ describe('captureWorkspaceDiff', () => {
     };
     await expect(captureWorkspaceDiff(transport, 'run-1')).rejects.toThrow(/exit 3/);
   });
-  it('returns an empty string when the worktree has no changes (exit 0, empty stdout)', async () => {
+  it('returns an empty patch when the worktree has no changes (the baseline alone)', async () => {
+    const transport = {
+      exec: async () => ({ stdout: captured(''), exitCode: 0, truncated: false }),
+      close: async () => {},
+      fastTier: 'per-call-exec' as const,
+    };
+    expect(await captureWorkspaceDiff(transport, 'run-1')).toEqual({ baseline: BASE, patch: '' });
+  });
+
+  it('reports an empty baseline rather than eating the patch when nothing was printed', async () => {
     const transport = {
       exec: async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false }),
       close: async () => {},
       fastTier: 'per-call-exec' as const,
     };
-    expect(await captureWorkspaceDiff(transport, 'run-1')).toBe('');
+    expect(await captureWorkspaceDiff(transport, 'run-1')).toEqual({ baseline: '', patch: '' });
   });
   it('restores a trailing newline the transport stripped (patch must not end mid-line)', async () => {
     // Some exec transports drop the trailing newline; a diff that ends mid-line is rejected by
     // `git apply` / GNU patch, so captureWorkspaceDiff must normalize it back.
     const transport = {
       exec: async () => ({
-        stdout: Buffer.from('diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b'),
+        stdout: captured('diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b'),
         exitCode: 0,
         truncated: false,
       }),
       close: async () => {},
       fastTier: 'per-call-exec' as const,
     };
-    const patch = await captureWorkspaceDiff(transport, 'run-1');
+    const { patch } = await captureWorkspaceDiff(transport, 'run-1');
     expect(patch.endsWith('\n')).toBe(true);
     expect(patch).toBe('diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n');
   });
   it('does not add a second newline when the patch already ends with one', async () => {
     const transport = {
       exec: async () => ({
-        stdout: Buffer.from('diff --git a/x b/x\n'),
+        stdout: captured('diff --git a/x b/x\n'),
         exitCode: 0,
         truncated: false,
       }),
       close: async () => {},
       fastTier: 'per-call-exec' as const,
     };
-    expect(await captureWorkspaceDiff(transport, 'run-1')).toBe('diff --git a/x b/x\n');
+    expect((await captureWorkspaceDiff(transport, 'run-1')).patch).toBe('diff --git a/x b/x\n');
   });
   it('reports a capped diff as truncation, not a failed capture', async () => {
     // A >8 MiB diff currently surfaces as "diff capture failed (exit null)", which reads
@@ -247,7 +269,10 @@ describe('converge + overlay + diff, executed end-to-end over a local repo', () 
     // a symlink in it, which is what the pre-fix bug would have left).
     expect(git(leaf, 'rev-parse', '--is-inside-work-tree').trim()).toBe('true');
     writeFileSync(join(leaf, 'src.txt'), 'patched\n');
-    const patch = sh(buildDiffCaptureScript(sid));
+    const { baseline, patch } = splitBaseline(sh(buildDiffCaptureScript(sid)));
+    // A real 40-hex commit out of the real worktree, and a patch with no trace of it.
+    expect(baseline).toMatch(/^[0-9a-f]{40}$/);
+    expect(patch.startsWith('diff --git')).toBe(true);
     expect(patch).toContain('src.txt');
     expect(patch).toContain('+patched');
     expect(patch).not.toContain('.sh-config');

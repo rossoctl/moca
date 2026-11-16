@@ -720,6 +720,27 @@ describe('runLeaf — solve routing', () => {
     });
     expect(r).toEqual({ status: 'solved', patch: 'PATCH' });
   });
+  it('attaches the patch DESCRIPTOR when the capture printed a baseline (#390)', async () => {
+    const patch = 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n';
+    const r = await runLeaf(base, undefined, {
+      produceSolve: async (_e, _c, cap) => {
+        cap.patch = patch;
+        cap.baseline = 'c'.repeat(40);
+      },
+    });
+    // The bytes stay in `patch` and nowhere else: `POST /runs` echoes the whole result, so a copy
+    // under `workspace` would double every synchronous solve body.
+    expect(r).toEqual({
+      status: 'solved',
+      patch,
+      workspace: {
+        baseline: 'c'.repeat(40),
+        patchSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+        patchBytes: Buffer.byteLength(patch, 'utf8'),
+        diffstat: { files: 1, insertions: 1, deletions: 1 },
+      },
+    });
+  });
   it('treats an unset patch as an empty (still solved) patch', async () => {
     const r = await runLeaf(base, undefined, {
       produceSolve: async () => {

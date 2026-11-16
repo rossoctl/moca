@@ -180,8 +180,62 @@ export interface TurnWorkspace {
   patchBase64?: string;
   patchSha256?: string;
   patchBytes?: number;
+  /** What the patch changes, so a caller can judge it without fetching it (#390). */
+  diffstat?: Diffstat;
   patchRefused?: 'too_large';
   error?: string;
+}
+
+/** A patch's shape in three numbers, the way a client shows one: `3 files, +120 -4`. */
+export interface Diffstat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+/**
+ * Count a unified diff's files and changed lines. Pure, and without git: the patch has already left
+ * the sandbox by the time anything wants a summary of it, and a second `exec` for `--numstat` would
+ * be a second capture that could disagree with the first.
+ *
+ * Only lines INSIDE a hunk count, which is what keeps the `+++`/`---` file headers, a
+ * `\ No newline at end of file` marker and a `GIT binary patch` payload (whose base85 lines start
+ * with letters, but can start with anything) out of the totals. A binary-only diff therefore reports
+ * its file count with zero changed lines, which is the truth about it.
+ */
+export function diffstat(patch: string): Diffstat {
+  let files = 0;
+  let insertions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      files += 1;
+      inHunk = false;
+    } else if (line.startsWith('@@')) {
+      inHunk = true;
+    } else if (line.startsWith('GIT binary patch')) {
+      inHunk = false;
+    } else if (inHunk) {
+      if (line.startsWith('+')) insertions += 1;
+      else if (line.startsWith('-')) deletions += 1;
+    }
+  }
+  return { files, insertions, deletions };
+}
+
+/**
+ * Describe a patch a caller already has in hand: what it applies to and how big it is, with no
+ * bytes of the patch itself (#390). The solve path returns its patch in `LeafResult.patch`, so a
+ * copy under `workspace` would double every synchronous `/runs` body for nothing.
+ */
+export function describePatch(baseline: string, patch: string): TurnWorkspace {
+  return {
+    baseline,
+    patchSha256: `sha256:${createHash('sha256').update(patch, 'utf8').digest('hex')}`,
+    patchBytes: Buffer.byteLength(patch, 'utf8'),
+    diffstat: diffstat(patch),
+  };
 }
 
 /**
@@ -488,13 +542,16 @@ export async function captureTurnPatch(
     if (nl < 0) return { error: 'capture printed no baseline' };
     const baseline = stdout.subarray(0, nl).toString('utf8').trim();
     const patch = stdout.subarray(nl + 1);
+    const text = patch.toString('utf8');
+    // `diffstat` is one of the FACTS, so the refused-too-large branch carries it too: there it is
+    // the only thing a caller learns about a patch it cannot have.
     const facts = {
       baseline,
       patchSha256: `sha256:${createHash('sha256').update(patch).digest('hex')}`,
       patchBytes: patch.byteLength,
+      diffstat: diffstat(text),
     };
     if (patch.byteLength > maxBytes) return { ...facts, patchRefused: 'too_large' };
-    const text = patch.toString('utf8');
     return Buffer.from(text, 'utf8').equals(patch)
       ? { ...facts, patch: text }
       : { ...facts, patchBase64: patch.toString('base64') };

@@ -29,6 +29,7 @@ import {
 } from './swebench-setup.js';
 import {
   captureTurnPatch,
+  describePatch,
   executeTurn,
   patchMaxBytes,
   resolveModelSelection,
@@ -209,7 +210,17 @@ export type LeafResult =
   | { status: 'done'; verdict: Verdict }
   | { status: 'paused'; gateId: number; gate: { summary: string; proposed_action: string } }
   | { status: 'aborted' }
-  | { status: 'solved'; patch: string; usage?: LeafUsage }
+  | {
+      status: 'solved';
+      patch: string;
+      usage?: LeafUsage;
+      /**
+       * The patch's DESCRIPTOR -- baseline, sha256, bytes, diffstat -- never a second copy of the
+       * patch (#390). Absent when the capture printed no baseline, which is every result written
+       * before #390 and any capture that failed.
+       */
+      workspace?: TurnWorkspace;
+    }
   | {
       status: 'responded';
       text: string;
@@ -294,7 +305,8 @@ export type ProduceVerdict = (
   capture: LeafCapture,
 ) => Promise<void>;
 
-export type SolveCapture = { patch?: string; usage?: LeafUsage };
+/** `baseline` is the commit the patch applies to, when the capture printed one (#390). */
+export type SolveCapture = { patch?: string; baseline?: string; usage?: LeafUsage };
 export type ProduceSolveDeps = {
   resolvePromotedConfig?: typeof resolvePromotedConfig;
   overlayConfig?: typeof overlayConfig;
@@ -495,7 +507,15 @@ export async function runSolveLeaf(
       message: err instanceof Error ? err.message : String(err),
     };
   }
-  return { status: 'solved', patch: capture.patch ?? '', usage: capture.usage };
+  const patch = capture.patch ?? '';
+  return {
+    status: 'solved',
+    patch,
+    usage: capture.usage,
+    // Only with a baseline: a descriptor whose `baseline` is missing describes a patch nobody can
+    // reapply, and the sha and diffstat are computable from `patch` anyway.
+    ...(capture.baseline ? { workspace: describePatch(capture.baseline, patch) } : {}),
+  };
 }
 
 async function runPromptLeaf(
@@ -964,9 +984,11 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
       } catch {
         /* usage is best-effort */
       }
-      capture.patch = swebench
+      const diff = swebench
         ? await captureSwebenchDiff(transport, sid)
         : await captureWorkspaceDiff(transport, sid);
+      capture.patch = diff.patch;
+      capture.baseline = diff.baseline;
     } finally {
       await backend.flush();
     }

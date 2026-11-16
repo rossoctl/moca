@@ -94,32 +94,61 @@ export async function cleanupWorkspace(
   }
 }
 
-/** Stage every edit in the leaf worktree and print the resulting unified diff (vs the pinned base). */
+/**
+ * A captured patch and the commit it applies to (#390). The baseline is what makes the patch
+ * usable: `git apply` needs the tree the diff was taken against, and a leaf's workspace is gone by
+ * the time a caller reads the result.
+ */
+export interface WorkspaceDiff {
+  patch: string;
+  baseline: string;
+}
+
+/**
+ * Print the baseline commit, then stage every edit in the leaf worktree and print the resulting
+ * unified diff (vs the pinned base). The baseline goes FIRST, as `buildPatchCaptureScript` already
+ * does it for a templated turn, so one exec yields both and the two cannot describe different trees.
+ *
+ * `rev-parse HEAD`, not the envelope's `ref`: that can be a branch name, which names a different
+ * commit by the time anyone reapplies the patch.
+ */
 export function buildDiffCaptureScript(sessionId: string): string {
   const LEAF = leafWorkspaceRef(sessionId);
   return [
     `set -eu`,
     `LEAF=${sq(LEAF)}`,
+    `git -C "$LEAF" rev-parse HEAD`,
     `git -C "$LEAF" add -A`,
     `git -C "$LEAF" diff --cached`,
   ].join('\n');
 }
 
-/** Run the diff-capture script in the pod; return the patch (possibly empty). Throws on non-zero exit. */
+/** Run the diff-capture script in the pod; return the patch (possibly empty) and its baseline. */
 export async function captureWorkspaceDiff(
   transport: SandboxTransport,
   sessionId: string,
-): Promise<string> {
+): Promise<WorkspaceDiff> {
   const { stdout, exitCode, truncated } = await transport.exec(buildDiffCaptureScript(sessionId), {
     timeout: 120,
   });
   if (truncated)
     throw new Error(`diff capture exceeded the sandbox output cap (diff too large): ${sessionId}`);
   if (exitCode !== 0) throw new Error(`diff capture failed (exit ${exitCode})`);
-  const patch = stdout.toString();
+  return splitBaseline(stdout.toString());
+}
+
+/**
+ * The baseline off the first line, the patch off the rest. The patch must NOT keep the sha: a
+ * `diff --git` preceded by a stray line is rejected by `git apply`, which is the one failure this
+ * whole capture exists to avoid.
+ */
+export function splitBaseline(raw: string): WorkspaceDiff {
+  const nl = raw.indexOf('\n');
+  const baseline = (nl < 0 ? raw : raw.slice(0, nl)).trim();
+  const patch = nl < 0 ? '' : raw.slice(nl + 1);
   // A unified diff must end with a newline. `git diff` emits one, but some exec transports strip
   // the trailing newline from captured stdout — and a patch that ends mid-line is rejected by
   // `git apply` / GNU patch ("patch unexpectedly ends in middle of line"), so the captured
   // model_patch fails to apply during offline evaluation. Restore it for a non-empty patch.
-  return patch && !patch.endsWith('\n') ? patch + '\n' : patch;
+  return { baseline, patch: patch && !patch.endsWith('\n') ? patch + '\n' : patch };
 }

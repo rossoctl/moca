@@ -1,5 +1,5 @@
 import type { SandboxTransport } from '@moca/k8s-sandbox';
-import { leafWorkspaceRef } from './converge.js';
+import { leafWorkspaceRef, splitBaseline, type WorkspaceDiff } from './converge.js';
 
 function sq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -48,9 +48,15 @@ export function buildSwebenchSetupScript(a: {
   ].join('\n');
 }
 
+/** Baseline first, then the diff — see `buildDiffCaptureScript`, which this mirrors. */
 export function buildSwebenchDiffScript(sessionId: string): string {
   const CO = swebenchCheckoutDir(sessionId);
-  return [`set -eu`, `git -C ${sq(CO)} add -A`, `git -C ${sq(CO)} diff --cached`].join('\n');
+  return [
+    `set -eu`,
+    `git -C ${sq(CO)} rev-parse HEAD`,
+    `git -C ${sq(CO)} add -A`,
+    `git -C ${sq(CO)} diff --cached`,
+  ].join('\n');
 }
 export function buildSwebenchCleanupScript(sessionId: string): string {
   // Also clear /workspace/leaves/<sid>: the SWE-bench path uses /workspace/co-<sid> and
@@ -102,7 +108,10 @@ export async function setupSwebenchWorkspace(
   if (exitCode !== 0) throw new Error(`swebench setup failed (exit ${exitCode})`);
   return stdout.toString().trim() || swebenchCheckoutDir(a.sessionId);
 }
-export async function captureSwebenchDiff(t: SandboxTransport, sessionId: string): Promise<string> {
+export async function captureSwebenchDiff(
+  t: SandboxTransport,
+  sessionId: string,
+): Promise<WorkspaceDiff> {
   const { stdout, exitCode, truncated } = await t.exec(buildSwebenchDiffScript(sessionId), {
     timeout: 120,
   });
@@ -112,7 +121,7 @@ export async function captureSwebenchDiff(t: SandboxTransport, sessionId: string
     );
   }
   if (exitCode !== 0) throw new Error(`swebench diff capture failed (exit ${exitCode})`);
-  return stdout.toString();
+  return splitBaseline(stdout.toString());
 }
 export async function cleanupSwebench(t: SandboxTransport, sessionId: string): Promise<void> {
   try {

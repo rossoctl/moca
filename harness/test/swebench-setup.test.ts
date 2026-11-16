@@ -37,10 +37,13 @@ describe('swebench-setup script builders', () => {
     // prints the checkout dir on stdout so the caller can set podCwd
     expect(s).toContain(swebenchCheckoutDir('run-1'));
   });
-  it('diff script stages all and prints the cached diff from the checkout dir', () => {
+  it('diff script prints the baseline, stages all, then the cached diff from the checkout dir', () => {
     const s = buildSwebenchDiffScript('run-1');
     expect(s).toContain(`git -C '${swebenchCheckoutDir('run-1')}' add -A`);
     expect(s).toContain('diff --cached');
+    // The baseline first, like the non-swebench capture: a patch with no commit to apply it to is
+    // not something an offline evaluation can use.
+    expect(s.indexOf('rev-parse HEAD')).toBeLessThan(s.indexOf('add -A'));
   });
   it('cleanup script removes the checkout, the venv, and the leaf dir created by the overlay bind', () => {
     // SWE-bench's real work lives in /workspace/co-<sid> and /workspace/venv-<sid>, but a solve
@@ -112,17 +115,20 @@ describe('setupSwebenchWorkspace', () => {
 });
 
 describe('captureSwebenchDiff', () => {
-  it('returns stdout as the patch on exit 0', async () => {
+  it('splits the baseline off line 1 and the patch off the rest, on exit 0', async () => {
     const transport = {
       exec: async () => ({
-        stdout: Buffer.from('diff --git a/x b/x\n'),
+        stdout: Buffer.from(`${'a'.repeat(40)}\ndiff --git a/x b/x\n`),
         exitCode: 0,
         truncated: false,
       }),
       close: async () => {},
       fastTier: 'per-call-exec' as const,
     };
-    expect(await captureSwebenchDiff(transport, 'run-1')).toBe('diff --git a/x b/x\n');
+    expect(await captureSwebenchDiff(transport, 'run-1')).toEqual({
+      baseline: 'a'.repeat(40),
+      patch: 'diff --git a/x b/x\n',
+    });
   });
   it('throws on non-zero exit', async () => {
     const transport = {
