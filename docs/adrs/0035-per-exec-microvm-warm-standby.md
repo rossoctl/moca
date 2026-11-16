@@ -1,6 +1,6 @@
 # ADR-0035: The sandbox isolation boundary becomes a per-`Exec` microVM, made affordable by warm standby rather than by a faster restore
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-15; implemented by #251, measured in #300); [ADR-0048](0048-sbx-lease-mode.md) adds an opt-in lease mode beside the per-`Exec` default
 - **Date:** 2026-09-09
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-09-09-p4-microvm-sandbox-design.md`](../specs/2026-09-09-p4-microvm-sandbox-design.md)

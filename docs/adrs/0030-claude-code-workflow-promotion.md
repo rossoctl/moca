@@ -1,6 +1,6 @@
 # ADR-0030: Promote local Claude Code workflows as a content-addressed config bundle
 
-- **Status:** Proposed, amended 2026-09-02 during implementation (still unaccepted; see Amendments below) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-09-03; implemented by #214), amended 2026-09-02 during implementation (see Amendments below) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-09-02
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-09-02-claude-code-workflow-promotion-design.md`](../specs/2026-09-02-claude-code-workflow-promotion-design.md)

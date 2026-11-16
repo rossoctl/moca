@@ -1,6 +1,6 @@
 # ADR-0032: Multi-session isolation comes from a per-request subject and no ambient credential, not from a `SessionContext` in `pi-fork`
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-29; implemented by #249, #350 as amended by the [MI1 spec](../specs/2026-09-28-moca-multi-user-isolation-design.md): the subject comes from the signed session token, and the scrub runs under `MOCA_TENANCY=multi`)
 - **Date:** 2026-09-06
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-09-06-p5-session-isolation-design.md`](../specs/2026-09-06-p5-session-isolation-design.md)
