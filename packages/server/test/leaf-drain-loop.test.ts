@@ -61,8 +61,11 @@ describe('shouldArmAsync', () => {
     delete env[missing];
     expect(shouldArmAsync(env)).toBe(false);
   });
-  it('refuses to arm under multi tenancy, which answers 501', () => {
-    expect(shouldArmAsync({ ...full, MOCA_TENANCY: 'multi' })).toBe(false);
+  it('arms under multi tenancy too, now that the dequeue hands out grants (#388)', () => {
+    // The gate here existed only because the control plane answered 501 under `multi`, so a loop
+    // that armed would claim and refuse forever. It mints grants instead, so there is nothing
+    // tenancy-specific left in this decision.
+    expect(shouldArmAsync({ ...full, MOCA_TENANCY: 'multi' })).toBe(true);
   });
   it('names the missing setting in the log when the knob is on', () => {
     const log = vi.fn();
