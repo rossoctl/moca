@@ -32,7 +32,9 @@ type boundConn struct {
 // then admit it: freeing the slot after the close, as a deferred step of the
 // handler, left a window in which the guest's next conn met conn_cap. Every
 // wrapper the handlers put around the conn (the TLS session, the idle clock)
-// closes through this method.
+// closes through this method. One wrapper speaks first: the intercepting
+// path's tls.Conn sends close_notify before it closes this conn, so that path
+// releases the slot itself before closing the TLS session (intercept.go).
 func (b *boundConn) Close() error {
 	if b.release != nil {
 		b.release()

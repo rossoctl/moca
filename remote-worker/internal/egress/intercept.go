@@ -139,6 +139,10 @@ func (ic *tlsInterceptor) serve(pc *proxyConn, t target, addrs []netip.Addr, br 
 		},
 	})
 	defer func() {
+		// The slot first (#783): tls.Conn.Close writes close_notify before it closes pc.c, and a
+		// guest may reconnect the moment it reads that orderly EOF, before boundConn.Close would
+		// release it.
+		pc.release()
 		_ = c.gtls.Close()
 		_ = utls.Close()
 	}()
