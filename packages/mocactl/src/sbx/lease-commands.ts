@@ -230,7 +230,7 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
   if (modeRank(s.mode) > 0) {
     let x;
     try {
-      x = await openExec(c.api, id, factory);
+      x = await openExec(c.api, id, factory, { activity: false });
     } catch (err) {
       if (c.signal?.aborted) return SBX_EXIT.interrupted;
       lease = { error: errorCode(err) };
@@ -241,7 +241,9 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
         printNotices(c, id, [v.pending]);
         if (!v.epochKnown) {
           try {
-            const { setModeToken } = await c.api.mintSandboxModeToken(id);
+            const { setModeToken } = await c.api.mintSandboxModeToken(id, {
+              activity: false,
+            });
             const r = await sendSetMode(x, c.api, id, setModeToken, c.signal);
             if (r.outcome === 'applied') {
               c.io.err(`re-sent mode ${s.mode}: applied`);

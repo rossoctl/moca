@@ -1125,6 +1125,12 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       reset?: (signal?: AbortSignal) => Promise<LeaseStatusView>;
       /** Wraps the control plane's fetch (a mint that hangs, say). */
       fetchWrap?: (f: typeof fetch) => typeof fetch;
+      /** The keepalive asks the token source for a token, as exec-conn's does (activity: false). */
+      keepaliveAsks?: boolean;
+      /** Extra fields on each minted token. */
+      token?: Record<string, unknown>;
+      /** Extra fields on the sandbox record. */
+      sandbox?: Record<string, unknown>;
     } = {},
   ) {
     const { home, env, io } = setup();
@@ -1132,11 +1138,15 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     const cp = fakeCp({
       [`POST /v1/sandboxes/${SBX}/token`]: () => ({
         status: 200,
-        body: { ...TOKEN, token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!) },
+        body: {
+          ...TOKEN,
+          ...over.token,
+          token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!),
+        },
       }),
       [`GET /v1/sandboxes/${SBX}`]: () => ({
         status: 200,
-        body: sandbox({ mode: over.record?.() ?? 'lease' }),
+        body: sandbox({ mode: over.record?.() ?? 'lease', ...over.sandbox }),
       }),
     });
     const flags: boolean[] = [];
@@ -1160,6 +1170,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       },
       leaseKeepalive: async () => {
         keepalives++;
+        if (over.keepaliveAsks) await o.token({ force: false, minValidS: 60, activity: false });
         await over.keepalive?.();
       },
       process: (async (op: string) => {
@@ -1191,6 +1202,8 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       signals,
       keepalives: () => keepalives,
       mints: () => minted,
+      mintBodies: () =>
+        cp.calls.filter((c) => c.path === `/v1/sandboxes/${SBX}/token`).map((c) => c.body),
       connect: () => client.connect(clientSide),
     };
   }
@@ -1244,6 +1257,97 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('an idle MCP server on a lease sandbox keeps the lease alive with no-activity mints only', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(TOKEN_IAT * 1000);
+    try {
+      const m = leaseSession(['lease'], { keepaliveAsks: true });
+      await m.connect();
+      await m.bash('echo'); // the first mint: an activity mint
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(m.keepalives()).toBe(60);
+      const idle = m.mintBodies();
+      expect(idle.length).toBeGreaterThan(1); // the 15-minute token ran out and was re-minted
+      expect(idle[0]).toBeUndefined();
+      expect(idle.slice(1).every((b) => (b as { activity?: boolean })?.activity === false)).toBe(
+        true,
+      );
+      await m.bash('echo'); // a command never runs on a no-activity token
+      const all = m.mintBodies();
+      expect(all).toHaveLength(idle.length + 1);
+      expect(all[all.length - 1]).toBeUndefined();
+      await m.client.close();
+      await m.served;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the MCP server follows the moved deadline in its expired text and its info', async () => {
+    const T2 = sandbox().expiresAt + 7200;
+    const gone = new ApiError(
+      'control-plane',
+      409,
+      'sandbox_terminated',
+      'sandbox has gone',
+      undefined,
+      undefined,
+      'expired',
+    );
+    const run = async (sbx: Record<string, unknown>, token: Record<string, unknown>) => {
+      const m = leaseSession(['lease'], { token, sandbox: sbx });
+      await m.connect();
+      return m;
+    };
+    const m = await run({}, { sandboxExpiresAt: T2 });
+    await m.bash('echo'); // the first mint moves the deadline to T2
+    const info = (await m.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    const rec = sandbox().expiresAt;
+    expect(info.content[0]!.text).toContain(`expires ${new Date(rec * 1000).toISOString()}.`);
+    expect(info.content[0]!.text).not.toContain('without use');
+    await m.client.close();
+    await m.served;
+
+    const w = await run({ idleLifetimeS: 604800 }, {});
+    await w.bash('echo');
+    const wi = (await w.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(wi.content[0]!.text).toContain(
+      `expires ${new Date(rec * 1000).toISOString()}, after 7 d without use.`,
+    );
+    await w.client.close();
+    await w.served;
+
+    // The refusal names the moved deadline.
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, sandboxExpiresAt: T2 },
+      }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox() }),
+    });
+    const x = fakeExec(() => gone);
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      execFactory: x.factory,
+      mcpTransport: serverSide,
+    });
+    const client = new Client({ name: 't', version: '0' });
+    await client.connect(clientSide);
+    const r = (await client.callTool({ name: 'bash', arguments: { command: 'ls' } })) as {
+      content: { text: string }[];
+    };
+    expect(r.content[0]!.text).toContain(`sandbox expired on ${new Date(T2 * 1000).toISOString()}`);
+    await client.close();
+    await served;
   });
 
   it("a lease sandbox gets the lease texts; reset and sandbox_info reach the connection's lease calls", async () => {

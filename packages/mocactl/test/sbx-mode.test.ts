@@ -1023,6 +1023,21 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
     expect(u.out()).not.toContain('processes    ');
   });
 
+  it('get on a lease sandbox mints with activity: false, its set-mode re-send too', async () => {
+    const w = leaseWorld({
+      record: { mode: 'lease', modeEpoch: 1 },
+      lease: (op) => (op === 'status' ? { ...APPLIED, epochKnown: false } : ACTIVE),
+    });
+    expect(await w.run(['get', SBX])).toBe(0);
+    const mints = w.cp.calls.filter(
+      (c) =>
+        c.path === `/v1/sandboxes/${SBX}/token` || c.path === `/v1/sandboxes/${SBX}/mode-token`,
+    );
+    expect(mints.map((c) => c.path.split('/').pop())).toEqual(['token', 'mode-token']);
+    // On the wire: the body the control plane received.
+    expect(mints.map((c) => c.body)).toEqual([{ activity: false }, { activity: false }]);
+  });
+
   it('get re-sends set_mode on an unknown epoch', async () => {
     const w = leaseWorld({
       record: { mode: 'lease', modeEpoch: 1 },
