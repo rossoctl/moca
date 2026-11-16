@@ -5,6 +5,7 @@ import {
   idempotencyKeyKey,
   isTerminalState,
   ownerTurnsKey,
+  sessionTurnsKey,
   turnKey,
   TURN_STATES,
   type TurnCaps,
@@ -94,6 +95,15 @@ export class TurnStore {
     return ownerTurnsKey(this.tag(owner));
   }
 
+  private sessionKey(sessionId: string): string {
+    return sessionTurnsKey(this.tag(sessionId));
+  }
+
+  /** A terminal record's lifetime, and the session index's: one sum, one place (§5.1). */
+  private ttlSeconds(): number {
+    return this.opts.resultTtlSeconds + this.opts.ttlMarginSeconds;
+  }
+
   /**
    * Claim `key` for `turnId`, returning whichever turn id HOLDS it. An existing holder wins, so a
    * resubmission returns the first turn (§4.3) rather than enqueueing a second copy. HSETNX, so two
@@ -161,6 +171,15 @@ export class TurnStore {
     await this.guard(() =>
       this.redis.zAdd(this.ownerKey(rec.owner), { score: rec.createdAt, value: rec.turnId }),
     );
+    // The SESSION index (§9.2), which unlike the open set keeps a turn after it finishes -- it is
+    // what lets `deleteSessionTurns` reach a finished turn's record and result. Given a TTL here
+    // rather than only at the terminal transition, so a session whose turns never finish (every one
+    // of them `lost` before the reaper's record write, or a crash between the two) cannot leave an
+    // immortal key behind; `toTerminal` re-arms it from the same sum.
+    await this.guard(() =>
+      this.redis.zAdd(this.sessionKey(rec.sessionId), { score: rec.createdAt, value: rec.turnId }),
+    );
+    await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
   }
 
   async get(turnId: string): Promise<TurnRecord | null> {
@@ -237,39 +256,56 @@ export class TurnStore {
   }
 
   /**
-   * Delete `sessionId`'s OPEN turns and return their quota slots, for `OwnershipIndex.cascadeDelete`
-   * (F2). A TERMINAL turn is left alone -- it already carries a TTL (§5.1) and will expire on its
-   * own, so re-deleting it here would only duplicate that clock. Only `queued`/`running` turns are
-   * at risk: nothing else in this design will ever move them to terminal once their session is gone,
-   * so without this they would hold their owner's quota slot forever.
+   * Delete every one of `sessionId`'s turns -- record, stored result and quota slot -- for
+   * `OwnershipIndex.cascadeDelete` (F2).
+   *
+   * Two enumerations, unioned, and both are needed:
+   *
+   * - The SESSION index (§9.2), which holds finished turns as well as open ones. It is what makes a
+   *   finished turn's record and result go away with its session rather than linger for the result
+   *   TTL -- seven days of them since #390, which is why the index stopped being optional.
+   * - The owner's OPEN set, exactly as before. A record written before the index existed has no
+   *   entry in it, and an open record carries NO TTL at all (§5.1), so dropping this pass would
+   *   leak such a turn's hash and its owner's quota slot for the deployment's lifetime.
    *
    * This is the only place outside `turn-handlers.ts` that knows a session can own several turns
    * over its life, which is why the cleanup lives here rather than as a `dataKeys` entry in
    * `ownership.ts`: a turn key is keyed by turnId, not sessionId, so `cascadeDelete` cannot name it
-   * without restating `TurnStore`'s own key derivation.
+   * without restating `TurnStore`'s own key derivation. The session index must NOT be added to
+   * `dataKeys` either -- `deleteSession` cascades before it calls this method, so the index would be
+   * gone before the walk could read it, with every test still green.
    *
    * Open-set member removed BEFORE the hash: a crash between the two steps must leave the quota
    * slot freed (the bug this method exists to fix) even if the orphaned hash itself lingers, which
-   * matches `get`'s existing rule that a member with no hash reads as "already gone".
+   * matches `get`'s existing rule that a member with no hash reads as "already gone". The index
+   * itself goes last, so a retried DELETE re-walks whatever the first attempt did not reach.
    */
   async deleteSessionTurns(sessionId: string, owner: string): Promise<void> {
-    const ids = await this.guard(() =>
-      this.redis.zRange(this.ownerKey(owner), '+inf', '-inf', { BY: 'SCORE', REV: true }),
+    const byRecency = { BY: 'SCORE', REV: true } as const;
+    const indexed = new Set(
+      await this.guard(() =>
+        this.redis.zRange(this.sessionKey(sessionId), '+inf', '-inf', byRecency),
+      ),
     );
-    for (const turnId of ids) {
+    const open = await this.guard(() =>
+      this.redis.zRange(this.ownerKey(owner), '+inf', '-inf', byRecency),
+    );
+    for (const turnId of new Set([...indexed, ...open])) {
       const rec = await this.get(turnId);
-      if (!rec || rec.sessionId !== sessionId) continue;
+      // A record naming another session is that session's turn, reached through the shared owner
+      // set. One that is ABSENT is only this session's to clean up when the index says so: the
+      // owner set spans a subject's sessions, so a missing record there says nothing about who the
+      // turn belonged to, and its hash is not this delete's to remove.
+      if (rec ? rec.sessionId !== sessionId : !indexed.has(turnId)) continue;
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
       // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
-      // key carries a turn id, so only an enumeration of the session's turns reaches it. This loop
-      // is that enumeration -- but it sees OPEN turns only (`toTerminal` zRems from the owner index
-      // to free the quota slot), so a FINISHED turn's result is left to expire on its own TTL, as
-      // its record already is. The pair goes together (`resultTtl`, `resultTtl + margin`) and the
-      // API can reach neither, but the bytes do outlive this delete: §9.2 records that limit and
-      // what closing it costs (a per-session turn index, M2).
+      // key carries a turn id, so only an enumeration of the session's turns reaches it.
       await this.guard(() => this.redis.del([this.key(turnId), leafResultKey(sessionId, turnId)]));
-      await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
+      // Only with a record in hand: the release compares against the holder, and without the
+      // record's own `idempotencyKey` there is nothing to compare.
+      if (rec) await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
     }
+    await this.guard(() => this.redis.del([this.sessionKey(sessionId)]));
   }
 
   /**
@@ -355,12 +391,14 @@ export class TurnStore {
     }
     await this.releaseIdempotencyKeyIf(rec.owner, rec.idempotencyKey, rec.turnId);
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
-    await this.guard(() =>
-      this.redis.expire(
-        this.key(rec.turnId),
-        this.opts.resultTtlSeconds + this.opts.ttlMarginSeconds,
-      ),
-    );
+    await this.guard(() => this.redis.expire(this.key(rec.turnId), this.ttlSeconds()));
+    // The session index LAST, and off the same sum: it must never expire while a record it points at
+    // is still there, or `deleteSessionTurns` loses its only route to that record and its result.
+    // Re-armed rather than set once, because this turn's record just started a fresh clock. A record
+    // written before #390 has no index entry; the walk keeps the owner-set pass for those.
+    if (rec.sessionId) {
+      await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
+    }
     return 'ok';
   }
 }

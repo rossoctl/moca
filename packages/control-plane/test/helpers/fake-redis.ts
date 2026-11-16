@@ -76,6 +76,9 @@ export function fakeRedis() {
       for (const k of keys) {
         hashes.delete(k);
         zsets.delete(k);
+        // STRINGS too, which is where a leaf result lives: without this line every assertion that a
+        // session delete removed a stored result passed without the code deleting anything.
+        strings.delete(k);
       }
       return keys.length;
     },

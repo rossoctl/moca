@@ -380,7 +380,8 @@ must never outlive its own result by more than the margin.**
 
 §12 notes that if #390 raises result retention to 7 days, this TTL follows it rather than being
 re-decided — one knob, with the record's margin derived from it. #390 did exactly that: the default
-is 604800, and the per-session turn index §9.2 asks for is armed off the same sum as the record.
+is 604800, and the per-session turn index §9.2 asked for now exists (`sh:cp:session:<sid>:turns`),
+armed off the same sum as the record so it cannot expire before one.
 
 ### 5.2 Where the consumer runs
 
@@ -956,6 +957,17 @@ have — a per-session turn set, written at submission and walked here, covering
 well as open ones — which also changes §5.1's terminal-record rule. M2 owns that, with the record
 and the result deleted by the same walk; a `SCAN MATCH` is not the alternative, because SCAN's cost
 is the whole keyspace per session delete, not the matches.
+
+> **Closed in #390**, because that issue raised the default to seven days and a week of a deleted
+> session's bytes is a different proposition from a day of them. The index is
+> `sh:cp:session:<sid>:turns`, scored by `createdAt`, written by `TurnStore.create` and walked by
+> `deleteSessionTurns` — **unioned** with the owner-set pass, which stays: a record written before
+> the index has no entry in it, and an open record carries no TTL at all, so the owner set is the
+> only thing that reaches one. The index is armed at `resultTtlSeconds + ttlMarginSeconds` — the
+> terminal record's own sum, §5.1's rule reused rather than changed — at `create` and re-armed last
+> at every terminal transition, so it never expires before a record it would have to reach. It is
+> deliberately NOT a `dataKeys` entry in `ownership.ts`: `deleteSession` cascades before it calls
+> `deleteSessionTurns`, so the index would be gone before the walk could read it.
 
 **Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
 sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported

@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { TurnStore } from '../src/turn-store.js';
-import { turnKey, type TurnRecord } from '../src/turn-record.js';
+import { sessionTurnsKey, turnKey, type TurnRecord } from '../src/turn-record.js';
+import { leafResultKey } from '../src/turn-result.js';
 import type { CpRedisLike } from '../src/ownership.js';
 import { turnStoreContract } from './helpers/turn-store-contract.js';
 
@@ -42,6 +43,15 @@ async function isolated() {
     // Observes the exact key the store wrote: the same `${id}:${tag}` suffix `TurnStore.tag()`
     // applies internally, wrapped in the same `turnKey()` the store uses.
     ttlOf: async (turnId: string) => client.ttl(turnKey(`${turnId}:${tag}`)),
+    ttlOfSession: async (sessionId: string) => client.ttl(sessionTurnsKey(`${sessionId}:${tag}`)),
+    // The tag is IN the session id, not appended by the store: `leafResultKey` is untagged, so this
+    // is what puts the results below inside `done()`'s sweep.
+    sessionId: `s-${tag}`,
+    putResult: async (sessionId: string, turnId: string, body: string) => {
+      await client.set(leafResultKey(sessionId, turnId), body);
+    },
+    hasResult: async (sessionId: string, turnId: string) =>
+      (await client.exists(leafResultKey(sessionId, turnId))) === 1,
     done: async () => {
       const keys = await client.keys(`*${tag}*`);
       if (keys.length) await client.del(keys);

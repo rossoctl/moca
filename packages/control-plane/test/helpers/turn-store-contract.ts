@@ -15,6 +15,18 @@ export type MakeTurnStore = () => Promise<{
    * TTL semantics so the §5.1 invariant reads the same against both backings.
    */
   ttlOf(turnId: string): Promise<number>;
+  /** The same, for the session's turn index (§9.2). */
+  ttlOfSession(sessionId: string): Promise<number>;
+  /**
+   * A session id unique to this make(). The suite cannot hardcode one: `leafResultKey` is
+   * deliberately UNTAGGED (turn-result.ts -- the worker writes it, and it knows no test key tag), so
+   * the only thing that keeps the real-Redis backing's `*${tag}*` sweep able to delete the results
+   * this suite seeds is the session id they are keyed by.
+   */
+  sessionId: string;
+  /** Seed a stored leaf result under the key the worker would have written (§4.4). */
+  putResult(sessionId: string, turnId: string, body: string): Promise<void>;
+  hasResult(sessionId: string, turnId: string): Promise<boolean>;
   done(): Promise<void>;
 }>;
 
@@ -272,6 +284,72 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       const cancelTtl = await ttlOf('t-cancel');
       expect(cancelTtl).toBeGreaterThan(band - 5);
       expect(cancelTtl).toBeLessThanOrEqual(band);
+      await done();
+    });
+
+    it('deletes a FINISHED turn s record and stored result with its session (§9.2)', async () => {
+      const { store, now, sessionId, putResult, hasResult, done } = await make();
+      // Same OWNER, a different session: the owner's open set spans both, so this is the turn a
+      // delete that walked the wrong set would take with it.
+      const other = `${sessionId}-other`;
+
+      await store.create(rec({ turnId: 't-fin', sessionId, idempotencyKey: 'k-fin' }));
+      await putResult(sessionId, 't-fin', '{"status":"done"}');
+      // TERMINAL, which is the case the owner-set walk could never reach: `finalize` removes the
+      // member it used to enumerate, so before the index this record and its seven days of result
+      // bytes survived the session that produced them.
+      expect(await store.finalize('t-fin', 'done', now)).toBe('ok');
+
+      await store.create(rec({ turnId: 't-other', sessionId: other, idempotencyKey: 'k-other' }));
+      await putResult(other, 't-other', '{"status":"done"}');
+      expect(await store.finalize('t-other', 'done', now)).toBe('ok');
+
+      // An OPEN turn of the doomed session, for the quota slot and the idempotency claim.
+      await store.create(rec({ turnId: 't-open', sessionId, idempotencyKey: 'k-open' }));
+      expect(await store.claimIdempotencyKey('github:1234', 'k-open', 't-open')).toBe('t-open');
+      expect(await store.countOpen('github:1234')).toBe(1);
+
+      await store.deleteSessionTurns(sessionId, 'github:1234');
+
+      expect(await store.get('t-fin')).toBeNull();
+      expect(await hasResult(sessionId, 't-fin')).toBe(false);
+      expect(await store.get('t-open')).toBeNull();
+      // The slot and the claim go with the record, or a deleted session's turns would hold a quota
+      // slot nothing can ever free and keep deduplicating submissions onto a turn that is gone.
+      expect(await store.countOpen('github:1234')).toBe(0);
+      expect(await store.claimIdempotencyKey('github:1234', 'k-open', 't-new')).toBe('t-new');
+
+      expect(await store.get('t-other')).not.toBeNull();
+      expect(await hasResult(other, 't-other')).toBe(true);
+      await done();
+    });
+
+    it('keeps the session index alive at least as long as the record it points at (§9.2)', async () => {
+      const {
+        store,
+        now,
+        sessionId,
+        resultTtlSeconds,
+        ttlMarginSeconds,
+        ttlOf,
+        ttlOfSession,
+        done,
+      } = await make();
+      const band = resultTtlSeconds + ttlMarginSeconds;
+
+      await store.create(rec({ turnId: 't-idx', sessionId }));
+      // Armed at CREATE as well, so a session whose turns all go `lost` without a terminal write
+      // cannot leave an index key with no expiry at all.
+      const atCreate = await ttlOfSession(sessionId);
+      expect(atCreate).toBeGreaterThan(band - 5);
+      expect(atCreate).toBeLessThanOrEqual(band);
+
+      expect(await store.finalize('t-idx', 'done', now)).toBe('ok');
+      // Read the INDEX first: it is armed after the record, so reading it earlier can only
+      // understate the gap. If the index ever expires first, `deleteSessionTurns` loses its only
+      // route to a finished turn -- the failure is silent, and the leaked bytes outlive the session.
+      const indexTtl = await ttlOfSession(sessionId);
+      expect(indexTtl).toBeGreaterThanOrEqual(await ttlOf('t-idx'));
       await done();
     });
   });

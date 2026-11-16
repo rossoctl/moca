@@ -171,6 +171,20 @@ export const isMintedTurnId = (turnId: string): boolean => MINTED_TURN_ID_RE.tes
  */
 export const ownerTurnsKey = (subject: string): string =>
   `sh:cp:owner:${subjectHash(subject)}:turns`;
+/**
+ * One SESSION's turns, open and finished alike, scored by `createdAt` (async fan-out spec §9.2).
+ *
+ * The owner set above cannot serve this: it holds OPEN turns only, because the quota counts its
+ * members, so a finished turn's record and result -- and with #390 that is seven days of them --
+ * survived `DELETE /v1/sessions/{id}` and expired on their own clock. A session's turns are keyed by
+ * turn id, so without an index nothing can enumerate them; §9.2 rules out `SCAN MATCH` for exactly
+ * the reason it is tempting, that it scans the whole keyspace on a tenant's delete.
+ *
+ * Armed with the same TTL as a terminal record (`resultTtlSeconds + ttlMarginSeconds`) and re-armed
+ * on every terminal transition, so the index never expires before a member it would have to reach.
+ */
+export const sessionTurnsKey = (sessionId: string): string => `sh:cp:session:${sessionId}:turns`;
+
 /** Owner-scoped, so one owner's key cannot address another's turn. */
 export const idempotencyKeyKey = (owner: string, key: string): string =>
   `sh:cp:turnidem:${subjectHash(owner)}:${key}`;

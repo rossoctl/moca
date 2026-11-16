@@ -119,10 +119,12 @@ describe('submitTurn (spec §4.1)', () => {
   it('carries no TTL while the turn is queued (§5.1)', async () => {
     const d = turnDeps();
     const sid = await session(d);
-    await submit(d, sid, { item, async: true });
+    const res = await submit(d, sid, { item, async: true });
+    const { turnId } = res.body as { turnId: string };
     // The invariant: "a record must never expire while its turn is live". A TTL set here would 404 a
-    // caller polling a turn that in fact succeeded.
-    expect(d.fake.expires).toEqual([]);
+    // caller polling a turn that in fact succeeded. The RECORD's key alone: the session turn index
+    // (§9.2) is armed at submission on purpose, and it holds turn ids rather than a record.
+    expect(d.fake.expires.filter((e) => e.key === turnKey(turnId))).toEqual([]);
   });
 
   it('404s another subject s session before looking at the body at all', async () => {
