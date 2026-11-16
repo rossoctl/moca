@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { RedisEgressStore, type EgressRedisLike } from '../src/egress-log.js';
 import { RedisSandboxStore, type SandboxRedisLike } from '../src/sandbox-redis.js';
 import { subjectHash } from '../src/subject-document.js';
 import { sandboxStoreContract } from './helpers/sandbox-store-contract.js';
@@ -15,7 +16,8 @@ function isolated() {
   const prefix = `test:sbx:${process.pid}:${randomUUID()}:`;
   return {
     prefix,
-    store: new RedisSandboxStore(redis, prefix),
+    store: new RedisSandboxStore(redis, prefix, `${prefix}egress:`),
+    egress: new RedisEgressStore(client as unknown as EgressRedisLike, 3600, `${prefix}egress:`),
     done: async () => {
       const keys = await client.keys(`${prefix}*`);
       if (keys.length) await client.del(keys);
@@ -118,6 +120,137 @@ describe('RedisSandboxStore TTLs (retention is the key lifetime)', () => {
     // A live member stays.
     expect(await store.create(rec('sbx-live'), limits, now)).toBe('ok');
     expect(await client.zScore(owner, 'sbx-live')).not.toBeNull();
+    await done();
+  });
+});
+
+describe('RedisSandboxStore touch (idle lifetime, spec §5.2)', () => {
+  const rec = (id: string, now: number, name = '') => ({
+    id,
+    owner: 'github:1',
+    tenant: 'github:1',
+    name,
+    template: 'd',
+    worker: 'w',
+    wsk: id,
+    labels: {},
+    createdAt: now,
+    expiresAt: now + 600,
+    mode: 'per-exec' as const,
+    idleTimeoutS: 0,
+    modeEpoch: 0,
+  });
+  const EVENT = '{"bytes_up":1000,"decision":"tunnel","host":"a.example.com"}';
+  const lim = { perSubject: 2, total: 2, retentionS: 3600 };
+  const near = (ttl: number, want: number) => {
+    expect(ttl).toBeGreaterThan(want - 2);
+    expect(ttl).toBeLessThanOrEqual(want);
+  };
+
+  it('a touch moves the record TTL and the name key PXAT with the deadline', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-tt', now, 'web'), lim, now);
+    const out = await store.touch('sbx-tt', now, 5000, 3600);
+    expect(out?.expiresAt).toBe(now + 5000);
+    near(await client.ttl(`${prefix}sandbox:sbx-tt`), 5000 + 3600);
+    const nameKey = (await client.keys(`${prefix}name:*`))[0]!;
+    near(await client.ttl(nameKey), 5000 + 3600);
+    expect(await client.zScore(`${prefix}live`, 'sbx-tt')).toBe(now + 5000);
+    await done();
+  });
+
+  it('a touch moves an existing egress log with the deadline, and leaves a missing one absent', async () => {
+    const { prefix, store, egress, done } = isolated();
+    const ep = `${prefix}egress:`;
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-e1', now), lim, now);
+    await store.create(rec('sbx-e2', now), lim, now);
+    await egress.append(
+      'host-1',
+      'c1',
+      [
+        {
+          sandboxId: 'sbx-e1',
+          lines: [EVENT],
+          proxyDropped: 0,
+          invalid: 1, // a counter is what creates the meta hash
+          expireAtS: now + 600 + 3600,
+        },
+      ],
+      0,
+      0,
+    );
+    await store.touch('sbx-e1', now, 5000, 3600);
+    await store.touch('sbx-e2', now, 5000, 3600);
+    near(await client.ttl(`${ep}sbx-e1`), 5000 + 3600);
+    near(await client.ttl(`${ep}sbx-e1:meta`), 5000 + 3600);
+    expect(await client.zScore(`${ep}expiry`, 'sbx-e1')).toBe(now + 5000 + 3600);
+    expect(await client.exists(`${ep}sbx-e2`)).toBe(0);
+    expect(await client.exists(`${ep}sbx-e2:meta`)).toBe(0);
+    expect(await client.zScore(`${ep}expiry`, 'sbx-e2')).toBeNull();
+    await done();
+  });
+
+  it('leaves a sealed egress log alone', async () => {
+    const { prefix, store, egress, done } = isolated();
+    const ep = `${prefix}egress:`;
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-s', now), lim, now);
+    await egress.append(
+      'host-1',
+      'c1',
+      [
+        {
+          sandboxId: 'sbx-s',
+          lines: [EVENT],
+          proxyDropped: 0,
+          invalid: 1, // a counter is what creates the meta hash
+          expireAtS: now + 600 + 3600,
+        },
+      ],
+      0,
+      0,
+    );
+    await egress.seal('sbx-s', now + 600 + 3600);
+    await store.touch('sbx-s', now, 5000, 3600);
+    expect(await client.zScore(`${ep}expiry`, 'sbx-s')).toBe(now + 600 + 3600);
+    near(await client.ttl(`${ep}sbx-s`), 600 + 3600);
+    await done();
+  });
+
+  it('does not touch a name key that now names another sandbox', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-o', now, 'web'), lim, now);
+    const nameKey = (await client.keys(`${prefix}name:*`))[0]!;
+    await client.set(nameKey, 'sbx-other', { PXAT: (now + 600 + 3600) * 1000 });
+    await store.touch('sbx-o', now, 5000, 3600);
+    near(await client.ttl(nameKey), 600 + 3600);
+    await done();
+  });
+
+  it('reads a hash written before idle lifetimes without idleLifetimeS', async () => {
+    const { prefix, store, done } = isolated();
+    const now = Math.floor(Date.now() / 1000);
+    const L = 7 * 86_400;
+    await client.hSet(`${prefix}sandbox:sbx-old`, {
+      id: 'sbx-old',
+      owner: 'github:1',
+      tenant: 'github:1',
+      name: '',
+      template: 'd',
+      worker: 'w',
+      wsk: 'sbx-old',
+      labels: '{}',
+      createdAt: String(now),
+      expiresAt: String(now + 1000),
+    });
+    const got = await store.get('sbx-old', now);
+    expect(got).not.toBeNull();
+    expect('idleLifetimeS' in got!).toBe(false);
+    const out = await store.touch('sbx-old', now, L, 3600);
+    expect(out?.expiresAt).toBe(Math.max(now + 1000, now + L));
     await done();
   });
 });

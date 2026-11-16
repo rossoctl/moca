@@ -1,3 +1,4 @@
+import { EGRESS_KEY_PREFIX } from './egress-log.js';
 import { CpError } from './errors.js';
 import {
   isSandboxModeName,
@@ -21,6 +22,9 @@ import { subjectHash } from './subject-document.js';
  * TTLs are retention only: the record hash lives until terminatedAt + retention (EXPIREAT on create,
  * EXPIRE on delete), the name key until expiresAt + retention (PXAT). The name key's TTL never
  * decides liveness, so a Redis clock running ahead cannot free a name whose holder is still live.
+ *
+ * A touch (idle lifetime, spec §5.2) moves the `live` score, the record's EXPIREAT, the name key's
+ * PXAT and the sandbox's egress log keys together, in one script.
  *
  * Subjects appear in key names only as subjectHash, as ownerKey does, so the keyspace names no logins.
  *
@@ -117,10 +121,42 @@ table.insert(out, 1, prev)
 return out
 `;
 
+// KEYS: rec, live, name (a placeholder when unnamed), egress stream, egress meta, egress expiry index.
+// ARGV: now, idleLifetimeS, retention, id, hasName.
+// Refuses a missing, deleted or expired record (now >= expiresAt), as SET_MODE and DELETE do. Never
+// moves the deadline backwards: when now + idleLifetimeS is not past it, nothing is written and the
+// record comes back as it is. Otherwise the deadline, the live score, the record's EXPIREAT and the
+// name key's PXAT (only while it still names this id) move together, and so do the egress log's
+// stream, meta and expiry-index score, which belong to the sandbox's end + retention. They move
+// here, not in a second write, so a crash cannot leave the log expiring before the record. A sealed
+// log belongs to an ended sandbox and stays; absent keys make EXPIREAT and ZADD XX no-ops.
+const TOUCH = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 1 then return false end
+local now = tonumber(ARGV[1]); local life = tonumber(ARGV[2]); local ret = tonumber(ARGV[3])
+local exp = tonumber(redis.call('HGET', KEYS[1], 'expiresAt'))
+if now >= exp then return false end
+local new = now + life
+if new <= exp then return redis.call('HGETALL', KEYS[1]) end
+redis.call('HSET', KEYS[1], 'expiresAt', new)
+redis.call('ZADD', KEYS[2], new, ARGV[4])
+redis.call('EXPIREAT', KEYS[1], new + ret)
+if ARGV[5] == '1' and redis.call('GET', KEYS[3]) == ARGV[4] then
+  redis.call('PEXPIREAT', KEYS[3], (new + ret) * 1000)
+end
+if redis.call('HGET', KEYS[5], 'sealed') ~= '1' then
+  redis.call('EXPIREAT', KEYS[4], new + ret)
+  redis.call('EXPIREAT', KEYS[5], new + ret)
+  redis.call('ZADD', KEYS[6], 'XX', new + ret, ARGV[4])
+end
+return redis.call('HGETALL', KEYS[1])
+`;
+
 export class RedisSandboxStore implements SandboxStore {
   constructor(
     private readonly redis: SandboxRedisLike,
     private readonly prefix: string = DEFAULT_SANDBOX_PREFIX,
+    private readonly egressPrefix: string = EGRESS_KEY_PREFIX,
   ) {}
 
   private recKey = (id: string) => `${this.prefix}sandbox:${id}`;
@@ -250,14 +286,37 @@ export class RedisSandboxStore implements SandboxStore {
   }
 
   touch(
-    _id: string,
-    _nowS: number,
-    _idleLifetimeS: number,
-    _retentionS: number,
+    id: string,
+    nowS: number,
+    idleLifetimeS: number,
+    retentionS: number,
   ): Promise<SandboxRecord | null> {
-    return Promise.reject(
-      new Error('RedisSandboxStore.touch: not implemented yet (idle-lifetime plan 1, task 3)'),
-    );
+    return this.guard(async () => {
+      // Read first only to learn the name key; the script re-checks everything atomically.
+      const r = await this.read(id);
+      if (!r) return null;
+      const out = (await this.redis.eval(TOUCH, {
+        keys: [
+          this.recKey(id),
+          this.liveKey,
+          r.name ? this.nameKey(r.owner, r.name) : this.noneKey,
+          `${this.egressPrefix}${id}`,
+          `${this.egressPrefix}${id}:meta`,
+          `${this.egressPrefix}expiry`,
+        ],
+        arguments: [
+          String(nowS),
+          String(idleLifetimeS),
+          String(retentionS),
+          id,
+          r.name ? '1' : '0',
+        ],
+      })) as string[] | null;
+      if (!out) return null;
+      const h: Record<string, string> = {};
+      for (let i = 0; i + 1 < out.length; i += 2) h[out[i]!] = out[i + 1]!;
+      return fromHash(h);
+    });
   }
 }
 
@@ -277,6 +336,7 @@ function toHash(r: SandboxRecord): Record<string, string> {
     mode: r.mode,
     idleTimeoutS: String(r.idleTimeoutS),
     modeEpoch: String(r.modeEpoch),
+    ...(r.idleLifetimeS !== undefined ? { idleLifetimeS: String(r.idleLifetimeS) } : {}),
   };
 }
 
@@ -306,5 +366,6 @@ function fromHash(h: Record<string, string>): SandboxRecord | null {
     mode: isSandboxModeName(h.mode) ? h.mode : 'per-exec',
     idleTimeoutS: Number(h.idleTimeoutS ?? 0),
     modeEpoch: Number(h.modeEpoch ?? 0),
+    ...(h.idleLifetimeS !== undefined ? { idleLifetimeS: Number(h.idleLifetimeS) } : {}),
   };
 }
