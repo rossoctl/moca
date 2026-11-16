@@ -1293,7 +1293,7 @@ if [ -n "$vfs_block_body" ]; then
   vfs_out="$(
     (
       VMM="cloud-hypervisor"; KERNEL="$vfs_missing_kernel"
-      : "$VMM" "$KERNEL"  # see scenario 1's comment above
+      : "$VMM" "$KERNEL"  # see the comment on scenario 1 above
       # shellcheck disable=SC1090
       . "$vfs_snippet"
       run_vfs_check
@@ -1311,7 +1311,7 @@ if [ -n "$vfs_block_body" ]; then
     vfs_out="$(
       (
         VMM="cloud-hypervisor"; KERNEL="$vfs_no_driver_kernel"
-        : "$VMM" "$KERNEL"  # see scenario 1's comment above
+        : "$VMM" "$KERNEL"  # see the comment on scenario 1 above
         # shellcheck disable=SC1090
         . "$vfs_snippet"
         run_vfs_check
@@ -1327,7 +1327,7 @@ if [ -n "$vfs_block_body" ]; then
     # 4) cloud-hypervisor arm, kernel WITH virtio_fs strings: passes (exit 0).
     (
       VMM="cloud-hypervisor"; KERNEL="$vfs_has_driver_kernel"
-      : "$VMM" "$KERNEL"  # see scenario 1's comment above
+      : "$VMM" "$KERNEL"  # see the comment on scenario 1 above
       # shellcheck disable=SC1090
       . "$vfs_snippet"
       run_vfs_check
@@ -1342,11 +1342,11 @@ if [ -n "$vfs_block_body" ]; then
     (
       # PATH is deliberately overridden here (not appended to) so
       # command -v strings fails inside the sourced snippet, exercising the
-      # preflight's own "'strings' is required" guard.
+      # guard in preflight that says strings is required.
       # shellcheck disable=SC2123
       PATH="/nonexistent-vfs-test-path"
       VMM="cloud-hypervisor"; KERNEL="$vfs_has_driver_kernel"
-      : "$VMM" "$KERNEL"  # see scenario 1's comment above
+      : "$VMM" "$KERNEL"  # see the comment on scenario 1 above
       # shellcheck disable=SC1090
       . "$vfs_snippet"
       run_vfs_check

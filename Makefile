@@ -40,14 +40,17 @@ test-deploy:
 # under `set -u`, which breaks every 3.2 run and was caught only in review (#440). Run in CI by the
 # `deploy-scripts-bash32` job.
 #
-# The list is explicit, NOT a glob over the same directories as test-deploy: four of those suites
+# The list is explicit, NOT a glob over the same directories as test-deploy: two of those suites
 # use bash 4 constructs on purpose and cannot run here (`declare -A` in deploy/compose/tests/
-# images.test.sh, `mapfile` in deploy/sbx/tests/smoke.test.sh and deploy/vm/tests/setup-vm.test.sh).
+# images.test.sh, `mapfile` in deploy/sbx/tests/smoke.test.sh).
 # Widening this to a glob would make the target fail for reasons that are not regressions. Add a
 # suite here once it is 3.2-clean.
 #
-# These four honour $$BASH rather than PATH's first bash, so /bin/bash below really is what runs
-# both them and the scripts they test -- which is the other half of #440.
+# The k8s, setup-microvm and templates-check suites honour $$BASH rather than PATH's first bash,
+# so /bin/bash below really is what runs both them and the scripts they test -- which is the other
+# half of #440. setup-vm.test.sh sources the script it tests, so the same holds there.
+# build-snapshot.test.sh runs its own checks under /bin/bash, but runs build-snapshot.sh (a
+# Linux-only tool, run on the KVM host) with PATH's bash.
 test-deploy-bash32:
 	@v="$$(/bin/bash --version 2>/dev/null | head -1)"; \
 	case "$$v" in \
@@ -56,7 +59,7 @@ test-deploy-bash32:
 	*) echo "skip - /bin/bash is not 3.x ($$v); this target checks the macOS interpreter"; exit 0 ;; \
 	esac; \
 	echo "== /bin/bash is $$v"; \
-	failed=''; for t in deploy/k8s/tests/setup.test.sh deploy/k8s/tests/smoke.test.sh deploy/microvm/tests/setup-microvm.test.sh deploy/sbx/tests/templates-check.test.sh; do \
+	failed=''; for t in deploy/k8s/tests/setup.test.sh deploy/k8s/tests/smoke.test.sh deploy/microvm/tests/setup-microvm.test.sh deploy/microvm/tests/build-snapshot.test.sh deploy/sbx/tests/templates-check.test.sh deploy/vm/tests/setup-vm.test.sh; do \
 		echo "== $$t"; \
 		/bin/bash "$$t" || failed="$$failed $$t"; \
 	done; \

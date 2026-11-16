@@ -335,8 +335,11 @@ pass "control plane: loopback :8090, file store in its own 0700 StateDirectory, 
 # both at once. This is the var-for-var mirror deploy/compose/tests/compose.test.sh keeps for compose.
 secrets_line="$(grep -E '^export const CONTROL_PLANE_SECRETS = \[' "$CP_MAIN")" ||
   fail "main.ts has no one-line CONTROL_PLANE_SECRETS export"
-mapfile -t cp_secrets < <(grep -oE "'SH_[A-Z_]+'" <<<"$secrets_line" | tr -d "'")
-mapfile -t cp_required < <(grep -oE "required\(env, '[A-Z_]+'\)" "$CP_MAIN" | grep -oE "'[A-Z_]+'" | tr -d "'" | sort -u)
+# A read loop, not mapfile: this suite runs under macOS's /bin/bash 3.2 too (make test-deploy-bash32).
+cp_secrets=()
+while IFS= read -r name; do cp_secrets+=("$name"); done < <(grep -oE "'SH_[A-Z_]+'" <<<"$secrets_line" | tr -d "'")
+cp_required=()
+while IFS= read -r name; do cp_required+=("$name"); done < <(grep -oE "required\(env, '[A-Z_]+'\)" "$CP_MAIN" | grep -oE "'[A-Z_]+'" | tr -d "'" | sort -u)
 # Non-empty guards: a main.ts refactor that renamed required() would otherwise pass both loops vacuously.
 ((${#cp_secrets[@]})) || fail "found no secret names in main.ts's CONTROL_PLANE_SECRETS line"
 ((${#cp_required[@]})) || fail "found no required(env, '...') settings in $CP_MAIN"
@@ -1013,7 +1016,10 @@ grep -q '@SH_ENV_DIR@' "$INSTALLED_FIREWALL_UNIT" &&
 pass "install_sandbox_firewall renders @SH_ENV_DIR@ into the real SH_ENV_DIR when installing the unit"
 
 # --- missing commands fail loudly -----------------------------------------------------------
-if PATH="/nonexistent" require_cmds podman 2>/dev/null; then
+# A plain assignment in a subshell, not `PATH=... require_cmds`: bash 3.2 keeps its command hash
+# for a prefix assignment to a function call, so `command -v` would still find a hashed podman.
+# shellcheck disable=SC2123 # PATH emptied on purpose: the tool must not be found
+if (PATH="/nonexistent"; require_cmds podman) 2>/dev/null; then
   fail "require_cmds should fail when podman is absent"
 fi
 pass "require_cmds reports missing tools"
@@ -1024,13 +1030,15 @@ HINT_DIR="$TMP/usr-local-bin"
 mkdir -p "$HINT_DIR"
 printf '#!/bin/sh\n' >"$HINT_DIR/podman"
 chmod +x "$HINT_DIR/podman"
-hint_out="$(PATH="/nonexistent" SH_CMD_HINT_DIRS="$HINT_DIR" require_cmds podman 2>&1)" &&
+# shellcheck disable=SC2123,SC2034 # PATH emptied on purpose; require_cmds reads SH_CMD_HINT_DIRS
+hint_out="$(PATH="/nonexistent"; SH_CMD_HINT_DIRS="$HINT_DIR"; require_cmds podman 2>&1)" &&
   fail "require_cmds must still fail for a tool that is off PATH"
 grep -qF "podman is at $HINT_DIR/podman" <<<"$hint_out" ||
   fail "require_cmds must say where an off-PATH tool is: $hint_out"
 grep -qF "sudo env PATH=\"$HINT_DIR:\$PATH\"" <<<"$hint_out" ||
   fail "require_cmds must give the re-run command that puts it on PATH: $hint_out"
-nohint_out="$(PATH="/nonexistent" SH_CMD_HINT_DIRS="$HINT_DIR" require_cmds nft 2>&1)" &&
+# shellcheck disable=SC2123,SC2034 # as above
+nohint_out="$(PATH="/nonexistent"; SH_CMD_HINT_DIRS="$HINT_DIR"; require_cmds nft 2>&1)" &&
   fail "require_cmds must fail for a tool that is nowhere"
 grep -q 'sudo env PATH' <<<"$nohint_out" && fail "no PATH hint for a tool that is nowhere: $nohint_out"
 pass "require_cmds names an off-PATH tool's location and the sudo env PATH= re-run"
