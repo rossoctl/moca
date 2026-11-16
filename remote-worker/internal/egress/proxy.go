@@ -321,19 +321,33 @@ func (p *Proxy) admit(b *vmBinding, c *boundConn) {
 		return
 	}
 	ctx, cancel := context.WithCancel(p.ctx)
-	pc := &proxyConn{p: p, c: c, caller: caller, ctx: ctx, cancel: cancel}
+	pc := &proxyConn{p: p, b: b, c: c, caller: caller, ctx: ctx, cancel: cancel}
+	c.release = pc.release
 	b.conns[pc] = struct{}{}
 	p.wg.Add(1)
 	p.mu.Unlock()
 	go func() {
 		defer p.wg.Done()
-		defer func() {
-			p.mu.Lock()
-			delete(b.conns, pc)
-			p.mu.Unlock()
-		}()
+		// serve's finish has closed c, which released the slot; this is
+		// the backstop that keeps the slot from leaking if it ever did not.
+		defer pc.release()
 		pc.serve()
 	}()
+}
+
+// release frees pc's per-VM connection slot. The slot is pc's entry in
+// b.conns, so releasing is exactly-once by construction however many exit
+// paths call it: the guest conn's Close (normal end, refusal, Unregister's
+// abort, Close), the tunnel before its event, and the handler's backstop. It
+// takes Proxy.mu, so no caller may hold it; pc.mu is never held around a
+// close, so the lock order is unchanged.
+func (pc *proxyConn) release() {
+	if pc.b == nil {
+		return
+	}
+	pc.p.mu.Lock()
+	delete(pc.b.conns, pc)
+	pc.p.mu.Unlock()
 }
 
 // chargeCapRefusal charges one connection-cap refusal to b and reports the
@@ -387,6 +401,7 @@ func (p *Proxy) countRequest(sid string) bool {
 // emitted for it: its own (tunnel, a refusal) or, if Unregister wins, aborted.
 type proxyConn struct {
 	p      *Proxy
+	b      *vmBinding // whose conns hold pc's slot; nil in unit tests that build a bare pc
 	c      *boundConn
 	caller Caller
 	ctx    context.Context
