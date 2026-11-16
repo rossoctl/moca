@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import { forLog } from './audit-log.js';
 import { CpError, writeError } from './errors.js';
 import { redeemInferenceGrant } from './grant-redeem.js';
 import type { CpDeps } from './handlers.js';
@@ -111,8 +112,8 @@ async function forward(req: IncomingMessage, res: ServerResponse, deps: CpDeps):
       /* the message is diagnostic; an unparseable endpoint is already the failure */
     }
     console.error(
-      `[inference] upstream ${host} unreachable for credential '${cred.credentialName}' ` +
-        `(session ${cred.sessionId}): ${(err as Error)?.message ?? String(err)}`,
+      `[inference] upstream ${host} unreachable for credential '${forLog(cred.credentialName)}' ` +
+        `(session ${forLog(cred.sessionId)}): ${(err as Error)?.message ?? String(err)}`,
     );
     throw new CpError('credential_unavailable', 'the inference endpoint is unreachable');
   }

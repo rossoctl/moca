@@ -833,8 +833,10 @@ if (isMainModule) {
     // dequeue with a grant and an inferenceUrl nothing is listening on, so each turn fails at its
     // first completion. Failing the boot is how `checkGrantRedemption` already treats a missing
     // redeemer; a bind that cannot happen is the same deployment mistake, found a moment later.
+    // The error itself names the address and the port it could not take, and `env` here holds
+    // RESOLVED SECRETS -- nothing read out of it belongs in a log line.
     inference.on('error', (err) => {
-      console.error(`[inference] cannot bind MOCA_INFERENCE_ADDR=${env.MOCA_INFERENCE_ADDR}:`, err);
+      console.error('[inference] cannot bind MOCA_INFERENCE_ADDR:', err);
       process.exit(1);
     });
     // Its own SIGTERM rather than a second server inside `startControlPlane`: the API listener's
