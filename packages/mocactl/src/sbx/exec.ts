@@ -103,7 +103,12 @@ export function jwtMode(token: string): SandboxModeName {
 export function grantOf(t: SbxToken): SandboxTokenGrant {
   const times = jwtTimes(t.token);
   const lifetimeS = times && times.exp > times.iat ? times.exp - times.iat : 0;
-  return { token: t.token, expiresAt: t.expiresAt || times?.exp || 0, lifetimeS };
+  return {
+    token: t.token,
+    expiresAt: t.expiresAt || times?.exp || 0,
+    lifetimeS,
+    ...(t.sandboxExpiresAt !== undefined ? { sandboxExpiresAt: t.sandboxExpiresAt } : {}),
+  };
 }
 
 /**
@@ -120,39 +125,62 @@ export function sandboxTokenFn(
   onMint?: (t: SbxToken) => void,
 ): {
   token: TokenFn;
-  first(signal?: AbortSignal): Promise<SbxToken>;
-  /** A fresh mint now, whatever is held; `signal` stops this caller's wait (and its request). */
+  /** The first mint; `activity` false for a read that must not count as use (`sbx get`). */
+  first(signal?: AbortSignal, activity?: boolean): Promise<SbxToken>;
+  /** A fresh activity mint now, whatever is held; `signal` stops this caller's wait (and its request). */
   force(signal?: AbortSignal): Promise<SbxToken>;
 } {
   let cur: SbxToken | undefined;
-  let pending: Promise<SbxToken> | undefined;
-  const mint = (signal?: AbortSignal) => untilAborted(mintShared(signal), signal);
-  const mintShared = (signal?: AbortSignal) =>
-    (pending ??= api.mintSandboxToken(id, signal ? { signal } : {}).then(
-      (t) => {
-        pending = undefined;
-        cur = t;
-        onMint?.(t);
-        return t;
-      },
-      (err: unknown) => {
-        pending = undefined;
-        throw err;
-      },
-    ));
+  let curActivity = true;
+  let pending: { p: Promise<SbxToken>; activity: boolean } | undefined;
+  const mint = (activity: boolean, signal?: AbortSignal) =>
+    untilAborted(mintShared(activity, signal), signal);
+  const mintShared = async (activity: boolean, signal?: AbortSignal): Promise<SbxToken> => {
+    // A no-activity mint in flight is not joined by an activity ask: wait it out, then mint.
+    while (pending && activity && !pending.activity) await pending.p.catch(() => undefined);
+    if (pending) return pending.p;
+    const entry = {
+      activity,
+      p: api
+        .mintSandboxToken(id, {
+          ...(signal ? { signal } : {}),
+          ...(activity ? {} : { activity: false }),
+        })
+        .then(
+          (t) => {
+            pending = undefined;
+            cur = t;
+            curActivity = activity;
+            onMint?.(t);
+            return t;
+          },
+          (err: unknown) => {
+            pending = undefined;
+            throw err;
+          },
+        ),
+    };
+    pending = entry;
+    return entry.p;
+  };
   const get = async (
     force: boolean,
     minValidS: number,
+    activity: boolean,
     signal?: AbortSignal,
   ): Promise<SbxToken> => {
     const need = Math.max(MIN_LEFT_S, minValidS);
-    if (force || !cur || cur.expiresAt - now() / 1000 < need) return mint(signal);
+    // A command never runs on a token from a no-activity mint (spec §3.1): an activity ask
+    // re-mints once, then reuses that token.
+    if (force || !cur || cur.expiresAt - now() / 1000 < need || (activity && !curActivity)) {
+      return mint(activity, signal);
+    }
     return cur;
   };
   return {
-    token: async ({ force, minValidS }) => grantOf(await get(force, minValidS)),
-    first: (signal?: AbortSignal) => get(false, MIN_LEFT_S, signal),
-    force: (signal?: AbortSignal) => get(true, MIN_LEFT_S, signal),
+    token: async ({ force, minValidS, activity }) => grantOf(await get(force, minValidS, activity)),
+    first: (signal?: AbortSignal, activity = true) => get(false, MIN_LEFT_S, activity, signal),
+    force: (signal?: AbortSignal) => get(true, MIN_LEFT_S, true, signal),
   };
 }
 
@@ -216,10 +244,12 @@ export async function openExec(
     keepalive?: ExecConnOptions['keepalive'];
     /** Aborts the opening's requests: the first token mint and the expiry lookup. */
     signal?: AbortSignal;
+    /** The first mint's activity hint (default true); false for a read (`sbx get`). */
+    activity?: boolean;
   } = {},
 ): Promise<OpenedExec> {
   const t = sandboxTokenFn(api, id, Date.now, o.onToken);
-  const first = await t.first(o.signal);
+  const first = await t.first(o.signal, o.activity ?? true);
   let sandboxExpiresAt = o.sandboxExpiresAt;
   const life = grantOf(first).lifetimeS;
   if (sandboxExpiresAt === undefined && life > 0 && life < SHORT_TOKEN_S) {

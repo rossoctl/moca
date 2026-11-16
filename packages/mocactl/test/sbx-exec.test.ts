@@ -28,7 +28,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/errors.js';
 import { DEFAULT_CONFIG, saveAuth, saveConfig } from '../src/config.js';
-import { SandboxApiClient } from '../src/sbx/api.js';
+import { SandboxApiClient, type SbxToken } from '../src/sbx/api.js';
 import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { jwtMode, sandboxTokenFn, type ExecFactory } from '../src/sbx/exec.js';
 import { busyRetries } from '../src/sbx/run.js';
@@ -66,7 +66,7 @@ function fakeExec(answer: (command: string) => ExecResult | Error = () => res())
     opened.push(o);
     return {
       exec: async (command: string, x: { stdin?: Uint8Array; timeoutS?: number } = {}) => {
-        await o.token({ force: false, minValidS: 60 });
+        await o.token({ force: false, minValidS: 60, activity: true });
         sent.push({
           command,
           stdin: x.stdin ? Buffer.from(x.stdin).toString() : undefined,
@@ -825,22 +825,83 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     let now = at(TOKEN_IAT);
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => now);
-    const g = await t.token({ force: false, minValidS: 60 });
+    const g = await t.token({ force: false, minValidS: 60, activity: true });
     expect(g).toEqual({ token: TOKEN.token, expiresAt: TOKEN.expiresAt, lifetimeS: 900 });
-    await t.token({ force: false, minValidS: 60 });
+    await t.token({ force: false, minValidS: 60, activity: true });
     // A token minted this instant has its whole lifetime left, so it covers a defaulted timeout.
-    await t.token({ force: false, minValidS: 900 });
+    await t.token({ force: false, minValidS: 900, activity: true });
     expect(cp.calls).toHaveLength(1);
     now = at(TOKEN_IAT + 500); // 400 s left
-    await t.token({ force: false, minValidS: 400 });
+    await t.token({ force: false, minValidS: 400, activity: true });
     expect(cp.calls).toHaveLength(1);
-    await t.token({ force: false, minValidS: 401 }); // a timeout the token cannot cover
+    await t.token({ force: false, minValidS: 401, activity: true }); // a timeout the token cannot cover
     expect(cp.calls).toHaveLength(2);
     now = at(TOKEN.expiresAt - 30); // within 60 s of exp
-    await t.token({ force: false, minValidS: 1 });
+    await t.token({ force: false, minValidS: 1, activity: true });
     expect(cp.calls).toHaveLength(3);
-    await t.token({ force: true, minValidS: 60 });
+    await t.token({ force: true, minValidS: 60, activity: true });
     expect(cp.calls).toHaveLength(4);
+  });
+
+  describe('the activity hint', () => {
+    const fakeApi = (answer: (n: number) => Promise<SbxToken> | SbxToken = () => TOKEN) => {
+      const calls: (boolean | undefined)[] = [];
+      const api = {
+        mintSandboxToken: async (_id: string, o: { activity?: boolean } = {}) => {
+          calls.push(o.activity);
+          return answer(calls.length);
+        },
+      } as unknown as SandboxApiClient;
+      return { api, calls };
+    };
+    const ask = (activity: boolean) => ({ force: false, minValidS: 60, activity });
+
+    it('reuses a no-activity token for a no-activity ask, and re-mints for an activity ask', async () => {
+      const { api, calls } = fakeApi();
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      await t.token(ask(false));
+      expect(calls).toEqual([false]);
+      await t.token(ask(false));
+      expect(calls).toHaveLength(1);
+      await t.token(ask(true));
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).not.toBe(false);
+      await t.token(ask(true));
+      expect(calls).toHaveLength(2);
+    });
+
+    it('an activity token serves a no-activity ask', async () => {
+      const { api, calls } = fakeApi();
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      await t.token(ask(true));
+      await t.token(ask(false));
+      expect(calls).toHaveLength(1);
+    });
+
+    it('an activity ask does not share a no-activity mint in flight', async () => {
+      const gates: ((t: SbxToken) => void)[] = [];
+      const { api, calls } = fakeApi(() => new Promise<SbxToken>((r) => gates.push(r)));
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      const quiet = t.token(ask(false));
+      const busy = t.token(ask(true));
+      await Promise.resolve();
+      expect(calls).toEqual([false]);
+      gates[0]!({ ...TOKEN, token: 'quiet' });
+      expect((await quiet).token).toBe('quiet');
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[1]).not.toBe(false);
+      gates[1]!({ ...TOKEN, token: 'busy' });
+      expect((await busy).token).toBe('busy');
+    });
+
+    it('passes sandboxExpiresAt through to the grant', async () => {
+      const a = fakeApi(() => ({ ...TOKEN, sandboxExpiresAt: 123 }));
+      const g = await sandboxTokenFn(a.api, SBX, () => at(TOKEN_IAT)).token(ask(true));
+      expect(g.sandboxExpiresAt).toBe(123);
+      const b = fakeApi();
+      const h = await sandboxTokenFn(b.api, SBX, () => at(TOKEN_IAT)).token(ask(true));
+      expect('sandboxExpiresAt' in h).toBe(false);
+    });
   });
 
   it('first() is the held grant: the connection reuses it', async () => {
@@ -848,7 +909,7 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
     expect((await t.first()).execEndpoint).toBe(TOKEN.execEndpoint);
-    await t.token({ force: false, minValidS: 900 });
+    await t.token({ force: false, minValidS: 900, activity: true });
     expect(cp.calls).toHaveLength(1);
   });
 
@@ -861,7 +922,7 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     });
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
-    expect(await t.token({ force: false, minValidS: 60 })).toEqual({
+    expect(await t.token({ force: false, minValidS: 60, activity: true })).toEqual({
       token: 'opaque',
       expiresAt: TOKEN.expiresAt,
       lifetimeS: 0,
@@ -1085,7 +1146,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     let keepalives = 0;
     const factory: ExecFactory = (o) => ({
       exec: async (command) => {
-        await o.token({ force: command === 'remint', minValidS: 60 });
+        await o.token({ force: command === 'remint', minValidS: 60, activity: true });
         flags.push(typeof o.keepalive === 'function' ? o.keepalive() : Boolean(o.keepalive));
         return res({ stderr: Buffer.alloc(0) });
       },
@@ -1102,7 +1163,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
         await over.keepalive?.();
       },
       process: (async (op: string) => {
-        await o.token({ force: false, minValidS: 60 });
+        await o.token({ force: false, minValidS: 60, activity: true });
         processOps.push(op);
         return { result: [], lease: [] };
       }) as never,

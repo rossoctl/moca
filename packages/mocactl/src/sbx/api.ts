@@ -31,6 +31,8 @@ export interface SbxSandbox {
   idleTimeoutS: number;
   /** Raised by every accepted mode change; 0 for per-exec from create, 1 for a lease mode. */
   modeEpoch: number;
+  /** The idle lifetime in seconds; absent from an older control plane. */
+  idleLifetimeS?: number;
 }
 
 /** The mode fields as a control plane from before modes answers them: absent. */
@@ -59,6 +61,8 @@ export interface SbxSandboxCreate {
   mode?: SandboxModeName;
   /** Omitted: the worker's default (stored as 0). */
   idleTimeoutS?: number;
+  /** Omitted: the deployment's default; the control plane's 400 names the range. */
+  idleLifetimeS?: number;
 }
 
 /** What a create answers: the sandbox, and the build it was served (template lifecycle spec §9). */
@@ -74,6 +78,8 @@ export interface SbxToken {
   wrk: string;
   wsk: string;
   execCa: string | null;
+  /** The sandbox's current deadline (epoch seconds); absent from an older control plane. */
+  sandboxExpiresAt?: number;
 }
 
 /**
@@ -505,10 +511,17 @@ export class SandboxApiClient extends ControlPlaneClient {
     return Buffer.from(await res.arrayBuffer());
   }
 
-  /** `signal` aborts the request (`rm`'s bounded lease step). */
-  mintSandboxToken(id: string, opts: { signal?: AbortSignal } = {}): Promise<SbxToken> {
+  /**
+   * `signal` aborts the request (`rm`'s bounded lease step). `activity: false` asks the control
+   * plane not to count the mint as use; an activity mint sends no body (older control planes).
+   */
+  mintSandboxToken(
+    id: string,
+    opts: { signal?: AbortSignal; activity?: boolean } = {},
+  ): Promise<SbxToken> {
     return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/token`, {
       signal: opts.signal,
+      ...(opts.activity === false ? { body: { activity: false } } : {}),
     });
   }
 
@@ -533,8 +546,13 @@ export class SandboxApiClient extends ControlPlaneClient {
    * A set-mode token for the mode and epoch the record holds now, raising nothing (spec §8.2):
    * `POST /v1/sandboxes/{id}/mode-token`. What a lease create sends, since the create answers none.
    */
-  mintSandboxModeToken(id: string): Promise<{ setModeToken: string }> {
-    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/mode-token`);
+  mintSandboxModeToken(
+    id: string,
+    opts: { activity?: boolean } = {},
+  ): Promise<{ setModeToken: string }> {
+    return this.json('POST', `/v1/sandboxes/${encodeURIComponent(id)}/mode-token`, {
+      ...(opts.activity === false ? { body: { activity: false } } : {}),
+    });
   }
 
   /** Every enrolled subject, with its roles (enrollment and roles spec §4; admins). */
