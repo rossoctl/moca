@@ -341,20 +341,23 @@ claims { iss: <SH_SANDBOX_TOKEN_ISSUER>, aud: "moca-sandbox", sub, tenant,
 
 ```
 GET    /v1/templates              → { templates: [{ id, description, tools }] }
-POST   /v1/sandboxes              { template, name?, labels? } → 201 Sandbox
+POST   /v1/sandboxes              { template, name?, labels?, idleLifetimeS? } → 201 Sandbox
 GET    /v1/sandboxes              own; ?state=ready|terminated; admins: ?all=1 → { sandboxes: [Sandbox] }, newest first
 GET    /v1/sandboxes/{id}         own (admins: any), else 404 (another user's sandbox is indistinguishable from none) → Sandbox
 DELETE /v1/sandboxes/{id}         idempotent → 200 { id, state: "terminated", reason }
-POST   /v1/sandboxes/{id}/token   owner only → { token, expiresAt, execEndpoint, wrk, wsk, execCa }
+POST   /v1/sandboxes/{id}/token   owner only; { activity? } → { token, expiresAt, sandboxExpiresAt,
+                                  execEndpoint, wrk, wsk, execCa }
                                   409 sandbox_terminated { reason } once terminated
 GET    /v1/janitor/sandboxes      → { live: [{ wsk, wrk }], terminated: [{ wsk, wrk, terminatedAt }] }
                                   Bearer SH_JANITOR_TOKEN only (§8.3); no user token is accepted
 
 Sandbox = { id, owner, name | null, template, state: "ready" | "terminated",
-            reason: "deleted" | "expired" | null, createdAt, expiresAt, terminatedAt | null, labels }
+            reason: "deleted" | "expired" | null, createdAt, expiresAt, idleLifetimeS,
+            terminatedAt | null, labels }
 ```
 
-Times are epoch seconds. `execCa` is the exec route's CA certificate (PEM) when it is self-issued,
+Times are epoch seconds. `idleLifetimeS`, `activity` and `sandboxExpiresAt` come from [the idle-lifetime design](2026-11-16-sbx-idle-lifetime-design.md) (§4).
+`execCa` is the exec route's CA certificate (PEM) when it is self-issued,
 else `null`.
 
 - **Ids:** `sbx-` plus 26 random lowercase hex characters. That satisfies the worker's key rule
@@ -377,7 +380,10 @@ else `null`.
   `terminated / expired` on every route and refuses to mint.
 - **Terminated records stay readable for 14 days** (`SH_SANDBOX_RETENTION_SECONDS`), so `mocactl sbx ls`
   can say why a sandbox is gone. Then they are deleted.
-- **Lifetime is absolute:** `SH_SANDBOX_LIFETIME_SECONDS`, default 7 days. No extension in SBX0.
+- **Lifetime is idle time** (since 2026-11-16, [the idle-lifetime design](2026-11-16-sbx-idle-lifetime-design.md)): a sandbox expires after its
+  `idleLifetimeS` with no activity mint, default `SH_SANDBOX_LIFETIME_SECONDS` (7 days), at most
+  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (30 days). Each activity mint moves `expiresAt` forward, never
+  back. SBX0 as first built had an absolute lifetime with no extension.
 
 ### 5.3 Quotas
 
@@ -392,13 +398,16 @@ else `null`.
 ### 5.4 Invariants that remove the silent reset
 
 1. **The worker never reclaims a live sandbox.**
-   - Every SBX0 worker sets `SH_WORKSPACE_IDLE` longer than `SH_SANDBOX_LIFETIME_SECONDS` (default
-     9 days against 7).
+   - Every SBX0 worker sets `SH_WORKSPACE_IDLE` longer than `SH_SANDBOX_MAX_LIFETIME_SECONDS`
+     (default 32 days against 30; before the idle lifetime, 9 days against the absolute 7). The
+     reasoning under an idle lifetime, and its one accepted gap, are in [the idle-lifetime design](2026-11-16-sbx-idle-lifetime-design.md) (§6.2, §7).
    - `SH_WORKSPACE_IDLE` is a Go duration. From 1b on, `setup.sh` owns it and writes it into every
-     worker bundle as `(SH_SANDBOX_LIFETIME_SECONDS / 3600 + 48)h` (216h for the default 7 days).
+     worker bundle as `(SH_SANDBOX_MAX_LIFETIME_SECONDS / 3600 + 48)h` (768h for the default 30
+     days).
      `install-host.sh` takes it from the bundle, replacing its 1a constant.
-   - Idle time can't exceed total lifetime, so the worker's idle sweep can only reach a workspace
-     whose sandbox has already ended.
+   - Every Exec is preceded by an activity mint within one token lifetime, so a workspace idle at
+     the worker for longer than the maximum idle lifetime belongs to a sandbox that has already
+     ended.
 2. **Access ends at expiry**, within the relay's 30 s clock leeway:
    - no token outlives its sandbox's `expiresAt`;
    - the relay accepts a token for at most 30 s past its `exp`;
@@ -423,7 +432,8 @@ Records live in the namespace's Redis, under `sbx:` keys. Subjects are hashed, a
 plane's ownership keys already are, so the keyspace names no logins:
 
 - `sbx:sandbox:<id>`: a hash with the record; it expires at the end of retention;
-- `sbx:live` (id → `expiresAt`): a sorted set of the sandboxes not deleted;
+- `sbx:live` (id → `expiresAt`): a sorted set of the sandboxes not deleted; an activity mint moves
+  the score, the record hash's `EXPIREAT` and the name key's `PXAT` together, in one script;
 - `sbx:owner:<subject hash>` and `sbx:all` (id → `createdAt`): sorted sets for listing;
 - `sbx:name:<subject hash>:<name>`: the id of the name's last holder. Whether that holder is still
   live is read from `sbx:live` at the caller's clock; the key itself expires at `expiresAt` plus

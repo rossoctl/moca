@@ -45,7 +45,7 @@ from what already runs:
   out to it.
 - **Identity and lifecycle:** a **second control-plane instance in a `sandbox` route profile**. It
   serves the existing login routes plus an explicit sandbox resource (create, list, get, delete,
-  with a fixed absolute lifetime). It mints a short-lived Ed25519 **sandbox token**
+  with a fixed absolute lifetime; idle-based since the 2026-11-16 revision below). It mints a short-lived Ed25519 **sandbox token**
   (`typ: moca-sandbox+jwt`, `aud: moca-sandbox`) naming exactly one worker (`wrk`) and one workspace
   key (`wsk`). The relay verifies it with public keys only and requires an exact match on both.
   Because every sandbox of a template shares one worker, the relay also:
@@ -63,7 +63,8 @@ from what already runs:
   allow-list in `mocactl`'s `layering.test.ts` becomes a two-entry list naming this ADR.
 - **No silent reset**, held by invariants rather than worker changes:
   - the control plane owns the lifetime;
-  - the worker's idle reclaim is set longer than any sandbox can live;
+  - the worker's idle reclaim is set longer than any sandbox can live (since the 2026-11-16
+    revision: longer than the longest idle lifetime a sandbox can have);
   - a janitor on the host frees the disk of terminated sandboxes.
 
 Templates are one `microvm-worker` per golden snapshot. The guest has no network until allowlisted
@@ -132,6 +133,35 @@ egress, the next increment.
 - **Follow-up owed:** retiring the prototype relay branch (`feat/relay-client-tokens`) once
   per-sandbox tokens land on `main`. Its static client tokens run only in the first, team-only
   increment and are never merged.
+
+## Revisions
+
+### 2026-11-16 — A sandbox's lifetime counts idle time, not time since creation
+
+A cohort user who works in one sandbox every day would lose its workspace at the 7-day mark,
+although the sandbox was never idle (rossoctl/moca#770). The absolute lifetime is right
+for an abandoned sandbox and wrong for one in use.
+
+**Decided** (design: [`../specs/2026-11-16-sbx-idle-lifetime-design.md`](../specs/2026-11-16-sbx-idle-lifetime-design.md)):
+
+- A sandbox ends after its **idle lifetime** with no activity. Each sandbox-token or set-mode-token
+  mint moves `expiresAt` to `max(expiresAt, now + idleLifetimeS)`, unless the client marks the mint
+  `activity: false` (`mocactl` does for mints that run no command). The deadline never moves
+  backwards, and an ended sandbox is never revived. Expiry stays computed, never scheduled.
+- The owner chooses `idleLifetimeS` at create, from 1 hour to `SH_SANDBOX_MAX_LIFETIME_SECONDS`
+  (30 days by default); the default is `SH_SANDBOX_LIFETIME_SECONDS` (7 days), which no longer means
+  an absolute lifetime.
+- **No hard maximum age.** It would bring back the loss this revision removes, and it is not needed
+  for the no-silent-reset invariant: the worker's idle reclaim is itself an idle clock, reset by
+  every Exec, and every Exec is preceded by a mint within one token lifetime.
+- "The control plane owns the lifetime" stands. "The worker's idle reclaim is set longer than any
+  sandbox can live" becomes "longer than the longest idle lifetime a sandbox can have":
+  `SH_WORKSPACE_IDLE` = the maximum plus 48 h (768 h at the default), so raising the maximum means
+  reinstalling every host's workers, as raising the lifetime did.
+- **Negative / accepted cost:** mints that keep coming while every Exec fails (or from a client of
+  its own that mints without running commands and without the hint) keep a sandbox alive while the
+  worker's idle clock runs. A silent reset needs that for more than `(max − L) + 48 h`: about 25 days
+  at the 7-day default, 2 days at the 30-day maximum. Documented in the user guide's limits.
 
 ---
 
