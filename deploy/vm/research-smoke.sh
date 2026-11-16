@@ -213,7 +213,7 @@ if ! records="$(podman exec sh-redis redis-cli HKEYS sh:sandbox:records 2>"$OUT/
 else
   others="$(grep -v '^sh-sandbox-' <<<"$records" | grep -v '^$' || true)"
   [[ -z "$others" ]] && ok "every pool record is a container sandbox" ||
-    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM guest reaches only moca-egress's allowlist; go back to containers (deploy/microvm/P4-ON-P6.md)"
+    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM guest reaches only moca-egress's allowlist (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
 fi
 if [[ "$FAIL" -ne 0 ]]; then
   printf '\n=== Results: %s passed, %s failed (preconditions; no turn run) ===\n' "$PASS" "$FAIL"

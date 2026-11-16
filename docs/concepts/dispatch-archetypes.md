@@ -94,8 +94,8 @@ which looks like a real answer. Poll the turn route, not this one.
   (501 `async_tenancy_unsupported`) and the drain refuses to arm. Lifting the gate needs the grant
   and token-endpoint slice; it is M2 of the spec's §9.
 - **`deploy/k8s` is proven by its smoke test, and nothing autoscales it.** Two opt-in smoke claims
-  drain queued leaves on a real cluster, and `deploy/k8s/README.md` §14 documents the consumer and
-  its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
+  check that a real cluster drains queued leaves, and `deploy/k8s/README.md` §14 documents the
+  consumer and its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
   ([#688](https://github.com/rossoctl/moca/issues/688), #765).
 - Per-turn wall-clock caps (`turn_exp`) are M2. A turn's caps are recorded, not enforced
   ([#391](https://github.com/rossoctl/moca/issues/391)).

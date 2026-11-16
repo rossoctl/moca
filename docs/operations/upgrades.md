@@ -64,8 +64,8 @@ period is only an outer bound. Practically:
 ## Version skew
 
 - **Harness before control plane.** Config bundles require the harness to be upgraded first: a harness older
-  than v0.5.0 ignores `configRef`, so turns run without the skills and report no error. Every later harness
-  applies it, so the order matters only when upgrading from before v0.5.0 or to a release that changes the
+  than v0.5.0 ignores `configRef` on the interactive turn path (prompt leaves have applied it since v0.3.0), so
+  turns run without the skills and report no error. Every later harness applies it, so the order matters only when upgrading from before v0.5.0 or to a release that changes the
   bundle format ([#510](https://github.com/rossoctl/moca/issues/510)). Nothing enforces this order, and the
   supervisor, control plane and relay use the same image, so one `--image` bump moves all three and they roll in
   parallel (the rule is in [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the

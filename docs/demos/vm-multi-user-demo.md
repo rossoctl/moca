@@ -704,8 +704,8 @@ Say these in the room. They are what stops someone over-promising.
   unless the host enforces IMDSv2 with hop limit 1 (#357). Egress control is MI1 S5's
   `moca-egress`.
 - **P4 reaches only an allowlist** (P4.1's `moca-egress`, no credentials) **and has no grant
-  binding** (MI1 S4). Its workspaces are per session,
-  but any holder of the relay's exec token can target any of them.
+  binding** (MI1 S4). Its workspaces are per session, but any holder of the relay's exec token
+  can target any of them.
 - **A session returns to its sandbox.** Each turn goes back to the sandbox that served the previous
   one. If that sandbox is saturated, or briefly absent (a relay restart) for up to
   `SH_SANDBOX_AFFINITY_GRACE_SECONDS` (60 s), the turn answers 503 with `Retry-After` and the client

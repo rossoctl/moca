@@ -138,7 +138,7 @@ export const sandboxRules = (ws: string, mode: SandboxModeName = 'per-exec'): st
     leased
       ? `- Files under \`${ws}\` persist between calls; anything else lasts at most until the guest restarts.`
       : `- Files under \`${ws}\` persist between calls; nothing else does.`,
-    "- There is no network beyond the operator's egress allowlist (any other host answers `403 destination_denied`): packages cannot be installed from the internet.",
+    "- There is no network beyond the operator's egress allowlist (any other host answers `403 destination_denied`): a package installs only from a registry on that allowlist.",
     '- Calls run one at a time, so batch the work: read several files in one `bash` call, and run the tests in one call after editing.',
   ].join('\n');
 };
