@@ -262,6 +262,8 @@ export class ActiveTurn {
   private renewing = false;
   private resolveEnded!: () => void;
   private readonly timer: ReturnType<typeof setInterval>;
+  /** Fires lease_lost at the lease deadline; every renew that lands rearms it (armDeadline). */
+  private deadline?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly reg: TurnRegistry,
@@ -276,6 +278,7 @@ export class ActiveTurn {
     this.lastRenewOk = leaseFrom;
     this.timer = setInterval(() => void this.tick(), reg.timings.renewMs);
     this.timer.unref();
+    this.armDeadline();
   }
 
   /** Whether the connection that started the turn is still open (§5.3). */
@@ -286,6 +289,7 @@ export class ActiveTurn {
   abort(reason: AbortReason): void {
     if (this.finished || this.controller.signal.aborted) return;
     this.abortReason = reason;
+    this.clearDeadline(); // aborted once is final: a late deadline has nothing left to do
     this.controller.abort(reason);
   }
 
@@ -316,6 +320,7 @@ export class ActiveTurn {
     if (this.finished) throw new Error('turn already ended');
     this.finished = true;
     clearInterval(this.timer);
+    this.clearDeadline();
     const frame: TurnStreamFrame =
       this.abortReason && terminal.type === 'error'
         ? {
@@ -342,17 +347,18 @@ export class ActiveTurn {
     return { id, frame: logged };
   }
 
-  /** Stops the renewal timer without ending the turn; only TurnRegistry.close() calls this. */
+  /** Stops the renewal timers without ending the turn; only TurnRegistry.close() calls this. */
   stop(): void {
     clearInterval(this.timer);
+    this.clearDeadline();
   }
 
   private async tick(): Promise<void> {
     if (this.finished) return;
     // A slow renew must not overlap the next tick: two in flight could judge the lease out of order.
-    // But a renew that never settles (a blackholed Redis keeps the socket open, and node-redis has no
-    // command timeout) never reaches its catch, so the skipped tick must still enforce the deadline.
-    if (this.renewing) return this.checkLeaseDeadline();
+    // A renew that never settles (a blackholed Redis keeps the socket open, and node-redis has no
+    // command timeout) never reaches its catch; the deadline timer aborts the turn regardless.
+    if (this.renewing) return;
     this.renewing = true;
     try {
       await this.renewOnce();
@@ -362,13 +368,30 @@ export class ActiveTurn {
   }
 
   /**
-   * Stop one renewal interval BEFORE the lease can lapse in Redis, judged by the clock now (after a
-   * failed await, or while one hangs), not at tick start: two owners must never both believe they
-   * hold the session (§5.1), and waiting for the next tick would come too late.
+   * Abort one renewal interval BEFORE the lease can lapse in Redis: two owners must never both
+   * believe they hold the session (§5.1). A timer of its own rather than a check on the renew tick:
+   * with the default timings leaseMs - renewMs is a whole number of ticks, so a tick lands on the
+   * deadline itself, a clock read there even 1 ms short lets it pass, and the next check comes one
+   * full tick later, when the lease has lapsed (#801). Armed from the clock read before the last
+   * renew that landed (or before BEGIN), so it is conservative; it fires whether or not a renew is
+   * in flight, failing, or hung.
    */
-  private checkLeaseDeadline(): void {
+  private armDeadline(): void {
+    this.clearDeadline();
+    if (this.finished || this.controller.signal.aborted) return;
     const { leaseMs, renewMs } = this.reg.timings;
-    if (this.reg.now() - this.lastRenewOk >= leaseMs - renewMs) this.abort('lease_lost');
+    const ms = Math.max(0, this.lastRenewOk + leaseMs - renewMs - this.reg.now());
+    this.deadline = setTimeout(() => {
+      this.deadline = undefined;
+      this.abort('lease_lost');
+    }, ms);
+    this.deadline.unref();
+  }
+
+  private clearDeadline(): void {
+    if (this.deadline === undefined) return;
+    clearTimeout(this.deadline);
+    this.deadline = undefined;
   }
 
   private async renewOnce(): Promise<void> {
@@ -378,12 +401,15 @@ export class ActiveTurn {
     let lease: { cancelRequested?: boolean } | null;
     try {
       lease = await this.reg.renew(this.sessionId, this.turnId);
-      this.lastRenewOk = now;
     } catch {
-      return this.checkLeaseDeadline();
+      return; // the deadline armed by the last renew that landed still stands
     }
     if (this.finished) return;
     if (lease === null) return this.abort('lease_lost');
+    // Landed, and ours: the lease was extended at some instant after `now`. A renew that lands only
+    // after the deadline fired finds the turn aborted, and armDeadline leaves it so.
+    this.lastRenewOk = now;
+    this.armDeadline();
     if (lease.cancelRequested) return this.abort('cancelled');
     let watched = this.ownWatched;
     if (!watched) {

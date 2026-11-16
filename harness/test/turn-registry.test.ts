@@ -4,6 +4,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   abortMessage,
   activeKey,
+  ActiveTurn,
   compareEntryIds,
   eventId,
   eventsKey,
@@ -12,11 +13,13 @@ import {
   termKey,
   turnRegistryTimings,
   TurnRegistry,
+  type TurnRegistryTimings,
   watchKey,
   withTimeout,
   BEGIN_LUA,
   CANCEL_SKEW_MS,
 } from '../src/turn-registry.js';
+import type { TurnStreamFrame } from '../src/turn-stream.js';
 
 const URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 const T = { leaseMs: 300, renewMs: 100, detachedMaxMs: 400, logTtlS: 60, maxLen: 1000 };
@@ -242,8 +245,9 @@ describe('begin / append / end', () => {
     await turn.end(aborted(s2));
   });
 
-  // Slower clocks than T: the abort lands within renewMs of leaseMs - renewMs after the last good
-  // renew, so the headroom below the leaseMs bound is renewMs -- 200 ms here rather than 100.
+  // Slower clocks than T: the deadline timer aborts leaseMs - renewMs after the last good renew, so
+  // the headroom below the leaseMs bound is renewMs -- 200 ms here rather than 100 -- of event-loop
+  // lag. The exact instant is pinned with fake timers under 'lease deadline' below.
   const L = { ...T, leaseMs: 600, renewMs: 200 };
   let stall = false;
   let renewalsOk = 0;
@@ -303,6 +307,141 @@ describe('begin / append / end', () => {
     expect(renewalsOk).toBeGreaterThan(0);
     expect(abortedAt - lastOk()).toBeLessThan(L.leaseMs);
     await turn.end(aborted(s));
+  });
+});
+
+// The lease deadline with no Redis and no real clock: a stub registry and fake timers, so where the
+// abort lands is exact rather than a race against the scheduler (#801).
+describe('lease deadline', () => {
+  const P = turnRegistryTimings({}); // 30 s lease, 10 s renew: the deadline sits on a tick
+  type Lease = { cancelRequested?: boolean } | null;
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * An ActiveTurn over a stub registry whose lease clock was read at t = 0. `renew` answers each
+   * call from `renews` in order, then hangs (a blackholed Redis); `lag` is how far the registry's
+   * clock reads behind the timer's when asked.
+   */
+  function stubTurn(timings: TurnRegistryTimings, renews: Array<() => Promise<Lease>>) {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    });
+    vi.setSystemTime(0);
+    const clock = { lag: 0 };
+    let calls = 0;
+    const stub = {
+      timings,
+      now: () => Date.now() - clock.lag,
+      renew: vi.fn(() => (renews[calls++] ?? (() => new Promise<Lease>(() => {})))()),
+      watching: vi.fn(async () => true),
+      forget: vi.fn(),
+      endTurn: vi.fn(async (_s: string, _t: string, frame: TurnStreamFrame) => ({
+        entryId: '1-0',
+        frame,
+      })),
+    };
+    const turn = new ActiveTurn(
+      stub as unknown as TurnRegistry,
+      's',
+      't',
+      { id: 't:0-1', frame: { type: 'turn', turnId: 't', sessionId: 's' } },
+      0,
+    );
+    const aborts: number[] = [];
+    turn.signal.addEventListener('abort', () => aborts.push(Date.now()));
+    return { turn, stub, clock, aborts };
+  }
+
+  it('aborts a turn whose renew hangs at the deadline, even when the clock reads a tick short', async () => {
+    const { turn, clock, aborts } = stubTurn(P, [
+      async () => {
+        return {}; // the tick at 10 s lands: the lease now lapses at 40 s, the deadline is 30 s
+      },
+      () => {
+        clock.lag = 1; // from here the clock reads 1 ms behind the timers, as Date.now can
+        return new Promise<Lease>(() => {});
+      },
+    ]);
+    await vi.advanceTimersByTimeAsync(10_000 + P.leaseMs);
+    // Judged only on a tick, the 30 s tick reads 19 999 ms since the renew and lets it pass; the
+    // next comes at 40 s, when the lease has already lapsed in Redis.
+    expect(turn.abortReason).toBe('lease_lost');
+    expect(aborts).toEqual([10_000 + P.leaseMs - P.renewMs]);
+    await turn.end(aborted('s'));
+  });
+
+  it('aborts at the deadline, not at the next tick, when the deadline falls between ticks', async () => {
+    const T25 = { ...P, leaseMs: 25_000 }; // deadline 15 s after a renew; ticks every 10 s
+    const { turn, aborts } = stubTurn(T25, [async () => ({})]);
+    await vi.advanceTimersByTimeAsync(10_000 + T25.leaseMs);
+    expect(turn.abortReason).toBe('lease_lost');
+    expect(aborts).toEqual([10_000 + T25.leaseMs - T25.renewMs]);
+    await turn.end(aborted('s'));
+  });
+
+  it('a renew that lands moves the deadline', async () => {
+    const ok = Array.from({ length: 10 }, () => async () => ({}) as Lease);
+    const { turn, stub, aborts } = stubTurn(P, ok);
+    await vi.advanceTimersByTimeAsync(100_000); // ten renews, each in time
+    expect(stub.renew).toHaveBeenCalledTimes(10);
+    expect(aborts).toEqual([]);
+    // The 11th hangs: the abort lands one deadline after the 10th renew began.
+    await vi.advanceTimersByTimeAsync(P.leaseMs);
+    expect(aborts).toEqual([100_000 + P.leaseMs - P.renewMs]);
+    await turn.end(aborted('s'));
+  });
+
+  it('a renew that settles after the deadline fired neither aborts again nor rearms', async () => {
+    let land!: (v: Lease) => void;
+    const { turn, aborts } = stubTurn(P, [() => new Promise<Lease>((r) => (land = r))]);
+    // The renew from the 10 s tick is still out at the deadline (20 s after the pre-BEGIN clock).
+    await vi.advanceTimersByTimeAsync(P.leaseMs - P.renewMs);
+    expect(aborts).toEqual([P.leaseMs - P.renewMs]);
+    land({ cancelRequested: true }); // it lands now, carrying a cancel
+    await vi.advanceTimersByTimeAsync(0);
+    expect(turn.abortReason).toBe('lease_lost'); // the first reason stands
+    expect(aborts).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(1); // only the renew interval, no rearmed deadline
+    const { frame } = await turn.end(aborted('s'));
+    expect(frame).toMatchObject({ abortReason: 'lease_lost' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a renew that lands just before the deadline rearms it', async () => {
+    let land!: (v: Lease) => void;
+    const { turn, aborts } = stubTurn(P, [() => new Promise<Lease>((r) => (land = r))]);
+    await vi.advanceTimersByTimeAsync(P.leaseMs - P.renewMs - 1);
+    land({}); // began at 10 s: the deadline moves to 30 s
+    await vi.advanceTimersByTimeAsync(1);
+    expect(aborts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(P.renewMs);
+    expect(aborts).toEqual([10_000 + P.leaseMs - P.renewMs]);
+    await turn.end(aborted('s'));
+  });
+
+  it('leaves no timer behind once the turn ends, is stopped, or is aborted for another reason', async () => {
+    const a = stubTurn(P, []);
+    await a.turn.end(done('s'));
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(P.leaseMs * 2);
+    expect(a.aborts).toEqual([]);
+
+    const b = stubTurn(P, []);
+    b.turn.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(P.leaseMs * 2);
+    expect(b.aborts).toEqual([]);
+
+    const c = stubTurn(P, []);
+    c.turn.abort('cancelled');
+    expect(vi.getTimerCount()).toBe(1); // the renew interval runs until end
+    await vi.advanceTimersByTimeAsync(P.leaseMs * 2);
+    expect(c.turn.abortReason).toBe('cancelled');
+    expect(c.aborts).toHaveLength(1);
+    await c.turn.end(aborted('s'));
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
