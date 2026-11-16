@@ -3,12 +3,15 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createClient } from 'redis';
 import { startControlPlane } from '../src/server.js';
-import { OwnershipIndex, ownerKey, type CpRedisLike } from '../src/ownership.js';
+import { AUDIT_STREAM, OwnershipIndex, ownerKey, type CpRedisLike } from '../src/ownership.js';
 import { RedisTurnQueue, LEAF_QUEUE_GROUP, LEAF_QUEUE_STREAM } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
 import { turnKey } from '../src/turn-record.js';
 import { defaultNewId } from '../src/handler-util.js';
+import { startInferenceProxy } from '../src/inference-proxy.js';
+import { INFERENCE_GRANT_AUDIENCE, SANDBOX_GRANT_AUDIENCE, verifyGrant } from '../src/grant.js';
 import { makeDeps, seedCredential, type TestDeps } from './helpers/deps.js';
+import { grantRing } from './helpers/grants.js';
 
 /**
  * The #387 acceptance criterion "an end-to-end test with a fake worker passes", over real HTTP and
@@ -76,6 +79,66 @@ async function createSession(sub: string): Promise<string> {
   const sid = res.json().sessionId as string;
   created.push(sid);
   return sid;
+}
+
+/**
+ * A fake inference upstream. Records what it was handed and answers a streamed body, so the
+ * listener's header swap and its pipe are both observable. The recorded header is the ONLY place in
+ * this suite where the real secret is expected to appear -- every other assertion is that it does not.
+ */
+function fakeUpstream(): Promise<{
+  url: string;
+  seen: { path?: string; auth?: string; body?: string };
+  close(): void;
+}> {
+  const seen: { path?: string; auth?: string; body?: string } = {};
+  const srv = http.createServer((req, res) => {
+    seen.path = req.url;
+    seen.auth = req.headers.authorization;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      seen.body = Buffer.concat(chunks).toString();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"type":"message_start"}\n\n');
+      res.end('data: {"type":"message_stop"}\n\n');
+    });
+  });
+  return new Promise((r) =>
+    srv.listen(0, '127.0.0.1', () =>
+      r({
+        url: `http://127.0.0.1:${(srv.address() as { port: number }).port}/anthropic/v1`,
+        seen,
+        close: () => srv.close(),
+      }),
+    ),
+  );
+}
+
+/** POST one request through the inference listener, the way pi sends a completion. */
+function spendGrant(
+  proxyUrl: string,
+  grant: string,
+  body: unknown,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      `${proxyUrl}/messages`,
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${grant}`, 'content-type': 'application/json' },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.end(JSON.stringify(body));
+  });
 }
 
 beforeEach(async () => {
@@ -149,6 +212,10 @@ async function fakeWorker(result: Record<string, unknown>): Promise<{
       sessionId: string;
       subject: string;
       caps: Record<string, number>;
+      // `grant` mode only (MI1 §6.1). Optional in the type because `single` returns neither; both
+      // are already here at runtime, since this returns `exchange.json()` verbatim.
+      sandboxGrant?: string;
+      turnExp?: number;
     };
   };
   rebuilt: { sessionId: string; credentialName: string; envelope: unknown; attempts: number };
@@ -462,5 +529,87 @@ describe('async turn, end to end (#387 acceptance)', () => {
     }
     expect(codes).toEqual([202, 202, 429]);
     expect(await client.xLen(stream)).toBe(quota);
+  });
+
+  it('runs an async turn under multi tenancy: a grant at dequeue, redeemed at the listener (#388)', async () => {
+    // The three things `multi` needs that `single` does not: a grant ring, a listener for the grant
+    // to be redeemed at, and a credential whose endpoint is reachable.
+    const upstream = await fakeUpstream();
+    const ring = grantRing();
+    Object.assign(d, ring);
+    const proxy = startInferenceProxy(d, 0, '127.0.0.1');
+    await new Promise<void>((r) => proxy.once('listening', () => r()));
+    const proxyUrl = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
+    d.config = { ...d.config, tenancy: 'multi', inferenceUrl: proxyUrl, turnMaxS: 1800 };
+    // Re-seeded so the endpoint is the fake upstream. `destination.hosts` must agree with it or
+    // refuseMisdirectedSecret refuses the redemption -- which is the check doing its job.
+    await seedCredential(d, ALICE, 'my-anthropic', {
+      destination: { hosts: ['127.0.0.1'] },
+      endpoint: upstream.url,
+    });
+
+    try {
+      const sub = await request('POST', `/v1/sessions/${await createSession(ALICE)}/turns`, {
+        body: { async: true, kind: 'prompt', prompt: 'go' },
+        headers: auth(ALICE),
+      });
+      expect(sub.status).toBe(202); // the submission gate is gone (turn-handlers.ts)
+
+      // The queue carries the id and nothing else -- the invariant `multi` cannot be allowed to break.
+      const w = await fakeWorker({ status: 'done' });
+      expect(JSON.stringify(w.fields)).not.toContain('sk-fake'); // notsecret
+      const claim = w.exchanged.body;
+
+      // What the worker got: a grant, not a key, aimed at the listener and not at the gateway.
+      expect(claim.mode).toBe('grant');
+      expect(claim.anthropicBaseUrl).toBe(proxyUrl);
+      expect(claim.anthropicAuthToken).not.toContain('sk-fake'); // notsecret
+      // `now` from the deps' fixed clock, which is what minted the grants: the default is the real
+      // one, and the fixture's 2025 timestamp is long expired against it.
+      const at = { now: Math.floor(d.now() / 1000) };
+      const inf = verifyGrant(
+        claim.anthropicAuthToken,
+        ring.grantVerifyKeys,
+        INFERENCE_GRANT_AUDIENCE,
+        at,
+      );
+      expect(inf.sub).toBe(ALICE);
+      expect(inf).toMatchObject({ cred: 'my-anthropic' });
+      const sbx = verifyGrant(
+        claim.sandboxGrant!,
+        ring.grantVerifyKeys,
+        SANDBOX_GRANT_AUDIENCE,
+        at,
+      );
+      expect(sbx.sid).toBe(inf.sid);
+      // exp == turn_exp in this slice (D4): one grant for the whole turn, no refresh in the worker.
+      expect(claim.turnExp).toBe(inf.turn_exp);
+      expect(inf.exp).toBe(inf.turn_exp);
+
+      const spend = await spendGrant(proxyUrl, claim.anthropicAuthToken, {
+        model: 'claude-x',
+        messages: [],
+      });
+      expect(spend.status).toBe(200);
+      expect(spend.body).toContain('message_stop'); // the stream came back through the pipe
+
+      // The upstream saw the real secret, under the credential's own path prefix, body intact.
+      expect(upstream.seen.auth).toBe('Bearer sk-fake'); // notsecret
+      expect(upstream.seen.path).toBe('/anthropic/v1/messages');
+      expect(upstream.seen.body).toContain('claude-x');
+
+      // And the secret is nowhere it is forbidden to be: not in the turn record, not in the audit.
+      const rec = await client.hGetAll(turnKey(`${w.fields.turnId}:${tag}`));
+      expect(JSON.stringify(rec)).not.toContain('sk-fake'); // notsecret
+      // Filtered by sessionId rather than read whole: a developer's local Redis holds other runs'
+      // entries, and the stream is the one key the teardown deliberately does not delete.
+      const audit = (await client.xRange(AUDIT_STREAM, '-', '+')) ?? [];
+      const mine = audit.filter((e) => e.message.sessionId === claim.sessionId);
+      expect(mine.map((e) => e.message.decision)).toContain('grants_issued');
+      expect(JSON.stringify(mine)).not.toContain('sk-fake'); // notsecret
+    } finally {
+      proxy.close();
+      upstream.close();
+    }
   });
 });
