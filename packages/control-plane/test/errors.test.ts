@@ -58,7 +58,6 @@ const EXPECTED: Record<CpErrorCode, number> = {
   envelope_invalid: 400,
   async_quota_exhausted: 429,
   workload_runs_unavailable: 501,
-  async_tenancy_unsupported: 501,
   turn_not_cancellable: 409,
   // 404: a turn id with no record. The dequeue exchange's answer (async spec §5.4).
   turn_not_found: 404,

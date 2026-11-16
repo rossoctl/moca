@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.23.0
+  version: 1.24.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -140,7 +140,6 @@ components:
             - envelope_invalid
             - async_quota_exhausted
             - workload_runs_unavailable
-            - async_tenancy_unsupported
             - turn_not_cancellable
             - turn_not_claimable
             - turn_not_found
@@ -1935,9 +1934,8 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '501':
           description: |
-            `workload_runs_unavailable` for a submission naming a `workloadId`, and
-            `async_tenancy_unsupported` under `MOCA_TENANCY=multi`, where async turns land in M2. Both
-            are refused at submission so they stay synchronous rather than becoming dead letters.
+            `workload_runs_unavailable` for a submission naming a `workloadId`, refused at submission
+            so it stays synchronous rather than becoming a dead letter.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -4711,10 +4709,13 @@ paths:
         is sufficient because everything else comes from the turn record the control plane wrote at
         the authenticated enqueue.
 
-        This is M1's **interim** form: it returns the credential resolved from the record, and only
-        under `MOCA_TENANCY=single` (`501 async_tenancy_unsupported` otherwise). M2 replaces the
-        return with MI1 S2 grants for both audiences and a `turn_exp`, and that is what lifts the
-        tenancy gate (ADR-0047).
+        What it returns depends on the deployment's tenancy, and nothing else. Under
+        `MOCA_TENANCY=single` it returns the credential resolved from the record (`mode: direct` or
+        `placeholder`). Under `multi` it returns MI1 §6.1 **grants** (`mode: grant`) and never a
+        credential value: `anthropicAuthToken` is the inference grant, `anthropicBaseUrl` is the
+        deployment's inference listener, and `sandboxGrant` and `turnExp` come with them. Under
+        `multi` the deployment must configure the grant ring and the listener or the control plane
+        refuses to boot -- which is what replaces M1's per-request `501` (ADR-0047).
 
         The call is a pure READ. It does not move the turn to `running` — the consumer does that,
         because it holds the delivery count the transition records, and because a deployment-wide
@@ -4758,11 +4759,14 @@ paths:
                     description: echoed, so a response cannot be misattributed to another claim
                   mode:
                     type: string
-                    enum: [placeholder, direct]
+                    enum: [placeholder, direct, grant]
                     description: |
                       as on /internal/credentials: `placeholder` when the deployment has an injector
                       to rewrite it, `direct` when none is configured. `direct` is reachable only
                       under `MOCA_TENANCY=single` (MI1 §6.6).
+
+                      `grant` is the only mode under `MOCA_TENANCY=multi`, and `direct`/`placeholder`
+                      the only modes under `single`: the tenancy picks it, never the caller.
                   anthropicAuthToken: { type: string }
                   anthropicBaseUrl:
                     { type: string, description: never absent — see endpoint_unresolved }
@@ -4796,7 +4800,21 @@ paths:
                     enum: [x-api-key]
                     description: |
                       present only when the credential must be sent as `x-api-key` rather than as a
-                      bearer; omitting it would make the worker 401 against the endpoint
+                      bearer; omitting it would make the worker 401 against the endpoint. Never
+                      present in `grant` mode: the listener sends whichever header the credential's
+                      binding names, so the worker always presents a bearer.
+                  sandboxGrant:
+                    type: string
+                    description: |
+                      the `moca-sandbox` half of MI1 §6.1's pair, present only in `grant` mode. Not
+                      spent by the worker itself -- it is what a sandbox presents to the egress proxy
+                      -- and carried here because the worker is the only thing holding the turn.
+                  turnExp:
+                    type: integer
+                    description: |
+                      unix seconds, present only in `grant` mode: the absolute end of this turn,
+                      anchored at the DEQUEUE and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`.
+                      Both grants expire at it; no refresh extends past it.
                   configRef:
                     { type: string, description: present only when the turn named a config bundle }
                   sandboxTier:
@@ -4876,14 +4894,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-        '501':
-          description: |
-            `async_tenancy_unsupported` under `MOCA_TENANCY=multi`. Checked BEFORE the credential is
-            resolved, because under `multi` this hop must never return a real key (MI1 §6.6); the
-            grants that replace it are M2.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
         '500':
           description: |
             `internal_error`: the audit write failed with an untyped error, or the turn store is not
@@ -4914,9 +4924,11 @@ paths:
 
         **Mounted only when `MOCA_GRANT_SIGNING_KEY` is configured.** Without it the path is
         genuinely unrouted and answers `404 not_found` before the body is parsed (ADR-0045).
-        Nothing redeems a grant yet — the `moca-egress` inference listener and the token endpoint
-        (§6.3, §8.6) are later slices — so `/internal/credentials` and `/internal/turn-credentials`
-        both stay exactly as they are, and the async tenancy gate stays shut.
+        The INFERENCE grant is redeemed at the control plane's own inference listener
+        (`MOCA_INFERENCE_ADDR`), which swaps it for the session's credential, and
+        `/internal/turn-credentials` returns a pair of its own under `MOCA_TENANCY=multi`. The
+        SANDBOX grant still has no redeemer: the `moca-egress` CONNECT path and `/internal/token`
+        (§6.3, §8.6) are later slices. `/internal/credentials` stays exactly as it is.
       security: [{ exchangeToken: [] }]
       requestBody:
         required: true

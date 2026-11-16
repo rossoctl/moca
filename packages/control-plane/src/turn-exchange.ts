@@ -1,6 +1,8 @@
 import { defaultAuditLog } from './audit-log.js';
 import { touchBundle } from './bundle-budget.js';
 import { CpError } from './errors.js';
+import { grantsForTurn } from './grant-exchange.js';
+import { turnExp } from './grant.js';
 import {
   placeholderFor,
   refuseMisdirectedSecret,
@@ -40,9 +42,12 @@ import { isTerminalState, type TurnCaps } from './turn-record.js';
  * a shared-bearer route. A library caller reaching this export directly has already passed whatever
  * gate it answers to, so repeating the check here would only turn its own 404 into a 400.
  *
- * M1 INTERIM (§9.1): it returns the resolved credential, under `MOCA_TENANCY=single` only. M2 replaces
- * the return value with MI1 §6.1's two grants and lifts the tenancy gate. `turn_exp`,
- * `MOCA_TURN_MAX_S` and refresh belong to that slice and are deliberately absent here.
+ * TWO MODES, picked by tenancy and nothing else. Under `MOCA_TENANCY=single` it returns the resolved
+ * credential (`direct`, or `placeholder` where an injector exists). Under `multi` it returns MI1
+ * §6.1's two grants and the inference listener's URL (`grant`) and reads no credential at all, which
+ * is §6.6's "under `multi` the exchange returns grants or refuses; it never returns a real key".
+ * Everything that is not the credential -- caps, envelope, bundle, tier, template, seed, model -- is
+ * identical on both.
  */
 export interface TurnExchangeResponse extends ExchangeResponse {
   turnId: string;
@@ -106,16 +111,111 @@ export async function exchangeTurnCredential(
   // cascade-deleted session's fan-out would drain anyway, each leaf spending the owner's credential.
   if (rec.tombstone) throw new CpError('session_not_found', undefined, turn.sessionId);
 
-  // The M1 interim gate (§9.1; MI1 §6.6: "under `multi` the exchange returns grants or refuses; it
-  // never returns a real key"). BEFORE resolveInference, deliberately: a gate that fired afterwards
-  // would have already read a secret it is forbidden to return. `submitTurn` refuses `multi` too, and
-  // both are needed -- that one stops new submissions, this one stops a deployment flipped to `multi`
-  // from draining the entries already on the queue down the single-tenant path.
-  if (deps.config.tenancy === 'multi') {
-    throw new CpError(
-      'async_tenancy_unsupported',
-      'async turns require MOCA_TENANCY=single in this release (ADR-0047); grant-at-dequeue is M2',
+  // The TURN's own cfg, not the session's current one: a session that changed bundles after
+  // submission must not move an already-queued turn onto the new one. '' when it names none.
+  // Above the tenancy branch because it depends on `turn.cfg` alone: a bundle in daily use by async
+  // turns must not age out just because the deployment runs multi-tenant.
+  if (turn.cfg) {
+    // Best effort: a bundle in daily use must not age out, but a failed refresh never fails a turn.
+    await touchBundle(deps.bundles, turn.cfg, deps.now()).catch((err: unknown) =>
+      console.error(
+        `[control-plane] bundle TTL refresh failed for configRef=${turn.cfg}: ` +
+          `${(err as Error)?.message ?? String(err)}`,
+      ),
     );
+  }
+
+  // The session's template and seed, resolved before either branch's audit as every refusal is: a
+  // store that cannot answer for the seed refuses the claim (sessionSeed), which leaves the turn
+  // pending, and nothing is recorded as issued and then withheld.
+  const template = sessionTemplate(rec, deps.config.sessionTemplates);
+  const seed = template ? await sessionSeed(rec, deps) : undefined;
+  // Everything the worker needs that is NOT the credential. Identical on both branches by
+  // construction: a grant-mode turn of a templated session must still land on that template's
+  // workers, pinned to its build and seeded, or it runs with the wrong workspace.
+  //
+  // The tier is the one the record STORED, which is the session's stored tier and not a raw choice:
+  // `createSession` already resolved it (`requestedTier ?? tiers?.default ?? ''`). So a turn keeps
+  // the default that was current when its SESSION was created, and an operator who changes
+  // `sandboxTiers.default` afterwards does not move an already-queued turn.
+  //
+  // It reads '' in exactly two cases, and the fallback to the session covers both. A session created
+  // while the deployment declared no tiers stores '' as well, so resolving against it is the same
+  // answer as resolving the record. A record written before #388 carries no tier at all, and there
+  // the fallback is load-bearing: handing the worker the deployment default instead of the session's
+  // own tier retiers the session's sandbox, and a retier starts its workspace empty
+  // (`select-sandbox.ts`, `reason: 'retiered'`).
+  //
+  // The template, its seed and its build come from the SESSION, not copied onto the turn record, and
+  // that is a pin all the same: a session's template and build are written once, at creation, and no
+  // route changes them, so the record of a turn queued an hour ago and the session now agree. A
+  // template the deployment no longer declares is still sent, without a seed, so the turn is refused
+  // rather than run untemplated.
+  const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
+  const sandbox = {
+    ...(turn.cfg ? { configRef: turn.cfg } : {}),
+    ...(tier ? { sandboxTier: tier } : {}),
+    ...(template ? { sandboxTemplate: template.id } : {}),
+    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
+    // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
+    ...(template && rec.sandboxBuildId?.startsWith('sha256:')
+      ? { sandboxBuildId: rec.sandboxBuildId }
+      : {}),
+    ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
+  };
+
+  // #388 item 3: ADR-0047's `async_tenancy_unsupported` gate is GONE from here, and the refusal it
+  // enforced is now a boot contract (`checkGrantRedemption`, main.ts) plus the branch below. The gate
+  // existed because MI1 §6.6 forbids returning a real key under `multi` and there was nothing else to
+  // return; there is now.
+  if (deps.config.tenancy === 'multi') {
+    // Unreachable in a booted deployment -- `checkGrantRedemption` refuses `multi` without a
+    // redeemer -- so this is the belt for a library caller assembling its own config. A refusal,
+    // never a fallthrough to the single-tenant path: that fallthrough is what §6.6 forbids.
+    if (!deps.config.inferenceUrl) {
+      throw new CpError('internal_error', 'MOCA_INFERENCE_URL is not configured');
+    }
+    const nowS = Math.floor(deps.now() / 1000);
+    // The turn record's own fields, as a GrantSource -- it is not structurally one, because the
+    // record calls the bundle digest `cfg` where a session record calls it `configRef`.
+    const grants = await grantsForTurn(
+      {
+        owner: turn.owner,
+        tenant: turn.tenant,
+        sessionId: turn.sessionId,
+        credentialName: turn.credentialName,
+        ...(turn.cfg ? { configRef: turn.cfg } : {}),
+      },
+      // Turn start means DEQUEUE (async §5.4), so the anchor is `now` -- here, at the claim -- and
+      // never the submission. `caps.wallClock` is the turn's own request, clamped to MOCA_TURN_MAX_S
+      // by `turnExp`; an ask above the cap is clamped rather than refused, since a caller asking for
+      // too long wants the longest turn it can have.
+      turnExp(nowS, turn.caps.wallClock, deps.config.turnMaxS),
+      turn.turnId,
+      deps,
+    );
+    // NO resolveInference above this line, deliberately: the gate this branch replaces sat before it
+    // for the same reason -- a path that returns grants must never have read a secret at all. That is
+    // also why the audit entry belongs to `grantsForTurn` and not to this function: nothing here
+    // knows a credential value to leave out.
+    if (rec.sandboxTemplate) await holdPinnedWorker(rec, deps);
+    return {
+      turnId: turn.turnId,
+      mode: 'grant',
+      anthropicAuthToken: grants.inferenceGrant,
+      // The control plane's own inference listener, not a provider. The worker cannot reach a
+      // provider directly in this mode and does not know one's address.
+      anthropicBaseUrl: deps.config.inferenceUrl,
+      sandboxGrant: grants.sandboxGrant,
+      turnExp: grants.turnExp,
+      sessionId: turn.sessionId,
+      subject: turn.owner,
+      caps: turn.caps,
+      envelope: { ...turn.envelope, sessionId: turn.sessionId },
+      // No `authHeader`: the redeemer sets whichever header the credential's binding names, so the
+      // worker always sends a Bearer and never has to be told otherwise.
+      ...sandbox,
+    };
   }
 
   // The TURN's own `owner`/`credentialName`, not the session's current ones. They are equal by
@@ -134,12 +234,6 @@ export async function exchangeTurnCredential(
     // may resolve to is not known until here.
     refuseMisdirectedSecret(resolved, turn.sessionId);
   }
-
-  // The session's template and seed (read below), resolved before the audit as every refusal is: a
-  // store that cannot answer for the seed refuses the claim (sessionSeed), which leaves the turn
-  // pending, and no credential is recorded as issued and then withheld.
-  const template = sessionTemplate(rec, deps.config.sessionTemplates);
-  const seed = template ? await sessionSeed(rec, deps) : undefined;
 
   const entry = {
     subject: turn.owner,
@@ -165,19 +259,7 @@ export async function exchangeTurnCredential(
   }
   (deps.log ?? defaultAuditLog)({ event: 'audit', ...entry });
 
-  // The TURN's own cfg, not the session's current one: a session that changed bundles after
-  // submission must not move an already-queued turn onto the new one. '' when it names none.
-  if (turn.cfg) {
-    // Best effort: a bundle in daily use must not age out, but a failed refresh never fails a turn.
-    await touchBundle(deps.bundles, turn.cfg, deps.now()).catch((err: unknown) =>
-      console.error(
-        `[control-plane] bundle TTL refresh failed for configRef=${turn.cfg}: ` +
-          `${(err as Error)?.message ?? String(err)}`,
-      ),
-    );
-  }
-
-  // Everything below comes from the RECORD, which is now authoritative for all four of
+  // Everything in `sandbox` above comes from the RECORD, which is now authoritative for all four of
   // `credentialName`, `cfg`, `model` and `sandboxTier` (§5.1). `sandboxTier` and `model` used to be
   // read from the live session, and that was a defect rather than a split: a
   // `PATCH /v1/sessions/{id}` between submission and dequeue moved an already-queued turn onto the
@@ -186,26 +268,6 @@ export async function exchangeTurnCredential(
   // submission. The session is still read above, for the owner compare and the tombstone; nothing
   // the turn SPENDS is taken from it.
   //
-  // The tier is the one the record STORED, which is the session's stored tier and not a raw choice:
-  // `createSession` already resolved it (`requestedTier ?? tiers?.default ?? ''`). So a turn keeps
-  // the default that was current when its SESSION was created, and an operator who changes
-  // `sandboxTiers.default` afterwards does not move an already-queued turn.
-  //
-  // It reads '' in exactly two cases, and the fallback to the session covers both. A session created
-  // while the deployment declared no tiers stores '' as well, so resolving against it is the same
-  // answer as resolving the record. A record written before #388 carries no tier at all, and there
-  // the fallback is load-bearing: handing the worker the deployment default instead of the session's
-  // own tier retiers the session's sandbox, and a retier starts its workspace empty
-  // (`select-sandbox.ts`, `reason: 'retiered'`).
-  const tier = sessionTier(turn.sandboxTier ? turn : rec, deps.config.sandboxTiers);
-  // The session's sandbox template, its seed and its build, exactly as the session exchange returns
-  // them (session-templates spec §3.4, combined control plane spec §3.4), so a queued turn of a
-  // templated session runs on that template's workers, pinned to its build, and seeded. Read from
-  // the session, not copied onto the turn record, and that is a pin all the same: a session's
-  // template and build are written once, at creation, and no route changes them, so the record of
-  // a turn queued an hour ago and the session now agree. A template the deployment no longer
-  // declares is still sent, without a seed, so the turn is refused rather than run untemplated.
-  // Both are resolved above, before the audit.
   // A queued turn of a session pinned to a build keeps that build's worker, as an interactive one:
   // after the audit and every refusal, so a refused claim holds nothing.
   if (rec.sandboxTemplate) await holdPinnedWorker(rec, deps);
@@ -222,14 +284,6 @@ export async function exchangeTurnCredential(
     // Direct mode only: in placeholder mode the worker sends `Bearer <placeholder>` and the injector
     // decides the upstream header.
     ...(mode === 'direct' && authHeader === 'x-api-key' ? { authHeader } : {}),
-    ...(turn.cfg ? { configRef: turn.cfg } : {}),
-    ...(tier ? { sandboxTier: tier } : {}),
-    ...(template ? { sandboxTemplate: template.id } : {}),
-    ...(seed ? { sandboxSeed: seed.seed, sandboxSeedSource: seed.source } : {}),
-    // Only a manifest-hash build pins workers; an `imported:` build names no snapshot.
-    ...(template && rec.sandboxBuildId?.startsWith('sha256:')
-      ? { sandboxBuildId: rec.sandboxBuildId }
-      : {}),
-    ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
+    ...sandbox,
   };
 }

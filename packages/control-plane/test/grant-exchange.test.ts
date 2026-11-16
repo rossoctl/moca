@@ -1,4 +1,3 @@
-import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { parseCredentialBody } from '../src/credential-store.js';
 import {
@@ -7,9 +6,8 @@ import {
   mintGrants,
   verifyGrant,
 } from '../src/grant.js';
-import { issueTurnGrants, refreshTurnGrants } from '../src/grant-exchange.js';
+import { grantsForTurn, issueTurnGrants, refreshTurnGrants } from '../src/grant-exchange.js';
 import { HANDLERS, type CpDeps } from '../src/handlers.js';
-import { makeSigner, publicKeyFromBase64 } from '../src/token.js';
 import {
   alice,
   codeOf,
@@ -19,32 +17,9 @@ import {
   seedCredential,
   type TestDeps,
 } from './helpers/deps.js';
+import { grantDeps, grantRing } from './helpers/grants.js';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
-
-/**
- * The grant ring, generated per call for the reason `makeDeps` gives about its own signer: a
- * committed Ed25519 private key would be a gitleaks finding on the blob. Separate from `deps.signer`
- * on purpose -- that separation is the §6.1 property these tests exercise.
- */
-function grantRing(): {
-  grantSigner: ReturnType<typeof makeSigner>;
-  grantVerifyKeys: Map<string, KeyObject>;
-} {
-  const { privateKey } = generateKeyPairSync('ed25519');
-  const grantSigner = makeSigner(
-    privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-    'MOCA_GRANT_SIGNING_KEY',
-  );
-  return {
-    grantSigner,
-    grantVerifyKeys: new Map([[grantSigner.kid, publicKeyFromBase64(grantSigner.publicKeyBase64)]]),
-  };
-}
-
-function grantDeps(over: Parameters<typeof makeDeps>[0] = {}): TestDeps {
-  return makeDeps({ ...grantRing(), ...over });
-}
 
 /** Create a session through the real handler and return its session token. */
 async function sessionToken(d: CpDeps, body: object = {}, id = 'sid-fixed'): Promise<string> {
@@ -358,5 +333,59 @@ describe('refreshTurnGrants (MI1 §6.2)', () => {
     const decisions = [...d.streams.values()].flat().map((e) => e.decision);
     expect(decisions).toContain('grants_issued');
     expect(decisions).toContain('grants_refreshed');
+  });
+});
+
+describe('grantsForTurn (the dequeue path`s mint)', () => {
+  /** A turn record's worth of the fields a mint needs -- deliberately NOT a session record. */
+  const src = {
+    owner: 'github:1234',
+    tenant: 'default',
+    sessionId: 'sid-1',
+    credentialName: 'pinned-at-submission',
+    configRef: 'sha256:abc',
+  };
+
+  it('mints exp == turn_exp, so nothing has to refresh mid-turn (decision D4)', async () => {
+    const d = grantDeps();
+    const now = nowS(d);
+    const g = await grantsForTurn(src, now + 600, 'turn-1', d);
+    expect(g.turnExp).toBe(now + 600);
+    expect(g.exp).toBe(now + 600);
+    // And the claim agrees with the envelope field, on both halves.
+    for (const [token, aud] of [
+      [g.inferenceGrant, INFERENCE_GRANT_AUDIENCE],
+      [g.sandboxGrant, SANDBOX_GRANT_AUDIENCE],
+    ] as const) {
+      const c = verifyGrant(token, d.grantVerifyKeys!, aud, { now });
+      expect(c.exp).toBe(now + 600);
+      expect(c.turn_exp).toBe(now + 600);
+    }
+  });
+
+  it('carries the TURN`s credential name, not the session`s (decision D2)', async () => {
+    const d = grantDeps();
+    const now = nowS(d);
+    const g = await grantsForTurn(src, now + 600, 'turn-1', d);
+    const c = verifyGrant(g.inferenceGrant, d.grantVerifyKeys!, INFERENCE_GRANT_AUDIENCE, { now });
+    expect(c).toMatchObject({ cred: 'pinned-at-submission' });
+    expect(g.cfg).toBe('sha256:abc');
+  });
+
+  it('audits the turn id, the credential NAME and no secret', async () => {
+    const d = grantDeps();
+    await seedCredential(d); // a real credential with secret sk-fake, to prove it is never read
+    const g = await grantsForTurn(src, nowS(d) + 600, 'turn-1', d);
+    const entries = [...d.streams.values()].flat().filter((e) => e.decision === 'grants_issued');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.turnId).toBe('turn-1');
+    expect(entries[0]!.credential).toBe('pinned-at-submission');
+    expect(JSON.stringify([entries, g])).not.toContain('sk-fake');
+  });
+
+  it('still clamps exp when turn_exp is nearer than MOCA_TURN_MAX_S', async () => {
+    const d = grantDeps();
+    const g = await grantsForTurn(src, nowS(d) + 30, 'turn-1', d);
+    expect(g.exp).toBe(nowS(d) + 30);
   });
 });

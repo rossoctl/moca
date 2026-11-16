@@ -92,16 +92,39 @@ function parseSecretJson(raw: string): SecretJson {
   return parsed as SecretJson;
 }
 
+/**
+ * How long a `get secret` answer is reused, and how many subjects' answers are held.
+ *
+ * Every read here FORKS A PROCESS (kubectl.ts spawns the binary). One fork per credential read was
+ * fine while reads happened at session start, and stopped being fine with MI1 §6.3's inference
+ * listener: a worker redeems its grant on every single request to the provider, so a handful of
+ * concurrent turns means a fork per completion -- the first thing to fall over under load, and the
+ * loudest possible neighbour to the apiserver.
+ *
+ * Three seconds, not three minutes: it must be short enough that a credential a user has just
+ * changed through another replica is not used for a visible length of time, and long enough that one
+ * turn's burst of requests costs one fork.
+ */
+const READ_TTL_MS = 3_000;
+const READ_MAX = 256;
+
 export class K8sSecretStore implements CredentialStore {
   private readonly namespace: string;
   /** The KEK ring, newest first: `seal` uses the first, `open` tries each (envelope.ts). */
   private readonly keks: Buffer[];
   private readonly run: RunKubectl;
+  private readonly now: () => number;
+  /**
+   * Cached READS, keyed by subject. The value is the in-flight PROMISE, not its result, so N
+   * concurrent redemptions for the same user collapse into one fork rather than N.
+   */
+  private readonly reads = new Map<string, { at: number; secret: Promise<SecretJson | null> }>();
 
-  constructor(opts: { namespace: string; keks: Buffer[]; run?: RunKubectl }) {
+  constructor(opts: { namespace: string; keks: Buffer[]; run?: RunKubectl; now?: () => number }) {
     this.namespace = opts.namespace;
     this.keks = opts.keks;
     this.run = opts.run ?? defaultRunKubectl;
+    this.now = opts.now ?? Date.now;
   }
 
   /**
@@ -126,12 +149,34 @@ export class K8sSecretStore implements CredentialStore {
     }
   }
 
-  private async fetch(subject: string): Promise<SecretJson | null> {
+  private fetch(subject: string): Promise<SecretJson | null> {
+    const hit = this.reads.get(subject);
+    if (hit && this.now() - hit.at < READ_TTL_MS) return hit.secret;
+    const secret = this.read(subject);
+    // A FAILED read is never cached: a momentarily unreachable store must be retried by the next
+    // caller, not held as this subject's answer for the whole TTL.
+    secret.catch(() => this.reads.delete(subject));
+    if (this.reads.size >= READ_MAX) this.prune();
+    this.reads.set(subject, { at: this.now(), secret });
+    return secret;
+  }
+
+  private async read(subject: string): Promise<SecretJson | null> {
     const raw = (
       await this.guard(() => this.run(buildGetSecretArgs(secretNameFor(subject), this.namespace)))
     ).trim();
     if (!raw) return null; // --ignore-not-found prints nothing
     return parseSecretJson(raw);
+  }
+
+  /** Drop what has expired, and if everything is still live, the oldest -- the map stays bounded. */
+  private prune(): void {
+    const cutoff = this.now() - READ_TTL_MS;
+    for (const [subject, entry] of this.reads) {
+      if (entry.at <= cutoff) this.reads.delete(subject);
+    }
+    const oldest = this.reads.keys().next();
+    if (this.reads.size >= READ_MAX && !oldest.done) this.reads.delete(oldest.value);
   }
 
   /** Idempotent: the create is attempted every time and AlreadyExists is the expected outcome. */
@@ -172,6 +217,9 @@ export class K8sSecretStore implements CredentialStore {
     await this.guard(() =>
       this.run(buildPatchSecretArgs(secretNameFor(subject), this.namespace), JSON.stringify(patch)),
     );
+    // A write THIS process made takes effect at once, whatever the read TTL says: a user who just
+    // re-entered a key must not be served the old one by the replica they entered it on.
+    this.reads.delete(subject);
   }
 
   async get(subject: string, name: string): Promise<StoredCredential | null> {
@@ -230,6 +278,7 @@ export class K8sSecretStore implements CredentialStore {
     await this.guard(() =>
       this.run(buildPatchSecretArgs(secretNameFor(subject), this.namespace), JSON.stringify(patch)),
     );
+    this.reads.delete(subject); // a revoke on this replica is immediate, as put()'s is
   }
 }
 

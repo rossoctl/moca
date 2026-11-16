@@ -212,7 +212,15 @@ export {
   type InferenceGrantClaims,
   type SandboxGrantClaims,
 } from './grant.js';
-export { issueTurnGrants, refreshTurnGrants, type TurnGrantsResponse } from './grant-exchange.js';
+export {
+  grantsForTurn,
+  issueTurnGrants,
+  refreshTurnGrants,
+  type GrantSource,
+  type TurnGrantsResponse,
+} from './grant-exchange.js';
+export { redeemInferenceGrant, type RedeemedInference } from './grant-redeem.js';
+export { buildInferenceHandler, startInferenceProxy } from './inference-proxy.js';
 export { TurnStore, type TurnStoreOptions } from './turn-store.js';
 export {
   isTerminalState,

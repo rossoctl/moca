@@ -3,7 +3,6 @@ import { CpError } from './errors.js';
 import { sessionFromToken } from './exchange.js';
 import { GRANT_AUDIENCES, mintGrants, turnExp, verifyGrant, type GrantClaims } from './grant.js';
 import type { CpDeps } from './handlers.js';
-import type { SessionRecord } from './ownership.js';
 
 /**
  * The GRANT lifecycle endpoints (MI1 §6.2): the two calls that put a turn's grants in a worker's
@@ -46,6 +45,22 @@ function grantDeps(deps: CpDeps): {
 }
 
 /**
+ * The fields a mint reads. A SESSION record satisfies it structurally, and so does the dequeue
+ * path's TURN record -- which is the point: a queued turn pins its own `credentialName` and `cfg` at
+ * submission (async §5.1), so the mint must be able to take them from the turn rather than from the
+ * session's current choice (decision D2).
+ */
+export interface GrantSource {
+  owner: string;
+  tenant: string;
+  sessionId: string;
+  /** A credential NAME, '' when none. Never a value (MI1 §7.2). */
+  credentialName: string;
+  /** `null` is what a SESSION record stores for "no bundle"; a turn record omits the field. */
+  configRef?: string | null;
+}
+
+/**
  * Both halves of the pair, derived from the SESSION RECORD rather than from anything the caller
  * presented. One code path for issue and refresh, which is what makes a mid-turn credential or
  * bundle change take effect at the next refresh (decision D4) instead of being echoed forward.
@@ -56,10 +71,12 @@ function grantDeps(deps: CpDeps): {
  * already happened; this audits a capability about to be handed out.
  */
 async function mintFor(
-  rec: SessionRecord,
+  src: GrantSource,
   turnExpS: number,
   decision: 'grants_issued' | 'grants_refreshed',
   deps: CpDeps,
+  /** The dequeue path's two differences from the interactive one. */
+  over: { ttlSeconds?: number; turnId?: string } = {},
 ): Promise<TurnGrantsResponse> {
   const { signer } = grantDeps(deps);
   // Descriptors only -- `list` is the route that must enumerate without decrypting. A session may
@@ -71,31 +88,32 @@ async function mintFor(
   // `kubectl get secret` subprocess, so a turn refreshing at half-life costs ~13 instead of 1.
   // Cache it on the session record (or pass the descriptors through) when a redeemer makes refresh
   // a real code path; today nothing refreshes.
-  const descriptors = await deps.credentials.list(rec.owner);
+  const descriptors = await deps.credentials.list(src.owner);
   const egress = descriptors.filter((d) => d.consumer === 'sandbox-egress').map((d) => d.name);
   const minted = mintGrants(signer, {
-    sub: rec.owner,
+    sub: src.owner,
     // The record's tenant, on both paths. A refresh does NOT echo the presented grant's claim:
     // every other field is re-read, and tenant re-read with them is one less thing to reason about.
-    tenant: rec.tenant,
-    sid: rec.sessionId,
+    tenant: src.tenant,
+    sid: src.sessionId,
     // The NAME the session chose at creation, verbatim. '' when it chose none: resolution, including
     // the audited operator fallback, is the token endpoint's job, and §6.3 keeps the session record
     // authoritative there rather than this claim.
-    cred: rec.credentialName,
+    cred: src.credentialName,
     egress,
-    ...(rec.configRef ? { cfg: rec.configRef } : {}),
-    ttlSeconds: deps.config.grantTtlS,
+    ...(src.configRef ? { cfg: src.configRef } : {}),
+    ttlSeconds: over.ttlSeconds ?? deps.config.grantTtlS,
     turnExp: turnExpS,
     now: Math.floor(deps.now() / 1000),
   });
   const entry = {
-    subject: rec.owner,
-    sessionId: rec.sessionId,
+    subject: src.owner,
+    sessionId: src.sessionId,
     // The credential NAME. Never its value (spec §7.2). Omitted when the session named none, which
     // is what `audit`'s own `entry.credential ? ...` already does with ''.
-    credential: rec.credentialName,
-    configRef: rec.configRef ?? undefined,
+    credential: src.credentialName,
+    configRef: src.configRef ?? undefined,
+    ...(over.turnId ? { turnId: over.turnId } : {}),
     decision,
   };
   try {
@@ -110,7 +128,7 @@ async function mintFor(
     sandboxGrant: minted.sandboxGrant,
     turnExp: minted.turnExp,
     exp: minted.exp,
-    ...(rec.configRef ? { cfg: rec.configRef } : {}),
+    ...(src.configRef ? { cfg: src.configRef } : {}),
   };
 }
 
@@ -137,6 +155,40 @@ export async function issueTurnGrants(
   const rec = await sessionFromToken(presentedToken, deps);
   const nowS = Math.floor(deps.now() / 1000);
   return mintFor(rec, turnExp(nowS, undefined, deps.config.turnMaxS), 'grants_issued', deps);
+}
+
+/**
+ * The DEQUEUE path's mint (#388 item 1): a worker claiming a queued turn gets the turn's two grants
+ * instead of a credential. Called by `turn-exchange.ts` under `MOCA_TENANCY=multi`.
+ *
+ * Two things differ from `issueTurnGrants`, and both come from the turn record:
+ *
+ *   - `turn_exp` is passed in, computed by the caller from `caps.wallClock` (async §5.4's
+ *     `dequeue + min(caps.wallClock ?? MAX, MAX)`). This is the call site that function was written
+ *     for -- turn start means DEQUEUE, so the anchor is the claim and never the enqueue.
+ *   - `ttlSeconds` is `MOCA_TURN_MAX_S`, so `exp == turn_exp` and nothing refreshes mid-turn
+ *     (decision D4). pi builds its model object once per turn, so a refresh loop would have to
+ *     mutate live request headers, and it would buy nothing: the redeemer re-reads the session and
+ *     the credential on EVERY request, so a deleted session takes effect at once rather than within
+ *     MOCA_GRANT_TTL_S, and a key rotated on another replica within the credential store's read
+ *     window (grant-redeem.ts step 2).
+ *     shortcut: a grant stolen from a worker is replayable until `turn_exp` rather than for one TTL
+ *     window. Re-introduce `MOCA_GRANT_TTL_S` here plus a worker refresh loop if a redeemer ever
+ *     runs somewhere the worker is not already trusted.
+ *
+ * The turn id rides the audit entry, which is what links `grants_issued` to the `turn_submitted`
+ * entry M1 already writes.
+ */
+export async function grantsForTurn(
+  src: GrantSource,
+  turnExpS: number,
+  turnId: string,
+  deps: CpDeps,
+): Promise<TurnGrantsResponse> {
+  return mintFor(src, turnExpS, 'grants_issued', deps, {
+    ttlSeconds: deps.config.turnMaxS,
+    turnId,
+  });
 }
 
 /**
