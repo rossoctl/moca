@@ -16,6 +16,7 @@ import { writeError } from '../src/errors.js';
 import { exchangeCredential } from '../src/exchange.js';
 import { HANDLERS } from '../src/handlers.js';
 import { MembersStore } from '../src/members.js';
+import { buildSessionsKey, type CpRedisLike } from '../src/ownership.js';
 import {
   HOST_STALE_S,
   HostRegistry,
@@ -1788,6 +1789,70 @@ describe('retire (§5.1)', () => {
     expect(await refusal(() => retireBuild(d, 't1', hash('9')))).toBe('template_not_found');
   });
 
+  it('never retires a build an active session is pinned to; deleting the session frees it', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    await seedCredential(d);
+    const s = (
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+        d,
+      )
+    ).body as Body;
+    expect(s.sessionId).toEqual(expect.any(String));
+    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
+    expect(await refusal(() => retireBuild(d, 't1', hash('1')))).toBe('build_in_use');
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
+    expect((await retire(d, 't1')).status).toBe(200);
+  });
+
+  it("prunes a pinned session that ended without the cascade's removal; an active one still blocks", async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    await seedCredential(d);
+    let n = 0;
+    d.newId = () => `sid-${++n}`;
+    const pinned = async () =>
+      (
+        (
+          await HANDLERS.createSession!(
+            ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+            d,
+          )
+        ).body as Body
+      ).sessionId as string;
+    const redis = (d.index as unknown as { redis: CpRedisLike }).redis;
+    const members = () =>
+      redis.zRange(buildSessionsKey(hash('1')), '+inf', '-inf', { BY: 'SCORE', REV: true });
+    // Two sessions that ended without the cascade's removal: their records are left deleting, as
+    // a crash mid-delete leaves them.
+    const ended = await pinned();
+    await d.index.tombstone(ended);
+    const ended2 = await pinned();
+    await d.index.tombstone(ended2);
+    expect(await members()).toEqual(expect.arrayContaining([ended, ended2]));
+    // Alone, they do not block, and the check drops them.
+    expect(await d.index.hasActiveSessionOnBuild(hash('1'))).toBe(false);
+    expect(await members()).toEqual([]);
+    // Beside an active one: the retire is refused, and its check drops the ended one.
+    const ended3 = await pinned();
+    await d.index.tombstone(ended3);
+    const live = await pinned();
+    expect(await members()).toEqual(expect.arrayContaining([ended3, live]));
+    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
+    expect(await members()).toEqual([live]);
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: live } }), d);
+    expect(await members()).toEqual([]);
+    expect((await retire(d, 't1')).status).toBe(200);
+  });
+
   it('judges build_in_use by build: a sandbox on another build of one worker does not block', async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
@@ -2205,6 +2270,27 @@ describe('reject after the fact (§5.2)', () => {
     );
     expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
     await HANDLERS.deleteSandbox!(ctx({ principal: alice, params: { id: sb.id } }), d);
+    expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
+  });
+
+  it('never rejects a build an active session is pinned to (409 build_in_use)', async () => {
+    const d = await setup();
+    attachedNow = ['sbx_t1'];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+    await activate(d, 't1');
+    await seedCredential(d);
+    const s = (
+      await HANDLERS.createSession!(
+        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+        d,
+      )
+    ).body as Body;
+    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'broken' }))).toBe(
+      'build_in_use',
+    );
+    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
     expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
   });
 
