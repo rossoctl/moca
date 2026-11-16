@@ -521,6 +521,19 @@ grep -q '^SH_RELAY_TOKEN=keep$' "$LST_DIR/relay.env" || fail "the migration touc
   fail "the migration changed supervisor.env's mode"
 pass "ensure_exec_listener: a pre-MI1 pair migrates both files together, and nothing else"
 
+# pre-MI1 with a relay.env whose last line has no newline (#363: ensure_exec_listener's
+# end_with_newline call was unpinned). Without it, the appended MOCA_RELAY_EXEC_ADDR joins the last
+# line, which here is SH_RELAY_TOKEN, and both values are lost.
+listener_env "" "SH_RELAY_ADDR=127.0.0.1:9443"
+printf 'SH_RELAY_PORT=9443\nREDIS_URL=redis://127.0.0.1:6379\nSH_RELAY_TOKEN=keep' >"$LST_DIR/relay.env"
+SH_ENV_DIR="$LST_DIR" ensure_exec_listener ||
+  fail "ensure_exec_listener failed to migrate a relay.env with no final newline"
+grep -q '^SH_RELAY_TOKEN=keep$' "$LST_DIR/relay.env" ||
+  fail "migrating a relay.env with no final newline changed SH_RELAY_TOKEN: $(cat "$LST_DIR/relay.env")"
+[[ "$(exec_addr_of)" == "127.0.0.1:9444" ]] ||
+  fail "a relay.env with no final newline did not gain MOCA_RELAY_EXEC_ADDR on its own line: $(cat "$LST_DIR/relay.env")"
+pass "ensure_exec_listener appends on its own line to a relay.env with no final newline"
+
 # already migrated: a second run is a byte-identical no-op
 before="$(sum_files)"
 SH_ENV_DIR="$LST_DIR" ensure_exec_listener || fail "ensure_exec_listener refused an already-migrated pair"
