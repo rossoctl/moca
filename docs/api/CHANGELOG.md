@@ -16,19 +16,23 @@ same snapshot registers as.
 - POST /v1/templates and POST /v1/templates/{id}/builds: on a deployment with host agents, a
   registered build with the same inputs is reused (`200`, `reused: true`) only while a fresh host
   (its last inventory at most HOST_STALE_S, 360 s, old, as placement counts hosts) holds its
-  manifest hash. When none does, the create is admitted as a new build (`202`, no `reused`), with
-  the usual quota and gate checks, instead of an answer naming a build whose sandbox create is
-  refused `409 template_unavailable`. A build on its way (`queued` to `built`) is reused as before,
-  and a deployment without host agents is unchanged. Right after a control-plane restart, before
-  any host has reported, such a create builds again.
+  manifest hash. When fresh hosts report and none holds it, the create is admitted as a new build
+  (`202`, no `reused`), the old build's rebuild, with the usual quota and gate checks, instead of
+  an answer naming a build whose sandbox create is refused `409 template_unavailable`. When no
+  fresh host reports at all (right after a control-plane restart, or the only host silent),
+  holding is unknown and the registered build is reused as before. A build on its way (`queued` to
+  `built`) is reused as before, and a deployment without host agents is unchanged.
 - Registration: that rebuild has the old build's manifest hash. When the old build is still
-  registered and no fresh host holds the hash but the one reporting the rebuild (which has just
-  built it), the rebuild registers and supersedes the old build in the same update: the old build
-  becomes `retired` with `reason: {step: superseded}` and keeps its build id, and the tags that
-  named it, `default` included, name the new build. A `retire` record by `policy` names both
-  builds. When another fresh host does hold the hash, the rebuild is rejected, rule `T.unique`, as
-  before. Only that rebuild supersedes: any other build with the same hash (another profile or
-  gate record) is rejected `T.unique`, as before, whoever holds the snapshot.
+  registered, the host that claimed the rebuild did not already hold the snapshot, and no fresh
+  host holds the hash but the one reporting the rebuild (which has just built it), the rebuild
+  registers and supersedes the old build in the same update: the old build becomes `retired` with
+  `reason: {step: superseded}` and keeps its build id, its live leases move to the new build, and
+  the tags that named it, `default` included, name the new build. A `retire` record by `policy`
+  names both builds. Otherwise the rebuild is rejected, rule `T.unique`, as before: when another
+  fresh host holds the hash, or when the claiming host already held it (it found the snapshot
+  already built), the old build staying registered with its leases. Only that rebuild
+  supersedes: any other build with the same hash (another profile or gate record) is rejected
+  `T.unique`, as before, whoever holds the snapshot.
 - GET /v1/templates/{id}/builds/{build}, DELETE /v1/templates/{id}/builds/{build}, POST
   /v1/templates/{id}/builds/{build}/reject, activate `{build}`, tags and `id@<build>`: a build id
   a superseded build shares names the build that took it over; the superseded build is found by

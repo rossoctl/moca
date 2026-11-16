@@ -202,21 +202,22 @@ for different ids never pass one check together. Another subject's id is `409 te
 template is private: no existence oracle). An admitted create writes `create`, `gate` (with a gate
 record) and `check` records (§7.1) and queues the build for a host agent (§6.1).
 
-**Reuse.** A create that matches a build already registered answers
-`200 {buildId, status: "registered", reused: true}`; one that matches a build still on its way
-(queued to built) answers `202` with that build and `reused: true`, and queues nothing. The match is
-the image, the spec as sent, the profile and the gate record's sha256 on the caller's own template;
-the builder (Moca commit, kernel) is not compared (one deployment's hosts build with one builder),
-and a failed or rejected build is never reused. With host agents (§6.1), a registered build is
-reused only while a fresh host holds its snapshot (its manifest hash): a host whose last inventory
-is at most `HOST_STALE_S` (360 s) old, the hosts placement and a sandbox create count (§6.2). When
-none does, the create is admitted as a new build (`202`), with the usual quota and gate checks; it
-registers under the same manifest hash and supersedes the old build (§6.1, rule `T.unique`). A
-build on its way has no snapshot yet and is reused as before, and a deployment without host agents
-reuses as before. The check is only as current as the hosts' last inventories: a snapshot removed
-since a host's last report still counts as held, and right after a control-plane restart, before
-any host has reported, or while every holder is briefly stale, a create builds again (a duplicate
-build, never an answer that names a missing snapshot).
+**Reuse.** A create that matches a build already registered answers `200 {buildId, status:
+"registered", reused: true}`; one that matches a build still on its way (queued to built) answers
+`202` with that build and `reused: true`, and queues nothing. The match is the image, the spec as
+sent, the profile and the gate record's sha256 on the caller's own template; the builder (Moca
+commit, kernel) is not compared (one deployment's hosts build with one builder), and a failed or
+rejected build is never reused. With host agents (§6.1), a registered build is not reused when fresh
+hosts report and none of them holds its snapshot (its manifest hash): a fresh host is one whose last
+inventory is at most `HOST_STALE_S` (360 s) old, the hosts placement and a sandbox create count
+(§6.2). Then the create is admitted as a new build (`202`), with the usual quota and gate checks:
+the old build's rebuild, which registers under the same manifest hash and supersedes the old build
+(§6.1, rule `T.unique`). When no fresh host reports at all (right after a control-plane restart,
+before any host has reported, or while the only host is silent), whether the snapshot is held is
+unknown, and the registered build is reused as before. A build on its way has no snapshot yet and is
+reused as before, and a deployment without host agents reuses as before. The check is only as
+current as the hosts' last inventories: a snapshot removed since a host's last report still counts
+as held.
 
 **Cancel** (built, #737): `POST /v1/templates/{id}/builds/{build}/cancel`, by the owner or an
 admin, withdraws a `queued`, `building` or `probing` build: it becomes `failed` with
@@ -562,26 +563,31 @@ run, or keeps it because its worker or id is shared), the message says to change
 again after the snapshot's removal.
 
 **A rebuild supersedes a registered build whose snapshot is gone** (#816). A create of a registered
-build's own inputs, admitted because no fresh host held its snapshot (§4, Reuse), is that build's
-rebuild: the control plane notes which build it rebuilds (internal, not on the wire). When the
-rebuild reports `built` with that build's manifest hash, the build is still `registered`, and no
-fresh host other than the reporting one holds the hash, the rebuild registers and, in the same
-catalog update, supersedes the old one. The reporting host is left out: it has just built the
-snapshot, and its inventory may list it before its `built` report arrives. Any other build with the
-same hash (another profile or gate record, which the host finds already built) is rejected, rule
-`T.unique`, whoever holds the snapshot. When superseding: the old build becomes `retired`
-(`reason.step: superseded`, its leases gone, as a retire's) and keeps its build id, and the tags
-that named that id, `default` included, name the new build. The registration `check` passes
-`T.unique` with a message naming the superseded build, and a `retire` record by `policy` follows it,
-with `from: registered`, the superseded build's `buildRecord`, `supersededBy` (the new build's
-handle), `supersededByRecord` (its `build` record) and `tags`. When another fresh host does hold the
-hash, the old build is still usable there and the rebuild is rejected as above; a rebuild that fails
-leaves the old build untouched. Two builds then share one build id, one retired: everywhere a build
-id names a build of a template (a reference `id@<build>`, a tag, the build routes, an activation, a
-lease, placement, a host's reports), it names the one not ended, and the superseded build is found
-by its handle. A sandbox or session recorded under the id is use of that build. The superseded build
-shares its snapshot with a build neither retired nor rejected, so its snapshot and worker are never
-stopped or removed for it (its `shared` is true), and a host's `removed` for the id is refused.
+build's own inputs, admitted because fresh hosts reported and none held its snapshot (§4, Reuse), is
+that build's rebuild: the control plane notes which build it rebuilds, and, when a host claims the
+rebuild, whether that host's last inventory already held the snapshot (both internal, not on the
+wire). When the rebuild reports `built` with that build's manifest hash, the build is still
+`registered`, the claiming host did not hold the snapshot at its claim, and no fresh host other than
+the reporting one holds the hash, the rebuild registers and, in the same catalog update, supersedes
+the old one. The reporting host is left out: it has just built the snapshot, and its inventory may
+list it before its `built` report arrives. A rebuild claimed by a host that already held the
+snapshot found it already built: it is no rebuild, and it is rejected, rule `T.unique`, the old
+build staying registered with its leases. Any other build with the same hash (another profile or
+gate record, which the host finds already built) is rejected, rule `T.unique`, whoever holds the
+snapshot. When superseding: the old build becomes `retired` (`reason.step: superseded`) and keeps
+its build id; its live leases move to the new build, each with its `since` and the `activate` record
+it cites, so its holders' workers keep running; and the tags that named that id, `default` included,
+name the new build. The registration `check` passes `T.unique` with a message naming the superseded
+build, and a `retire` record by `policy` follows it, with `from: registered`, the superseded build's
+`buildRecord`, `supersededBy` (the new build's handle), `supersededByRecord` (its `build` record),
+`leasesMoved` and `tags`. When another fresh host does hold the hash, the old build is still usable
+there and the rebuild is rejected as above; a rebuild that fails leaves the old build untouched. Two
+builds then share one build id, one retired: everywhere a build id names a build of a template (a
+reference `id@<build>`, a tag, the build routes, an activation, a lease, placement, a host's
+reports), it names the one not ended, and the superseded build is found by its handle. A sandbox or
+session recorded under the id is use of that build. The superseded build shares its snapshot with a
+build neither retired nor rejected, so its snapshot and worker are never stopped or removed for it
+(its `shared` is true), and a host's `removed` for the id is refused.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
@@ -866,7 +872,7 @@ follows) so the chain from the image to a sandbox can be walked and checked. Eve
 | `check`                        | policy is applied, at create and at registration                              | the policy's digest, the profile, each rule and its result, the outcome (`admitted`, `registered`, `rejected`); at registration, `build` is the digest of the `build` record it judged                                                                           |
 | `activate` · `deactivate`      | readiness changes                                                             | host, worker, manifest hash, subject, reason; each lease stores its `activate` record's digest                                                                                                                                                                   |
 | `tag` · `visibility` · `owner` | the owner or an admin changes one                                             | the new value and the one before                                                                                                                                                                                                                                 |
-| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it              | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`, `event: removed`; a build superseded at registration (§6.1), a `retire` by `policy` with `supersededBy`, `supersededByRecord` and `tags`              |
+| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it              | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`, `event: removed`; a superseded build (§6.1), a `retire` by `policy` with `supersededBy` and the rest §6.1 lists                                       |
 | `sandbox`                      | a sandbox is created, and when it ends                                        | at create: sandboxId, buildId, templateManifestHash, `lease` (null with no lease), expiresAt; at end: `state: terminated`, `reason` (`deleted` with endedAt, or `expired`, written once by the janitor's sweep when it first sees it; the true end is expiresAt) |
 | `session`                      | a Moca Pi session pinned through the store is created, and when it is deleted | at create: sessionId, buildId, templateManifestHash, `lease` (null with no lease), `state: created`; at delete: sessionId, buildId, `state: terminated`, `reason: deleted`, endedAt                                                                              |
 | `use` (summary)                | sessions start                                                                | per build and day: count, first and last, by subject                                                                                                                                                                                                             |

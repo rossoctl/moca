@@ -2309,15 +2309,17 @@ paths:
         a build host; follow it at `build`. A create whose inputs match a build of the caller's
         template that is registered or on its way (§3.2) queues nothing and answers that build with
         `reused: true`: `200` when it is registered, `202` while it is not. On a deployment with
-        host agents, a registered build is reused only while a fresh host (one whose last inventory
-        is at most HOST_STALE_S, 360 s, old: a host placement counts) holds its snapshot; when none
-        does, the create is admitted as a new build (`202`, no `reused`), with the usual quota and
-        gate checks. That build registers under the same build id and supersedes the old one,
-        which becomes `retired` (`reason.step: superseded`), and the tags that named it, `default`
-        included, name the new build; unless a fresh host other than the one that built it holds
-        the snapshot by then, when the new build is rejected, rule `T.unique`. Only such a rebuild
-        supersedes: another build of the same snapshot (another profile or gate record) is
-        rejected `T.unique`. A failed or rejected build is never reused.
+        host agents, a registered build is not reused when fresh hosts (those whose last inventory
+        is at most HOST_STALE_S, 360 s, old: the hosts placement counts) report and none holds its
+        snapshot; the create is then admitted as a new build (`202`, no `reused`), with the usual
+        quota and gate checks. When no fresh host reports at all, the registered build is reused
+        as before. That new build registers under the same build id and supersedes the old one,
+        which becomes `retired` (`reason.step: superseded`); its live leases move to the new
+        build, and the tags that named it, `default` included, name the new build. It is
+        rejected, rule `T.unique`, instead when a fresh host other than the one that built it
+        holds the snapshot by then, or when the host that claimed it already held the snapshot.
+        Only such a rebuild supersedes: another build of the same snapshot (another profile or
+        gate record) is rejected `T.unique`. A failed or rejected build is never reused.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
