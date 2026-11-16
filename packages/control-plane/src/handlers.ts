@@ -193,6 +193,13 @@ export interface CpConfig {
    * ask for less through its caps and never for more; the clamp is at mint (`grant.ts`'s `turnExp`).
    */
   turnMaxS: number;
+  /**
+   * `MOCA_INFERENCE_URL`: the inference listener as a WORKER dials it, handed out as
+   * `anthropicBaseUrl` in grant mode. Distinct from the bind address, which only `main()` reads:
+   * compose and Kubernetes bind a wildcard and are dialled by service name. Required under
+   * `MOCA_TENANCY=multi` (`checkGrantRedemption`), absent in every single-tenant deployment.
+   */
+  inferenceUrl?: string;
 }
 
 export interface CpDeps {

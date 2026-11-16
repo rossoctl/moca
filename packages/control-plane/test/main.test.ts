@@ -8,12 +8,15 @@ import { join } from 'node:path';
 import { FileCredentialStore } from '../src/file-store.js';
 import { formatEnvLines, generateMu1Secrets } from '../src/genkeys.js';
 import { K8sSecretStore } from '../src/k8s-secret-store.js';
-import { HANDLERS } from '../src/handlers.js';
+import { HANDLERS, type CpConfig } from '../src/handlers.js';
 import {
+  checkGrantRedemption,
   configFromEnv,
   depsFromEnv,
   credentialStoreFromEnv,
   grantRingFromEnv,
+  inferenceAddrFromEnv,
+  inferenceUrlFromEnv,
   portFromEnv,
   verifyKeysFromEnv,
   CONTROL_PLANE_SECRETS,
@@ -674,5 +677,51 @@ describe('the k8s credentials volume as the control plane sees it (ADR-0045)', (
     const env = withCredentials({ CREDENTIALS_DIRECTORY: dir }, CONTROL_PLANE_SECRETS);
     expect(env.SH_TEST_USER_SECRET).toBe(secret);
     expect(testUserSecretFromEnv(env.SH_TEST_USER_SECRET, 10)).toBe(secret);
+  });
+});
+
+describe('the inference listener`s env (MI1 §15, decision D1)', () => {
+  // Only the two fields checkGrantRedemption reads: a full CpConfig fixture here would assert
+  // against a config no deployment builds.
+  const baseConfig = { tenancy: 'single' } as CpConfig;
+
+  it('parses host:port and derives the URL a worker dials', () => {
+    expect(inferenceAddrFromEnv({ MOCA_INFERENCE_ADDR: '127.0.0.1:3129' })).toEqual({
+      host: '127.0.0.1',
+      port: 3129,
+    });
+    expect(inferenceAddrFromEnv({})).toBeUndefined();
+    expect(() => inferenceAddrFromEnv({ MOCA_INFERENCE_ADDR: '3129' })).toThrow(/host:port/);
+    expect(inferenceUrlFromEnv({ MOCA_INFERENCE_ADDR: '127.0.0.1:3129' })).toBe(
+      'http://127.0.0.1:3129',
+    );
+    // A wildcard bind cannot be dialled, so it derives nothing and the URL must be given.
+    expect(inferenceUrlFromEnv({ MOCA_INFERENCE_ADDR: '0.0.0.0:3129' })).toBeUndefined();
+    expect(
+      inferenceUrlFromEnv({
+        MOCA_INFERENCE_ADDR: '0.0.0.0:3129',
+        MOCA_INFERENCE_URL: 'http://cp:3129',
+      }),
+    ).toBe('http://cp:3129');
+  });
+
+  it('refuses a URL carrying a path, which the listener would count twice', () => {
+    expect(() => inferenceUrlFromEnv({ MOCA_INFERENCE_URL: 'http://cp:3129/v1' })).toThrow(/path/);
+  });
+
+  it('refuses multi tenancy without a ring or a URL, and a listener without a ring', () => {
+    const multi = { ...baseConfig, tenancy: 'multi' as const, inferenceUrl: 'http://cp:3129' };
+    expect(() => checkGrantRedemption(multi, false, true)).toThrow(/MOCA_GRANT_SIGNING_KEY/);
+    expect(() => checkGrantRedemption({ ...multi, inferenceUrl: undefined }, true, true)).toThrow(
+      /MOCA_INFERENCE_ADDR/,
+    );
+    expect(() => checkGrantRedemption({ ...baseConfig, tenancy: 'single' }, false, true)).toThrow(
+      /MOCA_GRANT_SIGNING_KEY/,
+    );
+    // Today's deployments: single tenancy, no ring, no listener -- nothing refuses.
+    expect(() =>
+      checkGrantRedemption({ ...baseConfig, tenancy: 'single' }, false, false),
+    ).not.toThrow();
+    expect(() => checkGrantRedemption(multi, true, true)).not.toThrow();
   });
 });
