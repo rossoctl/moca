@@ -711,6 +711,22 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
   });
 
+  it('ls appends the idle lifetime to the expiry only when the record carries one (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: { sandboxes: [sandbox({ idleLifetimeS: 604_800 }), sandbox({ id: 'sbx-old' })] },
+      }),
+    });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const lines = io.outs.join('').trim().split('\n');
+    const iso = new Date(1_800_604_800 * 1000).toISOString();
+    expect(lines[0]!.endsWith(`${iso} (7 d)`)).toBe(true);
+    expect(lines[1]!.endsWith(iso)).toBe(true);
+    expect(lines[1]).not.toContain('undefined');
+  });
+
   it('deletes a sandbox', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({

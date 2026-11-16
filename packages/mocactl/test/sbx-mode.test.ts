@@ -889,6 +889,16 @@ describe('mocactl sbx reset (spec §8.3)', () => {
     expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
   });
 
+  it('get shows the idle lifetime row only when the record carries one (#770)', async () => {
+    const w = leaseWorld({ lease: () => APPLIED, record: { idleLifetimeS: 604_800 } });
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.out()).toMatch(/^lifetime {6}7 d without use$/m);
+    const o = leaseWorld({ lease: () => APPLIED });
+    expect(await o.run(['get', SBX])).toBe(0);
+    expect(o.out()).not.toContain('lifetime');
+    expect(o.out()).not.toContain('undefined');
+  });
+
   it('reset with no lease', async () => {
     const w = leaseWorld({ lease: () => APPLIED });
     expect(await w.run(['reset', SBX])).toBe(0);

@@ -100,6 +100,17 @@ const byName = (cs: DoctorCheck[], name: string) => {
 };
 
 describe('mocactl sbx doctor (SBX0 §6.1)', () => {
+  it('names the idle lifetime in the ready line only when the record carries one (#770)', async () => {
+    const w = world({ box: { idleLifetimeS: 604_800 } });
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    expect(byName(cs, 'sandbox').detail).toMatch(/, in .+, after 7 d without use$/);
+    const o = world();
+    const os = await runDoctor(o.ctx(), o.r, SBX, fakeExec().factory, CURRENT);
+    const d = byName(os, 'sandbox').detail;
+    expect(d).not.toContain('without use');
+    expect(d).not.toContain('undefined');
+  });
+
   it('passes all six checks for a configured repository and a sandbox with days left', async () => {
     const w = world();
     const x = fakeExec();
