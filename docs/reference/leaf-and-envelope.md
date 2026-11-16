@@ -68,7 +68,7 @@ The 200 body is a `LeafResult`:
 
 A `failed` result is returned as HTTP 200 on the sync path, not as a 4xx or 5xx, except `saturated`,
 which becomes 503 with `Retry-After`. Every non-saturated outcome is stored at `leaf:result:<id>` with
-a TTL of `LEAF_RESULT_TTL_SECONDS` (default 86400); the last write wins. `GET /runs/status?sessionId=`
+a TTL of `LEAF_RESULT_TTL_SECONDS` (default 604800, seven days); the last write wins. `GET /runs/status?sessionId=`
 returns a **reduced view** of that record, not the whole result: no `message` on `failed` (the stored
 record keeps none either), no `usage` on `solved` and `responded`, and `paused` repeats `gateId` at the top
 level and inside `gate`. A session with no record yet, or none at all, answers `200 {status: "queued"}`,

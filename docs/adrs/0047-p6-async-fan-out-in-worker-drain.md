@@ -73,7 +73,8 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
 - **The turn record outlives its result.** Its TTL is `LEAF_RESULT_TTL_SECONDS` plus a margin, set
   when the turn goes terminal, not at creation; a non-terminal record carries no TTL and the
   reaper's `lost` transition is what guarantees every record eventually becomes terminal. Deriving
-  the record's TTL from the result's keeps one knob: raising retention moves both. The inverse
+  the record's TTL from the result's keeps one knob: raising retention moves both — which #390 then
+  did, to seven days, adding the per-session turn index to the same clock. The inverse
   ordering would reintroduce the queued/never-submitted conflation this record rejects elsewhere —
   a succeeded turn answering `404` because its record expired first.
 - **On drain, abandon without acking.** The loop stops claiming, the in-flight leaf is left pending
@@ -155,7 +156,7 @@ instead of once per turn.
 | Exit-0-when-idle drain semantics                        | **Replaced** by the supervisor's `drain` signal                                      |
 | `XAUTOCLAIM` reaper (#17)                               | **Kept.** Crash recovery depends on it                                               |
 | Dead-letter past `maxAttempts`                          | **Kept**, mapped to a `lost` turn state                                              |
-| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is; longer retention is owed                                             |
+| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is in M1; raised to 604800 by #390, on the one knob                      |
 | At-least-once delivery                                  | **Kept.** The claim/ack cycle is unchanged                                           |
 | `runLeaf` idempotency on the session id                 | **Kept**, and promoted to the submission-time `idempotencyKey` default               |
 | `classifyOutcome` retry classes                         | **Kept and already in tree** — `harness/src/classify-outcome.ts` survived #691       |

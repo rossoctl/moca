@@ -39,7 +39,7 @@
 # class as rwo; workload sandboxes spec §5.4, §6.3), SH_ASYNC_DRAIN=1 (every target: each P6 worker
 # also drains the async leaf queue, so turns submitted with POST /v1/turns run; off when unset or
 # empty; async fan-out spec §9.2), LEAF_RESULT_TTL_SECONDS (every target: how long a leaf result is
-# kept, whole seconds; empty means the default, 86400 -- read by BOTH the control plane and the
+# kept, whole seconds; empty means the default, 604800 (7 days) -- read by BOTH the control plane and the
 # supervisor from this one key, so the async turn record and the result it describes expire
 # together), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
@@ -1090,7 +1090,7 @@ hand_patched_catalog_hosts() {
 # SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack
 # (its sticky input lives in moca-setup). They are written even when '' so every stack hashes the
 # same key set; an empty token lifetime is the control plane's default, an empty catalog allow-list
-# its own, an empty LEAF_RESULT_TTL_SECONDS the 86400 both tiers default to, and an empty
+# its own, an empty LEAF_RESULT_TTL_SECONDS the 604800 both tiers default to, and an empty
 # SH_ASYNC_DRAIN the async drain off.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url

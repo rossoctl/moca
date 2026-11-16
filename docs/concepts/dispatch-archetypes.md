@@ -68,8 +68,9 @@ which looks like a real answer. Poll the turn route, not this one.
    by a worker that then died is withheld until the reaper has ruled on it, rather than returned as
    an answer. `DELETE` the same path cancels a turn that is still `queued`; a running leaf is
    not interrupted (409 `turn_not_cancellable`). A result expires on `LEAF_RESULT_TTL_SECONDS` — the
-   same variable and the same 24 h default the KEDA path used, nothing replaces it — and a finished
-   turn's record an hour after that, so the record outlives the result it points at.
+   same variable the KEDA path used, now seven days by default, because nobody is waiting on an
+   async turn and a Friday result must still be there on Monday — and a finished turn's record an
+   hour after that, so the record outlives the result it points at.
 
 **What changed from the KEDA path**, beyond where the consumer runs:
 

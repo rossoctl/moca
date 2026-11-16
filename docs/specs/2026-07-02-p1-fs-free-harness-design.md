@@ -149,7 +149,8 @@ same record.
     also readable).
   - **Async path:** the worker (`leaf-job-runner.ts`) writes the record instead of
     `writeDoneMarker(<resultRef>.status)` + `writeFileSync(resultRef)`.
-- **TTL:** env `LEAF_RESULT_TTL_SECONDS`, default `86400` (24h). Replaces the orchestrator's old file
+- **TTL:** env `LEAF_RESULT_TTL_SECONDS`, default `604800` (7 days since #390; `86400` originally).
+  Replaces the orchestrator's old file
   cleanup — records self-expire, no unbounded growth. A `paused` record carries the same TTL and is
   overwritten (fresh TTL) on approve/resume, so a long human-gate wait is bounded by the TTL; set it
   higher for long gates (documented caveat).

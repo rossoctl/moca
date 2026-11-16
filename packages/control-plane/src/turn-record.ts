@@ -53,6 +53,12 @@ export const TURN_RECORD_TTL_MARGIN_SECONDS = 3_600;
  * passes this straight to Redis as `EX`, and `EX NaN` is `ERR value is not an integer`, so a typo'd
  * TTL would turn every result write into a runtime error instead of a startup one. Zero is refused
  * too: Redis rejects `EX 0`, so "no retention" is not something this knob can express.
+ *
+ * SEVEN DAYS by default (#390). An async turn is submitted precisely because nobody is waiting for
+ * it, so a day is the wrong unit: a Friday afternoon turn must still be readable on Monday. This is
+ * the ONE retention knob -- the turn record's own expiry derives from it
+ * (`+ TURN_RECORD_TTL_MARGIN_SECONDS`) and so does the per-session turn index, so raising it moves
+ * everything together and there is no second number to keep in step (spec §5.1, ADR-0047).
  */
 export function resultTtlSeconds(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
@@ -62,7 +68,7 @@ export function resultTtlSeconds(
   // this parse runs at module load, so refusing one takes down a tier that was serving sync traffic
   // happily before the knob was ever set. Whitespace-only is therefore the same as unset.
   const v = env.LEAF_RESULT_TTL_SECONDS?.trim();
-  if (v === undefined || v === '') return 86_400;
+  if (v === undefined || v === '') return 7 * 86_400;
   if (!/^[1-9][0-9]*$/.test(v))
     throw new Error(`LEAF_RESULT_TTL_SECONDS must be a positive integer (seconds), got "${v}"`);
   return Number(v);
