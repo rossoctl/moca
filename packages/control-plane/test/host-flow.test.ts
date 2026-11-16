@@ -86,6 +86,30 @@ async function claimAndBuild(d: TestDeps): Promise<string> {
   return c.builds[0].build as string;
 }
 
+/** A host's inventory: the snapshots it holds, by manifest hash. */
+const inventory = (d: TestDeps, host: string, hashes: string[]) =>
+  HANDLERS.hostInventory!(
+    asHost(
+      host,
+      {},
+      {
+        holds: hashes.map((manifestHash) => ({ manifestHash, template: ID })),
+        limits: { activeLimit: 4, idleLimitSeconds: 3600 },
+      },
+    ),
+    d,
+  );
+
+/** The worked example's create again, the same inputs: a reuse while a host holds its snapshot. */
+const createAgain = (d: TestDeps) =>
+  HANDLERS.createTemplate!(
+    ctx({
+      principal: alice,
+      body: { id: ID, image: IMAGE, spec: REST, profile: 'benchmark', gateRecord: GATE },
+    }),
+    d,
+  );
+
 describe('the host agent flow (§6.1, §8.2)', () => {
   it('claims the queued build with what to build, then registers it on a matching built report', async () => {
     const d = await setup();
@@ -206,6 +230,8 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     expect(again.status).toBe(202);
     const second = await claimAndBuild(d);
     expect(second).not.toBe(first);
+    // The host already holds the snapshot (a fresh inventory says so): no supersede.
+    await inventory(d, 'host-1', [HASH]);
     const r = (
       await HANDLERS.hostBuildReport!(
         asHost('host-1', { build: second }, { event: 'built', ...records() }),
@@ -225,6 +251,152 @@ describe('the host agent flow (§6.1, §8.2)', () => {
     ).body as Body;
     expect(b).toMatchObject({ status: 'rejected', reason: { rule: 'T.unique' } });
     expect(b.reason.message).toContain(first);
+  });
+
+  it('supersedes a registered build whose snapshot no host holds when it is built again (#816)', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
+      d,
+    );
+    // The snapshot was removed from every host: the next inventory holds nothing, so the same
+    // create is admitted as a new build (not a reuse) rather than answered with the old build.
+    await inventory(d, 'host-1', []);
+    const again = await createAgain(d);
+    expect(again.status).toBe(202);
+    expect(again.body).not.toHaveProperty('reused');
+    const second = await claimAndBuild(d);
+    expect(second).not.toBe(first);
+    const r = (
+      await HANDLERS.hostBuildReport!(
+        asHost('host-1', { build: second }, { event: 'built', ...records() }),
+        d,
+      )
+    ).body as Body;
+    expect(r).toEqual({ status: 'registered', buildId: HASH });
+    const t = (await HANDLERS.getTemplate!(ctx({ principal: alice, params: { id: ID } }), d))
+      .body as Body;
+    // One usable build for HASH: the new one, with `default`; the old one retired, superseded.
+    const ofHash = t.builds.filter((b: Body) => b.buildId === HASH);
+    expect(ofHash.map((b: Body) => [b.handle, b.status, b.tags])).toEqual([
+      [second, 'registered', ['default']],
+      [first, 'retired', []],
+    ]);
+    expect(ofHash[1].reason).toMatchObject({ step: 'superseded' });
+    expect(ofHash[1].reason.message).toContain(second);
+    expect(t.tags).toEqual({ default: HASH });
+    expect(t.onboarding).toBe('registered');
+    // The build id, a bare id and `id@<hash>` name the new build.
+    const byId = (
+      await HANDLERS.getTemplateBuild!(
+        ctx({ principal: alice, params: { id: ID, build: HASH } }),
+        d,
+      )
+    ).body as Body;
+    expect(byId).toMatchObject({ handle: second, status: 'registered' });
+    // The old build's handle still names it, retired; retiring it again is a no-op.
+    const old = await HANDLERS.retireTemplateBuild!(
+      ctx({ principal: alice, params: { id: ID, build: first } }),
+      d,
+    );
+    expect(old.body).toMatchObject({ build: first, record: null, status: 'retired' });
+    // The records: the new build's build and check, then a retire by the policy naming both.
+    const chain = await d.provenance!.chain(`template/${ID}`);
+    expect(chain.slice(-3).map((x) => x.kind)).toEqual(['build', 'check', 'retire']);
+    expect(chain.at(-2)!.body).toMatchObject({ outcome: 'registered' });
+    expect(chain.at(-1)).toMatchObject({
+      subject: 'policy',
+      body: {
+        build: first,
+        buildId: HASH,
+        from: 'registered',
+        supersededBy: second,
+        tags: ['default'],
+      },
+    });
+    const exp = JSON.parse(JSON.stringify(await d.provenance!.export([`template/${ID}`])));
+    expect(verifyExport(exp)).toMatchObject({ ok: true });
+    // The host holds the new snapshot: the retired twin shares it, so it is never stopped or
+    // removed, and a `removed` for it is refused.
+    await inventory(d, 'host-1', [HASH]);
+    const w = (await HANDLERS.hostWanted!(asHost('host-1'), d)).body as Body;
+    expect(w.remove).toEqual([]);
+    // Only the new build's own entry (unleased, so stopped): none for the twin.
+    expect(w.stop).toEqual([
+      { template: ID, buildId: HASH, worker: 'sbx_django_django_11133_3d3e705ff379' },
+    ]);
+    expect(
+      await codeOf(() =>
+        HANDLERS.hostWorkerReport!(asHost('host-1', {}, { buildId: HASH, event: 'removed' }), d),
+      ),
+    ).toBe('build_in_use');
+    // And the same create is now a reuse of the new build.
+    expect((await createAgain(d)).body).toMatchObject({ reused: true, buildId: HASH });
+  });
+
+  it('addresses the build that took a superseded build id over: activate and reject by that id', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
+      d,
+    );
+    await inventory(d, 'host-1', []);
+    await createAgain(d);
+    const second = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: second }, { event: 'built', ...records() }),
+      d,
+    );
+    await inventory(d, 'host-1', [HASH]);
+    const act = await HANDLERS.activateTemplate!(
+      ctx({ principal: alice, params: { id: ID }, body: { build: HASH } }),
+      d,
+    );
+    expect(act.body).toMatchObject({ buildId: HASH, host: 'host-1' });
+    const leases = (await d.templates!.get(ID))!.builds.map((x) => [x.handle, x.leases ?? []]);
+    expect(leases.find(([h]) => h === second)![1]).toHaveLength(1);
+    expect(leases.find(([h]) => h === first)![1]).toEqual([]);
+    const rej = await HANDLERS.rejectTemplateBuild!(
+      ctx({
+        principal: { ...bob, roles: ['admin'] },
+        params: { id: ID, build: HASH },
+        body: { reason: 'a rule found broken' },
+      }),
+      d,
+    );
+    expect(rej.body).toMatchObject({ build: second, buildId: HASH, status: 'rejected' });
+    const after = (await d.templates!.get(ID))!.builds;
+    expect(after.find((x) => x.handle === first)).toMatchObject({ status: 'retired' });
+    expect(after.find((x) => x.handle === second)).toMatchObject({ status: 'rejected' });
+  });
+
+  it('does not count a stale host as holding the snapshot at registration', async () => {
+    const d = await setup();
+    const first = await claimAndBuild(d);
+    await HANDLERS.hostBuildReport!(
+      asHost('host-1', { build: first }, { event: 'built', ...records() }),
+      d,
+    );
+    // host-2 last reported the snapshot long ago (past HOST_STALE_S): it does not count.
+    const limits = {
+      activeLimit: 4,
+      idleLimitSeconds: 3600,
+      buildConcurrency: 1,
+      diskFreeGb: 200,
+      diskFloorGb: 60,
+    };
+    d.hosts!.set('host-2', { at: NOW_MS / 1000 - 400, holds: { [HASH]: ID }, running: [], limits });
+    expect((await createAgain(d)).status).toBe(202);
+    const second = await claimAndBuild(d);
+    const r = (
+      await HANDLERS.hostBuildReport!(
+        asHost('host-1', { build: second }, { event: 'built', ...records() }),
+        d,
+      )
+    ).body as Body;
+    expect(r).toEqual({ status: 'registered', buildId: HASH });
   });
 
   it('says how to rebuild when the same snapshot belongs to a retired build', async () => {

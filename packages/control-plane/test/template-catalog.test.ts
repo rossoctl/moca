@@ -9,6 +9,8 @@ import type { SandboxTemplate } from '../src/sandbox-config.js';
 import {
   FileTemplateCatalog,
   MemoryTemplateCatalog,
+  buildById,
+  buildByRef,
   docFromDeclared,
   PRESENCE_KEY,
   importedBuildId,
@@ -104,6 +106,41 @@ describe('the catalog', () => {
     expect(resolveBuild(d, { build: 'sha256:a' })?.worker).toBe('w_a');
     expect(resolveBuild(d, { tag: 'nope' })).toBeNull();
     expect(resolveBuild(d, { build: 'sha256:zz' })).toBeNull();
+  });
+
+  it('resolves a build id a superseded build shares to the build not ended, in any order', () => {
+    const build = (handle: string, status: 'registered' | 'retired') => ({
+      handle,
+      buildId: 'sha256:a',
+      status,
+      profile: 'benchmark',
+      worker: `w_${handle}`,
+      spec: { tools: [] },
+      createdAt: 0,
+    });
+    for (const builds of [
+      [build('b-old', 'retired'), build('b-new', 'registered')],
+      [build('b-new', 'registered'), build('b-old', 'retired')],
+    ]) {
+      const d: TemplateDoc = {
+        schema: 'moca-template/1',
+        id: 't',
+        owner: 'github:1',
+        visibility: 'deployment',
+        description: '',
+        tags: { default: 'sha256:a' },
+        builds,
+        createdAt: 0,
+      };
+      expect(resolveBuild(d, {})?.handle).toBe('b-new');
+      expect(resolveBuild(d, { build: 'sha256:a' })?.handle).toBe('b-new');
+      expect(buildByRef(d.builds, 'sha256:a')?.handle).toBe('b-new');
+      // Its handle still names the superseded build.
+      expect(buildByRef(d.builds, 'b-old')?.status).toBe('retired');
+    }
+    // With every build of the id ended, the newest (listed first).
+    const ended = [build('b-2', 'retired'), build('b-1', 'retired')];
+    expect(buildById(ended, 'sha256:a')?.handle).toBe('b-2');
   });
 });
 

@@ -2,7 +2,13 @@ import { CpError } from './errors.js';
 import { asRecord, membershipNow, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { buildRecordOf, recordDigest } from './provenance.js';
-import { LOG_MAX, type TemplateBuild, type TemplateDoc } from './template-catalog.js';
+import {
+  buildById,
+  buildByRef,
+  LOG_MAX,
+  type TemplateBuild,
+  type TemplateDoc,
+} from './template-catalog.js';
 import { activationLock } from './activation-lock.js';
 import {
   hostManaged,
@@ -293,6 +299,13 @@ export function freshHosts(deps: CpDeps): [string, HostState][] {
   return (deps.hosts?.all() ?? []).filter(([, h]) => nowS - h.at <= HOST_STALE_S);
 }
 
+/**
+ * Whether a fresh host's last inventory (freshHosts) holds this snapshot, by its manifest hash:
+ * the hosts placement reads, so a host gone silent past HOST_STALE_S does not count.
+ */
+export const heldFresh = (deps: CpDeps, buildId: string): boolean =>
+  freshHosts(deps).some(([, h]) => h.holds[buildId] !== undefined);
+
 function catalogOf(deps: CpDeps) {
   const cat = deps.templates;
   if (!cat?.update || !deps.provenance || !deps.policy) {
@@ -393,7 +406,7 @@ async function claimedBuild(
 ): Promise<{ doc: TemplateDoc; build: TemplateBuild }> {
   const { cat } = catalogOf(deps);
   for (const doc of await cat.list()) {
-    const build = doc.builds.find((b) => b.handle === handle || b.buildId === handle);
+    const build = buildByRef(doc.builds, handle);
     if (build) {
       if (build.claim?.host !== host)
         throw new CpError('not_found', 'no such build claimed by this host');
@@ -661,6 +674,8 @@ export const HOST_HANDLERS: Record<string, Handler> = {
         : x.status === 'registered' ||
           (event === 'detached' && (x.status === 'retired' || rejectedByAdmin(x)));
     const docs = await cat.list();
+    // A build id names one build in use; a superseded build keeps it, retired (buildById): of the
+    // builds this event is taken for, the one not ended is meant.
     const doc = docs.find((d) => d.builds.some((x) => x.buildId === buildId && ok(x)));
     if (!doc || deps.hosts?.get(host)?.holds[buildId] === undefined) {
       throw new CpError(
@@ -672,7 +687,7 @@ export const HOST_HANDLERS: Record<string, Handler> = {
             : 'no registered build this host holds',
       );
     }
-    const target = doc.builds.find((x) => x.buildId === buildId && ok(x))!;
+    const target = buildById(doc.builds.filter(ok), buildId)!;
     // The wanted state never asks for this one's removal; a report of it would drop the live
     // build's host from its heldBy.
     if (event === 'removed' && liveSnapshots(docs)(target)) {
@@ -949,23 +964,39 @@ export const HOST_HANDLERS: Record<string, Handler> = {
       });
       // Registration (§8.2): automatic, by policy, never a person.
       const results = registrationResults(y, t, sm);
-      // A build id names one build of a template: a second build of the same snapshot (the same
-      // image and spec, created again with another gate record or profile) is not registered
-      // beside the first.
-      const twin = c.builds.find((x) => x !== y && x.buildId === manifestHash);
+      // A build id names one build in use of a template: a second build of the same snapshot (the
+      // same image and spec, created again with another gate record or profile, which the host
+      // finds already built) is not registered beside the first. Except a registered twin whose
+      // snapshot no fresh host holds (heldFresh): it was removed from every host, so a create built
+      // it again (a create reuses a registered build only while a host holds it), and this build
+      // supersedes it in this same update. The twin becomes retired, keeping its id; the tags
+      // naming that id (`default` among them) then resolve to this build (buildById), and a
+      // `retire` record by the policy names both builds.
+      const twin = buildById(
+        c.builds.filter((x) => x !== y),
+        manifestHash,
+      );
+      const supersedes =
+        twin?.status === 'registered' && !heldFresh(deps, manifestHash) ? twin : undefined;
       results.push(
-        twin
+        supersedes
           ? {
               rule: 'T.unique',
-              passed: false,
-              // A retired twin is the host's "already built" short cut reporting a snapshot that
-              // removal has not reached (or keeps, being shared): say how to get a new build.
-              message:
-                twin.status === 'retired'
-                  ? `the same snapshot as retired build ${twin.handle ?? twin.buildId}: change the spec, or create again after its snapshot is removed from the host`
-                  : `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+              passed: true,
+              message: `supersedes registered build ${supersedes.handle ?? supersedes.buildId}, whose snapshot no host holds`,
             }
-          : { rule: 'T.unique', passed: true },
+          : twin
+            ? {
+                rule: 'T.unique',
+                passed: false,
+                // A retired twin is the host's "already built" short cut reporting a snapshot that
+                // removal has not reached (or keeps, being shared): say how to get a new build.
+                message:
+                  twin.status === 'retired'
+                    ? `the same snapshot as retired build ${twin.handle ?? twin.buildId}: change the spec, or create again after its snapshot is removed from the host`
+                    : `another build of this template (${twin.handle ?? twin.buildId}, ${twin.status}) already has this manifest hash`,
+              }
+            : { rule: 'T.unique', passed: true },
       );
       const failed = results.find((r) => !r.passed);
       verdict.failed = failed;
@@ -982,16 +1013,61 @@ export const HOST_HANDLERS: Record<string, Handler> = {
           results: results as unknown as Record<string, unknown>[],
         },
       });
+      // The twin this build supersedes: retired, its leases gone (a retire's), with why. Its record
+      // is written in this update too, so a twin is never retired without one, nor one written for
+      // a build that did not register.
+      const superseded =
+        !failed && supersedes
+          ? {
+              ...supersedes,
+              status: 'retired' as const,
+              leases: [],
+              reason: {
+                message: `superseded by build ${build.handle}: the same snapshot built again, after no host held it`,
+                step: 'superseded',
+              },
+            }
+          : undefined;
+      if (superseded) {
+        await prov.append({
+          stream,
+          kind: 'retire',
+          subject: 'policy',
+          body: {
+            build: supersedes!.handle ?? supersedes!.buildId,
+            buildId: manifestHash,
+            buildRecord: await buildRecordOf(prov, doc.id, supersedes!),
+            from: 'registered',
+            reason: superseded.reason.message,
+            supersededBy: build.handle!,
+            supersededByRecord: recordDigest(buildRec.record),
+            tags: Object.entries(c.tags)
+              .filter(([, id]) => id === manifestHash)
+              .map(([tag]) => tag)
+              .sort(),
+          },
+        });
+      }
       const next = failed
         ? patched(c, y, {
             status: 'rejected',
             reason: { message: failed.message ?? failed.rule, rule: failed.rule },
           })
-        : patched(c, y, {
-            status: 'registered',
-            buildId: manifestHash,
-            worker: String(t.worker ?? ''),
-          });
+        : {
+            ...c,
+            builds: c.builds.map((x) =>
+              x === y
+                ? {
+                    ...x,
+                    status: 'registered' as const,
+                    buildId: manifestHash,
+                    worker: String(t.worker ?? ''),
+                  }
+                : x === supersedes && superseded
+                  ? superseded
+                  : x,
+            ),
+          };
       // A first registered build of a template takes `default` (§3.2); later ones are tagged by the owner.
       return !failed && c.tags.default === undefined
         ? { ...next, tags: { ...c.tags, default: manifestHash } }
@@ -1096,9 +1172,8 @@ async function wantedAnswer(
     await activationLock(cat).run('activation', async () => {
       const t = seconds(deps);
       for (const e of displaced) {
-        const now = (await cat.get(e.template as string))?.builds.find(
-          (x) => x.buildId === e.buildId,
-        );
+        const cur = await cat.get(e.template as string);
+        const now = cur ? buildById(cur.builds, e.buildId as string) : undefined;
         if (now && now.status === 'registered' && liveLeases(now, t).length === 0) stop.push(e);
       }
     });
