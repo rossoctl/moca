@@ -192,6 +192,45 @@ describe('RedisSandboxStore touch (idle lifetime, spec §5.2)', () => {
     await done();
   });
 
+  it('a touch that would not move the deadline writes nothing', async () => {
+    const { prefix, store, egress, done } = isolated();
+    const ep = `${prefix}egress:`;
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-n', now, 'web'), lim, now);
+    await egress.append(
+      'host-1',
+      'c1',
+      [
+        {
+          sandboxId: 'sbx-n',
+          lines: [EVENT],
+          proxyDropped: 0,
+          invalid: 1,
+          expireAtS: now + 600 + 3600,
+        },
+      ],
+      0,
+      0,
+    );
+    const nameKey = (await client.keys(`${prefix}name:*`))[0]!;
+    const before = {
+      rec: await client.pExpireTime(`${prefix}sandbox:sbx-n`),
+      name: await client.pExpireTime(nameKey),
+      log: await client.expireTime(`${ep}sbx-n`),
+      meta: await client.expireTime(`${ep}sbx-n:meta`),
+      score: await client.zScore(`${ep}expiry`, 'sbx-n'),
+    };
+    // L = 100 s left 600: now + L <= expiresAt.
+    const out = await store.touch('sbx-n', now, 100, 3600);
+    expect(out?.expiresAt).toBe(now + 600);
+    expect(await client.pExpireTime(`${prefix}sandbox:sbx-n`)).toBe(before.rec);
+    expect(await client.pExpireTime(nameKey)).toBe(before.name);
+    expect(await client.expireTime(`${ep}sbx-n`)).toBe(before.log);
+    expect(await client.expireTime(`${ep}sbx-n:meta`)).toBe(before.meta);
+    expect(await client.zScore(`${ep}expiry`, 'sbx-n')).toBe(before.score);
+    await done();
+  });
+
   it('leaves a sealed egress log alone', async () => {
     const { prefix, store, egress, done } = isolated();
     const ep = `${prefix}egress:`;

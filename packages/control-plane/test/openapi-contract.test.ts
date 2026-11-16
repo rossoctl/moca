@@ -161,6 +161,12 @@ describe('§9.3 test 3 — contract drift', () => {
     expect(schema.required).toEqual(['setModeToken']);
     expect(Object.keys(schema.properties)).toEqual(['setModeToken']);
     expect(post.responses['409']).toBeDefined();
+    expect(Object.keys(post.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+    );
+    expect(Object.keys(doc().paths['/v1/sandboxes/{id}/token'].post.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+    );
   });
 
   it('states the label rules the code enforces: key pattern, and no character-count limit', () => {

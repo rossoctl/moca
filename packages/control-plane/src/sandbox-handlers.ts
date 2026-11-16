@@ -192,8 +192,10 @@ function parseMode(raw: unknown, cfg: SandboxConfig): SandboxModeName {
 
 /**
  * The idle lifetime a sandbox slides its deadline by: its own, else the default, never more than
- * the maximum as it is now (clamped like idleClaim clamps the lease idle timeout, so lowering the
- * maximum never leaves a sandbox outliving the workers' SH_WORKSPACE_IDLE).
+ * the maximum as it is now. The clamp keeps every NEW extension within the current maximum;
+ * deadlines set under an older, higher maximum stand until they pass, which is why lowering the
+ * maximum needs the hosts reinstalled only after the old maximum has passed (deploy/sbx README,
+ * idle-lifetime spec §6.3).
  */
 function lifetimeOf(cfg: SandboxConfig, rec: SandboxRecord): number {
   return Math.min(rec.idleLifetimeS ?? cfg.lifetimeS, cfg.maxLifetimeS);
@@ -3026,11 +3028,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       );
     const mode = parseMode(b.mode, cfg);
     const idleTimeoutS = parseIdleTimeout(b.idleTimeoutS, cfg);
+    // A mode change is activity: slide the deadline first, so a refusal (a delete that landed since
+    // the read) or a Redis failure leaves the epoch alone; setMode's read-back carries the move.
+    await extend(deps, rec, now);
     const changed = await store.setMode(rec.id, mode, idleTimeoutS, now);
     // Deleted, expired or past retention since the read above.
     if (!changed) return refuseGone(store, rec.id, now);
-    // A mode change is activity: slide the deadline from the record the change returned.
-    const next = await extend(deps, changed.record, now);
+    const next = changed.record;
     await auditBestEffort(deps, 'sandbox_mode_changed', rec.id, {
       subject: ctx.principal!.sub,
       sandboxId: rec.id,

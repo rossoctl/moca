@@ -495,6 +495,44 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(rec?.expiresAt).toBe(expiresAt);
   });
 
+  it('a mode change racing a delete refuses deleted, raises no epoch and audits nothing', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    const real = d.sandboxes!;
+    const before = await real.get(id as string, NOW);
+    const racing = new Proxy(real, {
+      get(t, p, r) {
+        if (p === 'touch') {
+          return async (...a: Parameters<typeof real.touch>) => {
+            await t.markDeleted(id as string, a[1], a[3]);
+            return t.touch(...a);
+          };
+        }
+        const v = Reflect.get(t, p, r) as unknown;
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const err = await HANDLERS.setSandboxMode!(
+      ctx({ principal: alice, params: { id: id as string }, body: { mode: 'lease' } }),
+      { ...d, sandboxes: racing },
+    ).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'deleted' } });
+    const rec = await real.get(id as string, NOW);
+    expect(rec?.modeEpoch).toBe(before?.modeEpoch);
+    expect(rec?.mode).toBe(before?.mode);
+  });
+
+  it('a no-activity mint on an expired sandbox still refuses expired', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    const expired = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+    const err = await HANDLERS.mintSandboxToken!(
+      { ...on(alice, id), body: { activity: false } },
+      expired,
+    ).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'expired' } });
+  });
+
   it('refuses to mint once deleted (with the reason) or expired, with no job having run', async () => {
     const d = sbxDeps();
     const { id } = await create(d);

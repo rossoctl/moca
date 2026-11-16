@@ -156,6 +156,7 @@ export class RedisSandboxStore implements SandboxStore {
   constructor(
     private readonly redis: SandboxRedisLike,
     private readonly prefix: string = DEFAULT_SANDBOX_PREFIX,
+    // Must equal the RedisEgressStore's prefix: touch moves that store's keys (main.ts relies on both defaults).
     private readonly egressPrefix: string = EGRESS_KEY_PREFIX,
   ) {}
 
