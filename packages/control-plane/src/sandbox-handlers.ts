@@ -1060,8 +1060,11 @@ async function admitBuild(
             );
           // §3.2: the same inputs are the same build. One registered, or still on its way there,
           // is answered instead of a second build (two creates would otherwise queue two builds
-          // that register under one manifest hash).
-          reused = cur?.builds.find((x) => REUSABLE.has(x.status) && buildReuseKey(x) === want);
+          // that register under one manifest hash). A registered one counts only while a host
+          // holds its snapshot (stillHeld).
+          reused = cur?.builds.find(
+            (x) => REUSABLE.has(x.status) && buildReuseKey(x) === want && stillHeld(deps, x),
+          );
           if (reused) return cur!;
           const u = await usage(cat, charged);
           // A template takes a slot when it holds none yet: a new id, or one whose builds all
@@ -1235,6 +1238,18 @@ function reuseKey(
     profile,
     gate: gateRecordSha256 ?? null,
   });
+}
+
+/**
+ * Whether a registered build's snapshot still exists somewhere (lifecycle spec §4, Reuse): on a
+ * deployment with host agents, some host's last inventory must hold it, or a create would be
+ * answered with a build no host can run (its snapshot removed from every host). A build on its way
+ * has no snapshot yet and is reused as before. Right after a restart no host has reported, so a
+ * create builds again: a duplicate build, never an answer that points at a missing snapshot.
+ */
+function stillHeld(deps: CpDeps, x: TemplateBuild): boolean {
+  if (x.status !== 'registered' || !deps.hosts) return true;
+  return deps.hosts.all().some(([, h]) => h.holds[x.buildId] !== undefined);
 }
 
 /** A stored build's reuse key; none for an imported build (it has no request). */
