@@ -26,6 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
+import { afterText, lifetimeText } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -381,7 +382,9 @@ export async function cmdCreate(
   try {
     const s = await createWaitingForActivation(c, body);
     const id = sanitizeRemote(s.id);
-    c.io.err(`created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`);
+    c.io.err(
+      `created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
+    );
     // A control plane from before modes ignores the body's mode: say so, never a silent per-exec.
     if (body.mode !== undefined && s.mode !== body.mode) {
       c.io.err(
@@ -488,7 +491,8 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
         cell(s.template, 12),
         cell(s.mode, 15),
         cell(stateText(s), 22),
-        when(s.expiresAt),
+        when(s.expiresAt) +
+          (s.idleLifetimeS !== undefined ? ` (${lifetimeText(s.idleLifetimeS)})` : ''),
         ...(all ? [cell(s.owner)] : []),
       ].join(' ');
       c.io.out(row + '\n');

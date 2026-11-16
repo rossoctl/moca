@@ -10,6 +10,7 @@ import { sanitizeRemote } from '../core/sanitize.js';
 import { rulesFor } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
+import { lifetimeText } from './lifetime.js';
 import { jwtMode, openExec, sandboxFailureText, type ExecFactory } from './exec.js';
 import {
   modeRank,
@@ -280,6 +281,9 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
     ['mode', s.mode],
     ['epoch', String(s.modeEpoch)],
     ['idle timeout', s.idleTimeoutS > 0 ? `${s.idleTimeoutS} s` : 'worker default'],
+    ...(s.idleLifetimeS !== undefined
+      ? [['lifetime', `${lifetimeText(s.idleLifetimeS)} without use`] as [string, string]]
+      : []),
     ['lease', leaseText(lease)],
   ];
   // The tracked processes, exited ones included (P5-R16): at lease+processes, or whenever the

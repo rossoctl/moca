@@ -325,13 +325,19 @@ export function controlPlane(initial: ReturnType<typeof sandbox>[] = []) {
     const [method, path] = key.split(' ') as [string, string];
     if (method === 'POST' && path === '/v1/sandboxes') {
       return (req) => {
-        const b = req.body as { template: string; name?: string; labels?: Record<string, string> };
+        const b = req.body as {
+          template: string;
+          name?: string;
+          labels?: Record<string, string>;
+          idleLifetimeS?: number;
+        };
         const id = created++ === 0 ? NEW : `${NEW.slice(0, -1)}${created}`;
         const s = sandbox({
           id,
           template: b.template,
           name: b.name ?? null,
           labels: b.labels ?? {},
+          ...(b.idleLifetimeS !== undefined ? { idleLifetimeS: b.idleLifetimeS } : {}),
         });
         boxes.set(id, s);
         return { status: 201, body: s };

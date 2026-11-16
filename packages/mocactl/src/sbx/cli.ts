@@ -14,6 +14,7 @@ import {
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { Io, LoginHelpers } from '../headless.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from '../runtime.js';
+import { parseLifetime } from './lifetime.js';
 import { SandboxApiClient, type SbxQuota, type SbxSandboxCreate } from './api.js';
 import {
   cmdCreate,
@@ -174,7 +175,8 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  change prints old -> new, and fails if the value
                                                  changed between its read and its write)
   mocactl sbx create [--template ID[:TAG|@BUILD]] [--name N] [--label k=v ...] [--seed]
-                     [--mode per-exec|lease|lease+processes] [--idle-timeout S] [--json]
+                     [--mode per-exec|lease|lease+processes] [--idle-timeout S] [--lifetime DURATION]
+                     [--json]
                                                  create a sandbox (template: default); prints its id;
                                                  --seed: run the served build's seed, then check
                                                  /workspace is a clean tree (its HEAD becomes the
@@ -183,7 +185,11 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  guest between commands (the deployment must allow
                                                  it; an upgrade, so only from a terminal), its
                                                  lease ending after S idle seconds (default: the
-                                                 worker's)
+                                                 worker's);
+                                                 --lifetime: the sandbox ends after DURATION (36h,
+                                                 14d, 30m or seconds) without use (default: the
+                                                 deployment's, 7 d; at most its maximum, 30 d by
+                                                 default)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx get [ID] [--json]                  a sandbox's mode, epoch and idle timeout, and its
                                                  lease's state (a lease mode the worker has not
@@ -264,6 +270,7 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  disabled, so local execution is restricted, not
                                                  denied: use Codex's own sandbox_mode as well
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config] [--cortex]
+                 [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
                                                  and point Claude Code, OpenCode and IBM Bob at the
@@ -278,6 +285,10 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  (--cortex: Cortex v0.9.3+ blocks the local tools
                                                  instead of a deny list, so Claude Code loads the
                                                  project's CLAUDE.md; kept by later runs)
+                                                 (--lifetime: a new sandbox ends after DURATION
+                                                 (36h, 14d, 30m or seconds) without use; default:
+                                                 the deployment's, 7 d; at most its maximum, 30 d
+                                                 by default; a reused sandbox keeps its own)
   mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and
@@ -554,6 +565,7 @@ const SYNC_FLAGS: [
     | 'seed'
     | 'mode'
     | 'idle-timeout'
+    | 'lifetime'
   ),
   string[],
 ][] = [
@@ -561,6 +573,7 @@ const SYNC_FLAGS: [
   ['seed', ['create']],
   ['mode', ['create']],
   ['idle-timeout', ['create', 'mode']],
+  ['lifetime', ['create', 'up']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
   ['apply', ['pull']],
@@ -596,6 +609,22 @@ function parseIdleTimeout(io: Io, raw: string | undefined): number | undefined |
   const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
   if (!Number.isSafeInteger(n) || n < 1) {
     io.err(`sbx: --idle-timeout must be a whole number of seconds (got '${sanitizeRemote(raw)}')`);
+    return null;
+  }
+  return n;
+}
+
+/**
+ * `--lifetime DURATION`: `<n>m`, `<n>h`, `<n>d` or whole seconds; syntax only (the control plane's
+ * 400 names the range). Undefined when absent; null, after saying why, when malformed.
+ */
+function parseLifetimeFlag(io: Io, raw: string | undefined): number | undefined | null {
+  if (raw === undefined) return undefined;
+  const n = parseLifetime(raw.trim());
+  if (n === undefined) {
+    io.err(
+      `sbx: --lifetime must be a duration such as 36h or 14d, or whole seconds (got '${sanitizeRemote(raw)}')`,
+    );
     return null;
   }
   return n;
@@ -652,6 +681,7 @@ async function sbxMainWith(
         seed: { type: 'boolean' },
         mode: { type: 'string' },
         'idle-timeout': { type: 'string' },
+        lifetime: { type: 'string' },
         name: { type: 'string' },
         cwd: { type: 'string' },
         tail: { type: 'string' },
@@ -1082,6 +1112,12 @@ async function sbxMainWith(
       io.err(`sbx: ignoring .sbx/sandbox.json: '${sanitizeRemote(bound.id)}' is not a sandbox id`);
     } else upBound = bound?.id;
   }
+  let upLifetime: number | undefined;
+  if (command === 'up') {
+    const l = parseLifetimeFlag(io, values.lifetime);
+    if (l === null) return SBX_EXIT.usage;
+    upLifetime = l;
+  }
   // `mode MODE [ID]`: the mode is checked before anything else is looked at.
   if (command === 'mode') {
     if (arg === undefined) {
@@ -1222,6 +1258,8 @@ async function sbxMainWith(
     }
     const idle = parseIdleTimeout(io, values['idle-timeout']);
     if (idle === null) return SBX_EXIT.usage;
+    const lifetime = parseLifetimeFlag(io, values.lifetime);
+    if (lifetime === null) return SBX_EXIT.usage;
     // Creating with a lease mode is an upgrade: the user's own act, never an agent's (spec §8.1).
     if (mode !== undefined && modeRank(mode) > 0 && deps.stdinIsTTY !== true) {
       io.err(`sbx: ${UPGRADE_NEEDS_TTY}`);
@@ -1233,6 +1271,7 @@ async function sbxMainWith(
       ...(Object.keys(labels).length ? { labels } : {}),
       ...(mode !== undefined ? { mode } : {}),
       ...(idle !== undefined ? { idleTimeoutS: idle } : {}),
+      ...(lifetime !== undefined ? { idleLifetimeS: lifetime } : {}),
     };
   }
 
@@ -1462,6 +1501,7 @@ async function sbxMainWith(
           ...(maxPush !== undefined ? { maxPush } : {}),
           ...(values.template ? { template: values.template } : {}),
           ...(values.name ? { name: values.name } : {}),
+          ...(upLifetime !== undefined ? { idleLifetimeS: upLifetime } : {}),
           noAgentConfig: values['no-agent-config'] === true,
           cortex: values.cortex === true,
           ...(upBound ? { boundId: upBound } : {}),

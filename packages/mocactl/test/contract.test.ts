@@ -110,7 +110,11 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     sends: ['template', 'name', 'labels', 'mode', 'idleTimeoutS', 'idleLifetimeS'],
   },
   { method: 'get', path: '/v1/sandboxes', reads: ['sandboxes'] },
-  { method: 'get', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason', 'expiresAt'] },
+  {
+    method: 'get',
+    path: '/v1/sandboxes/{id}',
+    reads: ['id', 'state', 'reason', 'expiresAt', 'idleLifetimeS'],
+  },
   { method: 'delete', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason'] },
   {
     method: 'post',

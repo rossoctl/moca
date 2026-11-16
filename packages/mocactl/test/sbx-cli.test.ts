@@ -613,6 +613,61 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     ).toBe(2);
   });
 
+  it('create --lifetime sends idleLifetimeS and prints the lifetime (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 201,
+        body: sandbox({ idleLifetimeS: 604_800 }),
+      }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
+    expect(cp.calls[0]!.body).toEqual({ template: 'default', idleLifetimeS: 1_209_600 });
+    expect(io.errs.join('\n')).toContain(
+      `created ${SBX} (node22), expires ${new Date(1_800_604_800 * 1000).toISOString()}, after 7 d without use`,
+    );
+  });
+
+  it('create --lifetime with a malformed value is a usage error and sends nothing (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
+    expect(
+      await sbxMain(['create', '--lifetime', 'soon'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toContain(
+      "sbx: --lifetime must be a duration such as 36h or 14d, or whole seconds (got 'soon')",
+    );
+    expect(cp.calls.length).toBe(0);
+  });
+
+  it("create --lifetime shows the control plane's 400 text (#770)", async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          message: 'idleLifetimeS must be an integer from 3600 to 2592000',
+        },
+      }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '30m'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(1);
+    expect(io.errs.join('\n')).toContain('idleLifetimeS must be an integer from 3600 to 2592000');
+  });
+
+  it('--lifetime is not a flag of ls (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({});
+    expect(
+      await sbxMain(['ls', '--lifetime', '7d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toContain('--lifetime only applies to create and up');
+  });
+
   it('reports a refusal from the control plane with its code (exit 1)', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({

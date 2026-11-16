@@ -16,6 +16,7 @@ import {
 } from './agentop.js';
 import { notEnrolledMessage, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, sandboxFailureText, type ExecFactory, type OpenedExec } from './exec.js';
+import { afterText } from './lifetime.js';
 import { PushError, sandboxState } from './push.js';
 import { noticingExec } from './notices.js';
 import { readRecords } from './recorder.js';
@@ -137,7 +138,7 @@ async function sandboxCheck(
     };
   }
   const ms = s.expiresAt * 1000 - c.rt.now();
-  const detail = `${id} (${template}) is ready; expires ${expires}, in ${left(ms)}`;
+  const detail = `${id} (${template}) is ready; expires ${expires}, in ${left(ms)}${afterText(s)}`;
   if (ms <= DAY_MS) {
     return {
       check: {

@@ -93,6 +93,45 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     expect(readFileSync(join(h.ws.get(NEW).ws, 'later.txt'), 'utf8')).toBe('later\n');
   });
 
+  it('up --lifetime sends idleLifetimeS in the create body and prints the lifetime (#770)', async () => {
+    const h = harness();
+    expect(await h.run(['up', '--lifetime', '14d'])).toBe(0);
+    expect(h.cp.posts()[0]!.body).toMatchObject({ idleLifetimeS: 1_209_600 });
+    expect(h.err()).not.toContain('keeps its');
+    // the fake echoes the request; the final line names it
+    expect(h.err()).toContain(`, after 14 d without use; bound in .sbx/sandbox.json`);
+  });
+
+  it('up --lifetime on a bound sandbox warns, creates nothing and still pushes (#770)', async () => {
+    const h = harness({ boxes: [sandbox({ id: SBX, idleLifetimeS: 604_800 })] });
+    mkdirSync(join(h.r, '.sbx'));
+    writeFileSync(
+      join(h.r, '.sbx/sandbox.json'),
+      JSON.stringify({ id: SBX, controlPlaneUrl: URL_ }),
+    );
+    expect(await h.run(['up', '--lifetime', '14d'])).toBe(0);
+    expect(h.err()).toContain(
+      `sbx up: ${SBX} keeps its 7 d lifetime; --lifetime applies only to a new sandbox`,
+    );
+    expect(h.cp.posts()).toHaveLength(0);
+    expect(h.err()).toMatch(/pushed \d+ files/);
+    expect(h.err()).toContain(
+      `sandbox ${SBX} (node22), expires ${new Date(1_800_604_800_000).toISOString()}, after 7 d without use; bound in .sbx/sandbox.json`,
+    );
+  });
+
+  it('up --lifetime on a reused sandbox without idleLifetimeS warns without "its" and prints no lifetime (#770)', async () => {
+    const r0 = repo();
+    const rid = await repoId(r0);
+    const h = harness({ boxes: [sandbox({ id: SBX, labels: { project: rid } })] });
+    expect(await h.run(['up', '--lifetime', '14d'], { cwd: r0 })).toBe(0);
+    expect(h.err()).toContain(
+      `sbx up: ${SBX} keeps its lifetime; --lifetime applies only to a new sandbox`,
+    );
+    expect(h.err()).not.toContain('without use');
+    expect(h.err()).not.toContain('undefined');
+  });
+
   it("reuses the user's newest ready sandbox labelled with this project, never another project's", async () => {
     const r0 = repo();
     const rid = await repoId(r0);
