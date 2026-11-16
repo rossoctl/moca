@@ -11,9 +11,22 @@ TMP="$(mktemp -d)"
 node "$MOCK" --port 0 >"$TMP/out" 2>"$TMP/err" &
 pid=$!
 trap 'kill $pid 2>/dev/null; rm -rf "$TMP"' EXIT
-for _ in $(seq 50); do grep -q listening "$TMP/out" && break; sleep 0.1; done
+# Up to 30 s: a cold node start on a busy CI runner has outlasted 5 s (#826). Stop early if the
+# mock exits, and stop the test when it never listens: every check below would only fail against
+# an empty port (curl's port 80), burying the cause.
+for _ in $(seq 300); do
+  grep -q listening "$TMP/out" && break
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.1
+done
 port="$(sed -nE 's/.*127\.0\.0\.1:([0-9]+).*/\1/p' "$TMP/out")"
 check "listening on loopback" "$([ -n "$port" ] && echo yes || echo no)" "yes"
+if [ -z "$port" ]; then
+  echo "  the mock is not listening; its stderr:"
+  sed 's/^/    /' "$TMP/err"
+  echo "FAIL ($fails)"
+  exit 1
+fi
 post() { curl -sS -o "$TMP/body" -w '%{http_code}' -X POST "http://127.0.0.1:$port/v1/messages" \
   -H 'content-type: application/json' -d "$1"; }
 
