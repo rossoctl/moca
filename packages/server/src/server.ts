@@ -1439,8 +1439,8 @@ export function startServer(port = PORT): ReturnType<typeof createServer> {
   return server;
 }
 
-// Exact entrypoint match — avoids a fragile substring
-// match that would misfire for any argv path containing "server".
+// Exact entrypoint match — a substring test on the file name would misfire for any other
+// entrypoint whose path merely contains it (another package's server.ts, say).
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMainModule) {
   startServer();

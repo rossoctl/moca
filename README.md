@@ -97,9 +97,8 @@ flowchart LR
 | **Control plane**         | Multi-user identity and credentials (MU1); issues per-session tokens ([ADR-0033](docs/adrs/0033-multi-user-control-plane.md))                                                                                                                                |
 
 > **Note:** The supervisor and its workers are the **same container image**: the supervisor forks
-> `packages/server/src/worker.ts` — the code is
-> P6-load-bearing). The "brain" (model inference + session logic) runs in a worker; the "hands"
-> (command/tool execution) always run in the sandbox.
+> `packages/server/src/worker.ts`. The "brain" (model inference + session logic) runs in a worker;
+> the "hands" (command/tool execution) always run in the sandbox.
 
 ---
 

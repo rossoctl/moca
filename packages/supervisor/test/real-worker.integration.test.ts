@@ -124,7 +124,7 @@ describe('the real worker, forked from DEFAULT_WORKER_ENTRY', () => {
   it('is the default entry, and forking it brings a worker up over IPC', async () => {
     // `DEFAULT_WORKER_ENTRY` had ZERO test references, so the highest-risk integration in the
     // slice ran only on a real VM.
-    expect(DEFAULT_WORKER_ENTRY).toMatch(/server[/\\]src[/\\]worker\.ts$/);
+    expect(DEFAULT_WORKER_ENTRY).toMatch(/[/\\]packages[/\\]server[/\\]src[/\\]worker\.ts$/);
 
     ({ sup, restore } = await withRealWorker({ SH_TURNS_PER_WORKER: '8' }));
     await waitReady(sup!);

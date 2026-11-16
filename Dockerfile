@@ -72,6 +72,6 @@ ARG MOCA_VERSION=dev
 ENV MOCA_VERSION=${MOCA_VERSION}
 EXPOSE 8080
 WORKDIR /app/packages/server
-# Default entrypoint: the HTTP server. The P6 supervisor
-# forks src/worker.ts instead (deploy/vm, deploy/k8s, deploy/compose).
+# Default entrypoint: the HTTP server. The P6 supervisor forks src/worker.ts instead (deploy/vm,
+# deploy/k8s, deploy/compose).
 CMD ["node", "--import", "tsx", "src/server.ts"]
